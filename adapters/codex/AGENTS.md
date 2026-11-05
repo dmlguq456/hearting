@@ -10,18 +10,14 @@ missing. `preflight.sh` means `<agent-home>/adapters/codex/bin/preflight.sh`.
 <!-- BEGIN generated from core/fragments/bootstrap-body.md by tools/sync-bootstrap-dispatch.py; edit the source -->
 ## Purpose
 
-Hearting keeps work consistent with the user's intent, whichever agent runs
-it. You do not need to memorize its procedures: one command starts tracked
-work, the runtime prints your next action, and its hooks wake you when work
-you started reports back. Paths are relative to the harness root named above.
-Read a document only when the task needs it.
+Hearting keeps work aligned with the user's intent. Its runtime prints the
+next action and wakes you when tracked work reports back. Paths use the
+harness root above. Read documents only as needed.
 
 ## Judgment
 
-- Look for what already exists before relying on your own knowledge:
-  the repository's research, analysis, and briefing artifacts, its code,
-  memory, and earlier outputs. An answer from memory alone says so and flags
-  its risky specifics; this holds for explanations too.
+- Consult existing artifacts, code and memory first. When answering from
+  memory alone, say so and flag uncertain specifics, including in explanations.
 - Stay inside the user's intent and the existing flow. Ask only for genuinely
   non-obvious or destructive choices, and use structured input only when the
   choice changes the goal, architecture, UX, large scope, destructive work,
@@ -46,26 +42,23 @@ Read a document only when the task needs it.
 
 ## Starting work
 
-Route by `core/WORKFLOW.md §0.2`: the capability that owns the artifacts is
-the primary. The main session decides only whether the work is direct
-(§0.2.1): use `--shape direct` for one atomic, reversible inline change;
-otherwise omit `--shape` and let the frame decide. Start with `hearting run
-capability-route compose`:
+The main session may finish one atomic, reversible fix in the current Git
+worktree by reading, editing, checking, and replying normally. Hearting records
+it automatically: no task file, compose, finish, or capability-info call.
+Use the existing direct predicates (§0.2.1); if scope grows, compose before
+expanding the work. Other work starts with:
 
 ```
-hearting run capability-route compose --start --prompt-file <task> [--shape direct]
+hearting run capability-route compose --start --prompt-file <task>
 ```
 
-Reuse the start receipt's `runtime` command prefixes; they already resolve
-the installation. `hearting run <utility>` uses `AGENT_HOME` when set, else the
-installed release. Other flags are hints, except a shape the person or an
-earlier frame already decided: honor it, and use `--shape staged --graph <stage,…>` for
-stages the person named (§0.2.1). A refusal names what to add, such as
-`--campaign-key`. For a user's material request that is not yet approved,
-present the §0.4 intent card before starting (진행 / 수정 / 중단); a
-request from a peer session needs only the `[경로]` line compose prints plus
-one clause of scope, unless the work is destructive or external-facing.
-Dispatch depth 3 is forbidden.
+Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
+`AGENT_HOME`, else the installed release. Flags are hints unless the person
+or a frame already chose the shape; honor it, using `--shape staged --graph
+<stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
+Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
+중단). Peer requests need only compose's `[경로]` line and scope, except for
+destructive or external-facing work. Dispatch depth 3 is forbidden.
 
 ## Following the runtime
 

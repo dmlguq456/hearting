@@ -542,7 +542,8 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
     project_key = st.project_key_for(item["cwd"])
     sessions, cursors, choices, skipped, unread = [], [], [], [], []
     remaining = TOTAL_CHUNK_BYTES
-    for target in _target_sessions(item, seat):
+    targets = _target_sessions(item, seat)
+    for target in targets:
         if remaining <= 0:
             break
         if not target["transcript"]:
@@ -581,6 +582,9 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
             if chunk.pending_after:
                 unread.append(_unread_entry(target, chunk))
             break
+    from turn_change_record import supplementary_records
+    automatic_records = [row for target in targets for row in supplementary_records(
+        target['harness'], target['sid'], item['cwd'])]
     pending = _pending_decisions(project_key)
     conversation = "\n".join(s["text"] for s in sessions)
     records, groups = existing_records(item["cwd"], conversation) if (sessions or pending or choices) else ([], [])
@@ -590,6 +594,7 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
            "caller": {"harness": item["harness"], "sid": item["sid"]},
            "card": (card or {}).get("body", "")[:CARD_CONTEXT_CHARS],
            "sessions": sessions, "skipped_sessions": skipped, "user_choices": choices,
+           "automatic_records": automatic_records,
            "pending_decisions": pending, "existing_records": records, "duplicate_groups": groups,
            "limits": {"max_new_records": 10, "max_duplicate_groups": DUPLICATE_SIGNAL_MAX}}
     path = run_dir / "input_v1.json"

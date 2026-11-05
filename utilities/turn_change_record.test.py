@@ -252,14 +252,17 @@ class TurnAttributionTest(Fixture):
         self.assertEqual(self.end()["state"], "no-start-snapshot")
         self.assertEqual(self.calls, [])
 
-    def test_a_folder_outside_git_or_in_the_temp_directory_is_left_alone(self):
+    def test_non_git_scratch_is_excluded_but_real_temp_git_projects_record(self):
         plain = self.tmp / "work" / "plain"
         plain.mkdir()
         self.assertEqual(T.turn_start("claude", SID, str(plain), self.env)["state"], "no-work-tree")
         scratch_repo = Path(tempfile.gettempdir()) / "clone"
         scratch_repo.mkdir()
         git(scratch_repo, "init", "-q")
-        self.assertEqual(T.turn_start("claude", SID, str(scratch_repo), self.env)["state"], "no-work-tree")
+        self.assertEqual(T.turn_start("claude", SID, str(scratch_repo), self.env)["state"], "baseline")
+        (scratch_repo/'fix.py').write_text('x = 1\n')
+        self.assertEqual(T.turn_end('claude', SID, str(scratch_repo), self.env, recorder=self.recorder)['state'], 'recorded')
+        self.assertEqual(self.calls[0]['sources'], [['fix.py']])
 
     def at(self, phase, when, sid=SID):
         step = T.turn_start if phase == "start" else T.turn_end
@@ -329,13 +332,13 @@ class TurnAttributionTest(Fixture):
             T._prune(lock.parent, time.time())
             self.assertTrue(lock.exists())
 
-    def test_a_work_tree_too_large_to_compare_is_not_walked_again(self):
-        (self.repo / "a.txt").write_text("a\n")
-        (self.repo / "b.txt").write_text("b\n")
-        with mock.patch.object(T, "MAX_ENTRIES", 1):
-            self.assertEqual(self.start()["state"], "too-large")
-            with mock.patch.object(T, "snapshot", side_effect=AssertionError("walked again")):
-                self.assertEqual(self.start()["state"], "too-large")
+    def test_dirty_path_count_does_not_disable_recording(self):
+        for index in range(5100):
+            (self.repo/f'dirty-{index}.txt').write_text('before\n')
+        self.assertEqual(self.start()['state'], 'baseline')
+        (self.repo/'dirty-5099.txt').write_text('after edit\n')
+        self.assertEqual(self.end()['state'], 'recorded')
+        self.assertIn('dirty-5099.txt', self.calls[0]['sources'][0])
 
 
 class InterruptedRecordTest(Fixture):
@@ -897,6 +900,202 @@ hooks.dispose?.({ silent: true });
             result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT,
                                     env=env, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class TinyFixContractTest(Fixture):
+    def native(self, harness='codex'):
+        path = self.tmp / f'{SID}.jsonl'
+        path.write_text('')
+        return path
+
+    def row(self, path, payload, **extra):
+        from datetime import datetime, timezone
+        with path.open('a') as stream:
+            stream.write(json.dumps({'timestamp': datetime.now(timezone.utc).isoformat(),
+                                     'type': 'response_item', 'payload': payload, **extra}) + '\n')
+
+    def test_misclassified_large_change_keeps_every_path_checks_and_final_reply(self):
+        path = self.native()
+        T.turn_start('codex', SID, str(self.repo), self.env, payload={'transcript_path': str(path)})
+        for index in range(260):
+            (self.repo / f'changed-{index:03d}.py').write_text('x = 42\n' * 60)
+        self.row(path, {'type': 'function_call', 'name': 'functions.exec_command', 'call_id': 'check',
+                        'arguments': json.dumps({'cmd': 'python3 -m unittest'})})
+        self.row(path, {'type': 'function_call_output', 'call_id': 'check',
+                        'output': json.dumps({'exit_code': 1, 'output': 'FAILED: details stay at native source'})})
+        self.row(path, {'type': 'message', 'role': 'assistant', 'channel': 'final',
+                        'content': [{'type': 'output_text', 'text': 'Changed the implementation; tests failed.'}]})
+        captured = []
+        def record(*args, **kwargs):
+            captured.extend(args[4])
+            return self.recorder(*args, **kwargs)
+        self.assertEqual(T.turn_end('codex', SID, str(self.repo), self.env, recorder=record)['state'], 'recorded')
+        self.assertEqual(len(captured[0]['source']), 260)
+        body = captured[0]['section']
+        for i in range(260):
+            self.assertIn(f'changed-{i:03d}.py', body)
+        self.assertIn('python3 -m unittest', body)
+        self.assertIn('exit codes [1]', body)
+        self.assertIn('tests failed.', body)
+        self.assertIn('#byte=', body)
+        self.assertNotIn('details stay at native source', body)
+        supplement = T.supplementary_records('codex', SID, str(self.repo), self.env)
+        self.assertEqual(supplement[0]['changed_files'], 260)
+        self.assertIn('tests failed.', supplement[0]['summary'])
+        self.assertEqual(T.supplementary_records('codex', 'different-sid', str(self.repo), self.env), [])
+
+    def test_many_checks_keep_final_reply_in_the_fleet_and_tidy_supplement(self):
+        path = self.native()
+        T.turn_start('codex', SID, str(self.repo), self.env, payload={'transcript_path':str(path)})
+        (self.repo/'greet.py').write_text('print("Hello")\n')
+        for index in range(80):
+            self.row(path, {'type':'function_call','name':'functions.exec_command','call_id':str(index),
+                            'arguments':json.dumps({'cmd':'pytest '+('focused-check '*12)})})
+            self.row(path, {'type':'function_call_output','call_id':str(index),'output':'{"exit_code":0}'})
+        self.row(path, {'type':'message','role':'assistant','channel':'final',
+                       'content':[{'type':'output_text','text':'Final conclusion survives many checks.'}]})
+        self.assertEqual(T.turn_end('codex', SID, str(self.repo), self.env, recorder=self.recorder)['state'],'recorded')
+        supplement = T.supplementary_records('codex', SID, str(self.repo), self.env)[0]
+        self.assertIn('Final conclusion survives many checks.',supplement['summary'])
+        self.assertIn('Reference:',supplement['summary'])
+
+    def test_native_running_failure_and_stop_reply_do_not_become_a_pass(self):
+        import tidy_transcripts as tt
+        path = self.native()
+        anchor = tt.turn_anchor('codex', SID, str(path))
+        for ident, output in [('running', {'session_id': 123, 'output': 'working'}),
+                              ('done', {'exit_code': 0, 'output': 'Process exited with code 91'})]:
+            self.row(path, {'type': 'function_call', 'name': 'functions.exec_command', 'call_id': ident,
+                            'arguments': json.dumps({'cmd': 'pytest'})})
+            self.row(path, {'type': 'function_call_output', 'call_id': ident, 'output': json.dumps(output)})
+        facts = tt.turn_observations('codex', SID, anchor,
+            {'last_assistant_message': 'Interrupted; no final verification.', 'interrupted': True})
+        self.assertEqual(facts['terminal'], 'interrupted')
+        self.assertEqual(facts['commands'][0]['state'], 'running')
+        self.assertEqual(facts['commands'][1]['exit_codes'], [0])
+        self.assertEqual(facts['reply_reference'], 'native Stop.last_assistant_message')
+        self.assertNotIn('PASS', json.dumps(facts))
+
+    def test_closed_manual_route_does_not_disable_new_records_but_unknown_does(self):
+        self.ledger_line()
+        self.assertEqual(self.start()['state'], 'route-held')
+        routes = self.root / '.runtime/routes'
+        routes.mkdir(parents=True)
+        (routes / 'rt-own.outcome.json').write_text(json.dumps({'route_id': 'rt-own', 'route_hash': 'hash',
+            'terminal_gate_proven': False, 'closed_at': '2026-11-05T00:00:00Z'}))
+        self.assertEqual(self.start()['state'], 'baseline')
+        (self.repo / 'greet.py').write_text('print("Hello")\n')
+        self.assertEqual(self.end()['state'], 'recorded')
+
+    def test_promotion_links_snapshot_and_checks_without_changing_user_dirt(self):
+        path = self.native()
+        (self.repo / 'README.md').write_text('user owns these bytes\n')
+        T.turn_start('codex', SID, str(self.repo), self.env, payload={'transcript_path': str(path)})
+        (self.repo / 'greet.py').write_text('print("Hello")\n')
+        self.row(path, {'type': 'function_call', 'name': 'functions.exec_command', 'call_id': 'test',
+                        'arguments': json.dumps({'cmd': 'pytest'})})
+        self.row(path, {'type': 'function_call_output', 'call_id': 'test', 'output': '{"exit_code":0}'})
+        before = git(self.repo, 'diff')
+        route = {'route_id': 'rt-promoted', 'artifact_root': str(self.root), 'cwd': str(self.tmp/'new-worktree')}
+        with mock.patch.object(route_chain, 'writer_identity', return_value=('codex', SID)):
+            evidence = T.link_promotion(route, self.env, source_cwd=str(self.repo))
+        body = Path(evidence).read_text()
+        self.assertIn('Start snapshot', body)
+        self.assertIn('README.md', body)
+        self.assertIn('greet.py', body)
+        self.assertIn('exit codes [0]', body)
+        self.assertEqual(git(self.repo, 'diff'), before)
+        self.assertEqual((self.repo/'README.md').read_text(), 'user owns these bytes\n')
+        from types import SimpleNamespace
+        import worker_bootstrap
+        route_file = self.root/'promoted-route.json'
+        route_file.write_text(json.dumps(route))
+        args = SimpleNamespace(route_id='rt-promoted',route_file=str(route_file),worker_type='frame')
+        for harness in ('claude','codex','opencode'):
+            prompt = worker_bootstrap.contract_read_prompt(args, harness)
+            self.assertIn(evidence, prompt)
+            self.assertIn('not completion or write authority', prompt)
+
+    def test_late_end_native_range_excludes_the_new_turn(self):
+        import tidy_transcripts as tt
+        path = self.native()
+        first = tt.turn_anchor('codex', SID, str(path))
+        self.row(path, {'type': 'message', 'role': 'assistant', 'channel': 'final',
+                        'content': [{'type': 'output_text', 'text': 'first turn result'}]})
+        boundary = path.stat().st_size
+        self.row(path, {'type': 'message', 'role': 'assistant', 'channel': 'final',
+                        'content': [{'type': 'output_text', 'text': 'second turn private result'}]})
+        facts = tt.turn_observations('codex', SID, first, until=boundary)
+        self.assertEqual(facts['reply'], 'first turn result')
+
+    def test_unicode_stop_handoff_stays_within_the_child_byte_bound(self):
+        seen = {}
+        def spawn(command, **kwargs):
+            raw = kwargs['stdin'].read()
+            self.assertLess(len(raw), 24 * 1024)
+            seen.update(json.loads(raw))
+            return mock.Mock()
+        self.assertTrue(T.launch('end','codex',{'session_id':SID,'cwd':str(self.repo),
+            'transcript_path':'/'+'경로'*3000,'last_assistant_message':'최종 답변 '*5000},
+            environ=self.env,popen=spawn))
+        self.assertTrue(seen['last_assistant_message'].startswith('최종 답변'))
+
+    def test_start_before_new_codex_prompt_does_not_replay_the_previous_turn(self):
+        import tidy_transcripts as tt
+        path = self.native()
+        self.row(path, {'type':'message','role':'user','content':[{'type':'input_text','text':'old task'}]},
+                 timestamp='2026-01-01T00:00:00Z')
+        self.row(path, {'type':'message','role':'assistant','channel':'final',
+                       'content':[{'type':'output_text','text':'old result must not become current'}]},
+                 timestamp='2026-01-01T00:00:01Z')
+        anchor = tt.turn_anchor('codex',SID,str(path),at=time.time())
+        self.assertEqual(anchor['cursor'],path.stat().st_size)
+        self.row(path, {'type':'message','role':'assistant','channel':'final',
+                       'content':[{'type':'output_text','text':'new result'}]})
+        facts = tt.turn_observations('codex',SID,anchor)
+        self.assertEqual(facts['reply'],'new result')
+
+    def test_three_native_sources_and_old_payload(self):
+        import sqlite3
+        import tidy_transcripts as tt
+        claude = self.native('claude')
+        anchor = tt.turn_anchor('claude', SID, str(claude))
+        self.row(claude, {}, type='assistant', message={'role':'assistant','content':[
+            {'type':'tool_use','name':'Bash','id':'c','input':{'command':'pytest'}}]})
+        self.row(claude, {}, type='user', toolUseResult={'exit_code':2}, message={'role':'user','content':[
+            {'type':'tool_result','tool_use_id':'c','is_error':True,'content':'failed'}]})
+        facts = tt.turn_observations('claude', SID, anchor, {'last_assistant_message':'Failed check'})
+        self.assertEqual(facts['commands'][0]['state'], 'failed')
+        self.assertEqual(facts['commands'][0]['exit_codes'], [2])
+        db = self.tmp/'native.db'
+        with sqlite3.connect(db) as con:
+            con.executescript('CREATE TABLE message(id TEXT,session_id TEXT,data TEXT); CREATE TABLE part(session_id TEXT,message_id TEXT,data TEXT,time_created INT);')
+            con.execute('INSERT INTO message VALUES(?,?,?)',('u',SID,'{"role":"user"}'))
+            con.execute('INSERT INTO message VALUES(?,?,?)',('a',SID,'{"role":"assistant"}'))
+            con.execute('INSERT INTO part VALUES(?,?,?,?)',(SID,'u','{"type":"text","text":"fix"}',1))
+        anchor = tt.turn_anchor('opencode', SID, str(db))
+        with sqlite3.connect(db) as con:
+            con.execute('INSERT INTO part VALUES(?,?,?,?)',(SID,'a',json.dumps({'type':'tool','tool':'bash','callID':'o',
+                'state':{'status':'completed','input':{'command':'pytest'},'metadata':{'exit':1}}}),2))
+            con.execute('INSERT INTO part VALUES(?,?,?,?)',(SID,'a','{"type":"text","text":"OpenCode failed check"}',3))
+            con.execute('INSERT INTO part VALUES(?,?,?,?)',('another-sid','a','{"type":"text","text":"never join this"}',4))
+        facts = tt.turn_observations('opencode', SID, anchor)
+        self.assertEqual(facts['commands'][0]['exit_codes'], [1])
+        self.assertEqual(facts['reply'], 'OpenCode failed check')
+        facts = tt.turn_observations('codex', SID, {}, {})
+        self.assertEqual(facts['coverage'], 'unknown')
+        self.assertTrue(facts['error'])
+
+    def test_launcher_hands_native_clues_to_child_without_reading_the_transcript(self):
+        seen = {}
+        def spawn(command, **kwargs):
+            seen.update(json.loads(kwargs['stdin'].read()))
+            return mock.Mock()
+        with mock.patch.object(Path, 'read_text', side_effect=AssertionError('hook must not read native history')):
+            self.assertTrue(T.launch('end','codex',{'session_id':SID,'cwd':str(self.repo),
+                'transcript_path':'/unreadable/native.jsonl','last_assistant_message':'normal final answer'},
+                environ=self.env,popen=spawn))
+        self.assertEqual(seen['last_assistant_message'], 'normal final answer')
 
 
 if __name__ == "__main__":

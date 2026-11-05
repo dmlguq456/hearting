@@ -1954,6 +1954,9 @@ def _route_chain_bodies(chain, tag_by_key=None, working=False):
             is_current = start + offset == current_idx
             segs += _route_chain_node_segs(node, current_knobs if is_current else past_knobs,
                                            tag_by_key, is_current=is_current, working=working)
+        if chain.get('automatic_records') and any(not node.get('automatic') for node in nodes):
+            latest = chain['automatic_records'][-1]
+            segs.append((f" · fix record ({latest.get('changed_files', '?')})", "dim"))
         return segs
 
     def current_only(with_knobs):

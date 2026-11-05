@@ -969,6 +969,235 @@ def read_chunk(harness: str, source, cursor: int = 0, sid: Optional[str] = None,
     return Chunk(harness, str(source), cursor, cursor, error="unknown harness")
 
 
+# Current-turn observations for automatic change records. This reads no tidy watermark
+# and writes nothing: the recorder owns its existing state and evidence lifecycle.
+TURN_SCAN_BYTES = 2 * 1024 * 1024
+
+
+def _turn_prompt(harness, row):
+    message = row.get('message') or row.get('payload') or {}
+    if not isinstance(message, dict):
+        return False
+    if harness == 'codex':
+        return (row.get('type') == 'event_msg' and message.get('type') == 'user_message' or
+                message.get('type') == 'message' and message.get('role') == 'user')
+    content = message.get('content')
+    return message.get('role') == 'user' and (isinstance(content, str) or
+        isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'text' for b in content))
+
+
+def turn_anchor(harness, sid, hint=None, *, at=None):
+    """Locate this exact native session and remember its current prompt boundary.
+
+    Called in the existing detached child, never in Stop. A bounded tail also
+    includes tools that started before the start child got CPU. Missing native
+    clues preserve the old Git record with unknown observations.
+    """
+    source = locate_transcript(harness, sid, hint)
+    if source is None:
+        return {'error': 'native source unavailable'}
+    anchor = {'source': str(source), 'session_id': sid, 'harness': harness}
+    if harness != 'opencode' and sid not in source.name:
+        return {**anchor, 'error': 'native source session mismatch'}
+    try:
+        if harness == 'opencode':
+            with _opencode_view(source) as con:
+                if at is not None:
+                    row = con.execute("SELECT MAX(rowid) FROM part WHERE session_id=? AND time_created<?",
+                                      (sid, int(at * 1000))).fetchone()
+                    anchor['cursor'] = int(row[0] or 0)
+                    return anchor
+                row = con.execute("SELECT MIN(p.rowid) FROM part p WHERE p.session_id=? AND p.message_id=("
+                    "SELECT id FROM message WHERE session_id=? AND json_extract(data,'$.role')='user' "
+                    "ORDER BY rowid DESC LIMIT 1)", (sid, sid)).fetchone()
+                anchor['cursor'] = max(0, int(row[0] or 1) - 1)
+        else:
+            with source.open('rb') as stream:
+                info = os.fstat(stream.fileno())
+                anchor['identity'] = f'{info.st_dev}:{info.st_ino}'
+                start = max(0, info.st_size - DEFAULT_CHUNK_BYTES)
+                stream.seek(start)
+                raw = stream.read(DEFAULT_CHUNK_BYTES)
+            cursor = info.st_size
+            offset = start
+            for line in raw.splitlines(keepends=True):
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        if at is None and _turn_prompt(harness, row):
+                            cursor = offset
+                        elif at is not None:
+                            from datetime import datetime
+                            stamp = row.get('timestamp')
+                            try:
+                                stamp = datetime.fromisoformat(str(stamp).replace('Z', '+00:00')).timestamp()
+                            except (ValueError, TypeError):
+                                stamp = 0
+                            if stamp >= at and cursor == info.st_size:
+                                cursor = offset
+                except (ValueError, UnicodeError):
+                    pass
+                offset += len(line)
+            anchor['cursor'] = cursor
+            if at is not None and start and cursor == start:
+                anchor['coverage'] = 'bounded start; earlier native rows unknown'
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        anchor['error'] = _read_error(exc)
+    return anchor
+
+
+def turn_observations(harness, sid, anchor, payload=None, *, until=None):
+    """Bounded native facts, not a test verdict. Full stdout stays at its source."""
+    from work_intent import redact_secrets
+
+    payload = payload or {}
+    result = {'commands': [], 'reply': '', 'terminal': 'stop-observed',
+              'coverage': 'unknown', 'source': anchor.get('source', ''), 'error': anchor.get('error', '')}
+    def text(value, cap=1200):
+        return redact_secrets(value if isinstance(value, str) else '')[:cap]
+    def command(name, key, args, ref):
+        try:
+            args = json.loads(args) if isinstance(args, str) else args
+        except ValueError:
+            args = {}
+        args = args if isinstance(args, dict) else {}
+        label = args.get('cmd') or args.get('command') or ''
+        item = {'tool': name, 'id': str(key), 'command': text(label, 240),
+                'state': 'unknown', 'exit_codes': [], 'reference': ref}
+        result['commands'].append(item)
+        return item
+    def output(item, value, *, failed=False):
+        codes, running = [], False
+        def visit(value):
+            nonlocal running
+            if isinstance(value, dict):
+                code = value.get('exit_code')
+                if isinstance(code, int) and not isinstance(code, bool):
+                    codes.append(code)
+                if isinstance(value.get('session_id'), int) and code is None:
+                    running = True
+                # stdout is evidence at the source, never a source of exit-code claims.
+                for key in ('content', 'structuredContent', 'value', 'result', 'results'):
+                    if key in value:
+                        visit(value[key])
+                if value.get('type') == 'text':
+                    visit(value.get('text', ''))
+            elif isinstance(value, list):
+                for part in value:
+                    visit(part)
+            elif isinstance(value, str):
+                try:
+                    visit(json.loads(value))
+                    return
+                except ValueError:
+                    pass
+                header = value.split('Final output:', 1)[0].split('Output:', 1)[0]
+                codes.extend(int(code) for code in re.findall(r'^Process exited with code (-?\d+)', header, re.M))
+                running |= bool(re.search(r'Script running with cell ID|Process running with session ID', header))
+                # Code-mode orchestration exposes tool-result JSON after its header.
+                if 'Output:' in value:
+                    for line in value.split('Output:', 1)[1].splitlines():
+                        try:
+                            visit(json.loads(line))
+                        except ValueError:
+                            pass
+        visit(value)
+        item.update(exit_codes=codes, state='running' if running else 'failed' if failed else 'exited' if codes else 'unknown')
+    try:
+        if result['error'] or anchor.get('session_id') != sid or anchor.get('harness') != harness:
+            raise ValueError(result['error'] or 'native session boundary unavailable')
+        source = Path(anchor['source'])
+        cursor = int(anchor['cursor'])
+        rows = []
+        if harness == 'opencode':
+            used = 0
+            with _opencode_view(source) as con:
+                for rowid, raw, message_raw in con.execute(
+                    "SELECT p.rowid,p.data,m.data FROM part p LEFT JOIN message m ON m.id=p.message_id "
+                    "WHERE p.session_id=? AND p.rowid>? AND p.rowid<=? ORDER BY p.rowid",
+                    (sid, cursor, until if until is not None else 2**63-1)):
+                    used += len(raw)
+                    if used > TURN_SCAN_BYTES:
+                        result['coverage'] = 'bounded; remaining native rows unknown'
+                        break
+                    rows.append((f'{source}#session={sid}&rowid={rowid}', json.loads(raw), json.loads(message_raw or '{}')))
+                else:
+                    result['coverage'] = 'current-turn'
+        else:
+            with source.open('rb') as stream:
+                info = os.fstat(stream.fileno())
+                if f'{info.st_dev}:{info.st_ino}' != anchor.get('identity') or info.st_size < cursor:
+                    raise ValueError('native source replaced or truncated')
+                stop = min(info.st_size, until if until is not None else info.st_size)
+                stream.seek(cursor)
+                raw = stream.read(min(TURN_SCAN_BYTES, max(0, stop - cursor)))
+            result['coverage'] = anchor.get('coverage') or ('current-turn' if cursor + len(raw) == stop else 'bounded; remaining native rows unknown')
+            offset = cursor
+            for line in raw.splitlines(keepends=True):
+                if not line.endswith(b'\n'):
+                    result['coverage'] = 'partial row; native tail unknown'
+                    break
+                try:
+                    rows.append((f'{source}#byte={offset}', json.loads(line), {}))
+                except ValueError:
+                    result['coverage'] = 'malformed row; partial observations'
+                offset += len(line)
+        calls = {}
+        for ref, row, message in rows:
+            if not isinstance(row, dict):
+                continue
+            if harness == 'opencode':
+                if row.get('type') == 'tool' and row.get('tool') in ('bash', 'shell'):
+                    state = row.get('state') or {}
+                    item = command(row['tool'], row.get('callID', ''), state.get('input'), ref)
+                    code = (state.get('metadata') or {}).get('exit')
+                    item.update(state='running' if state.get('status') in ('pending', 'running') else
+                        'failed' if state.get('status') == 'error' else 'exited' if isinstance(code, int) else 'unknown',
+                        exit_codes=[code] if isinstance(code, int) and not isinstance(code, bool) else [])
+                if row.get('type') == 'text' and message.get('role') == 'assistant' and not row.get('synthetic'):
+                    result.update(reply=text(row.get('text')), reply_reference=ref)
+            elif harness == 'claude':
+                msg = row.get('message') or {}
+                if not isinstance(msg, dict):
+                    continue
+                for block in msg.get('content') or []:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get('type') == 'tool_use' and block.get('name') in ('Bash', 'bash', 'shell'):
+                        calls[block.get('id')] = command(block['name'], block.get('id'), block.get('input'), ref)
+                    elif block.get('type') == 'tool_result' and block.get('tool_use_id') in calls:
+                        item = calls[block['tool_use_id']]
+                        output(item, row.get('toolUseResult') or block.get('content'), failed=block.get('is_error', False))
+                        item['result_reference'] = ref
+                    elif block.get('type') == 'text' and msg.get('role') == 'assistant':
+                        result.update(reply=text(block.get('text')), reply_reference=ref)
+            else:
+                p = row.get('payload') or {}
+                if not isinstance(p, dict):
+                    continue
+                kind = p.get('type')
+                if kind == 'function_call' and re.search(r'(?:^|\.)(?:exec|exec_command|write_stdin|wait)$', p.get('name', '')):
+                    calls[p.get('call_id')] = command(p['name'], p.get('call_id'), p.get('arguments'), ref)
+                elif kind == 'function_call_output' and p.get('call_id') in calls:
+                    item = calls[p['call_id']]
+                    output(item, p.get('output'))
+                    item['result_reference'] = ref
+                elif kind == 'message' and p.get('role') == 'assistant' and p.get('channel') in (None, 'final'):
+                    result.update(reply=text('\n'.join(_rt._codex_text(row))), reply_reference=ref)
+                elif kind in ('turn_aborted', 'task_aborted'):
+                    result['terminal'] = 'interrupted'
+                elif kind == 'task_complete' and p.get('last_agent_message'):
+                    result.update(reply=text(p['last_agent_message']), reply_reference=ref)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+        result['error'] = _read_error(exc)
+    if isinstance(payload.get('last_assistant_message'), str):
+        result.update(reply=text(payload['last_assistant_message']), reply_reference='native Stop.last_assistant_message')
+    if payload.get('interrupted') or payload.get('hook_event_name') == 'StopFailure':
+        result['terminal'] = 'interrupted'
+    result['turn_id'] = payload.get('turn_id', '')
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Watermarks
 # ---------------------------------------------------------------------------

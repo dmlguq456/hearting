@@ -1835,6 +1835,7 @@ def main():
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
         cwd_was_explicit = a.cwd is not None
         cwd=a.cwd or os.getcwd()
+        promotion_cwd = cwd
         artifact_root=a.artifact_root or _compose_artifact_root(cwd)
         if a.campaign_key is None and a.parent_cycle is None and not a.unassigned:
             a.campaign_key=_session_campaign_key(artifact_root)
@@ -2026,6 +2027,13 @@ def main():
                               **compose_observations(route)},sort_keys=True))
             return 0
         path = _emit_compiled_route(a,route,artifact_root)
+        try:
+            from turn_change_record import link_promotion
+            promotion = link_promotion(route, source_cwd=promotion_cwd)
+            if promotion:
+                print(f"prior_turn_evidence={promotion}", file=sys.stderr)
+        except Exception:
+            pass  # supplementary evidence never owns starting the workflow
         if a.start:
             from work_start import start_work
             jobs=Path(a.jobs or _compose_default_jobs())
