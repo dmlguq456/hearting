@@ -155,7 +155,9 @@ class ParsedRegistryRowsTest(unittest.TestCase):
     def test_fingerprint_budget_does_not_change_a_published_history(self):
         from runtime_observation import ProjectionCache
         evidence = dispatch.RegistryRouteEvidence(work={'note': '한글' * 100})
-        expected = dispatch.json.dumps(evidence, sort_keys=True, default=str)
+        expected = dispatch.hashlib.sha256(
+            dispatch.json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest()
+        self.assertEqual(len(expected), 64)
         with mock.patch.object(dispatch, '_REGISTRY_FINGERPRINT_CACHE', ProjectionCache(max_bytes=1)):
             self.assertEqual(evidence.fingerprint(), expected)
             self.assertEqual(evidence.fingerprint(), expected)

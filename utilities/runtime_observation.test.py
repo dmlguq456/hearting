@@ -14,6 +14,114 @@ from runtime_observation import (ObservationContext, file_generation,
                                 stable_read_bytes)  # noqa: E402
 
 
+class InputGenerationsTest(unittest.TestCase):
+    def test_external_display_input_stays_fresh_outside_the_explicit_scope(self):
+        from runtime_observation import InputGenerations, passive_input
+        current, calls = ['first proof'], []
+        def read():
+            calls.append(1)
+            return current[0]
+        self.assertEqual(passive_input('git-proof', read), 'first proof')
+        current[0] = 'next proof'
+        self.assertEqual(passive_input('git-proof', read), 'next proof')
+        self.assertEqual(len(calls), 2)
+        observed = InputGenerations()
+        with observed.capture():
+            self.assertEqual(passive_input('git-proof', read), 'next proof')
+            self.assertEqual(passive_input('git-proof', read), 'next proof')
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(observed.current())
+        current[0] = 'changed proof'
+        self.assertFalse(observed.current())
+
+    def test_dangling_symlink_retarget_and_lstat_are_observed(self):
+        from runtime_observation import InputGenerations, input_path_call
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'link'
+            path.symlink_to('missing-one')
+            observed = InputGenerations()
+            with observed.capture():
+                input_path_call(path, 'lstat')
+                self.assertTrue(input_path_call(path, 'is_symlink'))
+            self.assertTrue(observed.current())
+            path.unlink()
+            path.symlink_to('missing-two')
+            self.assertFalse(observed.current())
+
+    def test_read_set_detects_same_size_rewrite_and_missing_file_creation(self):
+        from runtime_observation import InputGenerations
+        with tempfile.TemporaryDirectory() as root:
+            present, missing = Path(root) / 'present', Path(root) / 'missing'
+            present.write_text('old')
+            observed = InputGenerations()
+            with observed.capture():
+                self.assertEqual(present.read_text(), 'old')
+                with self.assertRaises(FileNotFoundError):
+                    missing.read_text()
+            self.assertTrue(observed.current())
+            before = present.stat()
+            present.write_text('new')
+            os.utime(present, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertFalse(observed.current())
+            observed = InputGenerations()
+            with observed.capture():
+                with self.assertRaises(FileNotFoundError):
+                    missing.read_text()
+            missing.write_text('created')
+            self.assertFalse(observed.current())
+
+    def test_directory_discovery_and_stat_only_cache_hit_are_dependencies(self):
+        from runtime_observation import InputGenerations, input_stat
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'record'
+            path.write_text('old')
+            observed = InputGenerations()
+            with observed.capture():
+                self.assertEqual(os.listdir(root), ['record'])
+                input_stat(path)  # the parser returned its cached document
+            self.assertTrue(observed.current())
+            path.write_text('changed')
+            self.assertFalse(observed.current())
+            observed = InputGenerations()
+            with observed.capture():
+                os.listdir(root)
+            (Path(root) / 'new-record').write_text('new')
+            self.assertFalse(observed.current())
+
+    def test_sqlite_wal_change_and_read_set_limit_never_reuse_old_result(self):
+        import sqlite3
+        from runtime_observation import InputGenerations
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'state.sqlite'
+            with sqlite3.connect(path) as db:
+                db.execute('create table value (n)')
+            observed = InputGenerations()
+            with observed.capture(), sqlite3.connect(path) as db:
+                db.execute('select * from value').fetchall()
+            self.assertTrue(observed.current())
+            Path(str(path) + '-wal').write_bytes(b'published')
+            self.assertFalse(observed.current())
+            observed = InputGenerations(max_bytes=1)
+            with observed.capture():
+                path.read_bytes()
+            self.assertFalse(observed.current())
+            self.assertEqual(observed.paths, {})
+
+    def test_fresh_census_is_excluded_and_an_unclassified_rpc_prevents_reuse(self):
+        import socket
+        from runtime_observation import InputGenerations, untracked_inputs
+        observed = InputGenerations()
+        with observed.capture(), untracked_inputs():
+            with open('/proc/self/stat') as stream:
+                stream.read()
+        self.assertTrue(observed.current())
+        observed = InputGenerations()
+        with observed.capture(), socket.socket(socket.AF_UNIX) as stream:
+            with self.assertRaises(OSError):
+                stream.connect('/nonexistent-hearting-test-socket')
+        self.assertFalse(observed.current())
+
+
 class PassObservationTest(unittest.TestCase):
     def test_a_changed_effective_uid_has_its_own_observation(self):
         from runtime_observation import observation_read_scope, observe_once

@@ -7,6 +7,8 @@ producer side record), never by parsing a locator name.
 """
 from __future__ import annotations
 
+from runtime_observation import input_path_call
+from runtime_observation import input_stat
 import json
 import os
 import re
@@ -50,7 +52,7 @@ def _exact_cycle_manifest(root: Path, campaign: Path, cycle: Path) -> Optional[D
 
     path = Path(cycle) / "manifest.json"
     try:
-        observed = os.lstat(path)
+        observed = input_stat(path, follow_symlinks=False)
         if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
             return None
         campaign_rel = Path(campaign).relative_to(root).as_posix()
@@ -103,7 +105,7 @@ class LocatorError(ValueError):
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        if path.is_symlink() or not path.is_file():
+        if input_path_call(path, 'is_symlink') or not input_path_call(path, 'is_file'):
             return None
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError):
@@ -171,10 +173,10 @@ def validate_component(value: Any) -> str:
 def safe_child(root: Path, parent: Path, component: Any) -> Path:
     """Join one record locator and reject path or existing-symlink escape."""
 
-    root_resolved = Path(root).resolve(strict=False)
+    root_resolved = input_path_call(Path(root), 'resolve', strict=False)
     candidate = Path(parent) / validate_component(component)
     try:
-        candidate.resolve(strict=False).relative_to(root_resolved)
+        input_path_call(candidate, 'resolve', strict=False).relative_to(root_resolved)
     except (OSError, RuntimeError, ValueError) as exc:
         raise LocatorError("locator-outside-artifact-root", str(candidate)) from exc
     return candidate
@@ -189,7 +191,7 @@ def allocate_locator(parent: Path, timestamp: str, slug: str) -> Tuple[str, str]
     while True:
         candidate = Path(parent) / f"{base}{suffix}"
         try:
-            candidate.lstat()
+            input_stat(candidate, follow_symlinks=False)
             occupied = True
         except FileNotFoundError:
             occupied = False
@@ -208,14 +210,14 @@ def iter_campaign_dirs(root: Path) -> Iterator[Path]:
     import artifact_manifest
 
     base = campaigns_dir(root)
-    if not base.is_dir() or base.is_symlink():
+    if not input_path_call(base, 'is_dir') or input_path_call(base, 'is_symlink'):
         return
     for entry in sorted(base.iterdir(), key=lambda p: p.name):
-        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+        if entry.name.startswith(".") or input_path_call(entry, 'is_symlink') or not input_path_call(entry, 'is_dir'):
             continue
         record_path = entry / "campaign.json"
         try:
-            mode = os.lstat(record_path).st_mode
+            mode = input_stat(record_path, follow_symlinks=False).st_mode
         except OSError:
             mode = 0
         record_control = (stat.S_ISREG(mode) and not stat.S_ISLNK(mode)
@@ -232,19 +234,19 @@ def iter_cycle_dirs(campaign: Path) -> Iterator[Tuple[Path, str]]:
 
     rows = []
     campaign = Path(campaign)
-    if not campaign.is_dir() or campaign.is_symlink():
+    if not input_path_call(campaign, 'is_dir') or input_path_call(campaign, 'is_symlink'):
         return
     for entry in campaign.iterdir():
         if entry.name.startswith(".") or entry.name in {"cycles", CAMPAIGN_EVENTS_DIR}:
             continue
-        if entry.is_dir() and not entry.is_symlink():
+        if input_path_call(entry, 'is_dir') and not input_path_call(entry, 'is_symlink'):
             rows.append((entry, "readable"))
     legacy = campaign / "cycles"
-    if legacy.is_dir() and not legacy.is_symlink():
+    if input_path_call(legacy, 'is_dir') and not input_path_call(legacy, 'is_symlink'):
         for entry in legacy.iterdir():
             if entry.name.startswith("."):
                 continue
-            if entry.is_dir() and not entry.is_symlink():
+            if input_path_call(entry, 'is_dir') and not input_path_call(entry, 'is_symlink'):
                 rows.append((entry, "legacy-id"))
     for row in sorted(rows, key=lambda item: item[0].as_posix()):
         yield row
@@ -295,7 +297,7 @@ def cycle_binding_bytes(campaign_id: str, cycle_id: str, *, started_on: Optional
 
 def read_cycle_binding(path: Path) -> Optional[Dict[str, Any]]:
     marker = Path(path) / CYCLE_BINDING
-    if not marker.exists() and not marker.is_symlink():
+    if not input_path_call(marker, 'exists') and not input_path_call(marker, 'is_symlink'):
         return None
     binding = _read_json(marker)
     if (binding is None or not _BINDING_REQUIRED <= set(binding)
@@ -439,7 +441,7 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
     regardless of who called it.
     """
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     campaign = _campaign_view(root, campaign_path)
     if campaign is None:
         return None
@@ -447,7 +449,7 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
     rows: Rows = {}
 
     def add(identifier: str, path: Path, *, title: str, started: str, status: str) -> None:
-        rel = path.resolve().relative_to(root).as_posix()
+        rel = input_path_call(path, 'resolve').relative_to(root).as_posix()
         previous = rows.get(identifier)
         if previous is not None and previous["path"] != rel:
             raise LocatorError("locator-index-duplicate-id", identifier)
@@ -472,7 +474,7 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
     for cycle_path, layout in iter_cycle_dirs(campaign_path):
         cycle_id = _cycle_entry_id(root, campaign, campaign_id, cycle_path, layout)
         if cycle_id is None:
-            if layout == "readable" and (cycle_path / "artifacts").is_dir():
+            if layout == "readable" and input_path_call(cycle_path / "artifacts", 'is_dir'):
                 unresolved.append(cycle_path)
             continue
         assigned_ids.add(cycle_id)
@@ -536,7 +538,7 @@ def _merge_rows(into: Rows, part: Rows) -> None:
 def scan_index(root: Path) -> Tuple[Dict[str, str], Rows]:
     """Scan records into ``id -> root-relative path`` plus display metadata."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     rows: Rows = {}
     for campaign_path in iter_campaign_dirs(root):
         part = scan_campaign(root, campaign_path)
@@ -718,7 +720,7 @@ def _index_json_bytes(mapping: Mapping[str, str]) -> bytes:
 
 def _regular_bytes(path: Path) -> Optional[bytes]:
     try:
-        if path.is_symlink() or not path.is_file():
+        if input_path_call(path, 'is_symlink') or not input_path_call(path, 'is_file'):
             return None
         return path.read_bytes()
     except OSError:
@@ -745,7 +747,7 @@ def _load_published_rows(root: Path) -> Optional[Rows]:
     from a partially-parsed file.
     """
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     json_bytes = _regular_bytes(campaigns_dir(root) / INDEX_JSON)
     md_bytes = _regular_bytes(campaigns_dir(root) / INDEX_MD)
     if json_bytes is None or md_bytes is None:
@@ -795,7 +797,7 @@ def _write_index_pair(root: Path, json_bytes: bytes, md_bytes: bytes) -> bool:
     """Atomic two-file replace with rollback. Skips the write (returns False)
     when both files already hold these exact bytes."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     base = campaigns_dir(root)
     json_path = base / INDEX_JSON
     markdown_path = base / INDEX_MD
@@ -823,9 +825,9 @@ def _write_index_pair(root: Path, json_bytes: bytes, md_bytes: bytes) -> bool:
 
 
 def rebuild_indexes(root: Path) -> Dict[str, str]:
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     base = campaigns_dir(root)
-    if not base.is_dir() or base.is_symlink():
+    if not input_path_call(base, 'is_dir') or input_path_call(base, 'is_symlink'):
         return {}
     mapping, rows = scan_index(root)
     json_bytes, md_bytes = render_indexes(mapping, rows)
@@ -846,8 +848,8 @@ def _rel_prefix_rows(rows: Rows, prefix: str) -> List[str]:
 
 
 def _is_campaign_dir(path: Path) -> bool:
-    return path.is_dir() and not path.is_symlink() and (
-        (path / "campaign.json").is_file() or _campaign_from_manifests(path) is not None)
+    return input_path_call(path, 'is_dir') and not input_path_call(path, 'is_symlink') and (
+        input_path_call(path / "campaign.json", 'is_file') or _campaign_from_manifests(path) is not None)
 
 
 def _lenient_rebuild(root: Path, touched: Sequence[str]) -> Tuple[Rows, Dict[str, str], str,
@@ -860,7 +862,7 @@ def _lenient_rebuild(root: Path, touched: Sequence[str]) -> Tuple[Rows, Dict[str
     here.
     """
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     touched_set = set(touched)
     rows: Rows = {}
     skipped: List[Dict[str, str]] = []
@@ -907,7 +909,7 @@ def _lenient_rebuild(root: Path, touched: Sequence[str]) -> Tuple[Rows, Dict[str
 
 def _plan_update(root: Path, campaign_ids: Iterable[str]) -> Tuple[Rows, Dict[str, str], str,
                                                                      Tuple[str, ...], Tuple[Dict[str, str], ...]]:
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     touched = list(dict.fromkeys(campaign_ids))
     published = _load_published_rows(root)
     if published is None:
@@ -1002,7 +1004,7 @@ def update_indexes(root: Path, campaign_ids: Iterable[str]) -> IndexUpdate:
     import artifact_admission
     import dispatch_lock_order
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     if not artifact_admission.holds_lock(root):
         raise LocatorError("locator-index-lock-not-held")
     dispatch_lock_order.assert_held("producer-admission", "locator-update-indexes")
@@ -1022,7 +1024,7 @@ def verify_indexes(root: Path, *, repair: bool) -> Dict[str, Any]:
     unknown outcome is reported as unknown, not dressed up as success).
     """
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     try:
         mapping, rows = scan_index(root)
     except LocatorError as exc:
@@ -1056,10 +1058,10 @@ _HINT_CACHE: Dict[Tuple[Any, ...], Dict[str, str]] = {}
 
 
 def _hint_map(root: Path) -> Dict[str, str]:
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     json_path = campaigns_dir(root) / INDEX_JSON
     try:
-        st = json_path.stat()
+        st = input_stat(json_path)
         key: Tuple[Any, ...] = (str(root), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     except OSError:
         key = (str(root), None)
@@ -1078,9 +1080,9 @@ def _campaign_entries(root: Path) -> List[str]:
     to run on every incremental update and every 3a probe."""
 
     try:
-        with os.scandir(campaigns_dir(Path(root).resolve())) as it:
+        with os.scandir(campaigns_dir(input_path_call(Path(root), 'resolve'))) as it:
             return [entry.name for entry in it
-                    if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)]
+                    if not entry.name.startswith(".") and input_path_call(entry, 'is_dir', follow_symlinks=False)]
     except OSError:
         return []
 
@@ -1092,16 +1094,16 @@ def _verify_candidate(root: Path, path: Path, identifier: str) -> bool:
     or `LocatorError`/`OSError` means "not proven", never a crash: the caller
     always has a fallback to try next."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     path = Path(path)
     try:
-        if path.is_symlink() or not path.is_dir():
+        if input_path_call(path, 'is_symlink') or not input_path_call(path, 'is_dir'):
             return False
         base = campaigns_dir(root)
-        if base.is_symlink():
+        if input_path_call(base, 'is_symlink'):
             return False
         try:
-            rel = path.resolve(strict=False).relative_to(root)
+            rel = input_path_call(path, 'resolve', strict=False).relative_to(root)
         except (OSError, ValueError):
             return False
         parts = rel.parts
@@ -1174,7 +1176,7 @@ def _unindexed_campaign_probe(root: Path, campaign_id: str) -> Optional[Path]:
     normally empty); the only path that finds a hand-renamed or hand-copied
     campaign directory the index has never seen."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     hints = _hint_map(root)
     indexed: Set[str] = set()
     for rel in hints.values():
@@ -1239,7 +1241,7 @@ def _locate_within_owner_campaign(
     ``locator-cycle-binding-campaign-mismatch``, so finding it "elsewhere"
     would never be a valid answer anyway)."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     probed = False
 
     def probe() -> Optional[Path]:
@@ -1275,7 +1277,7 @@ def _scan_lenient(root: Path) -> Tuple[Dict[str, str], Rows, Set[str], Optional[
     the caller decides what to raise, since only it knows whether the id it
     actually wants was affected."""
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     rows: Rows = {}
     duplicates: Set[str] = set()
     defect: Optional[LocatorError] = None
@@ -1343,7 +1345,7 @@ def locate(
     without repairing.
     """
 
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     hints = _hint_map(root)
     hinted = hints.get(identifier)
     if hinted:
@@ -1391,7 +1393,7 @@ def resolve_historical(root, identifier, *, max_hops=8):
     checked against the canonical ID. Source campaign IDs remain original IDs.
     """
     import artifact_cross_root_move as move
-    root = Path(root).resolve()
+    root = input_path_call(Path(root), 'resolve')
     original = {"artifact_root": str(root), "campaign_id": None, "cycle_id": None, "locator": None}
     current, requested = root, identifier
     chain, seen = [], set()
@@ -1418,7 +1420,7 @@ def resolve_historical(root, identifier, *, max_hops=8):
                 original.update(campaign_id=journal["source_campaign"], cycle_id=requested if cycle else None,
                     locator=item["source"] if item else str(Path(journal["source_campaign_path"]).parent))
             chain.append({"operation_id": journal["operation_id"], "state": "committed"})
-            current = Path(journal["target_root"]).resolve()
+            current = input_path_call(Path(journal["target_root"]), 'resolve')
             requested = requested if cycle else journal["target_campaign"]
             continue
         if cycle:

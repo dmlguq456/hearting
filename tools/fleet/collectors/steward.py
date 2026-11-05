@@ -21,10 +21,12 @@ import os
 import copy
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
-from runtime_observation import ProjectionCache, retained_size, observe_once as _observe_once
+from runtime_observation import (ProjectionCache, retained_size, observe_once as _observe_once,
+                                 untracked_inputs, invalidate_inputs)
 
 
 def _peer_message_module():
@@ -42,15 +44,18 @@ def read_markers():
     F-98d resolver chain plus each installed runtime's own root); empty on any failure."""
     mod = _peer_message_module()
     if mod is None:
+        invalidate_inputs()
         return {}
     try:
         from . import peer_messages as _pm
         roots = _pm._state_roots()
     except Exception:
+        invalidate_inputs()
         roots = None
     try:
         return mod.read_steward_markers(roots or None) or {}
     except Exception:
+        invalidate_inputs()
         return {}
 
 
@@ -96,11 +101,14 @@ def read_relations():
     global _RELATIONS_OBSERVATION
     try:
         before = _relations_generation()
+        from runtime_observation import observe_generation
+        observe_generation(('steward-relations',), before, _relations_generation)
         with _RELATIONS_LOCK:
             held = _RELATIONS_OBSERVATION
             if held is not None and held[0] == before:
                 return copy.deepcopy(held[1])
     except (ImportError, OSError, TypeError, ValueError):
+        invalidate_inputs()
         return _read_relations_uncached()
     value = _read_relations_uncached()
     try:
@@ -122,6 +130,7 @@ def _read_relations_uncached():
         import dispatch_seat_handover
         return dispatch_seat_handover.resolved_steward_relations(include_released=True)
     except Exception:
+        invalidate_inputs()
         return []
 
 
@@ -191,6 +200,23 @@ def _observed_registry_records(harness, directory, reader):
 
 def _registry_sessions():
     """Reuse native session metadata; no process, herdr or role probe."""
+    with untracked_inputs():
+        rows = _registry_session_rows()
+    from runtime_observation import observe_generation
+    observe_generation(('role-registry-metadata',),
+                       _registry_role_signature(rows), _read_registry_role_signature)
+    return rows
+
+
+def _registry_role_signature(rows):
+    return tuple((row.harness, row.session_id, row.cwd, row.runtime_name) for row in rows)
+
+
+def _read_registry_role_signature():
+    return _registry_role_signature(_registry_session_rows())
+
+
+def _registry_session_rows():
     rows = []
     for harness in ('claude', 'codex', 'opencode'):
         for record in _registry_records(harness) or ():
@@ -253,7 +279,6 @@ def _native_role_sessions(markers, rows, relations=()):
         if cache is None:
             cache = scope[('native-role-cwds',)] = ProjectionCache(
                 max_entries=256, max_bytes=80 * 1024)
-    policy = (codex._state_db, codex._home, opencode._db, sqlite3.connect)
     present = {key for row in rows for key in _session_keys(row)}
     wanted = set(markers)
     mod = _peer_message_module()
@@ -276,6 +301,28 @@ def _native_role_sessions(markers, rows, relations=()):
             sid = target.get("session_id")
             if sid:
                 wanted.add((harness, sid))
+    from functools import partial
+    from runtime_observation import observe_generation
+    wanted, present = frozenset(wanted), frozenset(present)
+    with untracked_inputs():
+        out = _native_role_rows(wanted, present, cache)
+    observe_generation(('role-native-cwds', tuple(sorted(wanted)), tuple(sorted(present))),
+                       _native_role_signature(out),
+                       partial(_read_native_role_signature, wanted, present))
+    return out
+
+
+def _native_role_signature(rows):
+    return tuple((row.harness, row.session_id, row.cwd) for row in rows)
+
+
+def _read_native_role_signature(wanted, present):
+    return _native_role_signature(_native_role_rows(wanted, present))
+
+
+def _native_role_rows(wanted, present, cache=None):
+    from . import codex, opencode
+    policy = (codex._state_db, codex._home, opencode._db, sqlite3.connect)
     out = []
     for harness, database, queries in (
             ("codex", lambda: codex._state_db(codex._home()),
@@ -596,13 +643,20 @@ class _EndObservation:
     and at most once per harness, so a pass whose holders all have herdr rows reads no
     /proc."""
 
-    def __init__(self):
+    def __init__(self, basic=None):
         self._seen = {}
+        self.states = {}
+        self.processes = {}
+        for row in getattr(basic, "sessions", ()):
+            if (row.pid and row.proc_start
+                    and row.liveness not in (None, "dead", "unknown", "unobserved")):
+                self.processes[(row.pid, str(row.proc_start))] = (True, True)
 
     def _once(self, harness, read):
         if harness not in self._seen:
             try:
-                self._seen[harness] = read()
+                with untracked_inputs():
+                    self._seen[harness] = read()
             except Exception:
                 self._seen[harness] = None
         return self._seen[harness]
@@ -638,9 +692,47 @@ class _EndObservation:
         return self._once(('registry', harness), read)
 
 
+_DETAIL_HOLDERS = ContextVar("fleet_detail_holders", default=None)
+
+
+class HolderObservation:
+    """Fresh holder proof after a basic paint, shared with a needed full pass."""
+
+    def __init__(self, basic):
+        self.end = _EndObservation(basic)
+        self._agents = None
+
+    @property
+    def agents(self):
+        if self._agents is not None:
+            return self._agents
+        try:
+            from . import herdr
+            with untracked_inputs():
+                self._agents = herdr.list_agents() or []
+        except Exception:
+            self._agents = []
+        return self._agents
+
+    def check(self, holders):
+        with untracked_inputs():
+            return tuple((key, session_liveness(*key, agents=self.agents,
+                                                observation=self.end))
+                         for key in sorted(holders))
+
+    @contextmanager
+    def scope(self):
+        token = _DETAIL_HOLDERS.set(self)
+        try:
+            yield self
+        finally:
+            _DETAIL_HOLDERS.reset(token)
+
+
 def end_observation():
     """A fresh per-pass observation for ``session_liveness(..., observation=...)``."""
-    return _EndObservation()
+    current = _DETAIL_HOLDERS.get()
+    return current.end if current is not None else _EndObservation()
 
 
 def _process_proof(harness, session_id, observation):
@@ -694,6 +786,21 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     hold the session (``_process_proof``); otherwise the registry record's process is checked
     (dead pid, recycled pid, or an ``exited`` status). Anything unobserved is
     ``unknown`` and keeps counting."""
+    current = _DETAIL_HOLDERS.get()
+    if current is not None:
+        observation = observation if observation is not None else current.end
+        agents = current.agents if agents is None else agents
+    key = (str(harness or "").lower(), session_id)
+    if isinstance(observation, _EndObservation) and key in observation.states:
+        return observation.states[key]
+    with untracked_inputs():
+        value = _session_liveness(harness, session_id, agents=agents, observation=observation)
+    if isinstance(observation, _EndObservation):
+        observation.states[key] = value
+    return value
+
+
+def _session_liveness(harness, session_id, *, agents=None, observation=None):
     harness = str(harness or "").lower()
     if not session_id:
         return "unknown"
@@ -724,6 +831,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
             return "unknown"
         if record.get("status") == "exited":
             return "ended"
+        process = (observation.processes.get((pid, str(record.get("procStart"))))
+                   if isinstance(observation, _EndObservation) else None)
+        if process is not None:
+            return "live"
         from . import liveness
         alive, match = liveness._proc_evidence(pid, record.get("procStart"))
     except Exception:
@@ -941,7 +1052,8 @@ def _record_supervision(context, markers, relations):
         return
     try:
         from . import herdr
-        agents = herdr.list_agents()
+        current = _DETAIL_HOLDERS.get()
+        agents = current.agents if current is not None else herdr.list_agents()
     except Exception:
         agents = None
     try:

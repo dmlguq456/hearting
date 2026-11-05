@@ -12,6 +12,7 @@ from collections import OrderedDict
 from itertools import islice
 import json
 import os
+from .. import input_observation
 import re
 import stat
 import sys
@@ -64,7 +65,7 @@ _PASSIVE_PARSE_CACHE = _PassiveParseCache()
 
 
 def _file_generation(path):
-    info = os.stat(path)
+    info = input_observation.stat(path)
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
 
@@ -92,11 +93,11 @@ def _load_peer_message(diagnostics=None):
     global _peer_message_module
     if _peer_message_module is not None:
         return _peer_message_module
-    here = Path(__file__).resolve()
+    here = input_observation.path_call(Path(__file__), 'resolve')
     for candidate in here.parents:
         pm_path = candidate / "utilities" / "peer-message.py"
         try:
-            if not stat.S_ISREG(pm_path.stat().st_mode):
+            if not stat.S_ISREG(input_observation.path_call(pm_path, 'stat').st_mode):
                 continue
         except FileNotFoundError:
             continue
@@ -151,7 +152,7 @@ def _runtime_ledger_roots(diagnostics=None):
         active = False
         for child in ("peer-messages", "peer-steward"):
             try:
-                is_dir = stat.S_ISDIR(os.stat(os.path.join(root, child)).st_mode)
+                is_dir = stat.S_ISDIR(input_observation.stat(os.path.join(root, child)).st_mode)
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -189,13 +190,13 @@ def _state_roots(diagnostics=None):
         _note_diagnostic(diagnostics, "resolve_dispatch_home", exc)
         home = None
     if home is not None:
-        here = Path(__file__).resolve()
+        here = input_observation.path_call(Path(__file__), 'resolve')
         found_contract = False
         for candidate in here.parents:
             utilities_dir = candidate / "utilities"
             contract_path = utilities_dir / "dispatch_contract.py"
             try:
-                if not stat.S_ISREG(contract_path.stat().st_mode):
+                if not stat.S_ISREG(input_observation.path_call(contract_path, 'stat').st_mode):
                     continue
             except FileNotFoundError:
                 continue
@@ -361,7 +362,7 @@ def _ledger_paths(roots, diagnostics, scan_status):
                     if month.name.startswith("."):
                         continue
                     try:
-                        if not month.is_dir(follow_symlinks=True):
+                        if not input_observation.path_call(month, 'is_dir', follow_symlinks=True):
                             continue
                     except OSError as exc:
                         root_failed = True
@@ -373,7 +374,7 @@ def _ledger_paths(roots, diagnostics, scan_status):
                                 if entry.name.startswith(".") or not entry.name.endswith(".jsonl"):
                                     continue
                                 try:
-                                    if entry.is_file(follow_symlinks=True):
+                                    if input_observation.path_call(entry, 'is_file', follow_symlinks=True):
                                         paths.append(entry.path)
                                 except OSError as exc:
                                     root_failed = True
@@ -393,7 +394,7 @@ def _ledger_paths(roots, diagnostics, scan_status):
 
 def _regular_file_exists(path, diagnostics, operation):
     try:
-        return stat.S_ISREG(path.stat().st_mode)
+        return stat.S_ISREG(input_observation.path_call(path, 'stat').st_mode)
     except FileNotFoundError:
         return False
     except OSError as exc:
@@ -426,7 +427,7 @@ def _pending_obligations(roots, now, diagnostics=None):
         for path in paths:
             examined += 1
             try:
-                if path.is_symlink() or path.stat().st_size > 128 * 1024:
+                if input_observation.path_call(path, 'is_symlink') or input_observation.path_call(path, 'stat').st_size > 128 * 1024:
                     continue
                 duty = json.loads(path.read_text(encoding="utf-8"))
             except OSError as exc:
@@ -487,7 +488,7 @@ def _pending_obligations(roots, now, diagnostics=None):
                 continue
             examined += 1
             try:
-                if path.is_symlink() or path.stat().st_size > 128 * 1024:
+                if input_observation.path_call(path, 'is_symlink') or input_observation.path_call(path, 'stat').st_size > 128 * 1024:
                     continue
                 arm = json.loads(path.read_text(encoding="utf-8"))
             except OSError as exc:

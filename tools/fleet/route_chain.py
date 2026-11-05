@@ -17,6 +17,7 @@ are imported lazily, inside the functions that need them.
 """
 import json
 import os
+from . import input_observation
 from collections import OrderedDict
 from pathlib import Path
 import re
@@ -52,7 +53,7 @@ OWNING_EVENTS = COMPOSING_EVENTS | {"start"}
 
 def _session_identity(env):
     """`utilities/session_identity.identity`, imported lazily (this module needs only `tools`)."""
-    utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+    utilities = str(input_observation.path_call(Path(__file__), 'resolve').parents[2] / "utilities")
     if utilities not in sys.path:
         sys.path.insert(0, utilities)
     from session_identity import identity
@@ -62,7 +63,7 @@ def _session_identity(env):
 def _automatic(route):
     """`utilities/turn_change_record.is_automatic_route`, imported lazily (this module needs only `tools`)."""
     try:
-        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        utilities = str(input_observation.path_call(Path(__file__), 'resolve').parents[2] / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         from turn_change_record import is_automatic_route
@@ -137,7 +138,7 @@ def composing_anchor(route_id, environ=None, not_before=None):
             if not name.endswith(".jsonl"):
                 continue
             try:
-                recent.append((os.stat(os.path.join(directory, name)).st_mtime, harness, name[:-len(".jsonl")]))
+                recent.append((input_observation.stat(os.path.join(directory, name)).st_mtime, harness, name[:-len(".jsonl")]))
             except OSError:
                 continue
     if isinstance(not_before, (int, float)) and not isinstance(not_before, bool):
@@ -233,7 +234,7 @@ def build_line(route, *, event, harness, session_id, route_file, plan=None, plan
 
 def _prepare_directory(directory):
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    meta = os.lstat(directory)
+    meta = input_observation.lstat(directory)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError(f"route-chain directory must be an owner directory: {directory} uid={meta.st_uid} expected={os.getuid()}")
     try:
@@ -250,7 +251,7 @@ def append(harness, session_id, line, *, on_error=None):
         if len(payload) > MAX_LINE_BYTES + 1:
             raise ValueError("route-chain-line-too-large")
         _prepare_directory(os.path.dirname(path))
-        is_new = not os.path.exists(path)
+        is_new = not input_observation.exists(path)
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             meta = os.fstat(fd)
@@ -278,7 +279,7 @@ def append(harness, session_id, line, *, on_error=None):
 def _sweep_dir(directory, now, max_age, skip_dotfiles=False):
     removed = 0
     try:
-        dir_meta = os.lstat(directory)
+        dir_meta = input_observation.lstat(directory)
     except OSError:
         return 0
     if not stat.S_ISDIR(dir_meta.st_mode) or dir_meta.st_uid != os.getuid():
@@ -292,7 +293,7 @@ def _sweep_dir(directory, now, max_age, skip_dotfiles=False):
             continue
         path = os.path.join(directory, name)
         try:
-            meta = os.lstat(path)
+            meta = input_observation.lstat(path)
             if (stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
                     and now - meta.st_mtime > max_age):
                 os.unlink(path)
@@ -372,7 +373,7 @@ def read_tail(harness, session_id, max_bytes=TAIL_BYTES):
     except ValueError:
         return []
     try:
-        meta = os.lstat(path)
+        meta = input_observation.lstat(path)
     except OSError:
         return []
     if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid():
@@ -390,7 +391,7 @@ def read_tail(harness, session_id, max_bytes=TAIL_BYTES):
     except OSError:
         return []
     try:
-        after = os.lstat(path)
+        after = input_observation.lstat(path)
         after_stamp = (after.st_dev, after.st_ino, after.st_mtime_ns,
                        after.st_ctime_ns, after.st_size)
     except OSError:

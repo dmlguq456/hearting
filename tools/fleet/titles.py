@@ -22,6 +22,7 @@ import os
 import re
 import tempfile
 import time
+from . import input_observation
 
 _FRESH_SEC = 24 * 3600
 # F-63 (v48): the subtitle keeps the title's 24h window — honesty moved from hiding a
@@ -149,6 +150,7 @@ def fresh_title(sid, now=None, max_age=_FRESH_SEC, harness="claude"):
     if not isinstance(ts, (int, float)):
         return None
     now = time.time() if now is None else now
+    input_observation.deadline(ts + max_age, now)
     if now - ts > max_age:
         return None
     title = data.get("title")
@@ -187,6 +189,7 @@ def fresh_summary_with_ts(sid, harness="claude", now=None,
     if not isinstance(ts, (int, float)):
         return (None, None)
     now = time.time() if now is None else now
+    input_observation.deadline(ts + max_age, now)
     if now - ts > max_age:
         return (None, None)
     if after_offset is not None:

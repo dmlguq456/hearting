@@ -8,8 +8,10 @@ authority under the existing lock before a state transition.
 
 from __future__ import annotations
 
+from runtime_observation import input_path_call
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from runtime_observation import input_stat
 import atexit
 import codecs
 import contextlib
@@ -896,7 +898,7 @@ class RegistrySnapshot:
         path = Path(jobs)
         try:
             return (str(path.absolute()) == self.path_identity
-                    and str(path.resolve(strict=True)) == self.resolved_path
+                    and str(input_path_call(path, 'resolve', strict=True)) == self.resolved_path
                     and tuple(self.view.signature) == tuple(self.signature))
         except (OSError, RuntimeError, TypeError, ValueError):
             return False
@@ -932,8 +934,8 @@ def _stable_read(path: Path, path_identity: str):
     for _attempt in range(_RETRIES):
         fd = None
         try:
-            resolved_before = str(path.resolve(strict=True))
-            path_before = path.stat()
+            resolved_before = str(input_path_call(path, 'resolve', strict=True))
+            path_before = input_stat(path)
             fd = os.open(path, flags)
             fd_before = os.fstat(fd)
             before_signature = _stat_signature(path_before)
@@ -957,8 +959,8 @@ def _stable_read(path: Path, path_identity: str):
                 _METRICS["bytes_read"] += len(chunk)
 
             fd_after = os.fstat(fd)
-            path_after = path.stat()
-            resolved_after = str(path.resolve(strict=True))
+            path_after = input_stat(path)
+            resolved_after = str(input_path_call(path, 'resolve', strict=True))
             after_signature = _stat_signature(path_after)
             if (resolved_before != resolved_after or fd_after.st_nlink <= 0
                     or (path_after.st_dev, path_after.st_ino) != (fd_after.st_dev, fd_after.st_ino)
@@ -988,9 +990,9 @@ def _close_view_fd(view: RegistryView | None) -> None:
 
 def _path_matches_fd(path: Path, resolved: str, signature: tuple, fd: int) -> bool:
     try:
-        path_info = path.stat()
+        path_info = input_stat(path)
         fd_info = os.fstat(fd)
-        return (str(path.resolve(strict=True)) == resolved
+        return (str(input_path_call(path, 'resolve', strict=True)) == resolved
                 and path_info.st_dev == fd_info.st_dev
                 and path_info.st_ino == fd_info.st_ino
                 and fd_info.st_nlink > 0
@@ -1034,7 +1036,7 @@ def _current_cached(path: Path, identity: str, *, scoped: bool = False) -> "Regi
                    or not cached._prefix_reuse_eligible or cached.has_invalid_utf8):
         return None
     try:
-        resolved = str(path.resolve(strict=True))
+        resolved = str(input_path_call(path, 'resolve', strict=True))
     except (OSError, RuntimeError):
         return None
     if (cached.resolved_path != resolved
@@ -1051,8 +1053,8 @@ def _read_retained_suffix(path: Path, path_identity: str, cached: RegistryView):
     last_error = None
     for _attempt in range(_RETRIES):
         try:
-            resolved_before = str(path.resolve(strict=True))
-            path_before = path.stat()
+            resolved_before = str(input_path_call(path, 'resolve', strict=True))
+            path_before = input_stat(path)
             fd_before = os.fstat(cached._fd)
             before_signature = _stat_signature(path_before)
             fd_signature = _stat_signature(fd_before)
@@ -1073,8 +1075,8 @@ def _read_retained_suffix(path: Path, path_identity: str, cached: RegistryView):
                 size += len(chunk)
                 _METRICS["bytes_read"] += len(chunk)
             fd_after = os.fstat(cached._fd)
-            path_after = path.stat()
-            resolved_after = str(path.resolve(strict=True))
+            path_after = input_stat(path)
+            resolved_after = str(input_path_call(path, 'resolve', strict=True))
             after_signature = _stat_signature(path_after)
             if (resolved_before != resolved_after
                     or before_signature != after_signature
@@ -1171,7 +1173,7 @@ def _observe_generation(path: Path) -> list:
             return [current, None]
         fd = None
         try:
-            path.resolve(strict=True)  # a missing path fails at once, as in registry_view
+            input_path_call(path, 'resolve', strict=True)  # a missing path fails at once, as in registry_view
             started_ns = time.time_ns()
             resolved, signature, raw, fd = _stable_read(path, identity)
         except OSError:
@@ -1305,8 +1307,8 @@ def _registry_view_fresh(jobs: Path, *, append_only: bool = False) -> RegistryVi
     identity = str(path.absolute())
     with _LOCK:
         try:
-            resolved = str(path.resolve(strict=True))
-            signature = _stat_signature(path.stat())
+            resolved = str(input_path_call(path, 'resolve', strict=True))
+            signature = _stat_signature(input_stat(path))
         except OSError:
             if _drop(identity) is not None:
                 _METRICS["invalidations"] += 1

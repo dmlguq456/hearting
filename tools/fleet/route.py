@@ -56,12 +56,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 if __package__:
+    from . import input_observation
     from .model import current_attempt_rank
     from .work_titles import readable
 else:  # Existing file-path consumers load this module without a package.
     tools_dir = str(Path(__file__).resolve().parents[1])
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
+    from fleet import input_observation
     from fleet.model import current_attempt_rank
     from fleet.work_titles import readable
 
@@ -490,7 +492,7 @@ def load_diagnostic(path, expect_hash=None, expect_id=None):
     if not path:
         return RouteDiagnostic(ambiguity="route-record-mismatch")
     try:
-        if not os.path.exists(os.path.abspath(path)):
+        if not input_observation.exists(os.path.abspath(path)):
             return RouteDiagnostic(ambiguity="route-record-missing")
     except (OSError, TypeError, ValueError):
         pass
@@ -554,7 +556,7 @@ def load_outcome(route_file, expect_id=None, expect_hash=None):
         return {"present": False}
     try:
         path = _outcome_path(route_file)
-        st = os.stat(path)
+        st = input_observation.stat(path)
         key = (st.st_mtime, st.st_size)
     except (OSError, TypeError, ValueError):
         path = _outcome_path(route_file)
@@ -572,7 +574,7 @@ def load_outcome(route_file, expect_id=None, expect_hash=None):
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
         if route.get("route_id") == expect_id or expect_id is None:
             import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+            sys.path.insert(0, str(input_observation.path_call(Path(__file__), 'resolve').parents[2] / "utilities"))
             import inline_finish
             pending = inline_finish.pending_state(Path(route.get("artifact_root", "")), route.get("route_id", ""))
             if pending and pending.get("state") != "finished":
@@ -750,7 +752,7 @@ def load(path, expect_hash=None, expect_id=None):
                        # malformed caller, and "never raises" wins over surfacing that loudly.
     try:
         abspath = os.path.abspath(path)
-        st = os.stat(abspath)
+        st = input_observation.stat(abspath)
         key = (st.st_mtime, st.st_size)
     except (OSError, TypeError, ValueError):
         return None
@@ -786,10 +788,10 @@ def _completion_home():
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    here = Path(__file__).resolve()
+    here = input_observation.path_call(Path(__file__), 'resolve')
     for candidate in here.parents:
         utilities_dir = candidate / "utilities"
-        if (utilities_dir / "dispatch_contract.py").is_file():
+        if input_observation.path_call(utilities_dir / "dispatch_contract.py", 'is_file'):
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
             from dispatch_contract import resolve_agent_home
@@ -808,10 +810,10 @@ def _dispatch_state_roots(home=None, jobs=None):
 
     agent_home = home or _completion_home()
     legacy = os.path.join(agent_home, ".dispatch")
-    here = Path(__file__).resolve()
+    here = input_observation.path_call(Path(__file__), 'resolve')
     for candidate in here.parents:
         utilities_dir = candidate / "utilities"
-        if (utilities_dir / "dispatch_contract.py").is_file():
+        if input_observation.path_call(utilities_dir / "dispatch_contract.py", 'is_file'):
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
             try:
@@ -848,7 +850,7 @@ def _load_marker_uncached(abspath):
 def _load_marker(abspath):
     """marker dict | None. Never raises — mtime+size cached exactly like load()'s record cache."""
     try:
-        st = os.stat(abspath)
+        st = input_observation.stat(abspath)
         key = (st.st_mtime, st.st_size)
     except (OSError, TypeError, ValueError):
         return None
@@ -870,7 +872,7 @@ def _latest_marker_path(directory, node_id):
     torn window between those two writes (history landed, canonical replace not yet done),
     where the highest sequence is the latest."""
     canonical = os.path.join(directory, node_id + ".json")
-    if os.path.isfile(canonical):
+    if input_observation.isfile(canonical):
         return canonical
     best = None
     try:
@@ -1000,7 +1002,7 @@ def gate_mark(record, node_id, home=None, state_roots=None):
         if not isinstance(recorded, str):
             return None
         try:
-            if Path(recorded).resolve(strict=False) != Path(value).resolve(strict=False):
+            if input_observation.path_call(Path(recorded), 'resolve', strict=False) != input_observation.path_call(Path(value), 'resolve', strict=False):
                 return None
         except OSError:
             return None
@@ -1017,10 +1019,10 @@ def _resolve_dangling_registry(jobs):
     reduction it cannot prove.
     """
 
-    here = Path(__file__).resolve()
+    here = input_observation.path_call(Path(__file__), 'resolve')
     for candidate in here.parents:
         utilities_dir = candidate / "utilities"
-        if (utilities_dir / "dispatch_contract.py").is_file():
+        if input_observation.path_call(utilities_dir / "dispatch_contract.py", 'is_file'):
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
             try:

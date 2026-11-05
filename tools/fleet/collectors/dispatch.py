@@ -24,6 +24,7 @@ import glob
 import hashlib
 import math
 import os
+from .. import input_observation
 import re
 import shlex
 import sqlite3
@@ -38,9 +39,9 @@ from pathlib import Path
 
 _ROOT = next(
     parent
-    for parent in Path(__file__).resolve().parents
-    if (parent / "core" / "CORE.md").is_file()
-    and (parent / "utilities" / "dispatch_contract.py").is_file()
+    for parent in input_observation.path_call(Path(__file__), 'resolve').parents
+    if input_observation.path_call(parent / "core" / "CORE.md", 'is_file')
+    and input_observation.path_call(parent / "utilities" / "dispatch_contract.py", 'is_file')
 )
 sys.path.insert(0, str(_ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
@@ -278,7 +279,7 @@ def _registry_diagnostic_key(path, generation):
 def _registry_generation_is_current(path, generation):
     """Reject cache ownership from an observation superseded on disk."""
     try:
-        info = os.stat(path)
+        info = input_observation.stat(path)
     except OSError:
         return generation is None
     if not isinstance(generation, tuple) or len(generation) < 5:
@@ -888,6 +889,7 @@ def parsed_registry_rows(path):
     callers read the path once. Metadata uses the existing pipe parser so current
     legacy and key/value forms retain their established meaning.
     """
+    input_observation.observe(path)
     # Observe the pinned generation before asking for its text. Unchanged rows
     # and their diagnostics need no reconstruction of every historical raw line.
     if _dispatch_registry_cache.registry_scope_active():
@@ -912,14 +914,14 @@ def parsed_registry_rows(path):
     if lines is None:
         try:
             source = Path(path)
-            before = source.stat()
+            before = input_observation.path_call(source, 'stat')
             generation = (before.st_dev, before.st_ino, before.st_size,
                           before.st_mtime_ns, before.st_ctime_ns)
             found, cached = _cached_registry_rows(path, generation)
             if found:
                 return cached
             lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
-            after = source.stat()
+            after = input_observation.path_call(source, 'stat')
             if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
                     before.st_ctime_ns) == (after.st_dev, after.st_ino, after.st_size,
                                             after.st_mtime_ns, after.st_ctime_ns):
@@ -929,7 +931,7 @@ def parsed_registry_rows(path):
                 generation = None
         except OSError as exc:
             try:
-                current = os.stat(path)
+                current = input_observation.stat(path)
             except OSError:
                 _remember_registry_diagnostics(path, None, exc, 0)
             else:
@@ -1363,7 +1365,7 @@ _TERMINAL_ENVELOPE_CACHE = {}    # path -> (stat stamp, observed)
 
 
 def _stat_stamp(path):
-    return _stat_info_stamp(os.stat(path))
+    return _stat_info_stamp(input_observation.stat(path))
 
 
 def _stat_info_stamp(st):
@@ -1624,7 +1626,7 @@ def _opencode_job_liveness(cwd, now, stale_min=15, slug=None, job=None):
     runtime_dir = (getattr(job, "_registry_metadata", None) or {}).get("opencode_runtime_dir") if job is not None else None
     if runtime_dir:
         db = os.path.join(runtime_dir, "data", "opencode", "opencode.db")
-    if not os.path.exists(db):
+    if not input_observation.exists(db):
         return "unknown"
     try:
         import opencode_runtime
@@ -1856,7 +1858,7 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
     actual_proc_start = None
     if job.pid is not None:
         proc_path = "/proc/%s" % job.pid
-        visible = os.path.exists(proc_path)
+        visible = input_observation.exists(proc_path)
         if not visible:
             pid_alive = False
             proc_start_match = False if job.proc_start else None
@@ -2035,7 +2037,7 @@ def _opencode_config_home():
 def _registry_file(path):
     """Only absence is an empty source; inaccessible registry paths fail observation."""
     try:
-        return stat.S_ISREG(os.stat(path).st_mode)
+        return stat.S_ISREG(input_observation.stat(path).st_mode)
     except FileNotFoundError:
         return False
 
@@ -2067,7 +2069,7 @@ def _is_versioned_source_home(path):
     """Whether ``path`` is an activated immutable release directory."""
 
     try:
-        resolved = Path(path).expanduser().resolve(strict=False)
+        resolved = input_observation.path_call(Path(path).expanduser(), 'resolve', strict=False)
     except (OSError, TypeError, ValueError):
         return False
     return resolved.parent.name == "releases" and resolved.parent.parent.name == "hearting"
@@ -2297,7 +2299,7 @@ def _supervised_claude_transcript(job, receipt_path):
 def _parse_claude_stream_tail(path):
     """Read one bounded exact-attempt tail for identity, context, and open tool."""
     try:
-        st = os.stat(path)
+        st = input_observation.stat(path)
     except OSError:
         return None
     cache_key = (st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino)
@@ -2543,7 +2545,7 @@ def _enrich_claude_stream_session(job, fast_first=False):
     job.exec_tool = parsed.get("exec_tool")
     if job.ctx_pct is not None:
         try:
-            st = os.stat(telemetry_path)
+            st = input_observation.stat(telemetry_path)
             sequence = (st.st_mtime_ns, st.st_size)
             job._context_evidence = ContextEvidence(
                 used_pct=job.ctx_pct,
@@ -2616,7 +2618,7 @@ def _parse_codex_attempt_tail(path):
     bytes read stay a constant independent of file size (F-51b/F-51d non-blocking tick).
     """
     try:
-        st = os.stat(path)
+        st = input_observation.stat(path)
     except OSError:
         return None
     cache_key = (st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino)
@@ -2880,7 +2882,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
     job._context_evidence = None
     if job.ctx_pct is not None:
         try:
-            st = os.stat(evidence_path)
+            st = input_observation.stat(evidence_path)
             sequence = (st.st_mtime_ns, st.st_size)
             job._context_evidence = ContextEvidence(
                 used_pct=job.ctx_pct, source=evidence_source,
@@ -2919,7 +2921,7 @@ def _parse_opencode_attempt_tail(path):
     ``exec`` would assert it is still running, so the field stays absent instead.
     """
     try:
-        st = os.stat(path)
+        st = input_observation.stat(path)
     except OSError:
         return None
     cache_key = (st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino)
@@ -3151,7 +3153,7 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             record = None
     policy_data = record.get("policy") if isinstance(record, dict) else None
     try:
-        log_mtime = os.stat(path).st_mtime
+        log_mtime = input_observation.stat(path).st_mtime
     except OSError:
         log_mtime = None
     pair_current = bool(
@@ -3197,7 +3199,7 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
     if job.ctx_pct is None:
         return
     try:
-        st = os.stat(path)
+        st = input_observation.stat(path)
         sequence = (st.st_mtime_ns, st.st_size)
         job._context_evidence = ContextEvidence(
             used_pct=job.ctx_pct, source="opencode-attempt-stream",
@@ -3327,7 +3329,7 @@ def _scan_degradations(route_ids, agent_home=None, tail=64, jobs=()):
     paths.extend(os.path.join(root, "_unattributed.jsonl") for root in roots)
     for path in paths:
         try:
-            st = os.stat(path)
+            st = input_observation.stat(path)
         except OSError:
             continue
         key = (st.st_mtime_ns, st.st_size)
@@ -3398,7 +3400,7 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
         if artifact_reader is not None:
             return [str(b) for b, _ in artifact_reader.bucket_dirs(Path(root), "plans")]
         legacy = os.path.join(root, "plans")
-        return [legacy] if os.path.isdir(legacy) else []
+        return [legacy] if input_observation.isdir(legacy) else []
 
     def children(base):
         try:
@@ -3408,7 +3410,7 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
 
     bases = bases_for(artifact_root) if artifact_root else []
     if not bases:
-        ar = ".agent_reports" if os.path.isdir(os.path.join(jcwd, ".agent_reports")) else ".claude_reports"
+        ar = ".agent_reports" if input_observation.isdir(os.path.join(jcwd, ".agent_reports")) else ".claude_reports"
         bases = bases_for(os.path.join(jcwd, ar))
     cand = sorted((d for base in bases for d in children(base)
                    if os.path.basename(d).endswith("_" + slug)), key=os.path.basename)
@@ -3416,10 +3418,10 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
         # slug mismatch fallback: pick the plan folder with max hyphen-token overlap
         stoks = set(t for t in slug.split("-") if t)
         dirs = [d for base in bases for d in children(base)
-                if not os.path.basename(d).startswith(".") and os.path.isdir(d)]
+                if not os.path.basename(d).startswith(".") and input_observation.isdir(d)]
         best, bestn, bestm = None, 0, -1.0
         for d in dirs:
-            if os.path.exists(os.path.join(d, "pipeline_summary.md")):
+            if input_observation.exists(os.path.join(d, "pipeline_summary.md")):
                 continue                      # skip done folders (avoid generic-token false "done")
             name = os.path.basename(d)
             dslug = name.split("_", 1)[-1] if "_" in name else name
@@ -3444,7 +3446,7 @@ def live_stage(jcwd, slug, fallback, capability=None, worker_role=None, artifact
                         artifact_root=artifact_root)
     if not pd:
         return fallback
-    if os.path.exists(os.path.join(pd, "pipeline_summary.md")):
+    if input_observation.exists(os.path.join(pd, "pipeline_summary.md")):
         return "done"
     if _has_entries(os.path.join(pd, "test_logs")):
         return "test"
@@ -3456,7 +3458,7 @@ def live_stage(jcwd, slug, fallback, capability=None, worker_role=None, artifact
                 return "exec"
     except OSError:
         pass
-    if os.path.exists(os.path.join(pd, "plan", "plan.md")):
+    if input_observation.exists(os.path.join(pd, "plan", "plan.md")):
         return "plan"
     return "plan"
 
@@ -3497,7 +3499,7 @@ def resolve_plan_qa_artifact(job):
                 or (isinstance(cycle_id, str) and cycle_id)):
             return
         cycles_dir = os.path.join(root, ".runtime", "artifact-producer", "v1", "cycles")
-        if not os.path.isdir(cycles_dir) or not inside(cycles_dir, root):
+        if not input_observation.isdir(cycles_dir) or not inside(cycles_dir, root):
             return
         selected = []
         if cycle_id:
@@ -3541,7 +3543,7 @@ def resolve_plan_qa_artifact(job):
                 campaign_dirs.append(legacy_campaign)
             for campaign_dir in dict.fromkeys(campaign_dirs):
                 cpath = os.path.join(campaign_dir, "campaign.json")
-                if os.path.isfile(cpath):
+                if input_observation.isfile(cpath):
                     persisted = _read_cycle_record(cpath)
                     if isinstance(persisted, dict) and persisted.get("campaign_id") != campaign_id:
                         continue
@@ -3553,13 +3555,13 @@ def resolve_plan_qa_artifact(job):
                             or not inside(cycle_dir, root)):
                         continue
                     plans = os.path.join(cycle_dir, "artifacts", "plans")
-                    if (os.path.isdir(plans) and inside(plans, cycle_dir)
+                    if (input_observation.isdir(plans) and inside(plans, cycle_dir)
                             and inside(plans, root)):
                         try:
                             with os.scandir(plans) as entries:
                                 for entry in entries:
                                     if (entry.name.endswith("_" + slug)
-                                            and entry.is_dir(follow_symlinks=False)):
+                                            and input_observation.path_call(entry, 'is_dir', follow_symlinks=False)):
                                         candidates.add(os.path.realpath(entry.path))
                         except OSError:
                             pass
@@ -3567,11 +3569,11 @@ def resolve_plan_qa_artifact(job):
     for root in dict.fromkeys(roots):
         add_cycle_plans(root)
         legacy = os.path.join(root, "plans")
-        if os.path.isdir(legacy) and inside(legacy, root):
+        if input_observation.isdir(legacy) and inside(legacy, root):
             try:
                 with os.scandir(legacy) as entries:
                     for entry in entries:
-                        if entry.name.endswith("_" + slug) and entry.is_dir(follow_symlinks=False):
+                        if entry.name.endswith("_" + slug) and input_observation.path_call(entry, 'is_dir', follow_symlinks=False):
                             candidates.add(os.path.realpath(entry.path))
             except OSError:
                 pass
@@ -3744,7 +3746,7 @@ def _iso_to_epoch(ts):
 
 
 _REGISTRY_EVIDENCE_CACHE = ProjectionCache(max_bytes=48 * 1024 * 1024)
-_REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=16384, max_bytes=16 * 1024 * 1024)
+_REGISTRY_FINGERPRINT_CACHE = ProjectionCache(max_entries=16384, max_bytes=1024 * 1024)
 _REGISTRY_MERGED_CACHE = ProjectionCache(max_entries=1, max_bytes=512 * 1024)
 
 
@@ -3761,7 +3763,9 @@ class RegistryRouteEvidence(dict):
             if held is not None:
                 _REGISTRY_FINGERPRINT_CACHE.move_to_end(self._fingerprint_token)
                 return held
-        value = json.dumps(self, sort_keys=True, default=str)
+        # A generation key must not retain or repeatedly serialize the full
+        # historical record when used in detail/continuation neighbourhoods.
+        value = hashlib.sha256(json.dumps(self, sort_keys=True, default=str).encode()).hexdigest()
         with _PARSED_REGISTRY_CACHE_LOCK:
             _REGISTRY_FINGERPRINT_CACHE.remember(self._fingerprint_token, value,
                                                weight=sys.getsizeof(value) + 128)
@@ -4670,7 +4674,7 @@ def _route_lineage(route_id, route_file, limit=32):
     out.add(route_id)
     path = route_file
     for _ in range(limit):
-        if not path or not os.path.isfile(path):
+        if not path or not input_observation.isfile(path):
             break
         try:
             with open(path, encoding="utf-8") as fh:
@@ -4803,7 +4807,7 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None, *, orphan_rows_cache=
     if registry is None:
         return
     paths = _candidate_jobs_paths(jobs_path)
-    jobs_path = next((p for p in paths if p and os.path.isfile(p)), None)
+    jobs_path = next((p for p in paths if p and input_observation.isfile(p)), None)
     if not jobs_path:
         return
     try:
@@ -4916,7 +4920,7 @@ def _delivery_counts_generation(paths):
                 (root / 'supervisor-state' / 'obligations', 'batch-*.json', 128),
                 (root / 'pending-delivery', None, None)):
             try:
-                info = directory.stat()
+                info = input_observation.path_call(directory, 'stat')
             except FileNotFoundError:
                 inputs.append((os.fspath(directory), None))
                 continue
@@ -4933,13 +4937,13 @@ def _delivery_counts_generation(paths):
                 with os.scandir(directory) as entries:
                     children = sorted(entries, key=lambda entry: entry.name)
                 for child in children:
-                    child_info = child.stat()
+                    child_info = input_observation.path_call(child, 'stat')
                     if stat.S_ISDIR(child_info.st_mode):
                         inputs.append((child.path, _stat_info_stamp(child_info)))
                         with os.scandir(child.path) as entries:
                             files.extend(sorted((entry for entry in entries if entry.name.endswith('.json')),
                                                 key=lambda entry: entry.name))
-            inputs.extend((entry.path, _stat_info_stamp(entry.stat())) for entry in files)
+            inputs.extend((entry.path, _stat_info_stamp(input_observation.path_call(entry, 'stat'))) for entry in files)
     inputs.append((Path.read_text, Path.stat, Path.iterdir, os.scandir, json.loads,
                    parsed_registry_rows, _pending_delivery_counts_uncached))
     return tuple(inputs), tuple(parsed)
@@ -4951,11 +4955,17 @@ def _pending_delivery_counts(paths, *, session_observation=None):
         return _pending_delivery_counts_uncached(paths, session_observation=session_observation)
     try:
         before, held_inputs = _delivery_counts_generation(paths)
+        from runtime_observation import observe_generation
+        fixed_paths = tuple(paths)
+        observe_generation(('pending-delivery', fixed_paths), before,
+                           lambda: _delivery_counts_generation(fixed_paths)[0])
         with _PARSED_REGISTRY_CACHE_LOCK:
             held = _DELIVERY_COUNTS_CACHE
             if held is not None and held[0] == before:
                 return dict(held[2])
     except (OSError, TypeError, ValueError):
+        from runtime_observation import invalidate_inputs
+        invalidate_inputs()
         return _pending_delivery_counts_uncached(paths)
     value = _pending_delivery_counts_uncached(paths)
     try:
@@ -5099,7 +5109,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
             duty_files = []
         for duty_file in duty_files:
             try:
-                if duty_file.is_symlink():
+                if input_observation.path_call(duty_file, 'is_symlink'):
                     continue
                 duty = _delivery_document(duty_file)
             except (OSError, ValueError):
@@ -5109,7 +5119,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
                 retained_batch_duties += 1
         pending_root = root / "pending-delivery"
         try:
-            info = pending_root.stat()
+            info = input_observation.path_call(pending_root, 'stat')
         except FileNotFoundError:
             continue
         except OSError:
@@ -5123,7 +5133,7 @@ def _pending_delivery_counts_uncached(paths, *, session_observation=None):
             # Explicit enumeration preserves failures that glob can suppress.
             for recipient_dir in sorted(pending_root.iterdir()):
                 try:
-                    if stat.S_ISDIR(recipient_dir.stat().st_mode):
+                    if stat.S_ISDIR(input_observation.path_call(recipient_dir, 'stat').st_mode):
                         record_files.extend(sorted(path for path in recipient_dir.iterdir()
                                                    if path.suffix == ".json"))
                 except OSError:
@@ -5426,6 +5436,10 @@ def _cycle_inventory_matches(root, directory, wanted, projection, read_json):
         if isinstance(record, dict) and record.get('route_id') in wanted:
             found.setdefault(record['route_id'], (path, record))
     _CYCLE_ROUTE_INVENTORIES[root] = entries
+    if any(name not in entries or not entries[name][2] for name in names):
+        # A bounded scan must continue next round even without a publication.
+        from runtime_observation import invalidate_inputs
+        invalidate_inputs()
     _CYCLE_ROUTE_INVENTORIES.move_to_end(root)
     while len(_CYCLE_ROUTE_INVENTORIES) > 32:
         _CYCLE_ROUTE_INVENTORIES.popitem(last=False)

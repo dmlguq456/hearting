@@ -29,6 +29,7 @@ only for the Claude branch.
 """
 import json
 import os
+from . import input_observation
 import re
 import stat
 import tempfile
@@ -203,7 +204,7 @@ def read(harness, pid, *, home=None, validation_cache=None):
     _check_harness(harness)
     path = registry_path(harness, pid, home=home)
     try:
-        metadata = os.lstat(path)
+        metadata = input_observation.lstat(path)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
             return None
         if metadata.st_size > _MAX_BYTES:
@@ -224,7 +225,7 @@ def read(harness, pid, *, home=None, validation_cache=None):
     record["harness"] = harness   # directory-declared identity wins over file content
     if validation_cache is not None:
         try:
-            if generation == _read_generation(os.lstat(path)):
+            if generation == _read_generation(input_observation.lstat(path)):
                 validation_cache.put(path, generation, metadata.st_size, record)
         except OSError:
             pass
@@ -233,7 +234,7 @@ def read(harness, pid, *, home=None, validation_cache=None):
 
 def _prepare_directory(directory):
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    metadata = os.lstat(directory)
+    metadata = input_observation.lstat(directory)
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
         raise OSError("session registry directory must be an owner directory")
     try:

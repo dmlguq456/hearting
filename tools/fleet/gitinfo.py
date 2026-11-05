@@ -37,10 +37,12 @@ def resolve_gitdir(cwd):
     directory = os.path.abspath(cwd)
     for _ in range(30):
         pointer = os.path.join(directory, ".git")
-        if os.path.isdir(pointer):
+        from . import input_observation
+        input_observation.observe(pointer)
+        if input_observation.isdir(pointer):
             real = os.path.realpath(pointer)
             return real, real
-        if os.path.isfile(pointer):
+        if input_observation.isfile(pointer):
             try:
                 with open(pointer, encoding="utf-8") as fh:
                     text = fh.read().strip()
@@ -312,7 +314,7 @@ def _publish_display(request, value):
             handle.write(data)
         os.replace(scratch, path)
     finally:
-        if os.path.exists(scratch):
+        if input_observation.exists(scratch):
             os.unlink(scratch)
 
 
@@ -628,7 +630,7 @@ def refresh_display(request, fd):
         if code == 0 and text.strip():
             artifact = text.strip()
             value.update(artifact_root=artifact, artifact_root_kind=os.path.basename(artifact),
-                         artifact_root_exists=int(os.path.isdir(artifact)),
+                         artifact_root_exists=int(input_observation.isdir(artifact)),
                          artifact_root_scope="explicit" if request["AGENT_ARTIFACT_ROOT"] else
                          "primary-worktree" if value["git"]["root"] and
                          os.path.dirname(artifact) != value["git"]["root"] else "project-local")

@@ -12,6 +12,7 @@ import glob
 import hashlib
 import json
 import os
+from . import input_observation
 import re
 import sys
 import time
@@ -97,6 +98,8 @@ def normalize_context(evidence, now=None, live=False):
     if reason is None and (isinstance(pct, bool) or pct < 0 or pct > 100):
         reason = "malformed-context"
     if reason is None and ev.observed_at is not None and ev.fresh_until is not None:
+        if not live:
+            input_observation.deadline(ev.fresh_until, now)
         # Observed after its own expiry is a self-contradictory record, not an aged one: that
         # stays rejected for live rows too, because it says the stamp itself cannot be trusted.
         if ev.observed_at > ev.fresh_until or (not live and now > ev.fresh_until):
@@ -672,9 +675,9 @@ def _artifact_reader():
     global _ARTIFACT_READER
     if _ARTIFACT_READER is None:
         _ARTIFACT_READER = False
-        for candidate in Path(__file__).resolve().parents:
+        for candidate in input_observation.path_call(Path(__file__), 'resolve').parents:
             utilities_dir = candidate / "utilities"
-            if not (utilities_dir / "artifact_reader.py").is_file():
+            if not input_observation.path_call(utilities_dir / "artifact_reader.py", 'is_file'):
                 continue
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
@@ -699,9 +702,9 @@ def _report_verification():
     module is unavailable; the caller keeps its detail-only fallback."""
     global _REPORT_VERIFICATION
     if _REPORT_VERIFICATION is None:
-        for candidate in Path(__file__).resolve().parents:
+        for candidate in input_observation.path_call(Path(__file__), 'resolve').parents:
             utilities_dir = candidate / "utilities"
-            if not (utilities_dir / "report_verification_projection.py").is_file():
+            if not input_observation.path_call(utilities_dir / "report_verification_projection.py", 'is_file'):
                 continue
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
@@ -734,7 +737,7 @@ def _artifact_candidates(entity, artifact_root=None):
         pattern = "*_%s" % glob.escape(str(slug))
         matches = glob.glob(os.path.join(root, "plans", pattern))
         for path in matches + glob.glob(os.path.join(root, pattern)):
-            if os.path.isdir(path):
+            if input_observation.isdir(path):
                 candidates.add(os.path.realpath(path))
     return sorted(candidates)
 
@@ -771,7 +774,7 @@ def _artifact_stage(path):
     best_label, best_mtime = None, None
     for item in glob.glob(os.path.join(path, "*")):
         name = os.path.basename(item)
-        is_dir = os.path.isdir(item)
+        is_dir = input_observation.isdir(item)
         if is_dir and name in {"dev_logs", "test_logs", "shards", "_internal"} and not _has_entries(item):
             continue
         label = _artifact_stage_label(name)
@@ -812,10 +815,10 @@ def _grounding_home():
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
     if h:
         return h
-    here = Path(__file__).resolve()
+    here = input_observation.path_call(Path(__file__), 'resolve')
     for candidate in here.parents:
         utilities_dir = candidate / "utilities"
-        if (utilities_dir / "dispatch_contract.py").is_file():
+        if input_observation.path_call(utilities_dir / "dispatch_contract.py", 'is_file'):
             if str(utilities_dir) not in sys.path:
                 sys.path.insert(0, str(utilities_dir))
             from dispatch_contract import resolve_agent_home
@@ -843,7 +846,7 @@ def _scan_grounding_dir(path):
         if entry.name.startswith("."):
             continue
         try:
-            mtime = entry.stat().st_mtime
+            mtime = input_observation.path_call(entry, 'stat').st_mtime
             with open(entry.path, encoding="utf-8") as handle:
                 body = handle.read()
         except OSError:
@@ -884,6 +887,7 @@ def _capability_grounding_for(entity, index, now=None):
     mtime, fields = index[sid]
     now = time.time() if now is None else now
     elapsed_min = _field(entity, "elapsed_min") or 0
+    input_observation.clock(entity, mtime + _SPEC_MARKER_FRESHNESS_SLACK_S, now)
     if mtime < now - elapsed_min * 60 - _SPEC_MARKER_FRESHNESS_SLACK_S:
         return None
     return fields
@@ -897,7 +901,7 @@ def _spec_marker_index(home):
         with os.scandir(home) as entries:
             for entry in entries:
                 try:
-                    index[entry.name] = entry.stat().st_mtime
+                    index[entry.name] = input_observation.path_call(entry, 'stat').st_mtime
                 except OSError:
                     continue
     except OSError:
@@ -907,7 +911,7 @@ def _spec_marker_index(home):
 
 def _spec_marker_state_dir():
     """The shared release-independent marker directory used by the hook/writer."""
-    utilities = Path(__file__).resolve().parents[2] / "utilities"
+    utilities = input_observation.path_call(Path(__file__), 'resolve').parents[2] / "utilities"
     if str(utilities) not in sys.path:
         sys.path.insert(0, str(utilities))
     from dispatch_contract import state_root
@@ -968,6 +972,8 @@ def _fresh_spec_matches(matches, entity, now):
     sid across a new process), not a codex-specific rule."""
     elapsed_min = _field(entity, "elapsed_min") or 0
     cutoff = now - elapsed_min * 60 - _SPEC_MARKER_FRESHNESS_SLACK_S
+    for match in matches:
+        input_observation.clock(entity, match[2] + _SPEC_MARKER_FRESHNESS_SLACK_S, now)
     return [m for m in matches if m[2] >= cutoff]
 
 
@@ -995,7 +1001,7 @@ def _spec_pipeline_state_path(root, slug):
         bases = ([str(shared)] if shared is not None else []) + [os.path.join(artifacts, "spec")]
         for base in bases:
             path = os.path.join(base, slug, "pipeline_state.yaml") if slug else os.path.join(base, "pipeline_state.yaml")
-            if os.path.isfile(path):
+            if input_observation.isfile(path):
                 return path
     return None
 
@@ -1314,7 +1320,7 @@ def _owner_route_advance_for_pass(entity, owner_binding=None, scope=None):
 
     def observe_generation():
         try:
-            stat = os.stat(path, follow_symlinks=False)
+            stat = input_observation.stat(path, follow_symlinks=False)
         except OSError:
             return None
         return (stat.st_mode, stat.st_dev, stat.st_ino, stat.st_size,
@@ -1823,6 +1829,11 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
             continue
         marker = _capability_grounding_for(session, cap_index, now=now)
         elapsed_min = _field(session, "elapsed_min") or 0
+        for node in (getattr(session, "route_chain", None) or {}).get("nodes", ()):
+            timestamp = node.get("ts") if isinstance(node, dict) else None
+            if isinstance(timestamp, (int, float)):
+                input_observation.clock(session, timestamp + _SPEC_MARKER_FRESHNESS_SLACK_S,
+                                        now_for_chain)
         session.cap_grounding = _route_chain.current_capability(
             getattr(session, "route_chain", None), marker,
             session_start=now_for_chain - elapsed_min * 60,

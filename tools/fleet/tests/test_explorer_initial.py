@@ -135,7 +135,7 @@ class DetailCallbackSelection(unittest.TestCase):
             "generation-1", NavState(view="MEMORY", scope="repo:repo-a"))
         other_repo = render._explorer_optional_detail_key(
             "generation-1", NavState(view="MEMORY", scope="repo:repo-b"))
-        self.assertEqual(overview, peers)  # PEERS uses the existing list selection worker.
+        self.assertNotEqual(overview, peers)  # Opening detail explicitly requests fresh metadata too.
         self.assertNotEqual(peers, memory)
         self.assertNotEqual(memory, other_repo)
         self.assertEqual(peers, render._explorer_optional_detail_key(

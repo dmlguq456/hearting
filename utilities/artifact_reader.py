@@ -17,6 +17,7 @@ This module never writes under the artifact root.
 """
 from __future__ import annotations
 
+from runtime_observation import input_path_call
 import argparse
 import contextvars
 import fnmatch
@@ -29,7 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(input_path_call(Path(__file__), 'resolve').parent))
 import artifact_cutover as C  # noqa: E402
 import artifact_locator  # noqa: E402
 import artifact_resplit as RS  # noqa: E402
@@ -47,7 +48,7 @@ _FLAT_DESIGN_ANCHORS = frozenset({
 
 
 def _is_real_dir(path: Path) -> bool:
-    return path.is_dir() and not os.path.islink(str(path))
+    return input_path_call(path, 'is_dir') and not os.path.islink(str(path))
 
 
 def is_flat_design_layout(path: Path) -> bool:
@@ -87,12 +88,15 @@ def _record_stamp(root: Path):
     stamps = {}
 
     def stamp(path, observed=None):
+        from runtime_observation import observe_input
         try:
-            s = observed if observed is not None else path.lstat()
+            s = observed if observed is not None else input_path_call(path, 'lstat')
+            observe_input(path)
             stamps[str(path)] = (s.st_dev, s.st_ino, s.st_mode, s.st_size,
                                  s.st_mtime_ns, s.st_ctime_ns)
             return stat.S_ISDIR(s.st_mode)
         except FileNotFoundError:
+            observe_input(path)
             stamps[str(path)] = None
             return False
 
@@ -104,7 +108,7 @@ def _record_stamp(root: Path):
             for entry in entries:
                 p = path / entry.name
                 try:
-                    s = entry.stat(follow_symlinks=False)
+                    s = input_path_call(entry, 'stat', follow_symlinks=False)
                 except FileNotFoundError:
                     stamps[str(p)] = None
                     continue
@@ -138,7 +142,7 @@ class ReadCache:
         self.entries = OrderedDict()
 
     def scan(self, root):
-        key = str(Path(root).resolve())
+        key = str(input_path_call(Path(root), 'resolve'))
         root = Path(key)
         try:
             before = _record_stamp(root)
@@ -192,7 +196,7 @@ def _scan_index(root: Path) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
     scope = _READ_SCOPE.get()
     if scope is None:
         return artifact_locator.scan_index(root)
-    key = str(Path(root).resolve())
+    key = str(input_path_call(Path(root), 'resolve'))
     hit = scope.scan_index.get(key)
     if hit is None:
         hit = scope.scan_index[key] = (scope.cache.scan(root) if scope.cache is not None
@@ -206,7 +210,7 @@ def cycle_bucket_dirs(root: Path, bucket: str) -> List[Tuple[Path, Dict[str, str
     if scope is None:
         return _cycle_bucket_dirs(root, bucket)
     root = Path(root)
-    key = (str(root.resolve()), str(bucket))
+    key = (str(input_path_call(root, 'resolve')), str(bucket))
     hit = scope.cycle_buckets.get(key)
     if hit is None:
         # Keyed by the physical root, stored relative to it: a second spelling of
@@ -228,12 +232,12 @@ def _cycle_bucket_dirs(root: Path, bucket: str) -> List[Tuple[Path, Dict[str, st
     mapping, _rows = _scan_index(root)
     identities = {relative: identifier for identifier, relative in mapping.items()}
     for camp in artifact_locator.iter_campaign_dirs(root):
-        campaign_rel = camp.resolve().relative_to(root.resolve()).as_posix()
+        campaign_rel = input_path_call(camp, 'resolve').relative_to(input_path_call(root, 'resolve')).as_posix()
         campaign_id = identities.get(campaign_rel)
         if campaign_id is None:
             continue
         for cyc, _physical_layout in artifact_locator.iter_cycle_dirs(camp):
-            cycle_rel = cyc.resolve().relative_to(root.resolve()).as_posix()
+            cycle_rel = input_path_call(cyc, 'resolve').relative_to(input_path_call(root, 'resolve')).as_posix()
             cycle_id = identities.get(cycle_rel)
             if cycle_id is None:
                 continue
@@ -309,7 +313,7 @@ def spec_dir(root: Path, *, open_cycle_dir: Optional[str] = None) -> Optional[Tu
     if shared is not None:
         return shared, LAYOUT_SHARED
     legacy = root / "spec"
-    if _is_real_dir(legacy) and ((legacy / "prd.md").is_file() or (legacy / "pipeline_state.yaml").is_file()):
+    if _is_real_dir(legacy) and (input_path_call(legacy / "prd.md", 'is_file') or input_path_call(legacy / "pipeline_state.yaml", 'is_file')):
         return legacy, LAYOUT_LEGACY
     return None
 
@@ -349,8 +353,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 explicit_root = value.split("=", 1)[1]
                 break
         env_root = os.environ.get("AGENT_ARTIFACT_ROOT")
-        if not explicit_root or (env_root and Path(explicit_root).expanduser().resolve(strict=False)
-                                 == Path(env_root).expanduser().resolve(strict=False)):
+        if not explicit_root or (env_root and input_path_call(Path(explicit_root).expanduser(), 'resolve', strict=False)
+                                 == input_path_call(Path(env_root).expanduser(), 'resolve', strict=False)):
             from artifact_context import resolve_context
             context = resolve_context(environ=os.environ,
                 explicit={"artifact_root": explicit_root} if explicit_root else None)
@@ -384,7 +388,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = sub.add_parser("hold", help="nonterminal resplit (D-77-a) or relayout (A-17.8) journal hold, if any")
     p.add_argument("--artifact-root", required=True)
     args = parser.parse_args(values)
-    root = Path(args.artifact_root).resolve()
+    root = input_path_call(Path(args.artifact_root), 'resolve')
     if args.command == "bucket-dirs":
         _emit([{"path": str(p), **m} for p, m in bucket_dirs(root, args.bucket, include_legacy=not args.no_legacy)])
     elif args.command == "glob":

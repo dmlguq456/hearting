@@ -53,6 +53,12 @@ def _launch_tuple_roots(payload):
 _GIT_SHA=re.compile(r"[0-9a-f]{40}")
 
 def _inside_git_worktree(path):
+    from runtime_observation import passive_input
+    return passive_input(('git-worktree', os.fspath(path)),
+                         lambda: _inside_git_worktree_fresh(path))
+
+
+def _inside_git_worktree_fresh(path):
     """Is this path inside a git worktree? Ask git, not the filesystem.
 
     `(cwd/".git").exists()` answers only for a repository *root*: a route whose
@@ -96,6 +102,13 @@ def _source_lineage_unverifiable(reason):
     return SourceLineage("unverifiable",None,(),None,reason)
 
 def source_lineage_verdict(cwd, sealed_commit, *, timeout=SOURCE_LINEAGE_GIT_TIMEOUT):
+    """The original lineage proof, freshly observed for each passive detail round."""
+    from runtime_observation import passive_input
+    return passive_input(('git-source-lineage', os.fspath(cwd), sealed_commit, timeout),
+                         lambda: _source_lineage_verdict_fresh(cwd, sealed_commit, timeout=timeout))
+
+
+def _source_lineage_verdict_fresh(cwd, sealed_commit, *, timeout=SOURCE_LINEAGE_GIT_TIMEOUT):
     """The one first-parent lineage probe every SD-156 consumer shares.
 
     `worker-route-guard.py`'s mutation gate, the session hook's staleness

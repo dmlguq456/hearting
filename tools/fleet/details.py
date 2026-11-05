@@ -5,6 +5,7 @@ on one coalesced RefreshPump worker and can neither create rows nor change those
 observations. A slow filesystem read here leaves basic refresh independent.
 """
 from dataclasses import dataclass, replace
+import dataclasses
 from collections.abc import Mapping
 import copy
 import hashlib
@@ -12,6 +13,8 @@ import json
 import math
 import re
 import time
+import sys
+import os
 
 from .model import (ActiveNodeProjection, ContextProjection, ProgressProjection,
                     Session, WorkProjection)
@@ -25,6 +28,7 @@ _METADATA = ("campaign_label", "location_kind", "location_wt", "location_repo",
 _STEWARD_RELATIONS = ("steward_targets", "steward_parents")
 _PEER_FIELDS = ("peer_last_recv", "peer_last_sent", "peer_sent_1h",
                 "peer_recv_1h", "peer_obligations")
+_OPTIONAL_METADATA = ('campaign_label', 'qa', 'qa_source', 'steward')
 
 
 def identity(row):
@@ -61,9 +65,15 @@ def _activity(row):
     # Session observations have no attempt-log stamp. Their native update and
     # context sequence still distinguish current data from a copied old child.
     evidence = getattr(row, "_context_evidence", None)
+    child = getattr(row, "exec_child", None)
+    if isinstance(child, dict):
+        # Basic owns these clocks. Advancing them does not change native
+        # activity, child identity, its ancestry, or its detail dependencies.
+        child = {key: value for key, value in child.items()
+                 if key not in ("etime_s", "leaf_etime_s")}
     return (getattr(row, "_detail_activity_key", None), getattr(row, "updated_at", None),
             getattr(row, "summary_ts", None), getattr(evidence, "sequence", None),
-            json.dumps((getattr(row, "exec_child", None), getattr(row, "exec_tool", None),
+            json.dumps((child, getattr(row, "exec_tool", None),
                         getattr(row, "shell_jobs", None),
                         getattr(row, "shell_job_observation", None)),
                        sort_keys=True, default=str))
@@ -82,7 +92,8 @@ def state_key(snapshot):
                        r.pid, r.starttime, r.command_hash, r.exit_code, r.route_file, r.route) for r in snapshot.resources)
     from .collectors.dispatch import RegistryRouteEvidence
     evidence = {rid: (value.fingerprint() if isinstance(value, RegistryRouteEvidence)
-                     else json.dumps(value, sort_keys=True, default=str))
+                     else hashlib.sha256(json.dumps(
+                         value, sort_keys=True, default=str).encode()).hexdigest())
                 for rid, value in snapshot.node_evidence.items()}
     return {"rows": rows, "resources": resources, "evidence": evidence,
             "activity": {identity(row): _activity(row) for row in snapshot.sessions + snapshot.jobs}}
@@ -130,6 +141,384 @@ class DetailSnapshot:
     snapshot: object
     continuation_complete: bool = False
     continued_count: int = 0
+    reused_optional: bool = False
+
+
+class DetailReuse:
+    """Reuse one interpreted detail result while its complete inputs agree.
+
+    The loop still requests a fresh holder probe after every basic paint. Each
+    phase keeps one bounded display projection, without old process trees or
+    registry histories. Its read set holds only input generations.
+    """
+
+    def __init__(self, *, optional=False):
+        self.optional = optional
+        self.latest = None
+        self.inputs = None
+        self.key = None
+        self.holders = ()
+        self.holder_states = None
+        self.optional_complete = False
+        self.census_cpu = 0.0
+        self.hits = self.loads = 0
+        self.observation_identity = None
+        self.observation = None
+        self.last_decision = None
+        self.observed = False
+        self.result_bytes = 0
+        self.max_result_bytes = 8 * 1024 * 1024
+        self.rejections = 0
+        self.resource_titles = {}
+        self.probe_source_id = None
+        self.probe_key = None
+
+    def input_key(self, source):
+        rows = source.sessions + source.jobs
+        from .collectors.steward import _session_keys
+        paths = {getattr(row, field, None) for row in rows
+                 for field in ('cwd', 'parent_cwd', 'artifact_root') if getattr(row, field, None)}
+        canonical = {path: os.path.realpath(path) for path in paths}
+        state = state_key(source)
+        if self.optional:
+            from .work_titles import resource_identity
+            state = (tuple((identity(row), binding(row)) for row in rows),
+                     tuple(resource_identity(child) for child in source.resources),
+                     tuple(tuple(node.get("route_id") for node in
+                                 (getattr(row, "route_chain", None) or {}).get("nodes", ()))
+                           for row in rows),
+                     tuple(tuple(_result_name_key(result) for result in _row_results(row))
+                           for row in rows))
+        return (state, tuple((
+            getattr(row, "title", None), getattr(row, "summary", None) if not self.optional else None,
+            getattr(row, "title_ts", None) if not self.optional else None,
+            getattr(row, "summary_ts", None) if not self.optional else None,
+            getattr(row, "qa", None), getattr(row, "qa_source", None),
+            getattr(row, "campaign_label", None),
+            getattr(row, "parent_cwd", None), getattr(row, "artifact_root", None),
+            getattr(row, "worker_role", None), getattr(row, "capability_owner", None),
+            getattr(row, "assigned_contract", None), getattr(row, "slug", None),
+            getattr(row, "key", None), getattr(row, "runtime_name", None),
+            getattr(row, "_herdr_name", None), tuple(_session_keys(row)),
+            getattr(row, "parent_pid", None), getattr(row, "is_child", None),
+            getattr(row, "process_role", None), getattr(row, "depth", None),
+            getattr(row, "_registry_path", None), getattr(row, "logfile", None),
+            _metadata_key(getattr(row, "_registry_metadata", None)),
+            tuple(canonical.get(getattr(row, field, None))
+                  for field in ('cwd', 'parent_cwd', 'artifact_root'))) for row in rows),
+            (_tag_metadata_key(source.tag_metadata) if self.optional else
+             tuple(tuple(getattr(row, field, None) for field in _METADATA) for row in rows)))
+
+    def observe(self, source, *, force=False):
+        from .collectors import steward
+        identity = _observation_identity((source.observations or {}).get("basic"))
+        if not force and identity is not None and identity == self.observation_identity:
+            return self.observation, self.observation.check(self.holders)
+        started = time.thread_time()
+        observation = steward.HolderObservation(None if force else source)
+        if self.observed:
+            observation.agents  # also observe a round with no selected holders
+        states = observation.check(self.holders)
+        self.census_cpu = time.thread_time() - started
+        self.observation_identity, self.observation = identity, observation
+        return observation, states
+
+    def _matches(self, key):
+        if key == self.key:
+            return True
+        if not self.optional or self.key is None or key[1:] != self.key[1:]:
+            return False
+        current, previous = key[0], self.key[0]
+        if current[:3] != previous[:3]:
+            return False
+        # Scalar continuation deliberately omits optional result records. An
+        # absent result needs no title lookup; one returning later can use an
+        # already observed name. A genuinely new target still needs a read.
+        return all(set(wanted) <= set(known) for wanted, known in zip(current[3], previous[3]))
+
+    def reuse(self, source, states, *, force=False):
+        self.probe_source_id, self.probe_key = id(source), None
+        try:
+            key = self.input_key(source)
+            from runtime_observation import retained_size
+            if retained_size(key, self.max_result_bytes) > self.max_result_bytes:
+                self.rejections += 1
+                self.last_decision = "key-over-budget"
+                return None
+            self.probe_key = key
+        except Exception:
+            self.last_decision = "unobserved-key"
+            return None
+        if force or not self.optional_complete or self.latest is None:
+            self.last_decision = "forced-or-unobserved"
+            return None
+        if self.optional and not required_details_complete(source.observations):
+            self.last_decision = "required-pending"
+            return None
+        if not self._matches(key):
+            self.last_decision = "snapshot-input"
+            return None
+        if self.optional and states != self.holder_states:
+            self.last_decision = "holder-state"
+            return None
+        if self.inputs is None or not self.inputs.current():
+            self.last_decision = "file-input"
+            return None
+        from .input_observation import clock_key
+        elapsed = {clock_key(row): getattr(row, "elapsed_min", None) or 0
+                   for row in source.sessions + source.jobs}
+        now = time.time()
+        for (key, boundary), previous in self.inputs.clocks.items():
+            if key is not None and key not in elapsed:
+                self.last_decision = "clock-row"
+                return None
+            value = elapsed.get(key, 0)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                self.last_decision = "clock-unobserved"
+                return None
+            if (now - value * 60 <= boundary) != previous:
+                self.last_decision = "clock-boundary"
+                return None
+        if self.optional:
+            # The current required projection wins. Only optional description
+            # transfers from the exact previous row identity and binding.
+            value = copy.copy(source)
+            previous = {(identity(row), binding(row)): row
+                        for row in self.latest.snapshot.sessions + self.latest.snapshot.jobs}
+            value.sessions, value.jobs = [], []
+            for target, rows in ((value.sessions, source.sessions), (value.jobs, source.jobs)):
+                for row in rows:
+                    current = copy.copy(row)
+                    old = previous.get((identity(row), binding(row)))
+                    if old is not None:
+                        for field in _OPTIONAL_METADATA + _STEWARD_RELATIONS:
+                            setattr(current, field, copy.deepcopy(getattr(old, field, None)))
+                        _reuse_result_names(current, old)
+                    target.append(current)
+            # The exact child association also carries live context, NOW and
+            # shell observations. Rejoin these current rows instead of copying
+            # the optional pass's older native fields.
+            from .collectors import _adopt_child_titles
+            _adopt_child_titles(value.sessions, value.jobs)
+            for row in value.sessions + value.jobs:
+                old = previous.get((identity(row), binding(row)))
+                if old is not None and row.title == old.title:
+                    row.title_ts = old.title_ts
+            value.pending_delivery = self.latest.snapshot.pending_delivery
+            from .work_titles import resource_identity
+            names = self.resource_titles
+            value.resources = [copy.copy(child) for child in source.resources]
+            children = {}
+            for child in value.resources:
+                child.display_title = names.get(resource_identity(child), child.display_title)
+                children[resource_identity(child)] = child
+            for row in value.jobs:
+                row.resource_children = [children.get(resource_identity(child), child)
+                                         for child in row.resource_children]
+            value.observations = dict(source.observations or {})
+            for name, item in (self.latest.snapshot.observations or {}).items():
+                if str(name).startswith("optional:"):
+                    value.observations[name] = copy.deepcopy(item)
+            steward_observation = value.observations.get('optional:steward')
+            if isinstance(steward_observation, dict):
+                steward_observation['observed_at'] = now
+        else:
+            value = merge(source, self.latest)
+        required = (self.latest.snapshot.observations or {}).get("required-details", {})
+        if required.get("state") != "ok":
+            self.last_decision = "required-incomplete"
+            return None
+        if not self.optional:
+            set_required_details(value, "ok", all_new=False, observed_at=time.time())
+        # Peer age and rolling counters are clock projections. The existing
+        # bounded passive parser cache refreshes them without reinterpreting
+        # steward roles or metadata. Basic rows already carry fresh PID clocks.
+        if self.optional:
+            from .collectors import peer_messages
+            peer_state = _apply_peer_observation(peer_messages.collect, value.sessions)
+            value.observations['optional:peers'] = {
+                'state': peer_state, 'observed_at': time.time(),
+                'roster': tuple((identity(row), binding(row)) for row in value.sessions)}
+        from .collectors import dispatch
+        # Displayed native homes retain the existing periodic view marker even
+        # when their description did not need to be interpreted again.
+        previous_homes = {(identity(job), binding(job)): getattr(job, '_detail_home_admitted', None)
+                          for job in self.latest.snapshot.jobs}
+        admitted = [(identity(job), binding(job), dispatch._note_home_view(job))
+                    for job in source.jobs]
+        if any(previous_homes.get((row, route)) != state for row, route, state in admitted):
+            self.last_decision = "native-home-unavailable"
+            return None
+        self.hits += 1
+        self.last_decision = "reused"
+        self.probe_source_id = self.probe_key = None
+        return DetailSnapshot(state_key(source), value, reused_optional=self.optional)
+
+    def _discard(self):
+        self.latest = self.inputs = self.key = None
+        self.probe_source_id = self.probe_key = None
+        self.optional_complete = False
+        self.result_bytes = 0
+        self.resource_titles = {}
+
+    def remember(self, source, result, inputs, observation, *, optional=False):
+        self.observed = True
+        self.loads += 1
+        if not isinstance(result, DetailSnapshot):
+            self._discard()
+            return
+        self.optional_complete = True
+        self.holder_states = observation.check(self.holders)
+        if optional:
+            observation.agents
+            from .collectors import steward
+            supervision = steward.last_supervision()
+            if (supervision is None
+                    or (result.snapshot.observations or {}).get('optional:steward', {}).get(
+                        'state') != 'success'):
+                self.optional_complete = False
+            self.holders = tuple(sorted({
+                (holder["harness"], holder["session_id"])
+                for repository in (supervision or {}).values()
+                for holder in repository.get("holders", ())}))
+            self.holder_states = observation.check(self.holders)
+        if (not self.optional_complete or not inputs.complete
+                or (result.snapshot.observations or {}).get('required-details', {}).get(
+                    'state') != 'ok'
+                or (not self.optional and not (result.snapshot.observations or {}).get(
+                    'required-details', {}).get('all_new', True))):
+            self._discard()
+            return
+        if self.probe_source_id == id(source) and self.probe_key is None:
+            self._discard()
+            return
+        # A cached description needs neither an old host process tree nor the
+        # old registry census. Fresh basic owns both on every reuse. Keeping
+        # these references would pin a whole historical observation generation.
+        cached = copy.copy(result.snapshot)
+        cached.node_evidence = {}
+        cached.usage_snapshots = {}
+        cached.display_snapshot = None
+        cached.memory = cached.governor = cached.hearting = cached.project_status = None
+        cached.tag_metadata = []
+        from .work_titles import resource_identity
+        resource_titles = ({resource_identity(child): child.display_title
+                            for child in cached.resources} if self.optional else {})
+        cached.resources = []
+        for field in ('sessions', 'jobs', 'route_entities'):
+            rows = []
+            for row in getattr(cached, field) or ():
+                current = copy.copy(row)
+                for baggage in ('_proc_tree', '_proc_kids', '_registry_metadata'):
+                    current.__dict__.pop(baggage, None)
+                if hasattr(current, 'resource_children'):
+                    current.resource_children = []
+                rows.append(current)
+            setattr(cached, field, rows)
+        _rebind_projections(cached.sessions + cached.jobs + cached.route_entities)
+        try:
+            key = copy.deepcopy(self.input_key(source))
+            if self.probe_source_id == id(source) and key != self.probe_key:
+                raise ValueError('detail-input-changed-during-read')
+            held = replace(result, snapshot=cached)
+            size = _detail_owned_size((key, held, resource_titles), self.max_result_bytes)
+        except Exception:
+            size = self.max_result_bytes + 1
+        if size > self.max_result_bytes:
+            self.rejections += 1
+            self._discard()
+            return
+        self.latest, self.inputs, self.key = held, inputs, key
+        self.resource_titles = resource_titles
+        self.result_bytes = size
+        self.probe_source_id = self.probe_key = None
+
+
+def _detail_owned_size(value, limit):
+    """Bound the retained display graph, including its dataclass fields."""
+    seen, pending, total = set(), [value], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if total > limit:
+            return total
+        if isinstance(item, (str, bytes, int, float, bool, type(None))):
+            continue
+        storage = getattr(type(item), '_projection_storage', None)
+        if isinstance(storage, property):
+            pending.extend(storage.__get__(item, type(item)))
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            pending.extend(vars(item).values())
+        elif isinstance(item, Mapping):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+    return total
+
+
+def _metadata_key(value):
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        value = dict(value)
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _tag_metadata_key(agents):
+    from . import herdr_projection, session_tags
+    def shown_tag(agent):
+        shown = re.match(r'^\[([0-9a-f]{2})\]', str(agent.get('display_agent') or ''))
+        return shown.group(1) if shown else None
+    targets = tuple((herdr_projection._tag_metadata_identity(agent), shown_tag(agent))
+                    for agent in agents or ())
+    targets = tuple(value for value in targets if value[0] is not None)
+    if not targets:
+        return ()
+    from runtime_observation import file_generation
+    try:
+        generation = file_generation(session_tags._path())
+    except FileNotFoundError:
+        generation = None
+    return generation, targets
+
+
+def _row_results(row):
+    values = [getattr(getattr(row, 'work_projection', None), 'result', None)]
+    values.extend(node.get('result') for node in
+                  (getattr(row, 'route_chain', None) or {}).get('nodes', ()))
+    return [value for value in values if isinstance(value, Mapping)
+            and value.get('route_id') and value.get('artifact_root')]
+
+
+def _result_name_key(result):
+    return result.get('route_id'), result.get('artifact_root')
+
+
+def _reuse_result_names(current, previous):
+    """Transfer only work_titles' names; current required result/time wins."""
+    names = {_result_name_key(value): value.get('name') for value in _row_results(previous)}
+    if not names:
+        return
+    def named(result):
+        if isinstance(result, Mapping) and _result_name_key(result) in names:
+            return dict(result, name=names[_result_name_key(result)])
+        return result
+    work = getattr(current, 'work_projection', None)
+    if work is not None and work.result is not None:
+        current.work_projection = replace(work, result=named(work.result))
+    chain = getattr(current, 'route_chain', None)
+    if isinstance(chain, Mapping):
+        copies = {id(node): dict(node, result=named(node.get('result')))
+                  for node in chain.get('nodes', ())}
+        current.route_chain = dict(chain, nodes=[copies[id(node)] for node in chain.get('nodes', ())])
+        active = chain.get('current')
+        if isinstance(active, Mapping):
+            current.route_chain['current'] = copies.get(
+                id(active), dict(active, result=named(active.get('result'))))
 
 
 @dataclass(frozen=True)
@@ -672,7 +1061,9 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
         if required:
             job._required_detail_error = False
         try:
-            dispatch._note_home_view(job)
+            from runtime_observation import untracked_inputs
+            with untracked_inputs():
+                job._detail_home_admitted = dispatch._note_home_view(job)
         except Exception:
             job._details_error = True
         if required:
@@ -770,7 +1161,11 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
             steward_state = "failed"
         try:
             from .collectors import peer_messages
-            peer_state = _apply_peer_observation(peer_messages.collect, sessions)
+            # This reader already reuses generation-bound parses and projects
+            # its clocks every round, including rounds reusing all other detail.
+            from runtime_observation import untracked_inputs
+            with untracked_inputs():
+                peer_state = _apply_peer_observation(peer_messages.collect, sessions)
         except Exception:
             peer_state = "failed"
         observations = dict(getattr(value, "observations", None) or {})
@@ -784,7 +1179,9 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
         # Pane metadata only: no runtime identity/lifecycle writes. The input was
         # published with basic rows; slow panes occupy this existing detail worker.
         from .herdr_projection import refresh_observed_tag_metadata
-        refresh_observed_tag_metadata(value.tag_metadata)
+        from runtime_observation import untracked_inputs
+        with untracked_inputs():
+            refresh_observed_tag_metadata(value.tag_metadata)
     if not include_report_verification:
         _strip_report_verification(value)
     for row in sessions + jobs:
@@ -836,7 +1233,7 @@ def _child_activity_current(row, previous, basic, source):
             source.get("activity", {}).get(identity(children[0])) == _activity(children[0]))
 
 
-def _rebind_projections(rows):
+def _rebind_projections(rows, node_evidence=None, now=None):
     # Route cards consume backing node.job, not only the top-level merged row.
     # Rebind both backing shapes without mutating the cached detail snapshot.
     exact = {}
@@ -857,6 +1254,15 @@ def _rebind_projections(rows):
                 if old_job is not None:
                     candidates = exact.get((identity(old_job), binding(old_job)), ())
                     node["job"] = candidates[0] if len(candidates) == 1 else None
+                    if node["job"] is not None:
+                        node["elapsed_min"] = node["job"].elapsed_min
+                elif node_evidence is not None:
+                    from . import route
+                    evidence = (node_evidence.get(projection.route_id) or {}).get(node.get("id"))
+                    if node.get("state") == "degraded":
+                        evidence = node.get("degradation")
+                    if isinstance(evidence, Mapping):
+                        node["elapsed_min"] = route._ev_elapsed(evidence, now)
                 result.append(node)
             return tuple(result)
         attached = dict(backing, nodes=nodes(backing.get("nodes")))
@@ -951,7 +1357,7 @@ def merge(basic, detail):
                     if previous.resource_wait is not None:
                         current.resource_wait = previous.resource_wait
             target.append(current)
-    _rebind_projections(sessions + jobs)
+    _rebind_projections(sessions + jobs, basic.node_evidence, time.time())
     from .work_titles import resource_identity
     previous_resources = {resource_identity(child): child for child in value.resources}
     resources = []

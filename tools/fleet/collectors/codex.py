@@ -1771,7 +1771,10 @@ def _process_started_at(sess):
         clock_ticks = int(os.sysconf("SC_CLK_TCK"))
         if ticks < 0 or clock_ticks <= 0:
             return None
-        with open("/proc/stat", encoding="ascii", errors="replace") as handle:
+        # Boot epoch is not a reusable file generation. The exact process
+        # start identity remains owned by the fresh basic PID observation.
+        from runtime_observation import untracked_inputs
+        with untracked_inputs(), open("/proc/stat", encoding="ascii", errors="replace") as handle:
             boot = next(
                 int(line.split()[1]) for line in handle
                 if line.startswith("btime ")

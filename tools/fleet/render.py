@@ -6700,13 +6700,11 @@ def _explorer_detail_callback(collector, *, optional=False):
 
 
 def _explorer_optional_detail_key(identity, state):
-    """One optional pass per base generation, plus selected MEMORY scope."""
+    """One optional pass per base generation and explicit detail selection."""
     if identity is None:
         return None
     state = _explorer_state_for(state, 0)
-    view = state.view if state.view == "MEMORY" else None
-    scope = state.scope if view is not None else "-"
-    return identity, view, scope
+    return identity, state.view, state.scope, state.opened, state.usage_open, state.folds
 
 
 def _explorer_resume_continuation(collector, source, payload, details):
@@ -6777,7 +6775,12 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     latest_basic = [None]
     optional_detail_source = [None]
     optional_detail_identity = [None]
+    optional_detail_selection = [None]
     detail_generation = 0
+    detail_reuse = details.DetailReuse() if _EXPLORER_ENABLED else None
+    optional_reuse = details.DetailReuse(optional=True) if _EXPLORER_ENABLED else None
+    detail_basic_pending = False
+    detail_force = [False]
 
     def collect_snapshot():
         options = {"harness_filter": hfilter}
@@ -6796,7 +6799,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         latest_basic[0] = snapshot
         return snapshot
 
-    def collect_details():
+    def collect_details_once():
         optional_source = optional_detail_source[0]
         optional_detail_source[0] = None
         optional_pass = optional_source is not None
@@ -6807,13 +6810,29 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         result = None
         continuation = None
         required_only_pass = False
+        input_generations = holder_observation = None
+        reused = False
+        force = detail_force[0]
+        detail_force[0] = False
         if _EXPLORER_ENABLED:
+            from runtime_observation import InputGenerations
             runtime = _explorer_runtime()
+            holder_observation, holder_states = optional_reuse.observe(source, force=force)
+            cache = optional_reuse if optional_pass else detail_reuse
+            result = cache.reuse(source, holder_states, force=force)
+            reused = result is not None
+            required_only_pass = not optional_pass
+            if reused and not optional_pass:
+                optional_result = optional_reuse.reuse(result.snapshot, holder_states, force=force)
+                if optional_result is not None:
+                    result = optional_result
+                    required_only_pass = False
             if not optional_pass:
                 payload = runtime.clear_cached_continuation()
                 restore_continuation = getattr(details, "restore_continuation", None)
                 merge_continuation = getattr(details, "merge_continuation", None)
-                if payload is not None and callable(restore_continuation) and callable(merge_continuation):
+                if (result is None and payload is not None
+                        and callable(restore_continuation) and callable(merge_continuation)):
                     try:
                         resumed = _explorer_resume_continuation(
                             collect_all, source, payload, details)
@@ -6826,7 +6845,23 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 callback, required_only_pass = _explorer_detail_callback(
                     collect_all, optional=optional_pass)
                 if callable(callback):
-                    result = callback(source)
+                    input_generations = InputGenerations(
+                        max_bytes=(10 * 1024 * 1024 if optional_pass else 7 * 512 * 1024))
+                    # A warm parser may have no I/O on this call. Preserve its
+                    # previously observed dependencies across the two stages.
+                    if cache.inputs is not None:
+                        for path in cache.inputs.paths:
+                            input_generations.observe(path)
+                    with holder_observation.scope(), input_generations.capture():
+                        result = callback(source)
+            if (not optional_pass and result is not None and not reused
+                    and input_generations is not None):
+                cache.remember(source, result, input_generations, holder_observation)
+                input_generations = None
+                optional_result = optional_reuse.reuse(result.snapshot, holder_states, force=force)
+                if optional_result is not None:
+                    result = optional_result
+                    required_only_pass = False
         else:
             if callable(detail_refresh):
                 result = detail_refresh(source)
@@ -6868,6 +6903,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 except Exception:
                     pass
         if _EXPLORER_ENABLED:
+            if not reused and input_generations is not None:
+                cache.remember(source, result, input_generations,
+                               holder_observation, optional=optional_pass)
             export_continuation = getattr(details, "export_continuation", None)
             if not optional_pass and callable(export_continuation):
                 try:
@@ -6876,6 +6914,15 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                     continuation = None
             return result, continuation
         return result
+
+    def collect_details():
+        if not _EXPLORER_ENABLED:
+            return collect_details_once()
+        from .collectors.dispatch import collection_read_scope
+        # Rechecks and a needed interpretation share this round's fresh passive
+        # reads. Native holder census remains lazy and scoped to this basic ID.
+        with collection_read_scope():
+            return collect_details_once()
 
     # Draw a loading frame until the first complete snapshot is adopted. Empty
     # sessions here are unobserved, not a successful census with zero sessions.
@@ -6954,7 +7001,13 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         start_background_pumps()
 
     def queue_optional_details():
+        nonlocal detail_basic_pending
         if not _EXPLORER_ENABLED or optional_detail_source[0] is not None:
+            return
+        # Fresh census stays behind the basic paint, including the first one.
+        if detail_basic_pending:
+            detail_basic_pending = False
+            detail_pump.request(force=True)
             return
         if not (callable(getattr(collect_all, "required_detail_refresh", None))
                 and callable(getattr(collect_all, "detail_refresh", None))):
@@ -6966,7 +7019,11 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         identity = readiness.get("generation_identity") if isinstance(readiness, Mapping) else None
         request_key = _explorer_optional_detail_key(identity, _EXPLORER_STATE)
         source = latest_view[0]
-        if request_key is None or request_key == optional_detail_identity[0] or source is None:
+        selection = request_key[1:] if request_key is not None else None
+        selection_changed = (optional_detail_selection[0] is not None
+                             and selection != optional_detail_selection[0])
+        if (request_key is None or source is None
+                or (request_key == optional_detail_identity[0] and not selection_changed)):
             return
         observations = getattr(source, "observations", None)
         basic = observations.get("basic") if isinstance(observations, Mapping) else None
@@ -6976,6 +7033,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 or detail.get("generation_identity", detail.get("identity")) != identity):
             return
         optional_detail_identity[0] = request_key
+        optional_detail_selection[0] = selection
+        detail_force[0] = detail_force[0] or selection_changed
         optional_detail_source[0] = source
         detail_pump.request(force=True)
 
@@ -7017,7 +7076,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             if update is not None:
                 generation, basic_snapshot = update
                 if _EXPLORER_ENABLED:
-                    detail_pump.request(force=True)
+                    detail_basic_pending = True
             detail_update = detail_pump.poll(detail_generation)
             if detail_update is not None:
                 detail_generation, next_detail = detail_update
@@ -7027,6 +7086,12 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 if (_EXPLORER_ENABLED and latest_detail is not None and next_detail is not None):
                     next_detail = details.retain_optional_last_good(latest_detail, next_detail)
                 latest_detail = next_detail
+                if (detail_reuse is not None and next_detail is not None
+                        and next_detail.reused_optional):
+                    identity = details._observation_identity(
+                        (next_detail.snapshot.observations or {}).get("basic"))
+                    optional_detail_identity[0] = _explorer_optional_detail_key(
+                        identity, _EXPLORER_STATE)
             _explorer_question_pump_tick()
             _EXPLORER_GENERATION = generation
             if update is not None or detail_update is not None:
@@ -7118,6 +7183,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                         and not question_editing):
                     pump.request(force=True)
                     if latest_basic[0] is not None:
+                        detail_force[0] = True
                         detail_pump.request(force=True)
                     if compute_host_pump is not None:
                         compute_host_pump.request(force=True)
