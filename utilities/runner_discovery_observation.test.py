@@ -211,6 +211,10 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                     "batches": {"signature": (("batch-external",),) if active else ()}}
 
         def service_exec(fd, root, current, **kwargs):
+            # A replacement was selected: the real exec_service_runner runs its
+            # before_exec callback just before execve, which is where the runner
+            # joins its readiness worker and closes its settlement context.
+            kwargs["before_exec"]()
             self.assertTrue(all(stop.is_set() and not thread.is_alive()
                                 for thread, _, stop in workers))
             contexts[-1].close.assert_called_once()

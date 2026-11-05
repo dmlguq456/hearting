@@ -77,9 +77,13 @@ class OriginalExcerptTest(unittest.TestCase):
         self.transcript = self.root / "claude/projects/p" / f"{self.sid}.jsonl"
         self.transcript.parent.mkdir(parents=True)
 
-    def prompt_boundary(self, origin=None):
+    def prompt_boundary(self, origin=None, text=None):
         import session_tidy
         seat = session_tidy.resolve_seat("claude", str(self.cwd), dict(self.env), self.sid, "")
+        if text is not None:
+            session_tidy._run_hook("claude", "prompt", self.sid, cwd=str(self.cwd), env=dict(self.env),
+                                   prompt_text=text, render_context=False)
+            return session_tidy.read_prompt_seq(seat)
         seq = session_tidy.bump_prompt_seq(seat, "claude", self.sid, time.time())
         if origin is not None:
             path = session_tidy._prompt_seq_path(session_tidy.session_seat(seat, "claude", self.sid))
@@ -98,23 +102,24 @@ class OriginalExcerptTest(unittest.TestCase):
         return WI.original_excerpt(str(self.cwd), dict(env or self.env))
 
     def test_the_latest_person_prompt_is_read_and_bounded(self):
-        self.prompt_boundary()
+        text = "사용자의 의도가 맞는지 체크하는 건 중요해 " + "가" * 700
+        self.prompt_boundary(text=text)
         self.rows(self.user("an older prompt"),
                   {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
-                  self.user("사용자의 의도가 맞는지 체크하는 건 중요해 " + "가" * 700),
+                  self.user(text), self.user("unrelated later transcript write"),
                   self.user([{"type": "tool_result", "content": "tool"}]),
                   self.user("<system note>", isMeta=True))
         excerpt = self.excerpt()
         self.assertTrue(excerpt.startswith("사용자의 의도가 맞는지"))
         self.assertEqual(len(excerpt), WI.MAX_ORIGINAL_CHARS)
 
-    def test_a_bare_card_answer_is_skipped_for_the_request_before_it(self):
+    def test_a_bare_card_answer_has_no_request_quote(self):
         # Codex/OpenCode answer the plain-text card in the conversation; Claude's goes through a tool.
-        self.prompt_boundary()
+        self.prompt_boundary(text="진행")
         self.rows(self.user("로그인 API를 만들고 시험해 줘"),
                   {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "[의도 확인]"}]}},
                   self.user("진행"), self.user("  진행(권장) "), self.user("ok."))
-        self.assertEqual(self.excerpt(), "로그인 API를 만들고 시험해 줘")
+        self.assertEqual(self.excerpt(), "")
         self.rows(self.user("<task-notification>\n<task-id>x</task-id>"), self.user("진행"))
         self.assertEqual(self.excerpt(), "")              # what precedes the answer is not the person's
 
@@ -134,9 +139,20 @@ class OriginalExcerptTest(unittest.TestCase):
         self.assertEqual(self.excerpt(ambiguous), "")
 
     def test_a_pasted_token_never_reaches_the_record(self):
-        self.prompt_boundary()
+        self.prompt_boundary(text="push with ghp_" + "z" * 36 + " please")
         self.rows(self.user("push with ghp_" + "z" * 36 + " please"))
         self.assertEqual(self.excerpt(), "push with [redacted] please")
+
+    def test_second_request_uses_its_own_boundary_for_all_three_adapters(self):
+        import session_tidy
+        for harness, key in (("claude", "CLAUDE_CODE_SESSION_ID"), ("codex", "CODEX_THREAD_ID"),
+                             ("opencode", "OPENCODE_SESSION_ID")):
+            env = {k: v for k, v in self.env.items() if k != "CLAUDE_CODE_SESSION_ID"}
+            env.update(AGENT_DISPATCH_CALLER_HARNESS=harness, **{key: self.sid})
+            for text in ("First independent task", "Second independent task"):
+                session_tidy._run_hook(harness, "prompt", self.sid, cwd=str(self.cwd), env=env,
+                                       prompt_text=text, render_context=False)
+                self.assertEqual(WI.original_excerpt(str(self.cwd), env), text)
 
 
 class RecordTest(unittest.TestCase):
@@ -298,6 +314,13 @@ class CompletionSummaryTest(unittest.TestCase):
                          {"verified": ["claim"], "remaining": ["cite"]})   # the code-report reading
         self.assertEqual(WI.report_sections(strategy), {})
 
+    def test_completion_retains_unapplied_and_unknown_corrections_as_distinct_counts(self):
+        text = WI.completion_summary(self.route, self.report, corrections={"undelivered": 2, "unknown": 1})
+        self.assertIn("미반영 correct 2건", text)
+        self.assertIn("전달 불명 correct 1건", text)
+        self.assertIn("반영 여부 미확인", text)
+        self.assertIn("자동 재전송 금지", text)
+
     def test_one_leg_of_a_plan_says_a_later_leg_remains(self):
         decision = self.root / "campaigns/c/cyc/artifacts/shards/frame/route-decision.json"
         decision.parent.mkdir(parents=True)
@@ -326,7 +349,7 @@ class CompletionSummaryTest(unittest.TestCase):
         import dispatch_terminal_commit as DTC
         meta = {"owner_route_file": str(self.route_file)}
         self.assertEqual(WI.sealed_summary(meta, "att-owner"), "")
-        request = mock.Mock(route_file=self.route_file)
+        request = mock.Mock(route_file=self.route_file, jobs=self.root / "jobs.log", owner_attempt_id="att-owner")
         slot = DTC.terminal_slot(self.root, "rt-5555555555555555", "att-owner")
         DTC._seal_completion_summary(request, self.route, self.report, slot)
         first = WI.sealed_summary(meta, "att-owner")

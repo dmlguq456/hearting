@@ -357,6 +357,10 @@ runtime projection layer and should continue to point at `adapters/claude/*`.
 
 ## Route Presence Gate (2026-10-02)
 
+Ordinary edits and commits in the current Git worktree pass without a route;
+the historical /tmp exemption also remains. Turn hooks record real /tmp Git
+projects independently of the refusal gate.
+
 `settings.json` `PreToolUse` on `Edit|Write|MultiEdit|NotebookEdit|Bash` runs
 `hooks/route-presence-gate.py`, which calls the shared
 `utilities/route_presence_gate.py` (`core/HOOKS.md`). A refusal is exit 2 with

@@ -683,12 +683,13 @@ lifecycle predicate term.
 
 | Scale | Handling |
 |---|---|
-| One-off typo, one line, or `direct` work whose selected route does not change source | Work directly in the main working tree |
+| Tiny reversible fix satisfying WORKFLOW §0.2.1 in the current Git worktree | Read, edit, check and reply; existing hooks record it automatically |
+| Other `direct` work whose selected route does not change source | Work directly in the main working tree |
 | Small work routed to `quick` because atomic-direct predicates are incomplete and no promotion signal is present | Registered-headless dispatch-depth-1 one-shot conductor in an isolated worktree |
 | Work promoted to `standard+` by durable scope, shared-contract, resource, resume, verifier, or separability signals | Use a worktree and task branch from the latest base. Separable multi-file or feature work at `standard+` must use headless dispatch. Team delegation and inline micro-stages are limited to `quick` and genuinely microscopic stages. |
 | A new independent request while work is active | Dispatch it to a new worktree alongside the first job |
 
-`direct` remains inline. When its selected route changes source, the approved
+Explicit `direct` remains inline; small local completion units use WORKFLOW §0.2.1 without start/finish. When an explicit selected route changes source, the approved
 start uses the shared source-worktree preparation contract above.
 
 **Token-pressure non-interference:** token or context pressure cannot downshift this table, remove a required stage or depth, skip liveness and registry handling, or weaken worktree, write, spec, sandbox, approval, safety, validation, security, or accessibility guards. Unknown or exceeded budgets preserve the pipeline and surface degraded availability. Only unrequested optional exploration and user-facing verbosity may shrink.
@@ -964,7 +965,9 @@ current pointer. It records service code provenance only; it grants no session,
 route, recipient, or other operation authority. Changing service code preserves
 the accepted duty, transfer identity, recipient, and session authority.
 Release following uses self-exec and preserves the narrow legacy compatibility
-handoff.
+handoff. A service runner pass that selects no replacement keeps its settlement
+context and readiness worker; both are retired only after a replacement target
+is selected and just before the exec, and restored when that exec fails.
 
 The same managed lifecycle binding may select current code for the shared
 completion, batch, watch, and runner observers. A lifecycle callback may replace
@@ -2087,6 +2090,13 @@ PID/start/group, command, cwd, log, and registry identity for reattachment.
 
 Admission recovery is bounded: only a global/class-cap refusal from `acquire` or `reserve` triggers one `reclaim(root)` transaction after the failed admission has released its state lock. Only `reclaimed_count > 0` permits one complete admission retry. Kill switches, identity/validation errors, and rolling start budgets are never bypassed; start history is not refunded. `check` and refusal messages never scan witnesses. Reclaim returns only leases whose exact witness permits an exclusive nonblocking lock; live claimants, inherited descendant handles, foreign namespaces, and unprovable legacy records stay protected. Unclaimed reservations follow the same witness proof: every reserving wrapper, batch wrappers included, holds an owner witness until it exits. A reservation lives only while its launch claims or cancels it, so one whose owner witness is not held and that is at least 24 hours old is returned as `unclaimed-past-launch-bound`; a held owner witness keeps its slot at any age. No PID-only removal, state reset, or cap increase substitutes for this proof. A start-budget or cap refusal is typed on the governor's stdout (`refusal`, `retry_after_seconds`, `frees_at`) and carried onto the adapter's refusal receipt; when the refusal created no registry row, `start --wait` treats this as `waiting-capacity`, not a failed attempt, and waits at most one start window before relaunching the same attempt id exactly once, returning without arming another wait if refused again.
 
+Local worker observations compare the kernel boot UUID at the granularity
+recorded in their governor claim. A boot-only claim remains observable in a
+PID namespace without `/etc/machine-id`; a host-bound claim retains its host
+comparison. A matching boot continues the existing PID/start/namespace,
+live-descendant and terminal-receipt checks. `boot_identity()` supplies the
+complete host identity for resource and previous-boot decisions.
+
 Owner, resource and governor observations share the same previous-boot proof.
 A different boot UUID alone is insufficient on shared NAS state: the proof
 requires a matching recorded host or that UUID in this machine's boot journal
@@ -3184,12 +3194,20 @@ recipient generation. The notice-summary digest remains a separate fact, and a
 generic `received` ledger row is insufficient. Registered-batch continuation
 and handover duties retain their own settlement rules. Owner identity readers
 reuse the generation-checked registry input; current-row and non-registry
-authority checks remain fresh. The shared obligation runner may reuse a
-historical settlement observation only while the exact owner row and every
-identified settlement dependency remain unchanged. This is a scheduling
-optimization: it does not satisfy delivery, inspection, claim, mutation, or
-completion authority. Missing, unreadable, unstable, or untracked dependencies
-require a fresh observation and remain unknown until that observation succeeds.
+authority checks remain fresh. One read-only settlement classification pass
+observes a single registry generation; settlement writes and the
+classification after them read current state. The shared obligation runner may
+reuse a historical settlement observation only while the exact owner row and
+every identified settlement dependency remain unchanged. It likewise keeps a
+not-applicable, pending or unknown observation while the owner row, its related
+rows, its identified dependencies and its supervisor lease remain unchanged,
+until that owner's bounded retry time (at most ten minutes); a changed input is
+observed on the next pass, and a deferred unfinished settlement stays in the
+runner's outer signature. This is a scheduling optimization: it does not
+satisfy delivery, inspection, claim, mutation, or completion authority.
+Missing, unreadable, unstable, or untracked dependencies require a fresh
+observation before a settled result is reused and remain unknown until that
+observation succeeds.
 The first explicit lifecycle producer may initialize one state-root directory
 beneath an existing parent and then carries that root identity through its
 recovery-lock and runner request. Observers reuse that identity: recovery stops

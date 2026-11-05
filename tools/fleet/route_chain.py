@@ -525,8 +525,8 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
                 else:
                     state = "unknown"
         nodes.append({
-            "label": short_capability(capability), "capability": capability,
-            "capability_mode": capability_mode,
+            "label": "fix record" if line.get("automatic") else short_capability(capability), "capability": capability,
+            "capability_mode": capability_mode, "automatic": bool(line.get("automatic")),
             "route_id": rid, "route_file": route_file, "state": state, "shape": shape,
             "intensity": intensity, "round": 1, "handoff_to": None, "handoff_from": None,
             "ambiguity": ambiguity, "source_route_id": line.get("source_route_id"),
@@ -628,7 +628,7 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
 def current_capability(chain, marker_fields, *, session_start, slack):
     """Rule 5: an open route fresher than `session_start - slack` beats the capability marker."""
     current = (chain or {}).get("current")
-    if (isinstance(current, dict) and current.get("state") == "open"
+    if (isinstance(current, dict) and not current.get("automatic") and current.get("state") == "open"
             and isinstance(current.get("ts"), (int, float))
             and isinstance(session_start, (int, float))
             and current["ts"] >= session_start - slack):
@@ -730,6 +730,14 @@ def enrich(sessions, jobs=(), node_evidence=None, now=None, fast_first=False,
                 elif handoff["receiver"] == identity:
                     node["handoff_from"] = {"harness": handoff["origin"][0],
                                              "session_id": handoff["origin"][1]}
+            try:
+                from turn_change_record import supplementary_records
+                from . import session_registry
+                chain['automatic_records'] = [row for harness, sid in session_registry.session_join_keys(sess)
+                    for row in supplementary_records(harness, sid, getattr(sess, 'cwd', '') or '')]
+                chain['visible'] = chain.get('visible', False) or bool(chain['automatic_records'])
+            except Exception:
+                chain['automatic_records'] = []
             sess.route_chain = chain
         except Exception:
             try:

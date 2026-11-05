@@ -860,5 +860,25 @@ class RouteOutcomeLoaderTest(unittest.TestCase):
             self.assertNotIn(token, source)
 
 
+class AutomaticSupplementTest(EnvTmpTestCase):
+    def test_record_supplements_manual_chain_without_becoming_authority(self):
+        utilities = os.path.join(os.path.dirname(_TOOLS_DIR), 'utilities')
+        sys.path.insert(0, utilities)
+        import turn_change_record
+        session = _sess('codex', 'native-a', cwd='/repo')
+        lines = [{'route_id':'manual','harness':'codex','session_id':'native-a',
+                  'route_file':'/missing/manual.json','capability':'autopilot-code','ts':1}]
+        supplement = {'session_id':'native-a','changed_files':260,'summary':'exit 1; final reply reference'}
+        with mock.patch.object(route_chain, 'session_lines', return_value=lines), \
+             mock.patch.object(turn_change_record, 'supplementary_records', return_value=[supplement]) as reader:
+            route_chain.enrich([session])
+        reader.assert_called_once_with('codex', 'native-a', '/repo')
+        self.assertEqual(session.route_chain['current']['route_id'], 'manual')
+        self.assertEqual(session.route_chain['automatic_records'], [supplement])
+        self.assertTrue(session.route_chain['visible'])
+        automatic = {'current':{'automatic':True,'state':'open','ts':5,'capability':'autopilot-code'}}
+        self.assertEqual(route_chain.current_capability(automatic, {'source':'marker'}, session_start=0, slack=1), {'source':'marker'})
+
+
 if __name__ == "__main__":
     unittest.main()

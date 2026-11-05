@@ -36,6 +36,17 @@ inspection of completed work uses `audit`. Both may inspect code.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
+## Small inline completion units
+
+The main session may finish one reversible local completion unit in its current
+Git worktree under `core/WORKFLOW.md §0.2.1`: a small feature or fix with its
+source, regression tests and README. The existing seven direct predicates govern
+scope; file and verb counts do not split that unit. Read, edit, check and reply
+without task/start/finish/capability-info calls. Existing turn hooks record the
+changes, observed checks and ordinary final reply. Compose before expanding
+scope. This path adds no plan, worker or required reply format. Explicit direct
+routes keep their preparation, receipt and finish behavior.
+
 ## Artifact Ownership
 
 Artifact root: `core/CONVENTIONS.md §5.1`.

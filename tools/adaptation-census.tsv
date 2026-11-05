@@ -90,6 +90,7 @@ shared-utility-deferred	terminal_surface.py
 shared-utility-deferred	pane.py
 shared-utility-deferred	verification-background-lease.py
 shared-utility-deferred	work_start.py
+shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
 shared-utility-deferred	status_board.py
 shared-utility-deferred	start_receipt.py

@@ -432,6 +432,8 @@ class NamespaceE2E(unittest.TestCase):
             # absent, making git/tempfile fixtures fail before the liveness
             # assertions run.
             "--tmpfs", "/tmp",
+            # Linked checkouts used for local verification may live in /tmp.
+            "--ro-bind", str(ROOT), str(ROOT),
         ]
         # `/` is bound read-only, so a TMPDIR outside /tmp (the test runner
         # isolates one under /var/tmp) is unwritable inside the namespace and
@@ -1038,7 +1040,8 @@ class NamespaceE2E(unittest.TestCase):
             namespace = [
                 bwrap, "--die-with-parent", "--unshare-pid",
                 "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
-                "--tmpfs", "/tmp", "--bind", str(base), str(base),
+                "--tmpfs", "/tmp", "--ro-bind", str(ROOT), str(ROOT),
+                "--bind", str(base), str(base),
             ]
             env = {**base_environ(), "TMPDIR": str(base),
                    "XDG_STATE_HOME": str(base / "state"),
@@ -1143,6 +1146,137 @@ class NamespaceE2E(unittest.TestCase):
 
     def test_claude_pass_receipt_marker_and_join_are_ordered(self) -> None:
         self._run_harness("claude")
+
+
+# No harness/model is launched: the child only captures its real kernel
+# identity and writes a PASS envelope. Exercise the normal frame join, rather
+# than calling a settlement helper that bypasses its process checks.
+BOOT_ONLY_FRAME_SCRIPT = r'''
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / 'utilities'))
+import dispatch_contract as D
+import dispatch_completion_join as J
+import resource_run_registry as R
+
+base = Path(tempfile.mkdtemp(prefix='frame-boot-'))
+repo, art, home = (base / name for name in ('repo', 'artifacts', 'home'))
+for path in (repo, art, home):
+    path.mkdir()
+jobs = base / 'jobs.log'
+os.environ.update(
+    HOME=str(home), XDG_CONFIG_HOME=str(base / 'config'),
+    XDG_STATE_HOME=str(base / 'state'), XDG_DATA_HOME=str(base / 'data'),
+    AGENT_HOME=str(root), AGENT_ARTIFACT_ROOT=str(art),
+    AGENT_DISPATCH_JOBS=str(jobs), HEARTING_CAPACITY_PROBE_CLI=os.devnull)
+for args in (['init', '-q'], ['config', 'user.email', 'fixture@example.invalid'],
+             ['config', 'user.name', 'Fixture']):
+    subprocess.run(['git', '-C', str(repo), *args], check=True)
+(repo / 'file.txt').write_text('fixture\n')
+subprocess.run(['git', '-C', str(repo), 'add', 'file.txt'], check=True)
+subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture'], check=True)
+evidence = base / 'dispatch.json'
+evidence.write_text(json.dumps({'tuples': [{
+    'parent_harness': 'claude', 'parent_transport': 'headless',
+    'parent_sandbox': 'adapter-default', 'child_harness': 'claude',
+    'launch_authority': 'conductor', 'status': 'supported',
+    'probe_source': 'fixture', 'probe_time': '2026-11-05T00:00:00Z',
+    'failure_class': '', 'checked_worktree': str(repo), 'failure_scope': 'none',
+    'codex_command': 'ok', 'retry_on_isolated_worktree': 0}], 'native_subagent': []}))
+compiled = subprocess.run([
+    sys.executable, str(root / 'utilities/capability-route.py'), 'compile',
+    '--capability', 'autopilot-code', '--capability-mode', 'dev',
+    '--slug', 'frame-boot-fixture', '--intensity', 'standard', '--cwd', str(repo),
+    '--artifact-root', str(art), '--signal', 'shared-contract',
+    '--transport', 'headless', '--tracking', 'tracked', '--spec-read', 'fixture',
+    '--drift-verdict', 'within-spec', '--workflow-mode', 'tracked',
+    '--artifact-guard', 'fixture', '--dispatch-evidence', str(evidence)],
+    text=True, capture_output=True, timeout=20)
+assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+route = json.loads(compiled.stdout)
+route_path = art / '.runtime/routes' / (route['route_id'] + '.json')
+brief = art / 'frame.md'
+brief.write_text('---\nstatus: framed\n---\n# Direction\nUse the existing module.\n')
+original_brief = brief.read_bytes()
+identity_file, log = base / 'identity.json', base / 'frame.claude.jsonl'
+attempt = 'att-boot-frame'
+child_code = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import governor_identity as G
+Path(sys.argv[2]).write_text(json.dumps(G.capture_local_identity()))
+text = 'artifact: ' + sys.argv[3] + '\\nverdict: PASS\\nblocker: none'
+print(json.dumps({'type': 'result', 'subtype': 'success',
+                  'is_error': False, 'result': text}), flush=True)
+"""
+with log.open('w') as out:
+    child = subprocess.Popen([
+        sys.executable, '-c', child_code, str(root / 'utilities'),
+        str(identity_file), str(brief)], stdout=out, start_new_session=True,
+        env={**os.environ, 'AGENT_DISPATCH_ATTEMPT_ID': attempt})
+    assert child.wait(timeout=10) == 0
+identity = json.loads(identity_file.read_text())
+assert identity['boot_id'] and 'boot_host' not in identity, identity
+assert R.boot_identity() == {}, 'Full host identity must remain unavailable'
+state = art / '.runtime/model-worker-governor/state.json'
+state.parent.mkdir(parents=True, exist_ok=True)
+state.write_text(json.dumps({'claims': {'fixture': {
+    'claimant_pid': identity['pid'], 'claimant_starttime': identity['starttime'],
+    'claimant_identity': identity}}}))
+namespace = 'pid:[%s]' % identity['pid_namespace']
+meta = {
+    'attempt_schema_version': '2', 'dispatch_depth': '1', 'transport': 'headless',
+    'execution_surface': 'registered-headless', 'registered_worker': '1',
+    'fallback_hop': 'same-harness-headless', 'worker_type': 'frame',
+    'harness': 'claude', 'attempt_id': attempt, 'route_file': str(route_path),
+    'route_id': route['route_id'], 'route_hash': route['route_hash'],
+    'route_node': 'frame', 'artifact_root': str(art), 'log_file': str(log),
+    'pid': str(identity['pid']), 'pid_start': identity['starttime'],
+    'pgid': str(identity['pid']), 'pid_ns': namespace, 'pid_observer_ns': namespace,
+    'launch_lifecycle': 'foreground-scoped', 'launch_outcome': 'governed-process-reaped',
+    'group_reap_proof': D.GROUP_REAP_PROOF, 'group_reap_pgid': str(identity['pid']),
+    'launch_claimed': '1', 'launch_started': '1'}
+jobs.write_text('2026-11-05T00:00:00Z\topen\t%s\t%s\tframe\t%s\n' % (
+    repo, repo, ','.join(k + '=' + v for k, v in meta.items())))
+receipt = J.join_selected_attempts(jobs=jobs, expected_attempts={attempt},
+                                 interval=.01, timeout=1, recover=True)
+assert receipt['state'] == 'ready', receipt
+row = J.exact_attempt_row(jobs, attempt)
+assert row.status == 'done', row
+marker = Path(row.metadata['completion_marker'])
+assert json.loads(marker.read_text())['attempt_id'] == attempt
+assert brief.read_bytes() == original_brief
+assert len(jobs.read_text().splitlines()) == 1, 'Recovery must not relaunch'
+print(json.dumps({'state': receipt['state'], 'attempt_id': attempt}))
+'''
+
+
+class BootOnlyFrameRecoveryTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('bwrap'), 'bubblewrap is required')
+    def test_pass_frame_is_recovered_normally_without_machine_id(self):
+        # A fresh /etc deliberately has no machine-id. The kernel boot UUID,
+        # real PID namespace, process identity and normal receipt checks remain.
+        with tempfile.TemporaryDirectory() as td:
+            world = Path(td)
+            script = world / 'probe.py'
+            script.write_text(BOOT_ONLY_FRAME_SCRIPT)
+            args = [
+                'bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid',
+                '--unshare-uts', '--ro-bind', '/', '/', '--proc', '/proc',
+                '--dev', '/dev', '--tmpfs', '/tmp', '--tmpfs', '/etc',
+                '--ro-bind', str(ROOT), str(ROOT), '--bind', str(world), str(world),
+                sys.executable, '-u', str(script), str(ROOT)]
+            with (world / 'result.log').open('w+') as out:
+                result = subprocess.run(args, env={**base_environ(), 'TMPDIR': str(world),
+                                        'PYTHONDONTWRITEBYTECODE': '1'},
+                                        stdout=out, stderr=subprocess.STDOUT, timeout=40)
+                out.seek(0)
+                output = out.read()
+            self.assertEqual(result.returncode, 0, output)
+            self.assertEqual(json.loads(output.splitlines()[-1])['state'], 'ready')
 
 
 if __name__ == "__main__":

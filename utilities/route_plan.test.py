@@ -672,10 +672,35 @@ class RoutePlanArgumentTest(PlanFixture):
     def test_the_sealed_field_is_format_checked_only(self):
         good = RP.sealed_form(self.binding())
         self.assertEqual(RP.validate_sealed(good), good)
-        for bad in ({**good, "index": 4}, {**good, "digest": "md5:x"}, {**good, "decision": "/abs/path"},
+        self.assertEqual(RP.validate_sealed({**good, "decision": str(self.decision_path)})["decision"], str(self.decision_path))
+        for bad in ({**good, "index": 4}, {**good, "digest": "md5:x"},
                     {**good, "decision": "../x"}, {"decision": good["decision"]}, "x", {**good, "extra": 1}):
             with self.subTest(bad), self.assertRaises(ValueError):
                 RP.validate_sealed(bad)
+
+    def test_absolute_record_in_another_root_keeps_its_binding_and_never_adds_frames(self):
+        other = self.root / "another-artifact-root"
+        other.mkdir()
+        before = self.decision_path.read_bytes()
+        binding = RP.read_route_plan(f"{self.decision_path}#0", other)
+        self.assertEqual(binding["decision"], str(self.decision_path))
+        route = R.compose_route(capability=None, capability_mode=None, shape="framed", graph=None,
+                                cwd=str(R.ROOT), artifact_root=str(other), slug="cross-root-leg", route_plan=binding,
+                                campaign_key="fixture", spec_read="fixture")
+        R.verify_route(route)
+        self.assertFalse([n for n in route["nodes"] if R._frame_node(n)])
+        self.assertEqual(RP.validate_sealed(route["route_plan"]), RP.sealed_form(binding))
+        self.assertEqual(self.decision_path.read_bytes(), before)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_DISPATCH_")}
+        cli = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "compose", "--explain",
+                              "--route-plan", f"{self.decision_path}#0", "--artifact-root", str(other),
+                              "--cwd", str(R.ROOT), "--campaign-key", "fixture", "--spec-read", "fixture"],
+                             text=True, capture_output=True, env=env)
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        self.assertEqual(json.loads(cli.stdout)["shape"], "direct")
+        self.assertFalse([n for n in json.loads(cli.stdout)["nodes"] if n["id"].startswith("frame")])
+        with self.assertRaisesRegex(ValueError, "route-plan-invalid:path"):
+            RP.read_route_plan(f"../{self.decision_path.relative_to(self.root)}#0", other)
 
     def test_display_plan_is_the_capability_order_with_adjacent_repeats_shown_once(self):
         self.assertEqual(RP.display_plan([{"capability": "autopilot-code"}, {"capability": "autopilot-code"},
@@ -776,23 +801,19 @@ class RoutePlanCompileTest(PlanFixture):
         R.verify_route(json.loads(json.dumps(route)), R.ROOT)       # a vanished record is not a route-hash error
         self.assertIsNone(RP.project_next_leg(route, "cyc_" + "a" * 32))
 
-    def test_the_card_names_an_unreadable_plan_with_one_line(self):
-        route = self.leg(shape="direct")
-        self.assertNotIn("경로 계획을 읽지 못함", R.compose_card(route))
-        card = R.compose_card(route, route_plan_unreadable=True)
-        self.assertEqual(card.count("경로 계획을 읽지 못함"), 1)
-
-    def test_the_compose_cli_treats_an_unreadable_plan_as_absent_plus_one_card_line(self):
+    def test_the_compose_cli_refuses_an_unreadable_plan_before_publication(self):
         common = [sys.executable, str(HERE / "capability-route.py"), "compose", "--shape", "direct", "--slug", "cli-leg",
                   "--capability", "autopilot-code", "--cwd", str(R.ROOT), "--artifact-root", str(self.root),
                   "--campaign-key", "framed-key", "--spec-read", "fixture", "--explain"]
         env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_DISPATCH_")}
         plain = subprocess.run(common, text=True, capture_output=True, env=env)
         bad = subprocess.run([*common, "--route-plan", f"{self.root}/nope.json#0"], text=True, capture_output=True, env=env)
-        self.assertEqual((plain.returncode, bad.returncode), (0, 0), (plain.stderr, bad.stderr))
-        self.assertEqual(json.loads(plain.stdout)["route_id"], json.loads(bad.stdout)["route_id"])
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotEqual(bad.returncode, 0, bad.stderr)
+        self.assertEqual(bad.stdout, "")
+        self.assertIn("compose-route-plan-refused", bad.stderr)
         self.assertNotIn("경로 계획을 읽지 못함", plain.stderr)
-        self.assertEqual(bad.stderr.count("경로 계획을 읽지 못함"), 1)
+        self.assertNotIn("[경로]", bad.stderr)
 
     def test_route_plan_compose_card_bounds_preview_and_keeps_the_full_current_leg(self):
         parallel = [f"slice {index:02d}" for index in range(16)]

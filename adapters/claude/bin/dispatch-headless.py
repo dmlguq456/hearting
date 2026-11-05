@@ -86,6 +86,7 @@ from dispatch_contract import (
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
+import frame_repository
 # Identical in every wrapper; the old names stay so callers and mock targets do not move.
 _is_report_bundle_publish_stage = WRAPPER_COMMON.is_report_bundle_publish_stage
 _route_node_leg_fields = WRAPPER_COMMON.route_node_leg_fields
@@ -1172,6 +1173,7 @@ def _route_declares_terminal_commit_support(route_file: str) -> bool:
 
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
+    prompt_path, log_path = Path(frame_repository.native_path(prompt_path)), Path(frame_repository.native_path(log_path))
     if getattr(args, "resolved_completion_delivery", "one-shot") == "session-resume-supervised":
         command = [
             sys.executable,
@@ -1191,7 +1193,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             command += ["--add-dir", str(args.report_bundle_root)]
         if getattr(args, "execution_access_grant", None) is not None:
             for writable_dir in args.execution_access_grant.additional_writable_roots:
-                command += ["--add-dir", str(writable_dir)]
+                command += ["--add-dir", frame_repository.native_path(writable_dir)]
         read_dirs, read_deny = _read_only_projection(args)
         for read_dir in read_dirs:
             command += ["--add-dir", read_dir]
@@ -1232,7 +1234,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         cmd += ["--add-dir", str(args.report_bundle_root)]
     if getattr(args, "execution_access_grant", None) is not None:
         for writable_dir in args.execution_access_grant.additional_writable_roots:
-            cmd += ["--add-dir", str(writable_dir)]
+            cmd += ["--add-dir", frame_repository.native_path(writable_dir)]
     read_dirs, read_deny = _read_only_projection(args)
     for read_dir in read_dirs:
         cmd += ["--add-dir", read_dir]
@@ -1252,7 +1254,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         cmd += ["--allowedTools", ",".join(posture["allowed_tools"])]
     inner = " ".join(shlex.quote(x) for x in cmd)
     return (
-        f"cd {shlex.quote(args.worktree)} && "
+        f"cd {shlex.quote(frame_repository.native_worktree(args.worktree))} && "
         f"{inner} < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1"
     )
 
@@ -1387,9 +1389,10 @@ def validate_route_record(args: argparse.Namespace) -> int:
     )
 
 
+@frame_repository.process_entry
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
-    args.replacement_input_argv = list(argv[1:])
+    args.replacement_input_argv = frame_repository.durable_argv(argv[1:])
     # parent_sandbox is used here only to tighten the override gate, never to
     # loosen it, so consuming it before the tuple-validity check at :1392 is
     # safe even though it has not yet been validated.
@@ -1407,7 +1410,7 @@ def main(argv: list[str]) -> int:
         return fail("capacity-retry-evidence-missing", 64, child_spawned="0")
     if not Path(args.worktree).is_absolute():
         return fail("worktree-must-be-absolute", 64, worktree=args.worktree)
-    args.worktree = str(Path(args.worktree).resolve())
+    args.worktree = frame_repository.canonical_worktree(args.worktree)
     action = "start" if args.start else "register" if args.register else "dry-run"
     args.action = action
     args.command_attempt_id = args.attempt_id
@@ -1429,7 +1432,7 @@ def main(argv: list[str]) -> int:
     try:
         from dispatch_contract import launch_repository_identity
         args.repository_identity, args.repository_kind = launch_repository_identity(
-            args.worktree, args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
+            frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     except DispatchContractError as exc:
         return fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     try:
@@ -1736,8 +1739,8 @@ def main(argv: list[str]) -> int:
     command = None if action == 'start' else shell_command(args, prompt_path, log_path)
 
     if action in ("register", "start"):
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(prompt_path.parent)).mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(log_path.parent)).mkdir(parents=True, exist_ok=True)
 
     if action == "start" and args.profile:
         # Gate-first, then create -> register -> launch: a --check failure
@@ -1784,7 +1787,7 @@ def main(argv: list[str]) -> int:
         if args.attempt_claimed:
             initialize_supervised_owner_input(args, jobs)
             try:
-                prompt_path.write_text(prompt_text, encoding="utf-8")
+                Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")
             except OSError as exc:
                 annotate_attempt_row(
                     jobs, args.attempt_id, {"launch_outcome": "never-launched"}
@@ -2000,9 +2003,9 @@ def main(argv: list[str]) -> int:
             try:
                 return subprocess.Popen(
                     fence_command,
-                    env=env,
+                    env=frame_repository.child_environment(env),
                     start_new_session=True,
-                    pass_fds=(gate_fd, fence_failure_write_fd),
+                    **frame_repository.child_process_options(pass_fds=(gate_fd, fence_failure_write_fd)),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

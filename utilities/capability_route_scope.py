@@ -477,6 +477,9 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     """Read only the sealed selection/nodes; same display for every harness."""
     import route_plan as RP
 
+    if non_git_decision and non_git_decision.get("kind") == "direct":
+        return []  # The existing one-line non-Git card owns the notice.
+
     t = t or UI_TEXT.translator()
     basis = {row.get("axis"): row for row in
              (route.get("selection") or {}).get("selection_basis", [])}
@@ -488,6 +491,10 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         detail += f", requested={requested}"
     lines = [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
     shape = (route.get("selection") or {}).get("shape") or shape_for_intensity(route["effective_intensity"])
+    if shape == "framed":
+        legs = len(RP.frame_legs(route))
+        lines = ["  " + t("route.intensity.framed", requested=requested or "default", legs=legs,
+                           bootstrap=route["effective_intensity"], source=source)]
     if source == "shape-default" and shape != "framed":
         lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
@@ -543,7 +550,7 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     return lines + compose_omission_lines(route)
 
 
-def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, route_plan_unreadable=False,
+def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
                  campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
     """One-line `[경로]` notice the acting session pastes instead of a card."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
@@ -559,6 +566,11 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
+    if non_git_decision and non_git_decision.get("kind") == "direct":
+        notice = card.splitlines()[0] + " · " + t("route.card.non_git_direct")
+        if non_git_decision.get("capability_unresolved"):
+            notice += " · " + t("route.card.capability_unresolved")
+        return notice
     import work_intent
     for line in work_intent.card_lines(route, original=intent_original, t=t):
         card += "\n" + line
@@ -612,8 +624,6 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None, rout
         card += "\n  " + t("route.card.split", items=" · ".join(parallel[:3]))
         if len(parallel) > 3:
             card += t("route.card.split_more", count=len(parallel) - 3)
-    if route_plan_unreadable:
-        card += "\n  " + t("route.card.plan_unreadable")
     notice = _compose_spec_read_notice(route, t)
     if notice:
         card += "\n" + notice

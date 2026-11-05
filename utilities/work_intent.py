@@ -11,9 +11,9 @@ values now travel with every route, neither of them part of its identity:
   of the prompt file, read again from the sealed `work_request.text` whenever
   needed. With no intent line the request's first sentence is a marked draft.
 - `original`: a short excerpt of the person's own prompt, read by the runtime
-  from the session record when a route is first written -- only at a person's
-  prompt boundary (not a peer or runtime transfer), skipping bare approvals such
-  as "진행", with credentials masked -- and stored once in
+  from the shared hook's exact human prompt boundary when a route is first
+  written (not a peer/runtime transfer or a bare approval), with credentials
+  masked -- and stored once in
   `.runtime/intent/<work key>.json` beside the route. Every leg of a framed route
   shares the frame route's record and never reads the session itself.
 
@@ -36,8 +36,6 @@ if str(HERE) not in sys.path:
 MAX_ORIGINAL_CHARS = 600
 MAX_LINE_CHARS = 300
 MAX_NOT_DOING = 3
-MAX_APPROVALS_SKIPPED = 6
-TAIL_BYTES = 1024 * 1024
 RECORD_SCHEMA = "work_intent_original_v1"
 _LABELS = {
     "intent": ("의도", "intent", "goal"),
@@ -149,62 +147,6 @@ def _human_text(text: str) -> str:
     return value.strip()
 
 
-def _first_request(texts) -> str:
-    """From the newest user text back: skip bare approvals, stop at the first request.
-
-    The newest text decides whose boundary this is: an envelope there is not the person's."""
-    skipped = 0
-    for raw in texts:
-        text = _human_text(raw)
-        if not text:
-            return ""
-        if not _APPROVAL.match(text):
-            return text
-        skipped += 1
-        if skipped > MAX_APPROVALS_SKIPPED:
-            return ""
-    return ""
-
-
-def _jsonl_user_texts(harness: str, path: Path):
-    import tidy_transcripts
-    with open(path, "rb") as handle:
-        size = os.fstat(handle.fileno()).st_size
-        start = max(0, size - TAIL_BYTES)
-        handle.seek(start)
-        if start:
-            handle.readline()
-        rows = handle.read().splitlines()
-    for raw in reversed(rows):
-        try:
-            data = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
-            continue
-        role, text = tidy_transcripts._text_of_jsonl_row(data, harness)
-        if role == "user":
-            yield text
-
-
-def _opencode_user_texts(db_path: Path, sid: str):
-    import tidy_transcripts
-    from fleet import refresh_title
-    with tidy_transcripts._opencode_view(db_path) as con:
-        rows = con.execute(
-            "SELECT p.data, m.data FROM part p JOIN message m ON m.id = p.message_id "
-            "WHERE p.session_id = ? ORDER BY p.rowid DESC LIMIT 400", (sid,)).fetchall()
-    for raw, message_raw in rows:
-        try:
-            part, message = json.loads(raw), json.loads(message_raw)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        if (not isinstance(part, dict) or part.get("type") != "text"
-                or part.get("synthetic") or part.get("ignored")):
-            continue
-        yield refresh_title._opencode_text(part)
-
-
 def original_excerpt(cwd=None, environ=None) -> str:
     """The person's request at the current prompt, bounded and masked; empty whenever unsure."""
     environ = os.environ if environ is None else environ
@@ -215,21 +157,29 @@ def original_excerpt(cwd=None, environ=None) -> str:
             return ""
         if not _human_prompt_boundary(who.harness, who.session_id, cwd, environ):
             return ""
-        tools = HERE.parent / "tools"
-        if str(tools) not in sys.path:
-            sys.path.insert(0, str(tools))
-        import tidy_transcripts
-        source = tidy_transcripts.locate_transcript(who.harness, who.session_id)
-        if source is None:
+        # The shared prompt hook captures this boundary before later transcript
+        # writes can move it. Older boundaries without a quote stay unknown.
+        import session_tidy
+        seat = session_tidy.resolve_seat(who.harness, cwd or None, environ, who.session_id, "")
+        turn = session_tidy.read_json(session_tidy._prompt_seq_path(seat))
+        text = turn.get("request_excerpt", "")
+        if not isinstance(text, str):
             return ""
-        texts = (_opencode_user_texts(Path(source), who.session_id) if who.harness == "opencode"
-                 else _jsonl_user_texts(who.harness, Path(source)))
-        text = redact_secrets(_first_request(texts)).strip()
+        text = redact_secrets(text).strip()
     except Exception:  # noqa: BLE001 -- the excerpt is optional; any failure leaves it out
         return ""
     if len(text) > MAX_ORIGINAL_CHARS:
         text = text[:MAX_ORIGINAL_CHARS - 1].rstrip() + "…"
     return text
+
+
+def prompt_excerpt(text) -> str:
+    """A bounded quote of this exact human boundary, never an earlier request."""
+    text = _human_text(text) if isinstance(text, str) else ""
+    if not text or _APPROVAL.fullmatch(text):
+        return ""
+    text = redact_secrets(text)
+    return text if len(text) <= MAX_ORIGINAL_CHARS else text[:MAX_ORIGINAL_CHARS - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +205,88 @@ def record_path(route) -> Path | None:
     if not key or not isinstance(root, str) or not re.fullmatch(r"rt-[0-9a-f]{16}", key):
         return None
     return Path(root) / ".runtime" / "intent" / f"{key}.json"
+
+
+def frame_reference(route):
+    """The exact frame identity/root, also for a leg with an absolute plan reference."""
+    import route_plan as RP
+    if RP.is_framed_route(route):
+        return Path(route["artifact_root"]), route["route_id"], route["route_hash"]
+    try:
+        plan = route["route_plan"]
+        binding = RP.read_route_plan(f"{plan['decision']}#{plan['index']}", route["artifact_root"])
+        if binding["digest"] != plan["digest"]:
+            return None
+        decision = binding["record"]["decision"]
+        return (Path(decision["first_leg_compose"]["context"]["artifact_root"]),
+                decision["frame_route"]["route_id"], decision["frame_route"]["route_hash"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+FRAME_CORRECTION_INPUT_BYTES = 65536
+FRAME_CORRECTION_DELIVERY_BYTES = 8192
+
+
+def frame_correction_view(route):
+    """Retained history and bounded newest-first delivery share one admission contract.
+
+    The writer retains full accepted inputs. Total file size is not a reason to
+    silently discard them; only delivery is shortened, with explicit coverage.
+    """
+    ref = frame_reference(route)
+    empty = {"requests": [], "total": 0, "omitted": 0, "truncated": False, "reference": ""}
+    if ref is None:
+        return empty
+    root, rid, rhash = ref
+    path = root / ".runtime/framed-decision" / (rid + ".corrections.json")
+    try:
+        if path.is_symlink():
+            return empty
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        if (value.get("schema"), value.get("route_id"), value.get("route_hash")) != (
+                "frame_route_input_v1", rid, rhash):
+            return empty
+        retained = [item for item in value["requests"] if isinstance(item, dict)
+                    and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return empty
+    items, remaining, shortened = [], FRAME_CORRECTION_DELIVERY_BYTES, False
+    for item in reversed(retained):
+        overhead = len(item["id"].encode("utf-8")) + 32
+        if remaining <= overhead:
+            break
+        raw = item["text"].encode("utf-8")
+        text = raw[:remaining-overhead].decode("utf-8", errors="ignore")
+        shortened |= len(text.encode("utf-8")) < len(raw)
+        items.append({**item, "text": text})
+        remaining -= overhead + len(text.encode("utf-8"))
+        if shortened:
+            break
+    omitted = len(retained) - len(items)
+    return {"requests": items, "total": len(retained), "omitted": omitted,
+            "truncated": shortened or omitted > 0, "reference": str(path)}
+
+
+def frame_corrections(route):
+    return frame_correction_view(route)["requests"]
+
+
+def frame_correction_coverage(view):
+    return {"total": view["total"], "included": len(view["requests"]), "omitted": view["omitted"],
+            "truncated": view["truncated"], "reference": view["reference"]}
+
+
+def frame_corrections_text(route):
+    view = frame_correction_view(route)
+    if not view["requests"]:
+        return ""
+    coverage = (f"Coverage: truncated; recent conditions first, {len(view['requests'])}/{view['total']} "
+                f"entries shown ({view['omitted']} omitted; displayed text may be shortened). "
+                f"Full retained history: {view['reference']}\n\n") if view["truncated"] else ""
+    return ("\n## Conditions added during framing\n\n" + coverage + "\n".join(
+        f"- [{item['id']}] {item['text']}" for item in view["requests"]) + "\n")
 
 
 def seal_original(route, cwd=None, environ=None) -> str:
@@ -359,7 +391,7 @@ def prompt_block(route) -> str:
     if value.get("done"):
         lines.append(f"- Done when: {value['done']}")
     lines.append("Stay within this intent; the assignment below says which part is yours.")
-    return "\n".join(lines) + "\n\n"
+    return "\n".join(lines) + "\n\n" + frame_corrections_text(route)
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +538,7 @@ def cost_line(cost, t) -> str:
     return t("completion.cost", elapsed=elapsed, tokens=words)
 
 
-def completion_summary(route, primary, *, route_file=None, t=None, cost=None) -> str:
+def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -528,6 +560,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None) ->
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
     lines.append(t("completion.result", result=_result_line(route, t)))
+    for state in ("undelivered", "unknown"):
+        if (corrections or {}).get(state):
+            lines.append(t("completion.corrections_" + state, count=corrections[state]))
     if cost is not None:
         lines.append(cost_line(cost, t))
     try:

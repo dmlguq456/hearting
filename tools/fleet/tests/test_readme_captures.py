@@ -127,7 +127,8 @@ class PublishedFiles(unittest.TestCase):
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
 
     def test_no_private_path_or_address_on_public_pages(self):
-        for relative in ("docs/fleet.svg", "docs/index.html", "tools/render-landing.py"):
+        for relative in ("docs/fleet.svg", "docs/index.html", "docs/fleet.html", "docs/map.html",
+                         "tools/render-landing.py"):
             text = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIsNone(PRIVATE.search(text), relative)
 

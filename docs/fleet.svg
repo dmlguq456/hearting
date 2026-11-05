@@ -73,7 +73,7 @@
 <text x="585" y="162" textLength="45" lengthAdjust="spacing" fill="#db81db" font-weight="700" xml:space="preserve">xhigh</text>
 <text x="630" y="162" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">)</text>
 <text x="693" y="162" textLength="117" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Rate limiting</text>
-<text x="819" y="162" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">route 1</text>
+<text x="819" y="162" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="936" y="162" textLength="36" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━━</text>
 <text x="972" y="162" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────</text>
 <text x="1026" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">46%</text>
@@ -136,7 +136,7 @@
 <text x="504" y="234" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Opus 5.5</text>
 <text x="576" y="234" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">·high)</text>
 <text x="693" y="234" textLength="135" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Checkpoint eval</text>
-<text x="837" y="234" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">route 1</text>
+<text x="837" y="234" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="936" y="234" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="963" y="234" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────</text>
 <text x="1026" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38%</text>

@@ -93,6 +93,7 @@ from dispatch_contract import (
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
+import frame_repository
 # Identical in every wrapper; the old names stay so callers and mock targets do not move.
 _is_report_bundle_publish_stage = WRAPPER_COMMON.is_report_bundle_publish_stage
 _route_node_leg_fields = WRAPPER_COMMON.route_node_leg_fields
@@ -957,7 +958,7 @@ def ensure_owner_writable_dirs(args: argparse.Namespace) -> None:
         to_create.append(_core_grounding_dir(args))
     for path in to_create:
         try:
-            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            Path(frame_repository.execution_path(path)).mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError as exc:
             raise DispatchContractError("owner-writable-root-uncreatable", f"{path}: {exc}")
 
@@ -1075,6 +1076,8 @@ def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> N
 
 
 def _writer_shell_command(command, attempt_id, prompt_path: Path | None, log_path: Path) -> str:
+    prompt_path = Path(frame_repository.native_path(prompt_path)) if prompt_path is not None else None
+    log_path = Path(frame_repository.native_path(log_path))
     writer = [sys.executable, str(ROOT / "utilities" / "codex-jsonl-writer.py"),
               "--log", str(log_path), "--attempt", str(attempt_id or ""), "--"]
     rendered = shlex.join([*writer, *command])
@@ -1082,6 +1085,7 @@ def _writer_shell_command(command, attempt_id, prompt_path: Path | None, log_pat
 
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
+    prompt_path, log_path = Path(frame_repository.native_path(prompt_path)), Path(frame_repository.native_path(log_path))
     owner_supervised = (
         getattr(args, "resolved_completion_delivery", "one-shot")
         == "app-server-supervised"
@@ -1176,7 +1180,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "exec",
         "--ephemeral",
         "--cd",
-        args.worktree,
+        frame_repository.native_worktree(args.worktree),
         "--add-dir",
         args.artifact_root,
     ]
@@ -1205,7 +1209,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     for writable_dir in nested_owner_writable_dirs(args):
         # Core read markers and Claude's Bash pre-exec snapshot are the only
         # home-scoped writes needed by a recursive standard+ Codex owner.
-        cmd += ["--add-dir", str(writable_dir)]
+        cmd += ["--add-dir", frame_repository.native_path(writable_dir)]
     if spec_read_marker_required(args):
         # The same read obligation and exact grant as the supervisor builder.
         cmd += ["--add-dir", str(_spec_grounding_dir(args))]
@@ -1213,14 +1217,14 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         # SD-72: an ordinary route-bound depth-2 worker also runs the portable
         # core-read guard hook and must record its own .core-grounding marker,
         # independent of the owner-only nested_headless_network network grant.
-        cmd += ["--add-dir", str(writable_dir)]
+        cmd += ["--add-dir", frame_repository.native_path(writable_dir)]
     for writable_dir in linked_worktree_git_writable_dirs(args):
         # Commit-expected linked-worktree workers get exact Git metadata dirs;
         # the common-dir root, hooks/, and config stay ungranted.
-        cmd += ["--add-dir", str(writable_dir)]
+        cmd += ["--add-dir", frame_repository.native_path(writable_dir)]
     if getattr(args, "execution_access_grant", None) is not None:
         for writable_dir in args.execution_access_grant.additional_writable_roots:
-            cmd += ["--add-dir", str(writable_dir)]
+            cmd += ["--add-dir", frame_repository.native_path(writable_dir)]
     write_roots = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--add-dir"]
     if getattr(args, "repository_kind", "git") == "non-git":
         if uses_enclosing_codex_sandbox(args):
@@ -1236,7 +1240,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             )
             if profile is None:
                 raise RuntimeError("codex-non-git-recordish-profile-unsupported")
-            cmd += ["--skip-git-repo-check", *config_arguments(profile)]
+            cmd += ["--skip-git-repo-check", *config_arguments(frame_repository.runtime_paths(profile))]
     else:
         stage_route = None
         stage_node = getattr(args, "route_node", None)
@@ -1253,7 +1257,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             node_id=stage_node,
         )
         if profile is not None:
-            cmd += config_arguments(profile)
+            cmd += config_arguments(frame_repository.runtime_paths(profile))
         else:
             cmd += ["--sandbox", effective_runtime_sandbox(args)]
     if args.nested_headless_network and profile is None:
@@ -1572,6 +1576,22 @@ def recorded_supervisor_command(record: dict, fields: list[str], metadata: dict[
 
 
 def respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only=False):
+    from dispatch_completion_join import exact_attempt_row
+    row = exact_attempt_row(Path(jobs), attempt_id)
+    route_file = row.metadata.get("owner_route_file") or row.metadata.get("route_file")
+    try:
+        route = json.loads(Path(route_file).read_text()) if route_file else {}
+    except (OSError, ValueError):
+        route = {}  # the existing recovery validation supplies its typed reason
+    try:
+        with frame_repository.for_route(route, route_file):
+            return _respawn_supervised_owner(jobs, attempt_id,
+                expected_identity=expected_identity, check_only=check_only)
+    except frame_repository.RepositoryBindingError as exc:
+        return {"state": "not-started", "reason": exc.reason, "detail": str(exc)}
+
+
+def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only=False):
     """Restore a Codex consumer on the exact launched owner row, from its record.
 
     `check_only` runs the same record checks and stops before any reservation or
@@ -1830,8 +1850,9 @@ def respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only=
                     "run", "--class", "dispatch", "--", "sh", "-c", shell,
                 ))
                 child = subprocess.Popen(
-                    fence, start_new_session=True, env=dispatch_env,
-                    pass_fds=(gate_fd, failure_write_fd), stdin=prompt_stream,
+                    fence, start_new_session=True,
+                    **frame_repository.child_options(env=dispatch_env,
+                        pass_fds=(gate_fd, failure_write_fd)), stdin=prompt_stream,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 try:
@@ -2169,9 +2190,10 @@ def validate_route_record(args: argparse.Namespace) -> int:
     )
 
 
+@frame_repository.process_entry
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
-    args.replacement_input_argv = list(argv[1:])
+    args.replacement_input_argv = frame_repository.durable_argv(argv[1:])
     # parent_sandbox is used here only to tighten the override gate, never to
     # loosen it, so consuming it before the tuple-validity check at :1939 is
     # safe even though it has not yet been validated.
@@ -2189,7 +2211,7 @@ def main(argv: list[str]) -> int:
         return fail("capacity-retry-evidence-missing", 64, child_spawned="0")
     if not Path(args.worktree).is_absolute():
         return fail("worktree-must-be-absolute", 64, worktree=args.worktree)
-    args.worktree = str(Path(args.worktree).resolve())
+    args.worktree = frame_repository.canonical_worktree(args.worktree)
     forced_sandbox = os.environ.get("CODEX_DISPATCH_SANDBOX_FORCE")
     if forced_sandbox:
         if forced_sandbox not in ("read-only", "workspace-write", "danger-full-access"):
@@ -2218,7 +2240,7 @@ def main(argv: list[str]) -> int:
     try:
         from dispatch_contract import launch_repository_identity
         args.repository_identity, args.repository_kind = launch_repository_identity(
-            args.worktree, args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
+            frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     except DispatchContractError as exc:
         return fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     invalid_mount = invalid_codex_mount_target(args, worktree)
@@ -2623,8 +2645,8 @@ def main(argv: list[str]) -> int:
             assert_register_mkdir_containment(args, prompt_path.parent, log_path.parent)
         except DispatchContractError as e:
             return fail(e.reason, 73, detail=e.detail, child_spawned="0")
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(prompt_path.parent)).mkdir(parents=True, exist_ok=True)
+        Path(frame_repository.execution_path(log_path.parent)).mkdir(parents=True, exist_ok=True)
         if action == "start":
             try:
                 reservation_token, args.replica_batch_reservation = reserve_governor_token(
@@ -2653,7 +2675,7 @@ def main(argv: list[str]) -> int:
         if args.attempt_claimed:
             initialize_supervised_owner_input(args, jobs)
             try:
-                prompt_path.write_text(prompt_text, encoding="utf-8")
+                Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")
             except OSError as exc:
                 annotate_attempt_row(
                     jobs, args.attempt_id, {"launch_outcome": "never-launched"}
@@ -2865,8 +2887,8 @@ def main(argv: list[str]) -> int:
                 return subprocess.Popen(
                     fence_command,
                     start_new_session=True,
-                    env=dispatch_env,
-                    pass_fds=(gate_fd, fence_failure_write_fd),
+                    env=frame_repository.child_environment(dispatch_env),
+                    **frame_repository.child_process_options(pass_fds=(gate_fd, fence_failure_write_fd)),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,

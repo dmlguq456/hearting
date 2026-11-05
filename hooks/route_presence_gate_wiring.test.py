@@ -158,18 +158,21 @@ class ClaudeWiringTest(WiringFixture):
         self.assertTrue(link.is_symlink())
         self.assertEqual(link.resolve(), (ROOT / "hooks/route-presence-gate.py").resolve())
 
-    def test_bridge_refuses_then_passes(self):
+    def test_current_worktree_passes_and_other_worktree_still_routes(self):
         hook = ROOT / "adapters/claude/hooks/route-presence-gate.py"
-        payload = json.dumps({"tool_name": "Edit", "session_id": SID, "cwd": str(self.repo),
-                              "tool_input": {"file_path": str(self.repo / "src/engine.py")}})
-        first = subprocess.run(["python3", str(hook)], input=payload, capture_output=True,
-                               text=True, env=self.env)
-        self.assertEqual(first.returncode, 2)
-        self.assertIn("capability-route.py compose --start --shape direct", first.stderr)
-        self.ledger_line("claude", SID)
-        second = subprocess.run(["python3", str(hook)], input=payload, capture_output=True,
-                                text=True, env=self.env)
-        self.assertEqual((second.returncode, second.stderr), (0, ""))
+        payload = {"tool_name": "Edit", "session_id": SID, "cwd": str(self.repo),
+                   "tool_input": {"file_path": str(self.repo / "src/engine.py")}}
+        def run():
+            return subprocess.run(["python3",str(hook)],input=json.dumps(payload),capture_output=True,text=True,env=self.env)
+        current = run()
+        self.assertEqual((current.returncode,current.stderr),(0,""))
+        payload['cwd'] = str(self.tmp)
+        other = run()
+        self.assertEqual(other.returncode,2)
+        self.assertIn('capability-route.py compose --start --shape direct',other.stderr)
+        self.ledger_line('claude',SID)
+        routed = run()
+        self.assertEqual((routed.returncode,routed.stderr),(0,""))
 
 
 class CodexWiringTest(WiringFixture):
@@ -187,13 +190,17 @@ class CodexWiringTest(WiringFixture):
                               capture_output=True, text=True,
                               env={**self.env, "AGENT_HOME": str(ROOT)})
 
-    def test_run_hook_allows_the_bridge_and_blocks_with_codex_json(self):
+    def test_current_commit_passes_and_other_worktree_uses_codex_block_json(self):
         (self.repo / "src/engine.py").write_text("x = 2\n")
         payload = {"tool_name": "Bash", "session_id": "thread-1", "cwd": str(self.repo),
                    "tool_input": {"command": "git commit -am fix"}}
         first = self.run_hook(payload)
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(first.stdout, "")
+        payload['cwd'] = str(self.tmp)
+        payload['tool_input']['command'] = f'git -C {self.repo} commit -am fix'
+        other = self.run_hook(payload)
+        self.assertEqual(json.loads(other.stdout)['decision'],'block')
         self.ledger_line("codex", "thread-1")
         second = self.run_hook(payload)
         self.assertEqual((second.returncode, second.stdout), (0, ""))
@@ -206,11 +213,11 @@ class OpenCodeWiringTest(WiringFixture):
             self.skipTest("OpenCode Node subprocess stdin cannot be observed inside a Codex OS sandbox")
         super().setUp()
 
-    def call(self, tool, args, sid="ses_1"):
+    def call(self, tool, args, sid="ses_1", directory=None):
         script = f"""
 process.env.AGENT_HOME = {json.dumps(str(ROOT))}
 const mod = await import({json.dumps(str(ROOT / "adapters/opencode/plugins/hearting-guards.js"))})
-const plugin = await mod.AgentHarnessGuards({{ directory: {json.dumps(str(self.repo))}, worktree: {json.dumps(str(self.repo))} }})
+const plugin = await mod.AgentHarnessGuards({{ directory: {json.dumps(str(directory or self.repo))}, worktree: {json.dumps(str(directory or self.repo))} }})
 try {{
   await plugin["tool.execute.before"]({{ tool: {json.dumps(tool)}, sessionID: {json.dumps(sid)} }}, {{ args: {json.dumps(args)} }})
   console.log("PASS")
@@ -223,16 +230,19 @@ try {{
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
-    def test_plugin_gates_edits_commits_and_passes_artifacts(self):
+    def test_plugin_passes_current_worktree_and_routes_other_worktree(self):
         edit = {"filePath": str(self.repo / "src/engine.py"), "oldString": "1", "newString": "2"}
-        self.assertTrue(self.call("edit", edit).startswith("THROW hearting: this session has no route"))
+        self.assertEqual(self.call('edit',edit),'PASS')
+        self.assertTrue(self.call('edit',edit,directory=self.tmp).startswith('THROW hearting: this session has no route'))
         self.assertEqual(self.call("write", {"filePath": str(self.root / "notes.md")}), "PASS")
         (self.repo / "src/engine.py").write_text("x = 2\n")
-        self.assertTrue(self.call("bash", {"command": "git commit -am x"}).startswith("THROW"))
+        self.assertEqual(self.call('bash',{'command':'git commit -am x'}),'PASS')
+        other_commit = {'command': f'git -C {self.repo} commit -am x'}
+        self.assertTrue(self.call('bash',other_commit,directory=self.tmp).startswith('THROW'))
         self.assertEqual(self.call("bash", {"command": "git status"}), "PASS")
         self.ledger_line("opencode", "ses_1")
-        self.assertEqual(self.call("edit", edit), "PASS")
-        self.assertEqual(self.call("bash", {"command": "git commit -am x"}), "PASS")
+        self.assertEqual(self.call('edit',edit,directory=self.tmp),'PASS')
+        self.assertEqual(self.call('bash',other_commit,directory=self.tmp),'PASS')
 
 
 if __name__ == "__main__":

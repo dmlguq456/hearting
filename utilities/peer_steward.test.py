@@ -4277,6 +4277,8 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
 
 
 class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
+    _STEWARD_PANE = "w1:p8"
+
     def _watch(self, target):
         import session_tidy
 
@@ -4284,16 +4286,23 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         # The shared obligation runner these commands start can reach a duty before
         # its ACK; a census without the recipient would cancel it as
         # recipient-session-absent, so list the recipient's session.
-        env.update({"HERDR_PANE_ID": "fixture:watch-transport-seat",
+        # The target and recipient are different sessions. Reporting the
+        # recipient on w1:p9 contradicts get/wait's sid-fake target and makes
+        # the runner retire this watch as session-replaced while it is ready.
+        env.update({"HERDR_PANE_ID": self._STEWARD_PANE,
                     "AGENT_DISPATCH_CALLER_HARNESS": "claude",
-                    "FAKE_HERDR_PANES": json.dumps(
-                        [{"pane_id": "w1:p9", "agent_session": {"value": "steward-1"}}])})
+                    "FAKE_HERDR_PANES": json.dumps([
+                        {"pane_id": "w1:p9", "agent_session": {"value": "sid-fake"}},
+                        {"pane_id": self._STEWARD_PANE,
+                         "agent_session": {"value": "steward-1"}},
+                    ])})
         proc = self._run("watch", target, env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         fields = self._fields(proc.stdout.splitlines()[0])
-        self._wait_for_receipt(fields["watch_id"])
+        receipt = self._wait_for_receipt(fields["watch_id"])
+        self.assertEqual(receipt["state"], "idle", receipt)
         seat = session_tidy.Seat("pane", "watch-transport-" + fields["watch_id"],
-                                 "w1:p9", "claude")
+                                 self._STEWARD_PANE, "claude")
         arm_path = self.watch_root / f"{fields['watch_id']}.json"
         arm = json.loads(arm_path.read_text(encoding="utf-8"))
         arm["steward_seat"] = seat.as_dict()
@@ -4318,7 +4327,7 @@ class WatchMessageTransportSettlementTest(_WatchMixin, unittest.TestCase):
         row = peer_steward.peer_message._read_pending(ref)
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.create("message-" + ref, "message",
-            {"server": "default", "pane": "fixture:watch-transport-seat",
+            {"server": "default", "pane": self._STEWARD_PANE,
              **self._TRANSPORT_RECIPIENT},
             {"ref": ref, "body_digest": row["body_sha256"], "from": self._TRANSPORT_SENDER,
              "to": row["to"], "refs": row["refs"]})
@@ -8767,6 +8776,182 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
         self.assertTrue(context._dependency_watcher_fallback)
         with self.assertRaises(OSError):
             os.fstat(watcher_fd)
+
+    def run_three_service_passes(self, exec_service, *, on_external=None):
+        """Run a service-mode runner for three passes and record its settlement contexts.
+
+        ``on_external(settlement_context)`` runs where the runner would settle owners."""
+        store, duty = self.pending_message()
+        ticks = []
+        record = SimpleNamespace(created=[], closed=[], external=[], exec_kwargs=[],
+                                 readiness_threads=[], exit=None)
+        context_type = peer_steward.dispatch_batch_obligations.OwnerSettlementReadContext
+        real_close = context_type.close
+
+        def resume(row, current, *, read_context=None):
+            ticks.append(row["id"])
+            if len(ticks) == 3:
+                current.update(row["id"], state="complete")
+
+        def make_context():
+            context = context_type()
+            record.created.append(context)
+            return context
+
+        def close(context):
+            record.closed.append(context)
+            return real_close(context)
+
+        def readiness(_state_root, _lock_fd, _incarnation, stop):
+            record.readiness_threads.append(threading.current_thread())
+            stop.wait()
+
+        def exec_runner(*args, **kwargs):
+            record.exec_kwargs.append(kwargs)
+            return exec_service(record, kwargs)
+
+        def reconcile_external(*_args, settlement_context=None, **_kwargs):
+            record.external.append(settlement_context)
+            if on_external is not None:
+                on_external(settlement_context)
+
+        with (store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME).open("w") as lock, \
+             mock.patch.object(peer_steward, "_resume_message_obligation", side_effect=resume), \
+             mock.patch.object(peer_steward.dispatch_batch_obligations,
+                               "OwnerSettlementReadContext", side_effect=make_context), \
+             mock.patch.object(context_type, "close", autospec=True, side_effect=close), \
+             mock.patch.object(peer_steward, "_runner_readiness_loop", side_effect=readiness), \
+             mock.patch.object(peer_steward.peer_obligations, "exec_service_runner",
+                               side_effect=exec_runner), \
+             patch_split(peer_steward, "_external_obligation_snapshot",
+                         return_value={"jobs_stamps": {}}), \
+             mock.patch.object(peer_steward, "_external_obligation_signature",
+                               return_value=((), ())), \
+             mock.patch.object(peer_steward, "_external_obligation_snapshot_unchanged",
+                               return_value=True), \
+             mock.patch.object(peer_steward, "_reconcile_external_obligations",
+                               side_effect=reconcile_external), \
+             mock.patch.object(peer_steward, "_publish_watch_readiness"), \
+             mock.patch.object(peer_steward.time, "sleep"):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            record.exit = peer_steward.cmd_obligation_runner(SimpleNamespace(
+                state_root=self.tmp_root, lock_fd=lock.fileno(),
+                service_current="/fixture/current"))
+        self.assertFalse(any(thread.is_alive() for thread in record.readiness_threads),
+                         "the runner must not leave a readiness thread behind")
+        return record
+
+    def test_service_runner_keeps_one_settlement_context_across_passes_without_replacement(self):
+        record = self.run_three_service_passes(lambda _record, _kwargs: False)
+
+        self.assertEqual(record.exit, 0)
+        self.assertEqual(len(record.created), 1,
+                         "a service pass without replacement must keep its settlement context")
+        self.assertEqual(len(record.external), 3)
+        self.assertTrue(all(context is record.created[0] for context in record.external))
+        self.assertEqual(len(record.exec_kwargs), 3,
+                         "every service pass still asks for a replacement")
+        self.assertTrue(all(callable(kwargs.get("before_exec")) for kwargs in record.exec_kwargs))
+        self.assertEqual(len(record.readiness_threads), 1)
+        self.assertEqual(record.closed, [record.created[0]])
+
+    def test_service_runner_retires_context_and_readiness_only_at_replacement_exec(self):
+        class ReplacedByExec(Exception):
+            pass
+
+        at_exec = {}
+
+        def exec_service(record, kwargs):
+            if len(record.exec_kwargs) == 1:
+                self.assertEqual(record.closed, [],
+                                 "a pass that only asks for a replacement must not retire its context")
+                return False
+            kwargs["before_exec"]()
+            at_exec["closed"] = list(record.closed)
+            at_exec["readiness_alive"] = any(thread.is_alive() for thread in record.readiness_threads)
+            raise ReplacedByExec()
+
+        with self.assertRaises(ReplacedByExec):
+            self.run_three_service_passes(exec_service)
+
+        self.assertFalse(at_exec["readiness_alive"],
+                         "the readiness worker must be joined before the process image is replaced")
+        self.assertEqual(len(at_exec["closed"]), 1)
+
+    def test_service_runner_restores_context_after_failed_replacement_exec(self):
+        def exec_service(record, kwargs):
+            if len(record.exec_kwargs) == 2:
+                kwargs["before_exec"]()
+                self.assertEqual(len(record.closed), 1)
+            return False
+
+        record = self.run_three_service_passes(exec_service)
+
+        self.assertEqual(record.exit, 0)
+        self.assertEqual(len(record.created), 2)
+        retired, restored = record.created
+        self.assertEqual(record.external, [retired, restored, restored],
+                         "the retired context must never serve a later settlement")
+        self.assertEqual(record.closed, [retired, restored])
+        self.assertEqual(len(record.readiness_threads), 2)
+
+    def test_service_runner_serves_every_settled_owner_from_the_kept_context_on_later_passes(self):
+        """A kept settlement context answers each finished (``complete``) owner from its cache.
+
+        The runner settles the same owner rows on every pass. A context rebuilt each pass proves
+        every one of them again from scratch; the kept one serves all of them as cache hits when
+        the registry is read again in full (the file was replaced, so its owner cursor is void),
+        and proves none again while the registry stays as it was."""
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+        batch = peer_steward.dispatch_batch_obligations
+        owners = ["att-owner-%d" % index for index in range(5)]
+        jobs = self.tmp_root / "owner-jobs.log"
+        text = "".join(
+            "2026-10-18T00:00:00Z\tdone\t/repo\t/wt\towner\t" + ",".join((
+                "attempt_schema_version=2", "dispatch_depth=1", "worker_type=owner",
+                "launch_started=1", "supervisor_lease=flock-v1",
+                "supervisor_lease_file=/fixture/owner.lease", "log_file=/fixture/owner.log",
+                "attempt_id=%s" % attempt, "workflow_completion=runtime-v1",
+                "note=completed-supervisor")) + "\n" for attempt in owners)
+        jobs.write_text(text, encoding="utf-8")
+        evidence = self.tmp_root / "complete-evidence.json"
+        evidence.write_text("sealed", encoding="utf-8")
+        dispatch_registry_cache.clear_cache()
+        seen = []
+
+        def settle_owners(context):
+            if len(seen) == 1:
+                # Same rows in a replaced file: the next read is a full read.
+                replacement = jobs.with_name("owner-jobs.replacement")
+                replacement.write_text(text, encoding="utf-8")
+                os.replace(replacement, jobs)
+            batch._resume_owner_settlements(jobs, context=context)
+            seen.append((context, context.metrics()))
+
+        with mock.patch.object(batch, "_owner_settlement_dependency_paths", return_value=(evidence,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state",
+                        return_value=CompletionState("complete")), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as materialize:
+            record = self.run_three_service_passes(
+                lambda _record, _kwargs: False, on_external=settle_owners)
+
+        self.assertEqual(record.exit, 0)
+        self.assertEqual(len(seen), 3)
+        first_context, first = seen[0]
+        self.assertEqual((first["historical_checks"], first["settled_cache_hits"]), (len(owners), 0),
+                         "the first pass proves each finished owner once")
+        self.assertEqual(
+            seen[1][1]["settled_cache_hits"], len(owners),
+            "every complete owner row is a cache hit when the next pass reads the registry in full")
+        self.assertEqual(seen[2][1]["settled_cache_hits"], len(owners),
+                         "an unchanged registry keeps the owner cursor: nothing is looked at again")
+        for later_context, metrics in seen[1:]:
+            self.assertIs(later_context, first_context)
+            self.assertEqual(metrics["historical_checks"], len(owners),
+                             "a later pass must not prove a finished owner again")
+        materialize.assert_not_called()
 
     def test_runner_idle_backoff_ignores_repeated_observation_writes_and_resets_on_change(self):
         store, duty = self.pending_message()

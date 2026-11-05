@@ -43,10 +43,10 @@ def capture_local_identity() -> dict[str, Any]:
                 not all(x.isdecimal() for x in nspid + nspgid) or
                 int(nspid[-1]) != pid or int(nspgid[-1]) != os.getpgrp()):
             raise ValueError("malformed namespace coordinates")
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        from resource_run_registry import boot_identity, kernel_boot_id
+        boot = kernel_boot_id()
         if not boot:
             raise ValueError("missing boot id")
-        from resource_run_registry import boot_identity
         host = boot_identity()
         return {"pid": pid, "starttime": _starttime(pid), "boot_id": boot,
                 "pid_namespace": os.stat("/proc/self/ns/pid").st_ino,
