@@ -2563,10 +2563,10 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         from artifact_producer import prepare_route_artifact_env
         with frame_repository.for_route(route, path) as repository:
             repository.verify(route.get("cwd"))
+        cwd = route.get("cwd") or os.getcwd()
         return {**result, "state": "inline", "required_action": "execute-inline",
-                "task": request["text"],
-                # The inline session is the producer (capabilities/*.md lifecycle step 1):
-                # an inactive root with legacy content keeps its legacy-compat window.
+                "task": request["text"], "cwd": cwd,
+                "next_step": f"Do this inline work in {cwd}. Then run finish for this route with the result evidence and summary.",
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
     rows = _rows(jobs)
     existing_owner = _slot(route, "owner", rows, jobs)

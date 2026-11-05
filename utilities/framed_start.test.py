@@ -1605,6 +1605,8 @@ class FirstLegStateReplayTest(StartBase):
         self.assertEqual(again["plan_advanced"]["leg"], 1)
         second, second_path = self.started_leg(again)
         self.assertEqual((again["route_id"], second["route_plan"]["index"]), (second["route_id"], 1))
+        self.assertEqual(again["cwd"], second["cwd"])
+        self.assertIn(second["cwd"], again["next_step"])
         self.assertEqual(P.read_cycle_record(self.root, again["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"])
                          ["parent_cycle_id"], cycle)
         rows = self.cursor()

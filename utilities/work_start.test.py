@@ -1712,6 +1712,8 @@ class WorkStartTest(unittest.TestCase):
                                return_value={"AGENT_ARTIFACT_OUTPUT_DIR": "/exact/artifacts"}) as prepare:
             result = self.start()
         self.assertEqual(result["state"], "inline")
+        self.assertEqual(result["cwd"], os.getcwd())
+        self.assertIn(result["cwd"], result["next_step"])
         self.assertEqual(result["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"], "/exact/artifacts")
         prepare.assert_called_once_with(self.path, start=True, jobs=self.jobs, require_cycle=False)
         self.assertEqual(self.calls, [])

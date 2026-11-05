@@ -201,14 +201,17 @@ with its declared group and automatic owner close. Include `eval-run` only when
 the request needs new raw results, using its existing inputs and write scope.
 In a Git folder, the parent chooses the capability: omitting `--capability` in ordinary compose
 uses the fixed `autopilot-code` default, not a classifier of the task text; framed work
-leaves that choice to its frame. A depth-0 `compose --start --shape direct` in a non-Git
-folder runs inline in the current session. Its task purpose selects the capability when
+leaves that choice to its frame. An ordinary depth-0 `compose --start` in a non-Git
+folder with no shape runs directly in the current session without a start question,
+Git initialization or a worktree. Explicit shapes remain binding; an explicitly
+named new Git repository retains its existing framed preparation/approval path.
+Its task purpose selects the capability when
 clear; an explicit `--capability` and mode take precedence, and an unclear purpose is shown
 as unresolved while retaining the existing storage fallback. The session performs that
-capability's work and can close it through the normal inline `finish` path. The start card
-says `git 아닌 폴더 — 이 세션이 직접 진행. 작업자가 필요하면 --shape 없이 다시 시작(원본 수정은 git init 필요)`.
-An omitted shape follows the Git default: the start is framed and its frame decides, as in a
-Git folder. Any other shape, including a route-plan leg whose own shape is not direct, is a
+capability's work and can close it through the normal inline `finish` path. Its
+one-line card says `git 아닌 폴더 — 이 세션이 직접 진행`.
+Selection and compilation use the same task bytes, including a one-shot stdin input.
+An explicitly selected worker shape, including a route-plan leg whose own shape is not direct, is a
 worker request. In a non-Git folder, a compiled artifact-only worker route may run in the
 bound folder; a route whose compiled write scope mutates source is refused with the reason
 and the next action (`git init` and restart, or continue this session with `--shape direct`).
@@ -1063,6 +1066,21 @@ python3 utilities/capability-route.py finish [--route <route.json|rt-id>] --evid
 
 Without `--route` it finishes this session's latest route under the cwd's
 artifact root.
+An explicit route ID also uses the existing registry/route-chain lookup when
+the caller is in another folder. Every `execute-inline` receipt names the
+actual execution cwd, including a worktree prepared for a frame leg.
+Git finish prefers a proven changed caller head when the route checkout still
+has only its starting tree and a clean working tree/index; explicit commits remain binding.
+Execution edits keep their existing tracked-dirt observation and concrete-scope
+checks even when a commit is read from another checkout. Caller substitution
+uses Git common-directory identity as proof, independently of HEAD lookup.
+Compose's optional directory provenance supports a missing checkout only when
+the caller still belongs to that recorded repository. An ancestor shared with a
+different clone is insufficient; an unavailable observation stays unknown.
+Receipts name the
+commit source and warn when it comes from a different checkout or has the
+unchanged starting tree, without adding a completion gate. Normal execution
+checkout results need no warning. Non-Git finish keeps its null commit.
 
 Ineligible inline routes and legacy recovery also finish with the one command
 above (it completes the terminal marker, closes the route allowing an unproven
