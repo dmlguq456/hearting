@@ -3938,7 +3938,6 @@ tools/install/distribution.py 3
 tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
-tools/render-landing.py 1
 utilities/peer_obligations.py 1
 adapters/codex/bin/preflight.sh 1
 adapters/opencode/bin/preflight.sh 1
