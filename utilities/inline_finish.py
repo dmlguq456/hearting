@@ -156,23 +156,64 @@ def select_result_commit(route, supplied, api):
     def common(cwd):
         done = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-common-dir"],
                               capture_output=True, text=True)
-        return str((Path(cwd) / done.stdout.strip()).resolve()) if done.returncode == 0 else None
+        if done.returncode or not done.stdout.strip():
+            return None
+        try:
+            path = (Path(cwd) / done.stdout.strip()).resolve()
+            stamp = path.stat()
+            return {"path": str(path), "device": stamp.st_dev, "inode": stamp.st_ino}
+        except OSError:
+            return None
 
-    caller_valid = bool(caller_head and _shares_source_history(caller_cwd, source, caller_head)
+    def same(first, second):
+        return bool(first and second and (first.get("device"), first.get("inode"))
+                    == (second.get("device"), second.get("inode")))
+
+    provenance = route.get("source_repository") or {}
+    recorded_common = provenance.get("git_common_dir")
+    caller_common, route_common = common(caller_cwd), common(route_cwd)
+    caller_repo = same(caller_common, recorded_common or route_common)
+    execution_available = Path(route_cwd).is_dir()
+    recorded_worktree = provenance.get("worktree")
+    if execution_available and recorded_worktree:
+        try:
+            stamp = Path(route_cwd).stat()
+            execution_available = ((stamp.st_dev, stamp.st_ino) ==
+                                   (recorded_worktree["device"], recorded_worktree["inode"]))
+        except OSError:
+            execution_available = False
+    if route_common and recorded_common and not same(route_common, recorded_common):
+        execution_available = False
+    if execution_available:
+        status = subprocess.run(["git", "-C", route_cwd, "status", "--porcelain=v1", "-z",
+                                 "--untracked-files=normal"], capture_output=True,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        execution_status = ("unavailable" if status.returncode else
+                            "dirty" if status.stdout else "clean")
+    else:
+        execution_status = "missing-or-replaced"
+    route_candidate = route_head if execution_available else None
+    caller_valid = bool(caller_repo and caller_head
+                        and _shares_source_history(caller_cwd, source, caller_head)
                         and _on_a_branch(caller_cwd, caller_head))
-    if caller_valid and route_head:
-        caller_common, route_common = common(caller_cwd), common(route_cwd)
-        caller_valid = bool(caller_common and route_common and caller_common == route_common)
     git_cwd, selected_from = route_cwd, "execution-checkout"
-    commit = str(supplied or route_head or "").lower()
+    commit = str(supplied or route_candidate or "").lower()
     if supplied:
         selected_from = "explicit"
-        if not route_head and caller_valid:
+        if not route_candidate and caller_valid:
             git_cwd = caller_cwd
-    elif caller_valid and (not route_head or (not changed(route_cwd, route_head)
-                                              and changed(caller_cwd, caller_head))):
+    elif caller_valid and (
+            (not execution_available and recorded_common)
+            or (execution_status == "clean" and (not route_candidate or (
+                not changed(route_cwd, route_candidate) and changed(caller_cwd, caller_head))))):
         commit, git_cwd, selected_from = caller_head, caller_cwd, "caller-working-directory"
     warnings, messages = [], []
+    if execution_status != "clean":
+        warnings.append("execution-uncommitted-changes" if execution_status == "dirty"
+                        else "execution-checkout-unavailable")
+        messages.append("The execution checkout has uncommitted changes; its dirt and scope checks remain in force."
+                        if execution_status == "dirty" else
+                        "The execution checkout state could not be established; it is not reported as clean.")
     if caller_valid and route_head and caller_head != route_head and commit != route_head:
         warnings.append("checkout-heads-differ")
         messages.append("The execution checkout and caller have different Git heads; the receipt names "
@@ -183,9 +224,20 @@ def select_result_commit(route, supplied, api):
                         "a new source result commit is not established.")
     observation = {"selected_from": selected_from, "git_cwd": git_cwd, "source_commit": source,
                    "execution_cwd": route_cwd, "execution_head": route_head,
+                   "execution_available": execution_available, "execution_status": execution_status,
                    "caller_cwd": caller_cwd, "caller_head": caller_head,
+                   "caller_repository_proven": caller_repo,
                    "warnings": warnings, "warning_messages": messages}
     return commit, git_cwd, observation
+
+
+def _finish_tracked_dirt(route, git_cwd, scope, observation):
+    # Commit-object access and the original execution directory are distinct.
+    # Preserve the old concrete-scope rule on every observed execution edit.
+    cwds = [git_cwd]
+    if observation.get("execution_available") and route["cwd"] not in cwds:
+        cwds.append(route["cwd"])
+    return sorted({path for cwd in cwds for path in _unscoped_tracked_dirt(cwd, scope)})
 
 
 def recorded_head(state: Mapping[str, Any] | None) -> tuple[Any, Any]:
@@ -534,7 +586,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     # Tracked edits inside this direct node's declared scope are not admissible.
     scope = (node.get("write_scope") or [])
     if source_is_sha:
-        _unscoped_tracked_dirt(git_cwd, scope)
+        _finish_tracked_dirt(route, git_cwd, scope, commit_observation)
     else:
         unscoped_tracked_dirt = []
     identity = artifact_lifecycle.read_root_identity(root)
@@ -597,7 +649,7 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
                 facts={"registered_route": registered_route(route, jobs, bool(inherited_jobs))})
             if not choice.allowed:
                 raise InlineFinishError(choice.reason)
-            unscoped_tracked_dirt = (_unscoped_tracked_dirt(git_cwd, scope)
+            unscoped_tracked_dirt = (_finish_tracked_dirt(route, git_cwd, scope, commit_observation)
                                      if source_is_sha else [])
             latest = artifact_producer.read_cycle_record(root, record["cycle_id"])
             if (not latest or latest.get("state") not in {"open", "sealed"}

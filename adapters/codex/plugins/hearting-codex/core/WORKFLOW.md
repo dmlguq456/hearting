@@ -1066,7 +1066,14 @@ An explicit route ID also uses the existing registry/route-chain lookup when
 the caller is in another folder. Every `execute-inline` receipt names the
 actual execution cwd, including a worktree prepared for a frame leg.
 Git finish prefers a proven changed caller head when the route checkout still
-has only its starting tree; explicit commits remain binding. Receipts name the
+has only its starting tree and a clean working tree/index; explicit commits remain binding.
+Execution edits keep their existing tracked-dirt observation and concrete-scope
+checks even when a commit is read from another checkout. Caller substitution
+uses Git common-directory identity as proof, independently of HEAD lookup.
+Compose's optional directory provenance supports a missing checkout only when
+the caller still belongs to that recorded repository. An ancestor shared with a
+different clone is insufficient; an unavailable observation stays unknown.
+Receipts name the
 commit source and warn when it comes from a different checkout or has the
 unchanged starting tree, without adding a completion gate. Normal execution
 checkout results need no warning. Non-Git finish keeps its null commit.
