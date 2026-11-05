@@ -1442,8 +1442,11 @@ class HeldHistoryAndSnapshotLockTest(Fixture):
         self.assertEqual(self.calls,[])
         self.assertIn('deferred_end',self.state()['prior_turn'])
         self.assertEqual(T.turn_end('claude',SID,str(self.repo),self.env,now=140,
-            recorder=self.recorder,appender=self.appender)['state'],'no-start-snapshot')
-        self.assertEqual(self.calls,[])
+            recorder=self.recorder,appender=self.appender)['state'],'recorded')
+        self.assertEqual(self.calls[0]['sources'],[[]])  # A is retained as unknown; never B's README
+        last=self.state()['records'][str(self.root)]['last_turn']
+        self.assertFalse(last['changed_files_exact'])
+        self.assertTrue(last['truncated'])
 
     def test_held_history_evicts_oldest_with_marker_and_preserves_latest_reply(self):
         self.ledger_line('codex', SID, 'rt-still-open')
@@ -1631,6 +1634,246 @@ class HeldHistoryAndSnapshotLockTest(Fixture):
             self.assertEqual(self.appended, [[['README.md']]])
         else:
             self.assertEqual(self.calls[0]['sources'], [['README.md']])
+
+
+class DeferredEndRotationTest(Fixture):
+    starting = HeldHistoryAndSnapshotLockTest.starting
+
+    def step(self, phase, when, **kwargs):
+        return getattr(T,'turn_'+phase)('claude',SID,str(self.repo),self.env,now=when,
+            recorder=self.recorder,appender=self.appender,**kwargs)
+
+    def all_sources(self):
+        return [paths for call in self.calls for paths in call['sources']] + [paths for batch in self.appended for paths in batch]
+
+    def prepare_ab(self, *, own_end=False, unreadable=False):
+        self.step('start',100)
+        (self.repo/'greet.py').write_text('A edit\n')
+        with self.starting(120,resume=False,unreadable=unreadable):
+            (self.repo/'README.md').write_text('B edit\n')
+            self.step('end',110,payload={'last_assistant_message':'A final reply'})
+            if own_end:
+                self.step('end',140,payload={'last_assistant_message':'B final reply'})
+
+    def test_next_start_preserves_ready_prior_end_after_interrupted_publication(self):
+        self.prepare_ab()
+        self.assertTrue(list(T._ready_ends(self.state())))
+        self.assertEqual(self.calls,[])
+        self.step('start',160)
+        self.step('end',140,payload={'last_assistant_message':'B final reply'})
+        (self.repo/'C.py').write_text('C edit\n')
+        self.step('end',180,payload={'last_assistant_message':'C final reply'})
+        self.assertEqual(self.all_sources(),[['greet.py'],['README.md'],['C.py']])
+        self.assertEqual(self.state().get('pending'),[])
+
+    def test_overlapping_own_and_prior_ends_survive_two_more_starts(self):
+        with mock.patch.object(T,'_record_pass',return_value='busy'):
+            self.prepare_ab(own_end=True)
+            with self.starting(160,resume=False):
+                (self.repo/'C.py').write_text('C edit\n')
+                self.step('end',180,payload={'last_assistant_message':'C final reply'})
+            self.step('start',200)
+            (self.repo/'D.py').write_text('D edit\n')
+            self.step('end',220,payload={'last_assistant_message':'D final reply'})
+        self.step('start',240)
+        self.assertEqual(self.all_sources(),[['greet.py'],['README.md'],['C.py'],['D.py']])
+        self.assertEqual(self.state().get('pending'),[])
+
+    def test_normal_end_cannot_discard_a_prior_whose_drain_was_interrupted(self):
+        self.prepare_ab()
+        with mock.patch.object(T,'_resume_ends',return_value=[]):
+            self.step('end',140,payload={'last_assistant_message':'B final reply'})
+        self.assertEqual(self.all_sources(),[['greet.py'],['README.md']])
+
+    def test_missing_next_boundary_retains_prior_end_as_unknown(self):
+        captured=[]
+        record=self.recorder
+        def observe(*args,**kwargs):
+            captured.extend(args[4])
+            return record(*args,**kwargs)
+        self.recorder=observe
+        self.prepare_ab(unreadable=True)
+        self.step('start',160)
+        self.assertTrue(captured,'A completed end must survive even without a usable after snapshot')
+        item=next(row for row in captured if row['began']==100)
+        self.assertIsNone(item['source_count'])
+        self.assertIn('unknown',item['section'].lower())
+        self.assertIn('A final reply',item['section'])
+
+    def test_start_does_not_wait_for_the_record_lock_while_retiring_multiple_ends(self):
+        self.prepare_ab(own_end=True)
+        original=T._record_pass
+        waits=[]
+        def nonblocking(*args,**kwargs):
+            waits.append(args[7])
+            self.assertEqual(args[7],0.0,'a new start must not wait for an older record')
+            return original(*args,**kwargs)
+        with T._locked(T._record_lock(T.state_path(self.env,'claude',SID)),0.0) as held:
+            self.assertTrue(held)
+            with mock.patch.object(T,'_record_pass',side_effect=nonblocking):
+                self.assertEqual(self.step('start',160)['state'],'baseline')
+        self.assertTrue(waits)
+        self.assertEqual(len(self.state()['pending']),2)
+        self.step('end',180)
+        self.assertEqual(self.all_sources(),[['greet.py'],['README.md']])
+
+    def test_pending_budget_retains_unknown_coverage_instead_of_erasing_completed_ends(self):
+        with mock.patch.object(T,'_record_pass',return_value='busy'),mock.patch.object(T,'MAX_PENDING',2):
+            self.prepare_ab(own_end=True)
+            with self.starting(160,resume=False):
+                (self.repo/'C.py').write_text('C edit\n')
+                self.step('end',180,payload={'last_assistant_message':'C final reply'})
+            self.step('start',200)
+            (self.repo/'D.py').write_text('D edit\n')
+            self.step('end',220,payload={'last_assistant_message':'D final reply'})
+            pending=self.state()['pending']
+            self.assertLessEqual(len(pending),2)
+            self.assertEqual(sum(item.get('turn_count',1) for item in pending),4)
+            marker=next(item for item in pending if item.get('coverage_aggregate'))
+            self.assertIsNone(marker['source_count'])
+            self.assertIn('unknown coverage',marker['section'].lower())
+            self.assertIn('native session',marker['section'])
+        self.step('start',240)
+        held=self.state()['held_turn']
+        self.assertTrue(held['record_saved'])
+        self.assertIn('completed observations compacted',Path(held['reference']).read_text())
+        self.assertEqual(self.state()['pending'],[])
+
+    def test_open_route_keeps_retired_observations_without_takeover(self):
+        self.ledger_line('claude',SID,'rt-manual')
+        target=self.root/'.runtime/routes/rt-manual.json';target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({'route_id':'rt-manual','artifact_root':str(self.root)}))
+        original=target.read_bytes()
+        self.prepare_ab()
+        self.step('start',160)
+        self.step('end',140,payload={'last_assistant_message':'B final reply'})
+        self.assertEqual(self.calls,[])
+        history=Path(self.state()['held_turn']['reference']).read_text()
+        self.assertIn('A final reply',history)
+        self.assertIn('B final reply',history)
+        self.assertEqual(target.read_bytes(),original)
+        self.assertFalse(target.with_suffix('.outcome.json').exists())
+
+    def test_retired_native_checks_are_read_outside_lock_with_the_original_boundary(self):
+        path=self.tmp/f'{SID}.jsonl';path.write_text('')
+        captured=[]
+        record=self.recorder
+        def observe(*args,**kwargs):
+            captured.extend(args[4]);return record(*args,**kwargs)
+        def step(phase,when,**kwargs):
+            return getattr(T,'turn_'+phase)('codex',SID,str(self.repo),self.env,now=when,
+                recorder=observe,appender=self.appender,payload={'transcript_path':str(path),**kwargs})
+        def native(ident,code):
+            with path.open('a') as stream:
+                for row in [{'type':'function_call','name':'functions.exec_command','call_id':ident,
+                             'arguments':json.dumps({'cmd':'pytest-'+ident})},
+                            {'type':'function_call_output','call_id':ident,'output':json.dumps({'exit_code':code})}]:
+                    stream.write(json.dumps({'type':'response_item','payload':row})+'\n')
+        step('start',100)
+        (self.repo/'greet.py').write_text('A edit\n');native('A',7)
+        snapshot=T.snapshot
+        def capture_then_stop(*args):
+            value=snapshot(*args)
+            (self.repo/'README.md').write_text('B edit\n');native('B',0)
+            step('end',110,last_assistant_message='A final reply')
+            return value
+        with mock.patch.object(T,'snapshot',side_effect=capture_then_stop),mock.patch.object(T,'_resume_ends',return_value=[]):
+            step('start',120)
+        observation=T.observation_section
+        def outside_lock(*args,**kwargs):
+            with T._locked(T._state_lock(T.state_path(self.env,'codex',SID)),0.0) as available:
+                self.assertTrue(available,'retired native history must not be read under the state lock')
+            return observation(*args,**kwargs)
+        with mock.patch.object(T,'observation_section',side_effect=outside_lock):
+            step('start',160)
+        self.assertTrue(captured,'retired A observation is missing')
+        self.assertEqual(captured[0]['source'],['greet.py'])
+        self.assertIn('pytest-A',captured[0]['section'])
+        self.assertIn('exit codes [7]',captured[0]['section'])
+        self.assertNotIn('pytest-B',captured[0]['section'])
+        self.assertIn('A final reply',captured[0]['section'])
+
+    def test_unpublished_older_capture_is_retained_as_unknown_when_two_starts_overtake_it(self):
+        with self.starting(100,resume=False):
+            (self.repo/'greet.py').write_text('A edit\n')
+            self.step('end',110,payload={'last_assistant_message':'A reply before its capture publication'})
+            self.step('start',120)
+            (self.repo/'README.md').write_text('B edit\n')
+            self.step('start',160)
+        self.assertIn('held_turn',self.state(),'the overtaken completed end needs an unknown record')
+        held=self.state()['held_turn']
+        self.assertFalse(held['changed_files_exact'])
+        self.assertTrue(held['record_saved'])
+        self.assertIn('A reply before its capture publication',Path(held['reference']).read_text())
+        self.step('end',140)
+        (self.repo/'C.py').write_text('C edit\n');self.step('end',180)
+        self.assertEqual(self.all_sources(),[['README.md'],['C.py']])
+
+
+    def test_failed_auto_record_keeps_retired_completion_for_unknown_supplement(self):
+        self.fail_records=5
+        self.prepare_ab()
+        self.step('start',160)
+        self.step('end',140)
+        (self.repo/'C.py').write_text('C edit\n')
+        self.step('end',180)
+        pending=self.state()['pending']
+        self.assertTrue(pending)
+        self.assertTrue(all(row.get('supplement') for row in pending))
+        self.assertEqual(self.state()['last_failure']['retained_unknown'],1)
+        self.step('start',200)
+        self.assertIn('held_turn',self.state(),'failed auto record needs a retained unknown supplement')
+        held=self.state()['held_turn']
+        self.assertTrue(held['record_saved'])
+        history=Path(held['reference']).read_text()
+        self.assertIn('A final reply',history)
+        self.assertIn('greet.py',history)
+        self.assertIn('coverage unknown',history)
+        self.assertEqual(self.state()['pending'],[])
+
+    def test_rotation_matrix_preserves_each_completed_end_with_missing_boundaries_and_open_routes(self):
+        from collections import Counter
+        for missing in ('none','B','C'):
+            for manual in (False,True):
+                with self.subTest(missing=missing,manual=manual):
+                    fixture=DeferredEndRotationTest('test_next_start_preserves_ready_prior_end_after_interrupted_publication')
+                    fixture.setUp()
+                    try:
+                        if manual:
+                            fixture.ledger_line('claude',SID,'rt-manual-matrix')
+                        observed=[]
+                        record,append,held=T.record,fixture.appender,T._held_item
+                        original_recorder=fixture.recorder
+                        def keep_record(*args,**kwargs):
+                            observed.extend(args[4]);return original_recorder(*args,**kwargs)
+                        def keep_append(*args,**kwargs):
+                            observed.extend(args[5]);return append(*args,**kwargs)
+                        def keep_held(item,*args):
+                            observed.append(item);return held(item,*args)
+                        fixture.recorder,fixture.appender=keep_record,keep_append
+                        with mock.patch.object(T,'_held_item',side_effect=keep_held):
+                            with mock.patch.object(T,'_record_pass',return_value='busy'):
+                                fixture.prepare_ab(own_end=True,unreadable=missing=='B')
+                                with fixture.starting(160,resume=False,unreadable=missing=='C'):
+                                    (fixture.repo/'C.py').write_text('C edit\n')
+                                    fixture.step('end',180,payload={'last_assistant_message':'C final reply'})
+                                fixture.step('start',200)
+                                (fixture.repo/'D.py').write_text('D edit\n')
+                                fixture.step('end',220,payload={'last_assistant_message':'D final reply'})
+                            fixture.step('start',240)
+                        self.assertEqual(Counter(item['began'] for item in observed),Counter({100:1,120:1,160:1,200:1}))
+                        by_start={item['began']:item for item in observed}
+                        for began,name,unknown in ((100,'greet.py',missing=='B'),
+                                                  (120,'README.md',missing in ('B','C')),
+                                                  (160,'C.py',missing=='C'),(200,'D.py',False)):
+                            if unknown:
+                                self.assertIsNone(by_start[began]['source_count'])
+                                self.assertIn('unknown',by_start[began]['section'].lower())
+                            else:
+                                self.assertEqual(by_start[began]['source'],[name])
+                        self.assertEqual(fixture.state()['pending'],[])
+                    finally:
+                        fixture.tearDown()
 
 
 if __name__ == "__main__":
