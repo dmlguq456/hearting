@@ -14,7 +14,9 @@ path to seeing it work.
   OpenCode. Claude Code alone is enough.
 - You do not need herdr, Cairn, a NAS, remote memory exchange, or a GPU.
 
-<!-- TODO(public-readiness stage 5): add the tested OS x runtime matrix. -->
+Tested so far: CI checks the installation for Claude Code, Codex, and OpenCode
+on Ubuntu, and the measured runs below used Linux. macOS has not been checked end
+to end, and Windows (Git Bash) is experimental.
 
 ## Install and check
 
@@ -49,7 +51,16 @@ You do not type any Hearting command. The agent keeps the change local, runs
 the test, and tells you what it ran and what it did not. A passed test and a
 test that could not run are reported as different outcomes.
 
-<!-- TODO(public-readiness stage 1): link a published demo repository with the expected patch. -->
+To try it on a ready-made project, copy `greet.py` and `focused_test.py.txt`
+from the [demo files](tools/release/fixtures/first-journey/) into an empty folder,
+rename `focused_test.py.txt` to `test_greet.py`, and commit both in a new Git
+repository. The test fails until `greet.py` returns `Hello` instead of `Helo`;
+the expected change is one line:
+
+```diff
+-    return "Helo"
++    return "Hello"
+```
 
 ## Watch it finish
 
@@ -102,7 +113,10 @@ out sign-in and the time you spend reading and replying.
   also moves with your other sessions, and tokens cannot be converted into a
   quota percentage.
 
-<!-- TODO(public-readiness stage 4): replace this with the completion line (elapsed time and tokens) once it ships. -->
+When background workers finish a task, their completion summary shows the
+elapsed time and session tokens, and marks counts that are missing or partial.
+A tiny fix that Hearting records automatically, like the one above, does not get
+this line.
 
 ## If something blocks you
 

@@ -8,7 +8,9 @@ Hearting can place workers and reviews across them. In the
 [measured run](QUICKSTART.md#what-to-expect), a Claude-only install and a small
 fix completed.
 
-<!-- TODO(public-readiness stage 5): replace this with the tested OS x runtime matrix. -->
+CI checks the installation for all three runtimes on Ubuntu, and the measured
+runs used Linux. macOS has not been checked end to end, and Windows (Git Bash)
+is experimental.
 
 ## What permissions do background workers have?
 
