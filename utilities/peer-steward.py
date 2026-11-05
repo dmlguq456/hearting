@@ -7338,6 +7338,16 @@ def cmd_obligation_runner(args):
     notice_selection = {"state_root": str(store.root.parents[1].resolve()),
                         "runner_incarnation": runner_incarnation, "last_group": None}
     settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    retired_for_exec = []
+
+    def retire_for_service_exec():
+        # A service replacement is about to exec this process. Join the
+        # readiness worker first so no old-code thread survives the process
+        # image, and release the settlement watcher with its context.
+        retired_for_exec.append(True)
+        stop_readiness_worker()
+        settlement_context.close()
+
     duty_retry_state = {}
     terminal_handoff_scan = True
     terminal_handoff_duties = []
@@ -7396,16 +7406,16 @@ def cmd_obligation_runner(args):
                                notice_selection=notice_selection,
                                runner_incarnation=runner_incarnation)
         if service_current:
-            # A service replacement may exec this process. Join the readiness
-            # worker first so no old-code thread survives the process image.
-            stop_readiness_worker()
-            settlement_context.close()
+            retired_for_exec.clear()
             peer_obligations.exec_service_runner(
                 args.lock_fd, store.root.parents[1], service_current,
-                herdr_session=_HERDR_SESSION,
+                herdr_session=_HERDR_SESSION, before_exec=retire_for_service_exec,
             )
-            settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
-            start_readiness_worker()
+            if retired_for_exec:
+                # The exec failed after the old context retired: continue on a
+                # fresh context under the same lock.
+                settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+                start_readiness_worker()
         external_snapshot = _external_obligation_snapshot()
         _reconcile_external_obligations(
             store, service_current=service_current, snapshot=external_snapshot,

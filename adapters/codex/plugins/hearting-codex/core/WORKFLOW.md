@@ -762,7 +762,11 @@ At turn end the existing detached recorder stores changes, bounded native
 command termination facts, and the final reply with source references. It uses
 the existing automatic direct route in the unassigned container and appends
 later changing turns. Open explicit workflows also retain bounded exact-session observations for
-Fleet and continuation, without closing or taking over their routes. Active
+Fleet and continuation, without closing or taking over their routes. The route-side
+`.held.md` has a 256 KiB total cap as well as its 64 KiB append cap; oldest
+history is trimmed first with a visible truncation marker. Git snapshots run
+outside the session state lock, and results apply only to their matching turn.
+Unreadable or superseded observations stay unknown. Active
 explicit workflows keep their procedure; proven
 closed historical routes no longer suppress new automatic records, and unknown
 route state is not treated as closed. Actual Git projects under `/tmp` record
