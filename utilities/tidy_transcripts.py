@@ -1076,31 +1076,21 @@ def turn_observations(harness, sid, anchor, payload=None, *, until=None):
                     codes.append(code)
                 if isinstance(value.get('session_id'), int) and code is None:
                     running = True
-                # stdout is evidence at the source, never a source of exit-code claims.
-                for key in ('content', 'structuredContent', 'value', 'result', 'results'):
+                for key in ('structuredContent', 'value', 'result', 'results'):
                     if key in value:
                         visit(value[key])
-                if value.get('type') in ('text', 'input_text', 'output_text'):
-                    visit(value.get('text', ''))
+                # content/text/stdout/output are text carriers, never exit fields.
             elif isinstance(value, list):
                 for part in value:
-                    visit(part)
-            elif isinstance(value, str):
-                try:
-                    visit(json.loads(value))
-                    return
-                except ValueError:
-                    pass
-                header = value.split('Final output:', 1)[0].split('Output:', 1)[0]
-                codes.extend(int(code) for code in re.findall(r'^Process exited with code (-?\d+)', header, re.M))
-                running |= bool(re.search(r'Script running with cell ID|Process running with session ID', header))
-                # Code-mode orchestration exposes tool-result JSON after its header.
-                if 'Output:' in value:
-                    for line in value.split('Output:', 1)[1].splitlines():
-                        try:
-                            visit(json.loads(line))
-                        except ValueError:
-                            pass
+                    if isinstance(part, dict) and not part.get('type'):
+                        visit(part)
+                    elif isinstance(part, dict) and 'structuredContent' in part:
+                        visit(part['structuredContent'])
+        if isinstance(value, str) and item['tool'].rsplit('.', 1)[-1] in ('exec_command', 'write_stdin'):
+            try:
+                value = json.loads(value)  # whole native process-result object only
+            except ValueError:
+                value = None
         visit(value)
         item.update(exit_codes=codes, state='running' if running else 'failed' if failed else 'exited' if codes else 'unknown')
     try:

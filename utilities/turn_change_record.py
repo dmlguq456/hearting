@@ -43,10 +43,13 @@ MARK = "auto-record"
 HARNESSES = ("claude", "codex", "opencode")
 PHASES = ("start", "end")
 SCHEMA = 2
+MAX_ENTRIES = 5000
+MAX_LISTED = 200
 MAX_ATTEMPTS = 3
 MAX_CLOSE_ATTEMPTS = 10
 MAX_PENDING = 20
 EVIDENCE_LIMIT = 64 * 1024
+ENTRY_BYTES = EVIDENCE_LIMIT * 4
 OPEN_TURN_SECONDS = 6 * 3600
 KEEP_SECONDS = 14 * 86400
 STATE_LOCK_WAIT = 30.0
@@ -62,7 +65,7 @@ CHECKPOINT_TIMEOUT = 120
 CLOCK_SLACK = 2.0
 APPENDED = "auto-record-turns.md"
 # The open turn's start snapshot kept at the next start for its late end step.
-PRIOR_KEYS = ("turn_started_at", "top", "root", "head", "entries", "native_anchor")
+PRIOR_KEYS = ("turn_started_at", "top", "root", "head", "entries", "native_anchor", "entries_total", "source_total", "entries_truncated", "tail_digest")
 GATE_VALUE = (f"{MARK}: changes observed at turn end and recorded after the fact; "
               "this gate was not assessed")
 # Byte code Python writes beside sources; untracked, it is never a reason for a record.
@@ -177,12 +180,79 @@ def _read(path: Path) -> dict:
     return data if isinstance(data, dict) and data.get("v") == SCHEMA else {}
 
 
+def _sample_paths(paths, *, limit=MAX_LISTED, budget=EVIDENCE_LIMIT // 8):
+    sampled, used = [], 0
+    for path in paths:
+        size = len(json.dumps(path, ensure_ascii=True).encode('ascii'))
+        if len(sampled) >= limit or used + size > budget:
+            break
+        sampled.append(path)
+        used += size
+    return sampled
+
+
+def _compact_state(state):
+    """Keep old v2 payloads readable while bounding every subsequent state write."""
+    for snap in (state, state.get('prior_turn') or {}):
+        entries = snap.get('entries')
+        if not isinstance(entries, dict):
+            continue
+        total = max(snap.get('entries_total') or 0, len(entries))
+        kept, used = {}, 0
+        for path, meta in entries.items():
+            size = len(json.dumps([path, meta], ensure_ascii=True).encode('ascii'))
+            if len(kept) >= MAX_ENTRIES or used + size > ENTRY_BYTES:
+                break
+            kept[path] = meta
+            used += size
+        snap.update(entries=kept, entries_total=total, entries_truncated=total-len(kept))
+    for item in state.get('pending') or []:
+        paths = item.get('source') or []
+        item.setdefault('source_count', len(paths))
+        item.setdefault('source_known', len(paths))
+        item['source'] = _sample_paths(paths)
+        item['fresh'] = _sample_paths(item.get('fresh') or [])
+        observation = _bounded(item.get('observations') or '', EVIDENCE_LIMIT // 2)
+        section = item.get('section') or ''
+        if observation and not section.startswith(observation):
+            section = observation + '\n' + section
+        item['observations'] = observation
+        item['section'] = _bounded(section)
+    del (state.get('pending') or [])[:-MAX_PENDING]
+    return state
+
+
+def _change_meta(before, after, source):
+    tail_unknown = bool(before.get('entries_truncated') or after.get('entries_truncated')) and \
+        before.get('tail_digest') != after.get('tail_digest')
+    count = len(source)
+    if tail_unknown:
+        count = None
+        if before.get('head') == after.get('head') and before.get('source_total') == 0:
+            count = after.get('source_total')
+        elif before.get('head') == after.get('head') and after.get('source_total') == 0:
+            count = before.get('source_total')
+    return {'source_count': count, 'source_known': len(source), 'tail_unknown': tail_unknown,
+            'dirty_before': before.get('source_total', len(before.get('entries') or {})),
+            'dirty_after': after.get('source_total', len(after.get('entries') or {}))}
+
+
+def _batch_evidence(items):
+    items = sorted(items, key=lambda item: item.get('began') or 0)
+    summaries = [f"- Turn {_iso(i.get('began'))}: changed total {i.get('source_count', len(i['source']))}; "
+                 f"listed {len(i['source'])}; unknown/truncated tail {bool(i.get('tail_unknown'))}"
+                 for i in items]
+    # The latest reply remains visible if a backlog cannot fit in one bounded write.
+    return _bounded('Turn counts (None = unknown):\n' + '\n'.join(summaries) + '\n\n' +
+                    '\n'.join(i['section'] for i in reversed(items)))
+
+
 def _write(path: Path, data: dict) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".turn-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({**data, "v": SCHEMA}, stream, ensure_ascii=False, sort_keys=True)
+            json.dump({**_compact_state(data), "v": SCHEMA}, stream, ensure_ascii=False, sort_keys=True)
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -254,7 +324,9 @@ def snapshot(top: Path, env):
         return None
     if status.returncode != 0:
         return None
-    entries = {}
+    entries, total, used = {}, 0, 0
+    tail = hashlib.sha256()
+    root = gate.folder_root(top, env)
     for record in status.stdout.split(b"\0"):
         if not record:
             continue
@@ -262,12 +334,24 @@ def snapshot(top: Path, env):
             return None
         relative = os.fsdecode(record[3:])
         code = record[:2].decode("ascii", "replace")
+        path = Path(os.path.realpath(top / relative))
+        if _noise(relative, code) or gate._excluded(path, env, git_project=True) or gate._artifact_path(path, top, root):
+            continue
         try:
             meta = os.lstat(top / relative)
-            entries[relative] = [code, meta.st_size, meta.st_mtime_ns]
+            entry = [code, meta.st_size, meta.st_mtime_ns]
         except OSError:
-            entries[relative] = [code, -1, 0]
-    return {"head": head.stdout.strip() if head.returncode == 0 else "", "entries": entries}
+            entry = [code, -1, 0]
+        raw = json.dumps([relative, entry], ensure_ascii=True).encode('ascii')
+        total += 1
+        if len(entries) < MAX_ENTRIES and used + len(raw) <= ENTRY_BYTES:
+            entries[relative] = entry
+            used += len(raw)
+        else:
+            tail.update(raw)
+    return {"head": head.stdout.strip() if head.returncode == 0 else "", "entries": entries,
+            "entries_total": total, "source_total": total, "entries_truncated": total-len(entries),
+            "tail_digest": tail.hexdigest()}
 
 
 def _turn_commits(top: Path, before: str, after: str, began: float, env):
@@ -359,30 +443,39 @@ def _bounded(text: str, limit: int = EVIDENCE_LIMIT) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
         return text
-    return raw[:limit].decode("utf-8", "ignore") + "\n… (truncated)\n"
+    marker = "\n… (truncated; use native/Git references)\n".encode('utf-8')
+    if limit <= len(marker):
+        return marker[:limit].decode('utf-8', 'ignore')
+    return raw[:limit-len(marker)].decode('utf-8', 'ignore') + marker.decode('utf-8')
 
 
 def record_header(harness: str, sid: str, top: Path) -> str:
     return "\n".join([
         "# Automatic change record", "",
-        "Hearting recorded these changes because this session changed files during a turn",
-        "without an active explicit workflow here. No agent step was asked for. Later turns of",
-        f"this session in this folder are appended to `artifacts/{APPENDED}` in this cycle.", "",
+        "Hearting recorded source changes observed during this session's turn.",
+        "This evidence does not complete or take over an explicit workflow. No agent step was asked for.",
+        f"Later automatic observations use `artifacts/{APPENDED}` or a bounded route-side record.", "",
         f"- harness: {harness}", f"- session: {sid}", f"- work tree: {top}",
         "- attribution: changes observed in this work tree between each turn's own start and end",
         "", ""])
 
 
 def turn_section(harness, sid, top: Path, source, commits, before, after, began, ended,
-                 overlap, env) -> str:
+                 overlap, env, meta=None) -> str:
+    meta = _change_meta(before, after, source) if meta is None else meta
     prev, cur = before.get("entries") or {}, after.get("entries") or {}
-    listed = source  # size classification never discards a misclassified large change
+    listed = _sample_paths(source)
     rows = []
     for path in listed:
         code = (cur.get(path) or [""])[0].strip() or ("committed" if path not in prev else "clean")
         rows.append(f"{code:<9} {path}")
     earlier = [path for path in listed if path in prev]
-    lines = [f"## Turn {_iso(began)} to {_iso(ended)}", ""]
+    count = meta['source_count']
+    label = str(count) if count is not None else f"unknown (at least {len(source)} observed)"
+    lines = [f"## Turn {_iso(began)} to {_iso(ended)}", "",
+             f"- dirty source paths: before {meta['dirty_before']}, after {meta['dirty_after']}",
+             f"- HEAD references: before {before.get('head') or 'unknown'}, after {after.get('head') or 'unknown'}",
+             f"- path coverage: listed {len(listed)}; truncated snapshot tail {meta['tail_unknown']}"]
     if overlap:
         lines.append("- concurrent sessions in this work tree: " + ", ".join(overlap)
                      + " (some of these changes may be theirs)")
@@ -391,9 +484,10 @@ def turn_section(harness, sid, top: Path, source, commits, before, after, began,
     if earlier:
         lines.append("- already changed before the turn (the diff below is against HEAD and "
                      "includes those earlier edits): " + ", ".join(earlier[:20]))
-    lines += ["", f"### Changed files ({len(source)})", "", "```", *rows]
-    if len(source) > len(listed):
-        lines.append(f"… and {len(source) - len(listed)} more")
+    lines += ["", f"### Changed files ({label})", "", "```", *rows]
+    if len(source) > len(listed) or meta['tail_unknown']:
+        omitted = count-len(listed) if count is not None else 'unknown'
+        lines.append(f"… {omitted} paths omitted (truncated; counts/HEAD/native references above)")
     lines += ["```", ""]
     if after.get("head"):
         try:
@@ -412,7 +506,7 @@ def turn_section(harness, sid, top: Path, source, commits, before, after, began,
         lines += ["### Commits made during the turn", "", "```"]
         lines += [f"{commit[:12]}  {subject}" for commit, subject in commits]
         lines += ["```", ""]
-    return "\n".join(lines)
+    return _bounded("\n".join(lines), EVIDENCE_LIMIT // 2)
 
 
 def observation_section(harness, sid, before, payload=None, until=None):
@@ -490,7 +584,7 @@ def _keep(route_file: str, text: str) -> None:
     target = kept_record(route_file)
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "a", encoding="utf-8") as stream:
-        stream.write(text)
+        stream.write(_bounded(text))
 
 
 def _work(env, harness: str, sid: str, root: str) -> Path:
@@ -537,10 +631,11 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     source = list(dict.fromkeys(path for item in items for path in item.get("source", [])))
     (work / "evidence.md").write_text(
-        record_header(harness, sid, top) + "\n".join(item["section"] for item in items), encoding="utf-8")
+        _bounded(record_header(harness, sid, top) + _batch_evidence(items)), encoding="utf-8")
     shown = ", ".join(source[:5]) + (", …" if len(source) > 5 else "")
     (work / "summary.txt").write_text(
-        f"Automatic record: {len(source)} file(s) changed during a {harness} turn without a route "
+        f"Automatic record: turn change counts {[i.get('source_count', len(i['source'])) for i in items]} "
+        f"({len(source)} sampled paths) during a {harness} turn without a route "
         f"({shown})\n", encoding="utf-8")
     (work / "request.md").write_text(
         f"Intent: Hearting automatic record of the files this {harness} session changed in this "
@@ -549,7 +644,7 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
         encoding="utf-8")
     child_env = _child_env(env, harness, sid)
     fresh = [path for item in items for path in item.get("fresh", [])] or source
-    slug = gate._slug_word("auto-" + Path(fresh[0]).stem)
+    slug = gate._slug_word("auto-" + (Path(fresh[0]).stem if fresh else "truncated-turn"))
     composed = _run(_route_command("compose", "--shape", "direct", "--cwd", str(top), "--unassigned",
                                    "--slug", slug, "--parent-harness", harness,
                                    "--prompt-file", str(work / "request.md"),
@@ -584,7 +679,7 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
     """Append later turns to the session's closed automatic record for this folder: one
     file in the same cycle, then the producer's own checkpoint publishes it; a record
     without a cycle (closed by ``close``) keeps them beside its route."""
-    sections = "\n".join(item["section"] for item in items) + "\n"
+    sections = _bounded(_batch_evidence(items), EVIDENCE_LIMIT-1) + "\n"
     directory = None
     if entry.get("closed_by") != "close":
         try:
@@ -602,7 +697,7 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
     head = "" if target.exists() else (record_header(harness, sid, top).split("\n\n", 1)[0] + "\n\n"
                                        + f"Later turns of route {entry.get('route_id')}.\n\n")
     with open(target, "a", encoding="utf-8") as stream:
-        stream.write(head + "\n".join(item["section"] for item in items) + "\n")
+        stream.write(_bounded(head + _batch_evidence(items), EVIDENCE_LIMIT-1) + "\n")
     _run([str(UTILITIES / "artifact_producer.py"), "checkpoint", "--trigger", "explicit",
           "--artifact-root", root, "--cycle", cycle_id], _child_env(env, harness, sid), CHECKPOINT_TIMEOUT)
     return {"ok": True, "cycle_id": cycle_id, "file": str(target)}
@@ -785,9 +880,8 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                         entry = records_now.get(root)
                         root_items = [item for item in pending if item['root'] == root and item['id'] in ids]
                         if entry and root_items:
-                            item = root_items[-1]
-                            entry['last_turn'] = {'ended': item['ended'], 'changed_files': len(item['source']),
-                                                  'summary': item.get('observations', item['section'][-6000:])[:6000]}
+                            item = max(root_items, key=lambda row: row.get('began') or 0)
+                            entry['last_turn'] = _last_turn(item)
                         result = "recorded" if created else "appended"
                     elif carried:
                         state["last_carry_failure"] = {"reason": outcome.get("reason"),
@@ -838,7 +932,7 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
             return
         mode, root = _mode(harness, sid, top, state, env)
         result["state"] = mode
-        if mode == "record":
+        if mode in ("record", "route-held"):
             taken = snapshot(top, env)
             if taken is None:
                 result["state"] = "unreadable"
@@ -846,8 +940,8 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
                 from tidy_transcripts import turn_anchor
                 native = payload or {}
                 anchor = turn_anchor(harness, sid, native.get("transcript_path") or native.get("transcriptPath"), at=now)
-                state.update(head=taken["head"], entries=taken["entries"], root=root, native_anchor=anchor)
-                result["state"] = "baseline"
+                state.update(**taken, root=root, native_anchor=anchor)
+                result["state"] = "baseline" if mode == "record" else "route-held-baseline"
 
     _update(path, begin)
     state = _read(path)
@@ -866,22 +960,39 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
     path = state_path(env, harness, sid)
     result = {"state": "busy"}
 
-    def queue(state, before, after, top, root, began, until=None):
+    def queue(state, before, after, top, root, began, until=None, mode="record"):
         """Queue the source changes between ``before`` and ``after`` as one turn."""
         top_path = Path(top)
         source, commits = changes(before, after, top_path, root, began, env)
         result["state"] = "unchanged"
-        if source:
+        meta = _change_meta(before, after, source)
+        if source or meta['tail_unknown']:
             overlap = concurrent_sessions(env, harness, sid, top, began, now)
             pending = state.setdefault("pending", [])
             observations = observation_section(harness, sid, before, payload, until)
-            pending.append({
+            item = {
                 "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
-                "source": source, "observations": observations,
-                "fresh": [p for p in source if p not in (before.get("entries") or {})],
-                "section": turn_section(harness, sid, top_path, source, commits, before, after,
-                                        began, now, overlap, env) + "\n" +
-                           observations})
+                **meta, "source": _sample_paths(source), "observations": observations,
+                "fresh": _sample_paths(p for p in source if p not in (before.get("entries") or {})),
+                "section": _bounded(observations + "\n" + turn_section(harness, sid, top_path, source, commits,
+                    before, after, began, now, overlap, env, meta))}
+            if mode == 'route-held':
+                target = Path(root)/'.runtime/auto-record'/f'{harness}-{sid}.held.md'
+                saved, error = False, ''
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    header = '' if target.exists() else record_header(harness, sid, top_path)
+                    section = f"Supplement to existing routes; no completion or takeover. Turn {_iso(began)}.\n" + item['section']
+                    with target.open('a', encoding='utf-8') as stream:
+                        stream.write(_bounded(header + section, EVIDENCE_LIMIT-1) + '\n')
+                    saved = True
+                except OSError as exc:
+                    error = type(exc).__name__
+                state['held_turn'] = {'root': root, 'top': top, 'reference': str(target),
+                    'record_saved': saved, 'error': error, **_last_turn(item)}
+                result['state'] = 'route-observed'
+                return
+            pending.append(item)
             del pending[:-MAX_PENDING]
             _mark_pending(env, state, harness, sid)
             result["state"] = "changed"
@@ -907,10 +1018,10 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                     and prior.get("root") == state.get("root") and top and Path(top).is_dir()):
                 mode, root = _mode(harness, sid, Path(top), state, env)
                 result["root"] = root
-                if mode == "record" and root == prior["root"]:
-                    queue(state, prior, {"head": state.get("head") or "", "entries": state["entries"]},
+                if mode in ("record", "route-held") and root == prior["root"]:
+                    queue(state, prior, {key: state.get(key) for key in ("head", "entries", "entries_total", "source_total", "entries_truncated", "tail_digest")},
                           top, root, prior["turn_started_at"],
-                          (state.get("native_anchor") or {}).get("cursor"))
+                          (state.get("native_anchor") or {}).get("cursor"), mode)
             return
         state.pop("prior_turn", None)
         opened = (state.get("turn_ended_at") is None and isinstance(began, (int, float)) and top
@@ -921,7 +1032,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             mode, root = _mode(harness, sid, top_path, state, env)
             result["state"], result["root"] = mode, root
             after = None
-            if mode == "record":
+            if mode in ("record", "route-held"):
                 # Only this turn's own start snapshot is compared; without it nothing is attributed.
                 has_start = state.get("entries") is not None and root == state.get("root")
                 after = snapshot(top_path, env) if has_start else None
@@ -929,7 +1040,7 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
                 if after is not None and after.get("entries") is None:
                     after = None
             if after is not None:
-                queue(state, state, after, top, root, began)
+                queue(state, state, after, top, root, began, mode=mode)
         state.update(turn_ended_at=now, entries=None, head="")
 
     if _update(path, finish_turn) is None:
@@ -1001,6 +1112,17 @@ def _adopt_orphans(root: str, harness: str, sid: str, env, now: float, recorder,
     return adopted
 
 
+def _last_turn(item):
+    count = item.get('source_count', len(item['source']))
+    return {'ended': item['ended'], 'changed_files': count if count is not None else item.get('source_known', 0),
+            'changed_files_exact': count is not None, 'truncated': bool(item.get('tail_unknown')) or
+                count is None or count > len(item['source']),
+            'dirty_before': item.get('dirty_before'), 'dirty_after': item.get('dirty_after'),
+            'summary': _bounded(f"Changed total: {count}; known paths: {item.get('source_known', len(item['source']))}; "
+                f"dirty before/after: {item.get('dirty_before')}/{item.get('dirty_after')}; truncated: {bool(item.get('tail_unknown'))}\n" +
+                (item.get('observations') or item['section'][-6000:]), 6000)}
+
+
 def supplementary_records(harness, sid, cwd, env=None):
     """Read-only evidence for one exact native SID; never a route default/authority."""
     env = os.environ if env is None else env
@@ -1011,11 +1133,15 @@ def supplementary_records(harness, sid, cwd, env=None):
     if top is None or state.get('top') != str(top):
         return []
     rows = []
-    for entry in (state.get('records') or {}).values():
+    root = gate.folder_root(top, env)
+    for entry in [(state.get('records') or {}).get(root, {})]:
         if entry.get('last_turn'):
             rows.append({'harness': harness, 'session_id': sid, 'route_id': entry.get('route_id'),
                          'reference': entry.get('route_file'), 'record_saved': bool(entry.get('closed')),
                          **entry['last_turn']})
+    held = state.get('held_turn') or {}
+    if held.get('root') == root and held.get('top') == str(top):
+        rows.append({'harness': harness, 'session_id': sid, 'route_id': None, **held})
     return sorted(rows, key=lambda row: row.get('ended', 0))[-3:]
 
 
@@ -1040,8 +1166,16 @@ def link_promotion(route, env=None, *, source_cwd=None):
             return None
         now = time.time()
         source, commits = changes(state, after, top, state['root'], state['turn_started_at'], env)
-        evidence = record_header(harness, sid, top) + 'Start snapshot (status, size, mtime):\n```json\n' + json.dumps({key: state.get(key) for key in PRIOR_KEYS}, ensure_ascii=False) + '\n```\n' + turn_section(harness, sid, top, source, commits,
-            state, after, state['turn_started_at'], now, [], env) + "\n" + observation_section(harness, sid, state)
+        destination = str(_top(route['cwd'], env) or Path(route['cwd']).resolve())
+        guidance = (f"Original worktree: {top}\nPrepared worktree: {destination}\n" +
+            ("Dirty edits already remain in this same worktree; continue in place.\n" if destination == str(top) else
+             "Dirty edits remain in the original worktree; the prepared worktree starts at HEAD. "
+             "Read task-scoped diffs there and reapply only the task's changes in the prepared worktree. "
+             "Do not copy unrelated user changes or stash/reset/overwrite either worktree.\n"))
+        start_snapshot = _bounded(json.dumps({key: state.get(key) for key in PRIOR_KEYS}, ensure_ascii=False), EVIDENCE_LIMIT//4)
+        evidence = _bounded(record_header(harness, sid, top) + guidance + observation_section(harness, sid, state) +
+            '\nStart snapshot (bounded status, size, mtime; counts above):\n```json\n' + start_snapshot + '\n```\n' +
+            turn_section(harness, sid, top, source, commits, state, after, state['turn_started_at'], now, [], env))
         target = Path(route['artifact_root']) / '.runtime' / 'auto-record' / f"{route['route_id']}.promotion.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(evidence, encoding='utf-8')

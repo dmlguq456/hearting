@@ -282,7 +282,8 @@ links the current turn's start snapshot, observed changes and native evidence;
 preparation preserves existing edits and user changes, without automatic
 stash, reset or overwrite. Its workflow owns completion from there. A main
 session's mistaken small-work judgment never disables the automatic record:
-it still retains changes, observed command outcomes and the final reply.
+it retains total counts, bounded path samples with truncation/unknown markers,
+observed command outcomes and the final reply.
 `COMPLETE` for that automatic route means the record was saved, not that the
 fix or its tests passed. Missing, interrupted and running results stay unknown.
 
@@ -526,7 +527,7 @@ when nothing follows; a declared parallel group survives only when its anchor
 is kept and is not the new terminal. Composition changes route *shape* only —
 the write, spec, and core gates, the dispatch-depth-3 ban, and every
 completion gate are unchanged, and a preset-free route is still a route the
-§0.4 gate and the route-participation invariant apply to.
+§0.4 entry confirmation and explicit-workflow participation rule apply to.
 
 For an approved source-changing `--start`, the shared preparation boundary
 resolves the selected graph first, prepares a new independent worktree when the
@@ -706,13 +707,16 @@ automatic record. Ordinary main-session edits and commits in the current Git
 worktree pass without a route-presence refusal. The hook does not reclassify
 size. Other-worktree edits and long-running launches retain the existing route
 check; installed-release/shared-checkout protections and native permissions
-remain independent. Registered workers, artifact/runtime roots, CI, dev
+remain independent. The historical /tmp gate exemption remains; only the
+recorder includes real /tmp Git projects. Registered workers, artifact/runtime roots, CI, dev
 activation and judgment failures retain their exemptions.
 
 At turn end the existing detached recorder stores changes, bounded native
 command termination facts, and the final reply with source references. It uses
 the existing automatic direct route in the unassigned container and appends
-later changing turns. Active explicit workflows keep their procedure; proven
+later changing turns. Open explicit workflows also retain bounded exact-session observations for
+Fleet and continuation, without closing or taking over their routes. Active
+explicit workflows keep their procedure; proven
 closed historical routes no longer suppress new automatic records, and unknown
 route state is not treated as closed. Actual Git projects under `/tmp` record
 too. `HEARTING_AUTO_RECORD=off` still disables recording; no model, per-tool

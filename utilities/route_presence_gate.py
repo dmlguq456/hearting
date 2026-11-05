@@ -5,7 +5,8 @@ Ordinary main-session edits and commits in the current Git worktree pass;
 existing turn hooks record their changes. This gate does not classify size.
 Other-worktree work and plain long-run commands retain the route-existence
 check, worker/runtime/artifact/CI exemptions and fail-open behavior. Actual
-Git projects under the temp directory follow the same current-worktree rule.
+Git projects under the temp directory retain the historical gate exemption;
+the recorder includes them independently.
 Independent installed/shared-checkout guards and native permissions remain.
 
 Modes: --claude (exit 2), --codex (block JSON), --opencode (exit 1).
@@ -498,7 +499,7 @@ def _triggers(payload: dict, env) -> list[tuple[str, Path, str]]:
     found = []
     for raw in _edit_targets(tool, args, payload):
         path = _real(raw, cwd)
-        if _excluded(path, env, git_project=True):
+        if _excluded(path, env):
             continue
         top = _work_tree(path)
         if top is not None and not _artifact_path(path, top):
@@ -508,7 +509,7 @@ def _triggers(payload: dict, env) -> list[tuple[str, Path, str]]:
         workdir = _string(args, "workdir", "workDir", "cwd")
         base = _real(workdir, cwd) if workdir else cwd
         for kind, directory in shell_triggers(command, base) if command else []:
-            if _excluded(directory, env, git_project=True):
+            if _excluded(directory, env):
                 continue
             top = _work_tree(directory)
             if top is not None:

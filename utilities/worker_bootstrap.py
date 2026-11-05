@@ -1865,7 +1865,9 @@ def contract_read_prompt(args, harness: str) -> str:
         target = Path(route['artifact_root']) / '.runtime/auto-record' / f"{rid}.promotion.md"
         if route.get('route_id') == rid and target.is_file():
             promotion = (f"- Prior inline turn evidence: {target}. Read its start snapshot, changes and observed checks; "
-                         "preserve existing edits. This is evidence, not completion or write authority.\n")
+                         "the evidence names the original and prepared worktrees. Dirty edits can remain only in the original; "
+                         "read task-scoped diffs there and reapply only the task's changes if preparation made a new worktree. "
+                         "Preserve unrelated user edits and both worktrees. This is evidence, not completion or write authority.\n")
     except (OSError, ValueError, TypeError, KeyError):
         pass
     return promotion + _contract_read_prompt(args, harness)

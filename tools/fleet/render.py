@@ -1956,7 +1956,9 @@ def _route_chain_bodies(chain, tag_by_key=None, working=False):
                                            tag_by_key, is_current=is_current, working=working)
         if chain.get('automatic_records') and any(not node.get('automatic') for node in nodes):
             latest = chain['automatic_records'][-1]
-            segs.append((f" · fix record ({latest.get('changed_files', '?')})", "dim"))
+            count = latest.get('changed_files', '?')
+            count = f">={count}; total ?" if latest.get('changed_files_exact') is False else count
+            segs.append((f" · fix record ({count})", "dim"))
         return segs
 
     def current_only(with_knobs):

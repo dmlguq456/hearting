@@ -184,12 +184,12 @@ class EditTriggerTest(Fixture):
         self.assertTrue(self.judge(self.edit(self.repo / "src" / "engine.py"),
                                    AGENT_ARTIFACT_ROOT=str(override)))
 
-    def test_temp_git_project_passes_only_in_its_current_worktree(self):
+    def test_temp_git_project_passes_from_another_cwd_too(self):
         scratch_repo = Path(tempfile.gettempdir()) / "clone"
         scratch_repo.mkdir()
         git(scratch_repo, "init", "-q")
         payload = self.edit(scratch_repo / "a.py")
-        self.assertTrue(self.judge(payload))
+        self.assertEqual(self.judge(payload), "")
         payload["cwd"] = str(scratch_repo)
         self.assertEqual(self.judge(payload), "")
 

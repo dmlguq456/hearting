@@ -2027,6 +2027,7 @@ def main():
                               **compose_observations(route)},sort_keys=True))
             return 0
         path = _emit_compiled_route(a,route,artifact_root)
+        promotion = None
         try:
             from turn_change_record import link_promotion
             promotion = link_promotion(route, source_cwd=promotion_cwd)
@@ -2044,6 +2045,12 @@ def main():
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):
                 started={**started,"worktree":worktree}
+            if promotion:
+                started['prior_turn_evidence'] = promotion
+                started['prior_worktree'] = str(Path(promotion_cwd).resolve())
+                started['prior_turn_note'] = (
+                    'Dirty edits remain in the original worktree. Read the evidence for original/prepared paths; '
+                    'reapply only task-scoped changes when a new worktree was prepared, preserving user data.')
             started={**started, **compose_observations(route)}
             print(json.dumps(started,ensure_ascii=False),flush=True)
         # Bookkeeping runs after the work has started: the start does not depend on it (the sweep
