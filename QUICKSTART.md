@@ -75,7 +75,8 @@ next stage reads the evidence it holds.
 
 ## What to expect
 
-One measured run, not a promise. The numbers below come from
+One measured run, not a promise, and due to be measured again right before
+v4.0. The numbers below come from
 [`tools/release/first-journey.py`](tools/release/first-journey.md): published
 release v3.66.2 installed into an isolated Linux environment, one session per
 runtime, no confirmation card answered. Times are model work only. They leave

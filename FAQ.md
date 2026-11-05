@@ -91,9 +91,11 @@ before planning, while a one-step direct change still runs.
 
 ## Can I use it without herdr, Cairn, a NAS, or GPUs?
 
-Yes; these are optional. Without herdr the related hooks exit quietly, and
-`hearting runtime doctor` names what is off: peer windows, pane titles,
-question notifications, and automatic `/clear`. Cairn
+Yes; these are optional. Without herdr, peer windows, pane titles, peer
+delivery, automatic `/clear`, and question notifications use tmux when you
+work inside tmux (a desktop session also gets question notifications through
+`notify-send`); without either they are off, the related hooks exit quietly,
+and `hearting runtime doctor` says so. Cairn
 reports itself unavailable when it is not set up. `compute-hosts` stays a
 commented template until you name a host, and a compute request without a host
 fails with a clear error. Memory stays local unless you configure an exchange
@@ -101,16 +103,15 @@ in `~/.config/hearting/memory-sync.json`.
 
 ## Does the language setting translate every label?
 
-No. Conversation follows your language. The fixed text Hearting prints
-itself, such as the route card at the start of a request, the one-line
-direction notice, and the summary at its end, comes from one shared catalog
-in English and Korean. It is English unless you declare Korean
+Almost. Conversation follows your language. The fixed text Hearting prints
+for you, such as the route card at the start of a request, the one-line
+direction notice, the summary at its end, and Fleet's screens, comes from one
+shared catalog in English and Korean. It is English unless you declare Korean
 once: `"title_language": "ko"` in
 `${XDG_CONFIG_HOME:-~/.config}/hearting/fleet.json`, `FLEET_NOW_LANG=Korean`,
 or Korean as Claude Code's `language` setting. The same declaration sets the
-language of Fleet's session titles and NOW lines. Fleet's screens are not in
-the catalog yet: they stay English, and the MEMORY screen and a few status
-words are still Korean-only. Moving them is planned.
+language of Fleet's session titles and NOW lines. Lines meant only for the
+agent, such as internal diagnostics, are not translated.
 
 ## Why can progress be unknown? Can I read the original output?
 
@@ -122,9 +123,15 @@ Ask the agent for the real attempt id, then run
 
 ## How much will a task cost?
 
-There is no fixed estimate. The start card describes the workflow, and Fleet
-shows the token counts and usage windows that the runtimes report. That is not
-a bill or a quota forecast. The only timings we have are in
+There is no fixed estimate. The start card describes the workflow, the
+summary at the end of a dispatched request has one cost line (elapsed time and
+session tokens; a count the runtime did not report stays `unknown`), and Fleet
+shows the token counts and usage windows that the runtimes report. None of
+that is a bill or a quota forecast. What Hearting itself adds was measured on
+Codex on one machine: the first response about 1.5 s slower than without
+Hearting and about 2.5K more input tokens per request; a small two-turn fix
+took about twice as long, mostly because each turn records its start and
+finish. The only end-to-end timings we have are in
 [What to expect](QUICKSTART.md#what-to-expect), with their limits.
 
 ## Why do I need a new session after an update?
