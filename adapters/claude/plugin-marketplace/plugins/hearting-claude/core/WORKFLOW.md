@@ -853,6 +853,16 @@ decisions the frame legs could not settle without the user. The depth-0
 session builds that record from the joined frame legs and does the interview
 itself, and never leaves it to a helper.
 
+Scale a frame brief to the decision that remains. A small task whose direction
+is already fixed by the request and evidence keeps the eight-section schema
+with concise evidence and the sole admissible direction; it needs no invented
+alternatives. Ordinary defaults that leave the plan unchanged are chosen by
+the agent, recorded in the brief and carried into the executing leg's final
+answer, rather than becoming interview questions. Decisions that change the
+goal, scope, architecture, cost or an external outcome still go to the person.
+Larger or unsettled work retains its full direction comparison, independent
+perspectives and model grades.
+
 The interview brief may leave `affected` empty when the direction brief does
 not identify affected users or systems; unspecified scope stays unspecified.
 For answers, set `actor_kind: user` only for the person's actual reply, or

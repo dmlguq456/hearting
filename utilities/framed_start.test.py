@@ -2113,6 +2113,26 @@ class AutomaticDirectionTest(StartBase):
         root, record, output = W._framed_cycle(self.route)
         return W._automatic_direction(self.route, W._proposal_rows(self.route, self.jobs, root, record, output), output)
 
+    def test_compact_known_direction_uses_the_existing_interview_and_preserves_real_choices(self):
+        text = (HERE / 'fixtures/frame-known-direction/compact.md').read_text()
+        self.set_briefs(text, text)
+        interview, answers = self.automatic()
+        derived, errors = W._marked_route_proposals(self.route, self.jobs, interview)
+        self.assertEqual(errors, [])
+        self.assertEqual(FI.validate({**derived, 'summary': '-'}), [])
+        self.assertEqual(FI.validate_answers(derived, answers), [])
+        proposal = next(iter(derived['route_proposals']['by_option'].values()))
+        self.assertEqual((proposal['legs'][0]['shape'], len(proposal['legs'])), ('solo', 1))
+        self.assertIn('empty name keeps the unnamed greeting', interview['brief']['outcome'])
+        self.assertIn('final answer', interview['brief']['outcome'])
+        # An architectural choice still needs the person. The compact format
+        # does not authorize ignoring questions or divergent route proposals.
+        with_question = text.replace('None.', 'Should this become a public network service?')
+        self.set_briefs(text, with_question)
+        self.assertIsNone(self.automatic())
+        self.set_briefs(text, full_brief([CODE_STAGED]))
+        self.assertIsNone(self.automatic())
+
     def test_equal_proposals_with_nothing_to_choose_get_a_valid_runtime_interview(self):
         self.set_briefs(full_brief([DIRECT]), full_brief([DIRECT], questions="none"))
         interview, answers = self.automatic()
