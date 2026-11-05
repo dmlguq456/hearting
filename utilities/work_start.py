@@ -1917,7 +1917,8 @@ def _manual_frame_closure(route, jobs):
         command = [sys.executable, str(ROOT / "utilities/capability-route.py")]
         commands = [shlex.join([*command, "complete", "--route", str(frame_path), "--jobs", str(jobs),
                                "--node", RP.TERMINAL_NODE, "--evidence", str(record_path)]),
-                    shlex.join([*command, "close", "--route", str(frame_path), "--jobs", str(jobs),
+                    shlex.join(["env", f"AGENT_DISPATCH_JOBS={Path(jobs).resolve()}",
+                               *command, "close", "--route", str(frame_path),
                                "--summary", "manually recovered first leg " + route["route_id"]]),
                     shlex.join([sys.executable, str(ROOT / "utilities/artifact_producer.py"), "finalize",
                                 "--artifact-root", str(root), "--cycle", decision["frame_route"]["cycle_id"]])]
