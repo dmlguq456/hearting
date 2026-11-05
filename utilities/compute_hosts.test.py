@@ -998,6 +998,18 @@ class ComputeOutputReceiptTest(unittest.TestCase):
                 self.assertNotEqual(self.observe()["state"], "quiescent")
 
 
+# A suite run directly from an agent session inherits that session's identity.
+# A run started by a fixture would then attribute itself to the session's real
+# route (its route chain lives under the real HOME) and notify that session
+# through a runner under the fixture's temp state root -- a leaked runner that
+# reaches the real pane only when it is idle (C-W7: a notice ~18 h late).
+# Fixtures start from no session; a test that needs one sets it explicitly.
+def without_live_session(env):
+    session_keys = {key for key, _harness in load_module().SESSION_ENV_KEYS}
+    return {key: value for key, value in env.items()
+            if key not in session_keys and not key.startswith("HERDR_")}
+
+
 class ComputeHostsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1019,9 +1031,10 @@ class ComputeHostsTest(unittest.TestCase):
         self.fakebin = self.root / "fake-tmux-bin"
         install_fake_tmux(self.fakebin)
         # A run's completion watch notifies through the dispatch state root; keep it here.
-        self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
-                    "HARNESS_STATE_ROOT": str(self.root / "state"),
-                    "PATH": str(self.fakebin) + os.pathsep + os.environ.get("PATH", "")}
+        self.env = without_live_session(
+            {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
+             "HARNESS_STATE_ROOT": str(self.root / "state"),
+             "PATH": str(self.fakebin) + os.pathsep + os.environ.get("PATH", "")})
         self.env.pop("AGENT_DISPATCH_JOBS", None)
         for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
             self.env.pop(key, None)
@@ -1142,7 +1155,7 @@ class ComputeHostsTest(unittest.TestCase):
                                             "hostname": "MGPU-A1"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": ["workstation",
-                                                          "cnn"]}))
+                                                          "gpu"]}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
                                              "hostname": "mgpu-a10"}))
             self.assertFalse(module.is_self({"ssh_host": "203.0.113.9",
@@ -1375,6 +1388,26 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertIn("quoted output", tail.stdout)
         self.assertIn("exit 0", tail.stdout)
 
+    def test_a_fixture_run_from_an_agent_session_neither_attributes_nor_notifies(self):
+        # C-W7: run from an agent pane, this fixture used to attribute its run to
+        # that session's real route and leave a runner notifying the real pane.
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "live-session-c-w7",
+                                          "HERDR_PANE_ID": "fixture-pane-not-real"}):
+            self.tearDown()
+            self.setUp()
+        result = self.run_tool("run", "here", "--name", "ok", "--", "bash", "-c", "exit 0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_id = result.stdout.split()[1]
+        meta = json.loads((self.run_root / run_id / "meta.json").read_text(encoding="utf-8"))
+        provenance = meta.get("provenance") or {}
+        self.assertFalse(provenance.get("session"), provenance)
+        self.assertFalse(provenance.get("route"), provenance)
+        for _ in range(50):
+            if (self.run_root / run_id / "exit_code").is_file():
+                break
+            time.sleep(0.1)
+        self.assertFalse((self.root / "state" / "dispatch" / "pending-delivery").exists())
+
     def test_local_run_exports_exact_compute_identity(self):
         result = self.run_tool(
             "run", "here", "--name", "identity", "--", "bash", "-c",
@@ -1578,8 +1611,8 @@ class ComputeHostsTest(unittest.TestCase):
             log.write_text("Epoch 3/200\nTRAIN: 50% loss=0.5\n")
             with log.open("ab") as output:
                 run_proc = launch_fixture(
-                    {**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
-                     "HEARTING_COMPUTE_HOST": "cnn"}, stdout=output)
+                    {**clean, "HEARTING_COMPUTE_RUN_ID": "gpu-run-7",
+                     "HEARTING_COMPUTE_HOST": "gpu"}, stdout=output)
             ambiguous_proc = launch_fixture(
                 {**clean, "CODEX_THREAD_ID": "same-session-token",
                  "CLAUDE_CODE_SESSION_ID": "same-session-token"})
@@ -1627,7 +1660,7 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(len(first["processes"]), 2)
         by_pid = {row["pid"]: row for row in first["processes"]}
         self.assertEqual(by_pid[run_proc.pid]["owner"]["kind"], "run")
-        self.assertEqual(by_pid[run_proc.pid]["owner"]["label"], "run:cnn-run-7")
+        self.assertEqual(by_pid[run_proc.pid]["owner"]["label"], "run:gpu-run-7")
         self.assertEqual(by_pid[run_proc.pid]["proc_start"], proc_starts[run_proc.pid])
         self.assertIsNone(by_pid[ambiguous_proc.pid]["owner"])
         self.assertEqual(by_pid[ambiguous_proc.pid]["attribution_reason"],
@@ -1837,12 +1870,12 @@ class ComputeHostsTest(unittest.TestCase):
             gpu_pid = int(gpu_pid_file.read_text())
             claimed = self.run_tool(
                 "claim", "here", str(process.pid), "--harness", "codex",
-                "--session", "f11a0486-c090-4098-aeb0-0fd6d79f8d0c", "--json",
+                "--session", "100000ae-0000-4000-8000-0000000000bd", "--json",
             )
             self.assertEqual(claimed.returncode, 0, claimed.stderr)
             claim = json.loads(claimed.stdout)
             self.assertEqual(claim["root_pid"], process.pid)
-            self.assertEqual(claim["owner"]["label"], "codex:f11a0486")
+            self.assertEqual(claim["owner"]["label"], "codex:100000ae")
             outside_claimed = self.run_tool(
                 "claim", "here", str(os.getpid()), "--harness", "claude",
                 "--session", "outside-run-group", "--json",
@@ -1856,9 +1889,9 @@ class ComputeHostsTest(unittest.TestCase):
             def claim_with(env):
                 return subprocess.run([sys.executable, str(TOOL), "claim", "here", str(process.pid), "--json"],
                                       text=True, capture_output=True, env=env)
-            defaulted = claim_with({**bare, "CODEX_THREAD_ID": "f11a0486-c090-4098-aeb0-0fd6d79f8d0c"})
+            defaulted = claim_with({**bare, "CODEX_THREAD_ID": "100000ae-0000-4000-8000-0000000000bd"})
             self.assertEqual(defaulted.returncode, 0, defaulted.stderr)
-            self.assertEqual(json.loads(defaulted.stdout)["owner"]["label"], "codex:f11a0486")
+            self.assertEqual(json.loads(defaulted.stdout)["owner"]["label"], "codex:100000ae")
             alone = claim_with(bare)
             self.assertNotEqual(alone.returncode, 0)
             self.assertIn("--session", alone.stderr)
@@ -1926,7 +1959,7 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual(owner["id"], "managed-run")
         session_owner = process["session_owner"]
         self.assertEqual(session_owner["kind"], "session")
-        self.assertEqual(session_owner["label"], "codex:f11a0486")
+        self.assertEqual(session_owner["label"], "codex:100000ae")
         self.assertEqual(session_owner["source"], "persistent-claim+ancestry")
         for rejected in (stale_payload, reused_payload):
             rejected_owner = rejected["gpus"][0]["processes"][0]["session_owner"]
@@ -2084,7 +2117,7 @@ class ComputeHostsTest(unittest.TestCase):
         module = load_module()
         config = {"run_root": self.run_root}
         run_ids = ("xgpu-b-20261024-193701-ami-tf-a1-historical-parity",
-                   "xgpu-b-20261024-191238-ami-leg2-e1-recovery",
+                   "fixture-compute-run",
                    "just-created")
         for run_id in run_ids:
             run_dir = self.run_root / run_id
@@ -2153,6 +2186,42 @@ class ComputeHostsTest(unittest.TestCase):
         # host's default tmux server.
         self.assertEqual(listed.returncode, 0, listed.stderr)
 
+    def test_runs_lists_a_quiet_run_as_unknown_unless_its_session_is_seen(self):
+        module = load_module()
+        run_dir = self.run_root / "quiet-20261007-000001-gone-silent"
+        run_dir.mkdir(parents=True)
+        (run_dir / "meta.json").write_text(
+            json.dumps({"run_id": run_dir.name, "host": "here",
+                        "command": ["bash", "-c", "train"]}), encoding="utf-8")
+        (run_dir / "log").write_text("epoch 3\n", encoding="utf-8")
+        old = time.time() - module.RUN_QUIET_SECONDS - 3600
+        for path in run_dir.iterdir():
+            os.utime(path, (old, old))
+        config = {"run_root": self.run_root}
+        state = module._run_state(config, run_dir.name)
+        # Callers that act on a run (a route close stops "running") keep doing so.
+        self.assertEqual(state["state"], "running")
+        self.assertEqual(state["quiet_since"][:10],
+                         time.strftime("%Y-%m-%d", time.localtime(old)))
+        for alive, expected in ((None, "unknown"), (True, "running"), (False, "stopped")):
+            with self.subTest(alive=alive), \
+                    mock.patch.object(module, "load_config", return_value=config), \
+                    mock.patch.object(module, "_refuse_namespace_self"), \
+                    mock.patch.object(module, "_select", return_value=[("here", {})]), \
+                    mock.patch.object(module, "_tmux_session_alive", return_value=alive), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(module.cmd_runs(SimpleNamespace(limit=10, host=None, json=True)), 0)
+                row = json.loads(output.getvalue())[0]
+                self.assertEqual((row["state"], row["exit_code"]), (expected, None))
+        with mock.patch.object(module, "load_config", return_value=config), \
+                mock.patch.object(module, "_refuse_namespace_self"), \
+                mock.patch.object(module, "_select", return_value=[("here", {})]), \
+                mock.patch.object(module, "_tmux_session_alive", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            module.cmd_runs(SimpleNamespace(limit=10, host=None, json=False))
+        self.assertIn("unknown (no activity since " + state["quiet_since"][:10], output.getvalue())
+        self.assertFalse((run_dir / "exit_code").exists())
+
     def test_record_stop_writes_once_and_keeps_a_natural_exit(self):
         module = load_module()
         run_dir = self.root / "record-once"
@@ -2201,8 +2270,9 @@ class LauncherProvenanceTest(unittest.TestCase):
         environ.start()
         self.addCleanup(environ.stop)
         # A run's completion watch notifies through the dispatch state root; keep it here.
-        self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
-                    "HARNESS_STATE_ROOT": str(self.root / "state")}
+        self.env = without_live_session(
+            {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
+             "HARNESS_STATE_ROOT": str(self.root / "state")})
         self.env.pop("AGENT_DISPATCH_JOBS", None)
         for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
             self.env.pop(key, None)
@@ -2464,7 +2534,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         unreferenced = add_entry("v3.1", now - 15 * 86400)
         referenced = add_entry("v3.2", now - 20 * 86400)
         current = add_entry("v3.3", now - 30 * 86400)
-        for name in ("ami-eval-smoke-20261020", "asr-coresidence-20261007"):
+        for name in ("fixture-item-0280", "asr-coresidence-20261007"):
             (self.run_root / name).mkdir(parents=True)
         local_only = self.run_root / "old-local-path-run"
         local_only.mkdir()
@@ -3069,6 +3139,29 @@ class CompletionWatchTest(unittest.TestCase):
             unmapped = module._observe_compute_experiment(meta, self.run_dir, 7200)
         self.assertIsNone(unmapped["metric_root"])
 
+        def reason(run_id):
+            record = resource_progress.read_public_run_record(self.root / "artifacts", run_id)
+            return record["output_dir_state"], record["output_dir_reason"], record["output_dir"]
+        # A declared folder the observer cannot map is not reported as undeclared.
+        self.assertEqual(reason("unmapped-remote-run"), ("unknown", "remote-unmapped", None))
+        variants = {
+            # the namespace source is not mounted where the observer runs
+            "unmounted-source-run": {"output_dir": target + "/experiment",
+                                     "path_namespace": {target: str(self.root / "absent-mount")}},
+            # a remote host without a namespace, outside the shared run root
+            "plain-remote-run": {"output_dir": "/host-only/private/output", "path_namespace": None},
+            # no declaration at all stays not-declared
+            "undeclared-remote-run": {"output_dir": None, "path_namespace": None},
+        }
+        for run_id, change in variants.items():
+            variant = {**meta, **change, "run_id": run_id}
+            with mock.patch.object(resource_progress, "_observation_state_path",
+                                   return_value=state.with_name(run_id + ".json")):
+                module._observe_compute_experiment(variant, self.run_dir, 7200)
+        self.assertEqual(reason("unmounted-source-run"), ("unknown", "remote-unmapped", None))
+        self.assertEqual(reason("plain-remote-run"), ("unknown", "remote-unmapped", None))
+        self.assertEqual(reason("undeclared-remote-run"), ("unknown", "not-declared", None))
+
     def test_a_run_a_worker_starts_in_a_route_tells_the_routes_parent_session(self):
         module = load_module()
         jobs = self.root / "jobs.log"
@@ -3093,6 +3186,93 @@ class CompletionWatchTest(unittest.TestCase):
         self.assertEqual((len(mine), len(parents)), (0, 1))          # the parent, not the worker's own session
         self.assertIn("started by attempt att-worker-1 in route rt-0123456789abcdef",
                       sweep.delivery_context([(state / "dispatch", parents)]))
+
+    def _make_quiet(self, module):
+        (self.run_dir / "log").write_text("epoch 1\n")
+        old = time.time() - module.RUN_QUIET_SECONDS - 3600
+        for path in self.run_dir.iterdir():
+            os.utime(path, (old, old))
+
+    def test_a_quiet_run_whose_session_is_gone_stops_being_watched_as_unknown(self):
+        module = load_module()
+        self._make_quiet(module)
+        with mock.patch("session_notice.notify") as notify, \
+                mock.patch.object(module, "_run_session_alive", return_value=False) as probe:
+            self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
+                                                  sleep=lambda s: self.fail("slept")), 0)
+        notify.assert_not_called()
+        probe.assert_called_once()
+        record = json.loads((self.run_dir / module.QUIET_RUN_MARKER).read_text())
+        self.assertEqual((record["state"], record["reason"]),
+                         ("unknown", "session-gone-without-exit-code"))
+        self.assertFalse((self.run_dir / "exit_code").exists())
+        self.assertFalse((self.run_dir / module.STOP_REASON_FILENAME).exists())
+
+    def test_a_quiet_run_that_is_alive_or_unknown_keeps_its_watch(self):
+        # Alive and silent (buffered stdout, metrics only under its output
+        # dir): the watch stays and still reports the end and its outputs.
+        module = load_module()
+        for alive in (True, None):
+            with self.subTest(alive=alive):
+                (self.run_dir / "exit_code").unlink(missing_ok=True)
+                self._make_quiet(module)
+                slept = []
+
+                def sleep(seconds):
+                    slept.append(seconds)
+                    if len(slept) == 3:
+                        (self.run_dir / "exit_code").write_text("0\n")
+
+                with mock.patch("session_notice.notify") as notify, \
+                        mock.patch.object(module, "_run_session_alive", return_value=alive) as probe:
+                    module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=sleep)
+                self.assertEqual(slept, [module.COMPLETION_POLL_SECONDS] * 3)
+                probe.assert_called_once()           # at most once per QUIET_PROBE_SECONDS
+                self.assertEqual(notify.call_count, 1)
+                self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
+
+    def test_the_session_probe_reads_the_runs_host_and_transport(self):
+        module = load_module()
+        meta = {**self.meta, "host": "here", "tmux_transport": {"kind": "nohup-v1"}}
+        (self.run_dir / "meta.json").write_text(json.dumps(meta))
+        with mock.patch.object(module, "load_config", return_value={"hosts": {}}), \
+                mock.patch.object(module, "_select", return_value=[("here", {"address": "h"})]), \
+                mock.patch.object(module, "_tmux_session_alive", return_value=False) as alive:
+            self.assertIs(module._run_session_alive(self.run_dir), False)
+        self.assertEqual(alive.call_args.args, ({"address": "h"}, "here-1"))
+        self.assertEqual(alive.call_args.kwargs["transport"], {"kind": "nohup-v1"})
+        with mock.patch.object(module, "load_config", side_effect=module.ConfigError("missing", "x")):
+            self.assertIsNone(module._run_session_alive(self.run_dir))
+
+    def test_a_run_that_writes_again_is_still_watched(self):
+        module = load_module()
+        self._make_quiet(module)
+        (self.run_dir / "log").write_text("epoch 2\n")
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            (self.run_dir / "exit_code").write_text("0\n")
+
+        with mock.patch("session_notice.notify") as notify:
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=sleep)
+        self.assertEqual(slept, [module.COMPLETION_POLL_SECONDS])
+        self.assertEqual(notify.call_count, 1)
+        self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
+
+    def test_a_late_exit_code_is_reported_once_and_clears_the_unknown_record(self):
+        module = load_module()
+        self._make_quiet(module)
+        with mock.patch.object(module, "_run_session_alive", return_value=False):
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
+                                 sleep=lambda s: self.fail("slept"))
+        self.assertTrue((self.run_dir / module.QUIET_RUN_MARKER).exists())
+        (self.run_dir / "exit_code").write_text("0\n")
+        with mock.patch("session_notice.notify") as notify:
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)), sleep=lambda s: self.fail("slept"))
+        self.assertEqual(notify.call_count, 1)
+        self.assertIn("run here-1 on here ended with exit 0", notify.call_args.kwargs["text"])
+        self.assertFalse((self.run_dir / module.QUIET_RUN_MARKER).exists())
 
     def test_a_removed_run_ends_the_watch_quietly(self):
         module = load_module()

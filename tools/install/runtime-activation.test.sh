@@ -1367,11 +1367,11 @@ commands = [hook["command"] for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])
             if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
 managed = [command for command in commands if prefix in command]
-assert sum(command.count(prefix) for command in managed) == 42, len(managed)
+assert sum(command.count(prefix) for command in managed) == 40, len(managed)
 paths = [match.replace(prefix, str(expected_root), 1)
          for command in managed
          for match in re.findall(re.escape(prefix) + r'/[^\s"\']+', command)]
-assert len(paths) == 42, paths
+assert len(paths) == 40, paths
 for raw in paths:
     path = Path(raw)
     assert path.is_file() and path.is_relative_to(expected_root), path
@@ -1379,7 +1379,7 @@ PY
   harness uninstall claude > "$TMP/claude-template-default-uninstall.log" 2>&1 \
     || { cat "$TMP/claude-template-default-uninstall.log" >&2; fail "default template uninstall failed"; }
 )
-ok "default Claude activation keeps the 42 shipped hook paths healthy under HOME/.claude"
+ok "default Claude activation keeps the 40 shipped hook paths healthy under HOME/.claude"
 
 # Custom config roots have no fallback hook files under HOME/.claude. The
 # capture wrappers record resolved argv without running any hook workload.
@@ -1418,8 +1418,8 @@ commands = [hook["command"] for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])
             if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
 managed = [command for command in commands if prefix in command]
-assert sum(command.count(prefix) for command in managed) == 42, len(managed)
-assert sum("/hooks/" in command for command in managed) == 41
+assert sum(command.count(prefix) for command in managed) == 40, len(managed)
+assert sum("/hooks/" in command for command in managed) == 39
 assert sum("/tools/memory/mem.py" in command for command in managed) == 1
 assert not (Path(os.environ["HOME"]) / ".claude/hooks/run-hook.sh").exists()
 
@@ -1452,16 +1452,16 @@ for command in managed:
                                 capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, (command, result.returncode, result.stderr)
 records = [json.loads(line) for line in capture_log.read_text().splitlines()]
-assert len(records) == 42, records
+assert len(records) == 40, records
 paths = [record["argv"][0] for record in records]
 for raw in paths:
     path = Path(raw)
     assert str(path).startswith(str(expected_root) + os.sep), path
     assert path.is_file(), path
     assert ".claude}" not in str(path), path
-assert sum("/hooks/" in raw for raw in paths) == 41, paths
+assert sum("/hooks/" in raw for raw in paths) == 39, paths
 assert sum("/tools/memory/mem.py" in raw for raw in paths) == 1, paths
-assert sum(raw.endswith("/hooks/run-hook.sh") for raw in paths) == 40, paths
+assert sum(raw.endswith("/hooks/run-hook.sh") for raw in paths) == 38, paths
 assert sum(raw.endswith("/hooks/herdr-agent-state.sh") for raw in paths) == 1, paths
 session_start = [hook["command"] for group in settings["hooks"].get("SessionStart", [])
                  for hook in group.get("hooks", [])]
@@ -1478,7 +1478,7 @@ settings = json.load(open(sys.argv[1], encoding="utf-8"))
 commands = [hook.get("command") for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])]
 prefix = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-assert sum(command.count(prefix) for command in commands if isinstance(command, str)) == 42
+assert sum(command.count(prefix) for command in commands if isinstance(command, str)) == 40
 canonical = 'bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr-agent-state.sh" session'
 assert sum(command == canonical for command in commands) == 1
 assert any(hook.get("command") == "echo custom-user-hook"
@@ -1507,7 +1507,7 @@ assert settings["hooks"]["PreToolUse"] == [{"matcher": "*", "hooks": [
 PY
   test ! -e "$HOME/.claude" || fail "custom Claude activation wrote into default HOME/.claude"
 )
-ok "custom Claude activation resolves all 42 paths with spaces, repeats once, and uninstalls both spellings"
+ok "custom Claude activation resolves all 40 paths with spaces, repeats once, and uninstalls both spellings"
 
 # Uninstall must never mutate vendor executable/version bytes on any modeled
 # Claude channel; Hearting never had ingress into any of these paths.

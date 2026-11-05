@@ -299,7 +299,7 @@ def completed_nodes(jobs: Path, route_id: str) -> FrozenSet[str]:
 def started_nodes(jobs: Path, route_id: str, route_hash: str) -> FrozenSet[str]:
     """Every node id with ANY registry row bound to this exact
     `(route_id, route_hash)` pair (cancelled rows included — their recovery
-    is SD-105/106's `claim_recovery_retry` path, not stage advance).
+    is SD-106's same-node retry, not stage advance).
 
     Scoping by `route_hash` — rather than `route_id` alone — is what actually
     pins `advance_generation` (§4.2): a distinct generation always compiles

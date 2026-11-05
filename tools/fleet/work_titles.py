@@ -2,8 +2,36 @@
 import re
 import json
 import unicodedata
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
+
+
+class TitleReadCache:
+    """Pure validation results owned by observed, read-only parser documents."""
+
+    def __init__(self):
+        self.entries = OrderedDict()
+        self.lock = threading.RLock()
+
+    def read(self, key, dependencies, load, errors):
+        with self.lock:
+            previous = self.entries.get(key)
+            if (previous is not None and len(previous[0]) == len(dependencies)
+                    and all(old is new for old, new in zip(previous[0], dependencies))):
+                self.entries.move_to_end(key)
+                return previous[1]
+        try:
+            value = load()
+        except errors:
+            value = None
+        with self.lock:
+            self.entries[key] = (dependencies, value)
+            self.entries.move_to_end(key)
+            while len(self.entries) > 128:
+                self.entries.popitem(last=False)
+        return value
 
 
 def _text(value, limit=400):
@@ -50,7 +78,7 @@ def subject_command(subject, command):
     return subject if not command or command.casefold() in subject.casefold() else subject + ' ' + command
 
 
-def cycle_title(root, record, read_json):
+def cycle_title(root, record, read_json, *, validation_cache=None):
     """Read only this campaign's metadata; reuse canonical field validation."""
     from .collectors import dispatch
     cid, camp = record.get('cycle_id'), record.get('campaign_id')
@@ -83,8 +111,12 @@ def cycle_title(root, record, read_json):
                                for key in (doc.get('cycles') or {})
                                if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)}
                     try:
-                        foreign = artifact_meta._validate_meta_doc(doc, identity['artifact_root_id'], camp, members)
-                        if not foreign:
+                        validate = artifact_meta._validate_meta_doc
+                        load = lambda: validate(doc, identity['artifact_root_id'], camp, members)
+                        foreign = (validation_cache.read(('meta', str(root), camp),
+                            (validate, doc, identity, *members.values()), load, artifact_meta.MetaError)
+                            if validation_cache is not None else load())
+                        if foreign is not None and not foreign:
                             cycle = doc.get('cycles', {}).get(cid, {})
                             campaign = doc.get('campaign', {})
                     except artifact_meta.MetaError:
@@ -92,13 +124,19 @@ def cycle_title(root, record, read_json):
                 sidecar = read_json(str(producer / 'cycle-display-titles.json'))
                 if isinstance(sidecar, dict) and identity.get('artifact_root_id') and identity.get('repository_id'):
                     try:
-                        declaration = artifact_cycle_titles.validate_declaration(json.dumps(sidecar).encode(),
+                        validate = artifact_cycle_titles.validate_declaration
+                        load = lambda: validate(json.dumps(sidecar).encode(),
                             root_id=identity['artifact_root_id'], repository_id=identity['repository_id'])
+                        declaration = (validation_cache.read(('declaration', str(root)),
+                            (validate, sidecar, identity), load, artifact_cycle_titles.CycleTitlesError)
+                            if validation_cache is not None else load())
                         declarations['cycle_id'] = next((_text(row['display_title'], 120)
-                            for row in declaration['entries'] if row['cycle_id'] == cid and row['campaign_id'] == camp), '')
+                            for row in (declaration or {}).get('entries', ())
+                            if row['cycle_id'] == cid and row['campaign_id'] == camp), '')
                     except artifact_cycle_titles.CycleTitlesError:
                         pass
-                declarations['campaign_id'] = artifact_meta.legacy_title(root, camp)[0]
+                declarations['campaign_id'] = dispatch._observed_legacy_campaign_title(
+                    root, camp, artifact_meta.legacy_title)
         except Exception:
             pass
     # An automatically derived title equal to the slug is not a human title.

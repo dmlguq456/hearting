@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when a new document has an independent audience and document goal. Owns document; default preset. Not for experiment reports (lab), existing-document edits, or code."
 argument-hint: "<task description> [--mode paper|presentation|doc] [--intensity direct|quick|standard|strong|thorough|adversarial] [--user-refine] [--no-clarify] [--from analyze|strategy|strategy-refine|draft|draft-refine|finalize]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: doc
@@ -27,9 +28,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/autopilot-draft.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+Main session only: after approval, read `capabilities/autopilot-draft.md`. Registered owners read only `capabilities/autopilot-draft/references/owner-execution.md`; stage workers read only their assigned contracts.
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

@@ -1,8 +1,11 @@
 """Fail-soft collector for indexed resource-runner registries."""
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from ..model import ResourceJob, project_of
+
+_READ_CACHE = None
 
 
 def _shared():
@@ -15,10 +18,16 @@ def _shared():
 
 
 def collect(index_path=None):
+    global _READ_CACHE
     rows = []
     diagnostics = []
     try:
-        raw, diagnostics = _shared().scan(index_path=index_path)
+        shared = _shared()
+        scope = getattr(shared, 'passive_read_scope', None)
+        if callable(scope) and _READ_CACHE is None:
+            _READ_CACHE = shared.ResourceReadCache()
+        with scope(_READ_CACHE) if callable(scope) else nullcontext():
+            raw, diagnostics = shared.scan(index_path=index_path)
         for item in raw:
             try:
                 item["project"] = project_of(item.get("cwd"))

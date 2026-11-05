@@ -1,8 +1,6 @@
 # AGENTS.md — Codex Adapter Bootstrap
 
-This is a Codex adapter router, not the portable source of truth. The semantic
-hierarchy is `core/capabilities/roles -> {Claude, Codex, OpenCode}`; adapters
-are siblings and none is another's reference implementation. Edit core first.
+Codex adapter router, not the portable source of truth: `core/capabilities/roles -> {Claude, Codex, OpenCode}`, adapters are siblings; edit core first.
 
 The harness root `<agent-home>` is the active `AGENT_HOME`, else
 `${CODEX_HOME:-$HOME/.codex}/hearting` (shared resolver
@@ -58,9 +56,10 @@ capability-route compose`:
 hearting run capability-route compose --start --prompt-file <task> [--shape direct]
 ```
 
-`hearting run <utility>` uses `AGENT_HOME` when set, else the installed
-release. Other flags are hints, except a shape the person or an earlier frame
-already decided: honor it, and use `--shape staged --graph <stage,…>` for
+Reuse the start receipt's `runtime` command prefixes; they already resolve
+the installation. `hearting run <utility>` uses `AGENT_HOME` when set, else the
+installed release. Other flags are hints, except a shape the person or an
+earlier frame already decided: honor it, and use `--shape staged --graph <stage,…>` for
 stages the person named (§0.2.1). A refusal names what to add, such as
 `--campaign-key`. For a user's material request that is not yet approved,
 present the §0.4 intent card before starting (진행 / 수정 / 중단); a
@@ -108,17 +107,15 @@ dispatch depth, model role, tests, safety, or validation.
 
 ## Where to look
 
-| Need | Read |
-|---|---|
-| Layers, harness root, artifact root | `core/CORE.md` |
-| Routing §0.2, entry card §0.4, report §0.5, completion §0.6 | `core/WORKFLOW.md` |
-| Intensity, QA, model roles, artifacts, Skills | `core/CONVENTIONS.md` |
-| Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14 | `core/OPERATIONS.md` |
-| Memory | `core/MEMORY.md` |
-| Capabilities, roles, modes | `capabilities/README.md`, `roles/README.md`, `roles/MODES.md` |
-| Route health | `hearting run workflow-supervisor status --route <id> --json` |
-| Compute hosts | `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom |
-| This runtime's commands and edge cases | the adapter `README.md` and `ADAPTATION.md` named below |
+- Layers, harness root, artifact root: `core/CORE.md`
+- Routing §0.2, entry card §0.4, report §0.5, completion §0.6: `core/WORKFLOW.md`
+- Intensity, QA, model roles, artifacts, Skills: `core/CONVENTIONS.md`
+- Git, worktrees, dispatch, receipts §5.10a, frame questions §5.10b, continuation §5.12, other sessions §5.14: `core/OPERATIONS.md`
+- Memory: `core/MEMORY.md`
+- Capabilities, roles, modes: `capabilities/README.md`, `roles/README.md`, `roles/MODES.md`
+- Route health: `hearting run workflow-supervisor status --route <id> --json`
+- Compute hosts: `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom
+- This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
 Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
 write the primary checkout's `.agent_reports/`, and legacy `.claude_reports/`
@@ -160,16 +157,9 @@ Portable behavior contract = `roles/response-policy.md`.
   shell output does not wake you; for other long-running work follow
   `preflight.sh loop-info runtime-watch`.
 - Use native subagents only after `preflight.sh subagent-info --check`.
-- If the memory prompt hook is unavailable, record `recall` or `skip` with
-  `preflight.sh recall-gate <cwd> ...`.
 - Do not edit runtime-owned credentials, sessions, logs, caches, databases,
   or `$CODEX_HOME/config.toml`.
-- Command surface, tool checks, hook trust, token budget, and edge cases:
-  `adapters/codex/README.md` (Session Command Reference) and
-  `adapters/codex/ADAPTATION.md`. Command output is authoritative.
-
-## Compatibility Boundary
-
-Claude/OpenCode files are sibling references, not Codex bootstrap input. Portable
-meaning comes from `core/`, `capabilities/`, and `roles/`; map it to Codex
-tools, approval, sandbox, lifecycle, and discovery.
+- If the memory prompt hook is unavailable, record `recall` or `skip` with
+  `preflight.sh recall-gate <cwd> ...`.
+- Command surface, tool checks, hook trust, token budget, edge cases:
+  `adapters/codex/README.md` (Session Command Reference). Command output is authoritative.

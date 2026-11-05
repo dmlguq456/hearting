@@ -35,6 +35,7 @@ import session_tidy as tidy  # noqa: E402
 import session_tidy_clear as clear  # noqa: E402
 from peer_read_context import PeerReadContext  # noqa: E402
 from harness_capabilities import HARNESSES  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class IsolatedCase(unittest.TestCase):
@@ -138,6 +139,7 @@ class IsolatedCase(unittest.TestCase):
                          {key: dict(value) for key, value in compact.binding_rows.items()})
         self.assertEqual(full.seat_edges, compact.seat_edges)
         self.assertEqual(full.seat_unresolved, compact.seat_unresolved)
+        self.assertEqual(full.binding_conflicts, compact.binding_conflicts)
         self.assertEqual(set(full.ledger_rows), set(compact.ledger_rows))
         # Compaction may drop only rows no resolver reads: every kept row survives
         # in order, and a compact view is never larger than the full one.
@@ -336,6 +338,10 @@ class InboxContractTest(IsolatedCase):
         # A named open record rewritten or removed makes the discovery stale.
         record = pending.record_path(self.dispatch_root, "claude-A", "delivery-inbox-1")
         record.write_text('{"changed": true}\n')
+        # Fast writes can share the filesystem's timestamp tick. This check
+        # exercises a changed metadata generation, not wall-clock resolution.
+        changed = record.stat().st_mtime_ns + 1_000_000
+        os.utime(record, ns=(changed, changed))
         self.assertFalse(inbox.is_current(payload, self.dispatch_root))
         record.unlink()
         self.assertFalse(inbox.is_current(payload, self.dispatch_root))
@@ -343,7 +349,10 @@ class InboxContractTest(IsolatedCase):
         record.write_text("{}\n")
         payload = self.inbox_payload()
         self.assertTrue(inbox.is_current(payload, self.dispatch_root, folded_edge_digest=digest))
-        (pending.record_directory(self.dispatch_root, "claude-A") / "delivery-new.json").write_text("{}\n")
+        directory = pending.record_directory(self.dispatch_root, "claude-A")
+        (directory / "delivery-new.json").write_text("{}\n")
+        changed = directory.stat().st_mtime_ns + 1_000_000
+        os.utime(directory, ns=(changed, changed))
         self.assertFalse(inbox.is_current(payload, self.dispatch_root))
         # A new edge generation invalidates every derived inbox.
         payload = self.inbox_payload()
@@ -462,7 +471,10 @@ class ScopeBudgetTest(IsolatedCase):
         self.assertTrue(PeerReadContext(compact_lineage=True).compact_lineage)
         # The runner, Fleet readers and the courier keep their full observations;
         # only the sweep's effect groups opt in, and that file is not pinned here.
-        for relative in ("utilities/peer-steward.py",
+        steward_parts = [f"utilities/{path.name}"
+                         for path in sorted((ROOT / "utilities").glob("peer_steward_*.py"))
+                         if "Split out of `peer-steward.py`" in path.read_text(encoding="utf-8")]
+        for relative in ("utilities/peer-steward.py", *steward_parts,
                          "tools/fleet/collectors/dispatch.py",
                          "tools/fleet/collectors/__init__.py",
                          "utilities/dispatch_lineage_observation.test.py"):
@@ -543,6 +555,101 @@ class CompactLineageEquivalenceTest(IsolatedCase):
 
     def publish(self):
         return handover.publish_lineage_rows(self.dispatch_root)
+
+    def test_changed_compact_ledger_retains_authority_without_activity_history(self):
+        self.fixture_graph()
+        self.publish()
+        path = tidy.state_root() / "sessions" / "seat-bound.jsonl"
+        with path.open("a") as stream:
+            for index in range(200):
+                stream.write(json.dumps({"event": "prompt", "harness": "claude",
+                    "sid": "claude-B", "ts": index + 100}) + "\n")
+        complete, compact = self.graphs()
+        self.assert_equivalent(complete, compact)
+        self.assertLess(len(compact.ledger_rows["seat-bound"]),
+                        len(complete.ledger_rows["seat-bound"]))
+        self.assertEqual(self.resolver_answers("full"), self.resolver_answers("compact"))
+
+    def test_fork_bindings_hidden_fork_and_unreadable_recovery_match_full_projection(self):
+        rows = [dict(event="succession", source="tidy-clear", harness="claude", sid=target,
+                     ts=1, **{"from": origin})
+                for origin, target in (("P", "A"), ("A", "B"), ("B", "C"), ("A", "D"))]
+        binding = self.binding(parent="A")
+        rows.append(self.handover_row("B", "A", [binding], source="clear", ts=2))
+        path = self.write_ledger("fork", rows)
+        self.publish()
+        contexts = [PeerReadContext(), PeerReadContext(compact_lineage=True)]
+        def verify(expected):
+            full, compact = self.graphs()
+            self.assert_equivalent(full, compact)
+            self.assertEqual([handover.effective_parent(self.meta(parent="A"), self.jobs, read_context=ctx)
+                              for ctx in contexts], [expected, expected])
+            self.assertEqual(handover.chain_end("claude", "C"), ("C", "self"))
+        verify("C")
+        # A competing claim at a different depth must survive compact publication,
+        # physical duplicates, file order, and a warm reader's earlier observation.
+        rows.append(self.handover_row("E", "D", [binding], source="clear", ts=20))
+        for reverse in (False, True):
+            self.write_ledger("fork", list(reversed(rows)) if reverse else rows)
+            self.write_ledger("duplicate", [rows[-1]])
+            verify("")
+            self.publish()
+            verify("")
+        original = path.read_bytes()
+        path.write_bytes(original + b"{corrupt\n")
+        for ctx in contexts:
+            self.assertEqual(handover.effective_parent(self.meta(parent="A"), self.jobs, read_context=ctx), "")
+            with self.assertRaises(OSError):
+                handover.lineage_graph(read_context=ctx)
+        path.write_bytes(original)
+        verify("")
+        # A second fork hidden in a new ledger invalidates C but leaves full and
+        # compact readers in agreement after their warm observations.
+        self.write_ledger("hidden", [self.handover_row("F", "C", source="clear"),
+                                     self.handover_row("G", "C", source="clear")])
+        self.publish()
+        self.assert_equivalent(*self.graphs())
+        self.assertEqual(handover.chain_end("claude", "C"), ("C", "unresolved"))
+
+    def test_old_scope_inbox_is_normally_refreshed_and_ancestor_notice_is_not_deliverable(self):
+        import importlib.util
+        import dispatch_session_sweep as sweep
+        import peer_obligations
+        import session_notice
+        spec = importlib.util.spec_from_file_location("inbox_fork_steward", ROOT / "utilities/peer-steward.py")
+        steward = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = steward
+        spec.loader.exec_module(steward)
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        rows = [dict(event="succession", source="tidy-clear", harness="claude", sid=target,
+                     ts=1, **{"from": origin})
+                for origin, target in (("P", "A"), ("A", "B"), ("B", "C"), ("A", "D"))]
+        self.write_ledger("fork", rows)
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(peer_obligations, "request_dispatch_reconciliation", return_value=False):
+            records = [session_notice.notify("claude", sid, key="inbox-" + sid,
+                subject="fixture", text="pending result", jobs=self.jobs) for sid in ("A", "B")]
+        graph = handover.lineage_graph()
+        old = dict(schema=1, edge_generation=inbox.read_edge_generation(self.dispatch_root),
+            folded_edge_digest=inbox.edge_digest(graph.edges), dir_identities={}, delivery_ids=[],
+            candidates=[dict(storage_key="C", attempts=None)], observed_at_ns=time.time_ns())
+        path = inbox.inbox_path(self.dispatch_root, "claude", "C")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(old))
+        with patch_split(steward, "_live_recipients", return_value={("claude", "C")}):
+            result = steward._prefill_live_inboxes(self.dispatch_root, deadline_ns=time.monotonic_ns() + 10**10)
+        self.assertEqual(result["written"], 1)
+        refreshed = inbox.read_inbox(self.dispatch_root, "claude", "C")
+        self.assertEqual(refreshed["schema"], inbox.INBOX_SCHEMA_VERSION)
+        self.assertEqual({entry["storage_key"] for entry in refreshed["candidates"]}, {"B", "C"})
+        addressed, _ = sweep.addressed_records(self.dispatch_root, "claude-parent-runtime", "C")
+        self.assertEqual([record["delivery_id"] for record in addressed], [records[1]["delivery_id"]])
+        # The new projection is only discovery. A later fork changes the live
+        # per-record answer even if a caller still holds its cached scope.
+        self.write_ledger("later", [self.handover_row("F", "C", source="clear"),
+                                    self.handover_row("G", "C", source="clear")])
+        self.assertFalse(handover.record_for_session(records[1], None, session="C", harness="claude",
+                                                    storage_key="B", jobs=self.jobs))
 
     def test_compact_and_full_observations_agree_through_every_mutation(self):
         self.fixture_graph()

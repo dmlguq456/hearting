@@ -60,6 +60,11 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_SLEEP_SECONDS = 7 * 24 * 3600
@@ -67,6 +72,9 @@ MAX_CHAIN = 3
 SLACK_SECONDS = 60
 POLL_SECONDS = 60
 LATER_SECONDS = 60
+# Past the chain limit the re-arm floor doubles per step; this many doublings
+# already exceed the longest wait, so a larger chain value changes nothing.
+MAX_FLOOR_DOUBLINGS = (MAX_SLEEP_SECONDS // LATER_SECONDS).bit_length()
 # The usage gate's own probe interval (dispatch_capacity_evidence.PROBE_INTERVAL).
 RECHECK_SECONDS = 600
 LATER_REASONS = ("owner-launch-not-admitted", "owner-launch-not-started")
@@ -162,7 +170,7 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
         # The floor doubles per step past the limit so an already-passed (stale)
         # reset cannot re-arm in the same second; every step still stays inside
         # the longest wait.
-        floor = LATER_SECONDS * 2 ** (chain - MAX_CHAIN)
+        floor = LATER_SECONDS * 2 ** min(chain - MAX_CHAIN, MAX_FLOOR_DOUBLINGS)
         delay = min(max(epoch - now(), floor), MAX_SLEEP_SECONDS - SLACK_SECONDS)
         epoch = now() + delay
         retry_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
@@ -201,9 +209,9 @@ def arm(result: dict, route_file, jobs, *, environ=None, spawn=subprocess.Popen,
         return None
     log = path.with_suffix(".log")
     with open(os.devnull, "rb") as stdin, log.open("ab") as out:
-        spawn([sys.executable, str(Path(__file__).resolve()), "run", "--record", str(path)],
+        end_with_test(spawn([sys.executable, str(Path(__file__).resolve()), "run", "--record", str(path)],
               stdin=stdin, stdout=out, stderr=subprocess.STDOUT, env={**env, CHAIN_ENV: str(chain + 1)},
-              start_new_session=True, close_fds=True)
+              start_new_session=True, close_fds=True))
     return {"record": str(path), "resume_at": retry_at, "state": "armed", "cause": cause}
 
 
@@ -253,6 +261,28 @@ def follow_installed_release(path: Path) -> None:
         pass
 
 
+def _route_finished(record: dict) -> bool:
+    """Whether the waited route is closed as proven finished work.
+
+    Only a closure whose terminal gate is proven, with no inline finish
+    pending, not closed automatically and not a framed route qualifies;
+    anything unreadable does not.
+    """
+    try:
+        route_file = Path(record["route_file"])
+        route = json.loads(route_file.read_text(encoding="utf-8"))
+        if not isinstance(route, dict) or route.get("route_id") != record.get("route_id"):
+            return False
+        from dispatch_notice_state import closed_outcome
+        import route_plan
+        closed = closed_outcome(route_file, route)
+    except Exception:  # noqa: BLE001 -- unknown keeps the existing start
+        return False
+    return bool(isinstance(closed, dict) and closed.get("terminal_gate_proven") is True
+                and not closed.get("autoclose") and not closed.get("finish_pending")
+                and not route_plan.is_framed_route(route))
+
+
 def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cleared=_cleared,
         follow=follow_installed_release) -> int:
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -261,7 +291,12 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
         return 0
     slack = 0 if record.get("cause") in {"answer", "replacement"} else SLACK_SECONDS
     deadline = now() + min(MAX_SLEEP_SECONDS, max(0.0, epoch + slack - now()))
+    # The recheck schedule runs from the arm time, so a new `run` of the same
+    # record (a release follow, same PID) keeps it instead of restarting it.
     recheck_at = now() + RECHECK_SECONDS
+    armed = _epoch(record.get("armed_at") or "")
+    if armed is not None and armed <= now():
+        recheck_at = armed + RECHECK_SECONDS * (int((now() - armed) // RECHECK_SECONDS) + 1)
     early = False
     while now() < deadline:
         # Short steps: a record removed (or disarmed) meanwhile ends the wait.
@@ -298,11 +333,19 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
         receipt = json.loads(lines[-1]) if lines else {}
     except ValueError:
         receipt = {}
+    # `start` always runs: on a closed route it still retries settlement and
+    # shared-spec publication and reports what is left. Only a plain
+    # `completed` of a route that finished as proven work while this wait
+    # slept has nothing to tell its session.
+    quiet = (done.returncode == 0 and receipt.get("state") == "completed"
+             and not receipt.get("next_leg") and _route_finished(record))
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
-                  owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}))
+                  owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
+                  **({"notice": "skipped-route-completed"} if quiet else {}))
     _write(path, record)
-    _notify(record, receipt, capped=capped and not early)
+    if not quiet:
+        _notify(record, receipt, capped=capped and not early)
     return 0
 
 

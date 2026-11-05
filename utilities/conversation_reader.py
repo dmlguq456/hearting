@@ -31,15 +31,21 @@ def _problem(status: str, source: str | None, reason: str) -> ConversationRead:
     return ConversationRead(status, "", source, reason)
 
 
+def _say(message: str) -> str:
+    """A reason the viewer shows, from tools/i18n/messages.json (English unless Korean is declared)."""
+    import session_tidy
+    return session_tidy._ui_translator()(message)
+
+
 def _safe_file(path: Path) -> ConversationRead | None:
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return _problem("missing", str(path), "원문 파일이 없습니다")
+        return _problem("missing", str(path), _say("conversation.reason.no_file"))
     except OSError as exc:
         return _problem("unreadable", str(path), type(exc).__name__)
     if not stat.S_ISREG(info.st_mode):
-        return _problem("unreadable", str(path), "일반 파일이 아닙니다")
+        return _problem("unreadable", str(path), _say("conversation.reason.not_regular"))
     try:
         with path.open("rb") as stream:
             stream.read(0)
@@ -66,9 +72,9 @@ def _read_attempt(path: Path, harness: str) -> ConversationRead:
                 lines.extend(attempt_view.format_record(harness, record))
             if cursor.error or cursor.offset <= previous:
                 return ConversationRead("partial", "\n".join(line.text for line in lines), str(path),
-                                        "원문을 끝까지 읽지 못했습니다")
+                                        _say("conversation.reason.not_to_end"))
         text = "\n".join(line.text for line in lines)
-        return ConversationRead("available", text, str(path), "" if text else "대화 내용이 없습니다")
+        return ConversationRead("available", text, str(path), "" if text else _say("conversation.reason.empty"))
     except (OSError, ValueError, TypeError) as exc:
         return _problem("unreadable", str(path), type(exc).__name__)
 
@@ -76,18 +82,18 @@ def _read_attempt(path: Path, harness: str) -> ConversationRead:
 def read_conversation(entry: dict) -> ConversationRead:
     """Read an entry from ``session_tidy.seat_lineage`` from its first record to EOF."""
     if not isinstance(entry, dict):
-        return _problem("unreadable", None, "세션 위치 정보가 올바르지 않습니다")
+        return _problem("unreadable", None, _say("conversation.reason.bad_entry"))
     harness, sid = entry.get("harness"), entry.get("sid")
     transcript = entry.get("transcript") if isinstance(entry.get("transcript"), dict) else {}
     raw_path = transcript.get("path")
     if not isinstance(raw_path, str) or not raw_path:
         status = transcript.get("status")
         return _problem("missing" if status in (None, "missing", "expired") else "unreadable", None,
-                        "원문 위치를 찾을 수 없습니다" if status in (None, "missing", "expired")
-                        else "원문 위치를 읽을 수 없습니다")
+                        _say("conversation.reason.no_place" if status in (None, "missing", "expired")
+                             else "conversation.reason.place_unreadable"))
     path = Path(raw_path).expanduser()
     if not isinstance(harness, str) or harness not in tidy_transcripts.HARNESSES or not isinstance(sid, str):
-        return _problem("unreadable", str(path), "세션 식별 정보가 올바르지 않습니다")
+        return _problem("unreadable", str(path), _say("conversation.reason.bad_identity"))
     if _ATTEMPT.fullmatch(path.name):
         return _read_attempt(path, harness)
     checked = _safe_file(path)
@@ -112,10 +118,10 @@ def read_conversation(entry: dict) -> ConversationRead:
             seen.add(chunk.cursor_to)
             cursor = chunk.cursor_to
         text = "\n".join(chunks)
-        return ConversationRead("available", text, str(path), "" if text else "대화 내용이 없습니다")
+        return ConversationRead("available", text, str(path), "" if text else _say("conversation.reason.empty"))
     except FileNotFoundError:
         return ConversationRead("missing" if cursor == 0 else "partial", "\n".join(chunks), str(path),
-                                "원문 파일이 없습니다")
+                                _say("conversation.reason.no_file"))
     except (OSError, ValueError, TypeError) as exc:
         return ConversationRead("unreadable" if cursor == 0 else "partial", "\n".join(chunks), str(path),
                                 type(exc).__name__)

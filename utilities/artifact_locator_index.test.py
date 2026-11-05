@@ -921,8 +921,11 @@ def _writer_census():
     `update_indexes` fails this test instead of silently drifting the index."""
 
     found = set()
-    for name in ("artifact_producer.py", "artifact_campaign.py", "artifact_cutover.py",
-                "artifact_relayout.py", "artifact_residue.py", "artifact_resplit.py", "artifact_cross_root_move.py"):
+    # `artifact_producer.py` is split into `artifact_producer_*.py` siblings; scan them all.
+    producer_parts = tuple(sorted(path.name for path in Path(__file__).parent.glob("artifact_producer_*.py")))
+    for name in ("artifact_producer.py", *producer_parts, "artifact_campaign.py",
+                 "artifact_cutover.py", "artifact_relayout.py", "artifact_residue.py",
+                 "artifact_resplit.py", "artifact_cross_root_move.py"):
         path = Path(__file__).with_name(name)
         if not path.is_file():
             continue
@@ -947,32 +950,30 @@ def _writer_census():
 _EXPECTED_WRITER_CENSUS = {
     ("artifact_cross_root_move.py", "move"): "incremental",
     ("artifact_producer.py", "_begin_cycle_record"): "incremental",
-    ("artifact_producer.py", "_remove_empty_cycle"): "incremental",
-    ("artifact_producer.py", "_commit_sealed"): "incremental",
-    ("artifact_producer.py", "mark_cycle_superseded"): "incremental",
-    ("artifact_producer.py", "mark_campaign_superseded"): "incremental",
-    ("artifact_producer.py", "set_campaign_related"): "no-row-effect",
-    ("artifact_producer.py", "finalize"): "no-row-effect",  # the no-lineage cycle-record write
-    ("artifact_producer.py", "_recover_locked"): "no-row-effect",  # the dropped-record write
-    ("artifact_producer.py", "_refresh_journal_resume"): "no-row-effect",  # pending history; row changes use _commit_sealed
-    ("artifact_producer.py", "_observe_control_changes"): "no-row-effect",  # observation digests and pending history only
-    ("artifact_producer.py", "_bind_cycle_route_locked"): "no-row-effect",  # D-120: `route_bindings[]` is audit-only, never a judgment input
+    ("artifact_producer_interim.py", "_remove_empty_cycle"): "incremental",
+    ("artifact_producer_refresh.py", "_commit_sealed"): "incremental",
+    ("artifact_producer_cycle_ops.py", "mark_cycle_superseded"): "incremental",
+    ("artifact_producer_cycle_ops.py", "mark_campaign_superseded"): "incremental",
+    ("artifact_producer_cycle_ops.py", "set_campaign_related"): "no-row-effect",
+    ("artifact_producer_finalize.py", "finalize"): "no-row-effect",  # the no-lineage cycle-record write
+    ("artifact_producer_finalize.py", "_recover_locked"): "no-row-effect",  # the dropped-record write
+    ("artifact_producer_refresh.py", "_refresh_journal_resume"): "no-row-effect",  # pending history; row changes use _commit_sealed
+    ("artifact_producer_history.py", "_observe_control_changes"): "no-row-effect",  # observation digests and pending history only
+    ("artifact_producer_routes.py", "_bind_cycle_route_locked"): "no-row-effect",  # D-120: `route_bindings[]` is audit-only, never a judgment input
     # §45 D-126: the three commands and the finding of a hand-made change.
-    ("artifact_producer.py", "cycle_mark"): "no-row-effect",  # `disposition` is a record field no locator row reads
-    ("artifact_producer.py", "_publish_document_locked"): "incremental",  # its callers update the locator indexes
-    ("artifact_producer.py", "_adopt_location_locked"): "incremental",  # `cycle_move` and `reconcile_root` update them
-    ("artifact_producer.py", "_tombstone_cycle_locked"): "incremental",  # `delete_cycle`, `delete_campaign`, `reconcile_root`
-    ("artifact_producer.py", "_revive_cycle_locked"): "incremental",  # `reconcile_root` updates them
-    ("artifact_producer.py", "_reparent_children_locked"): "incremental",  # `delete_cycle`, `delete_campaign`, `reconcile_root` update them
-    ("artifact_producer.py", "_finalize_deleted_locked"): "no-row-effect",  # a deleted cycle has no row
-    ("artifact_producer.py", "delete_cycle"): "incremental",
+    ("artifact_producer_cycle_ops.py", "cycle_mark"): "no-row-effect",  # `disposition` is a record field no locator row reads
+    ("artifact_producer_cycle_ops.py", "_publish_document_locked"): "incremental",  # its callers update the locator indexes
+    ("artifact_producer_cycle_ops.py", "_adopt_location_locked"): "incremental",  # `cycle_move` and `reconcile_root` update them
+    ("artifact_producer_cycle_ops.py", "_tombstone_cycle_locked"): "incremental",  # `delete_cycle`, `delete_campaign`, `reconcile_root`
+    ("artifact_producer_cycle_ops.py", "_revive_cycle_locked"): "incremental",  # `reconcile_root` updates them
+    ("artifact_producer_cycle_ops.py", "_reparent_children_locked"): "incremental",  # `delete_cycle`, `delete_campaign`, `reconcile_root` update them
+    ("artifact_producer_finalize.py", "_finalize_deleted_locked"): "no-row-effect",  # a deleted cycle has no row
+    ("artifact_producer_cycle_ops.py", "delete_cycle"): "incremental",
     ("artifact_producer.py", "recover_cycle_times"): "full",
     ("artifact_producer.py", "backfill_cycle_bindings"): "full",
     ("artifact_campaign.py", "_commit_event"): "incremental",
     ("artifact_campaign.py", "_materialize"): "incremental",
     ("artifact_campaign.py", "supersede_locked"): "incremental",
-    ("artifact_cutover.py", "seal_legacy_cycle"): "out-of-band-legacy",
-    ("artifact_cutover.py", "adopt_campaign"): "out-of-band-legacy",
 }
 
 

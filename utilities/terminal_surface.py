@@ -11,6 +11,16 @@ pane list showed right after opening.
 
 A surface only places, labels and lists panes; the command it runs is composed
 separately by ``compose_command``, so every surface runs the same line.
+
+The same surfaces carry the agent terminal operations of the core loop: who runs
+in a pane (``process_info``), what it shows (``read_visible``), and one typed
+input (``send_text`` / ``send_keys`` / ``prompt``). ``pane_surface`` chooses by the
+pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. Pane
+ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. tmux
+has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
+the pane's foreground runtime, its process-proven session and that runtime's own
+turn record (Claude's session registry status, Codex's rollout lifecycle). What
+no record proves stays ``unknown``, which every typing path refuses.
 """
 from __future__ import annotations
 
@@ -24,13 +34,21 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
+import shutil
 import signal
 import subprocess
+import time
 from typing import Optional
 
 
 _HERE = Path(__file__).resolve().parent
+# A tmux pane address: the pane id, and the server socket it belongs to once known.
+_TMUX_PANE_ID = re.compile(r"(%[0-9]+)(?:@(/[^\s@]+))?")
+_HARNESSES = ("claude", "codex", "opencode")
+_PASTE_SETTLE_SEC = 0.2   # a TUI ends its bracketed-paste read before the separate Enter
+_WAIT_POLL_SEC = 0.5      # tmux has no agent event; its wait re-reads the native turn record
 _PROMPT = r"(?m)(?:^|[ ])(?:[$#%❯])\s*(?-m:$)"
 _PROMPT_LINE = re.compile(r"(?:^|[ ])(?:[$#%❯])\s*$")
 _SHELLS = frozenset({"bash", "dash", "fish", "ksh", "nu", "sh", "zsh"})
@@ -157,6 +175,27 @@ def _tidy_order(layout, caller):
     return [first] + [p for p in ids if p != first]
 
 
+def supervisor_corner(layout, marks):
+    """``(pane, top_left)`` for a tab's supervisor, as ``pane tidy`` would order it.
+
+    ``marks`` maps a pane id to its headers (display agent, title). The supervisor is
+    the first pane in reading order whose header carries ``⚑``; ``top_left`` says
+    whether it already is the top-left pane. None when no pane is marked or the
+    geometry does not read as a tiling. Read only.
+    """
+    try:
+        panes = _reading(layout)
+    except _TidyError:
+        return None
+    for pane in panes:
+        headers = marks.get(pane["pane_id"]) or ()
+        if isinstance(headers, str):
+            headers = (headers,)
+        if any(_SUPERVISOR.match(str(text or "")) for text in headers):
+            return pane["pane_id"], pane["pane_id"] == panes[0]["pane_id"]
+    return None
+
+
 def _shell_record(info):
     from pane_ownership import _process
     record = _process(info.get("shell_pid")) if isinstance(info, dict) else None
@@ -168,6 +207,188 @@ def _shell_record(info):
 def _run(argv):
     return subprocess.run(argv, capture_output=True, text=True, timeout=15,
                           stdin=subprocess.DEVNULL, check=False)
+
+
+def is_tmux_pane(pane):
+    """tmux pane ids are ``%N`` (``%N@<socket>`` with their server); Herdr's carry a
+    workspace (``w1:p2``), so they never meet."""
+    return isinstance(pane, str) and _TMUX_PANE_ID.fullmatch(pane) is not None
+
+
+def tmux_address(pane):
+    """``(pane id, server socket or None)`` of a tmux pane address, else ``("", None)``."""
+    found = _TMUX_PANE_ID.fullmatch(pane) if isinstance(pane, str) else None
+    return (found.group(1), found.group(2)) if found else ("", None)
+
+
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, TypeError, ValueError):
+        return path
+
+
+def same_tmux_pane(left, right):
+    """Two tmux addresses name one pane: the same id, and the same server where both say."""
+    (a, a_socket), (b, b_socket) = tmux_address(left), tmux_address(right)
+    return bool(a) and a == b and (not a_socket or not b_socket or _real(a_socket) == _real(b_socket))
+
+
+def tmux_socket(environ=None):
+    """The server ``$TMUX`` names, else None (tmux's own default server)."""
+    env = os.environ if environ is None else environ
+    return str(env.get("TMUX") or "").split(",", 1)[0].strip() or None
+
+
+def caller_tmux_pane(environ=None):
+    """``("%N@<socket>", socket)`` for a process started inside tmux; a hint, never proof."""
+    env = os.environ if environ is None else environ
+    pane = str(env.get("TMUX_PANE") or "").strip()
+    socket = tmux_socket(env)
+    if not socket or not is_tmux_pane(pane) or tmux_address(pane)[1]:
+        return "", None
+    return f"{pane}@{_real(socket)}", socket
+
+
+def pane_surface(pane, *, tmux=None, herdr_session=None):
+    """The surface that owns ``pane``: tmux for a tmux pane id (its own server first,
+    then ``tmux``, then ``$TMUX``), else Herdr."""
+    if is_tmux_pane(pane):
+        if not shutil.which("tmux"):
+            return None
+        return TmuxSurface(socket=tmux_address(pane)[1] or tmux or tmux_socket())
+    return HerdrSurface(session=herdr_session) if shutil.which("herdr") else None
+
+
+def _proc_table():
+    """``(pid, group, tty)`` of every live process this user owns, read once."""
+    rows = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return rows
+    uid = os.getuid()
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            path = Path("/proc") / name
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] in {"Z", "X"} or path.stat().st_uid != uid:
+                continue
+            rows.append((int(name), int(fields[2]), int(fields[4])))
+        except (OSError, ValueError, IndexError):
+            continue
+    return rows
+
+
+def _foreground_members(group, tty, table=None):
+    """Every process of one foreground group on one terminal, with its exact argv."""
+    from pane_ownership import _process
+    members = []
+    for pid, pgrp, terminal in (_proc_table() if table is None else table):
+        if pgrp != group or terminal != tty:
+            continue
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+            record = _process(pid)
+            if (not raw.endswith(b"\0") or len(raw) > 65536 or not record
+                    or record[2] != group or record[3] != tty):
+                continue
+            members.append({"pid": pid, "argv": [part.decode("utf-8") for part in raw[:-1].split(b"\0")]})
+        except (OSError, UnicodeError):
+            continue
+    return members
+
+
+def pane_runtime(info):
+    """``(harness, pid)`` of the one outermost interactive runtime in a pane's foreground.
+
+    Services, registered workers and anything that is not Claude/Codex/OpenCode are
+    ignored; a runtime started by another runtime in the same group (a tool's child)
+    belongs to the outer one. Two unrelated runtimes prove nothing.
+    """
+    from pane_ownership import _process, _registered_worker, _runtime
+    found = {}
+    for item in (info or {}).get("foreground_processes") or ():
+        pid = item.get("pid") if isinstance(item, dict) else None
+        if type(pid) is not int or pid <= 1:
+            continue
+        kind, service = _runtime(pid)
+        if kind in _HARNESSES and not service and not _registered_worker(pid):
+            found[pid] = kind
+    outer = []
+    for pid, kind in found.items():
+        ancestor, depth, nested = _process(pid), 0, False
+        while ancestor and depth < 64 and ancestor[1] > 1:
+            if ancestor[1] in found:
+                nested = True
+                break
+            ancestor, depth = _process(ancestor[1]), depth + 1
+        if not nested:
+            outer.append((kind, pid))
+    return outer[0] if len(outer) == 1 else None
+
+
+def _process_session(harness, pid, pane, surface):
+    """The session this exact runtime process proves, else ""."""
+    try:
+        if harness == "codex":
+            from pane_ownership import current_codex_thread
+            return current_codex_thread(pane, pid, tmux=surface.socket) or ""
+        import pane_ownership  # noqa: F401 - puts tools/ on the path
+        from fleet.process_identity import PROVEN, process_identity
+        found = process_identity(pid, harness)
+        return found.session_id if found.confidence == PROVEN and found.session_id else ""
+    except Exception:
+        return ""
+
+
+def _codex_home():
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def native_turn(harness, pid, session_id):
+    """``idle`` | ``working`` | ``blocked`` | ``unknown`` from the runtime's own record.
+
+    Claude: its session registry entry for this exact process (PID start) and
+    session. Codex: the latest task lifecycle in that thread's rollout; a thread with
+    no rollout has no recorded turn and stays unknown. OpenCode has no durable
+    turn record outside Herdr's pane events, so it stays unknown.
+    """
+    try:
+        import pane_ownership
+        if harness == "claude":
+            from fleet.collectors import claude
+            record = claude.read_registry(pid) or {}
+            live = pane_ownership._process(pid)
+            if (not live or str(record.get("procStart") or "") != live[5]
+                    or record.get("sessionId") != session_id):
+                return "unknown"
+            return {"busy": "working", "idle": "idle", "waiting": "blocked"}.get(
+                record.get("status"), "unknown")
+        if harness == "codex" and pane_ownership._THREAD_ID_RE.fullmatch(session_id or ""):
+            import glob
+            from fleet.collectors import codex
+            paths = glob.glob(str(_codex_home() / "sessions" / "*" / "*" / "*"
+                                  / f"rollout-*-{glob.escape(session_id)}.jsonl"))
+            if len(paths) != 1:
+                return "unknown"
+            lifecycle = codex._latest_task_lifecycle(paths[0])
+            if lifecycle and lifecycle[0] == "task_started":
+                return "working"
+            if lifecycle and lifecycle[0] in {"task_complete", "turn_aborted"}:
+                return "idle"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return None
 
 
 def next_cell(layout):
@@ -429,10 +650,56 @@ class TmuxSurface:
         rows = [line.split("\t") for line in out.splitlines() if line]
         return rows if all(len(row) == width for row in rows) else None
 
+    def _target(self, pane):
+        """The bare id of a pane on this server; an address naming another server is None."""
+        bare, socket = tmux_address(pane)
+        if not bare or (socket and self.socket and _real(socket) != _real(self.socket)):
+            return None
+        return bare
+
+    def _tmux_stdin(self, data, *args):
+        argv = ["tmux"] + (["-S", self.socket] if self.socket else []) + [str(a) for a in args]
+        try:
+            proc = subprocess.run(argv, input=data, capture_output=True, text=True, timeout=15,
+                                  check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if proc.returncode == 0 else None
+
     def _describe(self, pane, *fields):
+        pane = self._target(pane)
+        if pane is None:
+            return None
         rows = self._rows(1 + len(fields), "display-message", "-p", "-t", pane,
                           "\t".join(["#{pane_id}", *fields]))
         return rows[0][1:] if rows and len(rows) == 1 and rows[0][0] == pane else None
+
+    def address(self, pane):
+        """``%N@<socket>``: the pane id with the server that answers for it, else None."""
+        found = self._describe(pane, "#{socket_path}")
+        return f"{self._target(pane)}@{_real(found[0])}" if found and found[0] else None
+
+    def input_refusal(self, pane):
+        """Why typed input must not reach this pane now, else None.
+
+        A pane in a tmux mode (copy, choose-client, tree...) gives keys to the mode,
+        not to the program, and drops the paste brackets; a synchronized pane copies
+        keys to its neighbours; input-off ignores them. Unknown state refuses too.
+        """
+        found = self._describe(pane, "#{pane_in_mode}", "#{pane_input_off}",
+                               "#{pane_synchronized}", "#{pane_dead}")
+        if not found:
+            return "pane-unavailable"
+        in_mode, off, synchronized, dead = found
+        if dead != "0":
+            return "pane-dead" if dead == "1" else "pane-state-unknown"
+        if in_mode != "0":
+            return "pane-in-mode" if in_mode.isdigit() else "pane-state-unknown"
+        if off != "0":
+            return "pane-input-off" if off == "1" else "pane-state-unknown"
+        if synchronized != "0":
+            return "pane-synchronized" if synchronized == "1" else "pane-state-unknown"
+        return None
 
     def lock_key(self, session):
         return hashlib.sha256(f"tmux:{self.socket}:{session}".encode()).hexdigest()
@@ -485,6 +752,8 @@ class TmuxSurface:
 
     def empty_shell(self, pane):
         """The shell owns the terminal's foreground group and its last line is a prompt."""
+        if self.input_refusal(pane):
+            return False
         found = self._describe(pane, "#{pane_pid}", "#{pane_current_command}")
         if not found or found[1] not in _SHELLS:
             return False
@@ -495,7 +764,8 @@ class TmuxSurface:
                 return False
         except (OSError, ValueError, IndexError):
             return False
-        lines = [line.rstrip() for line in (self._tmux("capture-pane", "-p", "-t", pane) or "").splitlines()
+        lines = [line.rstrip() for line in (self._tmux("capture-pane", "-p", "-t", self._target(pane))
+                                            or "").splitlines()
                  if line.strip()]
         return bool(lines) and _PROMPT_LINE.search(lines[-1]) is not None
 
@@ -514,29 +784,230 @@ class TmuxSurface:
             "-P", "-F", "#{pane_id}"), None)
 
     def run(self, pane, command):
-        # Typed into the pane's shell like Herdr `pane run`, so both surfaces keep the shell after.
-        return (self._tmux("send-keys", "-t", pane, "-l", command) is not None
-                and self._tmux("send-keys", "-t", pane, "Enter") is not None)
+        # Written into the pane's shell like Herdr `pane run`, so both surfaces keep the shell
+        # after. A paste reaches this pane only; `send-keys` would also reach synchronized
+        # neighbours, so the line and its Enter both go through private buffers.
+        return (not self.input_refusal(pane) and self._paste(pane, command, bracketed=False) == "pasted"
+                and self._paste(pane, "\r", bracketed=False) == "pasted")
 
     def annotate(self, pane, title, labels):
         # A program can retitle its pane; the `@hearting_*` pane options are what stays.
-        ok = not title or self._tmux("select-pane", "-t", pane, "-T", title) is not None
+        # `select-pane -T` expands formats, so a literal `#` is doubled.
+        pane = self._target(pane)
+        if pane is None:
+            return False
+        ok = not title or self._tmux("select-pane", "-t", pane, "-T", title.replace("#", "##")) is not None
         for name, value in labels.items():
             ok = self._tmux("set-option", "-p", "-t", pane, f"@hearting_{name}", value) is not None and ok
         return ok
 
-    def process_info(self, pane):
+    def process_info(self, pane, *, table=None):
+        """Herdr's ``pane process-info`` shape, read from tmux and the kernel.
+
+        tmux names the pane's root process and terminal; the kernel names that
+        terminal's foreground group. Every live process of that group on that
+        terminal is listed with its argv. The root, its terminal and the group must
+        read the same before and after the listing, else nothing is claimed.
+        """
         found = self._describe(pane, "#{pane_pid}", "#{pane_tty}")
+        if not found:
+            return None
         try:
             from pane_ownership import _process
-            record = _process(int(found[0])) if found else None
-            if record:
-                return {"pane_id": pane, "shell_pid": record[0], "tty": found[1],
-                        "foreground_process_group_id": record[4],
-                        "foreground_processes": [{"pid": record[4]}]}
-        except (ValueError, TypeError):
-            pass
-        return None
+            root, tty = int(found[0]), found[1]
+            before = _process(root)
+            if (not before or not before[3] or before[4] <= 0 or not tty.startswith("/dev/")
+                    or os.stat(tty).st_rdev != before[3]):
+                return None
+            members = _foreground_members(before[4], before[3], table)
+            if not members or _process(root) != before:
+                return None
+        except (OSError, ValueError, TypeError):
+            return None
+        return {"pane_id": pane, "shell_pid": root, "tty": tty,
+                "foreground_process_group_id": before[4], "foreground_processes": members}
+
+    def read_visible(self, pane, *, ansi=False):
+        """The pane's visible screen; ``ansi`` keeps SGR, so faint text stays faint."""
+        pane = self._target(pane)
+        if pane is None:
+            return None
+        return self._tmux("capture-pane", "-p", *(["-e"] if ansi else []), "-t", pane)
+
+    def send_text(self, pane, text):
+        """Paste ``text`` once, bracketed when the program asked for it; no Enter."""
+        return not self.input_refusal(pane) and self._paste(pane, text) == "pasted"
+
+    def _paste(self, pane, text, *, bracketed=True):
+        """Write ``text`` to this pane only, through a private buffer read from stdin.
+
+        stdin keeps every byte (an argument loses a trailing ``;`` to tmux's command
+        parser and stops near 16 KB). ``-p`` brackets the paste when the program asked.
+        """
+        pane = self._target(pane)
+        if pane is None or not isinstance(text, str) or not text:
+            return "not-started"
+        name = f"hearting-{os.getpid()}-{secrets.token_hex(6)}"
+        if self._tmux_stdin(text, "load-buffer", "-b", name, "-") is None:
+            return "not-started"
+        if self._tmux("paste-buffer", *(["-p"] if bracketed else []), "-d", "-b", name, "-t", pane) is None:
+            self._tmux("delete-buffer", "-b", name)
+            return "failed"
+        return "pasted"
+
+    def send_keys(self, pane, *keys):
+        target = self._target(pane)
+        return (target is not None and not self.input_refusal(pane)
+                and self._tmux("send-keys", "-t", target, *keys) is not None)
+
+    def prompt(self, pane, text):
+        """One typed input in ``herdr agent prompt``'s ``(rc, payload)`` shape.
+
+        Nothing is typed into a pane that is in a tmux mode, synchronized or has input
+        off; that, or a buffer tmux never accepted, is ``herdr-not-started`` (nothing
+        reached the pane, so a carrier may retry it). The Enter is a one-byte paste to
+        this pane only, after the same check; a failed paste or Enter may already have
+        typed and stays an error that is never repeated.
+        """
+        refusal = self.input_refusal(pane)
+        if refusal:
+            return None, {"error": {"code": "herdr-not-started", "reason": refusal}}
+        pasted = self._paste(pane, text)
+        if pasted == "not-started":
+            return None, {"error": {"code": "herdr-not-started"}}
+        if pasted != "pasted":
+            return 1, {"error": {"code": "tmux_paste_failed"}}
+        time.sleep(_PASTE_SETTLE_SEC)
+        refusal = self.input_refusal(pane)
+        if refusal:
+            return 1, {"error": {"code": "tmux_" + refusal.replace("-", "_")}}
+        if self._paste(pane, "\r", bracketed=False) != "pasted":
+            return 1, {"error": {"code": "tmux_enter_failed"}}
+        return 0, {"result": {"type": "prompt", "pane_id": pane}}
+
+    def set_title(self, pane, title):
+        return self.annotate(pane, str(title), {})
+
+    def answers(self):
+        return self._tmux("display-message", "-p", "#{pid}") is not None
+
+    def notify(self, text, *, seconds=10):
+        """Show ``text`` once on every client attached to this server; display only.
+
+        Herdr's ``notification show`` counterpart: a status-line message, so nothing is
+        typed and no pane, focus, title or option changes. ``#`` is doubled so a
+        question is never read as a tmux format. True when a client was there to show it.
+        """
+        rows = self._rows(1, "list-clients", "-F", "#{client_name}")
+        message = str(text or "").replace("#", "##")
+        if not rows or not message:
+            return False
+        shown = False
+        for (client,) in rows[:16]:
+            ok = self._tmux("display-message", "-c", client, "-d", int(seconds * 1000),
+                            "--", message) is not None
+            if not ok:  # tmux before 3.2 has no -d; its own display-time applies
+                ok = self._tmux("display-message", "-c", client, "--", message) is not None
+            shown = ok or shown
+        return shown
+
+    def agent(self, pane, *, table=None):
+        """``herdr agent get``'s payload for one tmux pane; None when tmux cannot answer.
+
+        The agent is the one outermost Claude/Codex/OpenCode runtime among the pane's
+        foreground processes; its session is the one that process proves; its state
+        is that runtime's own turn record for that session (``unknown`` without one).
+        """
+        if self._target(pane) is None:
+            return {"error": {"code": "agent_not_found"}}
+        info = self.process_info(pane, table=table)
+        if info is None:
+            return {"error": {"code": "agent_not_found"}} if self.answers() else None
+        found = pane_runtime(info)
+        if found is None:
+            return {"error": {"code": "agent_not_found"}}
+        harness, pid = found
+        session_id = _process_session(harness, pid, pane, self)
+        agent = {"pane_id": pane, "agent": harness, "pid": pid,
+                 "agent_status": native_turn(harness, pid, session_id) if session_id else "unknown",
+                 "name": self._started_name(pane, pid), "cwd": _cwd(pid)}
+        if session_id:
+            agent["agent_session"] = {"kind": "id", "value": session_id}
+        return {"result": {"type": "agent_info", "agent": agent}}
+
+    def _started_name(self, pane, pid):
+        """The name ``peer-steward start`` gave this exact runtime process, else None.
+
+        The name is bound to the runtime's PID and start time, so a later program in
+        the same pane never inherits it.
+        """
+        from pane_ownership import _process
+        found = self._describe(pane, "#{@hearting_name}", "#{@hearting_name_pid}")
+        live = _process(pid)
+        if not found or not found[0] or not live or found[1] != f"{pid}:{live[5]}":
+            return None
+        return found[0]
+
+    def name_started(self, pane, pid, name):
+        """Bind ``name`` to the runtime ``pid`` now in ``pane`` (pane options only)."""
+        from pane_ownership import _process
+        live = _process(pid)
+        return bool(live) and self.annotate(pane, None, {"name": str(name),
+                                                         "name_pid": f"{pid}:{live[5]}"})
+
+    def close(self, pane):
+        target = self._target(pane)
+        return target is not None and self._tmux("kill-pane", "-t", target) is not None
+
+    def agents(self):
+        """``herdr agent list``'s payload over every pane of this tmux server."""
+        rows = self._rows(1, "list-panes", "-a", "-F", "#{pane_id}")
+        if rows is None:
+            return None
+        table, found = _proc_table(), []
+        socket = self._tmux("display-message", "-p", "#{socket_path}")
+        if not socket or not socket.strip():
+            return None
+        for (pane,) in rows:
+            payload = self.agent(f"{pane}@{_real(socket.strip())}", table=table)
+            if payload is None:
+                return None
+            agent = (payload.get("result") or {}).get("agent")
+            if isinstance(agent, dict):
+                found.append(agent)
+        return {"result": {"agents": found}}
+
+    def wait_agent(self, pane, until=(), timeout_ms=None):
+        """``herdr agent wait``: the agent once its state is in ``until`` (a change of
+        state when ``until`` is empty), an error payload, or None.
+
+        tmux sends no agent event, so the runtime's own turn record is re-read at a
+        fixed interval inside the bound; a changed foreground process re-reads all.
+        """
+        deadline = None if timeout_ms is None else time.monotonic() + max(0, timeout_ms) / 1000
+        first = None
+        while True:
+            payload = self.agent(pane)
+            agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
+            if not isinstance(agent, dict):
+                return payload
+            state = agent["agent_status"]
+            if (state in until) if until else (first is not None and state != first):
+                return payload
+            first = state if first is None else first
+            from pane_ownership import _process
+            record = _process(agent["pid"])
+            session = (agent.get("agent_session") or {}).get("value")
+            while True:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return {"error": {"code": "timeout"}}
+                time.sleep(_WAIT_POLL_SEC if deadline is None
+                           else max(0.0, min(_WAIT_POLL_SEC, deadline - time.monotonic())))
+                if _process(agent["pid"]) != record:
+                    break
+                current = native_turn(agent["agent"], agent["pid"], session) if session else "unknown"
+                if current != state:
+                    break
 
     def tidy_snapshot(self, pane):
         found = self._describe(pane, "#{session_id}", "#{window_id}", "#{window_zoomed_flag}",

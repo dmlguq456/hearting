@@ -95,7 +95,7 @@ runtime path, and any Claude-specific preview/screenshot/console wiring.
 Claude `UserPromptSubmit` first runs the portable `mem-recall-inject.sh` bridge.
 It emits `hookSpecificOutput.additionalContext` only for bounded active
 current-project/global capsule headline-and-ID candidates (maximum six and
-2,400 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
+1,200 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
 a same-turn recall-opportunity receipt on a successful probe, including a valid
 zero-hit probe. Main-session material mutation requires that receipt; the
 explicit `recall-gate` path recovers a missing or failed hook. Registered
@@ -523,7 +523,7 @@ unimplemented follow-up work.
 
 - **Runtime support:** PreCompact accepts successful stdout as summary instructions; PostCompact provides `compact_summary` and `trigger` for auto/idle and manual compaction.
 - **Adapter realization:** the shared compact hook requests six fields, records the epoch, saves the complete nonempty summary at the session's own verified pane/native seat, and queues memory tidying. Only `trigger=auto` with successful JSON and text card persistence can use the existing snapshot/clear/continue booking. The helper waits up to three hours for transcript evidence of actual turn completion, then stores bounded recent conversation and the transcript path before the clear.
-- **Fallback:** manual/unknown trigger, missing or empty summaries, card-write failure, project/outside-herdr seats, and workers/sub-sessions never auto-clear. Hook failures leave compaction running; summary admission is bounded at 256 KiB without truncation.
+- **Fallback:** manual/unknown trigger, missing or empty summaries, card-write failure, project seats (no Herdr or tmux pane), and workers/sub-sessions never auto-clear. Hook failures leave compaction running; summary admission is bounded at 256 KiB without truncation.
 
 ## Idle tidy
 
@@ -534,3 +534,8 @@ unimplemented follow-up work.
 ## Parent authority and peer transport
 
 Parent-only route actions use the shared current `effective_parent`. A readable handover chain grants them to its last confirmed recipient; an unreadable handover keeps the existing registered-parent fallback. Claude PTY and first-input delivery reserve a pending claim, repeat the native pane and draft checks, then mark it unverified immediately before `herdr prompt`. Hook context follows the same boundary immediately before output flush. A write already marked unverified is not sent again.
+
+## Resume and model fallback
+
+- **Resume:** a registered owner keeps one Claude session. Its first turn starts `claude -p --session-id <id>`; later turns run in the same stream-json process or as `claude -p --resume <id>` (`resume-process`), and a supervisor restarted during a resource wait resumes the session id saved in its phase state (`utilities/claude-session-supervisor.py`: `claude_command`, `saved_session`). Codex and OpenCode realize this differently (their ADAPTATION.md).
+- **Model fallback:** Hearting does not pass Claude's native `--fallback-model` (offered by Claude Code 2.1.317). A dispatched stage that dies of capacity gets the one shared SD-59 retry on the next model of `CFG_TIER_DEEP_FAILOVER_CASCADE` in `config/models.conf` (`utilities/stage-dispatch-fallback.py`: `capacity_retry`); a `top` stage takes no cascade step there.

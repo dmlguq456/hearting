@@ -1,5 +1,7 @@
 # autopilot-design
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 > **Output locations**:
 > - Direct invocation: `<artifact-root>/designs/<name>/`
 > - Delegated by `autopilot-spec`: `<artifact-root>/spec/design/`
@@ -110,7 +112,7 @@ For paper architecture figures, produce layout and composition guidance but do n
 
 ## Visual Harness
 
-Read [references/harness.md](harness.md) for the visual feedback loop, rendering tools, verifier, design rules, scaffolds, converters, and post-write checks. `design-init` should provision the available visual harness or report its fallback; absence of one integration alone must not stop the cycle.
+Only when a receipt or Route step names it, read [references/harness.md](harness.md) for the visual feedback loop, rendering tools, verifier, design rules, scaffolds, converters, and post-write checks. `design-init` should provision the available visual harness or report its fallback; absence of one integration alone must not stop the cycle.
 
 ## Rendered Visual Verification
 
@@ -125,7 +127,7 @@ At each phase boundary, apply the four-way confirmation contract in the conversa
 
 ## Pipeline Execution
 
-Read [references/pipeline-execution.md](pipeline-execution.md) for invocation arguments and exact output lists. The table below defines phase completion gates:
+Only when a receipt or Route step names it, read [references/pipeline-execution.md](pipeline-execution.md) for invocation arguments and exact output lists. The table below defines phase completion gates:
 
 | Phase | Invoke | Completion gate |
 |---|---|---|

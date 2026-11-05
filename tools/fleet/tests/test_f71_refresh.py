@@ -16,6 +16,33 @@ from fleet.model import Session  # noqa: E402
 
 
 class RefreshPumpTest(unittest.TestCase):
+    def test_adaptive_cpu_cooldown_preserves_cheap_reads_and_forced_refresh(self):
+        from types import SimpleNamespace
+
+        for adaptive, cpu_used, due in ((True, 3.0, 18.0), (True, 0.1, 12.0),
+                                        (False, 3.0, 8.0)):
+            with self.subTest(adaptive=adaptive, cpu=cpu_used):
+                clock, cpu = [0.0], [0.0]
+
+                def produce():
+                    clock[0] += 6.0
+                    cpu[0] += cpu_used
+                    return "ok"
+
+                def thread(**options):
+                    return SimpleNamespace(start=options["target"], is_alive=lambda: False,
+                                           join=lambda _timeout: None)
+
+                with mock.patch("fleet.refresh.time.thread_time", side_effect=lambda: cpu[0]):
+                    pump = RefreshPump(produce, 2.0, clock=lambda: clock[0],
+                                       thread_factory=thread, adaptive_cadence=adaptive)
+                    self.assertTrue(pump.start())  # first collection has no delay
+                    self.assertEqual(pump.poll()[1], "ok")
+                    self.assertFalse(pump.request_due(now=due - 0.1))
+                    self.assertTrue(pump.request(force=True))
+                    self.assertEqual(pump.generation, 2)
+                    pump.stop()
+
     def _wait(self, predicate, timeout=2.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

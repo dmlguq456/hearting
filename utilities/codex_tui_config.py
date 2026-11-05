@@ -9,9 +9,11 @@ import tempfile
 import tomllib
 
 
+# `thread-id` leads: Codex clips an overflowing footer from the right, so a
+# narrow pane loses trailing telemetry instead of the identity Fleet reads.
 DEFAULT_STATUS_LINE = (
-    "thread-title", "git-branch", "context-used", "model-with-reasoning",
-    "five-hour-limit", "weekly-limit", "thread-id",
+    "thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning",
+    "five-hour-limit", "weekly-limit",
 )
 DEFAULT_STATUS_LINE_USE_COLORS = True
 BACKUP_NAME = "config.toml.pre-harness-tui"
@@ -21,6 +23,9 @@ _MISSING = object()
 _TABLE_RE = re.compile(r"^\s*(\[\[?[^\]]+\]\]?)\s*(?:#.*)?$")
 _TUI_TABLE_RE = re.compile(r"^\s*\[tui\]\s*(?:#.*)?$")
 _STATUS_KEY_RE = re.compile(r"^\s*(?:status_line|\"status_line\"|'status_line')\s*=")
+_ARRAY_OPEN_RE = re.compile(r"^\s*(?:status_line|\"status_line\"|'status_line')\s*=\s*\[\s*(?:#.*)?$")
+_ARRAY_ITEM_RE = re.compile(r"""^(\s*)("(?:[^"\\]|\\.)*"|'[^']*')\s*,?\s*(?:#.*)?$""")
+_ARRAY_CLOSE_RE = re.compile(r"^\s*\]\s*(?:#.*)?$")
 
 
 class CodexTuiConfigError(ValueError):
@@ -40,7 +45,10 @@ def _parse(text: str, label: str = "Codex config") -> dict:
 def _normalize(items):
     if not isinstance(items, (list, tuple)) or any(not isinstance(item, str) for item in items):
         raise CodexTuiConfigError("tui.status_line must be an array of strings")
-    return [item for item in items if item != "thread-id"] + ["thread-id"]
+    # The single managed identity item goes first; every other item keeps its
+    # order. Earlier releases put it last, so the former default and lists that
+    # end with it converge here on the next install or refresh.
+    return ["thread-id"] + [item for item in items if item != "thread-id"]
 
 
 def _array_end(lines, start, limit):
@@ -86,6 +94,35 @@ def _array_end(lines, start, limit):
     raise CodexTuiConfigError("could not locate the end of tui.status_line")
 
 
+def _identity_first_in_place(lines, start, end):
+    """Move the managed item of a one-item-per-line array to its top.
+
+    Every other line, including comments inside the array, stays as written.
+    Returns None for any other layout; the caller then rewrites the array.
+    """
+    if (end <= start or not _ARRAY_OPEN_RE.match(lines[start])
+            or not _ARRAY_CLOSE_RE.match(lines[end])):
+        return None
+    body, indent = [], None
+    for line in lines[start + 1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            body.append(line)
+            continue
+        match = _ARRAY_ITEM_RE.match(line)
+        if not match:
+            return None
+        indent = match.group(1) if indent is None else indent
+        try:
+            value = tomllib.loads("v = " + match.group(2))["v"]
+        except tomllib.TOMLDecodeError:
+            return None
+        if value != "thread-id":
+            body.append(line)
+    if indent is None:
+        indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())] + "  "
+    return [lines[start], indent + '"thread-id",', *body, lines[end]]
+
+
 def _table_insert_index(lines, start, end):
     # Trailing comments may introduce the next managed table. Keep its block intact.
     while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
@@ -95,7 +132,7 @@ def _table_insert_index(lines, start, end):
 
 def merge_status_line_text(text: str, defaults=DEFAULT_STATUS_LINE,
                            default_colors=DEFAULT_STATUS_LINE_USE_COLORS) -> str:
-    """Return valid TOML with one thread-id item last; leave all other values intact."""
+    """Return valid TOML with one thread-id item first; leave all other values intact."""
     current = _parse(text)
     tui = current.get("tui", {})
     if not isinstance(tui, dict):
@@ -135,10 +172,17 @@ def merge_status_line_text(text: str, defaults=DEFAULT_STATUS_LINE,
         elif raw_items != items:
             end_index, suffix = _array_end(lines, status_index, table_end)
             indent = lines[status_index][:len(lines[status_index]) - len(lines[status_index].lstrip())]
-            lines[status_index:end_index + 1] = [
-                indent + "status_line = " + json.dumps(items, ensure_ascii=False) + suffix
-            ]
-            table_end -= end_index - status_index
+            span = [indent + "status_line = " + json.dumps(items, ensure_ascii=False) + suffix]
+            in_place = _identity_first_in_place(lines, status_index, end_index)
+            if in_place is not None:
+                candidate = lines[:status_index] + in_place + lines[end_index + 1:]
+                try:
+                    kept = _parse(newline.join(candidate)).get("tui", {}).get("status_line")
+                except CodexTuiConfigError:
+                    kept = None
+                span = in_place if kept == items else span
+            lines[status_index:end_index + 1] = span
+            table_end += len(span) - (end_index - status_index + 1)
         has_colors = any(re.match(r"^\s*(?:status_line_use_colors|\"status_line_use_colors\"|'status_line_use_colors')\s*=",
                                   lines[i]) for i in range(tui_start + 1, table_end))
         if not has_colors:
@@ -164,7 +208,9 @@ def status_line_capability(text: str) -> str:
         return "incapable"
     if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
         return "unknown"
-    return "capable" if items and items[-1] == "thread-id" else "incapable"
+    # First is the current order; last is how installs before the reorder still
+    # read until their next refresh. Both are a whole field the footer reader proves.
+    return "capable" if items and "thread-id" in (items[0], items[-1]) else "incapable"
 
 
 def _status_line_override(argv) -> bool:

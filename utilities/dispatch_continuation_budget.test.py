@@ -117,7 +117,7 @@ class AdmissionGateTest(unittest.TestCase):
         for index in range(2 + 3):
             verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
             self.assertTrue(verdict.admitted, (index, verdict))
-            self.assertEqual(verdict.charged, "gross")
+            self.assertEqual(verdict.charged, "none")
             self.assertEqual(verdict.gross_remaining, 2)
             self.assertEqual(verdict.refusal, "")
         self.assertEqual(ledger.gross_remaining, 2)
@@ -148,9 +148,8 @@ class AdmissionGateTest(unittest.TestCase):
         ledger = self._ledger(ordinary=3, reserved=1, stall=0)
         verdict = ledger.admit(purpose="ordinary", stalled=False, reservation_ok=True)
         self.assertTrue(verdict.admitted)
-        self.assertEqual(verdict.charged, "gross")
-        # Phase F: the admit is charged to the gross axis by name, but real
-        # progress no longer spends it.
+        self.assertEqual(verdict.charged, "none")
+        # Phase F: real progress spends no axis.
         self.assertEqual(ledger.gross_remaining, 3)
         self.assertEqual(ledger.stall_remaining, 0)
 

@@ -6,6 +6,10 @@ The existing pending-delivery queue owns a notice until a carrier accepts it.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections import OrderedDict
+import threading
 import hashlib
 import glob
 import fcntl
@@ -45,6 +49,57 @@ class StopWaiting(RuntimeError):
     """Abort a managed wait without recording a delivery notice or row change."""
 
 
+_ROUTE_ATTENTION_READ = ContextVar("supervision_route_attention_read", default=None)
+_PASSIVE_ROUTE_DOCUMENTS = OrderedDict()
+_PASSIVE_ROUTE_LOCK = threading.RLock()
+
+
+def _read_route_document(path):
+    """Borrow only pure JSON/hash work; no dynamic advisory result is cached."""
+    if _ROUTE_ATTENTION_READ.get() is None:
+        return json.loads(path.read_text(encoding='utf-8')), None
+    def signature():
+        st = path.stat()
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    key, before = str(path), signature()
+    with _PASSIVE_ROUTE_LOCK:
+        previous = _PASSIVE_ROUTE_DOCUMENTS.get(key)
+        if previous is not None and previous['signature'] == before:
+            _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
+            return previous['document'], previous
+    document = json.loads(path.read_text(encoding='utf-8'))
+    entry = {'signature': before, 'document': document, 'hash': None}
+    if before == signature() and before[3] <= 1024 * 1024:
+        with _PASSIVE_ROUTE_LOCK:
+            _PASSIVE_ROUTE_DOCUMENTS[key] = entry
+            _PASSIVE_ROUTE_DOCUMENTS.move_to_end(key)
+            while (len(_PASSIVE_ROUTE_DOCUMENTS) > 128
+                   or sum(value['signature'][3] for value in _PASSIVE_ROUTE_DOCUMENTS.values()) > 16 * 1024 * 1024):
+                _PASSIVE_ROUTE_DOCUMENTS.popitem(last=False)
+    return document, entry
+
+
+def passive_read_context():
+    """The current display scan's context; None outside its explicit scope."""
+    return _ROUTE_ATTENTION_READ.get()
+
+
+@contextmanager
+def route_attention_read_scope():
+    """Reuse lineage only within one passive display scan, never across effects."""
+    if _ROUTE_ATTENTION_READ.get() is not None:
+        yield
+        return
+    from peer_read_context import PeerReadContext
+    context = PeerReadContext()
+    token = _ROUTE_ATTENTION_READ.set(context)
+    try:
+        with context.pinned_lineage():
+            yield
+    finally:
+        _ROUTE_ATTENTION_READ.reset(token)
+
+
 def scoped_file_signature(metadata, worktree=""):
     """Bounded signature of declared write-scope paths; never reads file prose."""
     entries = []
@@ -60,7 +115,7 @@ def scoped_file_signature(metadata, worktree=""):
         if cycle_root not in roots:
             roots.append(cycle_root)
         try:
-            route = json.loads(route_file.read_text(encoding="utf-8"))
+            route, _entry = _read_route_document(route_file)
             node = next((item for item in route.get("nodes", [])
                          if item.get("id") == metadata.get("route_node")), {})
             declared.extend(str(item) for item in node.get("outputs", []))
@@ -180,6 +235,63 @@ def runtime_tool_progress(metadata, previous=None):
     return latest
 
 
+def _transient_retry_wait_active(metadata, attempt_id):
+    """Recognize only a live, exact-attempt bounded Codex transport wait."""
+    raw_path = metadata.get("log_file", "")
+    if not raw_path or not Path(raw_path).is_absolute():
+        return False
+    try:
+        with Path(raw_path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 1024 * 1024)
+            handle.seek(start)
+            if start:
+                handle.readline()
+            lines = handle.read(1024 * 1024).splitlines()
+    except OSError:
+        return False
+    active = None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("type")
+        if kind == "dispatch.supervisor.transient-wait.started":
+            if (metadata.get("harness") == "codex"
+                    and row.get("parent_attempt_id") == attempt_id
+                    and isinstance(row.get("thread_id"), str) and row.get("thread_id")
+                    and isinstance(row.get("turn_id"), str) and row.get("turn_id")
+                    and row.get("reason_code") == "transient-capacity"
+                    and isinstance(row.get("ordinal"), int)
+                    and not isinstance(row.get("ordinal"), bool)
+                    and 1 <= row["ordinal"] <= 5):
+                try:
+                    deadline = float(row.get("deadline_monotonic"))
+                except (TypeError, ValueError, OverflowError):
+                    active = None
+                    continue
+                active = ((row.get("thread_id"), row.get("turn_id"), deadline)
+                          if math.isfinite(deadline) and deadline - time.monotonic() <= 960
+                          else None)
+            else:
+                active = None
+        elif kind in {"dispatch.supervisor.transient-wait.ended",
+                      "dispatch.supervisor.turn.started", "turn.completed",
+                      "dispatch.supervisor.error"}:
+            if active is not None:
+                if (kind == "dispatch.supervisor.transient-wait.ended"
+                        and row.get("parent_attempt_id") == attempt_id
+                        and row.get("thread_id") == active[0]
+                        and row.get("turn_id") == active[1]):
+                    active = None
+                elif kind != "dispatch.supervisor.transient-wait.ended":
+                    active = None
+    return active is not None and time.monotonic() < active[2]
+
+
 def verification_process_digest(pid):
     """Hash the exact live argv without trusting the lease's copied command."""
     try:
@@ -286,20 +398,27 @@ def _route_needs_attention(metadata, jobs, now):
         if (not route_path.is_absolute() or route_path.is_symlink() or not route_path.is_file()
                 or not expected_route_id or not expected_route_hash):
             return None
-        route = json.loads(route_path.read_text(encoding="utf-8"))
+        route, cached_route = _read_route_document(route_path)
         from route_identity import route_hash
         if (route.get("route_id") != expected_route_id
-                or route.get("route_hash") != expected_route_hash
-                or route_hash(route) != expected_route_hash):
+                or route.get("route_hash") != expected_route_hash):
+            return None
+        actual_hash = cached_route.get('hash') if cached_route is not None else None
+        if actual_hash is None:
+            actual_hash = route_hash(route)
+            if cached_route is not None:
+                cached_route['hash'] = actual_hash
+        if actual_hash != expected_route_hash:
             return None
         route_node = metadata.get("route_node")
         if (route_node and route_node != "_owner"
                 and not any(item.get("id") == route_node
                             for item in route.get("nodes", []) if isinstance(item, dict))):
             return None
-        from dispatch_seat_handover import effective_parent, effective_parent_harness
-        parent = effective_parent(metadata, jobs)
-        harness = effective_parent_harness(metadata, jobs)
+        from dispatch_seat_handover import resolve_recipient
+        recipient = resolve_recipient("job-holder", metadata=metadata, jobs=jobs,
+                                      read_context=_ROUTE_ATTENTION_READ.get())
+        parent, harness = recipient.session_id, recipient.harness
         if not parent or harness not in {"claude", "codex", "opencode"}:
             return None
         key = hashlib.sha256(f"{harness}\0{parent}".encode()).hexdigest()
@@ -523,6 +642,8 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "active", "owned-child-executing"
         elif execution.state == "unknown":
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
+        elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
+            observation_state, reason = "waiting", "registered-transient-capacity-backoff"
         elif tool_active:
             observation_state, reason = "active", "native-tool-active"
         elif quiet >= max_quiet_windows:
@@ -1184,12 +1305,16 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
         jobs = Path(receipt["job_registry"])
         monitored = set(receipt["monitored_attempt_ids"])
         covered = {}
+        # Fleet already owns one fresh read-only lineage observation per scan.
+        # Carriers outside that scope keep their original per-recipient reads.
+        read_context = passive_read_context()
+        recipient_options = {'read_context': read_context} if read_context is not None else {}
         for attempt in sorted(monitored):
             row = current_attempt_row(jobs, attempt)
             if row is None:
                 return None
             meta = row.metadata
-            target = effective_parent(meta, jobs)
+            target = effective_parent(meta, jobs, **recipient_options)
             if (meta.get("parent_sid") != receipt["recipient_thread_id"]
                     or not meta.get("delivery_id") or not target):
                 return None
@@ -1212,7 +1337,7 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
             if notice_context is not None:
                 for aid in sorted(attempt_ids):
                     member = current_attempt_row(jobs, aid)
-                    if member is None or effective_parent(member.metadata, jobs) != target:
+                    if member is None or effective_parent(member.metadata, jobs, **recipient_options) != target:
                         return None
             def project(observer):
                 observer("file", jobs)

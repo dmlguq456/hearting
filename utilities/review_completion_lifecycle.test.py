@@ -26,6 +26,7 @@ import dispatch_completion_join as join  # noqa: E402
 import dispatch_contract as contract  # noqa: E402
 from dispatch_lifecycle import begin_finite_watchdog
 from review_watchdog import launch_review_watchdog
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _module(name: str, filename: str):
@@ -74,7 +75,7 @@ def _assert_success_delivery(test, jobs):
     receipt = join.unseal_delivery_receipt(_row(jobs).metadata["delivery_receipt_b64"])
     test.assertEqual(receipt["delivery_classification"], "success")
     # Write permission belongs to the live review, not the closed delivery.
-    with mock.patch.object(join, "validate_review_output_binding", side_effect=AssertionError("closed review must not reacquire write authority")):
+    with patch_split(join, "validate_review_output_binding", side_effect=AssertionError("closed review must not reacquire write authority")):
         state = join.current_delivery_state(jobs, "att-lifecycle", parent_attempt_id="att-lifecycle", advance=False)
         test.assertTrue(state.completion_proven)
         test.assertEqual(join.delivery_classification(state), "success", state)
@@ -214,11 +215,11 @@ class ForegroundClassificationLifecycleTest(unittest.TestCase):
                 return result
 
             with mock.patch.object(join, "inspect_terminal_attempt", side_effect=terminal), \
-                    mock.patch.object(join, "validate_review_output_binding", return_value=None), \
+                    patch_split(join, "validate_review_output_binding", return_value=None), \
                     mock.patch.object(join, "close_attempt_row", side_effect=counted_join_close), \
                     mock.patch.object(registry, "close_attempt_row_if", side_effect=counted_registry_close_if), \
-                    mock.patch.object(contract, "_updated_attempt_metadata", side_effect=counted_updated_metadata), \
-                    mock.patch.object(contract, "_delivery_intent_values", side_effect=counted_delivery_intent), \
+                    patch_split(contract, "_updated_attempt_metadata", side_effect=counted_updated_metadata), \
+                    patch_split(contract, "_delivery_intent_values", side_effect=counted_delivery_intent), \
                     mock.patch.object(join.pending_delivery, "create", side_effect=counted_delivery_create), \
                     mock.patch.object(watcher, "apply_exact_route_free_review_classification", side_effect=gated_apply):
                 thread = threading.Thread(target=lambda: watcher_result.setdefault("rc", watcher.watch(watcher_args)))

@@ -14,6 +14,8 @@ from fleet import model, projection, process_identity
 from fleet.collectors import claude, codex, herdr, procscan
 from fleet.model import Session, DispatchJob
 from test_process_identity import FakeClaudeProc
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class NativeBackgroundChainTest(unittest.TestCase):
@@ -51,7 +53,7 @@ class NativeBackgroundChainTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[3]
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             f = FakeClaudeProc(temporary)
-            sid = "7a47c285-2f29-4d37-ab20-8411e48c9d70"
+            sid = "1000008c-0000-4000-8000-00000000009b"
             project = str(Path(temporary) / "SR_ModelA_SD")
             Path(project).mkdir()
             (Path(project) / ".git").mkdir()
@@ -376,7 +378,7 @@ class CurrentSessionTest(unittest.TestCase):
         def save(_path, body):
             rows[:] = [json.loads(line) for line in body.decode().splitlines()]
         with mock.patch.object(session_tidy, "_read_ledger_lines", side_effect=lambda _seat: rows[:]), \
-                mock.patch.object(session_tidy, "atomic_write", side_effect=save), \
+                patch_split(session_tidy, "atomic_write", side_effect=save), \
                 mock.patch.object(session_tidy, "LEDGER_FOLD_LINES", 1), \
                 mock.patch.object(session_tidy, "LEDGER_KEEP_RAW", 1), \
                 mock.patch("fleet.gitinfo.resolve_gitdir", side_effect=lambda cwd: (None, cwd)):
@@ -513,9 +515,9 @@ class ProcessRolesTest(unittest.TestCase):
 
     def test_native_rollout_fd_keeps_a_headless_session_command(self):
         s = Session(harness="codex", pid=994241, proc_start="777", cwd="/proj",
-                    session_id="0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47", app_server=True)
+                    session_id="10000067-0000-4000-8000-000000000075", app_server=True)
         s._tty, s._invocation_mode = "?", "command"
-        path = "/tmp/rollout-0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47.jsonl"
+        path = "/tmp/rollout-10000067-0000-4000-8000-000000000075.jsonl"
         with mock.patch.object(codex, "_proc_rollout", return_value=path):
             codex.process_rollouts([s], "/tmp/codex")
             rows = [s]

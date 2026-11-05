@@ -19,6 +19,8 @@ from fleet.model import (  # noqa: E402
     ContextEvidence, ContextProjection, DispatchJob, ProgressProjection, Session,
     SubAgent, WorkProjection,
 )
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "route")
@@ -643,7 +645,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
                               self._assistant("sid-child", "<synthetic>", 160)])
         dispatch_collector._enrich_claude_stream_session(job)
         self.assertIsNone(job.resolved_model)
-        with mock.patch.object(render, "_resolved_alias_models", return_value={}):
+        with patch_split(render, "_resolved_alias_models", return_value={}):
             self.assertEqual(render._job_display_model(job), "Opus")
         self._write_log(job, [{"type": "system", "subtype": "init",
                               "session_id": "sid-child", "model": "claude-opus-5-5"},
@@ -1228,7 +1230,7 @@ for line in sys.stdin:
         self.assertIsNone(job.exec_tool)
 
     def test_depth2_raw_exec_joins_exact_projected_rollout_context(self):
-        thread_id = "019fd56f-1e8a-77f0-9964-dc8cba43d344"
+        thread_id = "01000006-0000-7000-8000-00000000000b"
         self._write_rollout(thread_id)
         job = self._job()
         with open(job._log_file, "w", encoding="utf-8") as stream:
@@ -1246,7 +1248,7 @@ for line in sys.stdin:
         self.assertIsNone(job._context_evidence)
 
     def test_depth2_duplicate_projected_rollouts_fail_closed(self):
-        thread_id = "019fd56f-1e8a-77f0-9964-dc8cba43d344"
+        thread_id = "01000006-0000-7000-8000-00000000000b"
         self._write_rollout(thread_id)
         second = os.path.join(self.worktree, ".dispatch", "codex-home")
         self._write_rollout(thread_id, home=second)

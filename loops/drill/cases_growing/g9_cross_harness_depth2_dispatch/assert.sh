@@ -32,7 +32,9 @@ assert "as_completed" in source
 assert '"parallel-group-cardinality"' in source
 assert '"parallel-group-dependency-mismatch"' in source
 assert '"concurrent_launch"' in source
-contract = (root / "utilities" / "dispatch_contract.py").read_text(encoding="utf-8")
+contract = "".join(path.read_text(encoding="utf-8") for path in (
+    root / "utilities" / "dispatch_contract.py",
+    *sorted((root / "utilities").glob("dispatch_contract_*.py"))))
 assert '"parallel-group-batch-required"' in contract
 assert '"parallel-group-reservation-mismatch"' in contract
 assert 'GROUP_REAP_PROOF = "pgid-empty-v1"' in contract

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import artifact_history as H  # noqa: E402
 import artifact_meta as M  # noqa: E402
 import artifact_producer as P  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location(
     "artifact_meta_producer_fixture", Path(__file__).with_name("artifact_producer.test.py"))
@@ -948,7 +949,7 @@ class WritePathTest(MetaBase):
             if Path(path).name == name:
                 raise OSError("injected disk failure")
             return real(path, data, mode)
-        return mock.patch.object(P, "_write_atomic", side_effect=selective)
+        return patch_split(P, "_write_atomic", side_effect=selective)
 
     def test_a_failure_before_the_commit_point_writes_nothing_at_all(self):
         self.vocab("CMD")

@@ -23,8 +23,12 @@ Only ``window.refresh()`` gets this protection: CPython releases the GIL around 
 ``refresh()``; the group/process screen still flushes with ``doupdate()`` and only gets
 the skip-when-unwritable part.
 
-Nothing here closes the window, signals a process, or drops terminal output. A hangup
-still ends Fleet exactly as before.
+Quitting is the one exception to keeping every byte: ``settle`` waits for the frame in
+flight before anything is written past curses or curses restores the terminal, and a
+terminal that has not taken that frame within ``QUIT_GRACE`` (or a second Ctrl-C) gets the
+unread frame dropped from its output queue, so q or Ctrl-C never waits on a terminal that
+stopped reading. Nothing here closes the window or signals a process. A hangup still ends
+Fleet exactly as before.
 """
 from contextlib import contextmanager
 import functools
@@ -34,15 +38,21 @@ import threading
 import time
 import unicodedata
 
+from .config import ui_text
+
 try:
     import curses
 except ImportError:  # pragma: no cover - platforms without curses never run the live loop
     curses = None
+try:
+    import termios
+except ImportError:  # pragma: no cover - no tty control: quitting waits for the terminal
+    termios = None
 
 WRITE_BUDGET = 0.25      # a pty write with room returns in microseconds
 REPAINT_AFTER = 5.0      # a stall this long means the terminal went away; repaint everything
+QUIT_GRACE = 1.0         # quitting waits this long for a frame the terminal has not taken
 RECOVERED_NOTE_SEC = 60.0
-STALLED = "화면 출력이 막혀 있음"
 # render globals that describe the painted frame: what a click or a navigation key is
 # resolved against (``_explorer_click_current``, ``reduce(..., _EXPLORER_FRAME)``, the
 # group screen's row maps). ``_draw`` resets and refills them on every pass.
@@ -61,11 +71,9 @@ def _cells(text):
 
 def _span(seconds):
     seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}초"
-    if seconds < 3600:
-        return f"{seconds // 60}분"
-    return f"{seconds // 3600}시간"
+    count, unit = ((seconds, "second") if seconds < 60 else (seconds // 60, "minute") if seconds < 3600
+                   else (seconds // 3600, "hour"))
+    return ui_text(f"fleet.span.{unit}" if count == 1 else f"fleet.span.{unit}s", count=count)
 
 
 class ScreenGuard:
@@ -146,18 +154,36 @@ class ScreenGuard:
         finally:
             render._loop, render._draw = loop, draw
 
-    def close(self):
-        """Let a pending write finish before curses restores the terminal, then stop the writer.
+    def settle(self, grace=QUIT_GRACE):
+        """Finish the frame in flight so Fleet can write past curses or let curses end.
 
-        Ctrl-C does not cut this wait short: ``endwin`` racing the writer's ``refresh``
-        would be two threads inside curses. A hangup or SIGTERM still ends the process.
+        The writer is never abandoned inside ``refresh``: ``endwin`` or a raw write racing
+        it would interleave two writers on one terminal (two threads inside curses for
+        ``endwin``). A terminal that has not taken the frame within ``grace`` is not
+        reading; the frame nobody can see is dropped from its output queue until the
+        writer finishes and the restore that follows has room. A Ctrl-C ends the grace.
         """
+        deadline = time.monotonic() + max(0.0, float(grace))
         while True:
             try:
-                self._done.wait()
-                break
+                done = self._done.wait(0.05)
+                if done and self._takes_bytes():
+                    return
+                if time.monotonic() >= deadline:
+                    self._discard_unread()
+                    if done:
+                        return
+                elif done:
+                    time.sleep(0.05)         # the frame is out; wait for room for the restore
             except KeyboardInterrupt:
-                continue
+                deadline = time.monotonic()
+
+    def close(self):
+        """Settle the pending write before curses restores the terminal, then stop the writer.
+
+        A hangup or SIGTERM still ends the process.
+        """
+        self.settle()
         self._closing = True
         self._request.set()
 
@@ -166,7 +192,7 @@ class ScreenGuard:
         if self._screen is None:
             return None
         if not self._done.is_set() or not self._takes_bytes():
-            return STALLED
+            return ui_text("fleet.screen.stalled")
         return None
 
     # -- state ----------------------------------------------------------------------------------
@@ -184,6 +210,21 @@ class ScreenGuard:
     def _stalled(self):
         if self._stalled_since is None:
             self._stalled_since = self._clock()
+
+    def _discard_unread(self):
+        """Drop output the terminal has not read and wake the write blocked on it.
+
+        A flush frees the queue but does not wake a writer asleep on it; restarting
+        output does (and also ends an XOFF stop, which quitting should not keep).
+        """
+        if termios is None or self._fd is None:
+            return
+        try:
+            termios.tcflush(self._fd, termios.TCOFLUSH)
+            termios.tcflow(self._fd, termios.TCOOFF)
+            termios.tcflow(self._fd, termios.TCOON)
+        except (termios.error, OSError, ValueError, TypeError):
+            pass
 
     def _ready(self):
         """Whether this frame may touch curses and write; keeps the stall bookkeeping."""
@@ -316,7 +357,7 @@ class ScreenGuard:
         if recovered is not None:
             when, lasted = recovered
             if self._clock() - when < RECOVERED_NOTE_SEC:
-                parts.append(f"화면 출력이 {_span(lasted)} 막혔다가 다시 그림")
+                parts.append(ui_text("fleet.screen.recovered", span=_span(lasted)))
             else:
                 self._recovered = None
         if callable(self.note):

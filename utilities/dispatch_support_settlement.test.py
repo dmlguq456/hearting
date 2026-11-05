@@ -12,6 +12,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "utilities")]
@@ -75,7 +76,7 @@ class SupportSettlementTest(unittest.TestCase):
 
     def test_join_settles_pass_artifact_dash_without_route_authority(self):
         row = self.row()
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent), \
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent), \
              mock.patch.object(JOIN, "run_route_completion") as route_completion:
             result = JOIN.settle_finished_attempt(self.jobs, row)
         current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
@@ -91,7 +92,7 @@ class SupportSettlementTest(unittest.TestCase):
                                        ("BLOCKED", "dead-worker-blocked", "blocked")):
             with self.subTest(verdict=verdict):
                 row = self.row(f"att-{verdict.lower()}", verdict)
-                with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+                with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
                     result = JOIN.settle_finished_attempt(self.jobs, row)
                 current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
                 self.assertTrue(result["closed"], result)
@@ -123,7 +124,7 @@ class SupportSettlementTest(unittest.TestCase):
         self.assertEqual(duplicate.reason, "support-row-not-unique")
         self.jobs.write_text("", encoding="utf-8")
         terminal = self.row(status="killed")
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             result = JOIN.settle_finished_attempt(self.jobs, terminal)
         self.assertTrue(result["closed"])
         self.assertEqual(JOIN.exact_attempt_row(self.jobs, terminal.attempt_id).status, "killed")
@@ -148,7 +149,7 @@ class SupportSettlementTest(unittest.TestCase):
         row = self.row("att-stop", status="killed")
         # The writer observes the explicit terminal row in the registry and cannot
         # reclassify or replace its stop history.
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             outcome = JOIN.settle_finished_attempt(self.jobs, row)
         self.assertTrue(outcome["closed"])
         self.assertEqual(JOIN.exact_attempt_row(self.jobs, "att-stop").status, "killed")
@@ -158,7 +159,7 @@ class SupportSettlementTest(unittest.TestCase):
         self.log.write_text(json.dumps({"type": "dispatch.supervisor.error",
                                         "reason": "runtime-session-failed"}) + "\n",
                             encoding="utf-8")
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             result = JOIN.settle_finished_attempt(self.jobs, row)
         current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
         self.assertTrue(result["closed"], result)
@@ -168,7 +169,7 @@ class SupportSettlementTest(unittest.TestCase):
 
         row = self.row("att-no-result", handoff=False)
         self.log.unlink()
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             result = JOIN.settle_finished_attempt(self.jobs, row)
         current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
         self.assertTrue(result["closed"], result)
@@ -193,7 +194,7 @@ class SupportSettlementTest(unittest.TestCase):
                     self.write_log(first)
                     return writer(*args, **kwargs)
 
-                with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent), \
+                with patch_split(JOIN, "attempt_process_quiescence", self.quiescent), \
                      mock.patch.object(JOIN, "close_attempt_row_if", restore_before_cas):
                     outcome = JOIN.apply_exact_route_free_support_classification(
                         row, jobs=self.jobs, classification=selected, selected_identity=identity,
@@ -232,7 +233,7 @@ class SupportSettlementTest(unittest.TestCase):
                     self.jobs.write_text(expected[0])
                     return writer(*args, **kwargs)
 
-                with mock.patch.object(JOIN, "attempt_process_quiescence", lambda *_: probe[0]), \
+                with patch_split(JOIN, "attempt_process_quiescence", lambda *_: probe[0]), \
                      mock.patch.object(JOIN, "close_attempt_row_if", change_before_cas):
                     result = JOIN.settle_finished_attempt(self.jobs, row)
                 self.assertEqual(self.jobs.read_text(), expected[0])
@@ -251,7 +252,7 @@ class SupportSettlementTest(unittest.TestCase):
         row = self.row()
         sibling = row.raw.replace("att-support", "att-sibling")
         self.jobs.write_text(row.raw + "\n" + sibling + "\n")
-        with mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             self.assertTrue(JOIN.settle_finished_attempt(self.jobs, row)["closed"])
             committed = self.jobs.read_bytes()
             self.assertTrue(JOIN.settle_finished_attempt(self.jobs, row)["closed"])
@@ -274,13 +275,13 @@ class SupportSettlementTest(unittest.TestCase):
             parent_recheck_interval=0.001,
         )
         empty = types.SimpleNamespace(state="empty", members=())
-        with mock.patch.object(REAP, "process_namespace_identity", return_value="test-ns"), \
-             mock.patch.object(REAP, "attempt_scan_namespace_authority", return_value=True), \
-             mock.patch.object(REAP, "process_start_ticks", return_value="43"), \
-             mock.patch.object(REAP, "process_group_observation", return_value=empty), \
-             mock.patch.object(REAP, "attempt_tagged_descendants", return_value=empty), \
-             mock.patch.object(REAP, "attempt_process_quiescence", self.quiescent), \
-             mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(REAP, "process_namespace_identity", return_value="test-ns"), \
+             patch_split(REAP, "attempt_scan_namespace_authority", return_value=True), \
+             patch_split(REAP, "process_start_ticks", return_value="43"), \
+             patch_split(REAP, "process_group_observation", return_value=empty), \
+             patch_split(REAP, "attempt_tagged_descendants", return_value=empty), \
+             patch_split(REAP, "attempt_process_quiescence", self.quiescent), \
+             patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             result = REAP.watch(args)
         current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
         self.assertEqual(CONTRACT.launched_attempt_identity(current.raw.split("\t")),
@@ -299,16 +300,16 @@ class SupportSettlementTest(unittest.TestCase):
 
     def test_registry_dry_run_and_apply_use_shared_settlement(self):
         self.row()
-        with mock.patch.object(REGISTRY, "attempt_process_quiescence", self.quiescent), \
-             mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(REGISTRY, "attempt_process_quiescence", self.quiescent), \
+             patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             dry_out = io.StringIO()
             with contextlib.redirect_stdout(dry_out):
                 dry = REGISTRY.reconcile(REGISTRY.read_rows(self.jobs), self.registry_args(False))
         self.assertEqual(JOIN.exact_attempt_row(self.jobs, "att-support").status, "open")
         self.assertEqual(dry, 0)
         self.assertEqual(json.loads(dry_out.getvalue())["closed"], 0)
-        with mock.patch.object(REGISTRY, "attempt_process_quiescence", self.quiescent), \
-             mock.patch.object(JOIN, "attempt_process_quiescence", self.quiescent):
+        with patch_split(REGISTRY, "attempt_process_quiescence", self.quiescent), \
+             patch_split(JOIN, "attempt_process_quiescence", self.quiescent):
             applied_out = io.StringIO()
             with contextlib.redirect_stdout(applied_out):
                 applied = REGISTRY.reconcile(REGISTRY.read_rows(self.jobs), self.registry_args(True))

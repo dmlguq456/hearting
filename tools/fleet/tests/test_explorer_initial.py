@@ -1,8 +1,25 @@
 """Initial explorer collection publishes a complete frame or explicit loading state."""
+import os
 import unittest
+from unittest import mock
 
 from tools.fleet.explorer.runtime import ExplorerRuntime
 from tools.fleet.explorer.view_model import ExplorerViewModel
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
+
+# The loading word comes from tools/i18n/messages.json; these suites keep the Korean screen.
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
 
 
 class InitialReadinessTests(unittest.TestCase):
@@ -28,6 +45,8 @@ class InitialReadinessTests(unittest.TestCase):
         frame = runtime.loading_frame(40, 10)
         self.assertEqual((frame.cols, frame.rows), (40, 10))
         self.assertIn("불러오는 중", frame.text_rows()[5])
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+            self.assertEqual(runtime.loading_frame(40, 10).text_rows()[5].strip(), "⠏ loading")
         _, completed = runtime.prepare({"observations": {"usage": {"state": "unavailable"}}}, None,
                                        vm=vm, generation=1, now=2.0)
         self.assertTrue(completed["ready"])
@@ -180,6 +199,19 @@ class LoadingGate(unittest.TestCase):
         self.assertNotIn("불러오는 중", self.draw(loading=False))
         self.assertNotIn("불러오는 중", self.draw(loading=False, pending=True))
 
+    def test_only_the_model_that_can_be_published_is_rendered(self):
+        from tools.fleet.explorer import frame
+
+        with mock.patch.object(frame, "draw", wraps=frame.draw) as draw:
+            self.assertIn("불러오는 중", self.draw(loading=False, pending=True))
+            self.assertEqual(draw.call_count, 0)
+            self.assertNotIn("불러오는 중", self.draw(loading=False))
+            self.assertEqual(draw.call_count, 1)
+            # A pending candidate must still advance readiness, but only the
+            # last complete model should pay for a cell frame and click map.
+            self.assertNotIn("불러오는 중", self.draw(loading=False, pending=True))
+            self.assertLessEqual(draw.call_count, 2)
+
     def test_cached_frame_skips_live_composition_before_first_collection(self):
         from unittest.mock import patch
         from tools.fleet.explorer.view_model import ExplorerViewModel
@@ -269,7 +301,7 @@ class SelectedDetailPublication(unittest.TestCase):
                             "_EXPLORER_RESULT": None, "_EXPLORER_REPLAY_ACTIVE": False,
                             "_EXPLORER_ORDER": [], "_EXPLORER_SIZE": None,
                             "_EXPLORER_COMPOSE_MODEL": None, "_EXPLORER_GENERATION": 1}.items():
-            patch = mock.patch.object(render, name, value)
+            patch = patch_split(render, name, value)
             patch.start()
             self.addCleanup(patch.stop)
         patch = mock.patch.object(render, "_explorer_runtime", return_value=self.runtime)
@@ -708,3 +740,7 @@ class StartupOrdering(unittest.TestCase):
         starts = [index for index, event in enumerate(events) if event.startswith("start:")]
         self.assertTrue(starts)
         self.assertTrue(all(draw_index < index for index in starts), events)
+
+
+if __name__ == "__main__":
+    unittest.main()

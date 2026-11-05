@@ -143,7 +143,7 @@ class EffectiveParentCwd(unittest.TestCase):
 
     # (4) a non-Codex parent has no thread rollout: behaviour is bit-identical.
     def test_cross_harness_parent_keeps_legacy_behaviour(self):
-        claude_sid = "3be8e9d7-756f-4943-8fd7-24c9bcad10ac"
+        claude_sid = "10000079-0000-4000-8000-000000000088"
         write_rollout(self.sessions, THREAD, {"cwd": str(self.session_cwd)})
         args = cwd_args(parent_session_id=claude_sid)
         with mock.patch.dict(os.environ, self.env(CODEX_HOME=str(self.codex_home)), clear=True), \

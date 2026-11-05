@@ -32,6 +32,7 @@ import artifact_payload  # noqa: E402
 import artifact_producer as P  # noqa: E402
 import artifact_reader as reader  # noqa: E402
 import dispatch_contract as D  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 _CORPUS_SPEC = importlib.util.spec_from_file_location(
     "shared_artifact_path_corpus", Path(__file__).with_name("artifact_manifest.test.py"))
@@ -62,8 +63,7 @@ def gate_evidence():
 def registered_headless():
     # Two supported harnesses, not one: quick now compiles a cross-harness
     # frame pair, so a single-candidate evidence set is no longer a valid quick
-    # route at all (`quick-frame-cross-harness-unavailable`). Same shape the
-    # canary's own fixture uses in `tools/artifact-producer-canary.py`.
+    # route at all (`quick-frame-cross-harness-unavailable`).
     return {"candidates": [{
         "harness": "codex", "transport": "headless", "surface": "registered-headless",
         "status": "supported", "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z",
@@ -1219,7 +1219,7 @@ class CheckWriteTest(ProducerTestBase):
         route, _, result = self.begin()
         foreign = Path(self._tmp.name) / "foreign.md"
         foreign.write_text("other cycle result\n")
-        with mock.patch.object(R, "_marker_attempt_axes") as axes:
+        with patch_split(R, "_marker_attempt_axes") as axes:
             with self.assertRaisesRegex(ValueError, "artifact-outside-bound-cycle"):
                 R._publish_completion_locked(route, {}, "frame", foreign,
                                              attempt_id="att-wrong-cycle", attempt_metadata={})
@@ -2111,7 +2111,7 @@ class DirectoryBundleFinalizeTest(ProducerTestBase):
             return stream_facts(path)
 
         with mock.patch.object(os, "scandir", side_effect=no_target_scandir), \
-                mock.patch.object(P, "_stream_file_facts", side_effect=no_target_hash):
+                patch_split(P, "_stream_file_facts", side_effect=no_target_hash):
             sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(sealed["status"], "sealed")
         document = json.loads((cycle / "manifest.json").read_text())
@@ -2233,7 +2233,7 @@ class DirectoryBundleFinalizeTest(ProducerTestBase):
 
         # This models an older producer: it used the normal collector and emitted one row
         # per raw file. Selection is disabled only while creating the initial sealed document.
-        with mock.patch.object(P, "_scan_directory_bundles", return_value=[]):
+        with patch_split(P, "_scan_directory_bundles", return_value=[]):
             first = P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
         self.assertEqual(first["cycle_state"], "active")
         manifest_path = cycle / "manifest.json"
@@ -2617,7 +2617,7 @@ class DirectoryBundleFinalizeTest(ProducerTestBase):
                     if ".tmp-" in Path(path).name:
                         raise OSError("injected crash before temp write")
                     return original(path, data, mode)
-                with mock.patch.object(P, "_write_exclusive", side_effect=fail_temp):
+                with patch_split(P, "_write_exclusive", side_effect=fail_temp):
                     with self.assertRaises(OSError):
                         P.finalize(self.root, cycle_id=result["cycle_id"])
             else:
@@ -2702,7 +2702,7 @@ class RecoveryTest(ProducerTestBase):
                 under_lock.append("every-cycle-record")
             return real_listing(root, **kwargs)
 
-        with mock.patch.object(P, "list_cycle_records", side_effect=listing):
+        with patch_split(P, "list_cycle_records", side_effect=listing):
             P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(under_lock, [])
         self.assertEqual(P.read_cycle_record(self.root, result["cycle_id"])["state"], "sealed")
@@ -2915,8 +2915,8 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         self.write_output(cycle, rel="plans/fixture/final_report.md", data=b"PASS\n")
         self.close(route, path)
         P.finalize(self.root, cycle_id=cycle["cycle_id"])
-        with mock.patch.object(P, "list_references", side_effect=AssertionError("no seed: no reference lookup")), \
-                mock.patch.object(P, "admit_shared", side_effect=AssertionError("no transaction: no admission")):
+        with patch_split(P, "list_references", side_effect=AssertionError("no seed: no reference lookup")), \
+                patch_split(P, "admit_shared", side_effect=AssertionError("no transaction: no admission")):
             self.assertEqual(self._publish(cycle)["status"], "not-applicable")
             self.assertEqual(P.status(self.root)["shared_spec_publications"], [])
             output = io.StringIO()
@@ -2950,9 +2950,9 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         }
         campaign_dir.rename(moved_campaign)
 
-        with mock.patch.object(P, "list_references",
+        with patch_split(P, "list_references",
                                side_effect=AssertionError("unseeded cleanup must not scan shared refs")), \
-                mock.patch.object(P, "admit_shared",
+                patch_split(P, "admit_shared",
                                   side_effect=AssertionError("unseeded cleanup must not admit shared refs")):
             self.assertEqual(self._publish(cycle), {"cycle_id": cycle["cycle_id"], "status": "not-applicable"})
             self.assertEqual(P.completed_route_spec_publication(route, settle=False),
@@ -2988,7 +2988,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         transaction.seed_cycle_spec(spec_base, self.root, spec_base / "c")
         self.close(route, path)
         P.finalize(self.root, cycle_id=cycle["cycle_id"])
-        with mock.patch.object(P, "admit_shared", side_effect=AssertionError("seed alone is not a publication")):
+        with patch_split(P, "admit_shared", side_effect=AssertionError("seed alone is not a publication")):
             publication = self._publish(cycle)
             self.assertEqual(publication["status"], "not-applicable", publication)
         self.assertFalse(any(row["cycle_id"] == cycle["cycle_id"]
@@ -3009,9 +3009,9 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         self.close(route, path)
         P.finalize(self.root, cycle_id=cycle["cycle_id"])
 
-        with mock.patch.object(P, "list_references",
+        with patch_split(P, "list_references",
                                side_effect=AssertionError("seed-only code cycle must not scan shared refs")), \
-                mock.patch.object(P, "admit_shared",
+                patch_split(P, "admit_shared",
                                   side_effect=AssertionError("seed-only code cycle must not publish")):
             self.assertEqual(self._publish(cycle)["status"], "not-applicable")
         publications = P.status(self.root)["shared_spec_publications"]
@@ -3059,9 +3059,9 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         unrelated_references = self.add_unrelated_spec_references(admitted["shared_reference_id"])
 
         with self.observe_shared_spec_enumeration() as enumerated:
-            with mock.patch.object(P, "list_references",
+            with patch_split(P, "list_references",
                                    side_effect=AssertionError("seed-only cleanup must not census shared refs")), \
-                    mock.patch.object(P, "admit_shared",
+                    patch_split(P, "admit_shared",
                                       side_effect=AssertionError("seed-only cleanup must not admit shared refs")):
                 self.assertEqual(self._publish(cycle, settle=False),
                                  {"cycle_id": cycle["cycle_id"], "status": "not-applicable"})
@@ -3189,7 +3189,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         P.finalize(self.root, cycle_id=cycle["cycle_id"])
         (spec_root / P.SPEC_BASE_RECEIPT).unlink()
 
-        with mock.patch.object(P, "admit_shared",
+        with patch_split(P, "admit_shared",
                                side_effect=AssertionError("corrupt seed must not admit")):
             publication = self._publish(cycle)
         self.assertEqual((publication["status"], publication["reason"]),
@@ -3228,7 +3228,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         manifest_bytes = manifest.read_bytes()
         outcome_bytes = R.outcome_path(path).read_bytes()
 
-        with mock.patch.object(P, "_commit_shared",
+        with patch_split(P, "_commit_shared",
                                side_effect=P.ProducerError("shared-base-mismatch", "fixture interruption")):
             pending = self._publish(cycle)
         self.assertEqual(pending["status"], "pending", pending)
@@ -3264,7 +3264,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         _, path, cycle = self._completed()
         manifest = Path(cycle["cycle_dir"]) / "manifest.json"
         sealed, outcome = manifest.read_bytes(), R.outcome_path(path).read_bytes()
-        with mock.patch.object(P, "_commit_shared", side_effect=P.ProducerError("shared-base-mismatch", "fault")):
+        with patch_split(P, "_commit_shared", side_effect=P.ProducerError("shared-base-mismatch", "fault")):
             pending = self._publish(cycle)
         self.assertEqual(pending["status"], "pending")
         journal = next(P.shared_journal_path(self.root, "probe").parent.glob("*.json"))
@@ -3634,13 +3634,13 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
         lease_path = P._review_lease_path(self.root, cycle_id, "att-recovery")
         lease_path.parent.mkdir(parents=True, exist_ok=True)
         lease_path.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
-        with mock.patch.object(P, "_live_review_lease", return_value=lease_path):
+        with patch_split(P, "_live_review_lease", return_value=lease_path):
             with self.assertRaises(P.ProducerError) as caught:
                 P.recover(self.root)
         self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
         self.assertEqual(P.read_cycle_record(self.root, cycle_id)["state"], "open")
         self.assertTrue(P.journal_path(self.root, cycle_id).exists())
-        with mock.patch.object(P, "_live_review_lease", return_value=None):
+        with patch_split(P, "_live_review_lease", return_value=None):
             recovered = P.recover(self.root)
         self.assertIn(cycle_id, recovered["producer"]["rolled_forward"])
 
@@ -3656,7 +3656,7 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
         lease_path = P._review_lease_path(self.root, cycle_id, "att-recovery-no-journal")
         lease_path.parent.mkdir(parents=True, exist_ok=True)
         lease_path.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
-        with mock.patch.object(P, "_live_review_lease", return_value=lease_path):
+        with patch_split(P, "_live_review_lease", return_value=lease_path):
             with self.assertRaises(P.ProducerError) as caught:
                 P.recover(self.root)
         self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
@@ -4064,7 +4064,7 @@ class FinalizeStateConflictTest(ProducerTestBase):
             self.assertIsNotNone(candidate)
             self.assertEqual(candidate["cycle"]["state"], "completed")
             if injection == "lease":
-                patch = mock.patch.object(P, "_live_review_lease", return_value={"lease": "live"})
+                patch = patch_split(P, "_live_review_lease", return_value={"lease": "live"})
                 patch.start(); patches.append(patch)
             elif injection == "cancelled-workflow":
                 self._cancel_workflow_for_latch(route)
@@ -4075,7 +4075,7 @@ class FinalizeStateConflictTest(ProducerTestBase):
             return candidate
 
         try:
-            with mock.patch.object(P, "_provisional_completion_projection", inject):
+            with patch_split(P, "_provisional_completion_projection", inject):
                 refreshed = P.refresh_cycle(self.root, cycle_id, trigger="explicit")
         finally:
             for patch in patches:
@@ -4112,7 +4112,7 @@ class FinalizeStateConflictTest(ProducerTestBase):
         self.assertEqual(json.loads(manifest_path.read_text())["cycle"]["state"], "active")
 
     def test_first_completion_with_active_review_lease_keeps_provisional_active(self):
-        patch = mock.patch.object(P, "_live_review_lease", return_value={"lease": "live"})
+        patch = patch_split(P, "_live_review_lease", return_value={"lease": "live"})
         self._assert_first_completion_negative_keeps_active(lambda output: (patch.start(), patch.stop)[1])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a mode-0 file")
@@ -4402,13 +4402,13 @@ class FinalizeStateConflictTest(ProducerTestBase):
 
         # Lookup failures are not absence. Mocking lstat keeps this portable
         # when the test process has permission to inspect the fixture.
-        with mock.patch.object(P, "cycle_dir", return_value=manifest_path.parent), \
+        with patch_split(P, "cycle_dir", return_value=manifest_path.parent), \
              mock.patch.object(Path, "lstat", side_effect=PermissionError("denied")):
             with self.assertRaises(P.ProducerError) as caught:
                 P._published_cycle_state(self.root, record)
         self.assertEqual(caught.exception.code, "sealed-cycle-state-unreadable")
         self.assertIn("lookup-error=PermissionError", caught.exception.detail)
-        with mock.patch.object(P, "cycle_dir", return_value=manifest_path.parent), \
+        with patch_split(P, "cycle_dir", return_value=manifest_path.parent), \
              mock.patch.object(Path, "lstat", side_effect=OSError(errno.ENOTDIR, "not a directory")):
             with self.assertRaises(P.ProducerError) as caught:
                 P._published_cycle_state(self.root, record)
@@ -4998,7 +4998,7 @@ class SharedBaseGuardTest(ProducerTestBase):
         cycle = self._cycle([["a"], ["a"], ["a"]])
         first = self._admit(cycle, 0)
         base = first["shared_reference_revision_id"]
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self._admit(cycle, 1, base_revision=base)
         journal_path = P.shared_journal_path(self.root, "probe").parent
@@ -5188,7 +5188,7 @@ class TerminalExactRecoveryTest(ProducerTestBase):
                                    crash_after_manifest=True)
         manifest = Path(result["cycle_dir"]) / "manifest.json"
         before = manifest.read_bytes()
-        with mock.patch.object(P, "_recover_locked", side_effect=AssertionError("root recovery forbidden")):
+        with patch_split(P, "_recover_locked", side_effect=AssertionError("root recovery forbidden")):
             replay = P.finalize_exact_cycle(self.root, cycle_id=result["cycle_id"], expected_binding=binding)
             self.assertEqual(replay["status"], "already-sealed")
             P.verify_finalized_cycle(self.root, cycle_id=result["cycle_id"], expected_binding=binding)
@@ -5549,7 +5549,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             self.assertEqual(proof.status, "proved", proof)
             commit_path = terminal._commit_state_path(request)
 
-            with mock.patch.object(P, "_commit_sealed", side_effect=RuntimeError("crash-before-seal")):
+            with patch_split(P, "_commit_sealed", side_effect=RuntimeError("crash-before-seal")):
                 interrupted = terminal.settle_terminal_commit(request)
             self.assertNotEqual(interrupted.result, "completed", interrupted)
             manifest = Path(begun["cycle_dir"]) / "manifest.json"
@@ -5647,7 +5647,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
         self.assertIsNotNone(completed)
         self.assertEqual(completed["state"], "pending")
         with contextlib.ExitStack() as stack:
-            heavy = [stack.enter_context(mock.patch.object(module, name,
+            heavy = [stack.enter_context(patch_split(module, name,
                          side_effect=AssertionError("heavy notice observation: " + name)))
                      for module, names in (
                          (terminal, ("owner_completion_state", "owner_completion_pending",
@@ -5721,7 +5721,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                   expected_terminal_marker_digest=state["terminal_marker_digest"])
         held.update(different)
         unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
-        with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+        with patch_split(R,"terminal_gate_observation",return_value=unproven):
             first,created=R.close_route(route,route_file,allow_unproven=True,jobs=jobs,**held)
         self.assertTrue(created); self.assertFalse(first["terminal_gate_proven"])
         return route,route_file,jobs,owner,result,request,R.outcome_path(route_file).read_bytes(),state
@@ -5807,7 +5807,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                   expected_producer_binding_digest=foreign,
                   expected_terminal_marker_digest=state["terminal_marker_digest"])
         unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
-        with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+        with patch_split(R,"terminal_gate_observation",return_value=unproven):
             first,created=R.close_route(route,route_file,allow_unproven=True,jobs=jobs,**held)
         self.assertTrue(created); self.assertFalse(first["terminal_gate_proven"])
         raw=R.outcome_path(route_file).read_bytes()
@@ -5877,7 +5877,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             unproven={"report":{"passed":False,"reason":"completion-attempt-not-current"}}
             manifest=Path(result["cycle_dir"])/"manifest.json"
             manifest_before=manifest.read_bytes() if manifest.exists() else None
-            with mock.patch.object(R,"terminal_gate_observation",return_value=unproven):
+            with patch_split(R,"terminal_gate_observation",return_value=unproven):
                 out,created=R.close_route(route,route_file)
             self.assertFalse(created); self.assertFalse(out["terminal_gate_proven"])
             self.assertNotEqual(P.read_cycle_record(self.root,result["cycle_id"])["state"],"sealed")
@@ -5933,7 +5933,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                     marker_bytes = marker.read_bytes()
                     with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
                         # Crash after manifest publication; exact finish owns recovery.
-                        with mock.patch.object(P, "_commit_sealed", side_effect=RuntimeError("crash")):
+                        with patch_split(P, "_commit_sealed", side_effect=RuntimeError("crash")):
                             interrupted = terminal.settle_terminal_commit(request)
                         self.assertNotEqual(interrupted.result, "completed", interrupted)
                         manifest = Path(result["cycle_dir"]) / "manifest.json"
@@ -6004,7 +6004,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                             return original(path,value,**kw)
                         crash=mock.patch.object(terminal,"_atomic_json",side_effect=write)
                     elif checkpoint=="manifest-after":
-                        crash=mock.patch.object(P,"_commit_sealed",side_effect=RuntimeError(checkpoint))
+                        crash=patch_split(P,"_commit_sealed",side_effect=RuntimeError(checkpoint))
                     else:
                         next_state={"close-after":"route-closed","finalize-after":"producer-finalized",
                                     "envelope-after":"owner-envelope-sealed"}[checkpoint]
@@ -6192,7 +6192,7 @@ class FinalizeRefusalOfInvalidNamesTest(ProducerTestBase):
         _route, _route_file, result = self.begin()
         self.write_output(result)
         bad = self.write_output(result, rel="evidence/snapshot/<sid>.jsonl", data=b"row\n")
-        with mock.patch.object(P, "_stream_file_facts", wraps=P._stream_file_facts) as hashed:
+        with patch_split(P, "_stream_file_facts", wraps=P._stream_file_facts) as hashed:
             with self.assertRaises(P.ProducerError) as caught:
                 P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
         self.assertEqual(caught.exception.code, "output-invalid")
@@ -6450,7 +6450,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         route, route_file, launch_env, owner, args = self._prepared_owner()
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}), \
                 mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile, \
-                mock.patch.object(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
+                patch_split(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
             result = P.bind_owner_launch(args, self.jobs, environ=launch_env)
         self.assertEqual(result["status"], "resumed")
         self.assertEqual(result["cycle_id"], launch_env["AGENT_ARTIFACT_CYCLE_ID"])
@@ -6463,7 +6463,7 @@ class OwnerLaunchBindingTest(ProducerTestBase):
         self.activate()
         route, route_file = self.route("quick")
         with mock.patch.object(P, "reconcile_root", wraps=P.reconcile_root) as reconcile, \
-                mock.patch.object(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
+                patch_split(P, "deliver_pending_history", wraps=P.deliver_pending_history) as history:
             first = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
             self.assertEqual((reconcile.call_count, history.call_count), (1, 1))
             second = P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs, sibling_looked=True)
@@ -7002,7 +7002,7 @@ class RouteLineageBindingTest(ProducerTestBase):
         self.jobs.write_text("corrupt registry row\n")
         self.assertFalse(P._closed_unexecuted_continuation(self.root, successor))
         self.jobs.write_text("")
-        with mock.patch.object(P.artifact_lifecycle._load_capability_route(), "resolve_dangling_registry",
+        with patch_split(P.artifact_lifecycle._load_capability_route(), "resolve_dangling_registry",
                                side_effect=OSError("unreadable registry")):
             self.assertFalse(P._closed_unexecuted_continuation(self.root, successor))
         markers = R.completion_dir(successor["route_id"], jobs=self.jobs)
@@ -8174,7 +8174,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
     def test_publish_interruption_recovers_exact_proof_and_rejects_corruption(self):
         from unittest import mock
         cycle, initial, winner = self.fixture()
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self._admit(cycle, 2, base_revision=initial["shared_reference_revision_id"])
         journal_path = next(P.shared_journal_path(self.root, "probe").parent.glob("*.json"))
@@ -8241,7 +8241,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
     def test_unresolved_publication_blocks_duplicate_attempt(self):
         from unittest import mock
         cycle, initial, winner = self.fixture()
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self._admit(cycle, 2, base_revision=initial["shared_reference_revision_id"])
         journal_path = next(P.shared_journal_path(self.root, "probe").parent.glob("*.json"))
@@ -8260,7 +8260,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
         cycle = self.trees(base, {**base, "b/prd.md": b"B"}, {"b/prd.md": b"b"})
         initial = self._admit(cycle, 0)
         self._admit(cycle, 1, base_revision=initial["shared_reference_revision_id"])
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self._admit(cycle, 2, base_revision=initial["shared_reference_revision_id"],
                             drop_components=["a"], drop_reason="retired")
@@ -8291,7 +8291,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
     def test_stripped_merge_proof_cannot_be_recovered_as_exact_copy(self):
         from unittest import mock
         cycle, initial, winner = self.fixture()
-        with mock.patch.object(P, "_commit_shared", side_effect=RuntimeError("crash")):
+        with patch_split(P, "_commit_shared", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):
                 self._admit(cycle, 2, base_revision=initial["shared_reference_revision_id"])
         journal_path = next(P.shared_journal_path(self.root, "probe").parent.glob("*.json"))

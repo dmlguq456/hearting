@@ -19,7 +19,8 @@ if [ "${AGENT_SESSION_ROLE:-}" = worker ] \
 fi
 
 HOOK_DIR="$HOOK_DIR" AGENT_HOME="$AGENT_HOME" python3 -c '
-import json, os, sys
+import json, os, sys, time
+started = time.monotonic()
 try:
     payload = json.load(sys.stdin)
 except Exception:
@@ -45,17 +46,45 @@ def text(key):
 contexts = []
 human = []
 deferred = []
+startup = {"due": event == "prompt"}
 def emit(context):
     contexts.append(context)
 try:
     import session_tidy
+    # An older session_tidy (a worktree pinned to its release) has no budget.
+    budget = getattr(session_tidy, "HUMAN_NOTICE_BUDGET_SECONDS", None)
     session_tidy.run_hook(
         "claude", event, sid, source=text("source"),
         transcript=text("transcript_path"), cwd=text("cwd") or os.getcwd(), emit=emit,
         emit_human=human.append, deferred=deferred,
-        prompt_text=text("prompt"))
+        render_context=event == "prompt", startup_context=startup,
+        prompt_text=text("prompt"),
+        **({"human_deadline": started + budget} if budget is not None else {}))
 except Exception:
     pass
+if event == "start":
+    try:
+        from peer_obligations import request_obligation_recovery
+        request_obligation_recovery(lifecycle_root=os.environ.get("AGENT_HOME"))
+    except Exception:
+        pass
+if startup.get("due"):
+    try:
+        import subprocess
+        # The outer card hook has five seconds. Keep the probe inside its
+        # remainder, reserving time to render the already prepared card.
+        probe_budget = min(0.5, max(0.0, 4.0 - (time.monotonic() - started)))
+        if probe_budget > 0:
+            result = subprocess.run(
+                [os.path.join(os.environ["HOOK_DIR"], "local-evidence-inject.sh"),
+                 "--cwd", text("cwd") or os.getcwd(), "--format", "text"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={**os.environ, "LOCAL_EVIDENCE_BUDGET": str(min(0.3, probe_budget))},
+                timeout=probe_budget)
+            if result.returncode == 0 and result.stdout.strip():
+                contexts.append(result.stdout.strip())
+    except Exception:
+        pass
 notice = ""
 try:
     from context_alert import claude_notice

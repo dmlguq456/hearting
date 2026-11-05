@@ -2,6 +2,7 @@
 import re
 from collections.abc import Mapping
 
+from ..config import ui_text
 from .grid import CellGrid, cell_width
 from .grid import clip_cells as clip
 
@@ -168,8 +169,9 @@ def draw_compute(grid: CellGrid, vm, state=None, x=34, y=3):
              "dim", limit=grid.cols - 1)
 
 
-OPEN_STAGE_WORDS = {"doing": ("진행 중", "g_spin_dim"), "waiting": ("확인 대기", "lvl_y"),
-                    "open": ("열림", "dim")}
+OPEN_STAGE_WORDS = {"doing": ("fleet.memory.stage_doing", "g_spin_dim"),     # catalog key, colour
+                    "waiting": ("fleet.memory.stage_waiting", "lvl_y"),
+                    "open": ("fleet.memory.stage_open", "dim")}
 
 
 def memory_projects(vm):
@@ -194,16 +196,22 @@ def memory_status(vm):
     data, order, _journal = memory_projects(vm)
     state = str(data.get("state") or "unknown")
     if data.get("decisions_today") is None:
-        return f"프로젝트 {len(order)} · 메모리 DB {state}"
-    return (f"프로젝트 {len(order)} · 오늘 결정 {data.get('decisions_today')} · "
-            f"진행 중 {data.get('doing', '·')}" + ("" if state == "success" else f" · DB {state}"))
+        return ui_text("fleet.memory.status_db", projects=len(order), state=state)
+    return (ui_text("fleet.memory.status", projects=len(order), decisions=data.get("decisions_today"),
+                    doing=data.get("doing", "·"))
+            + ("" if state == "success" else ui_text("fleet.memory.db_suffix", state=state)))
 
 
-def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None):
+def _memory_column(labels):
+    """Where a memory row's time starts: two cells past the widest label, never before x+12."""
+    return max(12, 3 + max((cell_width(label) for label in labels), default=0) + 2)
+
+
+def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None, column=12):
     if label:
         grid.put(x + 3, y, label, "label", limit=right)
-    grid.put(x + 12, y, "·" if when is None else str(when), "dim", limit=right)
-    cursor = x + 19
+    grid.put(x + column, y, "·" if when is None else str(when), "dim", limit=right)
+    cursor = x + column + 7
     if mark is not None:
         word, mark_key = mark
         cursor = grid.put(cursor, y, word, mark_key, limit=right) + 2
@@ -219,20 +227,23 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
     projects = data.get("projects") if isinstance(data.get("projects"), Mapping) else {}
     db_state = str(data.get("state") or "unknown")
     if data and db_state != "success":
-        detail = " · 마지막으로 읽은 값" if data.get("stale") else " · 결정·남은 일 모름"
-        grid.put(x + 1, y, "메모리 DB " + db_state + detail, "dim", limit=right)
+        detail = ui_text("fleet.memory.db_last_good" if data.get("stale") else "fleet.memory.db_unknown")
+        grid.put(x + 1, y, ui_text("fleet.memory.db_state", state=db_state) + detail, "dim", limit=right)
         y += 1
     if not order:
-        grid.put(x + 1, y, "프로젝트 기억 없음", "dim", limit=right)
+        grid.put(x + 1, y, ui_text("fleet.memory.no_projects"), "dim", limit=right)
         return
     opened = state.opened_for("memory:open", "") if state is not None else ""
+    labels = {key: ui_text(key)
+              for key in ("fleet.memory.decisions", "fleet.memory.open_work", "fleet.memory.recent")}
+    column = _memory_column(labels.values())
     for index, name in enumerate(order):
         if index:
             y = _group_sep(grid, x, use, y)
         project = projects.get(name) if isinstance(projects.get(name), Mapping) else {}
         recent = journal.get(name, ())
         last = project.get("last") or (recent[0][0] if recent and recent[0] else None)
-        tail = f"마지막 변화 {last}" if last else ""
+        tail = ui_text("fleet.memory.last_change", when=last) if last else ""
         grid.put(x + 1, y, clip(name + "/" if name else "·", max(1, use - cell_width(tail) - 3)),
                  "title_dim", limit=right)
         if tail:
@@ -240,38 +251,41 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
         y += 1
         for row_index, row in enumerate(tuple(project.get("decisions") or ())):
             when, text = (tuple(row) + (None,) * 2)[:2]
-            y = _memory_line(grid, x, y, right, "결정" if row_index == 0 else None, when, text)
+            y = _memory_line(grid, x, y, right, labels["fleet.memory.decisions"] if row_index == 0 else None,
+                             when, text, column=column)
         items = tuple(project.get("open") or ())
         if items:
             counts = project.get("counts") if isinstance(project.get("counts"), Mapping) else {}
             grid.add_hit(y, x, right, ("fold", "memory:open", name))
-            grid.put(x + 3, y, "남은 일", "label", limit=right)
-            cursor = x + 12
+            grid.put(x + 3, y, labels["fleet.memory.open_work"], "label", limit=right)
+            cursor = x + column
             more = "+" if project.get("limited") else ""
-            parts = [(f"진행 중 {counts.get('doing', 0)}", "g_spin_dim"),
-                     (f"확인 대기 {counts.get('waiting', 0)}", "lvl_y"),
-                     (f"기록상 열림 {counts.get('open', 0)}{more}", "dim")]
+            parts = [(ui_text("fleet.memory.count_doing", count=counts.get("doing", 0)), "g_spin_dim"),
+                     (ui_text("fleet.memory.count_waiting", count=counts.get("waiting", 0)), "lvl_y"),
+                     (ui_text("fleet.memory.count_open", count=counts.get("open", 0)) + more, "dim")]
             if cell_width(" · ".join(text for text, _key in parts)) >= right - cursor:
-                parts = [(f"진행 {counts.get('doing', 0)}", "g_spin_dim"),
-                         (f"대기 {counts.get('waiting', 0)}", "lvl_y"),
-                         (f"열림 {counts.get('open', 0)}{more}", "dim")]
+                parts = [(ui_text("fleet.memory.short_doing", count=counts.get("doing", 0)), "g_spin_dim"),
+                         (ui_text("fleet.memory.short_waiting", count=counts.get("waiting", 0)), "lvl_y"),
+                         (ui_text("fleet.memory.short_open", count=counts.get("open", 0)) + more, "dim")]
             for part_index, (text, key) in enumerate(parts):
                 if part_index:
                     cursor = grid.put(cursor, y, " · ", "dim", limit=right)
                 zero = text.rsplit(" ", 1)[-1] == "0"           # a zero count is not highlighted
                 cursor = grid.put(cursor, y, text, "dim" if zero else key, limit=right)
-            toggle = "▼ 접기" if opened == name else "▶ 펼치기"
+            toggle = ui_text("fleet.memory.collapse" if opened == name else "fleet.memory.expand")
             if cursor + 2 + cell_width(toggle) < right - 1:
                 grid.put(right - 1 - cell_width(toggle), y, toggle, "soft", limit=right)
             y += 1
             for row in (items if opened == name else items[:1]):
                 stage, when, text = (tuple(row) + (None,) * 3)[:3]
-                word = OPEN_STAGE_WORDS.get(stage, (str(stage), "dim"))
-                y = _memory_line(grid, x, y, right, None, when, text, mark=word)
+                word = OPEN_STAGE_WORDS.get(stage)
+                word = (ui_text(word[0]), word[1]) if word else (str(stage), "dim")
+                y = _memory_line(grid, x, y, right, None, when, text, mark=word, column=column)
         for row_index, row in enumerate(recent[:2]):
             when, action, _kind, text = (tuple(row) + (None,) * 4)[:4]
             saved = action == "saved"
-            y = _memory_line(grid, x, y, right, "최근" if row_index == 0 else None, when, text,
+            y = _memory_line(grid, x, y, right, labels["fleet.memory.recent"] if row_index == 0 else None,
+                             when, text, column=column,
                              key="soft" if saved else "now_sub",
                              mark=("+", "done") if saved else ("·", "dim"))
 
@@ -340,7 +354,7 @@ def draw_system(grid: CellGrid, vm, state=None, x=34, y=3):
     pending = [(str(delivery.get("pending", "·")), "lvl_y"), (" awaiting recipient", "dim")]
     no_recipient = delivery.get("no_recipient")
     if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
-        pending.append((f" · 받을 세션 없음 {no_recipient}", "dim"))
+        pending.append((ui_text("fleet.delivery.no_recipient", count=no_recipient), "dim"))
     obligations = []
     for entry in data.get("obligations") or ():
         if obligations:

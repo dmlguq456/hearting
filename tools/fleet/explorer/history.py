@@ -1,8 +1,9 @@
 """Seat and generation list for the HISTORY view."""
 
 from collections.abc import Mapping
+from ..config import ui_text
 from .grid import cell_width
-from .tables import _clip, _tint_row, repo_rule_label
+from .tables import _clip, _recede_row, _tint_row, repo_rule_label
 
 
 def _hard_cut(text, room):
@@ -21,10 +22,23 @@ def draw_history(grid, vm, state, x=34, y=3):
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 6
     grid.fill(x, right, y, " ", tint=234)
-    seats = tuple(vm.seats or ())
+    every = tuple(vm.seats or ())
+    seats = tuple(seat for seat in every if not _ended(seat))
+    live_tags = {str(seat[0]) for seat in seats}
+    under = {}                              # a live seat's tag -> ended seats its chain continued from
+    ended = []
+    for seat in every:
+        record = _ended(seat)
+        if record is None:
+            continue
+        if record.get("successor") in live_tags:
+            under.setdefault(record["successor"], []).append(seat)
+        else:
+            ended.append(seat)
     opened = state.opened_for("hopen:" + state.view)
     c_id = 18
-    c_h, c_gen = c_id + 4 + 3, c_id + 4 + 3 + 8 + 3
+    id_w = 9 if ended else 4               # an ended seat shows its short SID, never a freed tag
+    c_h, c_gen = c_id + id_w + 3, c_id + id_w + 3 + 8 + 3
     gen_width = max(8, min(24, max((len((vm.generations or {}).get(str(seat[0]), ())) for seat in seats),
                                    default=0), use - c_gen - 3 - 3 - 14 - 3 - 16))
     c_last = c_gen + 3 + gen_width + 3
@@ -71,6 +85,18 @@ def draw_history(grid, vm, state, x=34, y=3):
         y += 1
         if is_open:
             y = draw_seat_expand(grid, vm, state, tag, x, use, y, bottom, seat, harness) + 1
+        for earlier in under.get(tag, ()):
+            if y > bottom:
+                break
+            y = _draw_ended(grid, vm, state, earlier, x, use, y, bottom, right, c_id, c_h, c_gen,
+                            c_last, c_card, gen_width, opened, None)
+    for seat in ended:
+        if y > bottom:
+            break
+        repo = str(seat[1])
+        y = _draw_ended(grid, vm, state, seat, x, use, y, bottom, right, c_id, c_h, c_gen,
+                        c_last, c_card, gen_width, opened, repo if repo != previous_repo else None)
+        previous_repo = repo
     if y + 3 <= bottom:
         footer_end = x + use
         cursor = grid.put(x + 2, y + 1, "●", "soft", limit=footer_end)
@@ -81,6 +107,53 @@ def draw_history(grid, vm, state, x=34, y=3):
         cursor = grid.put(cursor, y + 1, " a running session took over (retire)   ", "dim", limit=footer_end)
         cursor = grid.put(cursor, y + 1, "colour", "soft", limit=footer_end)
         grid.put(cursor, y + 1, " = harness   ·   click a row: its generations here", "dim", limit=footer_end)
+
+
+def _ended(seat):
+    extra = seat[7] if len(seat) > 7 else None
+    return extra if isinstance(extra, Mapping) and extra.get("ended") else None
+
+
+def _draw_ended(grid, vm, state, seat, x, use, y, bottom, right, c_id, c_h, c_gen, c_last, c_card,
+                gen_width, opened, repo):
+    """An ended seat's row: short SID and ``ended`` in the seat columns, receded like history routes.
+
+    Under the live seat that continued it, the row says so in the PEERS handover words.
+    """
+    record = _ended(seat)
+    tag = str(seat[0])
+    harness = str(record.get("harness") or "·")
+    is_open = opened == tag
+    grid.add_hit(y, x, right, ("fold", "hopen:" + state.view, tag))
+    if is_open:
+        grid.fill(x - 1, right, y, " ", tint=236)
+        grid.put(x, y, "▶", "soft")
+    if repo:
+        grid.put(x + 2, y, _hard_cut(repo_rule_label(repo, 13), right - x - 2), "title_dim", limit=right)
+    grid.put(x + c_id + 1, y, _hard_cut(str(record.get("sid") or "·"), right - x - c_id - 1), "dim",
+             limit=right)
+    if record.get("successor"):
+        gen = record.get("gen")
+        link = (f"gen {gen} → [{record['successor']}]" if gen is not None
+                else f"→ [{record['successor']}]")
+        grid.put(x + c_h, y, _hard_cut(link, right - x - c_h), "soft", limit=right)
+    else:
+        grid.put(x + c_h, y, _hard_cut(harness, right - x - c_h), "hb_" + harness, limit=right)
+        grid.put(x + c_gen, y, f"{int(seat[2]) if len(seat) > 2 else 0:2d} ", "soft")
+        marks = tuple(seat[6]) if len(seat) > 6 else ()
+        _gen_strip(grid, x + c_gen + 3, y, marks, gen_width, harness)
+    grid.put(x + c_last, y, _hard_cut(str(record.get("at") or "ended"), right - x - c_last), "dim",
+             limit=right)
+    title = str(seat[5] or "·") if len(seat) > 5 else "·"
+    grid.put(x + c_card, y, _clip(title, use - c_card) if title != "·" else "·",
+             "soft" if title != "·" else "dim", limit=right)
+    _recede_row(grid, y, x, right)
+    if is_open:
+        _tint_row(grid, y, x - 1, right, 236)
+    y += 1
+    if is_open:
+        y = draw_seat_expand(grid, vm, state, tag, x, use, y, bottom, seat, harness) + 1
+    return y
 
 
 def _gen_strip(grid, x, y, marks, room, harness):
@@ -114,7 +187,8 @@ def draw_seat_expand(grid, vm, state, tag, x, use, y, bottom, seat, harness):
         cursor = grid.put(x0, y, f"{count} generations", "soft", limit=x + use + 1)
         usage = (vm.system or {}).get("usage_api") if isinstance(vm.system, Mapping) else None
         stamp = usage.get("freshness") if isinstance(usage, Mapping) else None
-        note = f"{stamp} 전에 남은 카드 본문이 없습니다." if stamp else "읽은 카드 본문이 없습니다."
+        note = (ui_text("fleet.history.no_card_before", when=stamp) if stamp
+                else ui_text("fleet.history.no_card"))
         limit = x + use + 1
         line = f"  · last clear {last_clear}   {note}"
         grid.put(cursor, y, _hard_cut(line, limit - cursor), "dim", limit=limit)

@@ -314,7 +314,7 @@ class BudgetInvariantTest(unittest.TestCase):
             verdict = admit(purpose="ordinary", stalled=False, reservation_ok=True)
             self.assertEqual(len(admit_calls), 1)
             self.assertTrue(verdict.admitted)
-            self.assertEqual(verdict.charged, "gross")
+            self.assertEqual(verdict.charged, "none")
         finally:
             sandbox.close()
 

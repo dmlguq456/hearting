@@ -21,6 +21,7 @@ import dispatch_contract as D
 import artifact_lifecycle as L
 import artifact_producer as P
 import dispatch_lifecycle as DL
+from split_module_fixture import patch_split
 
 _ROUTE_SPEC = importlib.util.spec_from_file_location(
     "review_binding_route_fixture", PROJECT_ROOT / "utilities/capability-route.py"
@@ -607,7 +608,7 @@ class ReviewAdapterWiringParityTest(unittest.TestCase):
                 self.assertEqual(kwargs["nonce"], args.review_governed_lease_nonce)
                 self.assertIs(kwargs["lease_acquire"], wrapper.review_lease_acquire)
                 with self.subTest(probe="witness-unlocked"):
-                    with mock.patch.object(wrapper, "review_governed_lease_is_held", return_value=True):
+                    with patch_split(wrapper, "review_governed_lease_is_held", return_value=True):
                         self.assertFalse(kwargs["witness_probe"]())
 
             with self.subTest(harness=harness, lifecycle="foreground"):

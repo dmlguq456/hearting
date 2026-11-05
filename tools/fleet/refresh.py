@@ -377,6 +377,7 @@ class RefreshPump:
     def _run(self):
         value = None
         error = None
+        cpu_started = time.thread_time()
         try:
             value = self._producer()
         except BaseException as exc:  # noqa: BLE001
@@ -404,9 +405,13 @@ class RefreshPump:
             self._running = False
             if self._adaptive_cadence:
                 # Explorer snapshots leave an idle interval after slow reads
-                # and back off repeated failures, bounded at eight intervals.
+                # and back off CPU-heavy reads too. Wall duration alone keeps
+                # a CPU-bound producer near 50% even after it becomes faster.
+                # Four CPU seconds of rest per CPU second keeps one periodic
+                # producer at <=20%; slow I/O alone retains the old cadence.
                 cooldown = self._interval * (2 ** self._failure_streak)
-                adaptive_delay = max(self._interval, self._last_duration)
+                cpu_duration = max(0.0, time.thread_time() - cpu_started)
+                adaptive_delay = max(self._interval, self._last_duration, 4 * cpu_duration)
                 delay = max(cooldown, adaptive_delay)
             else:
                 # Preserve the original shared-pump cadence for board callers.

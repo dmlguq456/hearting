@@ -30,6 +30,9 @@ if _TOOLS_DIR not in sys.path:
 
 from fleet import render, session_handle                          # noqa: E402
 from fleet.collectors import peer_messages                        # noqa: E402
+from pathlib import Path  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _write_session(cfg, pid, session_id, name=None, name_source="derived"):
@@ -152,7 +155,7 @@ class EndpointUpgradeTest(unittest.TestCase):
 
     def test_a_peer_that_resolves_to_no_badge_keeps_its_readable_name(self):
         # Losing a usable name to reach a badge that does not exist would be a downgrade.
-        with mock.patch.object(render, "_resolve_session_tag", return_value=None):
+        with patch_split(render, "_resolve_session_tag", return_value=None):
             self.assertEqual(self._label("peer-test-codex"), "peer-test-codex")
 
 

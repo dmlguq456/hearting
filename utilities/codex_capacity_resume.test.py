@@ -259,6 +259,16 @@ class CarrierTest(unittest.TestCase):
 
 
 class LaunchTest(unittest.TestCase):
+    def test_hook_launch_import_does_not_load_the_registered_supervisor_graph(self):
+        import subprocess
+        code = ("import sys; import codex_capacity_resume; "
+                "assert 'session_supervisor_decisions' not in sys.modules; "
+                "assert 'dispatch_stage_advance' not in sys.modules")
+        result = subprocess.run([sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": str(ROOT / "utilities")},
+            text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_launch_starts_one_detached_observer_for_the_exact_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript = Path(tmp) / "rollout.jsonl"
@@ -280,16 +290,16 @@ class LaunchTest(unittest.TestCase):
         hook = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = hook
         spec.loader.exec_module(hook)
-        payload = json.dumps({"session_id": THREAD, "turn_id": TURN, "prompt": "hi",
-                              "hook_event_name": "UserPromptSubmit"})
         quiet = dict(run_preflight=mock.Mock(return_value=""), card_context=mock.Mock(return_value=("", None)),
                      candidate_context=mock.Mock(return_value=("", None)), launch_trigger=mock.Mock(),
                      token_budget_context=mock.Mock(return_value=""), emit_context=mock.Mock(),
                      sd111_first_prompt_sweep=mock.Mock(), retry_pending_peer=mock.Mock(),
                      native_queue_prompt_receipts=mock.Mock(return_value=([], [])))
         import peer_obligations
-        for worker, expected in ((False, 1), (True, 0)):
-            with self.subTest(worker=worker), tempfile.TemporaryDirectory() as tmp, \
+        for worker, turn_id, expected in ((False, TURN, 1), (True, TURN, 0), (False, None, 0)):
+            payload = json.dumps({"session_id": THREAD, "turn_id": turn_id, "message_id": TURN,
+                                  "prompt": "hi", "hook_event_name": "UserPromptSubmit"})
+            with self.subTest(worker=worker, turn_id=turn_id), tempfile.TemporaryDirectory() as tmp, \
                     mock.patch.dict(os.environ, {"HOME": tmp, "XDG_STATE_HOME": tmp,
                                                  "CODEX_HOME": tmp, "PATH": os.environ["PATH"]},
                                     clear=True), \

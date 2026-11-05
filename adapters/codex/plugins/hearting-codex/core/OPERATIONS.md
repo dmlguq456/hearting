@@ -224,7 +224,10 @@ when it does not, or none can be resolved, does the launch keep the release its
 parent tree inherited. The wrapper chooses before registry, lock, or child-launch
 work, re-executing the chosen release's harness wrapper with the original
 argument vector and `AGENT_HOME` set to its real path, so admission runs once on
-that code. A runtime-owned long-lived observer follows the same rule at its own
+that code. An owner's Codex home stays linked to the release that built it, so
+the projection check validates a worker home against its own `worker-home.json`
+source; the child builds its own home on the chosen release. A runtime-owned
+long-lived observer follows the same rule at its own
 checkpoint boundary, before it projects or delivers and while it holds its duty
 lease: the completion observer hands the lease to the installed release's
 observer. A detached helper that can outlive its work, such as the per-attempt
@@ -620,10 +623,31 @@ and unlink. It resumes on the next normal cadence after
 interruption; examining and removing have separate time budgets, and the next
 pass may start after one minute while removable files remain. It runs beside the existing post-exit reaper and selector-free
 `reconcile --apply`; exact-attempt transactions remain scoped to their attempt.
+The same pass retires two state-root leftovers untouched for seven days: a
+route's completion markers when neither the registry nor its archive names that route and
+every marker's evidence lay in a removed default `mkdtemp()` root (a test
+fixture), and an ended attempt's per-attempt launch lock while holding it.
 The append-only session-sweep and pending-delivery observation logs rotate at
 complete record boundaries under their writer lock, retaining a bounded set of
 closed segments. Their active inode and authoritative receipts/ACK records are
 not removed by this policy.
+
+**Dispatch registry archive.** The same post-exit tail, at most every six
+hours, moves settled history out of the live `jobs.log`. Because a tail runs
+only when a dispatch ends, the peer obligation runner's six-hour maintenance
+pass also starts these post-exit retention passes (homes, logs, reusable
+runtimes, archive) in a short-lived process. A group of rows that
+share an attempt or route id moves only as a whole, when every row ended (the
+last write of its attempt log, else its registration) at least 14 days ago,
+belongs to a route closed at least 14 days ago, owes no parent delivery, has no
+attempt log left and, if it started, left its route's completion markers. Rows
+go byte-exact to `<state root>/archive/registry-<YYYY-MM>/` (read by
+`dispatch-registry.py inventory --include-archive`) and are synced there before
+the registry is replaced under its lock; uncertain evidence keeps a row live.
+A closed-route replay puts its rows back first, and
+`python3 <AGENT_HOME>/utilities/dispatch_registry_archive.py restore [--id <id>]`
+puts archived rows back in time order; rows that still qualify move again at
+the next pass.
 
 Preflight doctors share the same failure presentation: preserve the check's
 exit status, report a bounded cause excerpt when available (favoring explicit
@@ -865,16 +889,19 @@ tidy at its existing project seat and pane hooks silent, without new user input
 or runtime-state migration.
 
 For native Codex callbacks in a shared service, exactly one `thread-id` is the
-last `[tui].status_line` item, and the complete UUID in the last visible native
-footer field provides the current `Thread.id`; `sessionId` remains its tree
-root. A UUID in an earlier field, title, transcript, or arbitrary screen text
-is not current identity. A missing, clipped, wrapped, partial, ambiguous, or
-hidden last field stays unknown. Two fresh samples share stable foreground
-PID/start/TTY and one unique endpoint/pane, also used for reporting, number
-lookup and title. Managed apply preserves every other custom footer item and
-its order. Callback or environment SID, cwd, title, inherited pane and shared
-ancestry alone remain hints; registered workers have no foreground pane
-ownership.
+first `[tui].status_line` item (installs not yet refreshed keep it last), and
+the complete UUID in the first or last visible native footer field provides the
+current `Thread.id`; `sessionId` remains its tree root. A UUID in a middle
+field, title, transcript, or arbitrary screen text is not current identity. A
+missing, clipped, wrapped, partial, ambiguous, or hidden identity field stays
+unknown, as do two different complete UUIDs at the two ends; a clipped
+trailing UUID voids a first field it is not a prefix of. Fleet keeps a TUI
+row on its own thread while the footer shows one of its subagents. Two fresh
+samples share stable foreground PID/start/TTY and one unique endpoint/pane, also
+used for reporting, number lookup and title. Managed apply preserves every other
+custom footer item and its order. Callback or environment SID, cwd, title,
+inherited pane and shared ancestry alone remain hints; registered workers have
+no foreground pane ownership.
 
 For an unproven background caller, default `peer-steward start` locates the
 inherited pane's workspace by its live foreground directory in the caller's
@@ -902,6 +929,15 @@ execution.
 
 **Dispatch responsibility:** execution, semantic outcome, and notification are
 separate facts.
+
+Watcher attachment failure after the launch fence does not undo a launch.
+The execution boundary retains the published PID/start/group and actual child
+start, performs bounded exact cleanup, and hands unresolved cleanup to the
+existing resolver and supervision controller. A terminal result may coexist
+with an unsettled cleanup obligation; neither permits a second launch.
+After its direct native child returns, a governor may drain only its exact
+non-resource descendants. Protected resources and unknown observations retain
+their ownership, and the witness and lease remain held until actual settlement.
 
 | Decision | Accountable component | Required follow-through |
 |---|---|---|
@@ -1181,7 +1217,7 @@ A legacy hash collision is diagnostic
    - **Fleet observation:** tell the user once that Fleet shows background work, unless they already use it. `hearting run attempt-view <attempt>` reads owner output without Fleet; a cleaned native source may leave only the supervisor record. Execution and pending delivery are independent: the supervisor records `running-turn` with its unacknowledged outbox and owns acknowledgement/recovery. Fleet consumes exact runtime/tool evidence for activity; observation confers no completion, cleanup, retry, or delivery authority. Unverified and stale evidence remain unknown. One collector projects each snapshot from the displayed rows' bindings and directly scoped artifacts. One live producer owns each refresh through its eventual result; collection delay and last-success age are visible while the TUI stays responsive. Settled failure permits retry; elapsed time alone does not replace a live producer.
    - **Stealth-death guard:** the adapter liveness wrapper diagnoses a silent child: Codex `adapters/codex/bin/preflight.sh liveness [jobs.log]`, OpenCode `adapters/opencode/bin/preflight.sh liveness [jobs.log]`, or Claude/shared `utilities/dispatch-liveness.sh [jobs.log]`. They report `ALIVE`, `SUSPECT`, `DEAD`, or `EXITED`; exit 3 means at least one suspicious or unharvested job. An exact-attempt wait or harvest surface owns normal diagnosis; a parked parent never tails a child transcript/log or searches source/artifacts for progress. Raw inspection is permitted only after that child row is terminal/closed or after an explicit operator recovery override. Exact recorded `pid` plus `/proc/<pid>/cmdline` is the strongest signal. An attempt carrying canonical identity never falls through to cwd-wide transcript activity when exact evidence is stale or terminal. Transcript or DB mtime is a fallback only for legacy identity-less rows because workers sharing a worktree can make each other's directories look fresh; path-based `pgrep` is rejected as false-positive prone. For interactive Codex sessions, a validated exact `task_started`/`task_complete`/`turn_aborted` lifecycle outranks rollout mtime; terminal lifecycle makes the live TUI idle immediately and mtime is consulted only when lifecycle is unavailable or ambiguous.
    - **Completion delivery is runtime-owned (SD-14/78/92/97/113):** a registered owner is launched under an adapter supervisor and the parent obeys the launch receipt's `parent_next` — `end-turn` (a carrier wakes this session once; start nothing) or `bounded-wait` (run the printed `parent_next_command` once). Which carrier delivers, and how, is specified in `core/ADAPTATION.md §7`, never in the model's prompt.
-   - **Post-exit parent-bound reconcile under SD-64/71/77:** a conductor that dies mid-pipeline is reconciled by a non-model watcher bound to its exact PID/start. Reconcile first preserves any exact completion marker or typed terminal handoff, then classifies exact process identity before consulting worktree integration state. An exact-PID death closes the row (`dead-exact-pid`, or `dead-parent-orphaned` with one bounded cascade over its open direct children). The watcher settles evidence and publishes the recovery obligation; a bound runtime controller automatically replaces each proven-dead stage, frame leg, or owner under SD-157, without a cumulative count limit; a runtime end with no result is judged from the supervisor's recorded `terminal_event` and `failure_class`, not from a harness-specific reason name, and a resultless frame leg or owner runtime end that repeats the same observed columns stops at the budget state: the parent's bound completion carrier replaces one observed column set once and then reports the repeat to the current seat, while an explicit `start` keeps replacing an owner's `dead-runtime-*` death without a count limit. An OpenCode parent has no completion carrier controller, so a runtime death there still reaches it as a notice and a parent `start`. For each settled resultless death, a stable claim reserves one successor for that exact predecessor before registration and fenced spawn; it survives route changes, repeated calls and lost replies. A later successor is allowed only after that successor itself has a new settled resultless death. Live or unobservable attempts, live/unobservable owned children, pending terminal commits, and human stop decisions forbid replacement. Preserve original failure rows, completed stage/frame evidence and same-scope human answers. A usage-limit death (`dead-capacity`) is a pause, not a replacement budget: while the usage gate reports the harness limited, `start` returns `waiting-capacity` and launches nothing; after it clears, one `start` resumes the owner under the installed runtime (a sealed-release difference is a same-work diagnostic unless gates are on). When the pause names its reset time (`retry_at`), the runtime runs that `start` itself shortly after it and leaves the session one notice of the result, which repeats the `start` command when that `start` failed (`utilities/capacity_auto_resume.py`; at most three automatic resumes in a row per route). A usage-limit pause with no usable reset time (unknown, or past the longest wait) waits to the longest wait, where the `start` re-asks the usage gate; a known reset time is kept even past the chain limit, and a reset that has already passed past the limit re-arms at a doubling interval within the longest wait. While it waits for a usage limit, it rechecks the usage gate for the source model every 10 minutes and runs that `start` once the gate reports that harness `ok`; records without a resolvable source model retain their reset deadline. An owner its launcher closed before spawning (`launch_outcome=never-launched`, for example an admission lock still held after the bounded launch wait) is likewise a pause: the `start` that saw it reports `waiting-capacity` with nothing started and its `retry_at`, the runtime runs the next `start` itself about a minute later under the same bound and notice, and that `start` launches the same work again under its own family without spending a review round. A worker-class start budget still full after the one bounded capacity wait (`launch-capacity-wait`) is the same kind of pause: nothing was created or failed, so the runtime runs `start` at the refusal's `retry_at` under the same bound and notice instead of asking the parent to report it; inside that automatic `start` a first refusal arms the next resume the same way; past the chain limit it re-arms at its `retry_at` with a doubling interval within the longest wait, and its stable record name is freed after the resume so a later pause may arm again. An owner that ended `BLOCKED` or with a malformed final handoff, outside any declared gate and with no kept answer, is not waiting for a person: the next explicit `start` launches one replacement owner on the same route that receives the original result and its report or log as runtime observations, not as an answer (`death_kind=observed`), and the original row stays unchanged; a report and log that cannot be read yet wait (`owner-settlement-pending`). That replacement stopping again, or a held gate, goes to a person: `start` reports `owner-blocked` with the owner's report and its `correction_command`. The person's answer sent there is kept (`retained`), and the same `correct` call runs the shared `start`, which launches one replacement owner on the same route that receives the answer first (`death_kind=corrected`). An owner that ended with a readable FAIL (its own final envelope said FAIL) is answered the same way with a fix a person approved: the replacement reruns the stage that makes the fix and the checks after it, and each failed check the fix answers gets its one closure-check round within the verdict ceiling cap + 1; a bound or spent check uses its existing fallback or owner disposition while the owner continues the remaining approved work. It grants no additional registered verdict. The completed node whose evidence is the FAIL artifact the owner handed off, with the round-capped checks it directly consumed, is the result the fix answers: the replacement reopens it, an inline completion included, and runs it again on the corrected input as a fresh check (a replacement that was not started carries the same reopening); its earlier FAIL stays as history, and earlier preparation, unrelated siblings and resource runs keep their reuse. A readable FAIL is not retried automatically. An answered stop uses the same pause judgment for BLOCKED and readable FAIL, including a resource or infrastructure FAIL with no failed check round: each exact answer continues the work once without spending the automatic replacement budget, while past FAIL results and scientific check ceilings remain unchanged. Every owner replacement takes the ordinary owner launch with the current parent pin, sealed candidates and live allocation, retaining the same task, profile, route, worktree, access request and corrections. A claim does not fix its launch harness; even an existing unlaunched claim follows the current pin. An unavailable pin is diagnosed before launch. A launched attempt keeps its execution identity, and a later conflicting pin returns a diagnostic rather than silently reporting that pin applied. Like a usage-limit stop it is a pause: each answer may continue the work once, and it spends no replacement budget. An owner parked at a declared human gate keeps its own release path. A replacement transport death remains eligible through the same checked recovery path; other replacement failures retain their typed needs-attention handling. Capture the original task and validated launch tuple before the first registration and render the replacement under its own identity. The controller must carry the effective attempt mapping through exact join, supervisor parking and delivery; an old failed attempt must not be announced again after replacement success. An owner resumes its current verified active route and open cycle when valid, retaining completion markers and the existing gate journal; a new route is required only when the existing identity cannot be reused safely. A missing upstream is typed `no-upstream-configured` and never blocks registry hygiene.
+   - **Post-exit parent-bound reconcile under SD-64/71/77:** a conductor that dies mid-pipeline is reconciled by a non-model watcher bound to its exact PID/start. Reconcile first preserves any exact completion marker or typed terminal handoff, then classifies exact process identity before consulting worktree integration state. An exact-PID death closes the row (`dead-exact-pid`, or `dead-parent-orphaned` with one bounded cascade over its open direct children). The watcher settles evidence and publishes the recovery obligation; a bound runtime controller automatically replaces each proven-dead stage, frame leg, or owner under SD-157, without a cumulative count limit; a runtime end with no result is judged from the supervisor's recorded `terminal_event` and `failure_class`, not from a harness-specific reason name, and a resultless frame leg or owner runtime end that repeats the same observed columns stops at the budget state: the parent's bound completion carrier replaces one observed column set once and then reports the repeat to the current seat, while an explicit `start` keeps replacing an owner's `dead-runtime-*` death without a count limit. An OpenCode parent has no completion carrier controller (its carrier is proven only by its environment), so its runtime death reserves no automatic replacement at the terminal commit: a reservation there would only defer the notice. The death reaches it as its ordinary notice, and its `start` continues the work. For each settled resultless death, a stable claim reserves one successor for that exact predecessor before registration and fenced spawn; it survives route changes, repeated calls and lost replies. A later successor is allowed only after that successor itself has a new settled resultless death. Live or unobservable attempts, live/unobservable owned children, pending terminal commits, and human stop decisions forbid replacement. Preserve original failure rows, completed stage/frame evidence and same-scope human answers. A usage-limit death (`dead-capacity`) is a pause, not a replacement budget: while the usage gate reports the harness limited, `start` returns `waiting-capacity` and launches nothing; after it clears, one `start` resumes the owner under the installed runtime (a sealed-release difference is a same-work diagnostic unless gates are on). When the pause names its reset time (`retry_at`), the runtime runs that `start` itself shortly after it and leaves the session one notice of the result, which repeats the `start` command when that `start` failed (`utilities/capacity_auto_resume.py`; at most three automatic resumes in a row per route). A usage-limit pause with no usable reset time (unknown, or past the longest wait) waits to the longest wait, where the `start` re-asks the usage gate; a known reset time is kept even past the chain limit, and a reset that has already passed past the limit re-arms at a doubling interval within the longest wait. While it waits for a usage limit, it rechecks the usage gate for the source model every 10 minutes and runs that `start` once the gate reports that harness `ok`; records without a resolvable source model retain their reset deadline. An owner its launcher closed before spawning (`launch_outcome=never-launched`, for example an admission lock still held after the bounded launch wait) is likewise a pause: the `start` that saw it reports `waiting-capacity` with nothing started and its `retry_at`, the runtime runs the next `start` itself about a minute later under the same bound and notice, and that `start` launches the same work again under its own family without spending a review round. A worker-class start budget still full after the one bounded capacity wait (`launch-capacity-wait`) is the same kind of pause: nothing was created or failed, so the runtime runs `start` at the refusal's `retry_at` under the same bound and notice instead of asking the parent to report it; inside that automatic `start` a first refusal arms the next resume the same way; past the chain limit it re-arms at its `retry_at` with a doubling interval within the longest wait, and its stable record name is freed after the resume so a later pause may arm again. An owner that ended `BLOCKED` or with a malformed final handoff, outside any declared gate and with no kept answer, is not waiting for a person: the next explicit `start` launches one replacement owner on the same route that receives the original result and its report or log as runtime observations, not as an answer (`death_kind=observed`), and the original row stays unchanged; a report and log that cannot be read yet wait (`owner-settlement-pending`). That replacement stopping again, or a held gate, goes to a person: `start` reports `owner-blocked` with the owner's report and its `correction_command`. The person's answer sent there is kept (`retained`), and the same `correct` call runs the shared `start`, which launches one replacement owner on the same route that receives the answer first (`death_kind=corrected`). An owner that ended with a readable FAIL (its own final envelope said FAIL) is answered the same way with a fix a person approved: the replacement reruns the stage that makes the fix and the checks after it, and each failed check the fix answers gets its one closure-check round within the verdict ceiling cap + 1; a bound or spent check uses its existing fallback or owner disposition while the owner continues the remaining approved work. It grants no additional registered verdict. The completed node whose evidence is the FAIL artifact the owner handed off, with the round-capped checks it directly consumed, is the result the fix answers: the replacement reopens it, an inline completion included, and runs it again on the corrected input as a fresh check (a replacement that was not started carries the same reopening); its earlier FAIL stays as history, and earlier preparation, unrelated siblings and resource runs keep their reuse. A readable FAIL is not retried automatically. An answered stop uses the same pause judgment for BLOCKED and readable FAIL, including a resource or infrastructure FAIL with no failed check round: each exact answer continues the work once without spending the automatic replacement budget, while past FAIL results and scientific check ceilings remain unchanged. Every owner replacement takes the ordinary owner launch with the current parent pin, sealed candidates and live allocation, retaining the same task, profile, route, worktree, access request and corrections. A claim does not fix its launch harness; even an existing unlaunched claim follows the current pin. An unavailable pin is diagnosed before launch. A launched attempt keeps its execution identity, and a later conflicting pin returns a diagnostic rather than silently reporting that pin applied. Like a usage-limit stop it is a pause: each answer may continue the work once, and it spends no replacement budget. An owner parked at a declared human gate keeps its own release path. A replacement transport death remains eligible through the same checked recovery path; other replacement failures retain their typed needs-attention handling. Capture the original task and validated launch tuple before the first registration and render the replacement under its own identity. The controller must carry the effective attempt mapping through exact join, supervisor parking and delivery; an old failed attempt must not be announced again after replacement success. An owner resumes its current verified active route and open cycle when valid, retaining completion markers and the existing gate journal; a new route is required only when the existing identity cannot be reused safely. A missing upstream is typed `no-upstream-configured` and never blocks registry hygiene.
    - **Commit responsibility follows the sealed route:** a normal single-session mutation node with `commit_expected: true` commits its own validated work in the assigned worktree, including tracked documentation and configuration examples it changed. Source ownership follows assigned scope and tracked content, not filename extension. A declared sub-session (`subsession_id` / `stage_authority=0`) never commits; its owner closes the stage gate and commits after. Add only exact validated owned paths; artifact shadows, runtime state, and unrelated dirty files are excluded. For linked worktrees, wrappers grant commit-expected workers only the per-worktree Git metadata directory plus common `objects`, `refs`, and `logs`; common `config`, hooks, and the rest of `.git` remain outside the grant. Runtime sandbox support must be reported from an applied sandbox measurement, not inferred from argv or a full-access session.
    - **Approved repository-document refinement:** when a complete refine scope names an existing tracked document in the route worktree, the same acting modifier verifies its applied bytes and commits only the exact validated owned path or paths after the check passes. Direct inline work relies on its already approved depth-0 start, assigned target/worktree, native Git access, and existing git-state guard; it does not derive authority from the registered-worker policy. A registered quick or standard+ modifier uses the existing capability-owner `commit_policy.may_commit` decision and the wrapper's narrow per-worktree Git metadata grant. This does not change the refine transaction's `commit_expected` value or add a permission, actor, or topology field. Artifact-only and no-op work, report and review-only scope, and a pass with no tracked target diff produce no source commit. The existing stage commit-expected rule and declared sub-session no-commit boundary still apply.
    - **Completion marker bound to the exact attempt row under SD-70:** completing a node takes the canonical registry path and the current exact attempt id (`complete --jobs <registry> --attempt-id <id>`), not just the route/node pair. A registered worker completing its own node may omit both: with no attempt axes stated, `complete` reads `AGENT_DISPATCH_ATTEMPT_ID` when that registry row is this node's attempt, and `AGENT_DISPATCH_JOBS` once an attempt is named; an explicit value takes precedence, and the inline axes form takes nothing from the environment. An omitted `--jobs` on the other dispatch utilities takes `AGENT_DISPATCH_JOBS` when it is set; with nothing inherited, `--jobs` stays required. Completion never breadth-closes a prior `BLOCKED` row or a later retry. Marker write and row close are idempotent under retry; if the row close fails after the marker is written, the command returns a structured nonzero — rerun it rather than editing the registry.
@@ -1248,7 +1284,7 @@ A legacy hash collision is diagnostic
      OpenCode `session.idle` do not prove merge/push completion and must never
      perform destructive cleanup. They may expose diagnostics only.
 4. **Shared artifacts:** route writes to shared artifact-root files through the §5.8 lock. `plans/<slug>/` remains path-separated and noncontending.
-5. **Context:** when coordination records pressure the main context, propose a session-tidy handoff card under the global continuity rule. Runtime compaction also invokes main-session tidy as described in [`capabilities/session-tidy.md`](../capabilities/session-tidy.md). A nonempty automatic Claude/OpenCode summary saved to its own verified herdr seat can use the existing snapshot/clear/continue booking after transcript evidence confirms the compacted turn ended (up to three hours). An explicitly automatic Codex remote-V2 event can join after its exact turn ends; the helper asks that main session for a real card through the verified pane and waits for matching card/enqueue evidence. Manual/unknown events, workers/sub-sessions, unsupported seats, changed input/target/card and uncertain sends stay queue-only. Compaction stays non-blocking.
+5. **Context:** when coordination records pressure the main context, propose a session-tidy handoff card under the global continuity rule. Runtime compaction also invokes main-session tidy as described in [`capabilities/session-tidy.md`](../capabilities/session-tidy.md). A nonempty automatic Claude/OpenCode summary saved to its own verified herdr seat can use the existing snapshot/clear/continue booking after transcript evidence confirms the compacted turn ended (up to three hours). An explicitly automatic Codex remote-V2 event can join after its exact turn ends; the helper asks that main session for a real card through the verified pane and waits for matching card/enqueue evidence. Manual/unknown events, workers/sub-sessions, unsupported seats, changed input/target/card and uncertain sends stay queue-only. A confirmed successor prevents another clear booking from the old session, including cross-pane resume, while its memory queue continues. Fork ambiguity blocks its source and ancestors, not independent descendants; unbound ancestor jobs stay unresolved. Unique explicit job handoffs remain valid, competing branch bindings are unresolved, and merges/cycles still invalidate their component. Compaction stays non-blocking.
 
 **SD-91 current Codex override:** the projected Codex Stop bridge silently reads
 only enough payload to clear one exact interaction marker. It reads no registry,
@@ -1652,6 +1688,19 @@ Fleet's explicit user kill (`note=fleet-kill`, `failure_class=cancelled`)
 is likewise a committed cancellation. Once its process, owner and cleanup
 obligations settle, it no longer blocks pane completion or retirement as an
 unknown result. It grants neither automatic retry nor successful route advance.
+The same `close --route <attempt id>` naming one attempt that is not its
+route's owner (a stage or review worker, or one frame leg) stops that attempt
+alone with this cancellation; its receipt says `route_closed: false`. The
+parent authority is route close's, and a dispatched worker stops only its own
+descendants. The row is committed before any signal, then its own processes
+and registered descendants get TERM/KILL; once nothing of it runs, its cleanup
+receipt is recorded and its parent receives the cancelled result like any other
+child result. Its route, owner and every other attempt keep running. No carrier
+or tick replaces a stopped attempt;
+the person's next `start` of the same route relaunches a stopped frame leg.
+Closing a route also stops its still-running frame legs first, under the same
+parent authority checked for every leg before any stops; legs already stopped
+need no parent.
 Already-terminal owned attempts settle through the same terminal cleanup gate
 as the runtime join and reconcile, preserving their committed result,
 completion marker, and delivery evidence.
@@ -1682,7 +1731,12 @@ beyond the successor its sealed route already declares.
 Resource watches follow exact resource identity rather than a 24-hour deadline.
 Release activation reattaches observation to existing compute/resource runs,
 retaining payload, exit/sentinel and route/node identity. The argument-free
-`hearting run resource-observers` repeats that reconciliation. A registered
+`hearting run resource-observers` repeats that reconciliation. A compute run
+with no exit code whose own files have not changed for seven days, and whose
+tmux session its host reports gone, is no longer watched; a live or unreadable
+session keeps the watch. Listings show such an end as unknown rather than
+success or failure, and an exit code written later is reported once at the next
+reconciliation. A registered
 `resource-runner observe` side run shares its live resource's route/node and
 recipients, with its own run id, log, progress and sentinel. Its success/failure
 is reported separately from the unchanged stage predecessor and completion.
@@ -2549,6 +2603,10 @@ carries no launch, gate, write, or approval authority over the session it addres
 peer messages are advisory context between two already-running sessions, and the
 append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
 
+Keep work in this session's route by default; start another interactive session
+(`peer-steward start`) only for long work that needs its own human answers or
+recovery, because each one adds a seat, a model context, and supervision.
+
 | Question | Existing identifier |
 |---|---|
 | Who talks with the user? | any dispatch depth 0 session: main, peer or steward (elsewhere also "supervisor"). |
@@ -2723,6 +2781,60 @@ the pane list read once right after opening (`pane-exited`,
 `pane-list-unconfirmed`); nothing is retried or closed. A person in an
 agentless Herdr shell keeps running Fleet in the current terminal.
 
+Without Herdr, the core pane operations run through tmux when Hearting runs
+inside it. The pane id chooses: a tmux pane id (`%N`) is the tmux server `$TMUX`
+names (tmux's default server when unset), any other id stays Herdr, and neither
+falls back to the other. The proof before typed input is unchanged: tmux names
+the pane's root process and terminal, the kernel names that terminal's
+foreground group, and `pane_ownership.verified_pane` and the prompt, clear and
+continue guards bind the foreground runtime and its process-proven session as
+on Herdr. tmux has no agent state, so the state is the runtime's own record for
+that exact process and session: Claude's session registry status (`busy`
+working, `waiting` blocked, `idle`) or Codex's latest rollout task lifecycle.
+Without such a record (OpenCode; a Codex thread without a rollout) the state is
+`unknown` and nothing is typed. A wait re-reads that record every 0.5 s inside
+its existing bound. Typed input reaches that pane only: one bracketed paste
+from a private tmux buffer, then the Enter as a one-byte paste. A pane in a
+tmux mode (copy, choose, tree), with synchronized panes or with input off gets
+nothing; a prompt or continue stays queued and a clear is skipped with its
+reason. So in a proven tmux pane session-tidy books and performs
+the automatic clear and continue, `peer-steward prompt`, `clear`, `continue`,
+`idle-card-request` and `wait` accept the pane id (without Herdr, names and
+Fleet tags resolve among that server's panes), the Claude idle callback retries
+pending delivery there, the pane header of all three harnesses goes to the tmux
+pane title and the `@hearting_title` pane option (a shared Codex service, which
+runs hooks in some other pane's environment, sets none), and
+`interactive-main-recovery` checks and opens through tmux on a checked
+owner-only socket. An open question's notification (registration, then the 1 h
+and 6 h reminders) uses Herdr's `notification show`, tried again on the next
+refresh when it fails; without Herdr, and once in addition when Herdr's call
+fails, it is one status-line message on each client attached to the tmux
+server the producer runs inside (`$TMUX`; an installed tmux with no such server
+counts for nothing, so the producer does not stay for reminders nobody can
+see) and, when the producer sits in a graphical session with a session bus, one
+`notify-send` desktop notification. Both are display only and bounded, the
+producer that sends them runs detached, and when nothing could show a reminder
+it is tried again on the next refresh. Hearting writes no OSC 9/777
+escape: the producer owns no terminal, and writing into another pane's terminal
+could interleave with that program's output. `peer-steward start` beside a
+tmux pane opens the new pane in that window through the same placement, waits
+until its own shell shows the same empty prompt twice, types the launch line
+once through the guarded paste, and reports the runtime once its process (and,
+when it has one, its session record) shows in the pane; the started runtime's
+name is a pane option bound to its PID and start time. A start that cannot type
+closes only the pane it opened, while that shell still shows that screen; after
+typing it keeps the pane and prints its reuse command, which adopts the runtime
+without typing. `peer-steward retire` takes a tmux pane or that name and sends
+the same one normal exit action through the same guarded input, then waits
+through the bounded runtime-record wait for the original shell. OpenCode on
+tmux has no turn record, so retire types nothing into it there. `watch` stays
+Herdr-only: its observer is built on Herdr's event stream. tmux pane ids are
+unique per server only, so a pane travels as `%N@<socket>`: a bare `%N` given
+to `peer-steward prompt` or `wait` means the caller's own server, and a seat key
+includes the server. cmux's
+documented API reports no surface process or terminal, so Hearting does not
+type into cmux surfaces.
+
 `hearting run pane tidy` arranges the existing panes in the caller's tab once.
 It supports Herdr and tmux: two panes sit side by side, four form 2×2, six form
 3×2, and five fill two equal-height rows of three and two panes (equal widths
@@ -2747,6 +2859,18 @@ failure or an unconfirmed result exits 1. Hearting pane tidy is not supported
 on cmux. If desired, register the command in the terminal's key settings;
 detached key commands may lack the caller's terminal context. Hearting does
 not register keys or change user configuration.
+
+Supervision keeps one tab per supervisor: a peer start from the supervisor's
+pane opens the supervised session inside that tab, and `pane tidy` puts the
+`⚑` pane at the top left. Fleet shows the arrangement without changing it. The
+WHERE cell of a session's main row names its pane: Herdr `<workspace>:<tab>·<pane>`
+from the pane observation Fleet already reads, or tmux
+`<session>:<window>.<pane>` from one `list-panes` on the server `$TMUX` names
+(tmux's default server otherwise), matched by the runtime's controlling
+terminal; other rows keep the `herdr`/`tmux`/`tty` word. A `⚑` pane that is not
+the top-left pane of its tab leads that cell with `↖`; the Herdr tab geometry
+behind it is one `pane layout` read per such tab at most every 30 s, in the
+background. Fleet only reads here: it moves, resizes or focuses no pane.
 
 Same-seat succession uses `peer-steward.py start <name> --kind <harness>`,
 which with no `--pane` or `--beside` uses the calling pane (`HERDR_PANE_ID`)
@@ -3232,7 +3356,9 @@ name or tag is a search key, including when it comes from a historical seat or
 registry alias; it does not prove current identity. Resolution keeps the
 selected endpoint, canonical pane, harness, and current session ID together
 through readiness, identity rechecks, native delivery, deferred resume, and the
-ledger. The original address remains a bounded diagnostic label.
+ledger. The original address remains a bounded diagnostic label. A bare two-hex
+Fleet number (`e8`) is first a name; only when that name search completes with
+no match does it resolve as the `[e8]` tag.
 
 Prompt resolution distinguishes a complete no-match (`not-found`), multiple
 current matches or a name/tag collision (`ambiguous`), and observations that

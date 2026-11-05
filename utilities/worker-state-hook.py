@@ -61,6 +61,8 @@ def _main_compact(action: str, harness: str, payload: dict) -> int:
                "--harness", harness, "--event", "runtime-status" if runtime_status else "compact"]
     if not runtime_status:
         command.extend(("--phase", "before" if action == "compact-before" else "after"))
+        if action == "compact-after":
+            command.extend(("--format", "json"))
     sid = payload.get("session_id") or payload.get("sessionID") or payload.get("sessionId")
     cwd = payload.get("cwd")
     transcript = payload.get("transcript_path") or payload.get("transcriptPath")
@@ -95,6 +97,15 @@ def _main_compact(action: str, harness: str, payload: dict) -> int:
         sys.stdout.write(result.stdout or "")
         sys.stdout.flush()
     elif result.returncode == 0 and action == "compact-after":
+        try:
+            emitted = json.loads(result.stdout or "{}")
+            notice = emitted.get("humanNotice", "")
+        except (ValueError, AttributeError):
+            notice = ""
+        if notice:
+            print(json.dumps({"systemMessage": notice,
+                              "deferredConsumed": emitted.get("deferredConsumed", [])},
+                             ensure_ascii=False), flush=True)
         status = next((line.strip() for line in (result.stdout or "").splitlines()
                        if line.strip().startswith("booking=")), "")
         if status:

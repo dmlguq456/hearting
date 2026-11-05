@@ -360,14 +360,13 @@ def publish_claude_user_rules(source, home):
         raise ValueError(f'worker home collision: {target_rules}')
     wanted = {}
     if source_rules.is_dir():
-        for root, _dirs, names in os.walk(source_rules):
-            for name in names:
-                path = Path(root) / name
-                if name.endswith('.md') and path.is_file():
-                    try:
-                        wanted[path.relative_to(source_rules)] = path.read_bytes()
-                    except OSError:
-                        continue
+        # Claude follows links in its rule folder (linked folders of shared rules
+        # too); the worker copy reads the same files the main session does.
+        for path, relative in _install_module('user_rules').rule_files(source_rules):
+            try:
+                wanted[relative] = path.read_bytes()
+            except OSError:
+                continue
     for relative, data in sorted(wanted.items()):
         write_worker_copy(target_rules / relative, data)
     if target_rules.is_dir() and not target_rules.is_symlink():

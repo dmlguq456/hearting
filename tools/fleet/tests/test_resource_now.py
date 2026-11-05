@@ -113,14 +113,14 @@ class ResourceNowTest(unittest.TestCase):
 
     def test_remote_gpu_join_uses_exact_attempt_not_directory_or_local_pid(self):
         owner, child = self.owner(self.rows[0], "opencode")
-        snapshot = {"hosts": [{"host": "cnn", "self": False, "reachable": True,
+        snapshot = {"hosts": [{"host": "gpu", "self": False, "reachable": True,
             "gpus": [{"index": 1, "name": "RTX 4090", "processes": [
                 {"pid": 42, "proc_start": "99", "command": "python remote.py",
                  "owner": {"kind": "job", "id": "att-owner"}}]}]}]}
         with mock.patch.object(render, "_fresh_compute_hosts", return_value=(snapshot, 0)):
-            self.assertIn("cnn:1", render._resource_now_text(owner))
+            self.assertIn("gpu:1", render._resource_now_text(owner))
             child.parent_attempt_id = "foreign"
-            self.assertNotIn("cnn:1", render._resource_now_text(owner))
+            self.assertNotIn("gpu:1", render._resource_now_text(owner))
 
     def test_exited_resource_keeps_its_result_when_resumed_owner_has_no_now(self):
         for harness in ("claude", "codex", "opencode"):

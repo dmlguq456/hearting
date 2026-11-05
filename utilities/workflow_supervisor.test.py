@@ -40,6 +40,7 @@ import dispatch_contract as DC  # noqa: E402
 import fixture_processes  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "memory" / "tests"))
 from tidy_isolation import memory_fixture_env  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 
 # Completing nodes here must not launch detached open-cycle checkpoints into
@@ -128,6 +129,15 @@ class WorkflowFixture(unittest.TestCase):
         }
         for key in self._previous_dispatch:
             os.environ.pop(key, None)
+        # A fixture run must never name the caller's own session, state root, or
+        # terminal pane: a run started from a live session recorded that session as
+        # its notice recipient, and fixture run h0-a2's `experiment final` notice
+        # reached it (2026-10-28). tools/run-tests.py never passes these either.
+        import session_identity
+        inherited = [name for names in session_identity.session_env().values() for name in names]
+        inherited += [*session_identity.HARNESS_ENV, "HARNESS_STATE_ROOT", "TMUX", "TMUX_PANE",
+                      *(key for key in os.environ if key.startswith("HERDR_"))]
+        self._previous_session = {key: os.environ.pop(key) for key in inherited if key in os.environ}
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
         # A detached successor (`arm --successor-command`) can still be writing its
@@ -149,6 +159,7 @@ class WorkflowFixture(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        os.environ.update(self._previous_session)
 
     # -- fixtures -------------------------------------------------------------
     @contextlib.contextmanager
@@ -326,6 +337,23 @@ class WorkflowFixture(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # A. the portable state machine
 # ---------------------------------------------------------------------------
+class FixtureIsolationTest(unittest.TestCase):
+    def test_fixture_hides_the_callers_session_and_pane_until_cleanup(self):
+        caller = {"CLAUDE_CODE_SESSION_ID": "caller-session", "CODEX_THREAD_ID": "caller-thread",
+                  "AGENT_DISPATCH_CALLER_HARNESS": "claude", "HERDR_PANE_ID": "caller-pane",
+                  "HERDR_SOCKET_PATH": "/nonexistent/herdr.sock",
+                  "HARNESS_STATE_ROOT": "/nonexistent/live-state", "TMUX_PANE": "%9"}
+        with mock.patch.dict(os.environ, caller):
+            fixture = WorkflowFixture("run")
+            fixture.setUp()
+            try:
+                self.assertEqual({key: os.environ.get(key) for key in caller},
+                                 dict.fromkeys(caller))
+            finally:
+                fixture.doCleanups()
+            self.assertEqual({key: os.environ.get(key) for key in caller}, caller)
+
+
 class TestStateMachine(WorkflowFixture):
     def test_complete_is_reachable_only_through_terminal_verify(self):
         self.assertTrue(WS.can_transition("TERMINAL_VERIFY", "COMPLETE"))
@@ -461,9 +489,9 @@ class TestSupervisorAdvance(WorkflowFixture):
         request = terminal.TerminalCommitRequest(path, "att-parent", jobs, self.base)
         gates = {node: {"passed": passed} for node in WS.route_terminal_nodes(route)}
         with mock.patch.object(terminal, "_completion_request", return_value=request), \
-                mock.patch.object(terminal.dispatch_contract, "attempt_process_quiescence",
+                patch_split(terminal.dispatch_contract, "attempt_process_quiescence",
                                   return_value=terminal.dispatch_contract.ProcessQuiescence("quiescent", "fixture")), \
-                mock.patch.object(terminal, "_route_module", return_value=SimpleNamespace(
+                patch_split(terminal, "_route_module", return_value=SimpleNamespace(
                     terminal_gate_observation=lambda *a, **kw: gates)), \
                 mock.patch.object(terminal, "settle_terminal_commit",
                                   return_value=terminal.TerminalCommitResult("completed")) as commit, \
@@ -493,7 +521,7 @@ class TestSupervisorAdvance(WorkflowFixture):
             return None
 
         with mock.patch.object(SUP.RESOURCE_RESUME, "route_selected", return_value=True), \
-                mock.patch.object(route_module, "write_completion_marker", side_effect=capture):
+                patch_split(route_module, "write_completion_marker", side_effect=capture):
             result = SUP.poll_once(route, ledger)
         self.assertEqual(result[0]["action"], "advanced")
         self.assertEqual(marker_calls, [mapped_output])
@@ -1454,9 +1482,9 @@ class TestStatusProjection(WorkflowFixture):
             "FLEET_ROUTE_CHAIN_DIR": str(self.base / "route-chain"),
         }))
         self.enterContext(mock.patch.object(SUP, "route_module", return_value=ROUTE))
-        self.enterContext(mock.patch.object(ROUTE, "_compose_artifact_root",
+        self.enterContext(patch_split(ROUTE, "_compose_artifact_root",
                                            return_value=str(self.artifact_root)))
-        self.enterContext(mock.patch.object(ROUTE, "_route_chain_module", return_value=None))
+        self.enterContext(patch_split(ROUTE, "_route_chain_module", return_value=None))
 
     def test_closed_exact_terminal_projects_complete_without_writing_journal_or_registry(self):
         route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
@@ -1482,7 +1510,7 @@ class TestStatusProjection(WorkflowFixture):
         for value in (str(path), route["route_id"]):
             status_out = io.StringIO()
             with mock.patch.object(SUP, "terminal_gate_state", return_value=gates), \
-                 mock.patch.object(ROUTE, "resolve_route_argument",
+                 patch_split(ROUTE, "resolve_route_argument",
                                    wraps=ROUTE.resolve_route_argument) as resolve, \
                  contextlib.redirect_stdout(status_out):
                 self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -1533,7 +1561,7 @@ class TestStatusProjection(WorkflowFixture):
                                                    "AGENT_WORKFLOW_ROOT": str(self.base / "wrong")}):
                     for value in (str(path), route["route_id"]):
                         output = io.StringIO()
-                        with mock.patch.object(ROUTE, "resolve_route_argument",
+                        with patch_split(ROUTE, "resolve_route_argument",
                                                wraps=ROUTE.resolve_route_argument) as resolve, \
                              contextlib.redirect_stdout(output):
                             self.assertEqual(SUP.cmd_status(SimpleNamespace(
@@ -2711,16 +2739,16 @@ class TestGateSubjectNotCaller(WorkflowFixture):
 
     def test_a_registered_worker_may_not_name_the_releaser(self):
         """Finding #4: enforcement compared against the literal "user" only, so
-        `--by shinuh` from a headless owner recorded that name."""
+        `--by operator-a` from a headless owner recorded that name."""
         _route, path = self.two_stage_route(human_gate="frame-review")
         self.block_gate(path, "frame-review")
         env = {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}
-        for label in ("user", "shinuh", "headless-owner"):
+        for label in ("user", "operator-a", "headless-owner"):
             with self.subTest(label=label), mock.patch.dict(os.environ, env):
                 with self.assertRaises(SUP.SupervisorError) as caught:
                     SUP.resolved_released_by("headless-owner", label)
                 self.assertIn("gate-release-actor-refused", str(caught.exception))
-        self.assertEqual(SUP.resolved_released_by("user", "shinuh"), "shinuh")
+        self.assertEqual(SUP.resolved_released_by("user", "operator-a"), "operator-a")
         self.assertEqual(SUP.resolved_released_by("headless-owner", None),
                          "headless-owner")
 
@@ -3105,7 +3133,7 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": "1"}):
             for kind in ("user", "supervisor", "automatic", "unknown"):
                 answer, _ = self._answers(interview, actor_kind=kind)
-                for label in ("user", "shinuh", "supervisor", "automatic"):
+                for label in ("user", "operator-a", "supervisor", "automatic"):
                     with self.subTest(kind=kind, label=label):
                         with self.assertRaisesRegex(SUP.SupervisorError, "gate-release-actor-refused"):
                             SUP.main(["release", "--route", str(path), "--gate", "frame-review", "--decision", "proceed",
@@ -3628,8 +3656,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
             with contextlib.redirect_stdout(output):
                 code = SUP.main(argv[2:])
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True) as marker_check, \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True) as marker_check, \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction) as transaction:
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=blocked", detail)
@@ -3674,8 +3702,8 @@ class TestLegacyPreviewGateRecovery(WorkflowFixture):
                     return subprocess.CompletedProcess(argv, 64, "", str(exc))
             return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
         error = DC.DispatchContractError("human-gate-not-raised", "preview-disposition: old route has no record")
-        with mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+        with patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
              mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction):
             detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
             self.assertIn("preview_gate_recovery=unavailable", detail)
@@ -3742,8 +3770,8 @@ class TestInteractiveFrameGate(WorkflowFixture):
         with mock.patch.dict(os.environ, {session_key: "test-depth0", "AGENT_DISPATCH_CALLER_HARNESS": harness,
                 "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": ""}, clear=True), \
              mock.patch.object(SUP.HUMAN_GATE, "probe_consumer") as probe_consumer, \
-             mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
-             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
+             patch_split(DC, "completion_marker_is_current", return_value=True), \
+             patch_split(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
             kwargs = dict(route_path=path, release_authority="depth-0", interview=True, questions=1)
             record_path, created = SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 0, **kwargs)
             self.assertTrue(created)
@@ -4369,6 +4397,46 @@ class TestHarnessResourceEvidence(WorkflowFixture):
         self.assertTrue(resolved.is_file())
         self.assertFalse((self.base / "run.json").exists())
 
+    def test_a_row_changed_during_the_settle_is_a_not_yet_settled_look(self):
+        # RV-1055: another writer changing the row between this read and the
+        # settle raised `resource-reservation-changed` out of every caller.
+        route, path = self.two_stage_route(route_id="rt-settle-race")
+        registry = self.resource_registry(exit_code=0)
+        self.arm(path, registry, extra=["--artifact-base", str(self.base)])
+        armed = SUP.read_armed(SUP.ledger_for(route))["run"]
+        real_settle = SUP.runner().settle
+
+        def concurrent_writer(registry_path, run_id, row, **kwargs):
+            data = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+            data["runs"][run_id]["observed_by"] = "another-observer"
+            Path(registry_path).write_text(json.dumps(data), encoding="utf-8")
+            return real_settle(registry_path, run_id, row, **kwargs)
+
+        with mock.patch.object(SUP.runner(), "settle", side_effect=concurrent_writer):
+            raced = SUP.resource_evidence(armed)
+        current = json.loads(registry.read_text(encoding="utf-8"))["runs"]["fixture-run"]
+        self.assertEqual((raced["terminal"], raced["reason"]),
+                         (False, "resource-reservation-changed"))
+        self.assertEqual(raced["resource_sha256"], SUP.RESOURCE_RESUME.row_digest(current))
+        settled = SUP.resource_evidence(armed)
+        self.assertTrue(settled["terminal"], settled)
+        self.assertTrue(settled["succeeded"], settled)
+
+        route, path = self.two_stage_route(route_id="rt-settle-vanished")
+        registry = self.resource_registry(exit_code=0)
+        self.arm(path, registry, extra=["--artifact-base", str(self.base)])
+        armed = SUP.read_armed(SUP.ledger_for(route))["run"]
+
+        def concurrent_removal(registry_path, run_id, row, **kwargs):
+            data = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+            del data["runs"][run_id]
+            Path(registry_path).write_text(json.dumps(data), encoding="utf-8")
+            return real_settle(registry_path, run_id, row, **kwargs)
+
+        with mock.patch.object(SUP.runner(), "settle", side_effect=concurrent_removal):
+            self.assertEqual(SUP.resource_evidence(armed),
+                             {"terminal": False, "reason": "resource-run-absent"})
+
     def test_owner_fields_added_to_runtime_document_preserve_exact_bytes(self):
         route, path = self.two_stage_route()
         registry = self.resource_registry(exit_code=0)
@@ -4882,7 +4950,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         route_module = SUP.route_module()
         node = WS.route_node(route, "run")
         before = ledger.journal_path.read_bytes()
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             result, _ = route_module._continuation_reused_evidence(route, node)
         self.assertIsNone(result["terminal_attempt_id"])
         evidence = ledger.read_only_state()["nodes"]["run"]["evidence"]
@@ -4892,7 +4960,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
         document = json.loads(registry.read_text())
         document["runs"]["fixture-resource"]["execution"]["meta_sha256"] = "changed"
         registry.write_text(json.dumps(document))
-        with mock.patch.object(route_module, "_continuation_source_jobs", return_value=jobs):
+        with patch_split(route_module, "_continuation_source_jobs", return_value=jobs):
             with self.assertRaises(ValueError):
                 route_module._continuation_reused_evidence(route, node)
 

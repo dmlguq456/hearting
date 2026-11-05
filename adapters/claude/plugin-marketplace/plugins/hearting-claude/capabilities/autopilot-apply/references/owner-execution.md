@@ -1,5 +1,7 @@
 # autopilot-apply
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 > **Output convention**: This skill edits real source files outside `<artifact-root>/`. Store its own logs and snapshots under the cheatsheet artifact's `_internal/apply/` directory (CONVENTIONS.md §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`), T3).
 
 ## Position in the Autopilot Family

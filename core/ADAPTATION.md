@@ -306,9 +306,10 @@ v56 herdr-unified): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (
 `PostToolUse(Bash)` `asyncRewake` hook (`hooks/peer-steward-rewake.py`, exit 2 wakes,
 spec-only until a live-session measurement) and a `UserPromptSubmit` sweep of un-acked
 receipts in the same `hooks/peer-message-record.py` (fail-soft, ≤5 lines of
-`additionalContext`). The carrier reaches watch state only through the utility's
-subcommands, never through the state files, so a runtime without a wake carrier keeps the
-same schema. Codex — `herdr agent wait` watching is measured; the portable
+`additionalContext`, bounded by the hook's shared prompt budget). The carrier reaches
+watch state only through the utility (its shared undelivered-receipt reader and `ack`
+subcommand, loaded in the hook process), never through the state files, so a runtime
+without a wake carrier keeps the same schema. Codex — `herdr agent wait` watching is measured; the portable
 `watch/join/status/rearm/ack` subcommands work, but there is no wake carrier and next-turn
 receipt recovery is unmeasured (P-7); carrier parity is a separate decision. The managed
 gateway's `steer`/`watch-idle` ops are **not implemented** (closed-by-decision, P-1 through

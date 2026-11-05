@@ -108,7 +108,7 @@ class SpecMarkerAttributionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _write_pipeline_state(tmp, "topic-a", "phases:\n  dev: in_progress\n")
             markers = {_marker_name("codex", tmp, "topic-a"): NOW}
-            entity = _session(sid="019f1bdf-c9d8-72f0-b529-d8793305210e", cwd=tmp)
+            entity = _session(sid="01000002-0000-7000-8000-000000000002", cwd=tmp)
             _attach_projections([entity], [], artifact_root=tmp, now=NOW, spec_markers=markers)
             self.assertEqual(entity.work_projection.source, "none")
 

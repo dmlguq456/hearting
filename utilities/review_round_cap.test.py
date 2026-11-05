@@ -340,6 +340,18 @@ class RoundBudgetTest(unittest.TestCase):
         self.assertEqual(budget.correction_round, 3)
         self.assertEqual(budget.round_kind, "correction")
 
+    def test_rows_a_person_stopped_are_not_verdictless_rounds(self):
+        # RV-BC-1179 🟡7: two review workers a person stopped (close or Fleet) did
+        # not fail to produce a result; they must not bind the node.
+        stopped = [row("done", "fleet-kill", failure_class="cancelled"),
+                   row("done", "fleet-kill", failure_class="cancelled")]
+        budget = CAP.round_budget(route("standard", cap=2), review_node(), stopped)
+        self.assertEqual((budget.state, budget.verdictless_streak), ("admit", 0))
+        mixed = [row("done", "dead-capacity"), row("done", "fleet-kill", failure_class="cancelled"),
+                 row("done", "dead-invalid-envelope")]
+        budget = CAP.round_budget(route("standard", cap=2), review_node(), mixed)
+        self.assertEqual((budget.state, budget.verdictless_streak), ("verdictless-bound", 2))
+
     def test_a_sd153_2_two_blocking_rounds_exhaust_a_strong_cap(self):
         rows = [row("done", "completed-review-blocking"), row("done", "completed-review-blocking")]
         budget = CAP.round_budget(route("strong", cap=2), review_node(), rows)

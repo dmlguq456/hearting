@@ -377,10 +377,11 @@ def _evidence_owner_candidates(entity, node_evidence, route_records):
     owner_ids.discard(None)
     candidates = []
     for rid, nodes in (node_evidence or {}).items():
+        record = route_records.get(rid)
+        if record is None:
+            continue
         if any(_field(ev, "parent") in owner_ids for ev in (nodes or {}).values()):
-            record = route_records.get(rid)
-            if record is not None:
-                candidates.append((rid, record, nodes or {}))
+            candidates.append((rid, record, nodes or {}))
     return candidates
 
 

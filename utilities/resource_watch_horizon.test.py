@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from split_module_fixture import patch_split
 spec = importlib.util.spec_from_file_location("horizon_fixture", HERE / "workflow_supervisor.test.py")
 FIX = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = FIX
@@ -241,7 +242,7 @@ class ResourceWatchHorizonTest(FIX.WorkflowFixture):
             with self.subTest(harness=harness), \
                     mock.patch.object(INPUT, "_target", return_value=(SimpleNamespace(
                         status="done", metadata={"harness": harness, "note": "dead-worker-blocked"}), "target")), \
-                    mock.patch.object(INPUT, "supervisor_lease_is_held", return_value=False), \
+                    patch_split(INPUT, "supervisor_lease_is_held", return_value=False), \
                     mock.patch.object(INPUT, "retained", return_value=[]), \
                     mock.patch.object(INPUT, "submit", return_value={"retained": True}) as submit, \
                     mock.patch.object(DELIVERY, "materialize", return_value=[{
@@ -283,7 +284,7 @@ class ResourceWatchHorizonTest(FIX.WorkflowFixture):
         with mock.patch.object(SUP, "poll_once", side_effect=lambda *a: [{"node": "full-run", "action": "settled"}]) as poll, \
                 mock.patch.object(INPUT, "_target", return_value=(SimpleNamespace(status="done",
                     metadata={"note": "dead-worker-blocked"}), "target")), \
-                mock.patch.object(INPUT, "supervisor_lease_is_held", side_effect=[True, False, False]), \
+                patch_split(INPUT, "supervisor_lease_is_held", side_effect=[True, False, False]), \
                 mock.patch.object(INPUT, "retained", return_value=[]), \
                 mock.patch.object(INPUT, "submit", side_effect=[INPUT.InputError("lease-race"), {"retained": True}]) as submit, \
                 mock.patch.object(DELIVERY, "materialize") as deliver, \

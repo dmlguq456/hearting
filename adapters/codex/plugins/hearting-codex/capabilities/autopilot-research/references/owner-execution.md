@@ -1,5 +1,7 @@
 # autopilot-research
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Run shared upfront research across academic, technology, and market domains through a `search → analyze → report` pipeline, then route the result to downstream work such as `autopilot-draft` or `autopilot-code`. Keep only routing and stage contracts here; load the references below for detailed orchestration and report templates.
 
 The standalone default is `<artifact-root>/research/<topic>/`. Routed stages use declared node outputs and write scope. Follow the three-tier output convention for standalone layout; resolve the artifact root using the workspace assumption (`<agent-home>/core/CONVENTIONS.md#51-workspace-assumption`).
@@ -30,7 +32,7 @@ The mode selects search sources, active analysis phases, and the report set. The
 | `technology` | Standards, libraries, vendors, and ecosystems | Phases A and C | 7 reports, `00_briefing` through `07_resources` |
 | `market` | Markets, competitors, and business models | Phase A | 5 reports, `00_briefing` through `04_opportunities` |
 
-Read `invocation-and-modes.md` for source selection, report details, inference rules, and fallbacks.
+Only when a receipt or Route step names it, read `invocation-and-modes.md` for source selection, report details, inference rules, and fallbacks.
 
 ## Arguments
 
@@ -43,13 +45,13 @@ Read `invocation-and-modes.md` for source selection, report details, inference r
 - `--no-clarify` / `--no-figures`: Skip Step 1.5 / Step 3.5.
 - `--from`: Re-enter at `search`, `analyze`, or `report`.
 
-Read `invocation-and-modes.md` for exact defaults and flag behavior.
+Only when a receipt or Route step names it, read `invocation-and-modes.md` for exact defaults and flag behavior.
 
 ## Resume
 
 For standalone work, inspect the request and `<artifact-root>/research/<topic>/pipeline_state.yaml` to distinguish a new run from a resumed run. Routed work reads the inputs supplied by its node and writes to its declared outputs. An explicit `--from` always wins. Route one- or two-line corrections to `autopilot-refine`.
 
-Read `invocation-and-modes.md` for the detection table, confirmation format, and `pipeline_state.yaml` schema.
+Only when a receipt or Route step names it, read `invocation-and-modes.md` for the detection table, confirmation format, and `pipeline_state.yaml` schema.
 
 ## Pipeline
 
@@ -78,12 +80,12 @@ The references preserve detailed prompts, batching rules, QA tables, report temp
 
 ## Reference Index
 
-| File | Load when | Contents |
+| File | Load policy | Contents |
 |---|---|---|
-| `invocation-and-modes.md` | Interpreting options, selecting mode sources/report sets, or resuming | Argument parsing, mode behavior, defaults, context detection, resume flow, and `pipeline_state.yaml` schema |
-| `pipeline-search-analysis.md` | Running Steps 1–3.5 | Input parsing, scope clarification, source search, source analysis, and web figure extraction |
-| `report-generation.md` | Running Step 4 | Mode-specific templates, editorial polish, QA loop, and status checks |
-| `summary-and-briefing.md` | Running Steps 5–6 | Pipeline summary, briefing, and decision logging |
+| `invocation-and-modes.md` | Only when a receipt or Route step names it | Argument parsing, mode behavior, defaults, context detection, resume flow, and `pipeline_state.yaml` schema |
+| `pipeline-search-analysis.md` | Only when a receipt or Route step names it | Input parsing, scope clarification, source search, source analysis, and web figure extraction |
+| `report-generation.md` | Only when a receipt or Route step names it | Mode-specific templates, editorial polish, QA loop, and status checks |
+| `summary-and-briefing.md` | Only when a receipt or Route step names it | Pipeline summary, briefing, and decision logging |
 
 ## Task
 

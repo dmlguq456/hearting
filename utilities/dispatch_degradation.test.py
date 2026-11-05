@@ -16,6 +16,7 @@ from unittest import mock
 
 from dispatch_degradation import record_degradation
 import dispatch_stage_advance as SA
+from split_module_fixture import patch_split
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/tools"
 if TOOLS not in sys.path:
@@ -88,6 +89,45 @@ class DegradationWriterTest(unittest.TestCase):
                 detail="merge")
             row = json.loads(Path(path).read_text())
             self.assertEqual(row["detail"], "merge")
+
+    def test_projection_mismatch_detail_keeps_only_its_structured_form(self):
+        from dispatch_contract import bounded_candidate_outcomes, candidate_detail
+        reason = "codex-runtime-projection-mismatch"
+        kept = (
+            "check=hearting:failed reason=expected-symlink-to:/r/v3.70.0",
+            "check=agents-md:failed reason=worker-profile",
+            "exit-1",
+        )
+        omitted = (
+            ("a value with a space", reason, "check=hearting:failed reason=expected symlink to /r"),
+            ("a newline", reason, "check=hearting:failed reason=worker-profile\nreason=forged"),
+            ("a control character", reason, "check=hearting:failed reason=\x1b[31mworker-profile"),
+            ("another reason", "unsafe-git-operation", "check=hearting:failed reason=expected-symlink-to:/r/v3.70.0"),
+            ("no reason", "", "check=hearting:failed reason=expected-symlink-to:/r/v3.70.0"),
+            ("too long", reason, "check=hearting:failed reason=" + "a" * 241),
+            ("prompt-like text", reason, "PROMPT_FIXTURE_SENTINEL argv=ARGV_FIXTURE_SENTINEL"),
+        )
+        for value in kept:
+            with self.subTest(kept=value):
+                self.assertEqual(candidate_detail(reason, value), value)
+                rows, _ = bounded_candidate_outcomes([{
+                    "ordinal": 1, "tuple": "codex/headless", "attempted": True, "attempt_id": "att-projection",
+                    "exit": "1", "reason": reason, "detail": value}])
+                self.assertEqual(rows[0]["detail"], value)
+        for label, row_reason, value in omitted:
+            with self.subTest(omitted=label):
+                self.assertEqual(candidate_detail(row_reason, value), "[detail omitted]")
+                rows, _ = bounded_candidate_outcomes([{
+                    "ordinal": 1, "tuple": "codex/headless", "attempted": True, "attempt_id": "att-projection",
+                    "exit": "1", "reason": row_reason, "detail": value}])
+                self.assertEqual(rows[0]["detail"], "[detail omitted]")
+        with tempfile.TemporaryDirectory() as home:
+            path = record_degradation(
+                agent_home=home, jobs=os.path.join(home, "dispatch/jobs.log"),
+                route_id="rt-projection-detail", route_node="execute",
+                route_hash="sha256:fixture", dispatch_depth=2,
+                writer="stage-dispatch-fallback.py", reason=reason, detail=kept[0])
+            self.assertEqual(json.loads(Path(path).read_text())["detail"], kept[0])
 
     def test_direct_writer_normalizes_invalid_and_oversized_candidate_input(self):
         from dispatch_contract import CANDIDATE_PAYLOAD_BYTES
@@ -595,7 +635,7 @@ class SD110LedgerIsolationTest(unittest.TestCase):
                 "attempt_id": "att-a-0001",
                 "evidence": {"path": "/tmp/fixture-artifact.md", "state": "verified"},
             }), encoding="utf-8")
-            with mock.patch.object(
+            with patch_split(
                 SA.ROUTE, "completion_dir", return_value=marker_dir
             ), mock.patch.object(
                 SA, "gate_evidence", return_value=("verdict: PASS", None)

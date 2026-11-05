@@ -244,6 +244,7 @@ class BundleTest(unittest.TestCase):
             return "\n".join(row.rstrip() for row in
                              text(self.build([main, child], owners, width))) + "\n"
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_stage_divider_screen_matches_wide_and_narrow_goldens(self):
         for width in (60, 100, 168):
             with self.subTest(width=width):

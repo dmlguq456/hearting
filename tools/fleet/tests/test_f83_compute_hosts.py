@@ -107,7 +107,7 @@ class ComputeHostCollectorTest(unittest.TestCase):
         payload = {
             "run_root": "/runs",
             "hosts": [{
-                "host": "cnn", "reachable": True, "observed_at": 12.0,
+                "host": "gpu", "reachable": True, "observed_at": 12.0,
                 "cpu_count": 4, "cpu_utilization_pct": 25,
                 "cpu_thread_utilization_pct": [0, 75, 0, 25],
                 "memory_used_mib": 8192, "memory_total_mib": 32768,
@@ -155,8 +155,41 @@ class ComputeHostCollectorTest(unittest.TestCase):
             timed_out = compute_hosts.collect(timeout=0.05)
         self.assertIn("timed out", timed_out["error"])
 
+    def test_probe_never_reads_the_viewer_terminal(self):
+        """GH#840: the probe's ssh read the keys typed into Fleet, including ``q``."""
+        self.tool.write_text(
+            "import json, os, select\n"
+            "ready = select.select([0], [], [], 1.0)[0]\n"
+            "data = os.read(0, 64).decode() if ready else None\n"
+            "devnull = os.path.samestat(os.fstat(0), os.stat(os.devnull))\n"
+            "print(json.dumps({'hosts': [{'host': 'probe', 'read': data,"
+            " 'devnull': devnull}]}))\n",
+            encoding="utf-8")
+        for config in (self.config, self.root / "missing.yaml"):
+            with self.subTest(configured=config.exists()):
+                keys, typed = os.pipe()
+                saved = os.dup(0)
+                try:
+                    os.write(typed, b"q")
+                    os.dup2(keys, 0)
+                    with mock.patch.dict(os.environ, {
+                            "COMPUTE_HOSTS_CONFIG": str(config),
+                            "FLEET_COMPUTE_HOSTS_TOOL": str(self.tool)}, clear=False):
+                        snapshot = compute_hosts.collect(timeout=10)
+                    os.dup2(saved, 0)
+                    os.set_blocking(keys, False)
+                    left = os.read(keys, 8)
+                finally:
+                    os.dup2(saved, 0)
+                    for fd in (saved, keys, typed):
+                        os.close(fd)
+                self.assertEqual(snapshot["hosts"][0]["read"], "")
+                self.assertTrue(snapshot["hosts"][0]["devnull"])
+                self.assertEqual(left, b"q", "the key stays for the viewer")
+
 
 class ComputeHostRenderTest(unittest.TestCase):
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean screen words
     def test_expanded_reservation_keeps_start_without_task_description(self):
         gpu = self.snapshot["hosts"][0]["gpus"][0]
         gpu["reservations"] = [{"owner": {"label": "SR_ModelA [cd]"},
@@ -171,6 +204,52 @@ class ComputeHostRenderTest(unittest.TestCase):
             self.assertIn("10-04", text)
             self.assertNotIn("css", text)
             self.assertTrue(all(render._dw(render._plain(row)) <= width for row in rows))
+
+    def test_gpu_on_a_session_line_stays_folded_in_compute(self):
+        """GH#184: the drawn session GPU line is canonical; COMPUTE keeps the summary row."""
+        from fleet.model import Session
+        sid = "d1f6dce5-0000-4000-8000-000000000001"
+        owner = {"kind": "session", "harness": "claude", "id": sid,
+                 "source": "persistent-claim+ancestry"}
+        gpus = self.snapshot["hosts"][0]["gpus"]
+        gpus[0]["processes"] = [{"pid": 7, "proc_start": 70, "used_memory_mib": 15318,
+                                 "command": "python run.py --engine_mode train --config 1ch_fix_2spk_v2.yaml",
+                                 "owner": owner, "session_owner": owner}]
+        session = Session(harness="claude", pid=1, cwd="/tmp/f184-project", slug="s",
+                          session_id=sid, session_tag="cd", liveness="working")
+        render.set_compute_hosts(self.snapshot)
+        render._ROUTE_FOLD = {render._GPU_FOLD_ALL: False}      # every GPU's commands open
+        drawn = {("claude", sid)}
+
+        def compute(keys):
+            return "\n".join(render._plain(row) for row in render._compute_host_rows(
+                168, [session], drawn_strip_keys=keys))
+
+        text = compute(drawn)
+        self.assertNotIn("1ch_fix_2spk_v2", text)              # shown on [cd]'s own GPU line
+        self.assertIn("[cd]", text)                            # the summary row still names it
+        self.assertIn("shell.py", text)                        # an unattributed GPU still opens
+        strip = render._plain(render._gpu_resource_strip(render._gpu_resources_for_session(
+            session, render._gpu_session_resources()), 168)[0])
+        self.assertIn("1ch_fix_2spk_v2", strip)
+        self.assertIn("1ch_fix_2spk_v2", compute(set()))       # no drawn line: detail stays here
+        self.assertIn("1ch_fix_2spk_v2", compute(None))
+        render._ROUTE_FOLD[render._gpu_fold_key("mgpu-a1", 0)] = False
+        self.assertIn("1ch_fix_2spk_v2", compute(drawn))       # this row opened on purpose
+
+        # The whole board: the card draws the line, so COMPUTE folds; a folded repo does not.
+        render._ROUTE_FOLD = {render._GPU_FOLD_ALL: False}
+        for folded, compute_has_run in ((False, False), (True, True)):
+            with self.subTest(repo_folded=folded):
+                self.addCleanup(setattr, render, "_REPO_FOLD", render._REPO_FOLD)
+                render._REPO_FOLD = {"f184-project": True} if folded else {}
+                rows = [render._plain(row) for row in render._build_lines(
+                    [session], [], "both", False, 0, term_width=168) if row]
+                head = next(i for i, row in enumerate(rows) if "compute resources" in row)
+                compute_rows = rows[head:head + 12]
+                self.assertEqual(any("1ch_fix_2spk_v2" in row for row in compute_rows),
+                                 compute_has_run, compute_rows)
+                self.assertTrue(any("1ch_fix_2spk_v2" in row for row in rows), "on screen")
 
     def setUp(self):
         self.addCleanup(setattr, render, "_ROUTE_FOLD", render._ROUTE_FOLD)
@@ -205,7 +284,7 @@ class ComputeHostRenderTest(unittest.TestCase):
                      "processes": [{"pid": 4, "used_memory_mib": 1024,
                                     "command": "python shell.py", "owner": None}]},
                 ]},
-                {"host": "cnn", "self": False, "reachable": True,
+                {"host": "gpu", "self": False, "reachable": True,
                  "cpu_utilization_pct": 8, "cpu_count": 24, "load": "0.4 0.3 0.2",
                  "cpu_thread_utilization_pct": [0] * 24,
                  "memory_used_mib": 28672, "memory_total_mib": 32768,
@@ -270,13 +349,13 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertIn(("MEM ", "lvl_g_dim"), base_row)
         self.assertIn(("16/64GB", "lvl_g_dim"), base_row)
         self.assertIn(("SWP ", "lvl_g_dim"), base_row)
-        cnn_row = next(row for row in render._compute_host_rows(168)
-                       if "◇ cnn" in render._plain(row))
-        self.assertIn(("CPU ", "dim"), cnn_row)
-        self.assertIn(("MEM ", "lvl_r_dim"), cnn_row)
-        self.assertIn(("28/32GB", "lvl_r_dim"), cnn_row)
-        self.assertIn(("SWP ", "lvl_y_dim"), cnn_row)
-        self.assertIn(("5/8GB", "lvl_y_dim"), cnn_row)
+        gpu_row = next(row for row in render._compute_host_rows(168)
+                       if "◇ gpu" in render._plain(row))
+        self.assertIn(("CPU ", "dim"), gpu_row)
+        self.assertIn(("MEM ", "lvl_r_dim"), gpu_row)
+        self.assertIn(("28/32GB", "lvl_r_dim"), gpu_row)
+        self.assertIn(("SWP ", "lvl_y_dim"), gpu_row)
+        self.assertIn(("5/8GB", "lvl_y_dim"), gpu_row)
         unknown_cpu_row = next(row for row in render._compute_host_rows(168)
                                if "◇ cpu" in render._plain(row))
         self.assertIn(("CPU ", "dim"), unknown_cpu_row)
@@ -289,10 +368,10 @@ class ComputeHostRenderTest(unittest.TestCase):
             "processes": [{
                 "pid": 7,
                 "owner": {"kind": "session", "harness": "claude",
-                          "id": "f11a0486-c090-4fea-86be-c8097817761e",
-                          "label": "claude:f11a0486"},
+                          "id": "100000ae-0000-4000-8000-0000000000be",
+                          "label": "claude:100000ae"},
                 "session_owner": {"kind": "session", "harness": "claude",
-                                  "id": "f11a0486-c090-4fea-86be-c8097817761e"},
+                                  "id": "100000ae-0000-4000-8000-0000000000be"},
             }],
         }
         text = render._plain(render._gpu_token(gpu, 141, show_name=True))
@@ -300,7 +379,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         self.assertIn("RTX 6000 Ada Gen.", text)
         self.assertIn(("RTX 6000 Ada Gen. ", "gpu_rtx6000_active"),
                       render._gpu_token(gpu, 141, show_name=True))
-        self.assertNotIn("CL/f11a0486", text)
+        self.assertNotIn("CL/100000ae", text)
         self.assertNotIn("↳", text)
         self.assertNotIn("g1", text)
 

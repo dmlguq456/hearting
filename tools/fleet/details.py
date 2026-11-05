@@ -80,7 +80,9 @@ def state_key(snapshot):
     resources = tuple((r.run_id, r.parent_attempt_id, r.liveness,
                        r.route_id, r.route_hash, r.route_node, r.node,
                        r.pid, r.starttime, r.command_hash, r.exit_code, r.route_file, r.route) for r in snapshot.resources)
-    evidence = {rid: json.dumps(value, sort_keys=True, default=str)
+    from .collectors.dispatch import RegistryRouteEvidence
+    evidence = {rid: (value.fingerprint() if isinstance(value, RegistryRouteEvidence)
+                     else json.dumps(value, sort_keys=True, default=str))
                 for rid, value in snapshot.node_evidence.items()}
     return {"rows": rows, "resources": resources, "evidence": evidence,
             "activity": {identity(row): _activity(row) for row in snapshot.sessions + snapshot.jobs}}
@@ -558,16 +560,23 @@ def _strip_report_verification(snapshot):
 
 
 def _copy_for_enrichment(snapshot, *, required_only):
-    """Copy only the mutable required-detail graph for the first completion pass."""
-    if not required_only:
-        return copy.deepcopy(snapshot)
+    """Isolate mutable detail rows without cloning the read-only host/history census."""
     value = copy.copy(snapshot)
     # Required projection reads resource rows and attaches them to copied jobs,
     # but does not mutate the resource observations. Keep those immutable rows
     # shared so a large host census is not deep-copied just to enrich a few jobs.
-    memo = {id(resource): resource for resource in (snapshot.resources or ())}
-    value.sessions, value.jobs, value.route_entities = copy.deepcopy(
-        (snapshot.sessions, snapshot.jobs, snapshot.route_entities), memo)
+    if required_only:
+        memo = {id(resource): resource for resource in (snapshot.resources or ())}
+        value.sessions, value.jobs, value.route_entities = copy.deepcopy(
+            (snapshot.sessions, snapshot.jobs, snapshot.route_entities), memo)
+    else:
+        # Optional titles mutate resources and pane metadata as well as session/job
+        # rows. Copy them together to preserve aliases (job.resource_children).
+        # node_evidence, usage, memory and display observations are only read;
+        # enrichment replaces fields such as degradations rather than editing them.
+        (value.sessions, value.jobs, value.route_entities, value.resources,
+         value.tag_metadata) = copy.deepcopy((snapshot.sessions, snapshot.jobs,
+            snapshot.route_entities, snapshot.resources, snapshot.tag_metadata))
     value.observations = dict(snapshot.observations or {})
     return value
 

@@ -21,6 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import commit_policy  # noqa: E402
+from split_module_fixture import patch_split  # noqa: E402
 
 ADAPTER_FLAGS = {
     "claude": ["--model", "claude-fixture", "--effort", "low"],
@@ -459,7 +460,7 @@ class OwnerRuntimePermissionProjectionTest(unittest.TestCase):
             # This focused permission regression does not publish unrelated
             # route predecessor markers; completion-marker behavior is covered
             # by its own dispatch contract suite.
-            mock.patch.object(wrapper, "completion_marker_gate", return_value=None),
+            patch_split(wrapper, "completion_marker_gate", return_value=None),
             mock.patch.object(wrapper, "owner_frame_launch_gate", return_value=None),
             mock.patch.object(wrapper, "resolve_model_settings", side_effect=resolve_settings),
             mock.patch.object(wrapper, "shell_command", side_effect=capture_command),

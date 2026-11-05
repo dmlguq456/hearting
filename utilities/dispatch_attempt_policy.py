@@ -15,6 +15,9 @@ import json
 from typing import Mapping
 
 OPEN_STATES = frozenset({"open", "running"})
+# Shared by registered supervisors and the interactive capacity observer. Keep
+# this policy in the storage-free layer so launching an observer loads no graph.
+TRANSIENT_RETRY_DELAYS = (60, 120, 240, 480, 960)
 TERMINAL_STATES = frozenset({"done", "killed", "cancelled"})
 SUBSESSION_NOTE = "completed-subsession"
 REVIEW_BLOCKING_NOTE = "completed-review-blocking"

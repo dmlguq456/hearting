@@ -29,6 +29,7 @@ from review_watchdog import (
     _timeout_authority,
     launch_review_watchdog,
 )
+from split_module_fixture import patch_split
 
 
 class ReviewWatchdogIntegrationTest(unittest.TestCase):
@@ -80,8 +81,8 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                 opened.append(fd)
                 return fd
             with mock.patch.object(os, "pidfd_open", None, create=True), \
-                 mock.patch.object(watchdog, "process_group_observation", side_effect=group), \
-                 mock.patch.object(watchdog, "attempt_tagged_descendants", return_value=empty), \
+                 patch_split(watchdog, "process_group_observation", side_effect=group), \
+                 patch_split(watchdog, "attempt_tagged_descendants", return_value=empty), \
                  mock.patch.object(watchdog, "pidfd_open", side_effect=open_recorded):
                 try:
                     probe = contract.pidfd_open(child.pid)
@@ -90,7 +91,7 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                         self.skipTest("raw pidfd syscall unavailable")
                     raise
                 os.close(probe)
-                with mock.patch.object(watchdog, "process_start_ticks", return_value="mismatch"):
+                with patch_split(watchdog, "process_start_ticks", return_value="mismatch"):
                     self.assertFalse(watchdog._drain_owned_residue({"pid": str(child.pid)}, "att-test", .05))
                 fd = opened[-1]
                 with self.assertRaises(OSError):
@@ -265,11 +266,11 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                 handle = SimpleNamespace(process=process, receipt={"watchdog": identity},
                     _committing=True, close_control=lambda: None, readiness_fd=-1, attempt_id="att-held")
                 release = mock.Mock(return_value=True)
-                with mock.patch.object(lifecycle, "attempt_scan_namespace_authority", return_value=True), \
-                     mock.patch.object(lifecycle, "process_group_observation", side_effect=[
+                with patch_split(lifecycle, "attempt_scan_namespace_authority", return_value=True), \
+                     patch_split(lifecycle, "process_group_observation", side_effect=[
                          ProcessGroupObservation("unverifiable" if fault == "watchdog" else "empty"),
                          ProcessGroupObservation("unverifiable" if fault == "child" else "empty")]), \
-                     mock.patch.object(lifecycle, "attempt_tagged_descendants", return_value=ProcessGroupObservation(
+                     patch_split(lifecycle, "attempt_tagged_descendants", return_value=ProcessGroupObservation(
                          "unverifiable" if fault == "tagged" else "empty")):
                     result = lifecycle._review_cleanup(handle, child=identity, lease_acquired=True,
                         lease_release=release, witness_probe=lambda: True)

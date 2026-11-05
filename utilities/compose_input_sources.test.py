@@ -22,6 +22,7 @@ os.environ["FLEET_NOW_LANG"] = "Korean"
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from split_module_fixture import patch_split  # noqa: E402
 
 
 def _load(name, filename):
@@ -91,7 +92,7 @@ class ClassificationFreshnessTest(SourceBase):
         first = self.cycle()
         module = sys.modules["artifact_producer"]
         with R.compose_campaign_snapshot():
-            with mock.patch.object(module, "read_cycle_record", side_effect=AssertionError("summary cycle census")):
+            with patch_split(module, "read_cycle_record", side_effect=AssertionError("summary cycle census")):
                 selection = R.compose_campaign_selection({"artifact_root": str(self.root), "campaign_key": "k163"})
             self.assertEqual(selection["mode"], "join")
             second = self.cycle()

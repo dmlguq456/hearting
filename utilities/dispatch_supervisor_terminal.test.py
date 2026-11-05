@@ -295,6 +295,19 @@ class OpencodeGap1TerminalClassificationTest(unittest.TestCase):
             drifted = SUPERVISOR.classify_supervisor_error("codex", reason)
             self.assertIn(drifted.note, {"dead-protocol", "dead-runtime-exit"})
 
+    def test_parent_deploy_wait_blocked_survives_post_exit_classification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "wait.jsonl"
+            from dataclasses import asdict
+            terminal = SUPERVISOR.classify_parent_deploy_wait_blocked("parent-deploy-wait-timeout")
+            log.write_text(json.dumps({"type": "dispatch.supervisor.terminal",
+                                       "terminal": asdict(terminal)}) + "\n")
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(harness=harness):
+                    terminal = SUPERVISOR.classify_supervisor_log(log, harness)
+                    self.assertEqual((terminal.note, terminal.failure_class, terminal.process_exit),
+                                     ("dead-worker-blocked", "blocked", "3"))
+
 
 class RuntimeFailureClassifierTest(unittest.TestCase):
     """plan.md item 4: one shared classify_runtime_failure, structured-code-first."""

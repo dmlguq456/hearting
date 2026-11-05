@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -191,7 +192,7 @@ class TopPinTest(unittest.TestCase):
     def test_owner_and_worker_lose_a_main_session_only_model_but_keep_the_tool(self):
         pins = R._parse_selection_pins(
             ["owner=claude:fable@xhigh", "worker=claude:claude-fable-5-1", "frame=claude:fable"])
-        with mock.patch.object(R, "_main_session_only_models", return_value="fable"):
+        with patch_split(R, "_main_session_only_models", return_value="fable"):
             kept, warnings = R._filter_top_pins(pins)
         self.assertEqual(kept["owner"], {"harness": "claude", "model": None, "effort": None})
         self.assertEqual(kept["worker"], {"harness": "claude", "model": None, "effort": None})
@@ -201,7 +202,7 @@ class TopPinTest(unittest.TestCase):
 
     def test_an_ordinary_model_is_untouched_and_a_harness_only_pin_needs_no_lookup(self):
         pins = R._parse_selection_pins(["owner=claude:sonnet", "worker=opencode"])
-        with mock.patch.object(R, "_main_session_only_models", return_value="fable"):
+        with patch_split(R, "_main_session_only_models", return_value="fable"):
             kept, warnings = R._filter_top_pins(pins)
         self.assertEqual(kept, pins)
         self.assertEqual(warnings, [])
@@ -220,7 +221,7 @@ class ComposeSealTest(IsolatedCase):
             for inherited in (None, evidence(parent="claude")):
                 with self.subTest(harness=harness, inherited=inherited is not None):
                     pins = R._parse_selection_pins([f"owner={harness}"])
-                    with mock.patch.object(R, "_compose_readiness", return_value={
+                    with patch_split(R, "_compose_readiness", return_value={
                             "tuples": evidence(parent=harness)["tuples"]}) as probe:
                         route = self.compose(pins=pins, dispatch_evidence=inherited)
                     if inherited is None:
@@ -408,7 +409,7 @@ class DefaultChildrenTest(IsolatedCase):
         with self.assertRaisesRegex(ValueError,"disabled-by-user-policy"):
             R._apply_selection_pins(route,pins)
         self.assertEqual(json.dumps(route),before)
-        with mock.patch.object(R,"_compose_readiness") as probe:
+        with patch_split(R,"_compose_readiness") as probe:
             for target in ("owner","worker","frame"):
                 with self.assertRaisesRegex(ValueError,"disabled-by-user-policy"):
                     R._pin_change_probe(route,self.home/"state/jobs.log",target,"codex","claude")
@@ -422,7 +423,7 @@ class DefaultChildrenTest(IsolatedCase):
                "dispatch_evidence":{"tuples":[nested("claude","claude")]},
                "nodes":[{"id":"execute","dispatch_depth":2,"fallback_hops":[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[nested("claude","claude")]},{"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[]}]}]}
         before=json.dumps(route,sort_keys=True)
-        with mock.patch.object(R,"_compose_readiness",return_value={"tuples":[nested("claude","opencode")]}) as probe:
+        with patch_split(R,"_compose_readiness",return_value={"tuples":[nested("claude","opencode")]}) as probe:
             tuples,candidates=R._pin_change_probe(route,self.home/"state/jobs.log","worker","opencode","claude")
         self.assertEqual(probe.call_count,1)
         RA.record_pin_change(route,target="worker",pin={"harness":"opencode","model":None,"effort":None},

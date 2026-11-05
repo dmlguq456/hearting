@@ -17,6 +17,11 @@ import stat
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 DIAGNOSIS_BUDGET_SECONDS = 2.0
 _LOCK_ERROR = re.compile(
@@ -385,6 +390,7 @@ def _bounded_worker(payload: dict, deadline: float) -> dict | None:
         )
     except OSError:
         return _worker_unavailable("diagnostic-start-failed", "diagnostic worker did not start")
+    end_with_test(child)
 
     def stop_group() -> None:
         try:

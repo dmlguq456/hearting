@@ -55,8 +55,10 @@ def project(payload: dict[str, Any] | None, session_id: str, *, worker: bool = F
     # pane, socket and transcript proof all pass. Otherwise this existing
     # projection reports directly or uses its deferred exact-TUI proof path.
     report_session = not _state_hook_owns_report(payload, session_id, worker=worker)
+    # A display header, like the Claude projection hook: the steward mark reads
+    # the runner-published relations instead of walking every seat ledger.
     projected = _project("codex", session_id, worker=worker,
-                         report_session=report_session, **lifecycle)
+                         report_session=report_session, display_relations=True, **lifecycle)
     if request_recovery and not worker and session_id:
         try:
             utilities = ROOT / "utilities"

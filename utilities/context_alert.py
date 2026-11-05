@@ -57,6 +57,10 @@ def claude_usage(transcript: object, session_id: str) -> int | None:
                 row = json.loads(raw)
             except (ValueError, UnicodeDecodeError):
                 continue
+            if (isinstance(row, dict) and row.get("type") == "system"
+                    and row.get("subtype") == "compact_boundary"
+                    and row.get("sessionId", session_id) == session_id):
+                return None  # No request in the new context yet; pre-compact usage is stale.
             if (not isinstance(row, dict) or row.get("type") != "assistant"
                     or row.get("isSidechain") or row.get("isMeta")
                     or row.get("sessionId", session_id) != session_id):
@@ -107,6 +111,8 @@ def codex_usage(transcript: object, session_id: str) -> int | None:
                 continue
             if not isinstance(row, dict):
                 continue
+            if row.get("type") == "compacted":
+                return None
             payload = row.get("payload")
             if row.get("type") != "event_msg" or not isinstance(payload, dict) \
                     or payload.get("type") != "token_count":

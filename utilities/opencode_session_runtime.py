@@ -127,6 +127,27 @@ def command(args, session: str) -> list[str]:
     return prefix[:-1] + argv
 
 
+def _count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _add_step_tokens(usage: dict, tokens) -> None:
+    """Add one finished step's token counts to the turn's usage, in the Claude result's names.
+
+    Each `step_finish` reports that one model request; the turn's cost is their sum."""
+    if not isinstance(tokens, dict):
+        return
+    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+    output = [_count(tokens.get("output")), _count(tokens.get("reasoning"))]
+    for key, value in (("input_tokens", _count(tokens.get("input"))),
+                       ("cache_read_input_tokens", _count(cache.get("read"))),
+                       ("cache_creation_input_tokens", _count(cache.get("write"))),
+                       ("output_tokens", sum(v for v in output if v is not None)
+                        if any(v is not None for v in output) else None)):
+        if value is not None:
+            usage[key] = usage.get(key, 0) + value
+
+
 def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
              ordinary_owner_turn: bool = False) -> tuple[dict, int]:
     """Stream one exact native turn, then return the portable result envelope.
@@ -167,6 +188,7 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
     final_text = ""
     terminal_stop = False
     runtime_error = None
+    usage = {}
     binary_parts = shlex.split(getattr(args, "opencode_command", None) or "opencode")
     runtime_binary = binary_parts[-1] if binary_parts else "opencode"
     native_opencode = Path(runtime_binary).name == "opencode"
@@ -215,6 +237,7 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
             final_text, terminal_stop = "", False
         elif kind == "step_finish":
             terminal_stop = part.get("reason") == "stop"
+            _add_step_tokens(usage, part.get("tokens"))
         elif kind == "error":
             runtime_error = opencode_runtime.safe_provider_error(value.get("error"))
         elif kind == "tool_use":
@@ -307,6 +330,8 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
     result = {"type": "result", "runtime": "opencode", "session_id": session or "",
               "subtype": "error_during_execution" if runtime_error or code else "success",
               "is_error": bool(runtime_error or code), "result": final_text}
+    if usage:
+        result["usage"] = usage
     if runtime_error:
         result["error"] = runtime_error
         if native_opencode:

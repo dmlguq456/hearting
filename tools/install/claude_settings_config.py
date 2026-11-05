@@ -1,6 +1,6 @@
 """Upgrade migration for the user's `~/.claude/settings.json`.
 
-The managed install merges only hooks, statusLine, env and autoMemoryEnabled
+The managed install merges only hooks, statusLine, env, autoMemoryEnabled and idleCompaction
 into the user's file and never writes `permissions`, so Hearting does not read
 or judge permission settings (`harness config status` has no row for them).
 This module only removes retired harness hook registrations, preserving the
@@ -21,6 +21,13 @@ _RETIRED_HOOKS = (
     "spec-skill-gate.sh", "worktree-path-guard.sh", "runtime-root-guard.sh",
     "git-state-guard.sh", "core-read-marker.sh", "pretooluse-write-guard.py",
 )
+
+# These entrypoints still serve prompts. Retire only their former startup
+# registrations, including the run-hook.sh alias and direct-file spellings.
+_RETIRED_EVENT_HOOKS = {"SessionStart": (
+    "local-evidence-inject", "local-evidence-inject.sh",
+    "dispatch-session-sweep", "dispatch-session-sweep.py",
+)}
 
 
 # The SessionEnd `mem.py sync` registration older releases shipped (D-82: memory
@@ -86,7 +93,7 @@ def remove_retired_hooks(data: dict) -> bool:
                     '$root/adapters/codex/hooks/run-hook.sh',
                 )) or bool(_OWNED_ROOT_HOOK_PATH.search(command))
                 retired = any(re.search(r'(?<![\w.-])' + re.escape(name) + r'(?![\w.-])', command)
-                              for name in _RETIRED_HOOKS)
+                              for name in (*_RETIRED_HOOKS, *_RETIRED_EVENT_HOOKS.get(event, ())))
                 retired = retired or ('worker-state-compact.py' in command and 'guard-write' in command)
                 if event == "SessionEnd" and _RETIRED_SESSION_END_MEM_SYNC.match(command):
                     owned = retired = True

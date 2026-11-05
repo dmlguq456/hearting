@@ -79,7 +79,7 @@ class ReadingTest(unittest.TestCase):
 
     def test_r2_gpu_owner_adds_person_not_repeated_execution_id(self):
         from fleet.collectors import compute_hosts
-        for kind, identifier in (("run", "mgpu-a1-20261008-203517-css-AMI8var-v3"),
+        for kind, identifier in (("run", "fixture-run-0670"),
                                  ("job", "training-owner")):
             label = kind + ":" + identifier
             process = dict(pid=101, proc_start=11, command="python run.py --config AMI_8ch_varying_0_3spk_v3.yaml",
@@ -185,7 +185,7 @@ class ReadingTest(unittest.TestCase):
         text = render._plain(render._route_chain_node_segs(node, True, {}, True, True))
         self.assertIn("route-frame", text)
         self.assertNotIn("debug", text)
-        node["label"] = "AMI_8ch_fix_2spk_v3"
+        node["label"] = "fixture-item-0153"
         self.assertIn(node["label"], render._plain(render._route_chain_node_segs(node, True, {})))
 
     def test_r7_footer_preserves_keys_at_80_and_100(self):

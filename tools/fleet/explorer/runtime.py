@@ -7,7 +7,8 @@ the live adapter without moving I/O into the drawing code.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
+from collections import deque
+from dataclasses import fields
 import hashlib
 import json
 import math
@@ -45,10 +46,42 @@ class ExplorerRuntime:
         self._cache_path = None
         self._cached_continuation = None
         self._has_complete = False
-        self._persisted_generations = set()
+        self._persisted_generations = deque(maxlen=64)
+        self._failed_generations = deque(maxlen=64)
         self._pending_generations = set()
         self._persist_lock = threading.Lock()
         self._writer_threads = []
+        self._frame_inputs = None
+        self._frame = None
+
+    def draw_frame(self, model, state, cols, rows, *, beat=1):
+        """Keep one immutable cell frame between changes to its visible inputs.
+
+        The 100 ms loop still paints spinners and reads keys. Rebuilding the
+        same grid needlessly allocates thousands of cells on each wake. The
+        clock is rendered only as HH:MM; pending snapshots advance its raw
+        timestamp on every wake without changing a displayed cell.
+        """
+        from . import chrome, frame
+        from .grid import CellGrid
+        from .view_model import freeze
+
+        if CellGrid.default_trace is not None:
+            return frame.draw(model, state, cols, rows, beat=beat)
+        # The overview page and common chrome do not consume these detail
+        # records. Their current values still belong to the interaction model.
+        hidden = ({'nodes', 'cards', 'dialogue', 'answered'}
+                  if state.view == 'OVERVIEW' and state.scope == '-' else ())
+        values = tuple(chrome._clock_freshness(model.clock) if item.name == "clock"
+                       else None if item.name in hidden else getattr(model, item.name) for item in fields(model)
+                       if item.name not in {"source_records", "ordering", "readiness"})
+        # NavState deliberately omits the private question editor from equality.
+        # Snapshot it too, so a draft edit or response is painted immediately.
+        inputs = (values, state, freeze(state.question_overlay), cols, rows, beat)
+        if inputs != self._frame_inputs:
+            rendered = frame.draw(model, state, cols, rows, beat=beat)
+            self._frame_inputs, self._frame = inputs, rendered
+        return self._frame
 
     @property
     def has_complete(self):
@@ -275,7 +308,7 @@ class ExplorerRuntime:
                             str(row.get("tag", "")) for row in ordered_sessions},
             "tag_cycle": ["session:" + tag for tag in ordered_tags],
         }
-        return replace(model, repos=tuple(reconciled["repos"]),
+        return model.with_updates(repos=tuple(reconciled["repos"]),
                        sessions=tuple(ordered_sessions), ordering=replay_ordering)
 
     @staticmethod
@@ -356,26 +389,36 @@ class ExplorerRuntime:
         if token is None:
             return None
         with self._persist_lock:
-            if token in self._persisted_generations or token in self._pending_generations:
+            if (token in self._persisted_generations or token in self._pending_generations
+                    or token in self._failed_generations):
                 return None
             self._pending_generations.add(token)
         envelope = self._cache_envelope(vm, readiness, detail_continuation)
         if envelope is None:
             with self._persist_lock:
                 self._pending_generations.discard(token)
+                self._failed_generations.append(token)
             return None
         thread = threading.Thread(target=self._write_generation, args=(envelope, token),
                                   name="fleet2-observation-save", daemon=True)
-        self._writer_threads.append(thread)
+        with self._persist_lock:
+            # Finished Thread objects otherwise accumulate for the viewer's
+            # entire lifetime. Preserve active and not-yet-started writers.
+            self._writer_threads = [held for held in self._writer_threads
+                                    if held.ident is None or held.is_alive()]
+            self._writer_threads.append(thread)
         try:
             thread.start()
         except (RuntimeError, OSError):
             with self._persist_lock:
                 self._pending_generations.discard(token)
+                self._failed_generations.append(token)
+                self._writer_threads.remove(thread)
             return None
         return thread
 
     def _write_generation(self, envelope, token):
+        written = False
         try:
             written = self._write_cache(envelope)
             if not written:
@@ -383,9 +426,11 @@ class ExplorerRuntime:
                 written = existing is not None and existing.get("observed_at", 0) >= token[2]
             if written:
                 with self._persist_lock:
-                    self._persisted_generations.add(token)
+                    self._persisted_generations.append(token)
         finally:
             with self._persist_lock:
+                if not written:
+                    self._failed_generations.append(token)
                 self._pending_generations.discard(token)
 
     def wait_for_writes(self, timeout=None):
@@ -574,7 +619,7 @@ class ExplorerRuntime:
             sessions_value = tuple(ordered_sessions)
             if (tuple(model.repos) != repos_value or tuple(model.sessions) != sessions_value
                     or model.ordering != freeze(ordering)):
-                model = replace(model, repos=repos_value,
+                model = model.with_updates(repos=repos_value,
                                 sessions=sessions_value, ordering=ordering)
         except (AttributeError, TypeError, ValueError):
             # Preserve a valid frame if a third-party snapshot violates an optional
@@ -952,7 +997,8 @@ class ExplorerRuntime:
         from .grid import CellGrid
         grid = CellGrid(cols, rows)
         if rows > 0:
-            label = "불러오는 중"
+            from ..config import ui_text
+            label = ui_text("fleet.loading")
             x, y = max(0, (cols - len(label)) // 2), max(0, rows // 2)
             grid.put(max(0, x - 2), y, "⠏", "g_spin")    # turned at draw time, like a working mark
             grid.put(x, y, label, "dim")

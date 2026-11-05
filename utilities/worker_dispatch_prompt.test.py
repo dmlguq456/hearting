@@ -394,7 +394,9 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                     self.assertEqual(prompt.count(f"--route {route_path} --node plan --start"), 1)
                     self.assertIn(f"Outputs under {od}/:", prompt)
                     self.assertIn("Entry gate: none sealed", prompt)
-                    self.assertIn("Route steps carry the exact start commands", prompt)
+                    self.assertIn("Route steps and the latest receipt print", prompt)
+                    self.assertIn("capabilities/autopilot-code/references/owner-execution.md", prompt)
+                    self.assertIn(f"--route {route_path} --node test --start", prompt)
                     blocks[harness] = prompt[prompt.index("Route steps (sealed route"):].split("\n\n")[0]
             self.assertEqual(len(set(blocks.values())), 1)
 

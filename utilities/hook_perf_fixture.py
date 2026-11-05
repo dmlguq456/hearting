@@ -6,19 +6,31 @@ self-contained, throw-away state tree under an explicit base (the runtime
 directory or a temporary root) and refuses to write anywhere near the live
 ``~/.local/state/hearting`` tree.
 
-The fixture is intentionally larger than the measured live state so a hook
-that still walks global state cannot accidentally pass:
+The fixture is sized to the machine's live state (measured 2026-11-03: a
+55 MB / ~10,000-row ``jobs.log`` with ~1,600 claimed-and-started depth-1
+owner/frame rows, ~660 sessions ledgers, ~7,600 peer rows with two
+``.lock-<ref>`` files each), so a hook that still walks global state cannot
+accidentally pass:
 
-* sessions ledgers >= 550 (default 600) with >= 1,000 binding rows
+* sessions ledgers >= 650 (default 660) with >= 1,300 binding rows
 * delivery records >= 3,300, of which >= 3,000 are open ``pending``
-* peer waiting history >= 6,000 files
-* ``jobs.log`` >= 49 MiB and >= 9,391 six-field rows
+* peer waiting history >= 7,400 rows (mostly ``received``, a few hundred
+  verifiable ``queued``/``pending`` rows for unrelated recipients, each with
+  its transfer record) plus two ``.lock-<ref>`` files per row
+* ``jobs.log`` exactly 10,000 six-field rows and >= 52 MiB, of which >= 1,500
+  are depth-1 owner/frame rows that the asyncRewake hook scans
+  (``REGISTRY_DEPTH1_START`` in ``hooks/dispatch-owner-rewake.py``), bound to
+  unrelated sessions, ``open`` and ``done`` mixed
+* the target's own transcript (fixed size)
 
 Only the target session's own share is small (two open records plus one
-predecessor scope through a confirmed succession edge), so doubling the
-unrelated global state must not move the target hook's time or opened-file
-count. ``scale`` multiplies the unbounded unrelated state (ledgers, deliveries,
-peer history, snapshots); the jobs registry, the target's record set, and the
+predecessor scope through a confirmed succession edge, no owner row of its
+own), so doubling the unrelated global state must not move the target hook's
+time or its per-record-kind opened-file and listing counts. ``scale``
+multiplies the unbounded unrelated state (ledgers, deliveries, peer history,
+snapshots) and the registry's unrelated depth-1 rows; those rows replace filler
+rows, so the registry keeps the same row count and byte size and only the
+per-row work a scan does can grow. The target's record set, transcript and the
 bounded steward-marker set stay fixed.
 
 ``self_check`` re-derives the target's storage scopes with the real
@@ -30,6 +42,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from datetime import datetime, timezone
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -40,26 +55,41 @@ TARGET_SESSION = "perf-target"
 TARGET_STORAGE = TARGET_SESSION
 PREDECESSOR = "perf-origin"
 TARGET_RECORDS = 2
-DEFAULT_LEDGERS = 600
-DEFAULT_BINDINGS = 1100
+DEFAULT_LEDGERS = 660
+DEFAULT_BINDINGS = 1320
 DEFAULT_DELIVERIES = 3300
-DEFAULT_PEER_ROWS = 6300
-DEFAULT_JOBS_ROWS = 9700
-MIN_JOBS_BYTES = 49 * 1024 * 1024
-JOBS_FILLER_BYTES = 5120
+DEFAULT_PEER_ROWS = 7500
+# Per 1,000 peer rows: live 2026-11-03 held 368 queued and 163 pending of 7,611.
+PEER_QUEUED_PER_MILLE = 48
+PEER_PENDING_PER_MILLE = 22
+PEER_LOCKS_PER_ROW = 2  # live: 14,654 `.lock-<ref>` files for 7,611 rows
+DEFAULT_JOBS_ROWS = 10000
+# Every unrelated registry row is padded to exactly this many bytes, so the
+# registry size is fixed by its row count whatever mix of kinds it holds.
+JOBS_ROW_BYTES = 5500
+MIN_JOBS_BYTES = 52 * 1024 * 1024
+JOBS_FILLER_BYTES = JOBS_ROW_BYTES  # backward-compatible name for ``record_size``
+DEFAULT_DEPTH1_ROWS = 1600
+DEPTH1_OPEN_EVERY = 16  # 1 in 16 unrelated depth-1 rows is still ``open``
+TRANSCRIPT_ROWS = 2000
 DEFAULT_SNAPSHOTS = 8
 DEFAULT_STEWARD_MARKERS = 12
 TERMINAL_PREDECESSOR_RECORDS = 3
-FIXTURE_SCHEMA = 1
+FIXTURE_SCHEMA = 2
 
 _MINIMUMS = {
-    "ledgers": 550,
-    "bindings": 1000,
+    "ledgers": 650,
+    "bindings": 1300,
     "deliveries": 3000,
     "open_pending": 3000,
-    "peer_rows": 6000,
-    "jobs_rows": 9391,
+    "peer_rows": 7400,
+    "peer_open_rows": 400,
+    "peer_locks": 14800,
+    "jobs_rows": 10000,
     "jobs_bytes": MIN_JOBS_BYTES,
+    "depth1_rows": 1500,
+    "depth1_open": 50,
+    "transcript_rows": TRANSCRIPT_ROWS,
 }
 
 
@@ -218,9 +248,187 @@ def _write_terminal_records(root: Path, count: int, *, storage_key: str, jobs: P
     return delivery_ids
 
 
+def _peer_state(index: int) -> str:
+    slot = index % 1000
+    if slot < PEER_QUEUED_PER_MILLE:
+        return "queued"
+    if slot < PEER_QUEUED_PER_MILLE + PEER_PENDING_PER_MILLE:
+        return "pending"
+    return "received"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _empty_private_file(path: Path) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+
+
+def _write_peer_rows(peer_root: Path, count: int, *, now: float) -> dict:
+    """Peer waiting history: ``received`` rows plus open rows for unrelated recipients.
+
+    An open row is shaped exactly as ``prepare_peer_message`` writes it (row
+    plus transfer record, body and source digests), so a full scan verifies it
+    instead of quarantining it; ``self_check`` re-reads every open row through
+    the real ``_read_pending``. The ``.lock-<ref>`` files are what the send
+    path leaves behind: they are not rows, but every listing of the directory
+    pays for them.
+    """
+    pending = _private_dir(peer_root / "peer-messages" / "pending")
+    transfers = _private_dir(peer_root / "peer-messages" / "transfers")
+    states = {"received": 0, "queued": 0, "pending": 0}
+    locks = 0
+    for index in range(count):
+        ref = f"{index:032x}"
+        state = _peer_state(index)
+        states[state] += 1
+        if state == "received":
+            row = {"schema_version": 1, "state": "received", "ref": ref}
+        else:
+            sender = {"harness": "claude", "session_id": f"perf-peer-sender-{index % 53:03d}"}
+            recipient = {"harness": "codex" if index % 3 == 0 else "claude",
+                         "session_id": f"perf-peer-recipient-{index:05d}"}
+            body = f"perf peer body {index}"
+            text = (f"{body}\n\n(peer-from: claude [?] ; pane=- ; "
+                    f"sid={sender['session_id']} ; ref={ref})")
+            body_sha256 = _sha256(text)
+            row = {"schema_version": 1, "ref": ref, "from": sender, "to": recipient,
+                   "body_sha256": body_sha256, "source_sha256": _sha256(body),
+                   "refs": [], "created": now - 60 - index, "state": state,
+                   "text": text, "no_trailer": False, "receipt": "target-form-open"}
+            _write(transfers / f"{ref}.json", json.dumps({
+                "schema_version": 1, "message_id": ref, "from": sender, "to": recipient,
+                "body_sha256": body_sha256, "refs": []}) + "\n")
+        _write(pending / f"{ref}.json", json.dumps(row, sort_keys=True) + "\n")
+        # The row's own send lock plus one left by an already-pruned row.
+        _empty_private_file(pending / f".lock-{ref}")
+        locks += 1
+        for extra in range(1, PEER_LOCKS_PER_ROW):
+            _empty_private_file(pending / f".lock-{0xF0000000 * extra + index:032x}")
+            locks += 1
+    return {"peer_rows": count, "peer_open_rows": states["queued"] + states["pending"],
+            "peer_queued": states["queued"], "peer_pending": states["pending"],
+            "peer_locks": locks}
+
+
+def _iso(moment: float) -> str:
+    return datetime.fromtimestamp(moment, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _padded_row(stamp: str, status: str, slug: str, metadata: dict, size: int) -> str:
+    """One six-column registry row of exactly ``size`` bytes (UTF-8, newline included)."""
+    head = _attempt_row(0, slug, metadata, status=status).split("\t", 1)[1]
+    row = f"{stamp}\t{head}"
+    pad = size - len(row.encode("utf-8")) - len(",note=")
+    if pad < 0:
+        raise ValueError(f"registry row exceeds {size} bytes")
+    return row[:-1] + ",note=" + "x" * pad + "\n"
+
+
+def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
+                    target_attempts: list[str], ledgers: int, now: float) -> dict:
+    """The jobs registry: target rows, unrelated depth-1 owner rows, then filler.
+
+    The depth-1 rows carry every ``REGISTRY_DEPTH1_START`` stamp of
+    ``hooks/dispatch-owner-rewake.py`` and an allowed worker type, so the
+    asyncRewake scan resolves each one through ``seat_handover.owns``. Each is
+    bound to an unrelated session that has a handover edge in the lineage
+    (``perf-from-*`` -> ``perf-holder-*``), as live rows are. Every unrelated
+    row has the same byte size, so the registry's size does not depend on how
+    many depth-1 rows it holds.
+    """
+    written = 0
+    depth1_open = 0
+    with jobs.open("w", encoding="utf-8") as handle:
+        for index, attempt in enumerate(target_attempts):
+            metadata = {
+                "attempt_id": attempt,
+                "parent_sid": TARGET_SESSION,
+                "parent_harness": "claude",
+                "dispatch_depth": "1",
+                "worker_type": "frame",
+                "route_id": f"rt-perf-{index}",
+                "route_hash": "sha256:perf",
+                "route_node": "execute",
+                "delivery_classification": "success",
+            }
+            handle.write(_attempt_row(100 + index, "perf-target", metadata, status="done"))
+            written += 1
+        depth1 = max(0, min(depth1, rows - written))
+        holders = max(1, ledgers - 1)
+        for index in range(depth1):
+            status = "open" if index % DEPTH1_OPEN_EVERY == 0 else "done"
+            depth1_open += status == "open"
+            parent = f"perf-from-{index % holders + 1:05d}"
+            metadata = {
+                "capability": "autopilot-code",
+                "attempt_schema_version": "2",
+                "dispatch_depth": "1",
+                "transport": "headless",
+                "harness": "claude",
+                "parent_sid": parent,
+                "parent_harness": "claude",
+                "worker_type": "frame" if index % 3 == 2 else "owner",
+                "parent_completion_delivery": "claude-parent-runtime",
+                "launch_claimed": "1",
+                "launch_started": "1",
+                "owner_route_id": f"rt-perf-owner-{index:05d}",
+                "route_id": f"rt-perf-owner-{index:05d}",
+                "route_hash": "sha256:perf-owner",
+                "route_node": "execute",
+                "attempt_id": f"att-perf-owner-{index:05d}",
+            }
+            stamp = _iso(now - (300 + index if status == "open" else 86_400 + index))
+            handle.write(_padded_row(stamp, status, f"perf-owner-{index:05d}", metadata, row_bytes))
+            written += 1
+        for index in range(max(0, rows - written)):
+            metadata = {
+                "attempt_id": f"att-perf-filler-{index:05d}",
+                "parent_sid": f"perf-filler-{index % 97:03d}",
+                "dispatch_depth": "1",
+                "worker_type": "frame",
+                "route_id": "rt-filler",
+                "route_hash": "sha256:filler",
+                "route_node": "execute",
+            }
+            handle.write(_padded_row(str(1000 + index), "running", "perf-filler",
+                                     metadata, row_bytes))
+            written += 1
+        # Top up to the byte floor when the row target alone is smaller.
+        while handle.tell() < MIN_JOBS_BYTES:
+            metadata = {
+                "attempt_id": f"att-perf-pad-{written:05d}",
+                "parent_sid": "perf-pad",
+                "route_id": "rt-pad",
+                "route_hash": "sha256:pad",
+                "route_node": "execute",
+            }
+            handle.write(_padded_row(str(2000 + written), "running", "perf-pad",
+                                     metadata, row_bytes))
+            written += 1
+    os.chmod(jobs, 0o600)
+    return {"jobs_rows": written, "jobs_bytes": jobs.stat().st_size,
+            "depth1_rows": depth1, "depth1_open": depth1_open}
+
+
+def _write_transcript(path: Path, rows: int) -> None:
+    """The target's own transcript: fixed size, it does not grow with ``scale``."""
+    _private_dir(path.parent)
+    with path.open("w", encoding="utf-8") as handle:
+        for index in range(rows):
+            role = "user" if index % 2 == 0 else "assistant"
+            handle.write(json.dumps({
+                "type": role, "sessionId": TARGET_SESSION, "uuid": f"perf-turn-{index:05d}",
+                "message": {"role": role, "content": f"perf transcript turn {index} " + "y" * 400},
+            }, sort_keys=True) + "\n")
+    os.chmod(path, 0o600)
+
+
 def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DEFAULT_JOBS_ROWS,
-          record_size: int = JOBS_FILLER_BYTES, prime: bool = True,
-          prime_via: str = "hook") -> dict:
+          record_size: int = JOBS_ROW_BYTES, prime: bool = True,
+          prime_via: str = "hook", depth1_rows: int | None = None) -> dict:
     """Build one fixed fixture tree and return its paths, env and counts."""
     if scale < 1:
         raise ValueError("scale must be >= 1")
@@ -234,7 +442,6 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
     dispatch_root = _private_dir(state / "dispatch")
     jobs = dispatch_root / "jobs.log"
     sessions = _private_dir(xdg / "hearting" / "session-tidy" / "sessions")
-    pending = _private_dir(peer_root / "peer-messages" / "pending")
 
     ledgers = DEFAULT_LEDGERS * scale
     target_attempts = [f"att-perf-target-{index}" for index in range(TARGET_RECORDS)]
@@ -282,61 +489,24 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
     terminal_delivery_ids = _write_terminal_records(
         dispatch_root, TERMINAL_PREDECESSOR_RECORDS, storage_key=PREDECESSOR, jobs=jobs)
 
-    # Peer waiting history: the receiver's scan still opens every retained file.
-    peer_rows = DEFAULT_PEER_ROWS * scale
-    for index in range(peer_rows):
-        ref = f"{index:032x}"
-        _write(pending / f"{ref}.json",
-               json.dumps({"schema_version": 1, "state": "received", "ref": ref},
-                          sort_keys=True) + "\n")
+    # Peer waiting history: the receiver's full scan opens every retained file;
+    # a recipient index lets an exact-recipient read skip it.
+    now = time.time()
+    peer = _write_peer_rows(peer_root, DEFAULT_PEER_ROWS * scale, now=now)
+    peer_rows = peer["peer_rows"]
 
-    # jobs.log: >= 9,391 six-field rows and >= 49 MiB. Its content is fixed
-    # across scale: only unrelated ledgers/deliveries/peer rows scale, so the
-    # d2 comparison sees an identical registry.
-    filler = "x" * max(0, record_size)
-    written = 0
-    with jobs.open("w", encoding="utf-8") as handle:
-        for index, attempt in enumerate(target_attempts):
-            metadata = {
-                "attempt_id": attempt,
-                "parent_sid": TARGET_SESSION,
-                "parent_harness": "claude",
-                "dispatch_depth": "1",
-                "worker_type": "frame",
-                "route_id": f"rt-perf-{index}",
-                "route_hash": "sha256:perf",
-                "route_node": "execute",
-                "delivery_classification": "success",
-            }
-            handle.write(_attempt_row(100 + index, "perf-target", metadata, status="done"))
-            written += 1
-        extra = max(0, jobs_rows - written)
-        for index in range(extra):
-            metadata = {
-                "attempt_id": f"att-perf-filler-{index:05d}",
-                "parent_sid": f"perf-filler-{index % 97:03d}",
-                "dispatch_depth": "1",
-                "worker_type": "frame",
-                "route_id": "rt-filler",
-                "route_hash": "sha256:filler",
-                "route_node": "execute",
-                "note": filler,
-            }
-            handle.write(_attempt_row(1000 + index, "perf-filler", metadata))
-            written += 1
-        # Top up to the byte floor when the row target alone is smaller.
-        while handle.tell() < MIN_JOBS_BYTES:
-            metadata = {
-                "attempt_id": f"att-perf-pad-{written:05d}",
-                "parent_sid": "perf-pad",
-                "route_id": "rt-pad",
-                "route_hash": "sha256:pad",
-                "route_node": "execute",
-                "note": filler,
-            }
-            handle.write(_attempt_row(2000 + written, "perf-pad", metadata))
-            written += 1
-    os.chmod(jobs, 0o600)
+    # jobs.log: exactly ``jobs_rows`` rows and a fixed byte size at every
+    # scale. Only the share of unrelated depth-1 owner rows grows with
+    # ``scale`` (they replace filler rows), so a scan's per-row cost shows up
+    # as growth while its read volume does not change.
+    registry = _write_registry(
+        jobs, rows=jobs_rows,
+        depth1=DEFAULT_DEPTH1_ROWS * scale if depth1_rows is None else depth1_rows,
+        row_bytes=record_size, target_attempts=target_attempts, ledgers=ledgers, now=now)
+
+    transcript = home / ".claude" / "projects" / "-perf-work" / f"{TARGET_SESSION}.jsonl"
+    _write_transcript(transcript, TRANSCRIPT_ROWS)
+    work = _private_dir(base / "work")
 
     # Handover snapshots and steward markers are read by the live role path.
     # The legacy marker has no seat key on purpose: it makes the live resolver
@@ -383,6 +553,8 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
         "jobs": str(jobs),
         "sessions": str(sessions),
         "peer_root": str(peer_root),
+        "transcript": str(transcript),
+        "work": str(work),
         "target_session": TARGET_SESSION,
         "target_storage": TARGET_STORAGE,
         "predecessor": PREDECESSOR,
@@ -396,12 +568,12 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
         "counts": {
             "ledgers": 1 + unrelated_ledgers,
             "bindings": 1 + unrelated_bindings,
-            "peer_rows": peer_rows,
             "snapshots": snapshots,
             "steward_markers": markers + 1,
-            "jobs_rows": written,
-            "jobs_bytes": jobs.stat().st_size,
+            "transcript_rows": TRANSCRIPT_ROWS,
             "terminal_records": len(terminal_delivery_ids),
+            **peer,
+            **registry,
             **deliveries,
         },
         "terminal_delivery_ids": terminal_delivery_ids,
@@ -413,14 +585,25 @@ def build(base: str | Path | None = None, *, scale: int = 1, jobs_rows: int = DE
     return fixture
 
 
+def _load_by_path(name: str, path: Path):
+    """Load a module whose filename is hyphenated (once per process)."""
+    import sys
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # dataclasses resolve annotations through it
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 def _peer_steward_module():
     """The runner module, loaded by path because its filename is hyphenated."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "_hook_perf_peer_steward", Path(__file__).with_name("peer-steward.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_by_path("_hook_perf_peer_steward", Path(__file__).with_name("peer-steward.py"))
 
 
 def prime_inbox(fixture: dict, *, via_runner: bool = False) -> dict:
@@ -476,10 +659,13 @@ def prime_inbox(fixture: dict, *, via_runner: bool = False) -> dict:
             spec.loader.exec_module(module)
             pending_dir = peer_root / "peer-messages" / "pending"
             names = sorted(path.name for path in pending_dir.glob("*.json"))
-            module._publish_recipient_index(
-                pending_dir, {"harness": "claude",
-                              "session_id": fixture["target_session"]},
-                [], names, dispatch_root=peer_root)
+            # The runner publishes every recipient's index; the target is
+            # reached through both its Claude and its Codex hooks.
+            for harness in ("claude", "codex"):
+                module._publish_recipient_index(
+                    pending_dir, {"harness": harness,
+                                  "session_id": fixture["target_session"]},
+                    [], names, dispatch_root=peer_root)
             fixture["peer_index_primed"] = True
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
             fixture["peer_index_primed"] = False
@@ -519,9 +705,65 @@ def self_check(fixture: dict) -> dict:
     if rows < _MINIMUMS["jobs_rows"] or jobs.stat().st_size < _MINIMUMS["jobs_bytes"]:
         raise AssertionError("jobs.log is smaller than the required fixed size")
 
-    pending_files = list((Path(fixture["peer_root"]) / "peer-messages" / "pending").glob("*.json"))
+    pending_dir = Path(fixture["peer_root"]) / "peer-messages" / "pending"
+    pending_files = list(pending_dir.glob("*.json"))
     if len(pending_files) < _MINIMUMS["peer_rows"]:
         raise AssertionError("peer waiting history is smaller than the fixed size")
+    counts["peer_locks_seen"] = sum(1 for name in os.listdir(pending_dir)
+                                    if name.startswith(".lock-"))
+    if counts["peer_locks_seen"] < _MINIMUMS["peer_locks"]:
+        raise AssertionError("peer pending holds fewer lock files than the fixed size")
+    # Every open row must survive the real verifier, or a full scan would
+    # quarantine it and the fixture would change under the measurement.
+    peer_message = _load_by_path("_hook_perf_peer_message_check",
+                                 Path(__file__).with_name("peer-message.py"))
+    open_rows = 0
+    with applied_env(fixture):
+        roots, _source = peer_message.steward_marker_roots()
+        for path in pending_files:
+            if json.loads(path.read_text(encoding="utf-8")).get("state") == "received":
+                continue
+            row = peer_message._read_pending(path.stem, roots=roots)
+            if not row or row.get("state") not in {"queued", "pending"}:
+                raise AssertionError(f"open peer row did not verify: {path.name}")
+            if row["to"].get("session_id") == fixture["target_session"]:
+                raise AssertionError(f"open peer row addressed to the target: {path.name}")
+            open_rows += 1
+    counts["peer_open_rows_seen"] = open_rows
+    if open_rows < _MINIMUMS["peer_open_rows"]:
+        raise AssertionError("peer pending holds fewer verifiable open rows than the fixed size")
+
+    # The asyncRewake scan's rows, judged by the hook's own constants: enough
+    # unrelated claimed-and-started depth-1 rows (open and done), and none
+    # bound to the target, which therefore has no owner to wait for.
+    hooks = Path(__file__).resolve().parents[1] / "hooks"
+    rewake = _load_by_path("_hook_perf_owner_rewake", hooks / "dispatch-owner-rewake.py")
+    latest = {}
+    with jobs.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            columns = line.rstrip("\n").split("\t")
+            metadata = rewake._registry_metadata(columns[5])
+            latest[metadata.get("attempt_id", "")] = (columns[1], metadata)
+    depth1 = {"open": 0, "done": 0}
+    for status, metadata in latest.values():
+        if (status not in depth1
+                or any(metadata.get(key) != value
+                       for key, value in rewake.REGISTRY_DEPTH1_START.items())
+                or not rewake._worker_type_is_depth1(metadata.get("worker_type"))):
+            continue
+        if metadata.get("parent_sid") in {fixture["target_session"], fixture["predecessor"]}:
+            raise AssertionError("the target must own no depth-1 owner row")
+        depth1[status] += 1
+    counts["depth1_rows_seen"] = depth1["open"] + depth1["done"]
+    counts["depth1_open_seen"] = depth1["open"]
+    if (counts["depth1_rows_seen"] < _MINIMUMS["depth1_rows"]
+            or depth1["open"] < _MINIMUMS["depth1_open"] or depth1["done"] < 1):
+        raise AssertionError(f"registry depth-1 owner rows below the fixed size: {depth1}")
+
+    with Path(fixture["transcript"]).open("rb") as handle:
+        counts["transcript_rows_seen"] = sum(1 for _line in handle)
+    if counts["transcript_rows_seen"] < _MINIMUMS["transcript_rows"]:
+        raise AssertionError("target transcript is smaller than the fixed size")
 
     open_records = 0
     for path in (Path(fixture["dispatch_root"]) / "pending-delivery").glob("*/delivery-*.json"):
@@ -567,9 +809,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default="")
     parser.add_argument("--scale", type=int, default=1)
     parser.add_argument("--jobs-rows", type=int, default=DEFAULT_JOBS_ROWS)
+    parser.add_argument("--depth1-rows", type=int, default=None)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
-    fixture = build(args.base or None, scale=args.scale, jobs_rows=args.jobs_rows)
+    fixture = build(args.base or None, scale=args.scale, jobs_rows=args.jobs_rows,
+                    depth1_rows=args.depth1_rows)
     if args.check:
         fixture["counts"] = self_check(fixture)
     print(json.dumps(fixture, indent=2, sort_keys=True))

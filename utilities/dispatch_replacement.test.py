@@ -3,6 +3,7 @@
 import concurrent.futures
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -18,6 +19,7 @@ from unittest import mock
 import dispatch_replacement as R
 import dispatch_contract as D
 import route_identity
+from split_module_fixture import patch_split
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 
@@ -36,6 +38,10 @@ HEADLESS_MODEL_REFUSAL = (
 
 _STATE_TMP = None
 _STATE_OLD = None
+_spec = importlib.util.spec_from_file_location(
+    "replacement_fixture_processes", Path(__file__).resolve().parents[1] / "tools/fixture_processes.py")
+fixture_processes = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(fixture_processes)
 
 
 def setUpModule():
@@ -52,12 +58,17 @@ def tearDownModule():
         os.environ.pop("FLEET_USAGE_STATE_DIR", None)
     else:
         os.environ["FLEET_USAGE_STATE_DIR"] = _STATE_OLD
+    # A replacement start can leave human_wait_state.py's detached cache refresh
+    # running with this module's state root; stop it before the root goes.
+    fixture_processes.reap(_STATE_TMP.name)
     _STATE_TMP.cleanup()
 
 
 class ReplacementTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        # Cleanups run LIFO: detached helpers started under this root stop first.
+        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.root=Path(self.tmp.name);self.jobs=self.root/'jobs.log';self.jobs.touch()
         seat_state=mock.patch('session_tidy.state_root',return_value=self.root/'seat-state')
         seat_state.start();self.addCleanup(seat_state.stop)
@@ -67,7 +78,7 @@ class ReplacementTest(unittest.TestCase):
         self.route_mock=mock.patch.object(R,'_route',return_value=(self.path,self.route));self.route_mock.start();self.addCleanup(self.route_mock.stop)
         self.logical=mock.patch.object(R,'_logical_key',side_effect=lambda r,m:{'root_route_id':'rt-root','node':'__owner__' if m.get('worker_type')=='owner' else m['route_node']});self.logical.start();self.addCleanup(self.logical.stop)
         self.reuse=mock.patch.object(R,'_reuse_snapshot',return_value={'completed':[],'cycle_id':'cyc-test','producer_id':'prod-test','gate_releases':[]});self.reuse.start();self.addCleanup(self.reuse.stop)
-        self.quiet=mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='quiescent',reason='process-absent'));self.quiet.start();self.addCleanup(self.quiet.stop)
+        self.quiet=patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='quiescent',reason='process-absent'));self.quiet.start();self.addCleanup(self.quiet.stop)
         self.meta={'attempt_schema_version':'2','dispatch_depth':'1','transport':'headless',
              'execution_surface':'registered-headless','registered_worker':'1','fallback_hop':'same-harness-headless',
              'attempt_id':'att-source','route_id':'rt-test','route_hash':'sha256:test','route_node':'frame',
@@ -414,7 +425,7 @@ class ReplacementTest(unittest.TestCase):
 
     def test_live_or_unknown_never_claims(self):
         for state in ['live','unverifiable']:
-            with self.subTest(state=state),mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='proof')):
+            with self.subTest(state=state),patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='proof')):
                 with self.assertRaisesRegex(D.DispatchContractError,'proof'):self.claim()
         self.assertFalse((R._directory(self.jobs)/'claims').exists())
 
@@ -451,7 +462,7 @@ class ReplacementTest(unittest.TestCase):
                 self.write(owner, status='done')
                 self.write(child, status=status, append=True)
                 rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
-                with mock.patch.object(D, 'attempt_process_quiescence',
+                with patch_split(D, 'attempt_process_quiescence',
                                        return_value=SimpleNamespace(state=state, reason='fixture-state')):
                     if blocked:
                         with self.assertRaises(D.DispatchContractError) as caught:
@@ -459,6 +470,45 @@ class ReplacementTest(unittest.TestCase):
                         self.assertEqual(caught.exception.reason, 'replacement-owner-child-unsettled')
                     else:
                         self.assertIsNone(R._children_quiescent(rows, 'att-source'))
+
+    def test_legacy_and_new_unstarted_slice_rows_do_not_block_replacement(self):
+        # setUp patches the process verdict for every test; this one reads the real rows.
+        self.quiet.stop()
+        owner = {**self.meta, 'worker_type': 'owner'}
+        base = {k: v for k, v in self.meta.items()
+                if k not in {'launch_outcome', 'failure_class'} and not k.startswith('pid')}
+        slice_row = {**base, 'attempt_id': 'att-slice', 'parent_attempt_id': 'att-source',
+                     'worker_type': 'stage', 'subsession_id': 'ss-chain-a', 'stage_authority': '0',
+                     'route_node': 'execute', 'session_chain_id': 'ssc-execute-a',
+                     'subsession_mode': 'parallel', 'launch_claimed': '0'}
+        # A slice row closed before the close also wrote launch_outcome (note only), and the
+        # same close as it is written now.
+        legacy = {**slice_row, 'note': 'subsession-batch-start-failed'}
+        legacy_registration = {**slice_row, 'note': 'subsession-batch-registration-incomplete'}
+        current = {**legacy, 'launch_outcome': 'never-launched', 'failure_class': 'cancelled',
+                   'reconcile_reason': 'subsession-batch-start-failed'}
+        for name, row in (('legacy-start-failed', legacy), ('legacy-registration-incomplete', legacy_registration),
+                          ('current', current)):
+            with self.subTest(settled=name):
+                self.write(owner, status='done')
+                self.write(row, status='done', append=True)
+                rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
+                self.assertIsNone(R._children_quiescent(rows, 'att-source'))
+        lookalikes = {
+            'launch-cleanup-unverified': {**legacy, 'launch_outcome': 'launch-cleanup-unverified'},
+            'launch-started': {**legacy, 'launch_started': '1'},
+            'claimed': {**legacy, 'launch_claimed': '1'},
+            'pid-recorded': {**legacy, 'pid': '4242', 'pid_start': '77'},
+            'other-note': {**legacy, 'note': 'completed'},
+        }
+        for name, row in lookalikes.items():
+            with self.subTest(unsettled=name):
+                self.write(owner, status='done')
+                self.write(row, status='done', append=True)
+                rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
+                with self.assertRaises(D.DispatchContractError) as caught:
+                    R._children_quiescent(rows, 'att-source')
+                self.assertEqual(caught.exception.reason, 'replacement-owner-child-unsettled')
 
     def test_terminal_fence_vetoes_claim(self):
         with mock.patch.object(D,'ensure_terminal_claim_absent',side_effect=D.DispatchContractError('terminal-claim-pending')):
@@ -489,7 +539,7 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(R.admission(self.jobs,lines,candidate),record)
         for change in [{'attempt_id':'att-invented'},{'parent_sid':'other'},{'route_hash':'sha256:other'}]:
             with self.subTest(change=change),self.assertRaises(D.DispatchContractError):R.admission(self.jobs,lines,{**candidate,**change})
-        with mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='live',reason='live-now')):
+        with patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state='live',reason='live-now')):
             with self.assertRaises(D.DispatchContractError):R.admission(self.jobs,lines,candidate)
 
     def test_round_membership_needs_reciprocal_rows_and_the_canonical_claim(self):
@@ -544,9 +594,9 @@ class ReplacementTest(unittest.TestCase):
         candidate.update(D.parse_registry_metadata(R.seal_launch_input(args,'codex','the raw task')))
         rows=[(['now','done'],meta) for _,meta in R._rows(self.jobs.read_text().splitlines()).values()]
         route_module=review_input._dispatch_node_module().ROUTE
-        patches=[mock.patch.object(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
-                 mock.patch.object(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
-                 mock.patch.object(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
+        patches=[patch_split(route_module,'review_lineage_routes',side_effect=lambda route,node:[route]),
+                 patch_split(route_module,'review_round_records',side_effect=lambda *args,**kw:rows),
+                 patch_split(route_module,'_dependency_revisions',side_effect=lambda *args,**kw:[])]
         with contextlib.ExitStack() as stack:
             for patch in patches: stack.enter_context(patch)
             with self.assertRaises(D.DispatchContractError) as failure:
@@ -589,19 +639,19 @@ class ReplacementTest(unittest.TestCase):
         first=R.seal_launch_input(args,'codex','the raw task')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'0',
                     **D.parse_registry_metadata(first)},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/newer/release')):
+        with patch_split(R,'ROOT',Path('/newer/release')):
             second=R.seal_launch_input(args,'codex','the raw task')
         self.assertNotEqual(first,second)
         saved=json.loads((R._directory(self.jobs)/'inputs'/'att-next.json').read_text())
         self.assertEqual(saved['launch_home'],'/newer/release')
         self.assertEqual(',replacement_input_digest='+R._digest(saved),second)
         # Different work, or an attempt that already started, still conflicts.
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','changed task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
         self.write({**self.meta,'attempt_id':'att-next','launch_claimed':'1'},'open',append=True)
-        with mock.patch.object(R,'ROOT',Path('/third/release')):
+        with patch_split(R,'ROOT',Path('/third/release')):
             with self.assertRaises(D.DispatchContractError) as caught:
                 R.seal_launch_input(args,'codex','the raw task')
         self.assertEqual(caught.exception.reason,'replacement-record-conflict')
@@ -671,7 +721,7 @@ class ReplacementTest(unittest.TestCase):
         """Seal an attempt's input under a verified route and register it unstarted."""
         import execution_access as EA
         self.bind_fixture_route()
-        verify=mock.patch.object(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
+        verify=patch_split(D._route_module(),'verify_route',side_effect=lambda route,*a,**k:dict(route))
         verify.start();self.addCleanup(verify.stop)
         work=self.root/'work';work.mkdir(exist_ok=True)
         (self.root/'work2').mkdir(exist_ok=True)
@@ -926,18 +976,28 @@ class ReplacementTest(unittest.TestCase):
         prep.assert_not_called()
         self.assertEqual(env['AGENT_ARTIFACT_CYCLE_ID'],'cyc-stale')
 
+    def _existing_recovery_attention(self, attempt_id, recovery_id, reason):
+        # The two files an SD-106 recovery exhaustion recorded, by-source index
+        # first; its writer is retired and replacement still reads them.
+        base = self.jobs.parent / 'recovery-attention'
+        R._once(base / 'by-source' / (R._id(attempt_id) + '.json'),
+                {'original_attempt_id': attempt_id, 'recovery_id': recovery_id})
+        R._once(base / (hashlib.sha256(recovery_id.encode()).hexdigest() + '.json'),
+                {'schema': 'recovery-attention-v1', 'original_attempt_id': attempt_id,
+                 'recovery_id': recovery_id, 'state': 'needs-attention', 'reason': reason})
+
     def test_exhausted_sd106_budget_cannot_start_new_family(self):
         for addition in [{'recovery_exhausted':'1'}, {'start_permitted':'0'},
                          {'recovery_id':'rid-dead'}]:
             self.write({**self.meta,**addition})
             if addition.get('recovery_id'):
-                D._write_recovery_attention(self.jobs,'att-source','rid-dead','exhausted')
+                self._existing_recovery_attention('att-source','rid-dead','exhausted')
             with self.subTest(addition=addition),self.assertRaises(D.DispatchContractError) as caught:self.claim()
             self.assertEqual(caught.exception.reason,'automatic-replacement-exhausted')
         self.assertFalse((R._directory(self.jobs)/'claims').exists())
 
     def test_sd106_attention_before_row_publication_already_consumes_budget(self):
-        D._write_recovery_attention(self.jobs,'att-source','rid-dead','exhausted')
+        self._existing_recovery_attention('att-source','rid-dead','exhausted')
         self.assertNotIn('recovery_id',self.jobs.read_text())
         with self.assertRaises(D.DispatchContractError) as caught:self.claim()
         self.assertEqual(caught.exception.reason,'automatic-replacement-exhausted')
@@ -1258,7 +1318,7 @@ class ReplacementTest(unittest.TestCase):
     def test_quick_and_advanced_owner_route_lookup(self):
         current=self.root/'current.json';current.write_text(json.dumps(self.route))
         self.route_mock.stop()
-        with mock.patch.object(D,'_route_module',return_value=SimpleNamespace(verify_route=lambda route:None)):
+        with patch_split(D,'_route_module',return_value=SimpleNamespace(verify_route=lambda route:None)):
             with mock.patch('owner_route_binding.resolve_owner_route_lifecycle',return_value=(None,None)):
                 path,_=R._route(self.jobs,'att-source',{**self.meta,'worker_type':'owner','route_file':str(self.path)})
                 self.assertEqual(path,self.path)
@@ -1595,29 +1655,32 @@ class ReplacementTest(unittest.TestCase):
         meta.update(D.parse_registry_metadata(R.seal_launch_input(args, 'codex', 'the raw task')))
         return meta
 
-    def _legacy_retry_claim(self, meta, remaining=8):
+    def _legacy_recovery_id(self, meta):
         identity = {'source_route_id': meta['route_id'],
                     'source_route_hash': meta['route_hash'],
                     'node_or_group_leg': meta['route_node'],
                     'original_attempt_id': meta['attempt_id'],
                     'cancellation_receipt_digest': meta['cancellation_receipt_digest']}
-        return D.claim_recovery_retry(self.jobs,
-            recovery_id=D._recovery_identity_digest(identity),
-            source_route_id=identity['source_route_id'],
-            source_route_hash=identity['source_route_hash'],
-            node_or_group_leg=identity['node_or_group_leg'],
-            original_attempt_id=identity['original_attempt_id'], remaining_cascade=remaining)
+        return 'rec-' + hashlib.sha256(json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    def _legacy_retry_claim(self, meta):
+        # The row an existing SD-106 recovery claim left; its writer is retired,
+        # and replacement still reads such rows as a spent budget.
+        recovery = self._legacy_recovery_id(meta)
+        claim = SimpleNamespace(recovery_id=recovery, retry_ordinal=1,
+                                retry_attempt_id=D._stable_recovery_attempt_id(recovery))
+        self.assertTrue(D.annotate_attempt_row(self.jobs, meta['attempt_id'], {
+            'recovery_id': recovery, 'retry_ordinal': '1',
+            'retry_attempt_id': claim.retry_attempt_id,
+            'retry_claimed_at': '2026-09-01T00:00:00Z'}))
+        return claim
 
     def _legacy_claimed_pair(self):
         route, path = self._legacy_real_route('legacy-root')
         original = self._legacy_row('att-legacy-original', route, path)
         self.write(original)
         first = self._legacy_retry_claim(original)
-        self.assertTrue(first.start_permitted)
-        self.assertEqual(first.retry_ordinal, 1)
-        self.assertEqual(first.retry_attempt_id, D._stable_recovery_attempt_id(first.recovery_id))
-        # Existing SD106 idempotence must survive the shared-budget guard.
-        self.assertEqual(self._legacy_retry_claim(original), first)
         original = R._rows(self.jobs.read_text().splitlines())[original['attempt_id']][1]
         target = self._legacy_row(first.retry_attempt_id, route, path)
         self.assertNotIn('automatic_retry_of', target)
@@ -1647,10 +1710,6 @@ class ReplacementTest(unittest.TestCase):
                 self._legacy_assert_exhausted(lambda: R.admission(
                     self.jobs, self.jobs.read_text().splitlines(),
                     {**target, 'attempt_id': 'att-second-retry', predecessor_key: target['attempt_id']}))
-
-    def test_sd106_stable_target_cannot_claim_another_sd106_retry(self):
-        _, _, _, target = self._legacy_claimed_pair()
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(target))
 
     def test_legacy_automatic_retry_still_protects_its_exact_predecessor(self):
         route, path = self._legacy_real_route('automatic-root')
@@ -1717,7 +1776,6 @@ class ReplacementTest(unittest.TestCase):
         self.assertTrue(R.legacy_budget_exhausted(
             self.jobs, self.jobs.read_text().splitlines(), current, route=route))
         self._legacy_assert_exhausted(lambda: R.claim(self.jobs, current['attempt_id']))
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_sd106_other_node_in_verified_continuation_has_own_budget(self):
         root, _, _, _ = self._legacy_claimed_pair()
@@ -1737,25 +1795,21 @@ class ReplacementTest(unittest.TestCase):
             self.jobs, self.jobs.read_text().splitlines(), current, route=route))
         self.assertEqual(R.claim(self.jobs, current['attempt_id'])['original_attempt_id'], current['attempt_id'])
 
-    def test_sd106_attention_first_write_crash_consumes_continuation_budget(self):
+    def test_sd106_attention_index_without_row_annotation_consumes_continuation_budget(self):
+        # An SD-106 exhaustion that stopped after its first durable write left
+        # only the by-source attention index; the source row carries nothing.
         root, path = self._legacy_real_route('attention-root')
         original = self._legacy_row('att-attention-original', root, path)
         self.write(original)
-        real_once = R._once
-        def crash_after_index(path, value):
-            if path.parent.name == 'recovery-attention':
-                raise RuntimeError('crash before attention record and row annotation')
-            return real_once(path, value)
-        with mock.patch.object(R, '_once', side_effect=crash_after_index):
-            with self.assertRaisesRegex(RuntimeError, 'crash before'):
-                self._legacy_retry_claim(original, remaining=0)
+        R._once(self.jobs.parent / 'recovery-attention' / 'by-source'
+                / (R._id(original['attempt_id']) + '.json'),
+                {'original_attempt_id': original['attempt_id'],
+                 'recovery_id': self._legacy_recovery_id(original)})
         self.assertNotIn('recovery_exhausted', self.jobs.read_text())
-        self.assertEqual(len(list((self.jobs.parent / 'recovery-attention/by-source').glob('*.json'))), 1)
         route, path = self._legacy_real_route('attention-continuation', root)
         current = self._legacy_row('att-after-attention-crash', route, path)
         self.write(current, append=True); R._route.return_value = (path, route)
         self._legacy_assert_exhausted(lambda: R.claim(self.jobs, current['attempt_id']))
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_sd157_unresolved_reservation_protects_continuation(self):
         root, path = self._legacy_real_route('reservation-root')
@@ -1778,7 +1832,6 @@ class ReplacementTest(unittest.TestCase):
         with self.assertRaises(D.DispatchContractError) as refused:
             R.claim(self.jobs, current['attempt_id'])
         self.assertEqual(refused.exception.reason, 'replacement-legacy-budget-link-unproven')
-        self._legacy_assert_exhausted(lambda: self._legacy_retry_claim(current))
 
     def test_unrelated_corrupt_historical_route_does_not_block_healthy_stream(self):
         _, foreign_path, _, _ = self._legacy_claimed_pair()
@@ -2131,7 +2184,7 @@ class ReplacementTest(unittest.TestCase):
     def _authorized_as(self, caller, *, live=True, child='att-child'):
         rows=R._rows(self.jobs.read_text().splitlines())
         with mock.patch.dict(os.environ,{'AGENT_DISPATCH_ATTEMPT_ID':caller}), \
-                mock.patch.object(D,'_parent_liveness_evidence',return_value=(live,'fixture')):
+                patch_split(D,'_parent_liveness_evidence',return_value=(live,'fixture')):
             R._authorized(self.jobs,rows,rows[child][1])
 
     def test_depth2_replacement_parent_follows_launched_owner_lineage(self):
@@ -2231,7 +2284,7 @@ class ReplacementTest(unittest.TestCase):
     def test_sr_child_retry_preserves_process_and_semantic_result_refusals(self):
         child, candidate, _=self._sr_child_retry()
         for state in ('live', 'unverifiable'):
-            with self.subTest(state=state), mock.patch.object(
+            with self.subTest(state=state), patch_split(
                     D, 'attempt_process_quiescence',
                     return_value=SimpleNamespace(state=state, reason='fixture')):
                 with self.assertRaises(D.DispatchContractError) as caught:
@@ -2439,6 +2492,92 @@ class ReplacementTest(unittest.TestCase):
             self.assertEqual(PD.read(self.root, 'parent', intermediate['delivery_id'])['state'], 'rejected')
         self.assertEqual(PD.read(self.root, 'parent', old_intermediate['delivery_id'])['state'], 'acked')
         self.assertEqual(delivered[0]['state'], 'claimed')
+
+    def test_an_opencode_parent_gets_the_death_notice_instead_of_a_silent_reservation(self):
+        """C-#1153: the OpenCode turn carrier delivers notices but launches nothing, so
+        a reservation at the terminal commit only deferred the notice and left the
+        parent with nothing until a person ran `start`."""
+        import dispatch_completion_join as JOIN
+        import dispatch_pending_delivery as PD
+
+        self.meta.update(parent_sid='parent', parent_attempt_id='att-parent',
+                         parent_completion_delivery='opencode-turn')
+        (R._directory(self.jobs)/'inputs/att-source.json').unlink()
+        self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
+        self.write(self.meta, status='open')
+        self.assertTrue(D.close_attempt_row(self.jobs, 'att-source', 'dead-exact-pid',
+                                            evidence={'failure_class':'contract'}))
+        path=JOIN.materialize_after_terminal_close(self.jobs, 'att-source')
+        self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'none')
+        original=PD.read(self.root, 'parent', path.stem)
+        claimed=PD.claim(self.root, 'parent', original['delivery_id'],
+                         claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+        self.assertEqual(claimed['state'], 'claimed')
+        # The parent's `start` still reserves and launches the same replacement.
+        record=R.claim(self.jobs, 'att-source')
+        self.assertEqual(record['original_attempt_id'], 'att-source')
+        for carrier, expected in (('claude-parent-runtime', True), ('codex-native-queue', True),
+                                  ('opencode-turn', False), ('session-resume-supervised', True),
+                                  ('', True)):
+            with self.subTest(carrier=carrier):
+                self.assertIs(R._parent_carrier_replaces(
+                    {'parent_completion_delivery': carrier}), expected)
+
+    def test_a_successor_acked_by_the_handed_over_seat_consumes_the_old_seat_notice(self):
+        """rt-a87cfd349fd0aada: the source's failure notice is stored under the seat of
+        its terminal commit; the successor reported to the seat that seat handed over
+        to, and its completion was acked there. The old-seat notice (and its
+        registered-batch duty) stayed `replacement-defer` forever."""
+        import dispatch_completion_join as JOIN
+        import dispatch_pending_delivery as PD
+        import dispatch_seat_handover as SEAT
+
+        self.meta.update(parent_sid='seat-old', parent_attempt_id='att-parent',
+                         parent_completion_delivery='claude-parent-runtime')
+        (R._directory(self.jobs)/'inputs/att-source.json').unlink()
+        self.meta.update(D.parse_registry_metadata(R.seal_launch_input(self.args,'codex','the raw task')))
+        self.write(self.meta, status='open')
+        self.assertTrue(D.close_attempt_row(self.jobs, 'att-source', 'dead-exact-pid',
+                                            evidence={'failure_class':'contract'}))
+        original=PD.read(self.root, 'seat-old',
+                         JOIN.materialize_after_terminal_close(self.jobs, 'att-source').stem)
+        claim=R.claim(self.jobs, 'att-source')
+        successor=self._successor(claim, self.meta, status='running', launch_started='1',
+                                  parent_sid='seat-new')
+        self.assertTrue(D.close_attempt_row(self.jobs, successor['attempt_id'], 'completed-marker',
+                                            evidence={'failure_class':'pass'}))
+        delivered=PD.read(self.root, 'seat-new', JOIN.materialize_after_terminal_close(
+            self.jobs, successor['attempt_id']).stem)
+        PD.claim(self.root, 'seat-new', delivered['delivery_id'],
+                 claim_owner='fixture', lease_seconds=30)
+        PD.ack(self.root, 'seat-new', delivered['delivery_id'], acked_by='fixture')
+
+        def graph(*edges):
+            return SEAT.LineageGraph(edges=tuple(edges), unresolved=frozenset(), ledger_keys=(),
+                                     ledger_rows={}, binding_rows={}, generation=(),
+                                     seat_edges=(), seat_unresolved=frozenset())
+
+        # No confirmed handover (or a different seat): the deferral is kept.
+        for edges in ((), (('claude', 'seat-old', 'seat-other'),),
+                      (('codex', 'seat-old', 'seat-new'),)):
+            with self.subTest(edges=edges), \
+                    mock.patch.object(SEAT, 'lineage_graph', return_value=graph(*edges)):
+                with self.assertRaises(PD.PendingDeliveryError) as refused:
+                    PD.claim(self.root, 'seat-old', original['delivery_id'],
+                             claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+                self.assertIn('replacement-defer', refused.exception.detail)
+                self.assertEqual(PD.read(self.root, 'seat-old', original['delivery_id'])['state'],
+                                 'pending')
+        # The confirmed seat handover makes the successor's acked completion count.
+        with mock.patch.object(SEAT, 'lineage_graph',
+                               return_value=graph(('claude', 'seat-old', 'seat-new'))):
+            with self.assertRaises(PD.PendingDeliveryError) as refused:
+                PD.claim(self.root, 'seat-old', original['delivery_id'],
+                         claim_owner='fixture', lease_seconds=30, jobs=self.jobs)
+        self.assertIn('replacement-consumed', refused.exception.detail)
+        retired=PD.read(self.root, 'seat-old', original['delivery_id'])
+        self.assertEqual((retired['state'], retired['expiry_reason']),
+                         ('rejected', 'replacement-consumed'))
 
     def test_terminal_delivery_is_deferred_before_successor_registration(self):
         import dispatch_completion_join as JOIN
@@ -2698,7 +2837,7 @@ class ReplacementTest(unittest.TestCase):
         self._successor(record,self.meta|{'worker_type':'owner'},'open')
         hold={'until_epoch':4102444800,'label':'2100-01-01T00:00:00Z'}
         with mock.patch('dispatch_capacity_evidence.harness_hold',return_value=hold), \
-             mock.patch.object(R,'ROOT',self.root/'newer-release'):
+             patch_split(R,'ROOT',self.root/'newer-release'):
             result=R.advance(self.jobs,'att-source',authority_check=lambda *_:True)
         self.assertEqual(result.get('state'),'running',result)
         self.assertEqual(result['attempt_id'],record['replacement_attempt_id'])
@@ -3227,13 +3366,13 @@ class ReplacementTest(unittest.TestCase):
         self.reuse.stop()
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(D, 'gate_currency', side_effect=lambda *a, **k: currency[0]))
-        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+        stack.enter_context(patch_split(D, 'gate_currency', side_effect=lambda *a, **k: currency[0]))
+        stack.enter_context(patch_split(D, 'completion_attempt_readiness',
                                               return_value=SimpleNamespace(state='ready')))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+        stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
             'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+        stack.enter_context(patch_split(artifact_producer, 'cycle_route_admission',
                                               return_value=SimpleNamespace(allow=True)))
         self._blocked_owner()
         answer = 'Record the timeout as an environment FAIL and continue the host runs.'
@@ -3349,7 +3488,7 @@ class ReplacementTest(unittest.TestCase):
         with mock.patch('dispatch_attempt_policy.readable_result', return_value='PASS'):
             self.assertFalse(RA.runtime_owner_can_resume('done', meta))
         for state in ('live', 'unverifiable'):
-            with self.subTest(state=state), mock.patch.object(D, 'attempt_process_quiescence',
+            with self.subTest(state=state), patch_split(D, 'attempt_process_quiescence',
                     return_value=SimpleNamespace(state=state, reason='fixture')):
                 with self.assertRaisesRegex(Exception, 'owner-input-unavailable'):
                     self._answer()
@@ -3548,7 +3687,7 @@ class ReplacementTest(unittest.TestCase):
                       'parent_attempt_id': record['replacement_attempt_id'], 'note': ''}
         history = self.jobs.read_bytes()
         # This isolated claim fixture has one route; use the real registry census and admission.
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             for status in ('open', 'running'):
                 with self.subTest(status=status):
                     self.jobs.write_bytes(history)
@@ -3631,15 +3770,15 @@ class ReplacementTest(unittest.TestCase):
         self.reuse.stop()
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+        stack.enter_context(patch_split(D, 'gate_currency', return_value=D.GateCurrency(
             'current', 'completion-marker-verified')))
-        stack.enter_context(mock.patch.object(D, 'completion_attempt_readiness',
+        stack.enter_context(patch_split(D, 'completion_attempt_readiness',
                                               return_value=SimpleNamespace(state='ready')))
-        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(patch_split(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(artifact_producer, 'route_cycle_for', return_value={
+        stack.enter_context(patch_split(artifact_producer, 'route_cycle_for', return_value={
             'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(artifact_producer, 'cycle_route_admission',
+        stack.enter_context(patch_split(artifact_producer, 'cycle_route_admission',
                                               return_value=SimpleNamespace(allow=True)))
 
     def _sr_recovery_text(self, record):
@@ -3662,7 +3801,7 @@ class ReplacementTest(unittest.TestCase):
         dispatch = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = dispatch
         spec.loader.exec_module(dispatch)
-        with mock.patch.object(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
+        with patch_split(dispatch.ROUTE, 'review_lineage_routes', return_value=[self.route]):
             budget = dispatch.admit_round(self.route, self.route['nodes'][0], self.jobs,
                                           record_auto_revisions=False).budget
         self.assertEqual((budget.state, budget.round_kind, budget.next_round), ('admit', 'first', 1))
@@ -3693,9 +3832,9 @@ class ReplacementTest(unittest.TestCase):
         self._real_reuse()
         lines = self.jobs.read_text().splitlines()
         stale = D.GateCurrency('superseded', 'completion-review-source-stale')
-        with mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: (
+        with patch_split(D, 'gate_currency', side_effect=lambda route, node, *a, **k: (
                 stale if node['id'] == 'report' else D.GateCurrency('current', 'completion-marker-verified'))), \
-                mock.patch.object(D, 'completion_superseded', wraps=D.completion_superseded) as rule:
+                patch_split(D, 'completion_superseded', wraps=D.completion_superseded) as rule:
             snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
         self.assertEqual([row['node'] for row in snapshot['completed']], ['inspect'])
         (reopened,) = snapshot['invalidated']
@@ -3703,7 +3842,7 @@ class ReplacementTest(unittest.TestCase):
                          ('report', 'superseded', None))
         self.assertGreaterEqual(rule.call_count, 2)
         # Not reopened, not reused as current: an integrity break keeps its refusal.
-        with mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency(
+        with patch_split(D, 'gate_currency', return_value=D.GateCurrency(
                 'integrity-broken:history-conflict', 'completion-marker-unreadable')):
             with self.assertRaises(D.DispatchContractError):
                 R._reuse_snapshot(self.jobs, self.route, lines)
@@ -3711,7 +3850,7 @@ class ReplacementTest(unittest.TestCase):
         # Only the answered node shows the change: with gates on, the same change on an
         # unanswered node is still refused, which is not what this case is about.
         with mock.patch.object(R, '_answered_fail_verdicts', return_value={'inspect'}), \
-                mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
+                patch_split(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
                     'revised-unrecorded', 'completion-evidence-revised-unrecorded')
                     if node['id'] == 'inspect' else D.GateCurrency('current', 'completion-marker-verified')):
             snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
@@ -3726,8 +3865,8 @@ class ReplacementTest(unittest.TestCase):
         output = self.root / 'artifacts'
         cycle = {'campaign_id': 'camp-test', 'cycle_id': 'cyc-test'}
         import artifact_producer
-        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=cycle), \
-                mock.patch.object(artifact_producer, 'cycle_dir', return_value=output.parent), \
+        with patch_split(artifact_producer, 'route_cycle_for', return_value=cycle), \
+                patch_split(artifact_producer, 'cycle_dir', return_value=output.parent), \
                 mock.patch.object(D, 'reopened_output_path', side_effect=lambda r, node, j, out: (
                     str(Path(out) / 'reviews/audit-report.r2.md') if node['id'] == 'report' else None)) as named:
             note = R._reopened_outputs_note(route, invalidated, self.jobs)
@@ -3735,7 +3874,7 @@ class ReplacementTest(unittest.TestCase):
         self.assertIn('report -> ' + str(output / 'reviews/audit-report.r2.md'), note)
         self.assertNotIn('inspect ->', note)
         # No cycle, or no path to name: nothing is added.
-        with mock.patch.object(artifact_producer, 'route_cycle_for', return_value=None):
+        with patch_split(artifact_producer, 'route_cycle_for', return_value=None):
             self.assertEqual(R._reopened_outputs_note(route, invalidated, self.jobs), '')
 
     def test_sr_new_claim_pins_the_reopening_on_every_harness(self):
@@ -4342,7 +4481,7 @@ class ReplacementTest(unittest.TestCase):
         for state,expected in (('unverifiable',[('att-source',True)]),('live',[]),('quiescent',[])):
             calls.clear()
             rows=R._rows(self.jobs.read_text().splitlines())
-            with mock.patch.object(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='r')), \
+            with patch_split(D,'attempt_process_quiescence',return_value=SimpleNamespace(state=state,reason='r')), \
                  mock.patch.object(D,'resolve_attempt_cleanup',side_effect=lambda j,a,apply=False:calls.append((a,apply))):
                 R._settle_terminal_cleanup(self.jobs,rows,'att-source',rows['att-source'][1])
             self.assertEqual(calls,expected,state)
@@ -4517,6 +4656,36 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(sealed.read_bytes(), before_bytes)
 
 
+class RowsMemoTest(unittest.TestCase):
+    """The rows memo answers like a fresh parse without keeping a split copy of each line."""
+
+    LINES = ("t\tdone\t/r\t/w\tslug-a\tattempt_id=att-a,harness=codex",
+             "malformed row",
+             "t\topen\t/r\t/w\tslug-b\tattempt_id=att-b,parent_attempt_id=att-a",
+             "t\tdone\t/r\t/w\tslug-c\tnote=no-attempt")
+
+    def test_rows_match_a_fresh_parse_and_callers_get_copies(self):
+        expected = {aid: (list(fields), dict(meta))
+                    for aid, (fields, meta) in R._parse_rows(self.LINES).items()}
+        first = R._rows(list(self.LINES))
+        self.assertEqual(first, expected)
+        first["att-a"][0][1] = "changed"
+        first["att-a"][1]["harness"] = "changed"
+        self.assertEqual(R._rows(self.LINES), expected)
+        key, cached = R._ROWS_MEMO
+        self.assertEqual(key, self.LINES)
+        self.assertEqual({aid: index for aid, (index, _meta) in cached.items()},
+                         {"att-a": 0, "att-b": 2})
+
+    def test_a_changed_registry_is_parsed_again_and_duplicates_stay_ambiguous(self):
+        R._rows(self.LINES)
+        changed = self.LINES[:2] + ("t\tdone\t/r\t/w\tslug-b\tattempt_id=att-b",)
+        self.assertEqual(R._rows(changed)["att-b"][0][1], "done")
+        with self.assertRaises(D.DispatchContractError) as raised:
+            R._rows(changed + (self.LINES[0],))
+        self.assertEqual(raised.exception.reason, "replacement-attempt-ambiguous")
+
+
 class ReplacementLaunchSafetyTest(unittest.TestCase):
     """Real claim/reuse/input and fenced child at the two launch commits.
 
@@ -4623,12 +4792,12 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
                 'worker_type': 'stage', 'route_node': 'retained-peer', 'note': 'completed-marker',
                 'failure_class': '', 'launch_outcome': 'reaped-before-publish'}
         t.write(peer, append=True)
-        stack.enter_context(mock.patch.object(D._route_module(), 'completion_dir', return_value=completion))
-        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
-        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(patch_split(D._route_module(), 'completion_dir', return_value=completion))
+        stack.enter_context(patch_split(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
+        stack.enter_context(patch_split(D, 'note_evidence_change'))
         stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
-        stack.enter_context(mock.patch.object(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
-        stack.enter_context(mock.patch.object(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
+        stack.enter_context(patch_split(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(patch_split(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
         return peer
 
     def test_retained_non_direct_peer_is_pinned_at_both_commits_and_registration(self):
@@ -4779,6 +4948,66 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
         self.assertEqual(len(self.children), 1)
 
 
+class CompletedStageReplacementTest(unittest.TestCase):
+    """84b68e (2): the owner completed execute inline after its worker timed out, and the
+    replacement of that dead worker still launched and published a second execute result."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.jobs = self.root / 'jobs.log'
+        self.meta = {'attempt_schema_version': '2', 'dispatch_depth': '2', 'transport': 'headless',
+                     'execution_surface': 'registered-headless', 'registered_worker': '1',
+                     'fallback_hop': 'same-harness-headless', 'attempt_id': 'att-dead-execute',
+                     'parent_attempt_id': 'att-owner', 'worker_type': 'stage', 'route_node': 'execute',
+                     'route_id': 'rt-test', 'route_hash': 'sha256:test', 'harness': 'claude',
+                     'parent_sid': 'parent', 'note': 'dead-timeout', 'failure_class': 'runtime',
+                     'launch_claimed': '1', 'launch_started': '1'}
+        self.jobs.write_text('2026-10-21T18:51:30.574067Z\tdone\t' + str(self.root) + '\t' + str(self.root)
+                             + '\texecute\t' + ','.join(k + '=' + v for k, v in self.meta.items()) + '\n')
+        self.fields = self.jobs.read_text().rstrip('\n').split('\t')
+
+    def marker(self, attempt, completed_at, route_hash='sha256:test'):
+        path = self.root / 'completion' / 'rt-test' / 'execute.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'route_id': 'rt-test', 'route_hash': route_hash, 'node_id': 'execute',
+                                    'attempt_id': attempt, 'completed_at': completed_at}))
+
+    def progress(self):
+        return R.route_authority.decide_continuation(
+            action='replacement-progress', jobs=self.jobs, status='done', metadata=self.meta,
+            facts={'kind': 'silent', 'resume_capacity': False, 'bound_carrier': False,
+                   'registry_rows': R.registry_rows(self.jobs),
+                   'completed_since': R.stage_completed_since(self.jobs, self.fields, self.meta)})
+
+    def test_a_stage_another_attempt_finished_after_it_began_is_not_replaced(self):
+        self.assertEqual(self.progress().state, 'launch')
+        self.marker('att-owner-execute-inline', '2026-10-21T23:30:33.055743Z')
+        self.assertTrue(R.stage_completed_since(self.jobs, self.fields, self.meta))
+        self.assertEqual((self.progress().state, self.progress().allowed), ('not-applicable', False))
+        with mock.patch.object(R, 'claim', side_effect=AssertionError('a finished stage was claimed')):
+            self.assertEqual(R._advance(self.jobs, 'att-dead-execute')['state'], 'not-applicable')
+
+    def test_a_replacement_already_in_flight_keeps_its_decision_after_a_later_marker(self):
+        # RV-BC-P1B: the in-flight guard is needed because the replacement's own marker
+        # is also "another attempt's later marker"; removing it must fail here.
+        self.marker('att-dead-execute-replacement', '2026-10-21T23:30:33.055743Z')
+        self.assertTrue(R.stage_completed_since(self.jobs, self.fields, self.meta))
+        self.assertEqual(self.progress().state, 'not-applicable')
+        with mock.patch.object(R, '_replacement_in_flight', return_value=True):
+            self.assertNotEqual(self.progress().state, 'not-applicable')
+
+    def test_an_earlier_or_own_or_foreign_result_still_leaves_the_replacement(self):
+        for attempt, completed_at, route_hash in (
+                ('att-earlier-round', '2026-10-21T14:41:59.113038Z', 'sha256:test'),
+                ('att-dead-execute', '2026-10-21T23:30:33.055743Z', 'sha256:test'),
+                ('att-other-route', '2026-10-21T23:30:33.055743Z', 'sha256:other')):
+            with self.subTest(attempt=attempt):
+                self.marker(attempt, completed_at, route_hash)
+                self.assertFalse(R.stage_completed_since(self.jobs, self.fields, self.meta))
+                self.assertEqual(self.progress().state, 'launch')
+
+
 class StageRecoveryProgressTest(unittest.TestCase):
     def test_timeout_and_no_progress_report_bounded_git_and_cycle_observations(self):
         import artifact_context
@@ -4829,7 +5058,7 @@ class StageRecoveryProgressTest(unittest.TestCase):
             fixed_now = datetime.now(timezone.utc)
             start = (fixed_now - timedelta(minutes=5)).isoformat()
             jobs = root / 'jobs.log'; jobs.write_text('')
-            with mock.patch.object(D._route_module(), 'verify_route'), \
+            with patch_split(D._route_module(), 'verify_route'), \
                  mock.patch.object(artifact_context, 'resolve_context',
                                    return_value=SimpleNamespace(output_dir=output)):
                 for note in ('dead-timeout', 'dead-no-progress'):
@@ -4901,7 +5130,7 @@ class NonGitStageProgressTest(unittest.TestCase):
             route_path.write_text(json.dumps(route), encoding="utf-8")
             meta = {"worker_type": "stage", "route_node": "execute",
                     "route_file": str(route_path), "note": "dead-timeout"}
-            with mock.patch.object(D._route_module(), "verify_route"), \
+            with patch_split(D._route_module(), "verify_route"), \
                  mock.patch.object(artifact_context, "resolve_context",
                                    return_value=SimpleNamespace(output_dir=output)), \
                  mock.patch.object(R, "_git_readonly", side_effect=AssertionError("Git must not be probed")):
@@ -4945,15 +5174,15 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
         currency = lambda _route, node, _path, _marker, **_kwargs: D.GateCurrency(
             states[node["id"]][0], states[node["id"]][1])
         import artifact_producer
-        with mock.patch.object(D, "_route_module", return_value=module), \
-                mock.patch.object(D, "gate_currency", side_effect=currency), \
-                mock.patch.object(D, "completion_attempt_readiness",
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=currency), \
+                patch_split(D, "completion_attempt_readiness",
                                   return_value=SimpleNamespace(state=readiness)), \
-                mock.patch.object(D, "note_evidence_change"), \
+                patch_split(D, "note_evidence_change"), \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
-                mock.patch.object(artifact_producer, "route_cycle_for",
+                patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-reuse", "producer_id": "prod-reuse"}), \
-                mock.patch.object(artifact_producer, "cycle_route_admission",
+                patch_split(artifact_producer, "cycle_route_admission",
                                   return_value=SimpleNamespace(allow=True)):
             return R._reuse_snapshot(self.jobs, self.route, [])
 
@@ -5297,15 +5526,15 @@ class AnsweredFailVerdictReuseTest(unittest.TestCase):
             return D.GateCurrency(*self.states.get(node["id"], ("current", "completion-marker-verified")))
 
         import artifact_producer
-        with mock.patch.object(D, "_route_module", return_value=module), \
-                mock.patch.object(D, "gate_currency", side_effect=currency), \
-                mock.patch.object(D, "completion_attempt_readiness",
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=currency), \
+                patch_split(D, "completion_attempt_readiness",
                                   return_value=SimpleNamespace(state=readiness)), \
-                mock.patch.object(D, "note_evidence_change") as noted, \
+                patch_split(D, "note_evidence_change") as noted, \
                 mock.patch.object(R, "_gate_snapshot", return_value=[]), \
-                mock.patch.object(artifact_producer, "route_cycle_for",
+                patch_split(artifact_producer, "route_cycle_for",
                                   return_value={"cycle_id": "cyc-answered", "producer_id": "prod-answered"}), \
-                mock.patch.object(artifact_producer, "cycle_route_admission",
+                patch_split(artifact_producer, "cycle_route_admission",
                                   return_value=SimpleNamespace(allow=True)):
             snapshot = R._reuse_snapshot(self.jobs, self.route, [], proof=proof, pinned=pinned)
         self.noted = {call.args[1]["id"] for call in noted.call_args_list}
@@ -6183,7 +6412,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
     def test_live_or_unknown_process_proof_never_creates_a_claim(self):
         for state in ("live", "unverifiable"):
             with self.subTest(state=state), \
-                 mock.patch.object(D, "attempt_process_quiescence",
+                 patch_split(D, "attempt_process_quiescence",
                     return_value=SimpleNamespace(state=state, reason="fixture-" + state)), \
                  self.assertRaises(D.DispatchContractError):
                 self.claim()
@@ -6481,8 +6710,8 @@ class NamespaceExtinctDeathProofTest(unittest.TestCase):
                 return D.ProcessGroupObservation('empty')
             return D.ProcessGroupObservation('unverifiable', (), 'observer-namespace-mismatch')
         stack = __import__('contextlib').ExitStack()
-        stack.enter_context(mock.patch.object(D, 'namespace_gone', return_value=gone))
-        stack.enter_context(mock.patch.object(D, 'attempt_tagged_descendants', side_effect=probe))
+        stack.enter_context(patch_split(D, 'namespace_gone', return_value=gone))
+        stack.enter_context(patch_split(D, 'attempt_tagged_descendants', side_effect=probe))
         return stack
 
     def test_dead_namespace_absent_is_a_silent_death_with_an_exact_proof(self):

@@ -87,7 +87,7 @@ class AliasReceive(unittest.TestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.sender = {"harness": "codex", "session_id": "01a07b2b-9108-7110-bd41-93b7ade4d9c4", "name": "동명"}
+        self.sender = {"harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "동명"}
         self.recipient = {"harness": "codex", "session_id": "recipient-a"}
 
     def prepare(self, body="검증할 실제 본문", sender=None, recipient=None):
@@ -276,7 +276,6 @@ class AliasReceive(unittest.TestCase):
                       "adapters/codex/hooks/sessionstart-lifecycle.py")
         pane, a, b = "fixture:codex-start-seat", "start-input-A", "start-input-B"
         base_env = {"HERDR_PANE_ID": pane, "AGENT_DISPATCH_CALLER_HARNESS": "codex"}
-        commands = []
         with mock.patch.object(pane_ownership, "_caller_runtime", return_value=(None, False)), \
              mock.patch.object(pane_ownership, "verified_pane", side_effect=lambda value, *a, **k: value or ""), \
              mock.patch.object(pane_ownership, "current_codex_thread_for_caller", return_value=None):
@@ -293,24 +292,17 @@ class AliasReceive(unittest.TestCase):
                         seat, "codex", a, jobs=self.state / "jobs.log"), 0)
 
             with mock.patch.dict(os.environ, {**base_env, "CODEX_THREAD_ID": b}):
-                def confirmed_start(argv, **kwargs):
-                    commands.append(list(argv))
-                    self.assertIn("--harness", argv)
-                    self.assertIn("codex", argv)
-                    self.assertIn("--event", argv)
-                    self.assertIn("start", argv)
-                    self.assertIn("--session-id", argv)
-                    self.assertIn(b, argv)
-                    self.assertIn("--source", argv)
-                    self.assertIn("clear", argv)
-                    session_tidy.run_hook("codex", "start", b, source="clear",
-                                           cwd=str(ROOT), env=os.environ)
-                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-                with mock.patch.object(hook.subprocess, "run", side_effect=confirmed_start):
-                    self.assertEqual(hook.card_context(
-                        {"session_id": b, "source": "clear"}, str(ROOT)), ("", "", None))
-                self.assertEqual(len(commands), 1)
+                with mock.patch.object(hook, "load_payload", return_value={
+                        "session_id": b, "source": "clear", "cwd": str(ROOT)}), \
+                     mock.patch.object(hook, "is_worker_session", return_value=False), \
+                     mock.patch.object(hook, "request_lifecycle_recovery"), \
+                     mock.patch.dict(sys.modules, {"herdr_session_projection": mock.Mock()}), \
+                     mock.patch.object(session_tidy, "run_hook", wraps=session_tidy.run_hook) as record:
+                    self.assertEqual(hook.main(), 0)
+                record.assert_called_once()
+                self.assertEqual(record.call_args.args, ("codex", "start", b))
+                self.assertEqual(record.call_args.kwargs["source"], "clear")
+                self.assertFalse(record.call_args.kwargs["render_context"])
                 rows = handover.handover_rows(seat)
                 self.assertEqual([(row["from"], row["sid"]) for row in rows], [(a, b)])
                 self.assertEqual(handover.resolved_steward_relations(
@@ -903,8 +895,7 @@ class PendingCallbacks(unittest.TestCase):
         body = "[handoff] exact card\n" + "complete context " * 260 + "\nDo not run; final instruction: preserve the original"
         text, ref = AliasReceive.prepare_legacy_reference(self, body, self.sender, recipient)
         guidance = pm.receiver_guidance(text, recipient, cwd=str(ROOT))
-        self.assertIn("immediate results once", guidance)
-        self.assertIn("Receipt/queue/ACK is not execution", guidance)
+        self.assertIn("answer once", guidance)
         self.assertNotIn("handoff accept " + ref, guidance)
         self.assertNotIn("acceptance", pm._read_pending(ref))
         self.assertEqual(pm._read_pending(ref)["state"], "pending")
@@ -998,6 +989,8 @@ import { pathToFileURL } from "node:url";
 const { AgentHarnessGuards } = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
 const logs = [];
 process.env.HERDR_PANE_ID = "";
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 const hooks = await AgentHarnessGuards({client: {app: {log: async ({body}) => logs.push(body)}}});
 if (typeof hooks.dispose !== "function") throw Error("normal host disposal missing");
 await hooks["tool.execute.after"]({sessionID: "actual-callback", tool: "fixture-noop", args: {secret: "private-tool-body"}}, {});
@@ -1016,6 +1009,29 @@ console.log(JSON.stringify(logs));
         self.assertEqual(logs[1]["extra"]["sessionID"], "actual-callback")
         self.assertNotIn("private-tool-body", run.stdout)
         self.assertNotIn("private-error", run.stdout)
+
+    def test_opencode_without_a_herdr_pane_takes_its_tmux_pane_as_the_hint(self):
+        js = r"""
+import { pathToFileURL } from "node:url";
+const { AgentHarnessGuards } = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
+const reasons = [];
+process.env.HERDR_PANE_ID = "";
+for (const [tmux, pane] of [["/fixture/tmux.sock,1,0", "%4"], ["/fixture/tmux.sock,1,0", "w1:p0"], ["", "%4"]]) {
+  const logs = [];
+  if (tmux) process.env.TMUX = tmux; else delete process.env.TMUX;
+  process.env.TMUX_PANE = pane;
+  const hooks = await AgentHarnessGuards({client: {app: {log: async ({body}) => logs.push(body)}}});
+  await hooks["tool.execute.after"]({sessionID: "callback-" + reasons.length, tool: "fixture-noop", args: {}}, {});
+  reasons.push(logs.filter(row => row.extra.stage === "callback").map(row => row.extra.reason)[0]);
+  await hooks.dispose();
+}
+console.log(JSON.stringify(reasons));
+"""
+        run = subprocess.run(["node", "--input-type=module", "-e", js], env=dict(os.environ),
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # Only a tmux pane id inside a named tmux server is a hint; the projector proves it.
+        self.assertEqual(json.loads(run.stdout), ["callback-entry", "callback-no-pane", "callback-no-pane"])
 
     def test_opencode_publisher_observation_preserves_attempt_receipt_and_failure_boundaries(self):
         js = r'''

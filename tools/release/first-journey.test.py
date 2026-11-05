@@ -622,6 +622,36 @@ else: raise SystemExit(5)
             for signum, handler in zip(handled, handlers):
                 signal.signal(signum, handler)
 
+    def test_harness_option_picks_the_measured_task_harnesses(self):
+        self.assertEqual(fj.task_harnesses("all"), ["codex", "opencode"])
+        self.assertEqual(fj.task_harnesses("all", ["opencode"]), ["opencode"])
+        self.assertEqual(fj.task_harnesses("claude-only", ["opencode"]), [])
+        ran = []
+        prior = (fj.journey_profile, fj.write_report)
+        handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        handlers = tuple(signal.getsignal(signum) for signum in handled)
+        fj.journey_profile = lambda profile, args, repo: ran.append(
+            (profile, fj.task_harnesses(profile, args.harness))) or {"failures": []}
+        fj.write_report = lambda record, output: None
+        try:
+            with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                for argv, code, expected in (
+                        (["--harness", "opencode"], 0, [("all", ["opencode"])]),
+                        (["--harness", "claude"], 0, [("claude-only", ["claude"])]),
+                        (["--harness", "claude", "--harness", "codex"], 0,
+                         [("claude-only", ["claude"]), ("all", ["codex"])]),
+                        (["--profile", "claude-only", "--harness", "codex"], 2, []),
+                        ([], 0, [("claude-only", ["claude"]), ("all", ["codex", "opencode"])])):
+                    ran.clear()
+                    with mock.patch("sys.argv", ["first-journey.py", "run", "--output", tmp + "/out",
+                                                 "--local-root", tmp, *argv]):
+                        self.assertEqual(fj.main(), code, argv)
+                    self.assertEqual(ran, expected, argv)
+        finally:
+            fj.journey_profile, fj.write_report = prior
+            for signum, handler in zip(handled, handlers):
+                signal.signal(signum, handler)
+
     def test_world_path_has_standard_tools_and_no_optional_host_tools(self):
         for name in ("grep", "sed", "awk", "head", "ls", "find", "basename"):
             self.assertIn(name, fj.WORLD_COMMANDS)

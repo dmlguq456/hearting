@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when an approved cheatsheet or patching guide must be applied to the real source artifact and the applied result verified. Owns applied artifact; default preset. Not for drafting or refining the cheatsheet, or for unrelated source implementation."
 argument-hint: "\"<cheatsheet hint / task>\" [--target latex] [--source <path-to-real-source>] [--isolation branch|worktree] [--from preflight|apply|verify|handback]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: doc
@@ -27,9 +28,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/autopilot-apply.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+Main session only: after approval, read `capabilities/autopilot-apply.md`. Registered owners read only `capabilities/autopilot-apply/references/owner-execution.md`; stage workers read only their assigned contracts.
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

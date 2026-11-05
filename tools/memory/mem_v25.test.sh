@@ -83,7 +83,7 @@ raw = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 rows = [json.loads(line) for line in raw.splitlines()]
 probes = [row for row in rows if row.get("event") == "candidate-probe"]
 assert len(probes) == 4
-assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 2400 for row in probes)
+assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 1200 for row in probes)
 assert "automatic candidate recall" not in raw and "과거 결정 회수" not in raw
 receipts = list(pathlib.Path(sys.argv[2]).glob("*.json"))
 assert len(receipts) == 1

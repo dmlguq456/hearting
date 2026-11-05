@@ -1,7 +1,7 @@
 """Explorer draws the shared session number and never mints one of its own.
 
 Measured 2026-10-27 (Cairn report, v3.54.1): Herdr showed the Cairn Claude session as ``[39]`` and the
-KWS_Net OpenCode session (native ``ses_e88c7e169ffeY6FnJb6wuNZ0LA``) as ``[c4]``. Fleet had no native
+KWS_Net OpenCode session (native ``ses_fixture00000000000000000003``) as ``[c4]``. Fleet had no native
 session id for that OpenCode process, hashed its process seed to ``39``, showed ``[39] opencode`` and
 dropped the real ``[39]`` Cairn row. Other OpenCode rows likewise read ``e5``/``ff`` instead of Herdr's
 ``ae``/``cc``. A row now carries the collector's tag, else the one shared ``resolve_tag`` rule for its
@@ -18,19 +18,19 @@ _HANDLE = importlib.import_module(live.__name__.rsplit(".", 2)[0] + ".session_ha
 
 # The Herdr pane list at the same instant (/tmp/hearting-opencode-repo-identity-20261027/herdr.json).
 _HERDR = {
-    ("claude", "9922f71a-2d7c-4e6f-aaa9-606f83f1ffc3"): ("39", "/home/example/cairn"),
-    ("opencode", "ses_e88c7e169ffeY6FnJb6wuNZ0LA"):
+    ("claude", "1000009b-0000-4000-8000-0000000000aa"): ("39", "/home/example/cairn"),
+    ("opencode", "ses_fixture00000000000000000003"):
         ("c4", "/home/example/Project_Zoo/KWS_Net-wt/mac-demo-simple-ui-20261026"),
-    ("opencode", "ses_e89e9575cffec0fhda7G0B6IpZ"):
-        ("ae", "/home/example/Project_Zoo/SR_ModelA_SD-wt/csi-booth-ui-20261026"),
-    ("opencode", "ses_e876e14aaffe3VGJH5fjDwLL8E"): ("cc", "/home/example/hearting"),
+    ("opencode", "ses_fixture00000000000000000004"):
+        ("ae", "/home/example/Project_Zoo/fixture-item-0162/csi-booth-ui-20261026"),
+    ("opencode", "ses_fixture00000000000000000002"): ("cc", "/home/example/hearting"),
 }
 
 # The measured pair: the OpenCode process Fleet saw without a native session id, and Cairn.
 _OPENCODE = {"harness": "opencode", "pid": 2099088, "proc_start": "138584073", "session_id": None,
              "cwd": "/home/example/Project_Zoo/KWS_Net-wt/mac-demo-simple-ui-20261026"}
 _CLAUDE = {"harness": "claude", "pid": 2100610, "proc_start": "138585008",
-           "session_id": "9922f71a-2d7c-4e6f-aaa9-606f83f1ffc3", "session_tag": "39",
+           "session_id": "1000009b-0000-4000-8000-0000000000aa", "session_tag": "39",
            "cwd": "/home/example/cairn"}
 
 

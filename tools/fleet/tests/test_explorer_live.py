@@ -559,6 +559,7 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         from tools.fleet.explorer.view_model import ExplorerViewModel
         return ExplorerViewModel.from_mapping({"memory": memory, "system": {"project_memory": project_memory}})
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})
     def test_memory_page_marks_an_unread_database_and_shows_last_good(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.state import NavState
@@ -582,6 +583,7 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         self.assertIn("기록상 열림 1", stale_text)
         self.assertIn("last good task", stale_text)
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})
     def test_memory_page_cards_fold_open_work_per_project(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.state import NavState, reduce
@@ -615,6 +617,46 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
                 self.assertEqual(defects, [])
                 self.assertIn(counts, "\n".join(narrow.text_rows()))
 
+    @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"})
+    def test_memory_page_reads_in_english_without_a_korean_declaration(self):
+        from tools.fleet.explorer.frame import draw
+        from tools.fleet.explorer.state import NavState, reduce
+        from tools.fleet.tests.parity_matrix import own_trace_defects
+
+        unread = self.memory_vm({"state": "unavailable", "stale": False, "decisions_today": None,
+                                 "doing": None, "order": ["repo"], "projects": {}})
+        text = "\n".join(draw(unread, NavState(view="MEMORY"), 140, 45).text_rows())
+        self.assertIn("memory database unavailable · decisions and to-dos unknown", text)
+        self.assertIn("projects 1 · memory database unavailable", text)
+        items = [["doing", "10-26", "doing task", "a"], ["waiting", "10-27", "waiting task", "b"],
+                 ["open", "10-30", "open task", "c"]]
+        vm = self.memory_vm({"state": "failed", "stale": True, "decisions_today": 1, "doing": 1,
+                             "order": ["repo"], "projects": {"repo": {
+                                 "last": "21:36", "decisions": [["11-02", "the decision"]],
+                                 "open": items, "limited": True,
+                                 "counts": {"doing": 1, "waiting": 1, "open": 1}}}},
+                            memory=[["repo", [["21:36", "saved", "note", "recent change"]]]])
+        state = NavState(view="MEMORY")
+        frame = draw(vm, state, 140, 45)
+        text = "\n".join(frame.text_rows())
+        for expected in ("memory database failed · last good values", "last change 21:36", "decisions  11-02",
+                         "the decision", "to do", "in progress 1 · to verify 1 · open on record 1+",
+                         "▶ expand", "in progress  doing task", "recent", "recent change",
+                         "projects 1 · decisions today 1 · in progress 1 · database failed"):
+            self.assertIn(expected, text)
+        self.assertIsNone(__import__("re").search(r"[가-힣]", text), text)
+        hit = next(item for item in frame.hits if item.action == ("fold", "memory:open", "repo"))
+        state, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
+        expanded = "\n".join(draw(vm, state, 140, 45).text_rows())
+        for expected in ("▼ collapse", "to verify  waiting task", "open  open task"):
+            self.assertIn(expected, expanded)
+        for width, counts in ((80, "doing 1 · verify 1 · open 1+"),
+                              (100, "in progress 1 · to verify 1 · open on record 1+")):
+            with self.subTest(width=width):
+                narrow, defects = own_trace_defects(vm, state, width)
+                self.assertEqual(defects, [])
+                self.assertIn(counts, "\n".join(narrow.text_rows()))
+
     def test_peer_count_stays_unknown_or_marks_last_good_after_empty_unhealthy_source(self):
         from tools.fleet.explorer.frame import draw
         from tools.fleet.explorer.live import build_view_model
@@ -634,6 +676,45 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
         })
         stale_text = "\n".join(draw(stale, NavState(view="PEERS"), 140, 45).text_rows())
         self.assertIn("1 link · last good · observation unknown", stale_text)
+
+
+class ScreenWordLanguage(unittest.TestCase):
+    """Route-page and seat words read the shared catalog: English unless Korean is declared."""
+
+    def test_a_missing_catalog_never_blocks_a_screen(self):
+        from tools.fleet import config
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        with mock.patch.object(config, "_ui_catalog", side_effect=FileNotFoundError("gone")):
+            self.assertEqual(config.ui_text("fleet.memory.count_doing", count=3), "count doing 3")
+            self.assertIn("loading", ExplorerRuntime().loading_frame(40, 10).text_rows()[5])
+
+    def test_earlier_rounds_note(self):
+        from tools.fleet.explorer.live import _node_detail
+        node = {"id": "execute", "state": "active", "route_attempt_round": 3}
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"}):
+            self.assertEqual(_node_detail(node, 0)["rounds_note"], "R3 · 앞 2회는 이 기록 밖")
+        with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}):
+            self.assertEqual(_node_detail(node, 0)["rounds_note"], "R3 · earlier rounds outside this record: 2")
+            self.assertEqual(_node_detail({**node, "route_attempt_round": 1}, 0)["rounds_note"], "")
+
+    def test_seat_card_note_without_card_text(self):
+        from tools.fleet.explorer.grid import CellGrid
+        from tools.fleet.explorer.history import draw_seat_expand
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import ExplorerViewModel
+
+        for language, system, expected in (
+                ("Korean", {"usage_api": {"freshness": "21:36"}}, "21:36 전에 남은 카드 본문이 없습니다."),
+                ("Korean", {}, "읽은 카드 본문이 없습니다."),
+                ("English", {"usage_api": {"freshness": "21:36"}}, "no card text was kept before 21:36."),
+                ("English", {}, "no card text was read.")):
+            with self.subTest(language=language, system=system), \
+                    mock.patch.dict("os.environ", {"FLEET_NOW_LANG": language}):
+                grid = CellGrid(160, 6)
+                vm = ExplorerViewModel.from_mapping({"system": system})
+                draw_seat_expand(grid, vm, NavState(view="HISTORY"), "a1", 0, 150, 0, 5,
+                                 ("a1", "claude", 2, "10:00 · x"), "claude")
+                self.assertIn(expected, "\n".join(grid.rows_text()))
 
 
 class ParallelRouteProjection(unittest.TestCase):

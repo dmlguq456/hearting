@@ -606,7 +606,7 @@ class MetricSourcesTest(unittest.TestCase):
         sibling.mkdir()
         (sibling / "unrelated.md").write_text("foreign sibling context\n")
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "started_at": 1}}}) + "\n")
         for index in range(4):
@@ -739,7 +739,7 @@ class MetricSourcesTest(unittest.TestCase):
         bundle = root / "selected-bundle"
         bundle.mkdir(parents=True)
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "started_at": 1}}}) + "\n")
         for index in range(4):
@@ -850,7 +850,7 @@ class MetricSourcesTest(unittest.TestCase):
         root = self.root / "flat-root-cached-prefix-mutation"
         root.mkdir()
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "row_key": "run", "started_at": 1}}}) + "\n")
         (root / "entry.json").write_text(json.dumps({
@@ -989,17 +989,17 @@ class MetricSourcesTest(unittest.TestCase):
         bundle = root / "r2-launch-a8"
         bundle.mkdir(parents=True)
         registry = root / "resource-runs.json"
-        run_id = "ami-leg2__leg2-run-config__8ec838ee14c4__a8"
+        run_id = "fixture-run-0068__a8"
         registry.write_text(json.dumps({"runs": {run_id: {
             "run_id": run_id, "row_key": "run", "started_at": 1,
             "log": str(self.root / "eval-run-r2-a8.log")}}}) + "\n")
         (self.root / "eval-run-r2-a8.log").write_text("fixture log identity\n")
 
         admitted = {"admitted": True, "shared_admission": {
-            "authorized_run_id": "smoke__config-bundle__8a9d8619aed3"},
+            "authorized_run_id": "fixture-run-0929"},
             "snapshot": {"t": 100}}
         denied = {"admitted": False, "shared_admission": {
-            "authorized_run_id": "smoke__config-bundle__8a9d8619aed3"},
+            "authorized_run_id": "fixture-run-0929"},
             "preceding_evaluation_leases": [{"run_id": "preceding-run",
                 "task": "evaluation"}], "snapshot": {"t": 101},
             "reasons": ["other evaluation has priority"]}
@@ -1009,7 +1009,7 @@ class MetricSourcesTest(unittest.TestCase):
         for index in range(8):
             value = {"admitted": index % 2 == 0,
                 "shared_admission": {"authorized_run_id":
-                    "smoke__config-bundle__8a9d8619aed3"},
+                    "fixture-run-0929"},
                 "snapshot": {"t": 200 + index}, "padding": "x" * 1200}
             (bundle / f"admission-005{index + 1}-00.json").write_text(
                 json.dumps(value))
@@ -1082,6 +1082,71 @@ class MetricSourcesTest(unittest.TestCase):
         self.assertFalse(final_binding["foreign_seen"])
         self.assertTrue(final_binding["binding_complete"])
         self.assertNotIn("admission-run-binding-ambiguous", result["warnings"])
+
+    def test_shared_admission_lease_of_the_authorizing_run_is_not_a_foreign_identity(self):
+        # Synthetic shared-admission shape: each sample's shared_admission
+        # names the smoke run whose GPU lease it shares, with that run's pid and
+        # start time. That reference must not make the bundle ambiguous.
+        root = self.root / "raw-results"
+        bundle = root / "r2-launch-a7"
+        bundle.mkdir(parents=True)
+        run_id = "fixture-run-0068__a7"
+        smoke = "fixture-run-0929"
+        lease = {"gpus": ["0"], "host": "gpu-host-a", "pid": 2087782,
+                 "pid_namespace": "pid:[4026531836]", "run_id": smoke, "share": True,
+                 "started_at": 1792840758.0865579, "starttime": "121090704",
+                 "state": "S", "task": smoke, "token": "t" * 32}
+        expected = {"admitted": 0, "denied": 0}
+        for index in range(6):
+            admitted = index % 3 == 0
+            expected["admitted" if admitted else "denied"] += 1
+            (bundle / f"admission-{index:04d}-00.json").write_text(json.dumps({
+                "admitted": admitted, "reasons": [] if admitted else
+                    ["other GPU0 evaluation reservation has priority; no preemption"],
+                "snapshot": {"t": 100 + index, "processes": [{"pid": 2087889}]},
+                "preceding_evaluation_leases": [{"run_id": "other-eval", "pid": 7,
+                    "started_at": 50, "task": "evaluation"}],
+                "shared_admission": {"authorized_run_id": smoke, "leases": [lease],
+                    "matched_process_pids": [2087889],
+                    "numeric_thresholds_unchanged": True, "original_reasons": []}}))
+        (bundle / "entry.json").write_text(json.dumps({"run_id": run_id, "share": True}))
+
+        result = metrics.read_admission_sources([root], run_id=run_id, started_at=1, now=500)
+        self.assertNotIn("admission-run-binding-ambiguous", result["warnings"])
+        self.assertEqual(result["coverage"], "observed", result["warnings"])
+        states = [sample["state"] for sample in result["samples"]]
+        self.assertEqual({"admitted": states.count("admitted"),
+                          "denied": states.count("denied")}, expected)
+        self.assertNotIn("unknown", states)
+        # A bundle that names a different run as its own identity stays ambiguous.
+        (bundle / "other-entry.json").write_text(json.dumps({"run_id": smoke, "pid": 2087782}))
+        mixed = metrics.read_admission_sources([root], run_id=run_id, started_at=1, now=600)
+        self.assertIn("admission-run-binding-ambiguous", mixed["warnings"])
+
+    def test_authorizing_run_named_only_in_shared_admission_is_not_bound_to_the_bundle(self):
+        # Before the fix the smoke run's lease inside shared_admission was read as a
+        # run identity, so an observer of the smoke run took another evaluation's
+        # admission samples (synthetic raw-results/admission bundle) as its own.
+        root = self.root / "raw-results"
+        bundle = root / "admission"
+        bundle.mkdir(parents=True)
+        smoke = "fixture-run-0929"
+        lease = {"host": "gpu-host-a", "pid": 2087782, "run_id": smoke,
+                 "started_at": 1792840758.0865579, "starttime": "121090704",
+                 "state": "S", "task": smoke}
+        for index in range(4):
+            (bundle / f"asr__dev-root__attempt-{index:02d}.json").write_text(json.dumps({
+                "admitted": index % 2 == 0, "snapshot": {"t": 100 + index},
+                "shared_admission": {"authorized_run_id": smoke, "leases": [lease]}}))
+
+        cursor = None
+        for now in (500, 560, 620):
+            result = metrics.read_admission_sources([root], run_id=smoke, started_at=1,
+                                                    now=now, cursor=cursor)
+            cursor = result["cursor"]
+            self.assertEqual([sample for sample in result["samples"]
+                              if sample["state"] in {"admitted", "denied"}], [])
+            self.assertNotEqual(result["coverage"], "observed")
 
     def test_admission_reader_observes_320_separate_decisions_across_bounded_pages(self):
         root = self.root / "320-separate-admission-files"

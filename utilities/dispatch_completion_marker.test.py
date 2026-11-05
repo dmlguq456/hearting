@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as D
 import review_source_subject as SUBJECT
+from split_module_fixture import patch_split, split_patch
 spec = importlib.util.spec_from_file_location("route", ROOT / "utilities/capability-route.py")
 ROUTE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ROUTE)
@@ -922,7 +923,7 @@ class CompletionMarkerTest(unittest.TestCase):
             route, route_path, evidence, directory = self._consumed_incident_route("route-consumed-restore.json")
             nodes = {node["id"]: node for node in route["nodes"]}
             # The pre-fix writer: the same revise without the consumer proof.
-            with mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+            with patch_split(ROUTE, "_revision_consumers", return_value={}):
                 old = ROUTE.publish_revision_locked(
                     route, "plan", evidence, basis="owner-correction", reason="fixture: old writer",
                     author_attempt_id="att-old-writer", jobs=self.jobs)
@@ -961,7 +962,7 @@ class CompletionMarkerTest(unittest.TestCase):
     def test_restore_keeps_a_tombstone_whose_own_evidence_changed(self):
         with mock.patch.dict(os.environ, {**self.base_env()}, clear=True):
             route, _route_path, evidence, directory = self._consumed_incident_route("route-consumed-own-edit.json")
-            with mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+            with patch_split(ROUTE, "_revision_consumers", return_value={}):
                 ROUTE.publish_revision_locked(
                     route, "plan", evidence, basis="owner-correction", reason="fixture: old writer",
                     author_attempt_id="att-old-writer", jobs=self.jobs)
@@ -1176,7 +1177,6 @@ class CompletionMarkerTest(unittest.TestCase):
             with self.assertRaises(D.DispatchContractError) as caught:
                 D.completion_marker_gate(
                     str(route_path), "plan-check", "dry-run", self.agent_home, self.jobs,
-                    planned_revision_nodes=admission.planned_revision_nodes,
                 )
         self.assertEqual(caught.exception.reason, "prior-attempt-unverifiable")
         self.assertIn("process-identity-missing", caught.exception.detail)
@@ -1240,8 +1240,11 @@ class CompletionMarkerTest(unittest.TestCase):
         # to a failure string.
         offenders = []
         search_roots = [ROOT / "utilities", ROOT / "adapters", ROOT / "tools" / "fleet"]
+        # dispatch_contract.py is split into dispatch_contract_*.py siblings; the gate
+        # helper lives in one of them.
         allow = {
             (ROOT / "utilities" / "dispatch_contract.py").resolve(),
+            *((path.resolve()) for path in (ROOT / "utilities").glob("dispatch_contract_*.py")),
         }
         for adapter in ("claude", "codex", "opencode"):
             allow.add((ROOT / "adapters" / adapter / "bin" / "dispatch-headless.py").resolve())
@@ -1765,7 +1768,7 @@ class CompletionMarkerTest(unittest.TestCase):
         # A controlled quiescent observation still proposes generic death,
         # rather than borrowing the other attempt's completed marker.
         with self.stable_root_env(), \
-                mock.patch.object(D, "attempt_process_quiescence", return_value=
+                patch_split(D, "attempt_process_quiescence", return_value=
                                   D.ProcessQuiescence("quiescent", "controlled-process-exit")) as process:
             _, _, unrelated_note = registry.classify(unrelated_row, args, newest, rows)
         self.assertEqual(process.call_args.args[0]["attempt_id"], "att-unrelated")
@@ -2681,7 +2684,7 @@ class CompletionMarkerTest(unittest.TestCase):
                 if Path(path) == target:
                     raise OSError("fixture crash after immutable history")
                 return write(path, value)
-            with mock.patch.object(ROUTE, "atomic_write", side_effect=crash_after_history):
+            with patch_split(ROUTE, "atomic_write", side_effect=crash_after_history):
                 with self.assertRaisesRegex(OSError, "fixture crash"):
                     ROUTE.complete_node(route, node, node["id"], memo, self.jobs, "att-source-review-r2")
             self.assertFalse(target.exists())
@@ -2892,7 +2895,7 @@ class CompletionMarkerTest(unittest.TestCase):
         source_node = next(n for n in source["nodes"] if n["id"] == "plan-check")
         with mock.patch.dict(os.environ, self.base_env(), clear=True):
             for state in ("live", "unverifiable"):
-                with mock.patch.object(D, "attempt_process_quiescence", return_value=D.ProcessQuiescence(state, "fixture")):
+                with patch_split(D, "attempt_process_quiescence", return_value=D.ProcessQuiescence(state, "fixture")):
                     before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
                               for p in self.base.rglob("*") if p.is_file()}
                     with self.assertRaisesRegex(ValueError, f"owner-closure-round-{state}"):
@@ -2967,7 +2970,7 @@ class CompletionMarkerTest(unittest.TestCase):
         self.review_blocking_row("att-input-r1", 1, directory=output)
         self.sd161_bind_row(route, "att-input-r1", evidence)
         with mock.patch.dict(os.environ, {**self.base_env()}, clear=True), \
-                mock.patch.object(D, "attempt_process_quiescence",
+                patch_split(D, "attempt_process_quiescence",
                                   return_value=D.ProcessQuiescence("quiescent", "fixture")):
             def revise(path=evidence, answers=("att-input-r1",), author=owner):
                 return ROUTE.publish_review_input_revision(route, node["id"], path,
@@ -3029,12 +3032,12 @@ class CompletionMarkerTest(unittest.TestCase):
             marker, _ = ROUTE.complete_node(route, node, node["id"], memo, self.jobs, "att-source-review-r2")
             target = ROUTE.completion_dir(route["route_id"]) / "plan-check.json"
             original_marker, original_rows = target.read_bytes(), self.jobs.read_bytes()
-            with mock.patch.object(D, "attempt_process_quiescence", return_value=D.ProcessQuiescence("unverifiable", "namespace-not-visible")):
+            with patch_split(D, "attempt_process_quiescence", return_value=D.ProcessQuiescence("unverifiable", "namespace-not-visible")):
                 ready = D.completion_attempt_readiness(route, node, marker, self.jobs)
                 self.assertEqual(ready.state, "unverifiable")
                 self.assertIn("namespace-not-visible", ready.reason)
             # A currently unresolved conflict cannot consume the old receipt.
-            with mock.patch.object(D, "terminal_conflict_pending", return_value=True):
+            with patch_split(D, "terminal_conflict_pending", return_value=True):
                 self.assertFalse(D.completion_marker_is_current(route, node, target))
                 self.assertEqual(D.completion_attempt_readiness(route, node, marker, self.jobs).state, "unverifiable")
             reviews[0].write_text("changed findings\n")
@@ -3674,6 +3677,127 @@ class CompletionMarkerTest(unittest.TestCase):
             parent.kill()
             parent.wait(timeout=5)
 
+    # Parallel slices of one chain: real route, real markers, real gate, real launch fence.
+    SLICE_FILES = [{"files": [f"utilities/slice_{n}.py"]} for n in (1, 2, 3)]
+
+    def register_slices(self, rp, route, chain):
+        """Register three parallel slice rows of `chain`; returns their attempt ids."""
+        axes = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,harness=codex,capability=autopilot-code")
+        ids = []
+        for n in (1, 2, 3):
+            aid = f"att-{chain[4:]}-s{n}"
+            brief = self.base / f"{chain}-s{n}.brief.md"
+            brief.write_text("brief\n", encoding="utf-8")
+            meta = (f"{axes},attempt_id={aid},route_id={route['route_id']},route_hash={route['route_hash']},"
+                    f"route_node=execute,route_file={rp},subsession_id=ss-{chain[4:]}-s{n},stage_authority=0,"
+                    f"session_chain_id={chain},subsession_index={n},subsession_count=3,subsession_mode=parallel,"
+                    f"subsession_purpose=planned,phase_brief={brief},phase_brief_sha256={'0' * 64},"
+                    f"state_ledger={self.base / 'ledger.yaml'},fixed_files_sha256={'0' * 64},"
+                    f"narrow_verify_sha256={'0' * 64},expected_round_trips=2,batch_group={chain},parallel_group={chain}")
+            with mock.patch.dict(os.environ, {**self.base_env(), "AGENT_DISPATCH_ATTEMPT_ID": ""}, clear=True):
+                self.assertTrue(D.claim_attempt_row(
+                    self.jobs, aid, f"fixture\topen\t{self.repo}\t{self.repo}\tslice-{n}\t{meta}"))
+            ids.append(aid)
+        return ids
+
+    def launch_slices(self, rp, ids):
+        """Start every attempt of `ids` at once. Returns {attempt: "started" | refusal reason}."""
+        import threading
+        barrier = threading.Barrier(len(ids))
+        outcome, children = {}, []
+
+        def spawn_for(aid):
+            def start(gate_fd):
+                proc = subprocess.Popen(
+                    [sys.executable, str(ROOT / "utilities/launch-fence.py"),
+                     "--parent-pid", str(os.getpid()), "--gate-fd", str(gate_fd), "--",
+                     sys.executable, "-c", f"from pathlib import Path; Path({str(self.base / ('payload-' + aid))!r}).write_text('ran')"],
+                    pass_fds=(gate_fd,), start_new_session=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                children.append(proc)
+                return proc
+            return start
+
+        def run(aid):
+            waited = []
+
+            def preclaim(lines):
+                D.completion_marker_gate(str(rp), "execute", "start", self.agent_home, self.jobs,
+                                         registry_lines=lines, attempt_id=aid)
+                if not waited:  # every leg has read its inputs before any leg commits
+                    waited.append(True)
+                    barrier.wait(30)
+            preclaim._dispatch_registry_scoped = True
+            preclaim._dispatch_registry_nodes = frozenset({"plan-check"})
+            try:
+                D.spawn_claimed_attempt(self.jobs, aid, parent_binding=None, preclaim=preclaim, spawn=spawn_for(aid))
+                outcome[aid] = "started"
+            except D.DispatchContractError as exc:
+                outcome[aid] = exc.reason
+                barrier.abort()
+            except threading.BrokenBarrierError:
+                outcome[aid] = "barrier-broken"
+
+        env = {**self.base_env(), "AGENT_DISPATCH_ATTEMPT_ID": ""}
+        with mock.patch.dict(os.environ, env, clear=True):
+            threads = [threading.Thread(target=run, args=(aid,)) for aid in ids]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(60)
+        for child in children:
+            child.wait(timeout=15)
+        return outcome
+
+    def route_with_markers(self):
+        route = self.compile_route(intensity="standard")
+        rp = self.write_route(route, "route.json")
+        for node_id in ("plan", "plan-check"):
+            evidence = self.base / f"{node_id}.md"
+            evidence.write_text(f"{node_id}\n", encoding="utf-8")
+            done = self.complete(rp, node_id, evidence)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return route, rp
+
+    def test_three_parallel_slices_start_together_behind_real_markers(self):
+        import subdivision_batch_admission as SUBDIV
+        route, rp = self.route_with_markers()
+        chain = SUBDIV.slice_chain_id(route["route_id"], "execute", self.SLICE_FILES, owner_attempt_id="")
+        ids = self.register_slices(rp, route, chain)
+        outcome = self.launch_slices(rp, ids)
+        self.assertEqual(outcome, {aid: "started" for aid in ids})
+        for aid in ids:
+            self.assertTrue((self.base / f"payload-{aid}").exists(), aid)
+
+    def test_a_refused_slice_set_restarts_under_the_next_generation(self):
+        import subdivision_batch_admission as SUBDIV
+        route, rp = self.route_with_markers()
+        args = (route["route_id"], "execute", self.SLICE_FILES)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": ""}):
+            first_chain = SUBDIV.current_slice_chain_id(*args, self.jobs)
+            self.assertEqual(first_chain, SUBDIV.slice_chain_id(*args))
+            first_ids = self.register_slices(rp, route, first_chain)
+            marker = self.stable_dispatch / "completion" / route["route_id"] / "plan-check.json"
+            kept = marker.read_bytes()
+            marker.unlink()
+            refused = self.launch_slices(rp, first_ids)
+            self.assertEqual(set(refused.values()), {"completion-marker-missing"}, refused)
+            for aid in first_ids:
+                self.assertEqual(SUBDIV._close_unclaimed_row(self.jobs, aid), 1)
+            marker.write_bytes(kept)
+
+            second_chain = SUBDIV.current_slice_chain_id(*args, self.jobs)
+            self.assertEqual(second_chain, SUBDIV.slice_chain_id(*args, generation=1))
+            self.assertNotEqual(second_chain, first_chain)
+            second_ids = self.register_slices(rp, route, second_chain)
+            self.assertFalse(set(second_ids) & set(first_ids))
+            restarted = self.launch_slices(rp, second_ids)
+            self.assertEqual(restarted, {aid: "started" for aid in second_ids})
+            # Registered and started, the set keeps its id: asking again changes nothing.
+            self.assertEqual(SUBDIV.current_slice_chain_id(*args, self.jobs), second_chain)
+
 
 class RevisionConsumerProofTest(unittest.TestCase):
     def setUp(self):
@@ -3713,7 +3837,7 @@ class RevisionConsumerProofTest(unittest.TestCase):
     def consumers(self, *, launched="2026-01-01T00:00:00Z"):
         original = self.jobs.read_text().replace("2026-01-01T00:00:00Z", launched)
         self.jobs.write_text(original)
-        with mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "ok")):
+        with patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "ok")):
             return ROUTE._revision_consumers(self.route, "upstream", self.revision,
                                              directory=self.directory, registry=self.jobs)
 
@@ -3763,7 +3887,7 @@ class RevisionConsumerProofTest(unittest.TestCase):
 
     def test_unproved_intermediate_parent_blocks_transitive_leaf(self):
         self.setUp_registry_rows()
-        with mock.patch.object(ROUTE, "gate_currency", side_effect=lambda _r, node, _p, _m, **_kw:
+        with patch_split(ROUTE, "gate_currency", side_effect=lambda _r, node, _p, _m, **_kw:
                 D.GateCurrency("superseded" if node["id"] == "downstream" else "current", "fixture")):
             proof = ROUTE._revision_consumers(self.route, "upstream", self.revision,
                                              directory=self.directory, registry=self.jobs)
@@ -3780,7 +3904,7 @@ class RevisionConsumerProofTest(unittest.TestCase):
                       "launched_at": "2026-01-01T00:00:00Z"}}}
         (self.directory / "downstream.3.json").write_text(json.dumps(parent))
         (self.directory / "downstream.json").write_text(json.dumps(parent))
-        with mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")):
+        with patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")):
             proof = ROUTE._revision_consumers(self.route, "upstream",
                 {**self.revision, "upstream_sequence": 2}, directory=self.directory,
                 registry=self.jobs, restoring={"node": "upstream", "sequence": 2})
@@ -3807,21 +3931,16 @@ class RevisionConsumerProofTest(unittest.TestCase):
         import artifact_producer
         import review_source_subject
         proof = self.consumers()
-        with mock.patch.object(ROUTE, "completion_dir", lambda _route_id, jobs=None: self.directory), \
-                mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "evidence_digest", return_value="new-digest"), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value=proof), \
-                mock.patch.object(ROUTE, "revision_basis_verdict", return_value={"basis": "user-direction"}), \
+        with patch_split(ROUTE, "completion_dir", lambda _route_id, jobs=None: self.directory), \
+                patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
+                patch_split(ROUTE, "evidence_digest", return_value="new-digest"), \
+                patch_split(ROUTE, "_revision_consumers", return_value=proof), \
+                patch_split(ROUTE, "revision_basis_verdict", return_value={"basis": "user-direction"}), \
                 mock.patch.object(artifact_producer, "require_cycle_output", return_value=object()), \
                 mock.patch.object(review_source_subject, "marker_subject", return_value=None):
-            preview = ROUTE.preview_revision(
-                self.route, "upstream", self.evidence, basis="user-direction", direction="fixture",
-                author_attempt_id="att-author")
             published = ROUTE.publish_revision_locked(
                 self.route, "upstream", self.evidence, basis="user-direction", direction="fixture",
                 author_attempt_id="att-author")
-        self.assertEqual(preview["tombstoned"], [])
-        self.assertEqual(preview["kept"], ["downstream", "leaf"])
         self.assertEqual(published["tombstoned"], [])
         self.assertEqual(published["kept"], ["downstream", "leaf"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 1)
@@ -3875,9 +3994,9 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
     def restore(self):
         gate = lambda _route, _node, _path, marker=None, **_kw: D.GateCurrency(
             "superseded" if (marker or {}).get("state") == "superseded-by-upstream-revision" else "current", "fixture")
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", side_effect=gate), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", side_effect=gate), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
             return ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
 
     def test_restores_once_and_second_call_is_idempotent(self):
@@ -3895,14 +4014,14 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             first = self.restore()
         self.assertTrue(first["errors"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 2)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", side_effect=lambda *_a, **_kw: D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
-                mock.patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", side_effect=lambda *_a, **_kw: D.GateCurrency("current", "fixture")), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
+                split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
             second = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertEqual(second["restored"][0]["resumed"], True)
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 3)
@@ -3914,12 +4033,12 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         canonical_before = (self.directory / "downstream.json").read_bytes()
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={}):
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
+                patch_split(ROUTE, "_revision_consumers", return_value={}):
             result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("pending-restore-unproven:downstream", result["errors"])
         self.assertEqual((self.directory / "downstream.json").read_bytes(), canonical_before)
@@ -3930,15 +4049,15 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         revised_upstream = {**self.upstream, "sequence": 3,
                             "revision": {**self.upstream["revision"], "of_sequence": 2}}
         self._write("upstream.3.json", revised_upstream)
         self._write("upstream.json", revised_upstream)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}):
             result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("pending-restore-unproven:downstream", result["errors"])
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 2)
@@ -3950,18 +4069,18 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "leaf.json":
                 raise OSError("fixture second-node interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", side_effect=lambda _r, _n, _p, marker=None, **_kw:
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", side_effect=lambda _r, _n, _p, marker=None, **_kw:
                     D.GateCurrency("superseded" if (marker or {}).get("state") == "superseded-by-upstream-revision" else "current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value=both), \
-                mock.patch.object(ROUTE, "atomic_write", side_effect=fail_leaf):
+                patch_split(ROUTE, "_revision_consumers", return_value=both), \
+                patch_split(ROUTE, "atomic_write", side_effect=fail_leaf):
             first = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertEqual(json.loads((self.directory / "downstream.json").read_text())["sequence"], 3)
         self.assertEqual(json.loads((self.directory / "leaf.json").read_text())["sequence"], 2)
-        with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                mock.patch.object(ROUTE, "_revision_consumers", return_value={"leaf": both["leaf"]}), \
-                mock.patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
+        with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
+                patch_split(ROUTE, "_revision_consumers", return_value={"leaf": both["leaf"]}), \
+                split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
             second = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
         self.assertIn("upstream@2:OSError", first["errors"][0])
         self.assertEqual([row["node"] for row in second["restored"]], ["leaf"])
@@ -3973,7 +4092,7 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
             if Path(path) == self.directory / "downstream.json":
                 raise OSError("fixture canonical write interruption")
             return original_atomic(path, payload)
-        with mock.patch.object(ROUTE, "atomic_write", side_effect=fail_once):
+        with patch_split(ROUTE, "atomic_write", side_effect=fail_once):
             self.restore()
         orphan_path = self.directory / "downstream.3.json"
         for field, value in (("sequence", 4), ("route_id", "rt-wrong"),
@@ -3986,10 +4105,10 @@ class ConsumedTombstoneRestoreTest(unittest.TestCase):
                     orphan[field] = value
                 orphan_path.write_text(json.dumps(orphan, indent=2) + "\n")
                 before = (self.directory / "downstream.json").read_bytes()
-                with mock.patch.object(ROUTE, "completion_dir", self.module.completion_dir), \
-                        mock.patch.object(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
-                        mock.patch.object(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
-                        mock.patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
+                with patch_split(ROUTE, "completion_dir", self.module.completion_dir), \
+                        patch_split(ROUTE, "gate_currency", return_value=D.GateCurrency("current", "fixture")), \
+                        patch_split(ROUTE, "_revision_consumers", return_value={"downstream": self.proof}), \
+                        split_patch("dispatch_contract._marker_schema_identity_ok", return_value=(True, None)):
                     result = ROUTE.restore_consumed_tombstones(self.route, jobs=self.jobs)
                 self.assertIn("pending-restore-invalid:downstream", result["errors"][-1])
                 self.assertEqual((self.directory / "downstream.json").read_bytes(), before)

@@ -35,7 +35,7 @@ WRAPPER = ROOT / "adapters" / "claude" / "bin" / "dispatch-headless.py"
 
 CLAUDE_VERSION = "2.1.299"
 CODEX_VERSION = "0.162.1"
-CODEX_SID = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
+CODEX_SID = "01000005-0000-7000-8000-000000000009"
 
 
 def _plain(rows):
@@ -522,7 +522,7 @@ class CodexRegisteredTest(_CodexFixture, unittest.TestCase):
 
     def test_other_thread_rollout_is_not_borrowed(self):
         self.catalogue()
-        self.rollout(sid="019facc9-fe83-7480-89f6-9e64fbebf0cc")
+        self.rollout(sid="01000005-0000-7000-8000-00000000000a")
         payload, _row = self._collect(self._job(760_000, 360_000))
         self.assertIsNone(payload["ctx_pct"])
 

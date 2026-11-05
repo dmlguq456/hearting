@@ -36,12 +36,18 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 ROOT = Path(__file__).resolve().parents[1]
+from dispatch_attempt_policy import TRANSIENT_RETRY_DELAYS
 
 # Wait before the n-th consecutive no-progress continuation. Codex has already
 # spent any server Retry-After advice before it ends a turn on these errors.
-DELAYS = (60, 120, 240, 480, 960)
+DELAYS = TRANSIENT_RETRY_DELAYS
 POLL_SECONDS = 5.0
 MAX_WATCH_SECONDS = 12 * 3600
 LOCK_WAIT_SECONDS = 120.0
@@ -98,9 +104,9 @@ def launch(payload: dict, *, environ=None, popen=None) -> bool:
             pass
     spawn = subprocess.Popen if popen is None else popen
     try:
-        spawn(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        end_with_test(spawn(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-              cwd=str(ROOT), env=dict(os.environ if environ is None else environ))
+              cwd=str(ROOT), env=dict(os.environ if environ is None else environ)))
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     return True

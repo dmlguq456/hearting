@@ -17,6 +17,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 import harness_manifest
 
 
+# Entry routers are started by name (`$skill`); keep them out of the model's implicit list.
+EXPLICIT_ONLY_POLICY = "policy:\n  allow_implicit_invocation: false\n"
+
+
 def contract_rows(text: str) -> dict[str, str]:
     rows: dict[str, str] = {}
     for raw in text.splitlines():
@@ -111,7 +115,7 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
     if invocation_class == "entry-router":
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
 2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
-3. After approval, direct/quick acting sessions read `capabilities/{identifier}.md`; at `standard+`, the dispatch-depth-1 owner reads it and stage workers read only their assigned contracts.
+3. {harness_manifest.entry_read_instruction(identifier)}
 4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`; `preflight.sh route {identifier}` is grounding only, not route participation. A native-subagent restriction never authorizes direct execution.
 5. Run `adapters/codex/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""
         route_guard = f"""- Capability grounding only: `adapters/codex/bin/preflight.sh route {identifier} [cwd] [session-id]`
@@ -173,10 +177,13 @@ def main() -> int:
 
     manifest = harness_manifest.load()
     expected: dict[Path, str] = {}
+    explicit_only = harness_manifest.explicit_only_skill_names(manifest)
     for identifier, spec in harness_manifest.skill_capabilities(manifest).items():
         capability_file = CAPABILITIES / f"{identifier}.md"
         identifier, body = render(identifier, spec, capability_file)
         expected[OUT / identifier / "SKILL.md"] = body
+        if identifier in explicit_only:
+            expected[OUT / identifier / "agents" / "openai.yaml"] = EXPLICIT_ONLY_POLICY
 
     stale: list[str] = []
     for path, body in expected.items():
@@ -187,17 +194,18 @@ def main() -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body, encoding="utf-8")
 
-    existing = sorted(OUT.glob("*/SKILL.md")) if OUT.exists() else []
+    existing = sorted(OUT.glob("*/SKILL.md")) + sorted(OUT.glob("*/agents/openai.yaml")) if OUT.exists() else []
     extras = [path for path in existing if path not in expected]
     if args.check:
         stale.extend(str(path.relative_to(ROOT)) for path in extras)
     else:
         for path in extras:
             path.unlink()
-            try:
-                path.parent.rmdir()
-            except OSError:
-                pass
+            for parent in (path.parent, path.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
 
     if stale:
         print("Codex native skill projections are stale:", file=sys.stderr)

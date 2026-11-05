@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import ship_parent_deploy as S
 from review_round_cap import round_budget
+from split_module_fixture import patch_split
 
 
 class ParentDeployTest(unittest.TestCase):
@@ -57,6 +58,9 @@ class ParentDeployTest(unittest.TestCase):
                                   _marker_identity_row=lambda r, n, nid, gate, **kw: dict(self.proof[nid]),
                                   terminal_gate_observation=lambda *args, **kwargs: {})
         self.real_decide = S.authority.decide_continuation
+        notice = patch("session_notice._retain")  # temp notices, no courier process
+        notice.start()
+        self.addCleanup(notice.stop)
         decision = patch.object(S.authority, "decide_continuation", return_value=
             S.authority.ContinuationDecision(False, "answer", "owner-blocked", "correct"))
         self.decider = decision.start()
@@ -69,7 +73,7 @@ class ParentDeployTest(unittest.TestCase):
             (S.DC, "human_gate_entry_fence", lambda *args, **kwargs: None),
             (S, "record_path", lambda route: self.record),
         ]:
-            mock = patch.object(obj, name, value)
+            mock = patch_split(obj, name, value)
             mock.start()
             self.addCleanup(mock.stop)
         # Native identity resolution itself is real, and used for all three harnesses.
@@ -83,6 +87,164 @@ class ParentDeployTest(unittest.TestCase):
     def prepared(self):
         return Path(S.prepare(self.jobs, "owner", self.command)["request"])
 
+    def test_prepare_notifies_parent_once_for_the_exact_request(self):
+        request = self.prepared()
+        self.assertEqual(self.prepared(), request)
+        import dispatch_pending_delivery as pending
+        value = S.read(request)
+        delivery = pending.read(self.jobs.parent, "parent", "delivery-" +
+            __import__("hashlib").sha256(("notice\0parent-deploy-" + value["request_digest"]).encode()).hexdigest())
+        self.assertEqual(delivery["receipt"]["required_action"], "run-parent-deploy")
+        self.assertIn("--check, then", delivery["receipt"]["text"])
+        self.assertEqual(delivery["route_id"], "rt-test")
+
+    def test_notice_unavailable_returns_blocked_handoff_for_all_parents(self):
+        for harness, variable in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID"),
+                                  ("opencode", "OPENCODE_SESSION_ID")):
+            with self.subTest(harness=harness), patch.dict(os.environ, {variable: "parent"}, clear=True), \
+                 patch("session_notice.notify", return_value=None):
+                self.meta["parent_harness"] = harness
+                result = S.prepare(self.jobs, "owner", self.command)
+                self.assertEqual(result["state"], "blocked")
+                self.assertFalse(result["runtime_wait"])
+                self.assertIn("BLOCKED handoff", result["next_step"])
+                self.assertTrue(Path(result["request"]).exists())
+                self.assertIn("--request", result["run_command"])
+                self.assertFalse(self.counter.exists())
+
+    def test_unsupervised_owner_keeps_the_ordinary_blocked_handoff(self):
+        with patch.object(S, "owner_input", return_value={}):
+            prepared = S.prepare(self.jobs, "owner", self.command)
+            self.assertFalse(prepared["runtime_wait"])
+            self.assertIn("BLOCKED handoff", prepared["next_step"])
+            result = S.run(Path(prepared["request"]))
+            self.assertIn("correction_command", result)
+            self.assertNotIn("owner_resume", result)
+
+    def test_notice_storage_failure_returns_blocked_without_deployment(self):
+        with patch("session_notice.notify", side_effect=OSError("unavailable")):
+            result = S.prepare(self.jobs, "owner", self.command)
+        self.assertEqual(result["state"], "blocked")
+        self.assertFalse(result["runtime_wait"])
+        self.assertTrue(Path(result["request"]).exists())
+        self.assertFalse(self.counter.exists())
+
+    def test_wait_timeout_and_binding_error_are_blocked_and_release_parked_state(self):
+        import dispatch_resource_wait as WAIT
+        import dispatch_completion_join as JOIN
+        from dispatch_supervisor_terminal import classify_parent_deploy_wait_blocked
+        value = S.read(self.prepared())
+        for reason in ("timeout", "binding", "entry-binding"):
+            with self.subTest(reason=reason):
+                state_path = S.DC.dispatch_state_root(self.jobs) / "supervisor-state/owner.json"
+                JOIN.write_supervisor_state(state_path, "owner", set(), phase="running-turn")
+                if reason == "entry-binding":
+                    WAIT._write(state_path, "owner", set(),
+                        {"session_id": "thread", "delivered": [], "outbox": None,
+                         "parent_deploy": value["request_digest"]}, "parked")
+                args = SimpleNamespace(parent_attempt_id="owner", route_id="rt-test", jobs=str(self.jobs),
+                                       join_timeout=2)
+                control = SimpleNamespace(thread_id="thread", pending=lambda: False)
+                elapsed = [0]
+                def sleep(seconds):
+                    elapsed[0] += seconds
+                with patch.object(S, "waiting_request", side_effect=(
+                        ValueError("parent-deploy-owner-input-unavailable") if reason == "entry-binding" else
+                        [value, ValueError("parent-deploy-owner-input-unavailable")]
+                        if reason == "binding" else None), return_value=value):
+                    with self.assertRaises(WAIT.ParentDeployWaitBlocked) as stopped:
+                        WAIT.wait(args, state_path, control, set(), lambda _: None,
+                                  sleep=sleep, clock=lambda: elapsed[0])
+                terminal = classify_parent_deploy_wait_blocked(str(stopped.exception))
+                self.assertEqual((terminal.note, terminal.failure_class), ("dead-worker-blocked", "blocked"))
+                self.assertLessEqual(elapsed[0], 2)
+                state = JOIN.read_supervisor_phase_state(state_path, "owner")
+                self.assertEqual(state.phase, "running-turn")
+                self.assertNotIn("parent_deploy", state.resource)
+                self.assertFalse(WAIT.needs_recovery(state_path, "owner"))
+
+    def test_parent_wait_deploy_resume_and_post_deploy_for_all_owner_harnesses(self):
+        import dispatch_resource_wait as WAIT
+        import dispatch_completion_join as JOIN
+        import fcntl
+        for harness, variable in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID"),
+                                  ("opencode", "OPENCODE_SESSION_ID")):
+            with self.subTest(harness=harness), patch.dict(os.environ, {variable: "parent"}, clear=True):
+                self.meta["parent_harness"] = harness
+                request = self.prepared()
+                value = S.read(request)
+                import dispatch_pending_delivery as pending
+                from harness_capabilities import parent_completion
+                key = __import__("hashlib").sha256(("notice\0parent-deploy-" + value["request_digest"]).encode()).hexdigest()
+                notice = pending.read(self.jobs.parent, "parent", "delivery-" + key)
+                self.assertEqual(notice["recipient_kind"], parent_completion(harness)["carrier"])
+                state_path = S.DC.dispatch_state_root(self.jobs) / "supervisor-state/owner.json"
+                args = SimpleNamespace(parent_attempt_id="owner", route_id="rt-test",
+                    route_hash=self.route["route_hash"], route_file=str(self.root / "route.json"), jobs=str(self.jobs),
+                    join_timeout=14400)
+                delivered, resumed, events, virtual = set(), [], [], []
+                control = SimpleNamespace(thread_id=harness + "-thread", pending=lambda: bool(resumed))
+                channel = {"supervisor_live": True, "accepting": True, "thread_id": control.thread_id}
+                JOIN.write_supervisor_state(state_path, "owner", delivered, phase="running-turn")
+                lease_path = state_path.with_suffix(".lease")
+                lease = lease_path.open("w")
+                self.addCleanup(lease.close)
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                def correct(argv, **kwargs):
+                    self.assertIn("correct", argv)
+                    self.assertEqual(argv[-1], "parent-deploy-" + value["request_digest"])
+                    resumed.append(argv)
+                    return SimpleNamespace(returncode=0)
+                def sleep(_):
+                    virtual.append(4000)
+                    # A silent multi-hour wait retains the supervisor's lease.
+                    with lease_path.open() as probe:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.assertEqual(JOIN.read_supervisor_phase_state(state_path, "owner").phase, "parked")
+                    if len(virtual) == 3:
+                        self.assertEqual(S.run(request, check=True)["execution_state"], "not-run")
+                        self.assertTrue(S.run(request)["owner_resume"]["submitted"])
+                owner = SimpleNamespace(status="open", metadata=self.meta)
+                old_exact = S.exact_attempt_row
+                with patch.object(S, "owner_input", return_value=channel), \
+                     patch.object(S, "exact_attempt_row", side_effect=lambda jobs, aid: owner if aid == "owner" else old_exact(jobs, aid)), \
+                     patch.object(S.subprocess, "run", side_effect=correct):
+                    prompt = WAIT.wait(args, state_path, control, delivered, events.append, sleep=sleep,
+                                       clock=lambda: sum(virtual))
+                self.assertIn("parent deployment result", prompt)
+                self.assertEqual(sum(virtual), 12000)
+                self.assertEqual(len(resumed), 1)
+                self.assertEqual(events[0]["type"], "dispatch.supervisor.parent-deploy-parked")
+                self.assertNotIn("parent_deploy", JOIN.read_supervisor_phase_state(state_path, "owner").resource)
+                S.validate_completion(self.route, self.jobs, self.record)
+                message = S.paths(self.jobs, "rt-test")[1].with_suffix(".message.md").read_text()
+                self.assertIn("post-deploy verification", message)
+                self.assertEqual(self.counter.read_text(), "x")
+                # Reset only this temporary fixture for the next owner harness.
+                for path in (request, S.paths(self.jobs, "rt-test")[1], self.counter,
+                             S.paths(self.jobs, "rt-test")[1].with_suffix(".output.log")):
+                    path.unlink()
+                self.record.write_text("{}")
+                lease.close()
+                state_path.unlink()
+
+    def test_wait_follows_replacement_lineage_and_rejects_another_native_thread(self):
+        request = self.prepared()
+        args = SimpleNamespace(parent_attempt_id="replacement", route_id="rt-test",
+            route_hash=self.route["route_hash"], route_file=str(self.root / "route.json"), jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="replacement-thread")
+        self.cr._current_owner_attempt = lambda jobs, attempt: "replacement"
+        channel = {"supervisor_live": True, "accepting": True, "thread_id": control.thread_id}
+        with patch.object(S, "owner_input", return_value=channel), patch.object(S, "exact_attempt_row",
+                return_value=SimpleNamespace(status="open", metadata=self.meta)):
+            self.assertEqual(S.waiting_request(args, control)["owner_attempt_id"], "owner")
+            with self.assertRaisesRegex(ValueError, "owner-input-unavailable"):
+                S.waiting_request(args, SimpleNamespace(thread_id="foreign"))
+            args.parent_attempt_id = "unrelated"
+            self.assertIsNone(S.waiting_request(args, control))
+        self.assertEqual(S.read(request)["owner_attempt_id"], "owner")
+
     def test_success_preserves_record_and_hands_back_exact_route(self):
         request = self.prepared()
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
@@ -90,6 +252,7 @@ class ParentDeployTest(unittest.TestCase):
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
         result = S.run(request)
         self.assertEqual(result["state"], "success")
+        self.assertNotIn("owner_resume", result)  # legacy BLOCKED handback is unchanged
         self.assertEqual(self.counter.read_text(), "x")
         record = S.read(self.record)
         self.assertEqual(record["rollback"], "retained")
@@ -101,6 +264,19 @@ class ParentDeployTest(unittest.TestCase):
         self.assertIn(str(self.root / "route.json"), message)
         # Simulate a lost reply: a repeated run must only republish its result.
         S.run(request)
+        self.assertEqual(self.counter.read_text(), "x")
+
+    def test_failed_resume_retains_correct_command_without_repeating_deployment(self):
+        request = self.prepared()
+        with patch.object(S, "parked_request", return_value=True), patch.object(S, "owner_input",
+                return_value={"supervisor_live": True, "accepting": True}), \
+             patch.object(S.subprocess, "run", return_value=SimpleNamespace(returncode=69)) as correct:
+            result = S.run(request)
+            self.assertFalse(result["owner_resume"]["submitted"])
+            self.assertIn("correct", result["correction_command"])
+            again = S.run(request)
+            self.assertEqual(again["correction_command"], result["correction_command"])
+            self.assertEqual(correct.call_count, 2)
         self.assertEqual(self.counter.read_text(), "x")
 
     def test_all_native_harnesses_apply_same_parent_boundary(self):

@@ -15,6 +15,7 @@ from unittest import mock
 import gpu_execution_sandbox as G
 import execution_access as E
 import owner_write_advisory as A
+from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -366,7 +367,7 @@ class GpuSandboxTest(SandboxFixture):
             self.assertEqual(owner_harnesses, ("claude", "codex", "opencode"))
             return self.evidence(choice)
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-             mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+             patch_split(R, "_compose_readiness", side_effect=readiness):
             route = R.compose_route(capability="autopilot-lab", capability_mode="setup",
                 shape="staged", graph=None, slug="gpu-fixture", cwd=str(self.worktree),
                 artifact_root=str(self.artifact), signals=[], spec_read="fixture",
@@ -394,7 +395,7 @@ class GpuSandboxTest(SandboxFixture):
                 observed.append(choice)
                 return self.evidence(choice)
             with self.subTest(graph=graph), mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-                 mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+                 patch_split(R, "_compose_readiness", side_effect=readiness):
                 route = R.compose_route(capability="autopilot-code", capability_mode="dev",
                     shape="staged", graph=graph, slug=f"gpu-borrowed-{index}", cwd=str(self.worktree),
                     artifact_root=str(self.artifact), signals=[], spec_read="fixture",
@@ -419,7 +420,7 @@ class GpuSandboxTest(SandboxFixture):
             observed.append(choice)
             return self.evidence(choice)
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-             mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+             patch_split(R, "_compose_readiness", side_effect=readiness):
             route = R.compose_route(capability="autopilot-lab", capability_mode="setup",
                 shape="staged", graph=None, slug="gpu-parallel", cwd=str(self.worktree),
                 artifact_root=str(self.artifact), intensity="strong", signals=[], spec_read="fixture",
@@ -457,7 +458,7 @@ class GpuSandboxTest(SandboxFixture):
             observed.append(choice)
             return self.evidence(choice)
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-             mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+             patch_split(R, "_compose_readiness", side_effect=readiness):
             route = self.compose_with_evidence(previous)
             R.verify_route(route, self.worktree)
         self.assertEqual(previous, original)
@@ -482,7 +483,7 @@ class GpuSandboxTest(SandboxFixture):
                                            lambda: probe)
                 self.assertEqual(supplied["dispatch_evidence"]["tuples"], original["tuples"])
                 with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-                     mock.patch.object(R, "_compose_readiness") as readiness:
+                     patch_split(R, "_compose_readiness") as readiness:
                     route = self.compose_with_evidence(supplied["dispatch_evidence"], **changes)
                     R.verify_route(route, self.worktree)
                 readiness.assert_not_called()
@@ -503,7 +504,7 @@ class GpuSandboxTest(SandboxFixture):
                 expected = "dispatch-evidence-exact-worktree-reprobe-required"
             original = copy.deepcopy(evidence)
             with self.subTest(reason=reason), mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
-                 mock.patch.object(R, "_compose_readiness") as readiness:
+                 patch_split(R, "_compose_readiness") as readiness:
                 with self.assertRaisesRegex(ValueError, expected):
                     self.compose_with_evidence(evidence)
                 readiness.assert_not_called()

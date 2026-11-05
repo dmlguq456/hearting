@@ -57,8 +57,11 @@ def asked_from(harness: str, payload: dict) -> tuple[str, list]:
             given = ((replies or {}).get(q.get("id")) or {}).get("answers") or []
             picked = [str(a) for a in given if not str(a).startswith(NOTE_PREFIX)]
             typed = [str(a)[len(NOTE_PREFIX):] for a in given if str(a).startswith(NOTE_PREFIX)]
-            asked.append({"question": q.get("question"), "options": _labels(q),
-                          "answer": picked[0] if picked else (typed[0] if typed else "")})
+            row = {"question": q.get("question"), "options": _labels(q),
+                   "answer": picked[0] if picked else (typed[0] if typed else "")}
+            if picked and typed:
+                row["note"] = typed[0]   # the words the person added beside the option they picked
+            asked.append(row)
         return str(payload.get("session_id") or ""), asked
     if harness == "opencode":
         if payload.get("tool") != "question":

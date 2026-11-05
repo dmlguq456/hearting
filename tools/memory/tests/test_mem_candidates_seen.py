@@ -497,7 +497,7 @@ class ShortBodyTest(SeenTestCase):
         self.assertEqual(lead.count("  > "), 1)
         body_line = next(l for l in lead.splitlines() if l.startswith("  > "))
         self.assertLessEqual(len(body_line) - 4, 600)
-        self.assertLessEqual(len(lead.encode()), 2400)
+        self.assertLessEqual(len(lead.encode()), 1200)
         digest, name = mem._seen_names(session, mem.project_key(self.project))
         state = mem._seen_load(name, time.time())
         self.assertGreater(state["saved_bytes"], 0)
@@ -523,12 +523,12 @@ class ShortBodyTest(SeenTestCase):
         unclear = self.run_probe(mem, session, "zebrafish", gap=1e9)
         self.assertNotIn("  > ", unclear)
 
-    def test_the_whole_block_stays_within_2400_bytes_with_a_body(self):
+    def test_the_whole_block_stays_within_1200_bytes_with_a_body(self):
         mem = self.loaded()
-        rows = [(f"id-{i}", "durable", "lesson", "h" * 160) for i in range(6)]
+        rows = [(f"id-{i}", "durable", "lesson", "h" * 80) for i in range(6)]
         text, shown = mem._render_candidate_block(
-            rows, 2400, body=("id-0", "가" * 600))
-        self.assertLessEqual(len(text.encode()), 2400)
+            rows, 1200, body=("id-0", "가" * 600))
+        self.assertLessEqual(len(text.encode()), 1200)
         self.assertEqual(shown, 6)
 
 

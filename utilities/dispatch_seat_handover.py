@@ -39,9 +39,11 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 """
 
 from __future__ import annotations
+from collections import OrderedDict
+import threading
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import importlib.util
 import json
@@ -82,6 +84,7 @@ class LineageGraph:
     generation: tuple
     seat_edges: tuple
     seat_unresolved: frozenset
+    binding_conflicts: frozenset = frozenset()
 
 
 def _lineage_generation(info):
@@ -131,12 +134,9 @@ def _observed_ledger_bytes(path: Path, file_generation) -> bytes:
     a replaced, shrunk or unreadable ledger still is."""
     expected = tuple(file_generation)
     raw = _st().read_bytes(path)
-    if raw is not None and len(raw) >= expected[4]:
-        current = _lineage_generation(path.lstat())
-        if current == expected and len(raw) == expected[4]:
-            return raw
-        if _appended_since(expected, current):
-            return raw[:expected[4]]
+    if (raw is not None and len(raw) >= expected[4]
+            and _appended_since(expected, _lineage_generation(path.lstat()))):
+        return raw[:expected[4]]
     raise OSError("lineage-ledger-unavailable")
 
 
@@ -146,8 +146,7 @@ def _observation_holds(observed, current) -> bool:
     (location, files, generation), (now_location, now_files, now_generation) = observed, current
     if location != now_location or generation != now_generation or len(files) != len(now_files):
         return False
-    return all(old[0] == new[0] and (tuple(old[1:]) == tuple(new[1:])
-                                     or _appended_since(old[1:], new[1:]))
+    return all(old[0] == new[0] and _appended_since(old[1:], new[1:])
                for old, new in zip(files, now_files))
 
 
@@ -259,7 +258,14 @@ def _build_compact_lineage_graph(directory: Path, read_context=None):
         if reusable is not None:
             compact_rows[filename] = reusable
             continue
-        contents[filename] = _observed_ledger_bytes(directory / filename, file_generation)
+        raw = _observed_ledger_bytes(directory / filename, file_generation)
+        rows = _st()._read_ledger_lines(_st().Seat("pane", Path(filename).stem), raw=raw)
+        if not getattr(rows, "usable", True):
+            raise OSError("lineage-ledger-unavailable")
+        # Changed ledgers need a fresh readable observation, but activity rows
+        # need not flow through the relation graph's repeated normalization.
+        compact_rows[filename] = [(index, rows[index])
+                                  for index in sorted(_compact_row_indexes(rows))]
     if not _observation_holds((location, files, generation), _lineage_signature(directory)):
         raise OSError("lineage-observation-changed")
     graph = _build_lineage_graph_uncached((location, files, generation), contents,
@@ -370,7 +376,8 @@ def _pass_lineage_graph(read_context=None) -> LineageGraph:
     """Resolve read-only records from this pass; effects observe without it.
 
     Detect writer changes during a pass, but do not reopen every ledger for
-    every record. Normal lineage_graph observations always read current bytes.
+    every record. A normal lineage_graph observation reads each ledger's bytes as of
+    that ledger's own stat.
     """
     if read_context is None:
         return lineage_graph()
@@ -395,7 +402,10 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
             indexed = compact_rows[filename]
         else:
             seat = st.Seat("pane", ledger_key)
-            rows = st._read_ledger_lines(seat, raw=contents[filename])
+            # Bytes were freshly observed above. These graph builders only read
+            # row records, so a passive scan can reuse their pure ledger parse.
+            with st.seat_ledger_readonly_scope():
+                rows = st._read_ledger_lines(seat, raw=contents[filename])
             if not getattr(rows, "usable", True):
                 raise OSError("lineage-ledger-unavailable")
             indexed = list(enumerate(rows))
@@ -421,47 +431,18 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
                 order = (float(row.get("ts", 0) or 0), index, ledger_key)
                 if key not in latest_bindings or order > latest_bindings[key][0]:
                     latest_bindings[key] = (order, row)
-    outgoing, incoming = {}, {}
-    for harness, origin, target in edges:
-        outgoing.setdefault((harness, origin), set()).add(target)
-        incoming.setdefault((harness, target), set()).add(origin)
-    unresolved = set()
-    for vertex in set(outgoing) | set(incoming):
-        if len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1:
-            unresolved.add(vertex)
-    # Mark every directed cycle, including self-loops, as unresolved.
-    for start in outgoing:
-        path, positions, cursor = [], {}, start
-        while cursor in outgoing and len(outgoing[cursor]) == 1:
-            if cursor in positions:
-                unresolved.update(path[positions[cursor]:])
-                break
-            positions[cursor] = len(path)
-            path.append(cursor)
-            target = next(iter(outgoing[cursor]))
-            cursor = (cursor[0], target)
-    # Ambiguity invalidates the connected lineage component in either direction.
-    adjacent = {}
-    for harness, origin, target in edges:
-        left, right = (harness, origin), (harness, target)
-        adjacent.setdefault(left, set()).add(right)
-        adjacent.setdefault(right, set()).add(left)
-    pending = list(unresolved)
-    while pending:
-        vertex = pending.pop()
-        for neighbor in adjacent.get(vertex, ()):
-            if neighbor not in unresolved:
-                unresolved.add(neighbor)
-                pending.append(neighbor)
+    unresolved = _unresolved_vertices({((h, origin), (h, target))
+                                       for h, origin, target in edges})
     frozen_rows = MappingProxyType({key: tuple(MappingProxyType(dict(row)) for row in rows)
                                     for key, rows in rows_by_key.items()})
     frozen_bindings = MappingProxyType({key: MappingProxyType(dict(value[1]))
                                         for key, value in latest_bindings.items()})
     seat_edges, seat_unresolved = _seat_graph(rows_by_key, edges)
-    return LineageGraph(tuple(sorted(edges)), frozenset(unresolved),
+    graph = LineageGraph(tuple(sorted(edges)), frozenset(unresolved),
                         MappingProxyType({vertex: tuple(sorted(keys))
                                           for vertex, keys in keys_by_vertex.items()}), frozen_rows,
                         frozen_bindings, signature, seat_edges, seat_unresolved)
+    return replace(graph, binding_conflicts=_binding_conflicts(graph))
 
 
 
@@ -486,29 +467,121 @@ def _seat_graph(rows_by_key, edges):
     for sid, target in legacy:
         origins = {vertex for vertex in vertices if vertex[1] == sid}
         qualified.update((origin, target) for origin in origins or {("", sid)})
+    return tuple(sorted(qualified)), _unresolved_vertices(qualified)
+
+
+def _unresolved_vertices(qualified):
+    """Forks block their ancestors; merges and cycles block their component.
+
+    Kahn elimination visits every edge, including cycles through a fork. Any
+    remainder belongs to a component containing a cycle; propagation below
+    intentionally invalidates that entire component, including its tails.
+    """
     outgoing, incoming, adjacent = {}, {}, {}
     for origin, target in qualified:
         outgoing.setdefault(origin, set()).add(target)
         incoming.setdefault(target, set()).add(origin)
         adjacent.setdefault(origin, set()).add(target)
         adjacent.setdefault(target, set()).add(origin)
-    invalid = {vertex for vertex in adjacent
-               if len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1}
-    for start in outgoing:
-        cursor, seen = start, set()
-        while len(outgoing.get(cursor, ())) == 1:
-            if cursor in seen:
-                invalid.update(seen)
-                break
-            seen.add(cursor)
-            cursor = next(iter(outgoing[cursor]))
-    remaining = list(invalid)
-    while remaining:
-        for neighbor in adjacent.get(remaining.pop(), ()):
+    degree = {v: len(incoming.get(v, ())) for v in adjacent}
+    ready = [v for v in degree if degree[v] == 0]
+    while ready:
+        for target in outgoing.get(ready.pop(), ()):
+            degree[target] -= 1
+            if degree[target] == 0:
+                ready.append(target)
+    invalid = {v for v in adjacent if degree[v] or len(incoming.get(v, ())) > 1}
+    pending = list(invalid)
+    while pending:
+        for neighbor in adjacent.get(pending.pop(), ()):
             if neighbor not in invalid:
                 invalid.add(neighbor)
-                remaining.append(neighbor)
-    return tuple(sorted(qualified)), frozenset(invalid)
+                pending.append(neighbor)
+    pending = [v for v in adjacent if len(outgoing.get(v, ())) > 1]
+    invalid.update(pending)
+    while pending:
+        for origin in incoming.get(pending.pop(), ()):
+            if origin not in invalid:
+                invalid.add(origin)
+                pending.append(origin)
+    return frozenset(invalid)
+
+
+def _binding_conflicts(graph):
+    """Compare every exact handoff, not just the chronologically latest row.
+
+    Duplicate logical/physical publications collapse to one transfer. Explicit
+    transfers take priority over implicit succession, including cross-harness
+    retire. Multiple targets are safe only if their exact transfers and normal
+    suffixes converge; a timestamp cannot choose between different fork arms.
+    """
+    transfers = {}
+    for rows in graph.ledger_rows.values():
+        for row in rows:
+            origin = _st()._handover_origin(row)
+            target = (row.get("harness"), row.get("sid"))
+            for binding in row.get("bindings") or ():
+                if not isinstance(binding, dict):
+                    continue
+                key = tuple(binding.get(field) for field in ("jobs", "route", "hash", "node"))
+                if all(isinstance(value, str) for value in key) and key in graph.binding_rows:
+                    legacy = isinstance(row.get("from"), str) and _st().tidy_lineage_edge(row) is None
+                    transfers.setdefault(key, set()).add((origin, target, legacy))
+    implicit = {(h, origin): (h, target) for h, origin, target in graph.edges
+                if (h, origin) not in graph.unresolved}
+    vertices_by_sid = {}
+    for pair in graph.seat_edges:
+        for vertex in pair:
+            vertices_by_sid.setdefault(vertex[1], set()).add(vertex)
+    conflicts = set()
+    for key, pairs in transfers.items():
+        targets = {target for _origin, target, _legacy in pairs}
+        if len(targets) < 2:
+            continue
+        exact, targets_by_sid = {}, {}
+        for target in targets:
+            targets_by_sid.setdefault(target[1], set()).add(target)
+        for origin, target, legacy in pairs:
+            if legacy and origin:
+                # Schema-1 strings have no source harness. Like _seat_graph,
+                # qualify only a unique known SID, including earlier exact
+                # holders whose legacy handoffs are not implicit tidy edges.
+                candidates = {v for v in vertices_by_sid.get(origin[1], set())
+                              | targets_by_sid.get(origin[1], set()) if v[0]}
+                if len(candidates) == 1:
+                    origin = next(iter(candidates))
+            if origin and origin != target:
+                exact.setdefault(origin, set()).add(target)
+        ends, seen, pending = set(), set(), list(targets)
+        # Resolve the union once per exact job. A directed cycle or branching
+        # with distinct terminal holders cannot produce unique authority.
+        links = set()
+        while pending:
+            vertex = pending.pop()
+            if vertex in seen:
+                continue
+            seen.add(vertex)
+            following = exact.get(vertex)
+            if following is None:
+                following = {implicit[vertex]} if vertex in implicit else set()
+            if not following:
+                ends.add(vertex)
+            links.update((vertex, target) for target in following)
+            pending.extend(following - seen)
+        degree = dict.fromkeys(seen, 0)
+        adjacency = {}
+        for origin, target in links:
+            degree[target] += 1
+            adjacency.setdefault(origin, set()).add(target)
+        ready = [v for v in degree if degree[v] == 0]
+        while ready:
+            for target in adjacency.get(ready.pop(), ()):
+                degree[target] -= 1
+                if degree[target] == 0:
+                    ready.append(target)
+        if len(ends) != 1 or any(degree.values()):
+            conflicts.add(key)
+    return frozenset(conflicts)
 
 
 def _seat_end(graph, harness, session):
@@ -568,6 +641,24 @@ def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -
         if (harness, current) in graph.unresolved:
             return sid, "unresolved"
     return current, "successor" if moved else "self"
+
+
+def seat_chain_contains(harness: str, origin: str, sid: str, *, read_context=None) -> bool:
+    """Whether ``sid`` is ``origin`` or a confirmed successor on its same-harness chain.
+
+    A fork, cycle or unreadable observation answers False, so a caller keeps its
+    current disposition rather than reading an ambiguous seat as the same one."""
+    if not origin or not sid:
+        return False
+    if sid == origin:
+        return True
+    traversed = set()
+    try:
+        _end, state = _chain_end(_pass_lineage_graph(read_context), harness, origin,
+                                 traversed=traversed)
+    except (OSError, ValueError, TypeError):
+        return False
+    return state != "unresolved" and any(target == sid for _h, _o, target in traversed)
 
 
 class LineageAttempts(frozenset):
@@ -667,6 +758,61 @@ def _bindings_readable(bindings):
         for binding in bindings)
 
 
+def _snapshot_data_usable(data):
+    seat = data.get('seat') if isinstance(data, dict) else None
+    return (isinstance(seat, dict) and bool(seat.get('key'))
+            and seat.get('kind') in {'pane', 'native', 'project'}
+            and isinstance(data['from'].get('sid'), str) and bool(data['from']['sid'])
+            and _bindings_readable(data.get('bindings')))
+
+
+_PASSIVE_SNAPSHOT_SEATS = OrderedDict()
+_PASSIVE_SNAPSHOT_LOCK = threading.RLock()
+
+
+def _snapshot_seat_keys():
+    from dispatch_supervision import passive_read_context
+    if passive_read_context() is None:
+        return {str(snapshot['seat']['key']) for snapshot in _all_snapshots()}
+    directory = _snapshot_dir()
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith('.json'))
+    except FileNotFoundError:
+        return set()
+    keys = set()
+    for name in names:
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('handover-snapshot-unsafe')
+        def signature():
+            st = path.stat()
+            return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns,
+                    st.st_ctime_ns, read_snapshot, _snapshot_data_usable, SCHEMA)
+        before = signature()
+        key = str(path)
+        with _PASSIVE_SNAPSHOT_LOCK:
+            held = _PASSIVE_SNAPSHOT_SEATS.get(key)
+            if held is not None and held[0] == before:
+                _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
+                seat_key = held[1]
+            else:
+                held = None
+        if held is None:
+            data = read_snapshot(path.stem)
+            seat_key = str(data['seat']['key']) if _snapshot_data_usable(data) else None
+            if before == signature() and (seat_key is None or len(seat_key) <= 4096):
+                with _PASSIVE_SNAPSHOT_LOCK:
+                    _PASSIVE_SNAPSHOT_SEATS[key] = (before, seat_key)
+                    _PASSIVE_SNAPSHOT_SEATS.move_to_end(key)
+                    while len(_PASSIVE_SNAPSHOT_SEATS) > 128:
+                        _PASSIVE_SNAPSHOT_SEATS.popitem(last=False)
+        if seat_key is None:
+            raise ValueError('handover-snapshot-invalid')
+        keys.add(seat_key)
+    return keys
+
+
 def _all_snapshots_uncached() -> list[dict]:
     try:
         with os.scandir(_snapshot_dir()) as entries:
@@ -679,11 +825,7 @@ def _all_snapshots_uncached() -> list[dict]:
         if path.is_symlink() or not path.is_file():
             raise ValueError("handover-snapshot-unsafe")
         data = read_snapshot(path.stem)
-        seat = data.get("seat") if isinstance(data, dict) else None
-        if (not isinstance(seat, dict) or not seat.get("key")
-                or seat.get("kind") not in {"pane", "native", "project"}
-                or not isinstance(data["from"].get("sid"), str) or not data["from"]["sid"]
-                or not _bindings_readable(data.get("bindings"))):
+        if not _snapshot_data_usable(data):
             raise ValueError("handover-snapshot-invalid")
         out.append(data)
     return out
@@ -711,7 +853,14 @@ def _peer_message():
     if spec is None or spec.loader is None:
         raise ImportError("peer-message-reader-unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Watch resolution calls this for each retained message. Cache code, never
+    # its state reads: every call below still opens the current arm and ledger.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 
@@ -774,10 +923,23 @@ def _role_transition_matches(identity: tuple, relation: dict) -> bool:
 
 
 def _current_roles(states: dict) -> dict:
+    eligible = {identity: _role_transition_matches(identity, relation)
+                for identity, relation in states.items()}
+    groups = {}
+    unhashable = object()
+    generation_key = {}
+    for identity, relation in states.items():
+        generation = relation.get('generation')
+        try:
+            hash(generation)
+        except TypeError:
+            generation = unhashable
+        generation_key[identity] = generation
+        if eligible[identity]:
+            groups.setdefault(generation, []).append(relation)
     return {identity: relation for identity, relation in states.items()
-            if not (_role_transition_matches(identity, relation)
-                    and any(_role_transition_matches(other_id, other) and _role_follows(relation, other)
-                            for other_id, other in states.items()))}
+            if not (eligible[identity] and any(_role_follows(relation, other)
+                    for other in groups.get(generation_key[identity], ())))}
 
 
 def _role_actor(relation: dict, harness: str, sid: str) -> bool:
@@ -861,8 +1023,7 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         if seat_key is not None:
             rows = _transition_rows(seat_key)
         else:
-            keys = {str(snapshot["seat"]["key"]) for snapshot in _all_snapshots()
-                    if isinstance(snapshot.get("seat"), dict) and snapshot["seat"].get("key")}
+            keys = _snapshot_seat_keys()
             legacy_marker = False
             for marker in markers.values():
                 key = marker.get("seat_key") if isinstance(marker, dict) else None
@@ -1575,8 +1736,9 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
             if not registered or jobs is None or not eligible_row(metadata):
                 current, current_harness, disposition = registered, original_harness, "self"
             else:
+                jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
                 current, current_harness, disposition = _lineage_holder(graph,
-                    (_jobs_key(jobs), *route_identity(metadata)), registered, original_harness)
+                    (jobs_key, *route_identity(metadata)), registered, original_harness)
         else:
             raise ValueError("unknown-recipient-question")
         if disposition == "unresolved":
@@ -1660,6 +1822,8 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     queried session therefore answers only while it is the end of that chain.
     Keep the selected holder's disposition: an unresolved explicit handoff
     cannot restore the registered parent or authorize the ambiguous holder."""
+    if key in graph.binding_conflicts:
+        return registered, harness, "unresolved"
     latest = graph.binding_rows.get(key)
     holder = registered
     if latest is not None:
@@ -1894,6 +2058,14 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
                 return scopes({}, False)
             graph = _pass_lineage_graph(context)
             observed["edges"] = tuple(getattr(graph, "edges", ()) or ())
+            vertex = (harness, session)
+            if (harness and not any(target == vertex for _origin, target in graph.seat_edges)
+                    and not any((name, target) == vertex for name, _origin, target in graph.edges)
+                    and not any((row.get("harness"), row.get("sid")) == vertex
+                                for row in graph.binding_rows.values())):
+                # Activity rows alone grant no inherited scope. Every confirmed
+                # successor or logical holder occurs in an edge or binding row.
+                return scopes({}, True)
             candidates = set(graph.ledger_keys)
             owed = {}
             complete = True
@@ -1985,6 +2157,9 @@ def _chain_to(rows: list, session: str, *, graph=None) -> list:
         return []
     while len(reverse.get(cursor, {})) == 1:
         origin = next(iter(reverse[cursor]))
+        if ((harness, origin) in graph.unresolved
+                or (harness, origin) in graph.seat_unresolved):
+            break
         if origin in seen:
             return []
         matches = reverse[cursor][origin]
@@ -2626,7 +2801,8 @@ def resume_line(seat, harness: str, sid: str) -> str:
                     continue
                 # A finished attempt is shown only while its notice is owed and its route is
                 # still open: a closed route has nothing to resume, whatever record lingers.
-                if not owns(meta, sid, jobs) or (status == "done" and not (
+                # An unreadable lineage (unknown) is not shown as this session's work yet.
+                if owns(meta, sid, jobs) is not True or (status == "done" and not (
                         _delivery_open(jobs, meta) and _route_open(jobs, meta))):
                     continue
                 shown.setdefault((jobs, route_identity(meta)[0]), meta.get("route_file", ""))

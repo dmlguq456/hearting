@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -138,40 +139,25 @@ def candidate_context(payload: dict[str, Any], current_cwd: str, sid: str) -> tu
             value.get("deferredCandidateReceipt"))
 
 
-def card_context(payload: dict[str, Any], current_cwd: str) -> tuple[str, Any]:
-    """Session card / tidy notice due at this prompt; needs no prompt text or candidate.
-
-    JSON mode hands back the consumption receipts instead of writing them, so
-    they are committed only after the outer hook's final output exists.
-    """
+def card_context(payload: dict[str, Any], current_cwd: str, *, startup=None, human=None,
+                 read_context=None) -> tuple[str, Any]:
+    """Render through the shared hook, committing receipts after the outer output."""
     sid = interaction_session_id(payload)
     if not sid or not SESSION_TIDY.is_file():
         return "", None
-    command = [sys.executable, str(SESSION_TIDY), "hook", "--harness", "codex",
-               "--event", "prompt", "--session-id", sid, "--cwd", current_cwd,
-               "--format", "json"]
-    transcript = nested_string(payload, "transcript_path", "transcriptPath")
-    if transcript:
-        command += ["--transcript", transcript]
+    contexts, deferred = [], []
     try:
-        result = subprocess.run(
-            command, cwd=str(ROOT), env=os.environ.copy(), text=True,
-            input=json.dumps({"prompt": nested_string(payload, "prompt")}),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+        import session_tidy
+        session_tidy.run_hook(
+            "codex", "prompt", sid, cwd=current_cwd,
+            transcript=nested_string(payload, "transcript_path", "transcriptPath"),
+            prompt_text=nested_string(payload, "prompt"), emit=contexts.append,
+            emit_human=human.append if human is not None else None,
+            startup_context=startup if startup is not None else {}, deferred=deferred,
+            read_context=read_context)
+    except Exception:
         return "", None
-    if result.returncode != 0:
-        return "", None
-    try:
-        value = json.loads(result.stdout)
-    except (TypeError, ValueError):
-        return "", None
-    if not isinstance(value, dict):
-        return "", None
-    context = value.get("additionalContext")
-    return (context if isinstance(context, str) else "",
-            value.get("deferredConsumed"))
+    return "\n".join(contexts), deferred
 
 
 def run_preflight_result(*args: str, timeout_seconds: float | None = None,
@@ -409,7 +395,7 @@ def sd111_first_prompt_sweep(sid: str) -> None:
             continue
 
 
-def native_queue_prompt_receipts(sid: str):
+def native_queue_prompt_receipts(sid: str, *, read_context=None):
     """Render this exact session's pending queue receipts on a real prompt."""
     if not sid:
         return [], []
@@ -419,7 +405,8 @@ def native_queue_prompt_receipts(sid: str):
     notice_context = NoticeReadContext()
     batches = []
     for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home())):
-        records, _ = sweep_deliver(root, "codex-native-queue", sid, notice_context=notice_context)
+        records, _ = sweep_deliver(root, "codex-native-queue", sid, notice_context=notice_context,
+                                  read_context=read_context)
         if records:
             batches.append((root, records))
     context = delivery_context(batches)
@@ -480,9 +467,25 @@ def retry_pending_peer(sid: str) -> None:
         spec = importlib.util.spec_from_file_location("_pending_peer", ROOT / "utilities" / "peer-message.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.retry_pending_codex({"harness": "codex", "session_id": sid})
+        # Bounded like the Claude prompt hook: unreached rows stay pending.
+        mod.retry_pending_codex({"harness": "codex", "session_id": sid},
+                                deadline=time.monotonic() + 2.5)
     except Exception:
         pass
+
+
+def prompt_probe_context(payload, current_cwd, sid, *, startup_due):
+    """Overlap independent reads, keeping their existing output/receipt order."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as probes:
+        evidence = (probes.submit(run_preflight, "local-evidence", current_cwd)
+                    if startup_due else None)
+        candidate = probes.submit(candidate_context, payload, current_cwd, sid)
+        briefing = probes.submit(run_preflight, "briefing", current_cwd)
+        budget = probes.submit(token_budget_context, current_cwd, sid)
+        candidate_text, candidate_deferred = candidate.result()
+        return ([evidence.result() if evidence is not None else "", candidate_text,
+                 briefing.result(), budget.result()], candidate_deferred)
 
 
 def main() -> int:
@@ -543,20 +546,28 @@ def main() -> int:
         )
         # Codex runs no Stop hook when a turn fails; this turn's own observer
         # continues it after a transient model-capacity failure.
-        try:
-            from codex_capacity_resume import launch as launch_capacity_resume
-            launch_capacity_resume(payload)
-        except Exception:
-            pass
+        # The observer already requires this exact native turn field. Avoid
+        # loading its supervisor graph for payloads on which launch is a no-op.
+        if first_string(payload, "turn_id"):
+            try:
+                from codex_capacity_resume import launch as launch_capacity_resume
+                launch_capacity_resume(payload)
+            except Exception:
+                pass
     sd111_first_prompt_sweep(sid)
 
     # The card hook runs first: it is where a cleared window's successor is recorded, and the
     # receipts a predecessor left for it are swept only once that is known.
-    card, card_deferred = card_context(payload, current_cwd)
+    startup = {"due": True}  # a failed card lookup must not suppress the evidence probe
+    human_notices = []
+    from peer_read_context import PeerReadContext
+    discovery_context = PeerReadContext(compact_lineage=True)
+    card, card_deferred = card_context(payload, current_cwd, startup=startup, human=human_notices,
+                                       read_context=discovery_context)
     batches = []
     ackable = set()
     try:
-        batches, parts = native_queue_prompt_receipts(sid)
+        batches, parts = native_queue_prompt_receipts(sid, read_context=discovery_context)
         from dispatch_session_sweep import retain_receiving_turn
         ackable = retain_receiving_turn(
             batches, interaction_sid,
@@ -574,15 +585,13 @@ def main() -> int:
         parts.append(peer.receiver_guidance(current_prompt,
             {"harness": "codex", "session_id": interaction_sid}, cwd=current_cwd))
     parts.append(card)
-    candidate, candidate_deferred = candidate_context(payload, current_cwd, sid)
-    parts.append(candidate)
-    parts.append(run_preflight("briefing", current_cwd))
-    # Phase 1 token self-regulation is transition-only. Normal, unknown,
-    # native-owned, and repeated bands return an empty string (zero injection).
-    parts.append(token_budget_context(current_cwd, sid))
+    probe_parts, candidate_deferred = prompt_probe_context(
+        payload, current_cwd, sid, startup_due=startup.get("due"))
+    parts.extend(probe_parts)
     if context_notice:
         parts.append(context_notice)
-    emit_context("UserPromptSubmit", parts, system_message=context_notice)
+    emit_context("UserPromptSubmit", parts,
+                 system_message="\n".join(human_notices + ([context_notice] if context_notice else [])))
     # Commit candidate/card consumption only after the context above actually
     # rendered, and before the existing native-queue ack does the same for its
     # records. A timeout or render error before this point leaves the same

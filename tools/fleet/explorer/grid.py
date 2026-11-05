@@ -2,14 +2,56 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from .output import cell_width as _text_width
 from .style import normalize_style
+
+_CHAR_WIDTH = {}                           # one character -> its cells; drawing asks per character
 
 
 def cell_width(char):
     if not char:
         return 0
-    from .output import cell_width as existing_width
-    return existing_width(char)
+    if len(char) == 1:
+        width = _CHAR_WIDTH.get(char)
+        if width is None:
+            width = _CHAR_WIDTH[char] = _text_width(char)
+        return width
+    return _text_width(char)
+
+
+_RUN_SAFE = {}                             # one character -> whether the terminal agrees on its cells
+_LIBC_WIDTH = []
+
+
+def _terminal_width(char):
+    """The C library's width of ``char`` (what ncurses uses), or None when it cannot be asked."""
+    if not _LIBC_WIDTH:
+        try:
+            import ctypes
+            import ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or None)
+            libc.wcwidth.argtypes = (ctypes.c_wchar,)
+            libc.wcwidth.restype = ctypes.c_int
+            _LIBC_WIDTH.append(libc.wcwidth)
+        except (OSError, AttributeError, TypeError):
+            _LIBC_WIDTH.append(None)
+    wcwidth = _LIBC_WIDTH[0]
+    return None if wcwidth is None else wcwidth(char)
+
+
+def run_safe(char):
+    """Whether ``char`` may share one write with its neighbours.
+
+    A run is placed by the terminal, which advances by its own width of each character. Where
+    that width differs from Fleet's (decomposed Hangul jamo, U+3248, LRM, DEL ...) the rest of
+    the run would land in other columns, so such a character is written in its own cell.
+    """
+    safe = _RUN_SAFE.get(char)
+    if safe is None:
+        width = cell_width(char) if len(char) == 1 else 0
+        safe = width >= 1 and (" " <= char <= "~" or _terminal_width(char) == width)
+        _RUN_SAFE[char] = safe
+    return safe
 
 
 def clip_cells(text, room):
@@ -44,7 +86,11 @@ class CellGrid:
 
     def __init__(self, cols, rows, background=None):
         self.cols, self.rows = max(0, int(cols)), max(0, int(rows))
-        self.cells = [[(" ", None, background) for _ in range(self.cols)] for _ in range(self.rows)]
+        # Cells are immutable tuples and writes replace them. Share the blank,
+        # keeping each row independent, instead of allocating a tuple per cell
+        # on every spinner tick (and repeatedly collecting the long-lived VM).
+        blank = (" ", None, background)
+        self.cells = [[blank] * self.cols for _ in range(self.rows)]
         self.hits = []
         self.trace = CellGrid.default_trace   # ownership checks in tests; None in production
         self.pane_clip = None                 # (first column, edge): pane text never crosses the edge
@@ -88,8 +134,15 @@ class CellGrid:
         style = normalize_style(key, tint)
         if self.trace is not None:
             self.trace.append(("fill", y, lo, hi, glyph))
-        for x in range(lo, hi):
-            self.cells[y][x] = (glyph, style[0], style[1])
+        if lo >= hi:
+            return
+        row = self.cells[y]
+        cell = (glyph, style[0], style[1])
+        if type(row) is list:
+            row[lo:hi] = [cell] * (hi - lo)
+        else:
+            for x in range(lo, hi):
+                row[x] = cell
 
     def mark_moved(self):
         """Tell a recording test that cells were copied wholesale (their owners no longer apply)."""

@@ -4,11 +4,15 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,12 +21,48 @@ sys.path.insert(0, str(ROOT / "tools/install"))
 import session_tidy
 
 spec = importlib.util.spec_from_file_location(
-    "codex_sessionstart", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
+    "codex_prompt_history", ROOT / "adapters/codex/hooks/userprompt-lifecycle.py")
 codex = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = codex
 spec.loader.exec_module(codex)
 
 
 class HistoryChannelTests(unittest.TestCase):
+    def test_independent_probes_overlap_but_context_and_receipt_keep_their_order(self):
+        together = threading.Barrier(4, timeout=3)
+        receipt = {"candidate": "pending until output"}
+        def preflight(kind, _cwd):
+            together.wait()
+            return kind
+        def candidate(*_args):
+            together.wait()
+            return "candidate", receipt
+        def budget(*_args):
+            together.wait()
+            return "budget"
+        with patch.object(codex, "run_preflight", side_effect=preflight), \
+             patch.object(codex, "candidate_context", side_effect=candidate), \
+             patch.object(codex, "token_budget_context", side_effect=budget):
+            parts, deferred = codex.prompt_probe_context({}, "/fixture", "sid", startup_due=True)
+        self.assertEqual(parts, ["local-evidence", "candidate", "briefing", "budget"])
+        self.assertIs(deferred, receipt)
+
+    def test_notice_without_a_confirmed_incoming_edge_skips_full_history(self):
+        import dispatch_seat_handover as handover
+        for harness in ("claude", "codex", "opencode"):
+            seat = session_tidy.Seat("pane", "key", "pane", harness)
+            for edges, unresolved in (((), frozenset()),
+                    (((harness, "old", "new"), (harness, "old", "fork")),
+                     frozenset({(harness, "old")}))):
+                graph = SimpleNamespace(edges=edges, unresolved=unresolved)
+                with patch.object(handover, "_pass_lineage_graph", return_value=graph) as observe, \
+                     patch.object(session_tidy, "_lineage_history_index",
+                                  side_effect=AssertionError("full activity history")):
+                    self.assertEqual(session_tidy.build_human_history_notice(
+                        seat, harness, "new", env={}), "")
+                self.assertTrue(observe.call_args.args[0].compact_lineage)
+
+    @patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_person_notice_uses_confirmed_predecessor_and_omits_path(self):
         lineage = [{"harness": "claude", "sid": "new", "relation": "confirmed",
                     "predecessor": {"harness": "claude", "sid": "old"}},
@@ -48,17 +88,53 @@ class HistoryChannelTests(unittest.TestCase):
     def test_codex_places_notice_outside_additional_context(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            codex.emit_context("SessionStart", ["MODEL-CARD"], "PERSON-NOTICE")
+            codex.emit_context("UserPromptSubmit", ["MODEL-CARD"], system_message="PERSON-NOTICE")
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "MODEL-CARD")
         self.assertEqual(payload["systemMessage"], "PERSON-NOTICE")
 
-    def test_codex_card_bridge_parses_separate_fields(self):
-        payload = {"additionalContext": "MODEL-CARD", "humanNotice": "PERSON-NOTICE"}
-        result = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
-        with patch.object(codex.subprocess, "run", return_value=result):
-            card, human, deferred = codex.card_context({"session_id": "sid"}, "/fixture")
-        self.assertEqual((card, human, deferred), ("MODEL-CARD", "PERSON-NOTICE", None))
+    def test_codex_prompt_card_bridge_keeps_separate_fields(self):
+        human, startup = [], {}
+        receipt = {"kind": "startup-context", "receipt": "fixture"}
+        def shared_hook(*args, **kwargs):
+            self.assertEqual(args, ("codex", "prompt", "sid"))
+            kwargs["emit"]("MODEL-CARD")
+            kwargs["emit_human"]("PERSON-NOTICE")
+            kwargs["startup_context"]["due"] = True
+            kwargs["deferred"].append(receipt)
+        with patch.object(session_tidy, "run_hook", side_effect=shared_hook):
+            card, deferred = codex.card_context({"session_id": "sid"}, "/fixture",
+                                                 human=human, startup=startup)
+        self.assertEqual((card, human, deferred), ("MODEL-CARD", ["PERSON-NOTICE"], [receipt]))
+        self.assertTrue(startup["due"])
+
+    def test_slow_claude_evidence_probe_does_not_lose_the_prepared_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hooks = root / "hooks"
+            utilities = root / "utilities"
+            hooks.mkdir(); utilities.mkdir()
+            shutil.copyfile(ROOT / "hooks/session-card-inject.sh", hooks / "card.sh")
+            (utilities / "session_tidy.py").write_text(
+                'HUMAN_NOTICE_BUDGET_SECONDS = 2.0\n'
+                'def run_hook(*a, **kw):\n'
+                '    kw["emit"]("PREPARED-CARD")\n'
+                '    kw["startup_context"]["due"] = True\n'
+                'def apply_deferred(entries): pass\n')
+            probe = hooks / "local-evidence-inject.sh"
+            probe.write_text('#!/bin/sh\nexec python3 -c "import time; time.sleep(6)"\n')
+            probe.chmod(0o755)
+            env = {**os.environ, "AGENT_HOME": str(root)}
+            for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                        "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH", "MEM_DISTILL"):
+                env.pop(key, None)
+            result = subprocess.run(["bash", str(hooks / "card.sh")], env=env,
+                input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "fixture",
+                                  "cwd": directory, "prompt": "hi"}),
+                text=True, capture_output=True, timeout=2.5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+                             "PREPARED-CARD")
 
     def test_human_only_lookup_leaves_ledger_and_receipts_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +154,34 @@ class HistoryChannelTests(unittest.TestCase):
                 self.assertEqual(ledger.read_bytes(), before)
                 self.assertFalse(session_tidy._consumed_path(seat).exists())
 
+    def test_a_late_start_leaves_out_only_the_person_notice(self):
+        # HOOK-LATENCY: the notice reads the whole shared lineage (about half of
+        # a 1 s start). Past the hook's deadline it is left out; the start is
+        # still recorded and the card path runs as before.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            seat = session_tidy.Seat("pane", "late-start-seat", "pane", "claude")
+            for deadline, expected in ((0.0, []), (None, ["PERSON-NOTICE"]),
+                                       (float("inf"), ["PERSON-NOTICE"])):
+                with self.subTest(deadline=deadline), \
+                     patch.dict("os.environ", {"XDG_STATE_HOME": str(state)}, clear=False), \
+                     patch.object(session_tidy, "resolve_seat", return_value=seat), \
+                     patch.object(session_tidy, "build_human_history_notice",
+                                  return_value="PERSON-NOTICE") as notice:
+                    emitted = []
+                    session_tidy.run_hook("claude", "start", f"sid-{deadline}", source="startup",
+                                          env={}, emit_human=emitted.append, deferred=[],
+                                          human_deadline=deadline)
+                    self.assertEqual(emitted, expected)
+                    self.assertEqual(notice.called, bool(expected))
+                    ledger = session_tidy._ledger_path(seat).read_text(encoding="utf-8")
+                    self.assertIn(f"sid-{deadline}", ledger)
+
+    def test_the_claude_card_hook_bounds_the_notice_only_for_a_tidy_that_knows_it(self):
+        hook = (ROOT / "hooks" / "session-card-inject.sh").read_text(encoding="utf-8")
+        self.assertIn('getattr(session_tidy, "HUMAN_NOTICE_BUDGET_SECONDS", None)', hook)
+        self.assertEqual(session_tidy.HUMAN_NOTICE_BUDGET_SECONDS, 2.0)
+
     def test_opencode_history_notice_lookup_settles_per_session(self):
         script = r'''
 import { readFileSync } from "node:fs"
@@ -92,12 +196,13 @@ const fakeSpawnSync = (command, args, options) => {
     const notice = sid === "late" && count === 2 ? "NOTICE-APPEARED" : ""
     return { status: 0, stdout: JSON.stringify({ humanNotice: notice }), stderr: "" }
   }
-  return childProcess.spawnSync(command, args, options)
+  return { status: 0, stdout: "", stderr: "" }
 }
 globalThis.__historyNoticeFakeSpawnSync = fakeSpawnSync
+globalThis.__historyNoticeFakeSpawn = () => ({ on() {}, unref() {}, stdin: { end() {} } })
 let source = readFileSync("adapters/opencode/plugins/hearting-guards.js", "utf8")
 source = source.replace('import { spawnSync, spawn } from "node:child_process"',
-  'import childProcess from "node:child_process"\nconst spawn = childProcess.spawn\nconst spawnSync = globalThis.__historyNoticeFakeSpawnSync')
+  'const spawn = globalThis.__historyNoticeFakeSpawn\nconst spawnSync = globalThis.__historyNoticeFakeSpawnSync')
 source = source.replace('const pluginDir = path.dirname(fileURLToPath(import.meta.url))',
   'const pluginDir = path.join(process.cwd(), "adapters/opencode/plugins")')
 const { AgentHarnessGuards } = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"))

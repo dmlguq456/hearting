@@ -1093,7 +1093,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'This does not replace Codex `/statusline` for model/context/token/session fields' adapters/codex/README.md \
     || ! grep -Fq 'Codex has its own `/statusline` configuration for the TUI footer.' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh ui-info' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh ui-info' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'statusline_custom_dynamic_fields=unsupported' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'autopilot_auto_routing=instruction-guided-not-claude-slash-router' adapters/codex/bin/preflight.sh \
@@ -1113,7 +1112,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'git dirty/worktree/dead-branch risks' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/README.md \
     || ! grep -Fq 'git dirty/worktree/dead-branch risk fields' adapters/codex/ADAPTATION.md \
-    || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh subagent-info --check' adapters/codex/ADAPTATION.md \
     || ! grep -Fq 'do not duplicate Codex-native footer' adapters/codex/ADAPTATION.md; then
@@ -1165,8 +1163,8 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'parent_completion_harvested' adapters/codex/bin/dispatch-harvest.py \
     || grep -Fq 'register_parent_stop_attempt(args, jobs)' adapters/codex/bin/dispatch-headless.py \
     || grep -Fq 'sys.stdout.write(result.stdout)' adapters/codex/hooks/sessionend-lifecycle.py \
-    || ! grep -Fq 'run_preflight("briefing"' adapters/codex/hooks/userprompt-lifecycle.py \
-    || ! grep -Fq 'token_budget_context(current_cwd, sid)' adapters/codex/hooks/userprompt-lifecycle.py \
+    || ! grep -Fq 'probes.submit(run_preflight, "briefing", current_cwd)' adapters/codex/hooks/userprompt-lifecycle.py \
+    || ! grep -Fq 'probes.submit(token_budget_context, current_cwd, sid)' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'record_accounting(sid, event, adapter="codex")' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'timeout_seconds=token_budget_timeout()' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'CODEX_TOKEN_BUDGET_HOOK_TIMEOUT_SECONDS' adapters/codex/hooks/userprompt-lifecycle.py \
@@ -1280,7 +1278,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'verification-runner' capabilities/code-test.md \
     || ! grep -Fq 'test_logs/' adapters/codex/skills/code-test/SKILL.md \
     || ! grep -Fq '`code-report` alone updates `pipeline_summary.md`' adapters/codex/skills/code-test/SKILL.md \
-    || ! grep -Fq 'verification-runner' adapters/codex/plugins/hearting-codex/skills/code-test/SKILL.md; then
+    || ! grep -Fq 'verification-runner' adapters/codex/skills/code-test/SKILL.md; then
     fail_msg "code-test portable spec and Codex projections must describe the verification-runner contract"
   fi
   if ! grep -Fq 'compat_reference=not-projected' adapters/codex/bin/capability-map.sh \
@@ -1721,7 +1719,7 @@ check_codex_native_skill_projection() {
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
       if ! grep -Fq 'Present the intent card' "$skill" \
-        || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+        || ! grep -Fq 'Registered owners read only' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
       fi
@@ -1736,7 +1734,7 @@ check_codex_native_skill_projection() {
     fi
   done
   if ! grep -Fq 'Present the intent card' adapters/codex/skills/autopilot-code/SKILL.md \
-    || ! grep -Fq 'dispatch-depth-1 owner reads it' adapters/codex/skills/autopilot-code/SKILL.md \
+    || ! grep -Fq 'Registered owners read only' adapters/codex/skills/autopilot-code/SKILL.md \
     || grep -Fq '## Projected Portable Details' adapters/codex/skills/autopilot-code/SKILL.md; then
     fail_msg "Codex autopilot-code entry projection must stay compact and delegate contract reading"
   fi
@@ -1839,7 +1837,7 @@ check_codex_native_plugin_entry_skill() {
     return
   fi
   if ! grep -Fq 'Present the intent card' "$skill" \
-    || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+    || ! grep -Fq 'Registered owners read only' "$skill" \
     || grep -Fq '## Projected Portable Details' "$skill"; then
     fail_msg "Codex native plugin autopilot-code entry projection must stay compact"
   fi
@@ -2690,7 +2688,7 @@ check_opencode_native_skill_projection() {
         fail_msg "$skill must keep entry-router procedure detail out of the dispatch-depth-0 projection"
       fi
       if ! grep -Fq 'Present the intent card' "$skill" \
-        || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+        || ! grep -Fq 'Registered owners read only' "$skill" \
         || ! grep -Fq 'stage workers read only their assigned contracts' "$skill"; then
         fail_msg "$skill must project the confirmation and owner/worker context boundary"
       fi
@@ -3184,7 +3182,7 @@ check_claude_tool_projection() {
     rel=${p#tools/}
     adapter_p=adapters/claude/tools/$rel
     case "$rel" in
-      generate.py|harness_manifest.py|sync-skill-invocation-policy.py|sync-entry-skill-layer.py|entry-skill-layer.test.py|generated-projections.test.sh|native-skill-discovery.test.py|opencode-text-request.test.py|sync-missing-projections.sh|sync-missing-projections.py|context-footprint-baseline.json|surface-budget.json|install/projection-completeness.test.sh|install/test_compute_hosts_launcher.py|release|release/*|render-landing.py|render-fleet-svg.py|lab-config-provenance.py|lab_config_provenance.test.py|artifact-producer-canary.py|artifact-w8-handoff.py|artifact_w8_handoff.test.py|artifact-delta-census.py|artifact_delta_census.test.py|git-hooks|git-hooks/*)
+      generate.py|harness_manifest.py|sync-skill-invocation-policy.py|sync-entry-skill-layer.py|entry-skill-layer.test.py|generated-projections.test.sh|native-skill-discovery.test.py|opencode-text-request.test.py|sync-missing-projections.sh|sync-missing-projections.py|context-footprint-baseline.json|surface-budget.json|install/projection-completeness.test.sh|install/test_compute_hosts_launcher.py|release|release/*|render-landing.py|render-fleet-svg.py|lab-config-provenance.py|lab_config_provenance.test.py|artifact-w8-handoff.py|artifact_w8_handoff.test.py|git-hooks|git-hooks/*)
         # Harness-development, profile acceptance, repository release, Git
         # maintainer hooks, and GitHub Pages docs automation tools are
         # intentionally not runtime projections.
@@ -3436,11 +3434,9 @@ check_adaptation_inventory_native_surfaces() {
   fi
   if [ ! -x adapters/codex/bin/apply-tui-config.sh ] \
     || [ ! -f adapters/codex/config/tui-statusline.toml ] \
-    || ! grep -Fq 'status_line = ["thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit", "thread-id"]' adapters/codex/config/tui-statusline.toml \
+    || ! grep -Fq 'status_line = ["thread-id", "thread-title", "git-branch", "context-used", "model-with-reasoning", "five-hour-limit", "weekly-limit"]' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'status_line_use_colors = true' adapters/codex/config/tui-statusline.toml \
     || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'codex_setting/codex-config/tui-statusline.toml' adapters/codex/README.md \
-    || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' adapters/codex/README.md \
     || ! grep -Fq 'preflight.sh tui-config' core/ADAPTATION_INVENTORY.md \
     || ! grep -Fq 'statusline_fragment=codex_setting/codex-config/tui-statusline.toml' adapters/codex/bin/preflight.sh \
@@ -3991,8 +3987,10 @@ check_language_neutrality_contract() {
     fail_msg "headless worker prompts must not impose a fixed report locale"
   fi
 
-  if grep -Fq 'def auto_recall' tools/memory/mem.py \
-    || grep -Fq '"--auto"' tools/memory/mem.py \
+  # mem.py and the modules it is split into (tools/memory/mem_*.py, "Split out of `mem.py`").
+  mem_sources="tools/memory/mem.py $(grep -l 'Split out of `mem.py`' tools/memory/mem_*.py 2>/dev/null | tr '\n' ' ')"
+  if cat $mem_sources | grep -Fq 'def auto_recall' \
+    || cat $mem_sources | grep -Fq '"--auto"' \
     || grep -Fq 'run_preflight("recall"' adapters/codex/hooks/userprompt-lifecycle.py \
     || grep -Fq 'collectPreflight("recall"' adapters/opencode/plugins/hearting-guards.js \
     || ! grep -Fq 'mem-recall-inject.sh' adapters/claude/settings.json \
@@ -4005,9 +4003,9 @@ check_language_neutrality_contract() {
     || ! grep -Fq 'Memory follows D-40: the acting agent decides storing, retrieval, promotion, merge, and pruning.' core/DESIGN_PRINCIPLES.md \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/opencode/bin/preflight.sh \
-    || ! grep -Fq 'CANDIDATE_MAX_RESULTS = 6' tools/memory/mem.py \
-    || ! grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 2400' tools/memory/mem.py \
-    || ! grep -Fq 'records_capsule_fts' tools/memory/mem.py; then
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 6' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 1200' \
+    || ! cat $mem_sources | grep -Fq 'records_capsule_fts'; then
     fail_msg "memory semantics must remain agent-owned while capsule candidates and same-turn opportunity are enforced mechanically"
   fi
 

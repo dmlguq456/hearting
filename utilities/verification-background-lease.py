@@ -591,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         # A stop delivered between Popen's return and the assignment must not
         # lose the child identity. Defer only that window; all setup after it
         # is already inside this lifetime's cleanup boundary.
+        # Not passed to detached_lifetime.bind: this lease is a subreaper that ends
+        # its whole scope itself, and a test reaper started here would sit inside it.
         process = subprocess.Popen(command, start_new_session=True,
                                    env={**command_env, SCOPE_ENV: scope})
         _LAUNCHING = False

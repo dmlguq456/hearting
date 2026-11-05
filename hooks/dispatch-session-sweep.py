@@ -70,9 +70,10 @@ def _pass_start_ns() -> int:
 
 
 def main() -> int:
-    # One pass-wide deadline for discovery, claiming, rendering and ACK inside
-    # the configured 10 s prompt hook; the rest is the render/ACK reserve. It is
-    # derived from the pre-import start so import time is charged too.
+    # One pass-wide deadline for discovery and claiming inside the configured
+    # 10 s prompt hook; the rest is the reserve for rendering and ACK of what
+    # the pass holds. It is derived from the pre-import start so import time is
+    # charged too.
     deadline_ns = _pass_start_ns() + int(ACTION_BUDGET_SECONDS * 1_000_000_000)
     try:
         payload = json.load(sys.stdin)

@@ -32,7 +32,7 @@ def route_extension(key, value):
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
     if key == "owner_gauge":
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
-    if key == "current":
+    if key in ("current", "owner_waits"):
         return type(value) is bool
     if key == "worker_context_index":
         return type(value) is int and value >= 0
@@ -142,7 +142,8 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
-            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current", "worker_context_index"):
+            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
+                                              "worker_context_index", "owner_waits"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue
@@ -409,7 +410,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         hosts = [{"mark": "⌂", "name": "gpu-a"},
-                 {"mark": "◇", "name": "cnn"}, {"mark": "◇", "name": "gpu-b"},
+                 {"mark": "◇", "name": "gpu"}, {"mark": "◇", "name": "gpu-b"},
                  {"mark": "◇", "name": "gpu-legacy"}, {"mark": "◇", "name": "gpu-c"}]
         states = ["working"] * 15 + ["idle"] * 2 + ["blocked"]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
@@ -470,7 +471,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         host_name = "trainer-west-gpu-node-01"
-        hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "cnn"},
+        hosts = [{"mark": "⌂", "name": host_name}, {"mark": "◇", "name": "gpu"},
                  {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
                  {"mark": "◇", "name": "gpu-c"}]
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
@@ -602,7 +603,7 @@ class CensusHeaderTests(unittest.TestCase):
         from tools.fleet.explorer.state import NavState
 
         version, freshness = "v3.50.3-20-gad247e2界6", "02:38"
-        hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "cnn"},
+        hosts = [{"mark": "⌂", "name": "moving界4"}, {"mark": "◇", "name": "gpu"},
                  {"mark": "◇", "name": "gpu-b"}, {"mark": "◇", "name": "gpu-legacy"},
                  {"mark": "◇", "name": "gpu-c"}]
         vm = self._header_vm(session_states=["working"] * 15 + ["idle"] * 2 + ["blocked"],

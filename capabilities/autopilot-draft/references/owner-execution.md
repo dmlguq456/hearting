@@ -1,5 +1,7 @@
 # autopilot-draft
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Document-drafting entrypoint for paper, presentation, and prose work. Close the `analyze → strategy → strategy-refine → draft → draft-refine → finalize` pipeline. This file defines routing and stage contracts; load a reference only when its detailed procedure is needed.
 
 ## First Principle: the Draft Is an Edit Plan
@@ -49,7 +51,7 @@ Resolve `<artifact-root>`: CONVENTIONS §5.1 (`<agent-home>/core/CONVENTIONS.md#
 - `--from <stage>`: resume an existing artifact identified by path or fuzzy short name. Restore mode, intensity, discovered inputs, and `user_refine` from `pipeline_state.yaml`; explicit CLI flags take precedence.
 - After removing flags, treat the remaining text as the task description. Discover inputs from `<artifact-root>/{analysis_project,research}/`; there is no `--refs` flag.
 
-Read `invocation-and-args.md` for complete parsing and resolution rules.
+Only when a receipt or Route step names it, read `invocation-and-args.md` for complete parsing and resolution rules.
 
 ## Pipeline
 
@@ -72,7 +74,7 @@ The Step 4 drafting prompt embeds tone propagation, mode-specific conventions, d
 
 ## Safety Essentials
 
-Read `summary-and-safety.md` for the complete rules. Always enforce these invariants:
+Only when a receipt or Route step names it, read `summary-and-safety.md` for the complete rules. Always enforce these invariants:
 
 - Do not fabricate citations, data, or results. Cite only materials present in `{discovered_inputs}`; mark uncertainty or missing content as `[TODO: ...]`.
 - Treat the output as a working cheatsheet, not a final document or an already-applied source change.
@@ -82,16 +84,16 @@ Read `summary-and-safety.md` for the complete rules. Always enforce these invari
 
 ## Reference Index
 
-| File | When to load (mandatory) | Content |
+| File | Load policy | Content |
 |---|---|---|
-| `invocation-and-args.md` | When parsing arguments, defaults, resume state, or artifact structure | Mode inference, input discovery, intensity-derived rigor, `--user-refine`, `--from`, format-spec resolution, decision defaults, `pipeline_state.yaml`, input-source convention, artifact structure |
-| `pipeline-steps.md` | When running preflight or Steps 0, 1, 2, 4, 4b, or 5.5 | Orchestration, figure discovery and extraction, image-quality policy, path convention, drafting prompt, optional language mirror, factual detector, editorial polish |
-| `review-and-qa.md` | When running Step 3 or Step 5 | Rigor-scaled reviewer axes, domain/content, methodology/writing, style, cross-reference/coverage, quality review, and fact-checking prompts |
-| `summary-and-safety.md` | At Step 6 or another terminal state | Pipeline-summary template, process log, artifacts, decision points, and complete safety rules |
-| `convention-common.md` | At Step 4 for every output form | Shared drafting rules |
-| `convention-paper.md` | At Step 4 for paper mode | Academic and paste-ready paper contract |
-| `convention-presentation.md` | At Step 4 for presentation mode | Slide drafting contract |
-| `convention-doc.md` | At Step 4 for document mode | Word, HWP, and Markdown prose contract |
+| `invocation-and-args.md` | Only when a receipt or Route step names it | Mode inference, input discovery, intensity-derived rigor, `--user-refine`, `--from`, format-spec resolution, decision defaults, `pipeline_state.yaml`, input-source convention, artifact structure |
+| `pipeline-steps.md` | Only when a receipt or Route step names it | Orchestration, figure discovery and extraction, image-quality policy, path convention, drafting prompt, optional language mirror, factual detector, editorial polish |
+| `review-and-qa.md` | Only when a receipt or Route step names it | Rigor-scaled reviewer axes, domain/content, methodology/writing, style, cross-reference/coverage, quality review, and fact-checking prompts |
+| `summary-and-safety.md` | Only when a receipt or Route step names it | Pipeline-summary template, process log, artifacts, decision points, and complete safety rules |
+| `convention-common.md` | Only when a receipt or Route step names it | Shared drafting rules |
+| `convention-paper.md` | Only when a receipt or Route step names it | Academic and paste-ready paper contract |
+| `convention-presentation.md` | Only when a receipt or Route step names it | Slide drafting contract |
+| `convention-doc.md` | Only when a receipt or Route step names it | Word, HWP, and Markdown prose contract |
 
 ## Task
 

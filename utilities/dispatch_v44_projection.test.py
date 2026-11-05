@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import fields
 import importlib.util
 import json
 import os
@@ -57,8 +56,18 @@ WRAPPERS = {
 }
 
 
+def _split_sources(path: Path):
+    """`path` and the parts it is split into (capability-route.py -> capability_route_*.py)."""
+    parts = sorted(path.parent.glob(path.stem.replace("-", "_") + "_*.py"))
+    return [path, *[part for part in parts
+                    if f"Split out of `{path.name}`" in part.read_text(encoding="utf-8")]]
+
+
 def _scope(path: Path, function: str | None = None, class_name: str | None = None):
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = ast.Module(body=[node for source in _split_sources(path)
+                            for node in ast.parse(source.read_text(encoding="utf-8"),
+                                                  filename=str(source)).body],
+                      type_ignores=[])
     nodes: list[ast.AST] = list(tree.body)
     if class_name is not None:
         owner = next(
@@ -340,13 +349,6 @@ class DispatchV44ProjectionTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(
-            {field.name for field in fields(CONTRACT.RecoveryRetryClaim)},
-            {
-                "recovery_id", "original_attempt_id", "retry_ordinal",
-                "retry_attempt_id", "state", "reason", "start_permitted",
-            },
-        )
         self.assertTrue({
             "recovery_id", "retry_ordinal", "retry_attempt_id", "retry_claimed_at",
             "cancellation_quiescence_receipt", "cancellation_receipt_digest",

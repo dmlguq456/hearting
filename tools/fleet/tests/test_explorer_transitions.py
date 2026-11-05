@@ -1,15 +1,31 @@
 """Pure r13 reducer contract checks."""
+import os
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
 
 from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.input import ExplorerInput
 from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
 from tools.fleet.tests.test_explorer_peers import SEPARATOR, _arrow_glyph_delta, _card_boxes
+import sys  # noqa: E402
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "explorer"
+# transitions.json holds frames captured from a Korean screen; screen words now come from
+# tools/i18n/messages.json, so the replay declares Korean to compare them cell for cell.
+_KOREAN = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+
+
+def setUpModule():
+    _KOREAN.start()
+
+
+def tearDownModule():
+    _KOREAN.stop()
 
 
 def _expected_nav(st):
@@ -331,7 +347,7 @@ class CoreTransitions(unittest.TestCase):
         fake_curses = SimpleNamespace(KEY_MOUSE=999, BUTTON4_PRESSED=64,
                                       BUTTON5_PRESSED=128, BUTTON1_PRESSED=2,
                                       BUTTON1_CLICKED=4, BUTTON1_RELEASED=8)
-        with mock.patch.object(render, "curses", fake_curses), \
+        with patch_split(render, "curses", fake_curses), \
                 mock.patch.object(render, "_EXPLORER_STATE", state), \
                 mock.patch.object(render, "_EXPLORER_FRAME", frame), \
                 mock.patch.object(render, "_EXPLORER_MODEL", vm), \
@@ -486,7 +502,7 @@ class ModelTransitions(unittest.TestCase):
         self.assertEqual(effects, ())
 
 
-E8_SID = "5ed20fe8-499b-4490-a87f-f492612948cf"
+E8_SID = "10000086-0000-4000-8000-000000000095"
 
 
 def _e8_view_model():
@@ -501,7 +517,7 @@ def _e8_view_model():
         {"harness": "claude", "sid": "bbf14dfc", "at": "10-28 08:40", "kind": "new",
          "connection": "new session · no handover record", "note": None, "card": True, "detail": True,
          "title": "before the clear"},
-        {"harness": "claude", "sid": "5ed20fe8", "at": "now", "kind": "new",
+        {"harness": "claude", "sid": "10000086", "at": "now", "kind": "new",
          "connection": "clear · new session took over", "note": None, "card": False, "detail": True,
          "title": "current generation"}])
     data["seats"] = list(data["seats"]) + [
@@ -638,7 +654,7 @@ class SessionOpenPath(unittest.TestCase):
                                       BUTTON1_PRESSED=2, BUTTON1_CLICKED=4, BUTTON1_RELEASED=8)
         model = SimpleNamespace(ordering={"repo_by_tag": self.ordering["repo_by_tag"]})
         current = {"value": True}
-        with mock.patch.object(render, "curses", fake_curses), \
+        with patch_split(render, "curses", fake_curses), \
                 mock.patch.object(render, "_EXPLORER_STATE", NavState(scope="repo:" + self.repo)), \
                 mock.patch.object(render, "_EXPLORER_FRAME", frame), \
                 mock.patch.object(render, "_EXPLORER_MODEL", model), \

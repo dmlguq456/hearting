@@ -384,6 +384,27 @@ def _wrap_columns(col_gaps, box_width, use):
     return [[index] for index in range(count)]
 
 
+def _fit_box_width(desired, use, widest, column_gap=2, floor=36):
+    """Card width that lets as many columns share a line as the pane allows.
+
+    A card is as wide as its title wants (``desired``). When the pane would then hold fewer
+    columns than the repository has, the cards narrow, down to ``floor`` (to ``28`` when that
+    is the only way to put two side by side), until one more column fits. A line of ``n``
+    columns needs ``n * (width + column_gap) + 2`` cells.
+    """
+    def columns_at(width):
+        return max(1, (use - 2) // (width + column_gap))
+
+    current = min(widest, columns_at(desired))
+    if current >= widest or desired <= 28:
+        return desired
+    for lowest in (floor, 28):
+        target = min(widest, columns_at(min(desired, lowest)))
+        if target > current and (lowest == floor or current < 2):
+            return min(desired, (use - 2) // target - column_gap)
+    return desired
+
+
 def draw_peers(grid, vm, state, x=34, y=3):
     """Draw data-sized repository frames, session cards and the complete link list.
 
@@ -404,6 +425,9 @@ def draw_peers(grid, vm, state, x=34, y=3):
                    for column in columns for tag in column}
     title_width = max((cell_width(str(s.get("title") or "·")) for s in session_by_tag.values()), default=0)
     box_width = max(28, min(44, title_width + 4))
+    widest = max((len([col for col in columns if any(str(tag) in session_by_tag for tag in col)])
+                  for _, columns in nodes), default=1)
+    box_width = _fit_box_width(box_width, use, max(1, widest))
     frame_gap, column_gap, lane_gap, stack_gap = 3, 2, 6, 2
     owners_of = {tag: tuple(card.get("owners", ())) for tag, card in cards.items()}
     extra_of = {tag: _extra_lines(item, questions) for tag, item in session_by_tag.items()}

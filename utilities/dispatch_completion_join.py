@@ -425,6 +425,19 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
     return pending_delivery.record_path(root, metadata["parent_sid"], record["delivery_id"])
 
 
+def unpersistable_recipient_kind(metadata: dict) -> str:
+    """The recorded recipient kind of a delivery-intent row that no record can ever take.
+
+    ``dispatch_pending_delivery.create`` refuses a kind outside ``RECIPIENT_KINDS``
+    (``recipient-kind-unknown``) on every call, and a stamped kind never changes.
+    Empty when the row has no intent or its kind is persistable.
+    """
+    kind = metadata.get("delivery_recipient_kind", "")
+    if metadata.get("delivery_intent") != "1" or not kind or kind in pending_delivery.RECIPIENT_KINDS:
+        return ""
+    return kind
+
+
 def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None:
     """SD-111 P2 trigger 1 -- shared helper. Call once, right after a
     lock-releasing terminal close (`close_attempt_row`, `close_attempt_row_if`,
@@ -468,6 +481,11 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
             settlement = settle_owner_completion(jobs, row.status, row.metadata)
             if settlement is not None and settlement.result != "completed":
                 return None
+        if unpersistable_recipient_kind(row.metadata):
+            # No record can ever take this kind; skip the claim work the notice
+            # would gate and keep the existing refusal trace below.
+            raise pending_delivery.PendingDeliveryError(
+                "delivery-persistence-refused", "recipient-kind-unknown")
         # A resultless-death recovery claim is durable controller work. Publish
         # it before the immutable terminal notice becomes visible to carriers;
         # the carrier still waits for a launched successor or a settled failure.
@@ -687,7 +705,8 @@ def expire_pending_for_dead_recipient(
 
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                                time_budget_s: float | None = None,
-                               start_after: str | None = None) -> dict[str, int]:
+                               start_after: str | None = None,
+                               registry_start: int | None = None) -> dict[str, int]:
     """SD-111 P2 trigger 2 + the single declared expiry actor (§2-b-2/§2-c).
 
     Meant to run on the same bounded cadence as ``dispatch-registry.py
@@ -725,10 +744,22 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     end the returned ``cursor`` is ``None``, otherwise it is the last processed
     relative path.
 
-    A bounded registry pass that stops early never reaches the record loop: a
-    partial ``rows_by_attempt`` is not a valid authority view and must not
-    materialize or expire anything. Retention pruning still runs because it
-    reads the records alone.
+    A bounded pass whose backstops stop early does not reach the record loop
+    in that pass; the record loop starts once the backstops have reached the
+    last row. Retention pruning still runs because it reads the records alone.
+
+    The per-row materialize backstops are the expensive part of the registry
+    pass, so a bounded pass resumes them: ``registry_start`` is the row index
+    to continue from, and a pass cut off by its budget returns the next index
+    as ``registry_cursor``. Once they reach the last row, ``registry_cursor``
+    is the row count until the record walk finishes, so the next pass goes on
+    with the records. The authority view is still parsed from every row on
+    every pass. A pass that resumes the record walk (``start_after``) skips
+    the backstops, which finished earlier in the same cycle. Without the
+    resume a pass that could not reach the last row restarted at row 0
+    forever: on a 10k-row registry the runner re-read the same ~150 rows on
+    every pass and never reached the record walk or the duties after it
+    (2026-11-03).
     """
 
     try:
@@ -741,6 +772,11 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     except (TypeError, ValueError):
         deadline = None
     start_after = start_after if isinstance(start_after, str) and start_after else None
+    try:
+        registry_start = (None if registry_start is None or isinstance(registry_start, bool)
+                          else max(0, int(registry_start)))
+    except (TypeError, ValueError):
+        registry_start = None
 
     def out_of_budget():
         return deadline is not None and time.monotonic() >= deadline
@@ -751,33 +787,56 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
               "pruned_records": 0, "pruned_locks": 0, "prune_skipped": 0}
     counters = {"rows_read": 0, "records_read": 0, "budget_exhausted": 0}
     registry_complete = True
+    registry_cursor = None
     try:
         lines = registry_lines(jobs)
     except OSError:
         lines = []
     rows_by_attempt: dict[str, dict[str, str]] = {}
+    parsed: list[dict[str, str] | None] = []
     for line in lines:
-        if out_of_budget():
-            counters["budget_exhausted"] = 1
-            registry_complete = False
-            break
-        counters["rows_read"] += 1
         fields = line.split("\t")
         if len(fields) != 6:
+            parsed.append(None)
             continue
         metadata = parse_registry_metadata(fields[5])
         attempt_id = metadata.get("attempt_id", "")
         if attempt_id:
             rows_by_attempt[attempt_id] = metadata
+        parsed.append(metadata)
+    # The backstops ran to the last row earlier in this cycle when the record
+    # walk is being resumed; otherwise continue them where the last pass stopped.
+    first = len(parsed) if start_after is not None else min(registry_start or 0, len(parsed))
+    for index in range(first, len(parsed)):
+        if out_of_budget():
+            counters["budget_exhausted"] = 1
+            registry_complete = False
+            registry_cursor = index
+            break
+        counters["rows_read"] += 1
+        metadata = parsed[index]
+        if metadata is None:
+            continue
+        attempt_id = metadata.get("attempt_id", "")
         if attempt_id and metadata.get("worker_type") == "owner":
             from dispatch_owner_input import materialize_unresolved
             materialize_unresolved(jobs, attempt_id)
         if attempt_id and metadata.get("delivery_intent") == "1":
-            if materialize_backstop_due(root, metadata.get("parent_sid"),
-                                        metadata.get("delivery_id")) \
+            if unpersistable_recipient_kind(metadata):
+                # Its refusal was recorded when the row closed; a stamped kind
+                # never changes, so retrying each sweep only repeats it.
+                result["skipped"] += 1
+            elif materialize_backstop_due(root, metadata.get("parent_sid"),
+                                          metadata.get("delivery_id")) \
                     and materialize_after_terminal_close(jobs, attempt_id) is not None:
                 result["materialized"] += 1
 
+    if registry_complete and start_after is None:
+        # The backstops reached the last row in this pass. If the record walk
+        # below cannot finish too, the next pass must start at the records,
+        # not at row 0 again: a walk whose backstops end just as the budget
+        # does would otherwise restart forever.
+        registry_cursor = len(parsed)
     cursor = start_after
     walk_finished = False
     pending_root = root / "pending-delivery"
@@ -842,9 +901,11 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
         pass
     if walk_finished:
         cursor = None
+        registry_cursor = None
     if bounded:
         result.update(counters)
         result["cursor"] = cursor
+        result["registry_cursor"] = registry_cursor
     elif start_after is not None:
         result["cursor"] = cursor
     return result
@@ -1626,7 +1687,9 @@ class SupervisorState:
 
 def valid_resource_state(value: object) -> bool:
     """Separate resource delivery; never manufacture model attempts."""
-    if not isinstance(value, dict) or set(value) != {"session_id", "delivered", "outbox"}:
+    if (not isinstance(value, dict)
+            or set(value).difference({"parent_deploy"}) != {"session_id", "delivered", "outbox"}
+            or ("parent_deploy" in value and not re_fullmatch_digest(value["parent_deploy"]))):
         return False
     delivered = value["delivered"]
     if (not isinstance(value["session_id"], str) or not _safe_identity(value["session_id"])

@@ -15,6 +15,65 @@ import resource_run_registry as registry
 
 
 class ResourceRegistryTest(unittest.TestCase):
+    def test_passive_governor_observation_is_shared_but_next_scan_is_fresh(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.runtime/model-worker-governor/state.json'
+            path.parent.mkdir(parents=True)
+            worker = dict(artifact_root=directory, pid='123', pid_start='456', pid_ns='pid:[7]')
+            identity = dict(pid=123, starttime='456', pid_namespace=7,
+                            boot_id='00000000-0000-0000-0000-000000000001', nested={'value': 'original'})
+            path.write_text(json.dumps({'claims': {'one': {'claimant_identity': identity}}}))
+            original_read = Path.read_text
+            reads = []
+            def read(target, *args, **kwargs):
+                reads.append(target)
+                return original_read(target, *args, **kwargs)
+            with mock.patch.object(Path, 'read_text', read), \
+                    mock.patch.object(registry.json, 'loads', wraps=json.loads) as parse:
+                with registry.passive_read_scope(cache):
+                    first = registry.recorded_governor_identity(worker)
+                    first['nested']['value'] = 'caller mutation'
+                    self.assertEqual(registry.recorded_governor_identity(worker)['nested']['value'], 'original')
+                self.assertEqual((len(reads), parse.call_count), (1, 1))
+                with registry.passive_read_scope(cache):
+                    self.assertEqual(registry.recorded_governor_identity(worker)['pid'], 123)
+                self.assertEqual((len(reads), parse.call_count), (2, 1))
+                path.write_text('{"claims": {}}')
+                with registry.passive_read_scope(cache):
+                    self.assertIsNone(registry.recorded_governor_identity(worker))
+                self.assertEqual((len(reads), parse.call_count), (3, 2))
+
+    def test_passive_route_parse_reuses_generation_and_rechecks_identity_and_clock(self):
+        cache = registry.ResourceReadCache()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'route.json'
+            path.write_text(json.dumps(dict(route_id='rt-original')))
+            row = dict(route=str(path), route_id='rt-original', started_at=100)
+            with mock.patch.object(registry, 'classify_identity',
+                                   side_effect=[('working', None, 'live'), ('exited', None, 'gone')]) as identity, \
+                    mock.patch('resource_progress.read_progress', return_value=None), \
+                    mock.patch('resource_progress.collect', return_value=None), \
+                    mock.patch('resource_progress.remote_candidates', return_value=[]), \
+                    mock.patch('resource_placement.observe', return_value=None):
+                with registry.passive_read_scope(cache):
+                    first = registry.normalize_run('run-a', row, path, now=160)
+                with registry.passive_read_scope(cache):
+                    second = registry.normalize_run('run-a', row, path, now=220)
+                self.assertEqual(first['liveness'], 'working')
+                self.assertEqual(first['elapsed_min'], 1)
+                self.assertEqual(second['liveness'], 'exited')
+                self.assertEqual(identity.call_count, 2)
+            with mock.patch.object(registry.json, 'loads', wraps=json.loads) as parse:
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-original'))
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-original'))
+                self.assertEqual(parse.call_count, 1)
+                replacement = path.with_suffix('.new')
+                replacement.write_text(json.dumps(dict(route_id='rt-replaced')))
+                replacement.replace(path)
+                self.assertEqual(cache.route_document(path), dict(route_id='rt-replaced'))
+                self.assertEqual(parse.call_count, 2)
+
     def test_compute_identity_requires_output_receipt_but_keeps_stable_format(self):
         execution = {"kind": "compute-hosts", "run_id": "compute-1",
                      "meta_sha256": "m" * 64, "exit_sha256": "e" * 64,
@@ -140,7 +199,10 @@ class ResourceRegistryTest(unittest.TestCase):
                     registry._LEGACY_RESOURCE_IDENTITY_CACHE.pop(str(jobs), None)
                     found.append(registry.legacy_resource_identity(row))
                     dispatch_contract._registry_metadata_items.cache_clear()
-                    with dispatch_registry_cache.registry_read_scope():
+                    with (dispatch_registry_cache.registry_read_scope(),
+                          mock.patch.object(dispatch_registry_cache.RegistryRecord, 'raw',
+                                            new_callable=mock.PropertyMock,
+                                            side_effect=AssertionError('copied history'))):
                         found.append(registry.legacy_resource_identity(row))
                         found.append(registry.legacy_resource_identity(row))
                     parsed = dispatch_contract._registry_metadata_items.cache_info().misses
@@ -155,6 +217,17 @@ class ResourceRegistryTest(unittest.TestCase):
             self.assertEqual(found, [None] * 3)
             found, _parsed = identities(filler + near)
             self.assertEqual(found, [None] * 3)
+            # Noncanonical separators and a pending final line keep the exact
+            # original text-reader semantics instead of using the LF-only view.
+            for source in (owner.rstrip('\n'), owner.replace('\n', '\r\n'),
+                           owner.replace('\n', '\v')):
+                jobs.write_text(source)
+                registry._LEGACY_RESOURCE_IDENTITY_CACHE.pop(str(jobs), None)
+                with mock.patch.object(registry, 'recorded_governor_identity',
+                                       side_effect=lambda meta: dict(meta)):
+                    expected = registry.legacy_resource_identity(row)
+                    with dispatch_registry_cache.registry_read_scope():
+                        self.assertEqual(registry.legacy_resource_identity(row), expected)
 
     def test_empty_log_has_no_output_timestamp_but_nonempty_log_does(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -216,9 +289,9 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertEqual(diagnostics[0]["path"], str(source))
 
     def test_boot_change_is_host_bound_and_rejects_reused_pid(self):
-        current = {'boot_id': '67138871-1a60-467f-b9dc-d46749025baa', 'boot_host': 'local'}
+        current = {'boot_id': '10000088-0000-4000-8000-000000000097', 'boot_host': 'local'}
         row = {'pid': 123, 'starttime': '42', 'command_hash': 'hash',
-               'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6', 'boot_host': 'local'}
+               'boot_id': '10000094-0000-4000-8000-0000000000a3', 'boot_host': 'local'}
         with mock.patch.object(registry, 'boot_identity', return_value=current):
             self.assertEqual(registry.classify_identity(row, lambda _: row), ('exited', None, 'host-reboot'))
             for changes in ({'boot_host': 'foreign'}, {'boot_id': current['boot_id']},
@@ -226,8 +299,8 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertIsNone(registry.reboot_evidence({**row, **changes}))
 
     def test_shared_previous_boot_proof_requires_host_or_local_journal(self):
-        current = {'boot_id': '67138871-1a60-467f-b9dc-d46749025baa', 'boot_host': 'local'}
-        previous = '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current = {'boot_id': '10000088-0000-4000-8000-000000000097', 'boot_host': 'local'}
+        previous = '10000094-0000-4000-8000-0000000000a3'
         with mock.patch.object(registry, 'boot_identity', return_value=current), \
                 mock.patch.object(registry, 'local_boot_history', return_value={previous, current['boot_id']}) as history:
             self.assertIsNotNone(registry.previous_boot_evidence({'boot_id': previous, 'boot_host': 'local'}))
@@ -240,7 +313,7 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertIsNone(registry.previous_boot_evidence({'boot_id': previous}))
 
     def test_legacy_boot_reset_requires_all_existing_launch_coordinates(self):
-        current, previous = '67138871-1a60-467f-b9dc-d46749025baa', '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current, previous = '10000088-0000-4000-8000-000000000097', '10000094-0000-4000-8000-0000000000a3'
         row = {'resource_policy': 'supervised-owner', 'started_at': 50, 'starttime': '10000', 'owner_wait': {'bound': True},
                'pid_namespace': os.readlink('/proc/self/ns/pid')}
         with mock.patch.object(registry, '_boot_epoch', return_value=100), \
@@ -276,11 +349,11 @@ class ResourceRegistryTest(unittest.TestCase):
             state = root / '.runtime/model-worker-governor/state.json'
             state.parent.mkdir(parents=True)
             identity = {'pid': 123, 'starttime': '456', 'pid_namespace': int(namespace[5:-1]),
-                        'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6'}
+                        'boot_id': '10000094-0000-4000-8000-0000000000a3'}
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity}}}))
             self.assertEqual(registry.legacy_resource_boot(row), identity['boot_id'])
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity},
-                'ambiguous': {'claimant_identity': {**identity, 'boot_id': '67138871-1a60-467f-b9dc-d46749025baa'}}}}))
+                'ambiguous': {'claimant_identity': {**identity, 'boot_id': '10000088-0000-4000-8000-000000000097'}}}}))
             self.assertIsNone(registry.legacy_resource_boot(row))
             state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity}}}))
             for change in ({'owner_pid': 124}, {'owner_start': '457'}, {'route_hash': 'foreign'},
@@ -292,7 +365,7 @@ class ResourceRegistryTest(unittest.TestCase):
 
     def test_local_journal_requires_current_boot_and_never_uses_unreadable_history(self):
         from types import SimpleNamespace
-        current, previous = '67138871-1a60-467f-b9dc-d46749025baa', '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        current, previous = '10000088-0000-4000-8000-000000000097', '10000094-0000-4000-8000-0000000000a3'
         output = f'-1 {previous.replace("-", "")} previous\n0 {current.replace("-", "")} current\n'
         for code, stdout, expected in ((0, output, {current, previous}),
                                        (0, output.splitlines()[0], set()), (1, output, set())):
@@ -370,10 +443,15 @@ class ResourceRegistryTest(unittest.TestCase):
                 pass
 
     def test_an_unrelated_process_exiting_mid_scan_does_not_hold_a_drained_group(self):
-        leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
-        identity = registry.launched_identity(leader)
+        # Hold the fixture until its identity is observed. A zero-work child
+        # can exit before the first /proc read under ordinary scheduling.
+        leader = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                                  stdin=subprocess.PIPE, start_new_session=True)
+        try:
+            identity = registry.launched_identity(leader)
+        finally:
+            leader.communicate(timeout=5)
         self.assertIsNotNone(identity)
-        leader.wait(timeout=5)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         sentinel = Path(temporary.name) / "run.exit"
@@ -440,6 +518,102 @@ class ResourceRegistryTest(unittest.TestCase):
                 child.wait()
         self.assertEqual(registry.classify_identity(row), ("exited", None, "process-absent"))
 
+    def _zombie_child(self):
+        """A killed ``sleep`` child this test has not reaped, with its live identity."""
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(lambda: (child.kill(), child.wait()) if child.returncode is None else None)
+        deadline = time.monotonic() + 10
+        identity = registry.proc_identity(child.pid)
+        while identity is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            identity = registry.proc_identity(child.pid)
+        self.assertIsNotNone(identity)
+        os.kill(child.pid, signal.SIGKILL)
+        stat = Path(f"/proc/{child.pid}/stat")
+        while (stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+        self.assertEqual(stat.read_text().rsplit(") ", 1)[1].split()[0], "Z")
+        return child, {key: identity[key] for key in registry.IDENTITY_KEYS}
+
+    def test_controller_gone_zombie_is_exited_like_a_detached_wrapper(self):
+        # The controller died, so the kernel handed its wrapper to an adopter (this
+        # test process) that has not reaped it yet. The controller can no longer
+        # collect it; the sentinel it wrote is the exit proof.
+        child, row = self._zombie_child()
+        namespace = os.readlink("/proc/self/ns/pid")
+        dead = subprocess.Popen(["/bin/true"])
+        dead.wait()
+        gone = {**registry.proc_identity(os.getpid()), "pid": dead.pid, "pid_namespace": namespace}
+        supervised = {**row, "process_group": child.pid, "pid_namespace": namespace,
+                      "resource_policy": "supervised-owner", "launch_state": "started",
+                      "owner_wait": {"launch_scope": "codex-owner-controller"},
+                      "launch_controller": gone}
+        self.assertEqual(registry.classify_identity(supervised),
+                         ("exited", None, "process-exited-unreaped"))
+        # Still the recorded controller's own child: only that controller collects it.
+        own = {**supervised, "launch_controller": {**gone, "pid": os.getpid(), "starttime": "0"}}
+        self.assertEqual(registry.classify_identity(own),
+                         ("stale", None, "process-identity-unreadable"))
+        for controller in ({"pid": True}, {"command_hash": "x"}, "opaque"):
+            with self.subTest(controller=controller):
+                self.assertEqual(registry.classify_identity({**row, "launch_controller": controller}),
+                                 ("stale", None, "process-identity-unreadable"))
+
+    def test_live_process_whose_leader_thread_exited_stays_stale(self):
+        # Only the main thread called pthread_exit: the leader reads as a zombie with
+        # no cmdline while another thread of the process keeps running.
+        code = ("import ctypes, sys, threading, time\n"
+                "threading.Thread(target=time.sleep, args=(60,)).start()\n"
+                "sys.stdout.write('ready\\n'); sys.stdout.flush(); sys.stdin.readline()\n"
+                "ctypes.CDLL(None).pthread_exit(None)\n")
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(lambda: (child.kill(), child.wait()) if child.returncode is None else None)
+        self.assertEqual(child.stdout.readline().strip(), "ready")
+        identity = registry.proc_identity(child.pid)
+        self.assertIsNotNone(identity)
+        row = {key: identity[key] for key in registry.IDENTITY_KEYS}
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        stat = Path(f"/proc/{child.pid}/stat")
+        deadline = time.monotonic() + 10
+        fields = stat.read_text().rsplit(") ", 1)[1].split()
+        while fields[0] != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            fields = stat.read_text().rsplit(") ", 1)[1].split()
+        self.assertEqual((fields[0], int(fields[17]) > 1), ("Z", True))
+        self.assertIsNone(child.poll())
+        for extra in ({}, {"launch_controller": {"pid": os.getppid()}}):
+            with self.subTest(extra=extra):
+                self.assertEqual(registry.classify_identity({**row, **extra}),
+                                 ("stale", None, "process-identity-unreadable"))
+
+    def test_exiting_flag_without_zombie_state_is_exited_only_single_threaded(self):
+        # PF_EXITING (0x4) set while the state is not yet Z: past exit_mm, cmdline empty.
+        pid = 999999999
+        row = {"pid": pid, "starttime": "42", "command_hash": "a" * 64}
+
+        def stat(state="D", flags=0x4, threads=1, start="42", parent=1):
+            fields = [state, str(parent), str(pid)] + ["0"] * 16 + [start]
+            fields[6], fields[17] = str(flags), str(threads)
+            return f"{pid} (wrapper) " + " ".join(fields)
+
+        cases = (({}, "exited"), ({"state": "R", "flags": 0x4 | 0x40}, "exited"),
+                 ({"flags": 0x40}, "stale"), ({"threads": 2}, "stale"),
+                 ({"start": "43"}, "stale"))
+        for change, expected in cases:
+            with self.subTest(change=change), \
+                    mock.patch.object(Path, "read_text", return_value=stat(**change)):
+                self.assertEqual(registry.classify_identity(row, lambda _pid: None)[0], expected)
+        controlled = {**row, "launch_controller": {"pid": 7}}
+        with mock.patch.object(Path, "read_text", return_value=stat(parent=7)):
+            self.assertEqual(registry.classify_identity(controlled, lambda _pid: None)[0], "stale")
+        with mock.patch.object(Path, "read_text", return_value=stat(parent=1)):
+            self.assertEqual(registry.classify_identity(controlled, lambda _pid: None)[0], "exited")
+
     def test_owned_zombie_requires_exact_kernel_and_controller_identity(self):
         pid = 999999999
         parent = registry.proc_identity(os.getpid())
@@ -466,15 +640,19 @@ class ResourceRegistryTest(unittest.TestCase):
                            {"launch_controller": {**parent, "command_hash": "foreign", "pid_namespace": namespace}}):
                 with self.subTest(change=change):
                     self.assertEqual(registry.classify_identity({**row, **change}, reader)[0], "stale")
-            for index, value in ((0, "S"), (1, str(os.getpid() + 1)), (2, str(pid + 1)), (19, "43")):
+            # A zombie whose kernel parent is no longer the controller is not its to
+            # collect: the adopter reaps it, so it is exited like a detached wrapper.
+            for index, value, expected in ((0, "S", "stale"), (1, str(os.getpid() + 1), "exited"),
+                                           (2, str(pid + 1), "stale"), (19, "43", "stale")):
                 altered = list(fields); altered[index] = value
                 with self.subTest(field=index), mock.patch.object(Path, "read_text",
                         return_value=f"{pid} (wrapper) " + " ".join(altered)):
-                    self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
+                    self.assertEqual(registry.classify_identity(row, reader)[0], expected)
             for method in ("read_text", "read_bytes"):
                 with self.subTest(error=method), mock.patch.object(Path, method, side_effect=PermissionError()):
                     self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
-            with mock.patch.object(Path, "read_text", side_effect=[raw, raw.replace("42", "43")]):
+            reused = raw.replace(" 42", " 43")
+            with mock.patch.object(Path, "read_text", side_effect=[raw, reused, reused]):
                 self.assertEqual(registry.classify_identity(row, reader)[0], "stale")
             with mock.patch.object(Path, "read_text", return_value="malformed"):
                 self.assertEqual(registry.classify_identity(row, reader)[0], "stale")

@@ -31,6 +31,11 @@ import sys
 import time
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
+try:  # ends a detached child with the test that started it; no-op outside tests
+    from detached_lifetime import bind as end_with_test
+except ImportError:  # a partial tree without it (e.g. a fixture release): no record
+    def end_with_test(child):
+        return child
 
 UTILITIES = Path(__file__).resolve().parent
 PRODUCER = UTILITIES / "artifact_producer.py"
@@ -129,11 +134,11 @@ def launch(
     else:
         argv += ["--route", str(route)]
     try:
-        subprocess.Popen(
+        end_with_test(subprocess.Popen(
             argv, cwd=str(UTILITIES), env=child_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
-        )
+        ))
     except OSError:
         return False
     return True

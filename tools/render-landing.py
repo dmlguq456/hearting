@@ -2,8 +2,7 @@
 """Render the public GitHub Pages surface: docs/index.html + docs/map.html.
 
 The landing page is an app shell: a scrolling narrative sidebar on the left and
-a full-bleed diagram canvas on the right that carries the agent map — the same
-layered structure the internal operator hub (root hub.html) shows, re-cut for a
+a full-bleed diagram canvas on the right that carries the agent map, cut for a
 public audience so the flagship subsystems are visible: sealed N-way dispatch,
 the Fleet view over it, per-role model tiers, the fixed artifact system, the
 persistent memory store, and the loops that keep the harness honest.
@@ -11,7 +10,7 @@ persistent memory store, and the loops that keep the harness honest.
 Sources: manifest.json (tracks, hooks, loops) and
 harness-manifest.json (capability census, summaries, taxonomy). Both pages are
 self-contained (no CDN/network), share one design system, and are dark-first
-with a light override. The internal operator hub is intentionally NOT published.
+with a light override.
 
 Usage:
   python3 tools/render-landing.py          # write docs/index.html + docs/map.html
@@ -750,7 +749,7 @@ GUARD_NOTE = {}
 
 MEMORY_STEPS = [
     ("Capsule probe", "Every eligible main prompt runs <code>mem candidates</code> over the "
-     "active capsule index — at most 6 headline+ID hits in 2,400 bytes, bodies untouched."),
+     "active capsule index — at most 6 headline+ID hits in 1,200 bytes, bodies untouched."),
     ("Opportunity receipt", "The probe records each opportunity, including zero hits, "
      "without blocking the task."),
     ("Agent-owned recall", "No score threshold adopts a hit. The agent reads the full record by "
@@ -1765,8 +1764,6 @@ def main() -> int:
             for path, want in outputs.items()
             if not path.is_file() or path.read_text(encoding="utf-8") != want
         ]
-        if (DOCS / "hub.html").exists():
-            stale.append("docs/hub.html (internal hub must not be published)")
         if stale:
             print("stale: " + ", ".join(stale))
             return 1
@@ -1776,10 +1773,6 @@ def main() -> int:
     for path, want in outputs.items():
         path.write_text(want, encoding="utf-8")
         print(f"wrote {path.relative_to(ROOT)}")
-    legacy = DOCS / "hub.html"
-    if legacy.exists():
-        legacy.unlink()
-        print("removed docs/hub.html (internal operator hub stays local-only)")
     return 0
 
 

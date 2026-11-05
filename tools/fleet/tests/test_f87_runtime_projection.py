@@ -15,7 +15,7 @@ from tools.fleet.herdr_projection import compose
 from tools.fleet import render
 from tools.fleet.session_handle import current_session_subject, minted_tag
 
-CODEX_SID = "01a0c233-96b3-7cf3-871b-7beb1fc71679"   # a rollout name must end in a uuid
+CODEX_SID = "0100000d-0000-7000-8000-00000000013c"   # a rollout name must end in a uuid
 
 
 def codex_sid(path):
@@ -546,7 +546,7 @@ class RuntimeProjectionTest(unittest.TestCase):
 
     def test_fdless_embedded_tui_without_daemon_loader_stays_unknown(self):
         from fleet.collectors import codex, procscan
-        sid = "0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47"
+        sid = "10000067-0000-4000-8000-000000000075"
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bindir, _log = self.stub(root)
@@ -837,6 +837,31 @@ class ProjectionObservationTest(unittest.TestCase):
             self.assertEqual(send.call_args.args[0][2], "report-agent-session")
             self.assertEqual(observation["reason"], "guard-refused-before-metadata")
 
+    def test_without_a_herdr_pane_every_harness_takes_its_tmux_pane_as_the_hint(self):
+        from tools.fleet import herdr_projection as hp
+        env = {"HERDR_PANE_ID": "", "TMUX": "/fixture/tmux.sock,1,0", "TMUX_PANE": "%7"}
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), unittest.mock.patch.dict(os.environ, env), \
+                 unittest.mock.patch.object(hp, "_in_shared_codex_service", return_value=False), \
+                 unittest.mock.patch.object(hp, "_project_tmux", return_value=True) as tmux:
+                self.assertIs(hp.project(harness, "exact", report_session=False), True)
+                # The hint carries its server, as every tmux pane address does.
+                self.assertEqual(tmux.call_args.args[:3], (harness, "exact", "%7@/fixture/tmux.sock"))
+        # A shared Codex service runs hooks in some other pane's environment: no hint.
+        with unittest.mock.patch.dict(os.environ, env), \
+             unittest.mock.patch.object(hp, "_in_shared_codex_service", return_value=True), \
+             unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
+             unittest.mock.patch.object(hp, "_project_tmux") as tmux:
+            self.assertIs(hp.project("codex", "exact"), True)
+            tmux.assert_not_called()
+        # A Herdr pane stays Herdr; an explicit pane is never replaced.
+        for kwargs, extra in (({}, {"HERDR_PANE_ID": "w1:p2"}), ({"pane_id": "w1:p3"}, {})):
+            with unittest.mock.patch.dict(os.environ, dict(env, **extra)), \
+                 unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
+                 unittest.mock.patch.object(hp, "_project_tmux") as tmux:
+                self.assertIs(hp.project("opencode", "exact", **kwargs), True)
+                tmux.assert_not_called()
+
     def test_unavailable_and_no_report_session_observation_never_promote_identity(self):
         from tools.fleet import herdr_projection as hp
         with unittest.mock.patch.object(hp.shutil, "which", return_value=None), \
@@ -1014,15 +1039,18 @@ class ProjectionObservationTest(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(hp.main(["--harness", "opencode", "--session-id", "ses_A", "--pane", "fixture-pane",
                                           "--seq", "1000001", "--session-start-source", "startup"]), 0)
+            # The CLI only refreshes a pane header, so it reads published relations.
             project.assert_called_once_with("opencode", "ses_A", pane_id="fixture-pane", report_session=True,
-                                            observation={}, session_seq=1000001, session_start_source="startup")
+                                            observation={}, display_relations=True,
+                                            session_seq=1000001, session_start_source="startup")
             self.assertEqual(output.getvalue(), "{}\n")
         for harness in ("codex", "claude"):
             with self.subTest(harness=harness), unittest.mock.patch.object(hp, "project") as project:
                 output = StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(hp.main(["--harness", harness, "--session-id", "actual"]), 0)
-                project.assert_called_once_with(harness, "actual", pane_id=None, report_session=True, observation=None)
+                project.assert_called_once_with(harness, "actual", pane_id=None, report_session=True,
+                                                observation=None, display_relations=True)
                 self.assertEqual(output.getvalue(), "")
 
 

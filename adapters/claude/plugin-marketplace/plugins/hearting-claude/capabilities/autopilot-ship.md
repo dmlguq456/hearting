@@ -160,10 +160,23 @@ The owner or its actual interactive parent may prepare it. Preparation also
 records whether that parent is on the host; a parent preparation before readiness
 reviews supplies executor availability, not a deployment or review PASS. Give
 the exact request to the existing independent readiness reviews and finish them
-within their existing ceilings. While waiting for parent execution the owner
-uses its ordinary BLOCKED handoff. If upgrading an older owner or parent runtime, name the
+within their existing ceilings. Preparation notifies the actual parent with the
+printed check and run commands. A supervised owner waits with
+`runtime_wait: registered-children`; the runtime delivers the deployment result
+through the existing correction channel and resumes post-deploy verification. If upgrading an older owner or parent runtime, name the
 installed utility's absolute path in its existing correction; do not rewrite
 the sealed owner environment.
+
+Supervised Claude and Codex owners wait through their existing owner controllers.
+Supervised OpenCode owners use the same controller via
+`claude-session-supervisor.py --runtime-harness opencode`; this is a shared
+controller, not a Claude-only path. Waiting retains the exact supervisor lease
+and is bounded by its existing `--join-timeout` (default 3,600 seconds).
+A lost input channel, changed binding, or expired wait ends BLOCKED and keeps
+the deploy request for the ordinary parent handoff. A parent notification that
+cannot be retained also returns BLOCKED. Unsupervised and legacy owners use
+the ordinary BLOCKED handoff and printed correction command instead of
+`runtime_wait`; neither case grants the owner deployment authority.
 
 Owner status and parent admission use the common continuation decision. A live
 owner hands work back; an answerable BLOCKED/FAIL owner receives the existing

@@ -18,10 +18,13 @@ relations still require metadata confirming the same repository; foreign and
 unknown targets remain communication only.
 """
 import os
+import copy
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from runtime_observation import ProjectionCache, retained_size, observe_once as _observe_once
 
 
 def _peer_message_module():
@@ -51,7 +54,65 @@ def read_markers():
         return {}
 
 
+_RELATIONS_OBSERVATION = None
+_RELATIONS_LOCK = threading.RLock()
+
+
+def _relations_generation():
+    import dispatch_seat_handover as handover
+    mod = _peer_message_module()
+    if mod is None:
+        raise ValueError('steward-reader-unavailable')
+    roots, _source = mod.steward_marker_roots()
+    paths = []
+    from . import dispatch
+    for root in roots:
+        directory = Path(root) / 'peer-steward'
+        try:
+            directories = sorted(directory.iterdir())
+        except FileNotFoundError:
+            paths.append((os.fspath(directory), None))
+            continue
+        paths.append((os.fspath(directory), dispatch._stat_stamp(directory)))
+        for child in directories:
+            if child.name == 'obligations' or not child.is_dir():
+                continue
+            paths.append((os.fspath(child), dispatch._stat_stamp(child)))
+            paths.extend((os.fspath(path), dispatch._stat_stamp(path))
+                         for path in sorted(child.glob('*.json')))
+    tidy = handover._st()
+    return (tuple(paths), handover._snapshot_signature(),
+            handover._lineage_signature(tidy.state_root() / 'sessions'),
+            mod.read_steward_markers, mod.steward_evidence_targets,
+            handover.resolved_steward_relations, handover._role_states,
+            handover._transition_rows, handover.read_snapshot, tidy.read_bytes,
+            tidy._read_ledger_lines, Path.read_text, Path.open)
+
+
 def read_relations():
+    from . import dispatch
+    if dispatch._COLLECTION_INPUTS.get() is None:
+        return _read_relations_uncached()
+    global _RELATIONS_OBSERVATION
+    try:
+        before = _relations_generation()
+        with _RELATIONS_LOCK:
+            held = _RELATIONS_OBSERVATION
+            if held is not None and held[0] == before:
+                return copy.deepcopy(held[1])
+    except (ImportError, OSError, TypeError, ValueError):
+        return _read_relations_uncached()
+    value = _read_relations_uncached()
+    try:
+        if value and before == _relations_generation():
+            with _RELATIONS_LOCK:
+                _RELATIONS_OBSERVATION = (before, copy.deepcopy(value))
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    return value
+
+
+def _read_relations_uncached():
     """Read confirmed current holders without projecting a marker onto a successor SID."""
     try:
         import sys
@@ -78,25 +139,61 @@ def _session_keys(sess):
 
 def _repository_key(cwd):
     from ..gitinfo import resolve_gitdir
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    key = ('steward-repository', cwd, resolve_gitdir)
+    if scope is not None and key in scope:
+        return scope[key]
     try:
-        return resolve_gitdir(cwd)[1] if cwd else None
+        value = resolve_gitdir(cwd)[1] if cwd else None
     except (OSError, ValueError, TypeError):
+        value = None
+    if scope is not None:
+        scope[key] = value
+    return value
+
+
+_REGISTRY_READ_CACHE = None
+
+
+def _registry_records(harness):
+    """One current metadata census shared by this pass's display consumers."""
+    from .. import session_registry
+    return _observed_registry_records(harness, session_registry._dir_for(harness),
+                                      session_registry.read)
+
+
+@_observe_once(immutable=True)
+def _observed_registry_records(harness, directory, reader):
+    """Owned read-only metadata; liveness still uses fresh process evidence."""
+    from types import MappingProxyType
+    from .. import session_registry
+    from . import dispatch
+    global _REGISTRY_READ_CACHE
+    cache = None
+    if dispatch._COLLECTION_INPUTS.get() is not None:
+        if _REGISTRY_READ_CACHE is None:
+            _REGISTRY_READ_CACHE = session_registry.PassiveReadCache()
+        cache = _REGISTRY_READ_CACHE
+    try:
+        entries = os.listdir(directory)
+    except OSError:
         return None
+    records = []
+    for entry in entries:
+        if entry.endswith('.json') and entry[:-5].isdigit():
+            record = reader(harness, int(entry[:-5]),
+                            **({'validation_cache': cache} if cache is not None else {}))
+            if record:
+                records.append(MappingProxyType(record))
+    return tuple(records)
 
 
 def _registry_sessions():
     """Reuse native session metadata; no process, herdr or role probe."""
-    from .. import session_registry
     rows = []
-    for harness in ("claude", "codex", "opencode"):
-        try:
-            entries = os.listdir(session_registry._dir_for(harness))
-        except OSError:
-            continue
-        for entry in entries:
-            if not entry.endswith(".json") or not entry[:-5].isdigit():
-                continue
-            record = session_registry.read(harness, int(entry[:-5]))
+    for harness in ('claude', 'codex', 'opencode'):
+        for record in _registry_records(harness) or ():
             if record and record.get("sessionId") and record.get("cwd"):
                 rows.append(SimpleNamespace(harness=harness, session_id=record["sessionId"],
                                             cwd=record["cwd"], runtime_name=record.get("name")))
@@ -148,6 +245,15 @@ def _native_role_sessions(markers, rows, relations=()):
     conversation bodies, process state, or an inferred same-cwd identity.
     """
     from . import codex, opencode
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    cache = None
+    if scope is not None:
+        cache = scope.get(('native-role-cwds',))
+        if cache is None:
+            cache = scope[('native-role-cwds',)] = ProjectionCache(
+                max_entries=256, max_bytes=80 * 1024)
+    policy = (codex._state_db, codex._home, opencode._db, sqlite3.connect)
     present = {key for row in rows for key in _session_keys(row)}
     wanted = set(markers)
     mod = _peer_message_module()
@@ -171,31 +277,51 @@ def _native_role_sessions(markers, rows, relations=()):
             if sid:
                 wanted.add((harness, sid))
     out = []
-    for harness, db, queries in (
-            ("codex", codex._state_db(codex._home()),
+    for harness, database, queries in (
+            ("codex", lambda: codex._state_db(codex._home()),
              ("SELECT cwd FROM threads WHERE id=?",)),
-            ("opencode", opencode._db(),
+            ("opencode", opencode._db,
              ("SELECT directory FROM session_v2 WHERE id=?",
               "SELECT directory FROM session WHERE id=?"))):
         ids = sorted({sid for h, sid in wanted if h == harness and sid
                       and (h, sid) not in present})
-        if not ids or not db:
+        found = {}
+        missing = []
+        for sid in ids:
+            key = (harness, sid, policy)
+            if cache is not None and key in cache:
+                found[sid] = cache[key]
+            else:
+                missing.append(sid)
+        if not ids:
             continue
         try:
-            with closing(sqlite3.connect(Path(db).absolute().as_uri() + "?mode=ro",
-                                         uri=True, timeout=0.2)) as con:
-                for sid in ids:
-                    for query in queries:
-                        try:
-                            result = con.execute(query, (sid,)).fetchone()
-                        except sqlite3.OperationalError:
-                            continue
-                        if result and isinstance(result[0], str) and result[0]:
-                            out.append(SimpleNamespace(harness=harness, session_id=sid,
-                                                       cwd=result[0]))
-                            break
+            db = database() if missing else None
+            if db:
+                with closing(sqlite3.connect(Path(db).absolute().as_uri() + "?mode=ro",
+                                             uri=True, timeout=0.2)) as con:
+                    for sid in missing:
+                        cwd = None
+                        observed = False
+                        for query in queries:
+                            try:
+                                result = con.execute(query, (sid,)).fetchone()
+                            except sqlite3.OperationalError:
+                                continue
+                            observed = True
+                            if result and isinstance(result[0], str) and result[0]:
+                                cwd = result[0]
+                                break
+                        found[sid] = cwd
+                        if cache is not None and observed:
+                            # Policy functions are shared module identities,
+                            # rather than new owned objects for every SID.
+                            cache.remember((harness, sid, policy), cwd,
+                                           weight=retained_size((harness, sid, cwd)) + 128)
         except (OSError, sqlite3.Error):
-            continue
+            pass
+        out.extend(SimpleNamespace(harness=harness, session_id=sid, cwd=found[sid])
+                   for sid in ids if found.get(sid))
     return out
 
 
@@ -448,7 +574,9 @@ def _steward_limit():
         return _DEFAULT_MAX_SUPERVISORS
 
 
-def _registry_record(harness, session_id):
+def _registry_record(harness, session_id, observation=None):
+    if isinstance(observation, _EndObservation):
+        return (observation.registry(harness) or {}).get(session_id)
     from .. import session_registry
     try:
         entries = os.listdir(session_registry._dir_for(harness))
@@ -496,6 +624,18 @@ class _EndObservation:
     def opencode(self):
         from . import opencode
         return self._once("opencode", opencode.session_visibility)
+
+    def registry(self, harness):
+        def read():
+            records = {}
+            observed = _registry_records(harness)
+            if observed is None:
+                return None
+            for record in observed:
+                if record.get('sessionId'):
+                    records.setdefault(record['sessionId'], record)
+            return records
+        return self._once(('registry', harness), read)
 
 
 def end_observation():
@@ -573,10 +713,10 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
         proof = _process_proof(harness, session_id, observation)
         if proof == "live":
             return "live"
-        if proof == "ended" and _registry_record(harness, session_id) is None:
+        if proof == "ended" and _registry_record(harness, session_id, observation) is None:
             return "ended"
     try:
-        record = _registry_record(harness, session_id)
+        record = _registry_record(harness, session_id, observation)
         if record is None:
             return "unknown"
         pid = record.get("pid")
@@ -591,7 +731,7 @@ def session_liveness(harness, session_id, *, agents=None, observation=None):
     return "ended" if (not alive or match is False) else "live"
 
 
-def repository_for_session(harness, session_id, *, sessions=None):
+def repository_for_session(harness, session_id, *, sessions=None, _cwds_by_session=None):
     """Canonical repository key of one session, or ``None``. The cwd comes from the
     session's own row (herdr/registry/native metadata) and only when it is a single
     value; the process cwd is never a substitute."""
@@ -599,12 +739,37 @@ def repository_for_session(harness, session_id, *, sessions=None):
     if not session_id:
         return None
     rows = _projection_sessions() if sessions is None else list(sessions)
-    own = {(harness, session_id)}
-    cwds = {row.cwd for row in rows if getattr(row, "cwd", None) and own.intersection(_session_keys(row))}
-    if not cwds:
+    key = (harness, session_id)
+    indexed = _cwds_by_session is not None and key in _cwds_by_session
+    cwds = (set(_cwds_by_session[key]) if indexed else
+            {row.cwd for row in rows if getattr(row, "cwd", None) and key in _session_keys(row)})
+    if not cwds and not indexed:
         cwds = {row.cwd for row in _native_role_sessions({(harness, session_id): {}}, rows)
                 if row.harness == harness and row.session_id == session_id}
     return _repository_key(cwds.pop()) if len(cwds) == 1 else None
+
+
+def _repository_cwds_for_pass(holders, rows):
+    """Batch the same alias joins/native misses instead of rescanning per holder."""
+    wanted = set(holders)
+    if len(wanted) > 512:
+        return None
+    cwds = {key: set() for key in wanted}
+    for row in rows:
+        if getattr(row, 'cwd', None):
+            for key in _session_keys(row):
+                if key in cwds:
+                    cwds[key].add(row.cwd)
+    missing = {key: {} for key, directories in cwds.items() if not directories}
+    if missing:
+        for row in _native_role_sessions(missing, rows):
+            key = row.harness, row.session_id
+            if key in missing:
+                cwds[key].add(row.cwd)
+    index = ProjectionCache(max_entries=512, max_bytes=128 * 1024)
+    for key, directories in cwds.items():
+        index[key] = frozenset(directories)
+    return index
 
 
 def _context_rows(markers, relations, sessions):
@@ -619,6 +784,13 @@ def _holder_name(harness, session_id, rows):
             if name:
                 return name
     try:
+        from . import dispatch
+        if dispatch._COLLECTION_INPUTS.get() is not None:
+            for record in _registry_records(harness) or ():
+                if record.get('sessionId') == session_id:
+                    name = record.get('name')
+                    return name if isinstance(name, str) and name else None
+            return None
         from .. import session_registry
         return session_registry.name_for_session_id(session_id, harness)
     except Exception:
@@ -626,7 +798,7 @@ def _holder_name(harness, session_id, rows):
 
 
 def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None, agents=None,
-                  observation=None, _rows=None):
+                  observation=None, _rows=None, _read=None):
     """Distinct current holders attributed to ``repository_key``.
 
     A holder belongs to the repository when its role shows there (``basis="role"``,
@@ -641,8 +813,10 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
         return []
-    rows = _context_rows(markers, relations, sessions) if _rows is None else _rows
-    winners = _role_winners(markers, rows, evidence, relations)
+    rows = (_read["rows"] if _read is not None else
+            _context_rows(markers, relations, sessions) if _rows is None else _rows)
+    winners = (_read["winners"] if _read is not None else
+               _role_winners(markers, rows, evidence, relations))
     if agents is None:
         try:
             from . import herdr
@@ -658,7 +832,8 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
         sid = holder.get("sid")
         if not sid or (harness, sid) in seen:
             continue
-        row_repository = repository_for_session(harness, sid, sessions=rows)
+        row_repository = (_read["repositories"].get((harness, sid)) if _read is not None else
+                          repository_for_session(harness, sid, sessions=rows))
         basis = None
         if row_repository == repository_key and role_flag(
                 harness, sid, markers=markers, sessions=rows, _relations=relations,
@@ -682,13 +857,14 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
 
 
 def repo_supervision(cwd=None, *, repository_key=None, limit=None, markers=None, relations=None,
-                     sessions=None, agents=None, observation=None):
+                     sessions=None, agents=None, observation=None, _read=None):
     """The one count of current supervisors in a repository (linked worktrees fold
     into their primary). The grant limit and the Fleet display both call this."""
     key = repository_key or _repository_key(cwd)
     limit = _steward_limit() if limit is None else limit
     holders = _repo_holders(key, markers=markers, relations=relations, sessions=sessions,
                             agents=agents,
+                            _read=_read,
                             observation=end_observation() if observation is None else observation)
     counted = sum(1 for holder in holders if holder["counted"])
     return {"repository": Path(key).parent.name if key else None, "repository_key": key,
@@ -704,6 +880,21 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
     relations = read_relations() if relations is None else relations
     rows = _context_rows(markers, relations, sessions)
     observation = end_observation() if observation is None else observation
+    mod = _peer_message_module()
+    evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
+    read = {"rows": rows, "repositories": {},
+            "winners": _role_winners(markers, rows, evidence, relations) if evidence else {}}
+    from . import dispatch
+    scope = dispatch._COLLECTION_INPUTS.get()
+    repository_options = {}
+    if scope is not None:
+        holders = {(str(holder.get('harness') or '').lower(), holder.get('sid'))
+                   for relation in relations if relation.get('released') is not True
+                   and (holder := relation.get('holder') or {}).get('sid')}
+        index = _repository_cwds_for_pass(holders, rows)
+        if index is not None:
+            repository_options['_cwds_by_session'] = index
+            scope[('steward-repository-cwds',)] = index
     keys = set()
     for relation in relations:
         if relation.get("released") is True:
@@ -713,7 +904,11 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
         sid = holder.get("sid")
         if not sid:
             continue
-        key = repository_for_session(harness, sid, sessions=rows)
+        holder_key = (harness, sid)
+        if holder_key not in read["repositories"]:
+            read["repositories"][holder_key] = repository_for_session(
+                harness, sid, sessions=rows, **repository_options)
+        key = read["repositories"][holder_key]
         if key is None:
             origin = relation.get("origin") or {}
             for owner in ((str(origin.get("harness") or "").lower(), origin.get("sid")), (harness, sid)):
@@ -725,7 +920,7 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
             keys.add(key)
     return {key: repo_supervision(repository_key=key, limit=limit, markers=markers,
                                   relations=relations, sessions=rows, agents=agents,
-                                  observation=observation)
+                                  observation=observation, _read=read)
             for key in sorted(keys)}
 
 

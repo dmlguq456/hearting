@@ -7,6 +7,8 @@ ROOT=Path(__file__).resolve().parents[3]
 S=importlib.util.spec_from_file_location("route",ROOT/"utilities/capability-route.py"); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 WH_S=importlib.util.spec_from_file_location("opencode_dispatch_headless",Path(__file__).with_name("dispatch-headless.py")); WH=importlib.util.module_from_spec(WH_S); WH_S.loader.exec_module(WH)
 from dispatch_contract import ROUTE_IDENTITY_METADATA_KEYS
+sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+from split_module_fixture import patch_split  # noqa: E402
 
 
 class OpenCodeGenerationBindingTest(unittest.TestCase):
@@ -729,7 +731,7 @@ class ForegroundReviewStartPathTest(unittest.TestCase):
 
                     patches = [
                         mock.patch.object(WH, "validate_route_record", return_value=0),
-                        mock.patch.object(WH, "completion_marker_gate"),
+                        patch_split(WH, "completion_marker_gate"),
                         mock.patch.object(WH, "reconcile_launch_lifecycle", return_value=types.SimpleNamespace(
                             requested="detached", effective="detached", reselection="retained-test-scope",
                             override="absent", metadata=lambda: {},

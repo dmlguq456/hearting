@@ -512,9 +512,19 @@ class ReadOnlyStatusCallersTest(unittest.TestCase):
 
     def test_every_read_only_status_caller_skips_the_optional_index_lock(self):
         checked, missing = 0, []
-        for path in self.sources():
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            wrapper_env = any(marker in "\n".join(lines) for marker in self.MARKERS)
+        texts = {path: path.read_text(encoding="utf-8", errors="replace") for path in self.sources()}
+        # A module split into sibling parts ("Split out of `x.py`") is read as the
+        # one file it was: its parts share the facade's wrapper environment.
+        group = {}
+        for path, text in texts.items():
+            split = re.search(r"Split out of `([^`]+)`", text)
+            group[path] = path.with_name(split.group(1)) if split else path
+        whole = {}
+        for path, key in group.items():
+            whole[key] = whole.get(key, "") + "\n" + texts[path]
+        for path, text in texts.items():
+            lines = text.splitlines()
+            wrapper_env = any(marker in whole[group[path]] for marker in self.MARKERS)
             for number, line in enumerate(lines):
                 if not self.STATUS.search(line):
                     continue

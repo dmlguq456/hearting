@@ -1,5 +1,6 @@
 """D: easy titles reach actual result/resource rows without runtime-specific rules."""
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +18,21 @@ ROOT = 'root_' + 'c' * 32
 
 
 class WorkTitlesTest(unittest.TestCase):
+    def test_legacy_title_is_observed_once_per_pass_and_reader(self):
+        value=['original']
+        reader=mock.Mock(side_effect=lambda root,campaign:(value[0],False))
+        with dispatch.collection_read_scope():
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'original')
+            value[0]='updated'
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'original')
+            reader.assert_called_once()
+            other=mock.Mock(return_value=('other-reader',False))
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',other),'other-reader')
+        with dispatch.collection_read_scope():
+            self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'updated')
+        value[0]='standalone'
+        self.assertEqual(dispatch._observed_legacy_campaign_title('/root','camp',reader),'standalone')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -40,6 +56,49 @@ class WorkTitlesTest(unittest.TestCase):
 
     def save_meta(self):
         self.meta_path.write_text(json.dumps(self.meta, ensure_ascii=False))
+
+    def test_title_validation_reuses_observed_documents_and_invalidates_changed_member(self):
+        import artifact_meta
+        extra = 'cyc_' + 'd' * 32
+        self.meta['cycles'][extra] = {'title': 'Other cycle'}
+        self.save_meta()
+        path = self.root / '.runtime/artifact-producer/v1/cycles' / (extra + '.json')
+        member = {'cycle_id': extra, 'campaign_id': CAMP}
+        path.write_text(json.dumps(member))
+        job = self.job()
+        with mock.patch.object(artifact_meta, '_validate_meta_doc', wraps=artifact_meta._validate_meta_doc) as validate:
+            dispatch._campaign_labels([job])
+            original = job.campaign_label
+            dispatch._campaign_labels([job])
+            self.assertEqual(validate.call_count, 1)
+            before = path.stat()
+            member['campaign_id'] = 'camp_' + 'e' * 32
+            path.write_text(json.dumps(member))
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            dispatch._campaign_labels([job])
+            self.assertEqual(validate.call_count, 2)
+            self.assertNotEqual(job.campaign_label, original)
+            oracle = work_titles.cycle_title(self.root, self.record,
+                                             lambda value: dispatch._read_cycle_record(value))
+            self.assertEqual(job.campaign_label, oracle)
+
+    def test_complete_cycle_hint_avoids_negative_sweep_and_directory_change_reopens_it(self):
+        import directory_record_index as index
+        directory = self.root / '.runtime/artifact-producer/v1/cycles'
+        hint = directory / '.cycle-routes-index.json'
+        index._save(hint, index._listing(directory, ()), {'rt-one': [CYC + '.json']})
+        job = self.job()
+        job.route_id = 'rt-new'
+        with mock.patch.object(dispatch, '_read_cycle_record',
+                               side_effect=AssertionError('negative locator swept history')):
+            dispatch._campaign_labels([job])
+        self.assertIsNone(job.campaign_label)
+        record = {**self.record, 'route_id': 'rt-new', 'cycle_id': 'cyc_' + 'e' * 32,
+                  'title': 'New cycle title'}
+        (directory / (record['cycle_id'] + '.json')).write_text(json.dumps(record))
+        # The old index was not updated: its listing no longer covers the source.
+        dispatch._campaign_labels([job])
+        self.assertEqual(job.campaign_label, 'New cycle title')
 
     def job(self, harness='codex'):
         return model.DispatchJob(key='code', slug=self.record['slug'], harness=harness,
@@ -75,7 +134,7 @@ class WorkTitlesTest(unittest.TestCase):
         self.assertEqual(result['name'], 'fleet freshness p2')
 
     def test_resource_and_gpu_use_same_title(self):
-        child = model.ResourceJob(run_id='mgpu-a1-20261008-203517-css-AMI8var-v3',
+        child = model.ResourceJob(run_id='fixture-run-0670',
                                   node='train', liveness='working')
         child.display_title = '환경별 모델 비교'
         rows = render._resource_child_rows(self.job(), children=[child])

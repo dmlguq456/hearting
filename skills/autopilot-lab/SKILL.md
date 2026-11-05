@@ -2,6 +2,7 @@
 # GENERATED METADATA — edit harness-manifest.json, then run tools/generate.py.
 description: "Use when experiments need setup, evaluation/analysis, failure reproduction, or result reporting, including fixed results without new measurements. Owns experiments; default preset. Not for reusable evaluation code, independent documents, or fixed-data document layout/caption edits."
 argument-hint: "<task description> [--mode setup|eval|auto] [--parent <slug>] [--ref <similar-model-path>] [--intensity direct|quick|standard|strong|thorough|adversarial] [--report] [--from spec|scaffold|run|eval|summary]"
+disable-model-invocation: true
 metadata:
   group: entry
   fam: code
@@ -27,9 +28,9 @@ before approval.
 
 ## Post-approval owner contract
 
-After approval, direct/quick sessions and the `standard+` dispatch-depth-1 owner load
-`capabilities/autopilot-lab.md`, then use the Reference Index below. Assigned
-stage workers load only their assigned stage contracts.
+Main session only: after approval, read `capabilities/autopilot-lab.md`. Registered owners read only `capabilities/autopilot-lab/references/owner-execution.md`; stage workers read only their assigned contracts.
+The other entry-router steps apply to the main session. A registered owner uses
+only its Route steps and the latest receipt for runtime commands.
 
 ## Reference Index
 

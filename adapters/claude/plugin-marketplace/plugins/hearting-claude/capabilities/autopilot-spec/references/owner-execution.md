@@ -1,5 +1,7 @@
 # autopilot-spec
 
+Read only this file for owner procedure. Run only the runtime commands your Route steps and the latest receipt print; never assemble a runtime command yourself. Read another reference or `core/` only when a receipt or Route step names that section. Named task inputs and artifacts remain inputs to read; policy cross-references below are lookup locations, not additional required reading.
+
 Create or update a product or technical blueprint without implementing the product itself. While the cutover is inactive, store outputs under `<artifact-root>/spec/`; once active, every durable artifact goes under the open cycle's `<cycle_dir>/artifacts/spec/...` (`AGENT_ARTIFACT_OUTPUT_DIR`, the resolved path a worker's own prompt already carries — `capabilities/autopilot-spec.md#L113-114`). Use the three-tier output convention (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) and plain names without numeric prefixes: `prd.md` as the always-current T1 document, plus `stack.md`, `design/`, `ship.md`, `pipeline_state.yaml`, and `_internal/`. Resolve `<artifact-root>` using the workspace assumption (`<agent-home>/core/CONVENTIONS.md#51-workspace-assumption`).
 
 ## Intake Gate
@@ -61,12 +63,12 @@ Follow an explicit artifact or audience language when provided. Otherwise, write
 
 ## Reference Index
 
-| File | Load when | Contents |
+| File | Load policy | Contents |
 |---|---|---|
-| `invocation-and-modes.md` | Parsing options, inferring modes, or choosing new versus resumed work | `--mode`, `--intensity`, `--user-refine`, mode clues, `pipeline_state.yaml` detection, step classification, confirmation summary, update-mode contract, and version management |
-| `prd-authoring.md` | Writing or updating the PRD, Steps 1–3.5 | Information collection, one-screen confirmation, concurrency guard, three-part PRD authoring, semantic/rule boundary checks, PRD template, architecture diagrams, and bundled-update logic |
-| `scaffolding.md` | Scaffolding and skeleton work, Step 4 | Reference-source selection, repository or checkpoint acquisition, pretrained-checkpoint preflight, `dev/new-lib` unit work, result confirmation, and Step 5 gate |
-| `operations-and-examples.md` | Deployment routing, gate behavior, return format, continuity, or examples | `autopilot-ship` routing, forbidden zones, gate branches, pipeline-state management, return format, optional agent-owned continuity notes, and worked examples |
+| `invocation-and-modes.md` | Only when a receipt or Route step names it | `--mode`, `--intensity`, `--user-refine`, mode clues, `pipeline_state.yaml` detection, step classification, confirmation summary, update-mode contract, and version management |
+| `prd-authoring.md` | Only when a receipt or Route step names it | Information collection, one-screen confirmation, concurrency guard, three-part PRD authoring, semantic/rule boundary checks, PRD template, architecture diagrams, and bundled-update logic |
+| `scaffolding.md` | Only when a receipt or Route step names it | Reference-source selection, repository or checkpoint acquisition, pretrained-checkpoint preflight, `dev/new-lib` unit work, result confirmation, and Step 5 gate |
+| `operations-and-examples.md` | Only when a receipt or Route step names it | `autopilot-ship` routing, forbidden zones, gate branches, pipeline-state management, return format, optional agent-owned continuity notes, and worked examples |
 
 ## Artifact Producer Lifecycle (W7C)
 

@@ -272,8 +272,10 @@ class ContextAlertTest(unittest.TestCase):
         preflight.write_text("#!/bin/sh\nexit 0\n")
         preflight.chmod(0o755)
         (fixture / "utilities").mkdir()
-        for name in ("context_alert.py", "session_tidy.py"):
+        for name in ("context_alert.py", "session_tidy.py", "session_card_format.py"):
             shutil.copy(ROOT / "utilities" / name, fixture / "utilities" / name)
+        (fixture / "capabilities").mkdir()
+        shutil.copy(ROOT / "capabilities/session-tidy.md", fixture / "capabilities/session-tidy.md")
         plugin_path = ROOT / "adapters/opencode/plugins/hearting-guards.js"
         script = r'''
 import assert from "node:assert/strict"

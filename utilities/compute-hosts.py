@@ -2644,7 +2644,7 @@ def cmd_list(args):
             for g in row["gpus"] if g.get("used_mib") is not None
             and g.get("total_mib") is not None)
         if row.get("gpu_status"):
-            summary = row["gpu_status"]["summary"]
+            summary = _gpu_leases().gpu_status_text(row["gpu_status"])
         summary = summary or "no gpu"
         here = "*" if row.get("self") else " "
         cpu = row.get("cpu_utilization_pct")
@@ -2664,7 +2664,8 @@ def cmd_list(args):
         if row.get("reservation_detail"):
             print(f"    reservations unknown: {row['reservation_detail']}")
         for lease in row.get("unplaced_gpu_reservations", []):
-            print("    GPU 예약 · 장치 위치 모름: " + gpu_leases.description(lease))
+            print("    " + gpu_leases.ui_translator()("compute.reservation_unplaced",
+                                                   lease=gpu_leases.description(lease)))
     return 0
 
 
@@ -2679,7 +2680,7 @@ def cmd_probe(args):
         for row in results:
             detail = row.get("detail") or row.get("process_detail")
             if not row["reachable"] or detail:
-                summary = (row.get("gpu_status") or {}).get("summary")
+                summary = _gpu_leases().gpu_status_text(row.get("gpu_status"))
                 if summary:
                     print(f"compute-hosts: {row['host']}: {summary}", file=sys.stderr)
                 else:
@@ -2690,14 +2691,16 @@ def cmd_probe(args):
         for row in results:
             state = "up" if row["reachable"] else f"down ({row.get('detail', '')})"
             print(f"{row['host']:<10} {state}")
-            summary = (row.get("gpu_status") or {}).get("summary")
+            summary = _gpu_leases().gpu_status_text(row.get("gpu_status"))
             if summary:
                 print("    " + summary)
             for gpu in row.get("gpus", []):
                 if gpu.get("observation_source"):
-                    print(f"    GPU {gpu['index']} {gpu.get('name') or '모름'}: 사용률·VRAM 모름")
+                    t = _gpu_leases().ui_translator()
+                    print("    " + t("compute.gpu_unobserved_named", index=gpu["index"],
+                                      name=gpu.get("name") or t("compute.unknown")))
                     for process in gpu.get("processes", []):
-                        print(f"      pid {process['pid']} · {process.get('command') or '장치 접근 확인'}")
+                        print(f"      pid {process['pid']} · {process.get('command') or t('compute.device_access')}")
                     continue
                 util = gpu.get("utilization_gpu_pct")
                 print(f"    gpu{gpu['index']} {gpu['name']}: "
@@ -2855,6 +2858,11 @@ def _run_gpu_observation(name, host):
             "suggested_gpu": suggested["index"] if suggested is not None else None}
 
 
+def _gpu_leases():
+    import gpu_leases
+    return gpu_leases
+
+
 def _print_run_gpu_observation(observation):
     observed_at = observation.get("observed_at")
     observed_time = (datetime.datetime.fromtimestamp(observed_at, datetime.timezone.utc)
@@ -2862,14 +2870,14 @@ def _print_run_gpu_observation(observation):
                      if isinstance(observed_at, (int, float)) else "unknown")
     print(f"  GPUs observed at: {observed_time}")
     if not observation.get("reachable") or observation.get("detail"):
-        summary = (observation.get("gpu_status") or {}).get("summary")
+        summary = _gpu_leases().gpu_status_text(observation.get("gpu_status"))
         print("  " + summary if summary else
               f"  GPU headroom: unknown ({observation.get('detail') or 'probe unavailable'})")
     elif not observation["gpus"]:
         print("  GPU headroom: no GPUs observed")
     for gpu in observation["gpus"]:
         if gpu.get("observation_source"):
-            print(f"  GPU {gpu['index']}: 사용률·VRAM 모름")
+            print("  " + _gpu_leases().ui_translator()("compute.gpu_unobserved", index=gpu["index"]))
             continue
         free, total, util = (gpu.get(key) for key in
                              ("free_mib", "total_mib", "utilization_gpu_pct"))
@@ -3087,6 +3095,82 @@ def cmd_run(args):
 
 
 COMPLETION_POLL_SECONDS = 60
+# A run with no exit code whose own files have not changed for this long, and
+# whose session its host reports gone, is no longer watched (the user's
+# seven-day unused rule). Its end is unknown: never success or failure. A
+# remote run whose wrapper died before writing `exit_code` would otherwise keep
+# one resident watcher, respawned on every install, for as long as its
+# directory exists.
+RUN_QUIET_SECONDS = 7 * 24 * 3600
+# Written when watching stops for that reason; a later exit code is then
+# reported once by the next observer reconnect (`resource-observers`).
+QUIET_RUN_MARKER = ".observation-unknown"
+# A quiet run's session is asked about at most this often (one ssh probe).
+QUIET_PROBE_SECONDS = 3600
+
+
+def _run_last_activity(run_dir):
+    """Newest change among the run's own top-level files, never the observer's."""
+    newest = None
+    try:
+        entries = list(os.scandir(run_dir))
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name.startswith(".observation-"):
+            continue
+        try:
+            changed = entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+        newest = changed if newest is None else max(newest, changed)
+    return newest
+
+
+def _run_quiet_since(run_dir, now):
+    """The run's last activity when it is quiet without an exit code, else None."""
+    run_dir = Path(run_dir)
+    if (run_dir / "exit_code").exists() or _read_stop_reason(run_dir):
+        return None
+    last = _run_last_activity(run_dir)
+    if last is None or now - last < RUN_QUIET_SECONDS:
+        return None
+    return last
+
+
+def _run_session_alive(run_dir):
+    """The run's tmux session on its host: True, False when reported gone, None when unknown."""
+    try:
+        meta = json.loads((Path(run_dir) / "meta.json").read_text(encoding="utf-8"))
+        host_name = meta.get("host")
+        if not isinstance(host_name, str) or not host_name:
+            return None
+        (_name, host), = _select(load_config(), [host_name])
+        return _tmux_session_alive(host, meta.get("run_id") or Path(run_dir).name,
+                                   transport=meta.get("tmux_transport", _LEGACY_TMUX_TRANSPORT))
+    except Exception:  # noqa: BLE001 -- an unreadable answer keeps the watch
+        return None
+
+
+def _iso_time(epoch):
+    return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
+
+
+def _record_quiet_run(run_dir, last_activity, now):
+    """Keep why watching stopped beside the run; an existing record stays."""
+    path = Path(run_dir) / QUIET_RUN_MARKER
+    if path.exists():
+        return
+    body = json.dumps({"state": "unknown", "reason": "session-gone-without-exit-code",
+                       "last_activity": _iso_time(last_activity),
+                       "recorded_at": _iso_time(now)}, sort_keys=True) + "\n"
+    temporary = path.with_name(f"{QUIET_RUN_MARKER}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(body, encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
 
 
 def _observe_compute_experiment(meta, run_dir, now, *, final=False):
@@ -3111,6 +3195,7 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         except (OSError, subprocess.SubprocessError):
             pass
     output_dir = meta.get("output_dir") or resource.get("output_dir")
+    declared_output = isinstance(output_dir, str) and bool(output_dir)
     mapping = meta.get("path_namespace")
     if isinstance(output_dir, str) and isinstance(mapping, dict):
         mapped = []
@@ -3121,8 +3206,12 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
                     relative = candidate.relative_to(Path(target))
                 except (ValueError, TypeError):
                     continue
-                mapped.append(Path(source) / relative)
-        output_dir = str(mapped[0]) if len(mapped) == 1 else None
+                mapped.append((Path(source), Path(source) / relative))
+        try:
+            visible = len(mapped) == 1 and mapped[0][0].is_dir()
+        except OSError:
+            visible = False
+        output_dir = str(mapped[0][1]) if visible else None
     elif (isinstance(output_dir, str) and meta.get("host_is_local") is False
           and isinstance(meta.get("run_root"), str)):
         try:
@@ -3130,6 +3219,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
                 output_dir = None
         except (OSError, TypeError, ValueError):
             output_dir = None
+    # A declared folder this observer cannot map is told apart from an undeclared one.
+    output_dir_unmapped = declared_output and output_dir is None
     try:
         started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
     except (TypeError, ValueError, OverflowError):
@@ -3145,7 +3236,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
         "cycle_id": resource.get("cycle_id") or meta.get("cycle_id"),
         "route_id": route.get("route_id") or route_doc.get("route_id"),
         "node": resource.get("node"), "host": meta.get("host"),
-        "output_dir": output_dir, "artifact_root": artifact_root,
+        "output_dir": output_dir, "output_dir_unmapped": output_dir_unmapped,
+        "artifact_root": artifact_root,
         "route": route_file, "jobs": resource.get("jobs"),
         "command": meta.get("command"), "cwd": meta.get("cwd"),
         "config_sha256": ((resource.get("contract") or {}).get("sealed") or {}).get("config_sha256"),
@@ -3170,6 +3262,8 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
 
 
 def _compute_observation_summary(result):
+    # Part of the run-ended notice text; dispatch_session_sweep (this and older releases) matches the
+    # no-observation form of that notice literally, so the words stay as they are.
     if not isinstance(result, dict) or not isinstance(result.get("observation"), dict):
         return "; 지표 없음; 계획 시간 미상; run 기록 경로 없음"
     observation = result["observation"]
@@ -3289,6 +3383,7 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
     run_dir = Path(args.run_dir)
     exit_path = run_dir / "exit_code"
     last_observation = None
+    next_session_probe = 0.0
     while True:
         if not run_dir.is_dir():
             return 0
@@ -3298,12 +3393,32 @@ def _watch_run(args, *, sleep=time.sleep, now=time.time):
             code = None
         if code is not None:
             break
+        observed_at = now()
+        quiet_since = _run_quiet_since(run_dir, observed_at)
+        if quiet_since is not None and observed_at >= next_session_probe:
+            # Nothing written for RUN_QUIET_SECONDS and no exit code. A run can
+            # stay alive and silent (buffered stdout, metrics only under its
+            # output dir), so only a session its host reports gone ends the
+            # watch, with the end left unknown. Alive or unreadable keeps it.
+            next_session_probe = observed_at + QUIET_PROBE_SECONDS
+            if _run_session_alive(run_dir) is False:
+                _record_quiet_run(run_dir, quiet_since, observed_at)
+                return 0
         try:
             meta_live = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-            last_observation = _observe_compute_experiment(meta_live, run_dir, now()) or last_observation
+            last_observation = _observe_compute_experiment(meta_live, run_dir, observed_at) or last_observation
         except (OSError, ValueError, TypeError):
             pass
         sleep(COMPLETION_POLL_SECONDS)
+    try:
+        return _report_run_end(run_dir, code, last_observation, now)
+    finally:
+        # The end is known now; a reconnect has nothing late left to report.
+        with contextlib.suppress(OSError):
+            (run_dir / QUIET_RUN_MARKER).unlink()
+
+
+def _report_run_end(run_dir, code, last_observation, now):
     try:
         meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -3373,7 +3488,12 @@ def _run_state(config, run_id):
     stop_reason = _read_stop_reason(run_dir)
     # Launch writes metadata only after the remote receipt. An empty legacy
     # directory and an in-flight launch are both unconfirmed, never proof of
-    # running or failure. Keep this observation read-only and age-independent.
+    # running or failure. Keep this observation read-only and age-independent:
+    # `state` is what callers act on (a route close still stops a quiet run).
+    # `quiet_since` only tells that nothing was written past RUN_QUIET_SECONDS,
+    # so the run is no longer watched and listings show its end as unknown.
+    quiet_since = (_run_quiet_since(run_dir, time.time())
+                   if has_metadata and exit_code is None and not stop_reason else None)
     state = ("finished" if exit_code is not None else
              "stopped" if stop_reason else
              "running" if has_metadata else "unknown")
@@ -3415,6 +3535,7 @@ def _run_state(config, run_id):
             "launch_receipt": receipt,
             "experiment_observation": experiment_record,
             "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
+            "quiet_since": _iso_time(quiet_since) if quiet_since is not None else None,
             "state": state}
 
 
@@ -3810,7 +3931,9 @@ def cmd_runs(args):
                         host, row["run_id"], transport=transport
                     )
             row["stale"] = (alive is False)
-            row["state"] = "stopped" if alive is False else "running"
+            # A quiet run reads as unknown unless its session is seen either way.
+            row["state"] = ("stopped" if alive is False else "running"
+                            if alive or not row.get("quiet_since") else "unknown")
         else:
             row["stale"] = False
     if args.json:
@@ -3828,6 +3951,8 @@ def cmd_runs(args):
             tail = "stopped (gone)"
         elif row.get("stop_reason"):
             tail = f"stopped ({row['stop_reason']})"
+        elif row["state"] == "unknown" and row.get("quiet_since"):
+            tail = f"unknown (no activity since {row['quiet_since'][:10]})"
         else:
             tail = row["state"]
         command = " ".join(row["meta"].get("command") or [])
