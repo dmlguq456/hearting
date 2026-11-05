@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fleet import model, projection, process_identity
 from fleet.collectors import claude, codex, herdr, procscan
 from fleet.model import Session, DispatchJob
-from test_process_identity import FakeClaudeProc
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from tools.fleet.tests.test_process_identity import FakeClaudeProc
 sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
 from split_module_fixture import patch_split  # noqa: E402
 
