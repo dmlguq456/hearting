@@ -66,9 +66,11 @@ For a worker's raw output, ask the agent for its attempt id and run
 ## Read the result
 
 Read the changed files, the verification result, and anything left undone.
-The change is usually in a separate git worktree beside your project,
-`<project>-wt/<name>`, on its own branch; your own folder stays as it was. The
-result names that folder and branch and whether the change is committed.
+A small, reversible fix like this one is made in your own folder, and Hearting
+records it automatically. A bigger change usually goes to a separate git
+worktree beside your project, `<project>-wt/<name>`, on its own branch, and
+your own folder stays as it was; the result names that folder and branch and
+whether the change is committed.
 For anything beyond a one-line fix, the plan, evidence, and report stay in the
 project's `.agent_reports/` folder. Do not delete it to unblock a task; the
 next stage reads the evidence it holds.

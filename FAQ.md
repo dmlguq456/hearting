@@ -64,8 +64,8 @@ separate git worktree beside your project, `<project>-wt/<name>`, on its own
 branch. Your folder, branch, and uncommitted files stay as they were. The
 result names the folder and branch that hold the change and whether it is
 committed. Review it there, and ask the agent when you want it in your own
-branch. A small edit the agent made in place instead is in your folder, and
-Hearting records it automatically as a direct route.
+branch. A small, reversible fix is made in your own folder instead, and
+Hearting records it automatically; there is nothing to start or finish.
 
 ## Why did .agent_reports appear in my project?
 
@@ -128,10 +128,9 @@ summary at the end of a dispatched request has one cost line (elapsed time and
 session tokens; a count the runtime did not report stays `unknown`), and Fleet
 shows the token counts and usage windows that the runtimes report. None of
 that is a bill or a quota forecast. What Hearting itself adds was measured on
-Codex on one machine: the first response about 1.5 s slower than without
-Hearting and about 2.5K more input tokens per request; a small two-turn fix
-took about twice as long, mostly because each turn records its start and
-finish. The only end-to-end timings we have are in
+Codex on one machine, three pairs each: the first response about 1 s slower
+than without Hearting and about 2.4K more input tokens per request; a small
+two-turn bug fix took 42 s against 36 s. The only end-to-end timings we have are in
 [What to expect](QUICKSTART.md#what-to-expect), with their limits.
 
 ## Why do I need a new session after an update?
