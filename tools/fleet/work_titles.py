@@ -3,7 +3,7 @@ import re
 import json
 import unicodedata
 import threading
-from collections import OrderedDict
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +12,12 @@ class TitleReadCache:
     """Pure validation results owned by observed, read-only parser documents."""
 
     def __init__(self):
-        self.entries = OrderedDict()
+        utilities = str(Path(__file__).resolve().parents[2] / 'utilities')
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from runtime_observation import ProjectionCache
+        self.entries = ProjectionCache(max_entries=128, max_bytes=16 * 1024 * 1024)
+        self.member_paths = ProjectionCache(max_entries=32, max_bytes=448 * 1024)
         self.lock = threading.RLock()
 
     def read(self, key, dependencies, load, errors):
@@ -28,10 +33,28 @@ class TitleReadCache:
             value = None
         with self.lock:
             self.entries[key] = (dependencies, value)
-            self.entries.move_to_end(key)
+            if key in self.entries:
+                self.entries.move_to_end(key)
             while len(self.entries) > 128:
                 self.entries.popitem(last=False)
         return value
+
+    def members(self, root, doc, read_json):
+        """Reuse immutable locators; every member still uses this pass's read."""
+        keys = tuple(key for key in (doc.get('cycles') or {})
+                     if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key))
+        cache_key = (str(root), keys)
+        with self.lock:
+            paths = self.member_paths.get(cache_key)
+            if paths is None:
+                directory = root / '.runtime/artifact-producer/v1/cycles'
+                # Stable empty documents keep a missing member from forcing
+                # identical failed validation again on every title lookup.
+                paths = tuple((key, str(directory / (key + '.json')), {}) for key in keys)
+                self.member_paths[cache_key] = paths
+            else:
+                self.member_paths.move_to_end(cache_key)
+        return {key: read_json(path) or empty for key, path, empty in paths}
 
 
 def _text(value, limit=400):
@@ -107,9 +130,11 @@ def cycle_title(root, record, read_json, *, validation_cache=None):
                 doc = read_json(str(directory / 'meta.json'))
                 identity = read_json(str(root / '.runtime/artifact-admission/v1/root-identity.json')) or {}
                 if isinstance(doc, dict) and identity.get('artifact_root_id'):
-                    members = {key: read_json(str(producer / 'cycles' / (key + '.json'))) or {}
-                               for key in (doc.get('cycles') or {})
-                               if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)}
+                    members = (validation_cache.members(root, doc, read_json)
+                               if callable(getattr(validation_cache, 'members', None)) else
+                               {key: read_json(str(producer / 'cycles' / (key + '.json'))) or {}
+                                for key in (doc.get('cycles') or {})
+                                if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)})
                     try:
                         validate = artifact_meta._validate_meta_doc
                         load = lambda: validate(doc, identity['artifact_root_id'], camp, members)

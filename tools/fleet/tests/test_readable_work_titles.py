@@ -82,6 +82,60 @@ class WorkTitlesTest(unittest.TestCase):
                                              lambda value: dispatch._read_cycle_record(value))
             self.assertEqual(job.campaign_label, oracle)
 
+    def test_one_detail_pass_shares_title_inputs_and_next_pass_updates(self):
+        job = self.job()
+        original = dispatch._stat_memo
+        reads = []
+        def observe(cache, path, loader):
+            if str(path) == str(self.meta_path):
+                reads.append(path)
+            return original(cache, path, loader)
+        with mock.patch.object(dispatch, '_stat_memo', side_effect=observe):
+            with dispatch.collection_read_scope():
+                dispatch._campaign_labels([job])
+                first = job.campaign_label
+                self.meta['cycles'][CYC]['title'] = 'changed in this pass'
+                self.save_meta()
+                work_titles.annotate([], [job], [])
+                self.assertEqual(job.campaign_label, first)
+                self.assertEqual(len(reads), 1)
+            with dispatch.collection_read_scope():
+                dispatch._campaign_labels([job])
+            self.assertEqual(job.campaign_label, 'changed in this pass')
+            self.assertEqual(len(reads), 2)
+
+    def test_missing_member_validation_reuses_then_observes_new_file(self):
+        import artifact_meta
+        missing = 'cyc_' + 'f' * 32
+        self.meta['cycles'][missing] = {'title': 'Not yet published'}
+        self.save_meta()
+        job = self.job()
+        with mock.patch.object(artifact_meta, '_validate_meta_doc', wraps=artifact_meta._validate_meta_doc) as validate:
+            dispatch._campaign_labels([job])
+            first = job.campaign_label
+            dispatch._campaign_labels([job])
+            self.assertEqual(validate.call_count, 1)
+            self.assertEqual(job.campaign_label, first)
+            path = self.root / '.runtime/artifact-producer/v1/cycles' / (missing + '.json')
+            path.write_text(json.dumps(dict(cycle_id=missing, campaign_id=CAMP)))
+            dispatch._campaign_labels([job])
+            self.assertEqual(validate.call_count, 2)
+            expected = work_titles.cycle_title(self.root, self.record, dispatch._read_cycle_record)
+            self.assertEqual(job.campaign_label, expected)
+
+    def test_title_cache_byte_limits_preserve_uncached_output(self):
+        cache = work_titles.TitleReadCache()
+        cache.entries.max_bytes = cache.member_paths.max_bytes = 1
+        expected = work_titles.cycle_title(self.root, self.record, dispatch._read_cycle_record)
+        for _ in range(2):
+            actual = work_titles.cycle_title(self.root, self.record, dispatch._read_cycle_record,
+                                             validation_cache=cache)
+            self.assertEqual(actual, expected)
+        self.assertEqual(len(cache.entries), 0)
+        self.assertEqual(len(cache.member_paths), 0)
+        self.assertGreater(cache.entries.rejections, 0)
+        self.assertGreater(cache.member_paths.rejections, 0)
+
     def test_complete_cycle_hint_avoids_negative_sweep_and_directory_change_reopens_it(self):
         import directory_record_index as index
         directory = self.root / '.runtime/artifact-producer/v1/cycles'

@@ -5455,7 +5455,9 @@ def _campaign_labels_read(jobs):
     for path in list(_CYCLE_RECORD_CACHE):
         if os.fspath(path).endswith(os.path.join(".runtime", "artifact-admission", "v1", "index.json")):
             _CYCLE_RECORD_CACHE.pop(path, None)
-    observed = {}
+    inputs = _COLLECTION_INPUTS.get()
+    observed = (inputs.setdefault(('campaign-title-documents', _read_cycle_record, _stat_stamp, _stat_memo), {})
+                if inputs is not None else {})
     def read_json(path):
         if path not in observed:
             observed[path] = _stat_memo(_CYCLE_RECORD_CACHE, path, _read_cycle_record)
