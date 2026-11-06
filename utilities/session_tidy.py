@@ -2935,11 +2935,13 @@ def last_human_prompt_seq(seat: Seat) -> int:
 # (Claude ``<agent-message>`` with its fixed framing) and runtime ``<system-reminder>`` text.
 # OpenCode v2 inserts command/description raw, including quotes and angle brackets.
 # Its native opener ends with a quote, greater-than sign and newline.
+# A later opener boundary cannot recover a missing close. Keep the first
+# boundary instead of rescanning the remaining body for every delimiter.
 _RUNTIME_BLOCK = re.compile(
     r'<(task-notification|subagent_notification|agent-message|system-reminder'
     r'|(?P<opencode>subagent(?= sessionID="[^"\r\n]+" state="(?:completed|error|cancelled)" description=")'
     r'|shell(?= id="[^"\r\n]+" state="(?:completed|error|cancelled)" command=")))'
-    r'''(?(opencode)\b.*?">\r?\n|\b(?:[^>"']|"[^"]*"|'[^']*')*>)'''
+    r'''(?(opencode)(?>\b.*?">\r?\n)|\b(?:[^>"']|"[^"]*"|'[^']*')*>)'''
     r'(?P<body>.*?)</\1>', re.S)
 _PEER_FRAMING = (
     re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
@@ -3114,6 +3116,8 @@ def runtime_turn_source(prompt_text: str) -> str:
     wrapped = _PROMPT_PASTE_BLOCK.fullmatch(prompt_text.strip())
     if wrapped:
         prompt_text = wrapped.group("body")
+    if "</" not in prompt_text:
+        return ""  # No complete block exists; avoid retrying every opener.
     kinds = [match.group(1) for match in _RUNTIME_BLOCK.finditer(prompt_text)]
     if not kinds:
         return ""

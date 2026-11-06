@@ -1,5 +1,7 @@
 """The existing prompt classifier also supplies a bounded, read-only Fleet view."""
 from pathlib import Path
+import json
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -10,6 +12,44 @@ from tidy_isolation import isolated_env
 import session_tidy as st
 import session_tidy_clear as clear
 from tools.fleet.collectors import prompt_inputs
+
+
+RUNTIME_COST_PROBE = '''
+import importlib.util,json,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]);sys.path[:0]=[str(root/'utilities'),str(root/'tools/memory/tests'),str(root)]
+spec=importlib.util.spec_from_file_location('runtime_cost_fixture',root/'utilities/session_tidy_prompt_display.test.py')
+fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+st=fixture.st
+rows=[]
+f=fixture.PromptDisplayTests();f.setUp()
+try:
+ for n in (15000,60000):
+  for kind in ('truncated','foreign-close','complete'):
+   prefix='<shell id="s" state="completed" command="'
+   text=(prefix+'x">\\n'*n if kind!='complete' else
+         prefix+'printf done">\\nACTUAL OUTPUT\\n'+'x'*(4*n)+'\\n</shell>')
+   if kind=='foreign-close':text+='</unrelated>'
+   sid=f'cost-{n}-{kind}'
+   if sys.argv[2]=='hook':
+    human=f.prompt('Original person input','opencode',sid)['human']
+   started=time.perf_counter()
+   if sys.argv[2]=='hook':
+    display=f.prompt(text,'opencode',sid,now=1010)
+    if kind=='complete':
+     assert display['human']==human
+     assert display['received'][-1]['text']=='ACTUAL OUTPUT'
+    else:
+     assert display['human_state']=='known' and display['human']['source']=='real'
+   else:
+    source=st.runtime_turn_source(text)
+    assert source==('notification' if kind=='complete' else '')
+    line=st.prompt_first_line(text)
+    assert line==('ACTUAL OUTPUT' if kind=='complete' else '<shell id="s" state="completed" command="x">')
+   rows.append({'kind':kind,'bytes':len(text.encode()),'seconds':time.perf_counter()-started})
+finally:f.doCleanups()
+print(json.dumps(rows))
+'''
 
 
 class PromptDisplayTests(unittest.TestCase):
@@ -216,6 +256,26 @@ class PromptDisplayTests(unittest.TestCase):
         self.assertEqual(st.real_prompt_frontier(seat, "opencode", sid), frontier)
         self.assertEqual(value["received"][-1]["source"], "notification")
         self.assertEqual(value["received"][-1]["text"], "?")
+
+    def _runtime_cost(self, mode):
+        try:
+            result = subprocess.run([sys.executable, "-c", RUNTIME_COST_PROBE, str(ROOT), mode],
+                                    cwd=ROOT, text=True, capture_output=True, timeout=3)
+        except subprocess.TimeoutExpired:
+            self.fail(f"large {mode} input exceeded the 3s guard (adapter budget: 4s)")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = json.loads(result.stdout)
+        self.assertEqual(len(rows), 6)
+        # The original real hook took about 0.054s. Allow CI scheduling noise,
+        # but retain substantial headroom below the actual adapter's 4s budget.
+        for row in rows:
+            self.assertLess(row["seconds"], 1.0, row)
+
+    def test_large_complete_and_unclosed_runtime_inputs_have_bounded_parse_cost(self):
+        self._runtime_cost("parse")
+
+    def test_large_complete_and_unclosed_inputs_finish_the_actual_hook_in_budget(self):
+        self._runtime_cost("hook")
 
     def test_verified_peer_and_self_request_do_not_replace_the_human(self):
         self.prompt("original", now=1000)
