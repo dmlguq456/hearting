@@ -142,7 +142,8 @@ for tree in OWNER_TREES + ("adapters/codex/skills", "adapters/opencode/skills"):
 portable_sources = harness_manifest.portable_bundle_files(ROOT)
 portable_paths = {path.relative_to(ROOT).as_posix() for path in portable_sources}
 assert "docs/lab-execution-access.md" in portable_paths, "linked lab access document is absent from plugin closure"
-assert len(portable_sources) == 190, f"expected 190 portable bundle sources, got {len(portable_sources)}"
+assert "core/references/session-shell.md" in portable_paths, "session shell contract is absent from plugin closure"
+assert len(portable_sources) == 191, f"expected 191 portable bundle sources, got {len(portable_sources)}"
 assert {path for path in portable_paths if path not in {
     path.relative_to(ROOT).as_posix()
     for section in ("core", "capabilities", "roles")
