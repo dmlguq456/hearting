@@ -322,6 +322,8 @@ fence and cannot hide session-root drift.
 
 ### §5.10. Work Isolation and Parallel Dispatch
 
+A same start after a settled blocking review of unchanged bound input returns the existing verdict and correction guidance without launching a new round; changed input uses the existing revision and closure-check rules. A settled incomplete producing-stage handoff resumes remaining work through the same start within the existing budget, preserving partial work and original results. Identity, quiescence, and transport-retry protections remain in force.
+
 The shared `status` snapshot displays exact-attempt observations alongside
 registry words: PID/start identity, exit/sentinel evidence, log modification
 time, and the declared result artifact. It reuses the Fleet classifier and

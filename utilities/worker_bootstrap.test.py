@@ -31,6 +31,97 @@ _OPA_SPEC.loader.exec_module(OPA)
 
 
 class WorkerBootstrapTest(unittest.TestCase):
+    def test_review_followup_uses_bound_result_and_quoted_same_start(self):
+        import review_input
+        import review_source_subject
+        node = {"id": "plan-check", "kind": "review-worker"}
+        route = {"route_id": "rt-test", "route_hash": "sha256:test", "nodes": [node]}
+        metadata = {"attempt_id": "att-test", "route_id": "rt-test", "route_hash": "sha256:test",
+                    "route_node": "plan-check", "note": "completed-review-blocking",
+                    "review_input_digest": "bound"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs, artifact, target = root / "jobs with space", root / "review.md", root / "plan with space.md"
+            jobs.write_text(""); artifact.write_text("review"); target.write_text("plan")
+            with mock.patch.object(W, "attempt_outcome", return_value={"artifact": str(artifact)}), \
+                 mock.patch.object(DC, "observe_terminal_review_failure"), \
+                 mock.patch.object(review_input, "read_binding", return_value={"path": str(target)}), \
+                 mock.patch.object(review_source_subject, "read_binding", return_value={"family": "document:plan"}):
+                fields = W.continuation_followup_fields(route, node, metadata, jobs, root / "route.json")
+            self.assertEqual(fields["artifact"], str(artifact))
+            self.assertEqual(fields["target"], str(target))
+            argv = shlex.split(fields["command"])
+            self.assertEqual(argv[argv.index("--reviewed-evidence") + 1], str(target))
+            self.assertEqual(argv[argv.index("--jobs") + 1], str(jobs))
+            self.assertIn("batch the findings", W.continuation_followup_text(fields))
+            group = W.continuation_followup_text([fields, {**fields, "attempt": "att-peer", "artifact": "peer.md"}])
+            self.assertIn("peer.md", group)
+            self.assertEqual(group.count(fields["command"]), 1)
+            self.assertEqual(W.continuation_followup_fields(route, node, {**metadata, "route_hash": "other"}, jobs, root / "route.json"), {})
+
+    def test_passed_producer_reopens_only_for_verified_blocking_review(self):
+        node = {"id": "execute", "kind": "pipeline-stage", "completion_gate": "code-execute"}
+        review = {"id": "impl-review", "kind": "review-worker", "depends_on": ["execute"]}
+        route = {"route_id": "rt-test", "route_hash": "sha256:test", "nodes": [node, review]}
+        producer = {"attempt_id": "att-execute", "route_id": "rt-test", "route_hash": "sha256:test",
+                    "route_node": "execute", "parent_attempt_id": "att-owner", "note": "completed-marker", "failure_class": "pass"}
+        judgment = {"attempt_id": "att-review", "route_id": "rt-test", "route_hash": "sha256:test",
+                    "route_node": "impl-review", "worker_type": "review", "note": "completed-review-blocking"}
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = Path(directory) / "jobs"; jobs.write_text("")
+            artifact = Path(directory) / "review.md"; artifact.write_text("blocking finding")
+            rows = {"execute": [("done", producer)], "impl-review": [("done", judgment)]}
+            with mock.patch.object(W, "_lineage_rows", return_value=rows), \
+                 mock.patch.object(W, "attempt_outcome", return_value={"artifact": str(artifact)}), \
+                 mock.patch.object(DC, "attempt_process_quiescence", return_value=SimpleNamespace(state="quiescent")), \
+                 mock.patch.object(DC, "observe_terminal_review_failure") as observe:
+                self.assertTrue(W.correction_continuation_eligible(route, node, producer, jobs, "att-owner"))
+                observe.assert_called_once()
+                self.assertFalse(W.correction_continuation_eligible(route, node, producer, jobs, "other-owner"))
+                rows["impl-review"] = []
+                self.assertFalse(W.correction_continuation_eligible(route, node, producer, jobs, "att-owner"))
+
+    def test_test_failure_followup_uses_bounded_producer_and_test_start(self):
+        import codex_dispatch_terminal as terminal
+        producer = {"id":"execute", "kind":"pipeline-stage", "completion_gate":"code-execute"}
+        node = {"id":"test", "kind":"pipeline-stage", "completion_gate":"code-test", "depends_on":["execute"]}
+        route = {"route_id":"rt-test", "route_hash":"sha256:test", "nodes":[producer,node]}
+        metadata = {"attempt_id":"att-test", "route_id":"rt-test", "route_hash":"sha256:test",
+                    "route_node":"test", "note":"dead-worker-fail", "failure_class":"fail", "worker_type":"test"}
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); jobs=root/"jobs"; jobs.write_text(""); artifact=root/"test.md"; artifact.write_text("failure")
+            with mock.patch.object(W,"_lineage_rows",return_value={"test":[("done",metadata)]}), \
+                 mock.patch.object(W,"attempt_outcome",return_value={"artifact":str(artifact)}), \
+                 mock.patch.object(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
+                 mock.patch.object(terminal,"inspect_terminal_attempt",return_value={"state":"valid","verdict":"FAIL","artifact_state":"readable"}):
+                fields=W.continuation_followup_fields(route,node,metadata,jobs,root/"route.json")
+            self.assertEqual(fields["kind"],"review")
+            self.assertIn("--node execute",fields["producer_command"])
+            self.assertIn("--node test",fields["command"])
+
+    def test_test_failure_correction_keeps_existing_pipeline_retry_ceiling(self):
+        import codex_dispatch_terminal as terminal
+        producer={"id":"execute","kind":"pipeline-stage","completion_gate":"code-execute"}
+        test={"id":"test","kind":"pipeline-stage","completion_gate":"code-test","depends_on":["execute"]}
+        route={"route_id":"rt-test","route_hash":"sha256:test","nodes":[producer,test],"effective_intensity":"standard"}
+        passed={"attempt_id":"att-execute","route_id":"rt-test","route_hash":"sha256:test",
+                "parent_attempt_id":"att-owner","note":"completed-marker","failure_class":"pass"}
+        failure={"attempt_id":"att-test","route_id":"rt-test","route_hash":"sha256:test",
+                 "note":"dead-worker-fail","failure_class":"fail","worker_type":"test"}
+        with tempfile.TemporaryDirectory() as directory:
+            jobs=Path(directory)/"jobs"; jobs.write_text("")
+            artifact=Path(directory)/"test.md"; artifact.write_text("failed")
+            rows={"execute":[("done",passed)],"test":[("done",failure)]}
+            with mock.patch.object(W,"_lineage_rows",return_value=rows), \
+                 mock.patch.object(W,"attempt_outcome",return_value={"artifact":str(artifact)}), \
+                 mock.patch.object(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")), \
+                 mock.patch.object(terminal,"inspect_terminal_attempt",return_value={"state":"valid","verdict":"FAIL","artifact_state":"readable"}):
+                self.assertTrue(W.correction_continuation_eligible(route,producer,passed,jobs,"att-owner"))
+                rows["test"].append(("done",{**failure,"attempt_id":"att-test-2"}))
+                self.assertFalse(W.correction_continuation_eligible(route,producer,passed,jobs,"att-owner"))
+                rows["test"].pop(); route["effective_intensity"]="quick"
+                self.assertFalse(W.correction_continuation_eligible(route,producer,passed,jobs,"att-owner"))
+
     def test_stage_attempt_budget_prompt_and_legacy_rendering(self):
         from datetime import datetime, timezone
         args = SimpleNamespace(worker_type="stage", foreground_timeout=3600)

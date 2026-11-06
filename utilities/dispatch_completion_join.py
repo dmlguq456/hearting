@@ -1146,11 +1146,23 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     command_text = "\n".join(command for command in commands if command)
     if not command_text:
         command_text = "\n".join(["(no harvest command; advance the route)", *_next_ready_start_lines(receipt, jobs)])
+    followups = []
+    if jobs:
+        import worker_bootstrap
+        for child in receipt.get("children") or ():
+            try:
+                meta = exact_attempt_row(Path(jobs), child["attempt_id"]).metadata
+                fields = worker_bootstrap.continuation_followup_for_row(meta, jobs, return_fields=True)
+                if fields and fields not in followups:
+                    followups.append(fields)
+            except (OSError, ValueError, KeyError, JoinContractError):
+                continue
     return ("Completion bookkeeping for the listed attempts:\n" + command_text
             + "\nThe commands use the shared, runtime-neutral registry harvest compatibility surface; "
               "it does not select or change the owner or child harness. "
               "Continue the authorized work within its existing human gates. "
-              "Receipt/ACK isn't execution. This receipt creates no new approval step.")
+              "Receipt/ACK isn't execution. This receipt creates no new approval step."
+              + ("\n" + worker_bootstrap.continuation_followup_text(followups) if followups else ""))
 
 
 def _project_legacy_receipt(receipt, jobs: Path, parent_attempt_id: str):

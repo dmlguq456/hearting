@@ -336,6 +336,7 @@ def _attempt_action(status: str, metadata: Mapping[str, str]) -> str:
 def _round_action(state, node_kind):
     review = node_kind == "review-worker"
     return {"admit": "dispatch", "blocked-live": "wait", "blocked-unsettled": "wait",
+            "review-correction-required": "correct-and-restart",
             "exhausted": "owner-report" if review else "report",
             "verdictless-bound": "native-subagent" if review else "owner-inline"}[state]
 
@@ -363,6 +364,14 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     locking and immutable publication stay with the existing consumers.
     """
     route, facts, metadata = route or {}, facts or {}, metadata or {}
+    if action == "producing-continuation":
+        # The caller observes the exact result and process; this pure decision
+        # does not turn a readable worker result into a transport retry.
+        reason = next((name for name in ("identity", "settled", "quiescent", "readable", "unfinished", "no_human_decision")
+                       if not facts.get(name)), "")
+        return ContinuationDecision(not reason, "continue" if not reason else "inspect",
+                                    "" if not reason else "continuation-" + reason,
+                                    "same-command" if reason else "start")
     if action in {"finish", "finish-registry"}:
         registered_reason = "finish-registered-route-ineligible" if facts.get("registered_route") else ""
         if action == "finish-registry":
@@ -939,6 +948,16 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             any(last_id in (r.get("supersedes") or ()) for r in budget_revisions)))
         if closure:
             state = "admit"
+        # A known content subject with an undisposed blocking judgment cannot
+        # use another verdict on the same bytes.  In particular, an old
+        # answers revision for A must not turn A -> B -> A into a correction.
+        # Leave legacy unknown bindings, tests, and stronger refusals alone.
+        transport_retry = bool(rows and kinds[-1] == "verdict-less" and
+            retry_predecessor([{**rows[-1][1], "_status": rows[-1][0]}]))
+        if (action == "round" and state == "admit" and source_aware and not transport_retry
+                and node.get("kind") == "review-worker"
+                and _ROUND.open_blocking_verdict(budget_rows, worker_type) is not None):
+            state = "review-correction-required"
         # The verdict budget stays with the content subject, but the round kind
         # follows the node lineage: a correction always changes the reviewed
         # content, so a review whose lineage ends in a blocking verdict checks
@@ -984,7 +1003,8 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     else:
         allowed = state == "admit"
         reason = {"blocked-live": "prior-attempt-still-live", "blocked-unsettled": "round-unsettled",
-                  "exhausted": "review-round-budget-exhausted", "verdictless-bound": "review-verdictless-bound"}.get(state, "")
+                  "exhausted": "review-round-budget-exhausted", "verdictless-bound": "review-verdictless-bound",
+                  "review-correction-required": "review-subject-unchanged"}.get(state, "")
     detail = ""
     if action == "owner-closure" and not allowed:
         if state == "admit":

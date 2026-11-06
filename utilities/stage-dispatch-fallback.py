@@ -1203,6 +1203,12 @@ def _report_launched(args, route, node, allocation_context, row, hop, ordinal, a
     if review_verdict:
         print(f"terminal_note={terminal_note or REVIEW_BLOCKING_NOTE}")
         print(f"review_verdict={review_verdict}")
+        prior = finished_verdict_row(args.jobs, route["route_id"], node["id"], attempt_id)
+        if prior:
+            from worker_bootstrap import continuation_followup_fields, continuation_followup_text
+            guidance = continuation_followup_text(continuation_followup_fields(route, node, prior, args.jobs, args.route))
+            if guidance:
+                print(f"continuation_followup={guidance}")
     if watch_fields.get("watchdog_verdict") == "advisory":
         # SD-OPEN-38 (#9): the progress tool failed while the
         # child was verified alive -- advisory, not a verdict.
@@ -1237,9 +1243,8 @@ def finished_verdict_row(jobs: Path, route_id: str, node_id: str, attempt_id: st
     for row in reversed(registry_rows(jobs, route_id, node_id)):
         if row.get("attempt_id") != attempt_id or row.get("_status") != "done":
             continue
-        worker_type = row.get("worker_type", "")
-        verdict = classify_round_row("done", row, worker_type=worker_type) == "verdict"
-        return row if verdict or readable_result(row) else None
+        from dispatch_attempt_policy import finished_verdict
+        return row if finished_verdict("done", row) else None
     return None
 
 
@@ -1443,6 +1448,48 @@ def request_attempt_identity(attempt_id, prior_rows, *, jobs, task):
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return "att-" + digest[:48]
+
+
+def semantic_continuation_identity(route, node, parent_attempt_id, predecessor_id):
+    """Stable for one settled producing predecessor, regardless of candidate tuple."""
+    payload = {"route_id": route["route_id"], "route_hash": route["route_hash"],
+               "node": node["id"], "parent_attempt_id": parent_attempt_id,
+               "continuation_of": predecessor_id}
+    return "att-" + hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()[:48]
+
+
+def semantic_continuation_predecessor(args, route, node, prior_rows):
+    """Find a readable, quiescent incomplete producing attempt owned by this parent."""
+    if (node.get("kind") != "pipeline-stage" or node.get("completion_gate") != "code-execute"
+            or not prior_rows):
+        return None
+    current = prior_rows[-1]
+    active = [row for row in prior_rows if row.get("_status") in {"open", "running"}]
+    if len(active) > 1 or (active and active[0] is not current):
+        return None
+    previous = current
+    if current.get("_status") in {"open", "running"}:
+        if len(prior_rows) < 2:
+            return None
+        previous = prior_rows[-2]
+        expected = semantic_continuation_identity(route, node, args.parent_attempt_id,
+                                                   previous.get("attempt_id", ""))
+        if current.get("attempt_id") != expected or current.get("parent_attempt_id") != args.parent_attempt_id:
+            return None
+    prompt_file = getattr(args, "prompt_file", None)
+    if prompt_file is not None:
+        try:
+            from dispatch_replacement import launch_input
+            old_task = launch_input(args.jobs, previous["attempt_id"], previous)["task"]
+            task = prompt_file.read_text(encoding="utf-8")
+            if not isinstance(old_task, str) or " ".join(old_task.split()) != " ".join(task.split()):
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+    from worker_bootstrap import incomplete_continuation_eligible, correction_continuation_eligible
+    return previous if (incomplete_continuation_eligible(route, node, previous, args.jobs, args.parent_attempt_id)
+                        or correction_continuation_eligible(route, node, previous, args.jobs, args.parent_attempt_id)) else None
 
 
 def retry_attempt_identity(failed_attempt_id: str) -> str:
@@ -2434,7 +2481,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         choice = decide_continuation(route, action="round", node=node, facts={"budget": node_round_budget})
         if not choice.allowed:
             fields = {"next_action": choice.next_action, "retry_when": choice.retry_when}
-            if choice.state in {"exhausted", "verdictless-bound"}:
+            if choice.state in {"exhausted", "verdictless-bound", "review-correction-required"}:
                 fields.update(DISPATCH_NODE.review_budget_recovery_fields(node.get("kind"), choice.state,
                     route=route, node=node, jobs=args.jobs, route_file=args.route))
             return fail(choice.reason, 78 if choice.state == "blocked-live" else 65,
@@ -2479,14 +2526,22 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
     prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])
+    semantic_predecessor = semantic_continuation_predecessor(args, route, node, prior_rows)
     # A fresh owner assignment is new work, not an automatic replay of the
     # interrupted assignment. Capped rounds retain their admission above.
     request_task = (args.prompt_file.read_text(encoding="utf-8")
                     if args.prompt_file is not None
                     and not DISPATCH_NODE.REVIEW_ROUND_CAP.is_round_capped_node(node)
                     else None)
+    if (node.get("completion_gate") == "code-execute" and prior_rows and not semantic_predecessor
+            and readable_result(prior_rows[-1]) == "BLOCKED"
+            and not (request_task and new_owner_request(prior_rows[-1], jobs=args.jobs, task=request_task))):
+        return fail("prior-result-requires-inspection", 78, child_spawned="0",
+                    next_action="inspect-done-failure")
     args.automatic_retry_of = retry_predecessor(
         prior_rows, jobs=args.jobs, task=request_task)
+    if semantic_predecessor:
+        args.automatic_retry_of = ""
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
@@ -2698,6 +2753,9 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 attempt_id = attempt_identity(
                     args, route, node, row, ordinal,
                     node_round_admission.budget.next_round if node_round_admission is not None else 1)
+                if semantic_predecessor:
+                    attempt_id = semantic_continuation_identity(
+                        route, node, args.parent_attempt_id, semantic_predecessor["attempt_id"])
                 if request_task is not None:
                     attempt_id = request_attempt_identity(
                         attempt_id, prior_rows, jobs=args.jobs, task=request_task)

@@ -50,6 +50,52 @@ def dispatch_defaults_config_text(text):
 
 
 class FallbackTest(unittest.TestCase):
+ def test_semantic_continuation_uses_exact_quiescent_blocked_handoff(self):
+  import codex_dispatch_terminal as terminal
+  import dispatch_contract as dc
+  import worker_bootstrap as worker
+  route={"route_id":"rt-one","route_hash":"sha256:one","cwd":"/work","artifact_root":"/artifacts"}
+  node={"id":"execute","kind":"pipeline-stage","completion_gate":"code-execute"}
+  args=SimpleNamespace(parent_attempt_id="att-owner",prompt_file=None,jobs=Path("/fixture/jobs"))
+  row={"attempt_id":"att-old","_status":"done","route_id":"rt-one","route_hash":"sha256:one",
+       "route_node":"execute","parent_attempt_id":"att-owner","note":"dead-worker-blocked",
+       "failure_class":"blocked","log_file":"/log","worker_type":"stage"}
+  valid={"state":"valid","artifact_state":"readable","verdict":"BLOCKED"}
+  with mock.patch.object(terminal,"inspect_terminal_attempt",return_value=valid), \
+       mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"remaining implementation unfinished"}), \
+       mock.patch.object(worker,"_lineage_rows",return_value={"execute":[("done",row)]}), \
+       mock.patch.object(dc,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")):
+   self.assertIs(F.semantic_continuation_predecessor(args,route,node,[row]),row)
+   identity=F.semantic_continuation_identity(route,node,"att-owner","att-old")
+   open_row={"_status":"open","attempt_id":identity,"parent_attempt_id":"att-owner"}
+   self.assertIs(F.semantic_continuation_predecessor(args,route,node,[row,open_row]),row)
+   self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row,{**open_row,"attempt_id":"other"}]))
+   for text in ("need user decision", "waiting for supervisor guidance", "사람의 판단이 필요", "답변 대기"):
+    with self.subTest(blocker=text), mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":text}):
+     self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
+   with mock.patch.object(dc,"attempt_process_quiescence",return_value=SimpleNamespace(state="unverifiable")):
+    self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
+   with mock.patch.object(terminal,"inspect_terminal_attempt",return_value={**valid,"artifact_state":"missing"}):
+    self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
+   self.assertNotEqual(identity,F.semantic_continuation_identity(route,node,"att-owner","att-other"))
+
+ def test_concurrent_semantic_successor_claims_share_one_registry_row(self):
+  import dispatch_contract as dc
+  from concurrent.futures import ThreadPoolExecutor
+  route={"route_id":"rt-one","route_hash":"sha256:one"}; node={"id":"execute"}
+  attempt=F.semantic_continuation_identity(route,node,"att-owner","att-predecessor")
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory); jobs=root/"jobs.log"; jobs.write_text("")
+   row=(f"now\topen\t{root}\t{root}\tsemantic\t"
+        f"attempt_schema_version=2,dispatch_depth=2,registered_worker=1,worker_type=stage,transport=headless,"
+        f"execution_surface=registered-headless,fallback_hop=same-harness-headless,harness=codex,"
+        f"route_id=rt-one,route_hash=sha256:one,route_node=execute,attempt_id={attempt},"
+        f"parent_attempt_id=att-owner,completion_gate=code-execute")
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    claims=list(pool.map(lambda _: dc.claim_attempt_row(jobs,attempt,row,launch=True),range(2)))
+   self.assertEqual(sorted(claims),[False,True])
+   self.assertEqual(sum(attempt in line for line in jobs.read_text().splitlines()),1)
+
  def test_projection_mismatch_detail_reaches_failures_and_candidate_outcomes(self):
   reason="codex-runtime-projection-mismatch"
   for detail in ("check=hearting:failed reason=expected-symlink-to:/r/v3.70.0","exit-1"):
@@ -1388,6 +1434,48 @@ class FallbackTest(unittest.TestCase):
   self.assertIn(f"round={cap+1}",printed)
   self.assertIn(f"max_round={cap}",printed)
   self.assertIn("child_spawned=0",printed)
+
+ def test_same_review_start_refuses_unchanged_bound_input_without_launch(self):
+  import shlex
+  import dispatch_contract as DC
+  import worker_bootstrap as worker
+  with self.dispatch_env():
+   path=self.route(same_status="supported",intensity="standard")
+   route=json.loads(path.read_text()); self.seed_parent(); evidence=self.seed_plan_marker(route)
+   self.seed_bound_review_rounds(route,"plan-check",1,evidence)
+   before=self.jobs.read_bytes(); marker=R.completion_dir(route["route_id"],jobs=self.jobs)/"plan.json"
+   marker_before=marker.read_bytes()
+   previous=F.registry_rows(self.jobs,route["route_id"],"plan-check")[-1]
+   node=next(item for item in route["nodes"] if item["id"]=="plan-check")
+   review=self.art/"review.md"; review.write_text("blocking finding")
+   with mock.patch.object(worker,"attempt_outcome",return_value={"artifact":str(review)}), \
+        mock.patch.object(DC,"observe_terminal_review_failure"):
+    followup=worker.continuation_followup_fields(route,node,previous,self.jobs,path)
+   self.assertIn(str(review),worker.continuation_followup_text(followup))
+   # Feed the shared follow-up's literal argv back into the public dispatcher.
+   argv=shlex.split(followup["command"])[1:]
+   with mock.patch.object(sys,"argv",argv), \
+        mock.patch.object(F,"run_wrapper",side_effect=AssertionError("unchanged input launched")), \
+        contextlib.redirect_stdout(io.StringIO()) as output:
+    code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+   self.assertEqual(code,65,output.getvalue())
+   self.assertIn("reason=review-subject-unchanged",output.getvalue())
+   self.assertIn("child_spawned=0",output.getvalue())
+   self.assertEqual(self.jobs.read_bytes(),before)
+   self.assertEqual(marker.read_bytes(),marker_before)
+   evidence.write_text("corrected reviewed plan\n")
+   with mock.patch.object(sys,"argv",argv), \
+        mock.patch.object(F,"run_wrapper",return_value=SimpleNamespace(returncode=0,stdout="check=ok\nregistered=1\nstarted=1\nchild_spawned=1\n",stderr="")) as launched, \
+        mock.patch.object(F,"watch_launched_attempt",return_value=("observed",{})), \
+        contextlib.redirect_stdout(io.StringIO()) as output:
+    code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+   self.assertEqual(code,0,output.getvalue())
+   launched.assert_called_once()
+   # Current evidence-history policy retains the original marker bytes.
+   self.assertEqual(marker.read_bytes(),marker_before)
+   brief=os.environ.get("AGENT_DISPATCH_RETRY_BRIEF", "")
+   self.assertIn("is every prior 🔴 closed",brief)
+   self.assertIn("did the delta since that review introduce a correctness defect",brief)
  def test_review_round_cap_allows_a_round_within_budget(self):
   with self.dispatch_env():
    path=self.route(same_status="supported")
@@ -1645,6 +1733,64 @@ class FallbackTest(unittest.TestCase):
 
  def test_new_execute_gap_registers_after_transport_budget_was_spent(self):
   self.assert_new_execute_request("gap-three")
+
+ def test_same_execute_start_claims_one_semantic_successor(self):
+  import codex_dispatch_terminal as terminal
+  import dispatch_contract as DC
+  import dispatch_replacement as replacement
+  with self.dispatch_env():
+   path=self.route(same_status="supported",intensity="standard",tuples=[self.tuple("codex","supported")])
+   route=json.loads(path.read_text()); node=next(n for n in route["nodes"] if n["id"]=="execute")
+   self.seed_parent(); self.seed_predecessor_markers(path,"execute")
+   parent=F.parent_attempt_generation(self.jobs,"owner",route)
+   previous={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
+       "execution_surface":"registered-headless","registered_worker":"1",
+       "fallback_hop":"same-harness-headless","worker_type":"stage","harness":"codex",
+       "attempt_id":"att-prior-blocked","route_id":route["route_id"],"route_hash":route["route_hash"],
+       "route_node":"execute","parent_attempt_id":parent,"parent_sid":"fixture-native-parent",
+       "note":"dead-worker-blocked","failure_class":"blocked","log_file":"/fixture-log"}
+   with self.jobs.open("a") as handle:
+    handle.write(f"now\tdone\t{self.repo}\t{self.repo}\tsemantic-gap\t"+
+                 ",".join(f"{k}={v}" for k,v in previous.items())+"\n")
+   original=self.jobs.read_bytes(); calls=[]
+   def wrapper(_args,command,**_policy):
+    aid=self.arg(command,"--attempt-id"); calls.append(command)
+    candidate={k:v for k,v in previous.items() if k not in {"note","failure_class","log_file"}}
+    candidate.update(attempt_id=aid,completion_gate="code-execute")
+    retry=self.arg(command,"--automatic-retry-of")
+    if retry: candidate["automatic_retry_of"]=retry
+    replacement.admission(self.jobs,self.jobs.read_text().splitlines(),candidate)
+    row=f"now\topen\t{self.repo}\t{self.repo}\tsemantic-gap\t"+",".join(f"{k}={v}" for k,v in candidate.items())
+    started="--start" in command
+    self.assertTrue(DC.claim_attempt_row(self.jobs,aid,row,launch=started))
+    return SimpleNamespace(returncode=0,stdout=f"check=ok\nregistered_worker=1\nchild_spawned={int(started)}\nattempt_id={aid}\n",stderr="")
+   hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[self.tuple("codex","supported")]}]
+   common=["stage-dispatch-fallback.py","--route",str(path),"--node","execute","--slug","semantic-gap",
+           "--parent","owner","--capability-mode","dev","--jobs",str(self.jobs)]
+   with self.compiled_order(), mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), \
+        mock.patch.object(F,"watch_launched_attempt",return_value=("observed",{})), \
+        mock.patch.object(terminal,"inspect_terminal_attempt",return_value={"state":"valid","artifact_state":"readable","verdict":"BLOCKED"}), \
+        mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"remaining implementation unfinished"}), \
+        patch_split(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")):
+    blocked_out=io.StringIO()
+    with mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"need user decision"}), \
+         mock.patch.object(sys,"argv",common+["--start"]), contextlib.redirect_stdout(blocked_out):
+     blocked_code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+    self.assertEqual(blocked_code,78,blocked_out.getvalue())
+    self.assertIn("reason=prior-result-requires-inspection",blocked_out.getvalue())
+    self.assertEqual(calls,[])
+    for action in ("--register","--start"):
+     out=io.StringIO()
+     with mock.patch.object(sys,"argv",common+[action]), contextlib.redirect_stdout(out):
+      code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+     self.assertEqual(code,0,out.getvalue())
+   self.assertEqual(len(calls),2)
+   ids=[self.arg(command,"--attempt-id") for command in calls]
+   self.assertEqual(ids,[F.semantic_continuation_identity(route,node,parent,"att-prior-blocked")]*2)
+   self.assertTrue(all("--automatic-retry-of" not in command for command in calls))
+   self.assertTrue(self.jobs.read_bytes().startswith(original))
+   self.assertEqual(len([r for r in F.registry_rows(self.jobs,route["route_id"],"execute") if r["attempt_id"]==ids[0]]),1)
 
  def test_new_execute_request_can_reuse_its_failed_slug(self):
   self.assert_new_execute_request("gap-two")

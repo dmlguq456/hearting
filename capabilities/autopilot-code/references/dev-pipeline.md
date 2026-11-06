@@ -345,7 +345,7 @@ others. When a non-anchor leg wins or a graft is required, materialize the final
    dispatch prompt must name the group it arbitrates and how many auxiliary legs
    were realized. Skipping this step does not fail here — it fails later, when
    `execute` refuses to start with `auxiliary-arbitration-missing`.
-4. Read only the memo verdict. If it reports blocking findings, pause when `--user-refine` is set; otherwise run one `code-refine` within the correction budget.
+4. Read only the memo verdict. If it reports blocking findings, pause when `--user-refine` is set; otherwise run one `code-refine` within the correction budget. Repeat the same review start after the batched correction; unchanged bound input returns the existing FAIL without another round. A settled incomplete execute handoff resumes its remaining work with the same execute start within the existing budget.
 5. On a clean memo (or after the bounded refinement), continue to Step 3.
 
 ### Step 3: code-execute

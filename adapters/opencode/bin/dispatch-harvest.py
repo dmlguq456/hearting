@@ -225,6 +225,10 @@ def main(argv: list[str]) -> int:
         print(f"job_worktree={worktree}")
         print(f"job_slug={slug}")
         print(f"job_pipe={pipe}")
+        from worker_bootstrap import continuation_followup_for_row
+        guidance = continuation_followup_for_row(parse_registry_metadata(pipe), jobs)
+        if guidance:
+            print(f"continuation_followup={guidance}")
     return 0
 
 
