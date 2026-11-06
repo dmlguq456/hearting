@@ -898,8 +898,10 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         fields, unknown = REPLACEMENT._rows(self.jobs.read_text().splitlines())[target]
         unknown = {**unknown, 'attempt_id': 'att-fixture-unknown-binding-2',
                    'note': 'dead-missing-result'}
-        # Unknown history stays unknown under a new identity and refuses before
-        # it can be counted against the current source subject.
+        # Unknown history stays unknown under a new identity. Isolate binding
+        # refusal from the node-lineage stall bound by leaving the preceding
+        # row substantive; the separate case below exercises two verdict-less
+        # rounds, including history from another content subject.
         unknown.pop('review_subject_digest', None)
         unknown.pop('review_subject_binding_digest', None)
         unknown.update(launch_claimed='0', launch_started='0', launch_outcome='never-launched')
@@ -908,6 +910,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         fields[5] = ','.join(k + '=' + v for k, v in unknown.items())
         unknown_row = '\t'.join(fields)
         settled = self.jobs.read_bytes()
+        self.fixture_row(target, note='completed-marker', failure_class='pass')
         with self.jobs.open('a') as handle:
             handle.write(unknown_row + '\n')
         refusal = self.assert_atomic_refusal(reason='batch-prior-binding-drift')

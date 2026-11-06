@@ -734,7 +734,7 @@ def build_continuation_route(
         "selection_pins","requested_intensity",
         "effective_intensity","owner_model_profile","execution_topology",
         "owner_dispatch_depth","max_dispatch_depth","tracking",
-        "tracked_gate_evidence","spec_touch","cwd","source_commit","source_repository",
+        "tracked_gate_evidence","spec_touch","artifact_storage_contract_version","cwd","source_commit","source_repository",
         "registry_digest","capability_registry_digest","dispatch_defaults_digest","dispatch_allocation",
         "owner_harness_policy","selection","codex_execution_sandbox","human_gates","human_gate_bindings",
         "confirmation_mode","small_work_confirmation",
@@ -1559,6 +1559,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "owner_dispatch_depth":0 if effective=="direct" else (recipe["quick"]["owner_dispatch_depth"] if effective=="quick" else recipe["standard_plus"]["owner_dispatch_depth"]),
       "max_dispatch_depth":recipe["quick"]["max_dispatch_depth"] if effective=="quick" else (0 if effective=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
       "tracking":tracking,"tracked_gate_evidence":evidence,"spec_touch":spec_touch,
+      "artifact_storage_contract_version":2,
       "cwd":str(cwd),"artifact_root":str(artifact),"source_commit":_git_commit(cwd),
       "registry_digest":TOPO.registry_digest(registry),
       "capability_registry_digest":TOPO.capability_registry_digest(

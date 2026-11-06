@@ -48,7 +48,7 @@
 <text x="432" y="126" textLength="63" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">HARNESS</text>
 <text x="693" y="126" textLength="45" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">TITLE</text>
 <text x="936" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">CTX</text>
-<text x="1080" y="126" textLength="45" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">INPUT</text>
+<text x="1080" y="126" textLength="90" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">LAST INPUT</text>
 <text x="1404" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">AGE</text>
 <text x="9" y="144" textLength="45" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">PEERS</text>
 <text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
@@ -77,7 +77,7 @@
 <text x="936" y="162" textLength="36" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━━</text>
 <text x="972" y="162" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────</text>
 <text x="1026" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">46%</text>
-<text x="1080" y="162" textLength="261" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">› me 1m ago: Keep the rate l…</text>
+<text x="1080" y="162" textLength="261" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› 1m · Keep the rate limit p…</text>
 <text x="1368" y="162" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">1h 12m</text>
 <text x="9" y="180" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">QUESTIONS</text>
 <text x="270" y="180" textLength="9" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">1</text>
@@ -95,7 +95,7 @@
 <text x="936" y="180" textLength="54" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">━━━━━━</text>
 <text x="990" y="180" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">──</text>
 <text x="1026" y="180" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">71%</text>
-<text x="1080" y="180" textLength="261" lengthAdjust="spacing" fill="#858689" xml:space="preserve">› me 2m ago: Add a test for …</text>
+<text x="1080" y="180" textLength="261" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› 2m · Add a test for the re…</text>
 <text x="1395" y="180" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38m</text>
 <text x="9" y="198" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">HISTORY</text>
 <text x="288" y="198" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -114,7 +114,7 @@
 <text x="936" y="198" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="963" y="198" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────</text>
 <text x="1026" y="198" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">33%</text>
-<text x="1080" y="198" textLength="90" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">› me: none</text>
+<text x="1080" y="198" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1395" y="198" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">19m</text>
 <text x="9" y="216" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">RESOURCES</text>
 <text x="252" y="216" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2/2 │</text>
@@ -139,7 +139,7 @@
 <text x="936" y="234" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="963" y="234" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────</text>
 <text x="1026" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38%</text>
-<text x="1080" y="234" textLength="90" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">› me: none</text>
+<text x="1080" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1395" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">54m</text>
 <text x="9" y="252" textLength="288" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ │</text>
 <text x="333" y="252" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
@@ -155,7 +155,7 @@
 <text x="936" y="252" textLength="18" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━</text>
 <text x="954" y="252" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">──────</text>
 <text x="1026" y="252" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">29%</text>
-<text x="1080" y="252" textLength="261" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">› me 3m ago: Try four data-l…</text>
+<text x="1080" y="252" textLength="261" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› 3m · Try four data-loader …</text>
 <text x="1395" y="252" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">26m</text>
 <rect x="0" y="256" width="288" height="18" fill="#1c2030"/>
 <text x="9" y="270" textLength="72" lengthAdjust="spacing" fill="#8a8c93" xml:space="preserve">SESSIONS</text>
@@ -184,7 +184,7 @@
 <text x="936" y="288" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━</text>
 <text x="945" y="288" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───────</text>
 <text x="1026" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">14%</text>
-<text x="1080" y="288" textLength="90" lengthAdjust="spacing" fill="#858689" xml:space="preserve">› me: none</text>
+<text x="1080" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1395" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">44m</text>
 <text x="9" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="306" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─ [</text>
@@ -209,7 +209,7 @@
 <text x="936" y="306" textLength="45" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">━━━━━</text>
 <text x="981" y="306" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───</text>
 <text x="1026" y="306" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">63%</text>
-<text x="1080" y="306" textLength="90" lengthAdjust="spacing" fill="#858689" xml:space="preserve">› me: none</text>
+<text x="1080" y="306" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1368" y="306" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">6h 50m</text>
 <text x="9" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -242,7 +242,7 @@
 <text x="936" y="342" textLength="18" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━</text>
 <text x="954" y="342" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">──────</text>
 <text x="1026" y="342" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">21%</text>
-<text x="1080" y="342" textLength="90" lengthAdjust="spacing" fill="#858689" xml:space="preserve">› me: none</text>
+<text x="1080" y="342" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1377" y="342" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">3h 5m</text>
 <text x="9" y="360" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="360" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>

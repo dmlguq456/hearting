@@ -235,7 +235,7 @@ def iter_cycle_dirs(campaign: Path) -> Iterator[Tuple[Path, str]]:
     if not campaign.is_dir() or campaign.is_symlink():
         return
     for entry in campaign.iterdir():
-        if entry.name.startswith(".") or entry.name in {"cycles", CAMPAIGN_EVENTS_DIR}:
+        if entry.name.startswith(".") or entry.name in {"cycles", "journals", CAMPAIGN_EVENTS_DIR}:
             continue
         if entry.is_dir() and not entry.is_symlink():
             rows.append((entry, "readable"))
@@ -1344,6 +1344,11 @@ def locate(
     """
 
     root = Path(root).resolve()
+    if str(identifier).startswith("cyc_"):
+        record = read_cycle_record(root, identifier)
+        if record and record.get("journal_migration"):
+            from artifact_journal_migration import resolve_backup
+            return resolve_backup(root, record)
     hints = _hint_map(root)
     hinted = hints.get(identifier)
     if hinted:
@@ -1392,6 +1397,21 @@ def resolve_historical(root, identifier, *, max_hops=8):
     """
     import artifact_cross_root_move as move
     root = Path(root).resolve()
+    if str(identifier).startswith("cyc_"):
+        record = read_cycle_record(root, identifier)
+        if record and record.get("journal_migration"):
+            from artifact_journal_migration import resolve_backup
+            migration = record["journal_migration"]
+            backup = resolve_backup(root, record)
+            operation_path = backup.parent / "operation.json"
+            operation = (_read_json(operation_path) or {}) if operation_path.stat().st_size <= 1024 * 1024 else {}
+            state = operation.get("state", "unknown")
+            return {"resolution": "journal", "migration_state": state,
+                    "original": {"artifact_root": str(root), "campaign_id": record["campaign_id"],
+                                 "cycle_id": identifier, "locator": migration["source"]},
+                    "canonical": migration["entry"], "absolute": str(backup),
+                    "provenance": [{"operation_id": migration["operation_id"], "state": state}],
+                    "preserved_original": str(backup.parent / "retired") if state != "committed" else None}
     original = {"artifact_root": str(root), "campaign_id": None, "cycle_id": None, "locator": None}
     current, requested = root, identifier
     chain, seen = [], set()

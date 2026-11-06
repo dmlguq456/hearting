@@ -282,6 +282,18 @@
    "en": "+{count} more",
    "ko": "외 {count}개"
   },
+  "entrance.open_record": {
+   "en": "View record",
+   "ko": "기록 보기"
+  },
+  "entrance.open_result": {
+   "en": "Open result",
+   "ko": "결과물 열기"
+  },
+  "entrance.partial": {
+   "en": "Some records could not be read completely; this list is partial.",
+   "ko": "일부 기록을 완전히 읽지 못했습니다. 부분 목록입니다."
+  },
   "entrance.recent_campaigns": {
    "en": "Recent campaigns",
    "ko": "최근 캠페인"
@@ -339,24 +351,24 @@
    "ko": "{count}초 전"
   },
   "fleet.input.label": {
-   "en": "INPUT",
-   "ko": "내 입력"
+   "en": "LAST INPUT",
+   "ko": "LAST INPUT"
   },
   "fleet.input.none": {
-   "en": "› me: none",
-   "ko": "› 나 없음"
+   "en": "› ·",
+   "ko": "› ·"
   },
   "fleet.input.received": {
    "en": "RECEIVED",
-   "ko": "받은 메시지"
+   "ko": "RECEIVED"
   },
   "fleet.input.unknown": {
-   "en": "› me: unknown",
-   "ko": "› 나 미확인"
+   "en": "› ?",
+   "ko": "› ?"
   },
   "fleet.input.value": {
-   "en": "› me {age}: {text}",
-   "ko": "› 나 {age}: {text}"
+   "en": "› {age} · {text}",
+   "ko": "› {age} · {text}"
   },
   "fleet.install.after_dialog": {
    "en": "after the open dialog or input finishes",

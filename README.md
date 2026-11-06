@@ -140,11 +140,13 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and received peer/runtime messages. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and the first lines of received peer/runtime messages, without notification wrappers. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
+
+LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
 
 ### Key screens
 
@@ -294,7 +296,7 @@ signature.
 
 Work leaves files you can read, not only a chat log. Each project has one
 artifact root, `.agent_reports/`, shared by every runtime and by every git
-worktree of the project. Each request is one work cycle in
+worktree of the project. Planned work uses one work cycle in
 `campaigns/<campaign>/<cycle>/artifacts/`, where a campaign groups related
 requests (a new project starts one named after its folder):
 
@@ -462,3 +464,12 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 ## License
 
 [MIT](LICENSE)
+
+Small direct changes and automatic turn records use one campaign daily journal
+(`journals/YYYY-MM-DD.md`) instead of creating a cycle folder. Results remain
+at their project locations; journal entries retain versions, checks and evidence.
+A saved record does not mean tests passed. Existing cycle records stay readable.
+`hearting run artifact-journal dry-run --artifact-root <root>` previews eligible
+old small direct cycles. Explicit `apply --cycle <id>` backs them up before
+consolidation; `restore --cycle <id>` resumes interrupted restores and preserves
+later records. Planned, live, ambiguous and unsupported cycles are skipped.

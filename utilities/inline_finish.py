@@ -96,7 +96,7 @@ def _read(path: Path):
         return None
     except (OSError, ValueError, UnicodeError) as exc:
         raise InlineFinishError("finish-intent-corrupt") from exc
-    if not isinstance(row, dict) or row.get("schema") != "inline_finish_v1":
+    if not isinstance(row, dict) or row.get("schema") not in {"inline_finish_v1", "inline_finish_v2"}:
         raise InlineFinishError("finish-intent-corrupt")
     return row
 
@@ -490,6 +490,17 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
         # `finish` itself is the normal completion consumer: it still validates
         # the evidence, caller, route binding, and cleanup before it publishes
         # the terminal marker and current outcome.
+    import artifact_journal
+    journal_target = artifact_journal.target(root, route["route_id"])
+    existing_cycle = artifact_producer.route_cycle_for(root, route)
+    if (route.get("artifact_storage_contract_version", 1) == 2
+            and journal_target is None and existing_cycle is None and route.get("capability") != "autopilot-spec"
+            and not pending_state(root, route["route_id"]) and not api.outcome_path(route_file).exists()):
+        artifact_producer.prepare_route_artifact_env(route_file, start=True, jobs=jobs, require_cycle=False)
+        journal_target = artifact_journal.target(root, route["route_id"])
+    if journal_target is not None and existing_cycle is None:
+        import journal_finish
+        return journal_finish.finish(args, route, route_file, api, (_choice, jobs, inherited_jobs), journal_target)
     # A finish that already completed is replayed from what it recorded (§45 D-127):
     # the evidence file, the summary, or a manifest revision may have changed since.
     finished = bool(prior_state and prior_state.get("state") == "finished")

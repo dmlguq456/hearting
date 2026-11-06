@@ -1147,9 +1147,11 @@ def handed_over_prompt(route, node_id, output_dir) -> str:
     found = handed_over_scan(route, node_id, output_dir)
     if not found.rows:
         return ""
-    return ("Checks earlier stages handed over (their environment could not run them); run each as "
-            "part of your verification. One your environment cannot run either leaves your verdict "
-            "BLOCKED: repeat its handed-over line in your report so the owner runs it.\n"
+    return ("Checks earlier stages handed over (their environment could not run them); assess their "
+            "available evidence and run checks whose result can still change the decision. An unavailable "
+            "check stays unverified (reason), never PASS: repeat its handed-over line and reason. "
+            "A required unknown leaves the verdict BLOCKED. If the user already accepted that limit, "
+            "retain it in the normal completion report without repeating the unavailable check.\n"
             + "\n".join(handed_over_lines(found, "- ")) + "\n")
 
 

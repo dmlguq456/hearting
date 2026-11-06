@@ -3827,13 +3827,13 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
     """
     if row.status not in OPEN_STATES:
         return resolve_attempt_cleanup(jobs, row.attempt_id, apply=True)
-    if tagged_residue_receipt(row.metadata):
+    if tagged_residue_receipt(row.metadata) or row.metadata.get("reap_watch") == "post-exit":
         drain = resolve_residue_drain(jobs, row.attempt_id, apply=True)
         if drain.get("changed") is True:
             # The watcher's own drain observation, repeated now that the residue
             # it recorded is gone. The existing close path runs on the next tick.
             return {"attempt_id": row.attempt_id, "closed": False, "changed": True,
-                    "reason": "residue-drain-refreshed"}
+                    "reason": drain["reason"]}
     exact = reconcile_exact_dead_attempt(jobs, row)
     if exact["closed"]:
         # A closed row can still lack its namespace cleanup proof. Settle the

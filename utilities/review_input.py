@@ -170,7 +170,15 @@ def resolve_input(route, node, jobs, reviewed_evidence=None, *, retry_of=None):
             raise DC.DispatchContractError("reviewed-evidence-required", str(node.get("id")))
         return explicit
     producer = next(n for n in route["nodes"] if n.get("id") == "plan")
-    marker_path = DC.resolve_dispatch_state_root(ROOT, Path(jobs)) / "completion" / route["route_id"] / "plan.json"
+    # Completion gates can read a marker from any existing dispatch root
+    # (for example an inline plan published before an explicit jobs registry
+    # was selected). Resolve that same authoritative marker here; the registry
+    # filename alone does not relocate its producer's completion evidence.
+    marker_path = next((root / "completion" / route["route_id"] / "plan.json"
+                        for root in DC.dispatch_state_roots(ROOT, Path(jobs))
+                        if (root / "completion" / route["route_id"] / "plan.json").is_file()),
+                       DC.resolve_dispatch_state_root(ROOT, Path(jobs))
+                       / "completion" / route["route_id"] / "plan.json")
     try:
         marker = json.loads(marker_path.read_text())
         if not DC.completion_marker_is_current(route, producer, marker_path, marker):

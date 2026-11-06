@@ -2250,6 +2250,16 @@ class ArtifactProofReceiptSealTest(RegistryFixtureTestCase):
   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
   return json.loads(result.stdout)
 
+ def test_normal_reconcile_repeats_drain_when_the_watcher_died_before_its_receipt(self):
+  self.write_row(status="open",extra=",reap_watch=post-exit,reap_watch_pid=99999995")
+  result=self.invoke("reconcile","--attempt",self.attempt,"--apply")
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  saved=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual(saved.get("launch_outcome"),"governed-process-group-drained")
+  self.assertEqual(saved.get("attempt_descendant_proof"),D.ATTEMPT_DESCENDANT_PROOF)
+  self.assertEqual(D.attempt_process_quiescence(saved,terminal_receipt=True).state,"quiescent")
+  self.assertNotIn("post_exit_receipt_substitute",saved)  # ordinary drain, no artifact-proof exception
+
  def test_dry_run_reports_eligible_and_writes_nothing(self):
   self.write_row()
   before=self.jobs.read_text()

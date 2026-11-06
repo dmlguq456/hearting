@@ -28,7 +28,7 @@ class OverviewLastInputTests(unittest.TestCase):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 row = self.model(self.snapshot(harness)).sessions[0]
-                self.assertEqual(row["last_input"], "› 나 1분 전: 유휴 기준이 너무 짧다")
+                self.assertEqual(row["last_input"], "› 1m · 유휴 기준이 너무 짧다")
                 self.assertEqual(row["now"], "Bash · current work")
                 self.assertIn("⇄ [73]", row["received_inputs"][0])
                 self.assertTrue(row["received_inputs"][0].endswith("계획 2라운드 검토"))
@@ -37,9 +37,47 @@ class OverviewLastInputTests(unittest.TestCase):
     def test_absent_and_unavailable_inputs_are_distinct(self):
         snapshot = self.snapshot()
         snapshot["sessions"][0]._prompt_display = {"human": None, "human_state": "none", "received": []}
-        self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› 나 없음")
+        self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› ·")
         snapshot["sessions"][0]._prompt_display = None
-        self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› 나 미확인")
+        self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› ?")
+
+    def test_input_labels_and_compact_ages_are_english_in_both_ui_languages(self):
+        for language in ("en", "ko"):
+            with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                for age, expected in ((30, "0m"), (60, "1m"), (10800, "3h"), (172800, "2d")):
+                    vm = live.build_view_model(self.snapshot(now=200000 - age + 60), now=200000)
+                    self.assertEqual(vm.sessions[0]["last_input"], "› " + expected + " · 유휴 기준이 너무 짧다")
+                vm = live.build_view_model(self.snapshot(), now=1000)
+                frame = draw(vm, NavState(opened="b6"), 168, 45)
+                text = "\n".join(frame.text_rows())
+                self.assertIn("LAST INPUT", text)
+                self.assertIn("NOW", text)
+                self.assertIn("RECEIVED", text)
+                self.assertNotIn("› 나", text)
+                self.assertNotIn("› me", text)
+                self.assertNotIn("미확인", text)
+
+    def test_unavailable_and_unquoted_human_frontiers_stay_question_marks(self):
+        for display in (None, {"human": None, "human_state": "unknown", "received": []}):
+            snapshot = self.snapshot()
+            snapshot["sessions"][0]._prompt_display = display
+            for language in ("en", "ko"):
+                with self.subTest(language=language, display=display), \
+                        mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                    vm = live.build_view_model(snapshot, now=1000)
+                    self.assertEqual(vm.sessions[0]["last_input"], "› ?")
+
+    def test_input_uses_existing_grey_and_now_keeps_its_white(self):
+        from tools.fleet import render
+        vm = self.model(self.snapshot())
+        frame = draw(vm, NavState(opened="b6"), 168, 45)
+        input_row = next(row for row in frame.cells if "유휴 기준" in "".join(c[0] for c in row))
+        marker = next(i for i, cell in enumerate(input_row) if cell[0] == "›")
+        self.assertEqual(input_row[marker][1], "dim")
+        now_row = next(row for row in frame.cells if "Bash · current work" in "".join(c[0] for c in row))
+        first = next(i for i, cell in enumerate(now_row) if cell[0] == "B")
+        self.assertEqual(now_row[first][1], "name_dim")
+        self.assertNotEqual(render._HUE_OF["dim"][0], render._HUE_OF["name_dim"][0])
 
     def test_received_sender_uses_the_exact_native_tag_instead_of_the_saved_name(self):
         snapshot = self.snapshot()
@@ -80,10 +118,10 @@ class OverviewLastInputTests(unittest.TestCase):
                 folded_text = "\n".join("".join(cell[0] for cell in row) for row in folded.cells)
                 expanded_text = "\n".join("".join(cell[0] for cell in row) for row in expanded.cells)
                 if width >= 140:
-                    self.assertIn("› 나", folded_text)
+                    self.assertIn("› 1m ·", folded_text)
                 self.assertNotIn("Bash · current work", folded_text)
                 self.assertIn("Bash · current work", expanded_text)
-                self.assertIn("받은 메시지", expanded_text)
+                self.assertIn("RECEIVED", expanded_text)
                 self.assertIn("계획 2라운드", expanded_text)
                 self.assertTrue(all(len(row) == width for row in folded.cells))
 

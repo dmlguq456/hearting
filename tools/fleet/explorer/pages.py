@@ -907,6 +907,16 @@ def draw_history_detail(grid, vm, state, tag, x, right, y, bottom):
     if not 0 <= index < len(generations):
         return y
     generation = generations[index]
+    for record in (generation.get("journal_records") or [])[:3]:
+        if y >= bottom - 1:
+            break
+        grid.put(x, y, _clip(record.get("title") or "record", right - x), "soft", limit=right)
+        y += 1
+        targets = [ui_text("entrance.open_record") + ": " + str(record.get("reference") or record.get("record_target"))]
+        targets += [ui_text("entrance.open_result") + ": " + str(row["path"])
+                    for row in (record.get("result_targets") or [])[:1]]
+        grid.put(x, y, _clip(" · ".join(targets), right - x), "dim", limit=right)
+        y += 1
     card_block = (vm.cards or {}).get(tag, {})
     ordered_cards = tuple(card_block.get("prior_cards", ())) + tuple(card_block.get("cards", ()))
     card = None

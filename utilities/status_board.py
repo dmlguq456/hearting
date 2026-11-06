@@ -75,7 +75,7 @@ def status_page(campaign: Path) -> Path | None:
     return max(pages)[1] if pages else None
 
 
-def closure_line(route, outcome, now: datetime) -> str:
+def closure_line(route, outcome, now: datetime, *, journal_entry=None, page=None, language="en") -> str:
     what = ""
     try:
         import work_intent
@@ -87,7 +87,28 @@ def closure_line(route, outcome, now: datetime) -> str:
         what = what[:89] + "…"
     parts = [now.strftime("%Y-%m-%d %H:%M"), what, f"route {route.get('route_id')}"]
     prs = list(dict.fromkeys(_PR_URL.findall(str((outcome or {}).get("summary") or ""))))[:2]
-    return "- " + " · ".join(part for part in parts + prs if part)
+    links = []
+    try:
+        import artifact_journal as journal
+        import inline_finish
+        root = Path(route["artifact_root"])
+        if journal_entry is None:
+            slot = inline_finish.pending_state(root, route["route_id"]) or {}
+            refs = (slot.get("intent") or {}).get("entries") or []
+            journal_entry = ({**journal.read_reference(refs[0]["path"]), "reference": refs[0]["path"]}
+                             if slot.get("schema") == "inline_finish_v2" and refs else None)
+        if journal_entry:
+            value = journal.read_reference(journal_entry["reference"])
+            path, aid, rid = journal.split_reference(journal_entry["reference"])
+            relative = os.path.relpath(path, Path(page).parent) if page else str(path)
+            record_label, result_label = (("기록 보기", "결과물 열기") if language == "ko" else ("View record", "Open result"))
+            links.append(f"[{record_label}](<{relative}#{aid}-{rid}>)")
+            for result in journal.result_targets(root, value)[:1]:
+                if result.get("availability") == "available":
+                    links.append(f"[{result_label}](<{result['href']}>)")
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # historical cycle rows keep their original text
+    return "- " + " · ".join(part for part in parts + prs + links if part)
 
 
 def _ours(row: str) -> bool:
@@ -129,7 +150,7 @@ def refreshed(text: str, line: str, now: datetime) -> str:
     return "\n".join(lines[:start + 1] + section + lines[end:])
 
 
-def note_route_closed(route, outcome, *, now: datetime | None = None) -> Path | None:
+def note_route_closed(route, outcome, *, now: datetime | None = None, journal_entry=None) -> Path | None:
     """Refresh the closed route's campaign status page; the page path, or None when untouched."""
     if not isinstance(outcome, dict) or outcome.get("terminal_gate_proven") is not True:
         return None                       # a cancelled or unproven close is not finished work
@@ -156,7 +177,8 @@ def note_route_closed(route, outcome, *, now: datetime | None = None) -> Path | 
         try:
             before = page.stat(follow_symlinks=False)
             text = page.read_text(encoding="utf-8")
-            after = refreshed(text, closure_line(route, outcome, now), now)
+            after = refreshed(text, closure_line(route, outcome, now, journal_entry=journal_entry,
+                page=page, language="ko" if _HANGUL.search(text) else "en"), now)
             if after == text:
                 return page
             fd, temporary = tempfile.mkstemp(prefix=".status-", dir=page.parent)
@@ -176,3 +198,18 @@ def note_route_closed(route, outcome, *, now: datetime | None = None) -> Path | 
             return page
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def note_journal_entry(root: Path, entry):
+    """A later automatic observation supplements an already closed record.
+
+    Its actual existing outcome supplies route authority. Saved observations
+    never invent a test/task PASS or create a status page.
+    """
+    import json
+    import artifact_journal
+    path = artifact_journal.safe_path(root, root / ".runtime/routes" / (entry["route_id"] + ".json"), missing=False)
+    route = json.loads(path.read_text())
+    outcome = json.loads(path.with_suffix(".outcome.json").read_text())
+    return note_route_closed(route, outcome, journal_entry=entry,
+                             now=datetime.fromisoformat(entry["at"].replace("Z", "+00:00")))
