@@ -5695,7 +5695,8 @@ def _resume_ordinary_notice_obligation(duty, store):
     _resume_session_notice_obligations([duty], store)
 
 
-def _resume_registered_obligation(duty, store, *, read_context=None):
+def _resume_registered_obligation(duty, store, *, read_context=None,
+                                  settlement_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
     intent = duty.get("intent") or {}
     from harness_capabilities import parent_completion
@@ -5814,6 +5815,7 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
             return
         delivery_id = row.metadata.get("delivery_id", "")
         record = pending.read(jobs.parent, storage_recipient, delivery_id)
+        redrive_performed = False
         if record is None:
             terminal_state = peer_obligations._registered_terminal_state(
                 jobs.parent, storage_recipient, delivery_id, row.attempt_id,
@@ -5826,7 +5828,42 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
             # missing exact record; _reconcile_obligations backs off an unknown
             # duty if this bounded recovery attempt still cannot restore source.
             from dispatch_completion_join import materialize_after_terminal_close
-            materialize_after_terminal_close(jobs, row.attempt_id)
+            materialize = lambda: materialize_after_terminal_close(jobs, row.attempt_id)
+            owner_meta = row.metadata
+            if (settlement_context is not None and row.status == "done"
+                    and owner_meta.get("worker_type") == "owner"
+                    and owner_meta.get("workflow_completion") == "runtime-v1"):
+                from dispatch_contract import supervisor_lease_is_held
+                lease_held = supervisor_lease_is_held(jobs, owner_meta)
+                if not lease_held:
+                    from dispatch_registry_cache import registry_view
+                    view = registry_view(jobs, append_only=True)
+                    related = view.completion_related(
+                        row.attempt_id,
+                        owner_meta.get("owner_route_id") or owner_meta.get("route_id", ""),
+                        owner_meta.get("owner_route_hash") or owner_meta.get("route_hash", ""))
+                    def refresh_owner_observation():
+                        fresh = current_attempt_row(jobs, row.attempt_id)
+                        if fresh is None:
+                            return None
+                        fresh_view = registry_view(jobs, append_only=True)
+                        fresh_related = fresh_view.completion_related(
+                            fresh.attempt_id,
+                            fresh.metadata.get("owner_route_id") or
+                            fresh.metadata.get("route_id", ""),
+                            fresh.metadata.get("owner_route_hash") or
+                            fresh.metadata.get("route_hash", ""))
+                        return fresh.status, fresh.raw, fresh.metadata, fresh_related
+                    redrive_deferred = settlement_context.registered_owner_redrive(
+                        jobs, row.status, row.raw, owner_meta, related,
+                        lease_held=False, materialize=materialize,
+                        refresh=refresh_owner_observation)
+                    redrive_performed = not redrive_deferred
+                # The helper either performed this materialization or deferred
+                # it; this duty must not perform a second copy.
+                materialize = None
+            if materialize is not None:
+                materialize()
             record = pending.read(jobs.parent, storage_recipient, delivery_id)
             expected_digest = row.metadata.get("delivery_receipt_digest")
             expected_revision = row.metadata.get("delivery_row_revision")
@@ -5846,8 +5883,12 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
                 store.update(duty["id"], state="unknown",
                              observation={**observation,
                                           "reason": "completion-delivery-record-unavailable",
-                                          "delivery_id": delivery_id})
+                                          "delivery_id": delivery_id},
+                             skip_unchanged=True)
                 return
+            if redrive_performed and settlement_context is not None:
+                # The exact record is now present and has passed recovery validation.
+                settlement_context.forget_unsettled_owner(jobs, row.attempt_id)
         if record and record.get("state") in {"acked", "rejected", "expired"}:
             if record.get("state") == "acked" and _resume_native_receiving_turn(
                     duty, store, row, record, recipient_sid, storage_recipient):
@@ -6559,7 +6600,8 @@ def _reconcile_external_obligations(store, *, service_current=None, snapshot=Non
 
 
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
-                           notice_selection=None, runner_incarnation=None):
+                           notice_selection=None, runner_incarnation=None,
+                           settlement_context=None):
     """Advance only the accepted duties owned by this runner."""
     if duties is None:
         duties = _runner_duties(store, store.list())
@@ -6616,7 +6658,9 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                             duty, store, read_context=read_context,
                             persist_followup=True, runner_lock_held=True)
             elif kind == "registered-batch":
-                _resume_registered_obligation(duty, store, read_context=read_context)
+                _resume_registered_obligation(
+                    duty, store, read_context=read_context,
+                    settlement_context=settlement_context)
             elif kind == "steward-check":
                 _steward_check_module().advance(duty, store)
         except Exception as exc:
@@ -7409,7 +7453,8 @@ def cmd_obligation_runner(args):
         _reconcile_obligations(store, duties, read_context=read_context,
                                retry_state=duty_retry_state,
                                notice_selection=notice_selection,
-                               runner_incarnation=runner_incarnation)
+                               runner_incarnation=runner_incarnation,
+                               settlement_context=settlement_context)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
