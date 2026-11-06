@@ -14,7 +14,7 @@
   Python 버전은 설치기가 확인합니다.
 - 설치하고 로그인한 에이전트 CLI 하나 이상: Claude Code, Codex, OpenCode.
   Claude Code만 있어도 됩니다.
-- herdr, Cairn, NAS, 원격 메모리 교환, GPU는 필요 없습니다.
+- herdr, 외부 산출물 도구, NAS, 원격 메모리 교환, GPU는 필요 없습니다.
 
 지금까지 확인한 범위: CI가 Ubuntu에서 Claude Code·Codex·OpenCode용 설치를 확인하고,
 아래 실측은 Linux에서 했습니다. macOS는 처음부터 끝까지 확인하지 않았고,
