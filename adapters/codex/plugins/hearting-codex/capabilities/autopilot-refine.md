@@ -17,7 +17,14 @@ This is the portable capability contract for `autopilot-refine`. It defines runt
 
 ## Invocation Semantics
 
-Autopilot family — post-creation iteration pipeline for research and doc artifacts (NOT code). Prompt-driven: target artifact identified via prompt fuzzy match against `<artifact-root>/{research,documents}/*`, then auto-discovers the artifact's file structure, plans edits, shows a diff preview in chat, and on user confirm applies edits with versioning + integrated history logging in `pipeline_summary.md` (single source of truth — no separate CHANGELOG). Default intensity is `quick` (one registered conductor). New starts carry complete or report scope in the existing start choice; report ends after the preview without target-artifact writes. Older sealed quick routes retain their `preview-disposition` inline gate and current-preview protection. Escalate intensity to `standard|strong|thorough|adversarial` for multi-round review, fact-check, or external adversary work. Optional `--memo <file>` falls back to file-memo style for deferred reviews.
+Git availability changes execution placement, not the correction goal. A small
+known document correction uses the existing direct path in its folder. In a
+larger approved document route, edits to non-Git originals stay in a direct leg
+while artifact-only analysis/review legs retain their stages and handoffs.
+Use available HWPX or other format Skills/tools within production and checks;
+tool success does not settle missing drafts or the route's content review.
+
+Autopilot family — post-creation iteration pipeline for research and doc artifacts (NOT code). Prompt-driven: use the project document named in the request in place; only unspecified legacy targets use fuzzy match against `<artifact-root>/{research,documents}/*`. Then auto-discover the artifact's file structure, plans edits, shows a diff preview in chat, and on user confirm applies edits with versioning + integrated history logging in `pipeline_summary.md` (single source of truth — no separate CHANGELOG). Default intensity is `quick` (one registered conductor). New starts carry complete or report scope in the existing start choice; report ends after the preview without target-artifact writes. Older sealed quick routes retain their `preview-disposition` inline gate and current-preview protection. Escalate intensity to `standard|strong|thorough|adversarial` for multi-round review, fact-check, or external adversary work. Optional `--memo <file>` falls back to file-memo style for deferred reviews.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
@@ -134,9 +141,12 @@ non-direct major rewrite of an existing file is pre-snapshotted by the artifact
 write guard into one route-bound `_internal/versions/v{N}/` directory; the
 model does not allocate or copy versions. The abstract `target-artifact` write
 scope resolves to `documents/<artifact>/**` and `research/<artifact>/**`, or to
-an existing document in the route's own working-tree repository (a README, for
-example), whose pre-change copy is kept in the route's cycle under
+an existing document in the route's own project, including an unversioned
+folder, whose pre-change copy is kept in the route's cycle under
 `artifacts/_internal/versions/v{N}/`.
+Keep the user's original document path. A review, snapshot or history record
+names that path and its captured version; it does not become a second canonical
+document. Git repository targets retain their existing commit rules below.
 For a complete, approved repository-document target, the existing acting
 modifier verifies the changed document and commits only its validated owned
 path or paths in that assigned worktree. A direct inline modifier uses the

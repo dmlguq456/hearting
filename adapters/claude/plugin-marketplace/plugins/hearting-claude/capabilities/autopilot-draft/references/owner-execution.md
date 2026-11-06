@@ -4,15 +4,17 @@ Read only this file for owner procedure. Run only the runtime commands your Rout
 
 Document-drafting entrypoint for paper, presentation, and prose work. Close the `analyze → strategy → strategy-refine → draft → draft-refine → finalize` pipeline. This file defines routing and stage contracts; load a reference only when its detailed procedure is needed.
 
-## First Principle: the Draft Is an Edit Plan
+## First Principle: Preserve the Mode and Project Target
 
-The output is not the final document. It is a draft cheatsheet—a mutation or edit plan that the user or `autopilot-apply` can apply to canonical source such as `main.tex`. This applies to every mode.
+In paper mode the output is a draft cheatsheet, an edit plan that the user or
+`autopilot-apply` applies to canonical source such as `main.tex`. Doc mode creates
+the requested prose document; presentation mode creates slide Markdown. Each
+starts at its project target and remains a working draft until its review is done.
 
-- `autopilot-apply` applies the cheatsheet to real source and verifies the build.
-- `draft-refine` and `autopilot-refine` improve the cheatsheet, not the final source document.
-- In the code analogy, draft corresponds to `code-plan` and apply corresponds to `code-execute`.
+- `autopilot-apply` applies a paper cheatsheet to real source and verifies the build.
+- `draft-refine` and `autopilot-refine` improve the bound document in place; records and pre-change copies stay in the cycle.
 
-> **Output convention**: Follow CONVENTIONS §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`). Store reviewer logs under `_internal/strategy_reviews/` and `_internal/draft_reviews/`, and snapshots under `_internal/versions/v{N}/strategy/` and `_internal/versions/v{N}/draft/`. Before `draft-refine` rewrites an existing file, the route write preflight must obtain the deterministic `artifact-snapshot.py` receipt; do not allocate versions or copy snapshots manually.
+> **Output convention**: Follow CONVENTIONS §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`). Reviewer logs use the declared cycle review outputs (legacy standalone `_internal/strategy_reviews/` and `_internal/draft_reviews/`). Pre-change copies use `_internal/versions/v{N}/<target-relative-path>` in cycle records for project documents. Before `draft-refine` rewrites an existing file, the existing `artifact-snapshot.py` preflight preserves it; do not allocate versions or copy snapshots manually.
 
 ## Invocation
 
@@ -55,7 +57,7 @@ Only when a receipt or Route step names it, read `invocation-and-args.md` for co
 
 ## Pipeline
 
-Write the artifact under `<artifact-root>/documents/{YYYY-MM-DD}_{short-name}/`.
+Create the document at its stated project path, defaulting to the project cwd. Use `<artifact-root>/documents/{YYYY-MM-DD}_{short-name}/` for process records and target/version references.
 
 | Resume stage | Step | Contract | Reference |
 |---|---|---|---|
@@ -77,7 +79,7 @@ The Step 4 drafting prompt embeds tone propagation, mode-specific conventions, d
 Only when a receipt or Route step names it, read `summary-and-safety.md` for the complete rules. Always enforce these invariants:
 
 - Do not fabricate citations, data, or results. Cite only materials present in `{discovered_inputs}`; mark uncertainty or missing content as `[TODO: ...]`.
-- Treat the output as a working cheatsheet, not a final document or an already-applied source change.
+- Treat a paper cheatsheet as an edit plan, and other output as the requested working document. Claim completion only for the review and production actually performed.
 - For rebuttal-response intent, answer every reviewer point; omissions are critical errors.
 - For peer-review intent, ground scores in the paper and require a format specification during preflight.
 - In presentation mode, do not claim to insert unavailable figures. Describe the required visual explicitly and leave PPTX conversion to the selected downstream tool or user workflow.
@@ -112,9 +114,10 @@ by the dispatch-depth-1 owner). Full contract: `capabilities/autopilot-draft.md`
    --intensity <intensity> --env-file <env>`; export the returned
    `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
    and the legacy `documents/` layout is still the write target.
-2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/documents/...`; never
-   write to a legacy top-level bucket while the cutover is active, never write
-   under `shared/`.
+2. Create and update the document at the project target. Write process records
+   under `$AGENT_ARTIFACT_OUTPUT_DIR/documents/...` or the sealed node outputs,
+   retaining the target path and version. Keep records out of a legacy top-level
+   bucket while cutover is active and out of `shared/`.
 3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
    (the adapters forward them); stage workers call `begin --node <id>` and
    join the same cycle.

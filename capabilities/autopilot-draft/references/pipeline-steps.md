@@ -2,17 +2,22 @@
 
 > **Stage dispatch** (`standard+`, OPERATIONS §5.10 ③④, SD-1, SD-2): dispatch each durable stage below as an independent dispatch-depth-2 headless session. The named unit runs inside that stage session. The dispatch-depth-1 conductor passes artifact paths and reads verdicts or status only; each stage reads its inputs from files. Keep `direct`, `quick`, and micro-stages inline. Stage sessions must not redispatch because dispatch depth 3+ is forbidden.
 
+For a non-Git project, the approved route plan places document production and
+polish in current-session direct legs, while artifact-only analysis and review
+retain their staged workers. The table describes the logical work in either
+placement; it does not widen a worker's declared write scope.
+
 | Stage | In-session owner | Input artifacts | Output artifacts | Write class |
 |---|---|---|---|---|
 | Step 1: Material Analysis | Orchestrator; candidate stage | Discovered reference and analysis materials | `analysis/material_index.md`, `analysis/{ref,reviewer}_analysis.md` | analysis |
 | Step 2: draft-strategy | `draft-strategy` subskill | `analysis/*`, discovered inputs | `strategy/strategy.md`, optional mirror | strategy |
 | Step 4.0b: On-demand Figure Extraction | `material/pdf-extract` unit; candidate stage | Paper-card PDF paths | `figures/figure_index.md` | figures |
-| Step 4.1: Draft Generation | `research/research-survey` unit | Strategy, Style Guide, analysis, discovered inputs | `draft/draft.md` | draft |
+| Step 4.1: Draft Generation | `research/research-survey` unit | Strategy, Style Guide, analysis, discovered inputs | Project target document; `draft/` holds its path/version record | draft |
 | Step 5.5: Editorial Polish | finalize node (`editorial/report` unit), mode-B polish | Primary draft and optional mirror | Same files, polished in place | draft, sequential single writer |
 | Step 4b: Post-draft Factual Detector | Orchestrator | Primary draft and optional mirror | Decision Points row | inline micro-stage |
 | Step 4c: Report Figure Semantic Gate | Orchestrator/QA | Spectrogram report, JSON manifest, generated PNG | Fail-closed verifier result and visual-review evidence | inline micro-stage |
 
-Never let two stages mutate the same file concurrently. Step 4.1 writes `draft.md`; Step 5.5 may polish it later in sequence.
+Never let two stages mutate the same file concurrently. Step 4.1 writes the project target from the first draft; Step 5.5 polishes that same file later in sequence. Record its path and version in the cycle.
 
 ### Preflight validation
 
@@ -195,13 +200,10 @@ Visually inspect at least one or two extracted PNGs. Re-extract immediately when
 
 #### Step 4.0c: Relative paths
 
-Compute paths from the draft automatically:
-
-- Research figure: `../../../research/{topic}/figures/{file}.png`
-- Paper-analysis figure: `../../../analysis_project/paper/figures/{file}.png`
-- Artifact-local figure: `../assets/figures/{file}.png`
-
-Apply the same pattern to `figure_index.md`. Users must not have to calculate these paths.
+Compute each link relative to the actual project document's parent, including links
+to research, paper-analysis and cycle-local figure files. Do not assume a draft
+inside the artifact tree. Apply the same calculation to `figure_index.md` and
+check that links resolve; users must not have to calculate these paths.
 
 #### Step 4.1: Dispatch the Survey Unit
 
@@ -216,7 +218,8 @@ Primary strategy: {strategy_path}
 Strategy mirror, if present: {strategy_mirror_path}
 Analysis: {strategy_folder}/analysis/
 Discovered inputs: {discovered_inputs}
-Output: {strategy_folder}/draft/draft.md
+Output: {project_document_path} (the stated project path, or a filename directly under project cwd)
+Process record: {strategy_folder}/draft/target.json with the document path and content version
 
 Read `## Style Guide` before writing. Apply it to every citation, caption,
 bullet depth, speaker note, model classification, and venue/year tag.
@@ -279,8 +282,8 @@ Skip companion generation unless the user explicitly requests a second language,
 
 ```text
 Mode A — translate from {source language} to {target language}.
-Source: {strategy_folder}/draft/draft.md
-Target: {strategy_folder}/draft/draft_{language-code}.md
+Source: {project_document_path}
+Target: an adjacent project file with the requested language suffix
 Use the `editorial/translate` unit contract.
 
 Preserve LaTeX commands, paper titles, author names, venues, acronyms, model
@@ -298,7 +301,7 @@ Take the target language and audience requirement from the explicit request or e
 
 Run this inline at every intensity.
 
-1. Apply regex, card lookup, and section-context checks to `draft/draft.md` and any mirror.
+1. Apply regex, card lookup, and section-context checks to the project document and any mirror, using their recorded paths and versions.
 2. Classify each material claim as `verified`, `unverified`, `ambiguous`, or `conflict`.
 3. Do not modify the draft.
 4. Append a Decision Points row:
@@ -334,7 +337,7 @@ At `standard`, `thorough`, or `adversarial` rigor, run one final mode-B polish p
 
 ```text
 Finalize polish task:
-  prompt: `Polish {strategy_folder}/draft/draft.md and its mirror, if present.
+  prompt: `Polish {project_document_path} and its adjacent mirror, if present.
 This is a user-reviewed, paste-ready artifact. Improve natural wording,
 terminology consistency, and sentence rhythm in the selected language.
 Preserve claims, numbers, citations, decisions, LaTeX, code, and formulas.`

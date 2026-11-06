@@ -555,9 +555,14 @@ Skills run from the project root. Resolve the project-wide write surface with
 primary worktree's canonical `.agent_reports/`, not the tracked local
 snapshot; legacy `.claude_reports/` is selected only when it already exists
 at the canonical project root and the new root does not. `analyze-project`
-reads the current source checkout, `autopilot-code` mutates code there, and
-draft/research/refine read and write persistent inputs only below the canonical
-artifact root. Cross-project work changes cwd and uses another session.
+reads the current source checkout and `autopilot-code` mutates code there.
+Code and document deliverables live at their project location. A new document
+is created there from its first draft, at the user's stated path or directly
+under the project cwd when none was stated. Draft/refine/apply keep that same canonical target;
+planning, material analysis, reviews, pre-change copies and history live below
+the canonical artifact root. Each process record identifies its target path and
+version (a source commit or captured content hash). Cross-project work changes
+cwd to the selected project.
 
 Non-Git cwd resolution never inherits a strict ancestor's root by mere
 discovery. The cwd's own root (`.agent_reports/` or legacy `.claude_reports/`)
@@ -613,7 +618,7 @@ classification or copying.
 
 | Tier | Meaning | Location |
 |---|---|---|
-| **T1 primary** | Core index and deliverable that users routinely see | Artifact directory root |
+| **T1 primary** | Core index, artifact outputs and references to project deliverables | Artifact directory root; code/document deliverables stay at their project paths |
 | **T2 secondary** | Chapters, strategy, analysis, logs, and supporting assets read as needed | Named subdirectories |
 | **T3 tertiary** | Reviews, raw metadata, and version snapshots rarely read directly | `_internal/` |
 
@@ -624,7 +629,7 @@ The underscore keeps internal data visible but de-emphasized; a dot directory wo
 ```text
 <artifact-dir>/
 ├── pipeline_summary.md
-├── <T1 deliverables>
+├── <T1 artifact outputs and references to project deliverables>
 ├── <T2 subdirectories>
 └── _internal/
     ├── <capability-specific review directories>
@@ -645,7 +650,16 @@ The standalone default `$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/` contains T
 
 #### §5.4.2. Documents
 
-The standalone default `$AGENT_ARTIFACT_OUTPUT_DIR/documents/<date>_<name>/` contains T1 pipeline state and the latest `draft/`; T2 latest `strategy/`, `analysis/`, and `assets/`; and T3 metadata, strategy/draft reviews, audits, discarded variants, and major-refine snapshots under `_internal/versions/v{N}/`. Direct minor edits remain snapshot-free and are recorded in `pipeline_summary.md`. Routed invocations follow their node's declared outputs and preserve the existing target binding.
+The document itself stays at its stated project path, or directly under cwd
+when no location was stated. Its first draft, integration and polish update
+that file in sequence. The standalone record default
+`$AGENT_ARTIFACT_OUTPUT_DIR/documents/<date>_<name>/` contains T1 pipeline state,
+summary and target/version references; T2 `strategy/`, `analysis/` and supporting
+assets; and T3 reviews, audits, discarded variants and major-refine pre-change
+copies under `_internal/versions/v{N}/`. Direct minor edits keep their existing
+snapshot-free policy and record the target/version in `pipeline_summary.md`.
+Routed invocations distinguish target-document writes from cycle record
+outputs. Existing sealed targets retain their binding.
 
 #### §5.4.3. Code Track — Flat `spec/` and Cycle Outputs
 
@@ -689,7 +703,7 @@ For a new or empty directory, create the modern layout. On re-entry, the presenc
 New route-owned output may be created only in the capability buckets listed in
 §6.5. `autopilot-refine`'s `target-artifact` scope resolves to
 `documents/<artifact>/**` or `research/<artifact>/**`, or to an existing document
-in the route's working-tree repository (its snapshot stays in the route's cycle);
+in the route's project, including an unversioned folder (its snapshot stays in the route's cycle);
 an ad-hoc top-level artifact folder such as `rebuttal/` is input or legacy state,
 never a new output target.
 
@@ -841,8 +855,8 @@ When `spec/pipeline_state.yaml` exists, read it and activate every applicable ap
 | spec-owned design | `spec/design/` decision record |
 | code | standalone default: `plans/<date>_<slug>/` |
 | lab | standalone default: `experiments/<date>_<slug>/` plus `_RUNLOG.md` |
-| draft | `documents/<date>_<name>/` |
-| refine | Target artifact plus `_internal/versions/v{N}/` for a major refine; direct minor edits update history only |
+| draft | Project document from the first draft; `documents/<date>_<name>/` holds process records and target path/version references |
+| refine | Project target stays in place; pre-change copies and history stay in cycle records under `_internal/versions/v{N}/`; direct minor edits update history only |
 | note | Run logs in artifact root plus routed cards and digests under the configured notes target |
 | apply | Real source outside artifact root; git branch and commit provide versions, with apply logs under the cheatsheet artifact |
 
