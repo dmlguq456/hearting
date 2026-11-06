@@ -1743,6 +1743,8 @@ def _refresh_cycle_observed(root: Path, cycle_id: str, *, trigger: str, clock: f
     record = read_cycle_record(root, cycle_id)
     if record is None:
         return skipped("cycle-unknown")
+    if record.get("journal_migration"):
+        return skipped("consolidated-to-journal")
     if record.get("deleted_at"):
         return skipped("cycle-deleted")
     if record.get("state") != "sealed":

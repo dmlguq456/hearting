@@ -296,7 +296,7 @@ signature.
 
 Work leaves files you can read, not only a chat log. Each project has one
 artifact root, `.agent_reports/`, shared by every runtime and by every git
-worktree of the project. Each request is one work cycle in
+worktree of the project. Planned work uses one work cycle in
 `campaigns/<campaign>/<cycle>/artifacts/`, where a campaign groups related
 requests (a new project starts one named after its folder):
 
@@ -464,3 +464,12 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 ## License
 
 [MIT](LICENSE)
+
+Small direct changes and automatic turn records use one campaign daily journal
+(`journals/YYYY-MM-DD.md`) instead of creating a cycle folder. Results remain
+at their project locations; journal entries retain versions, checks and evidence.
+A saved record does not mean tests passed. Existing cycle records stay readable.
+`hearting run artifact-journal dry-run --artifact-root <root>` previews eligible
+old small direct cycles. Explicit `apply --cycle <id>` backs them up before
+consolidation; `restore --cycle <id>` resumes interrupted restores and preserves
+later records. Planned, live, ambiguous and unsupported cycles are skipped.

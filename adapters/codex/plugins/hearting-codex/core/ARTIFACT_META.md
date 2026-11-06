@@ -422,3 +422,15 @@ and never create a file; they only report `pending_recovery`. Limits: several fi
 replaced as one atomic step, so between the first and last replacement of an interrupted
 write a reader may see the new `meta.json` before the new number state; a disk that keeps
 failing or a foreign writer is reported with a typed code and retried at the next write.
+
+## Journal records
+
+The common journal row has `kind=journal-entry`, opaque `artifact_id` and
+`revision_id`, a root-relative `path`, exact `anchor`, `record_target`,
+`result_targets`, original `session`/`turn`/`at`, `status`, and `coverage`.
+Partial scans and unreadable/corrupt evidence remain partial/unknown; they do
+not disappear into an empty-success result. Result versions are commit/hash or
+unknown, never inferred from a path or mtime. A versioned journal finish binds
+one immutable entry revision digest. Appending another entry cannot change that
+proof. Confirmed corrections append provenance and keep historical revisions;
+hand-edited drift is reported without inventing a correction event.

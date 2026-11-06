@@ -775,7 +775,8 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
         # Use the canonical writer's projection, scoped to this exact cycle.
         # Root-wide rebuild/repair could touch unrelated open cycles and is
         # not evidence that this transaction's two index rows were applied.
-        relative_path = os.path.relpath(str(directory), str(root))
+        relative_path = ((record.get("journal_migration") or {}).get("source")
+                         or os.path.relpath(str(directory), str(root)))
         def expected_rows():
             expected = artifact_index.apply(
                 artifact_index.empty(identity.artifact_root_id), document,

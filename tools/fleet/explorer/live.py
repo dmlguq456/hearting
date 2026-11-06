@@ -2127,6 +2127,19 @@ def _memory_text(snippet):
     return re.sub(r"^\d{4}-\d\d-\d\d(?:\s+\d\d:\d\d)?(?:\s*KST)?\s*[.:]?\s+", "", text) or text
 
 
+def _work_journal_rows(snapshot):
+    rows, seen = [], set()
+    for session in _records(_get(snapshot, "sessions", default=())):
+        chain = _get(session, "route_chain") or {}
+        for row in chain.get("automatic_records") or ():
+            identity = (row.get("artifact_id"), row.get("revision_id"))
+            if row.get("kind") != "journal-entry" or identity in seen:
+                continue
+            seen.add(identity)
+            rows.append({**row, "project": _gpu_repo(_get(session, "cwd") or "")})
+    return rows
+
+
 def _journal_groups(snapshot, clock=None):
     """Journal rows per project, newest first: ``{project: [(epoch, [when, action, type, text])]}``.
 
@@ -2134,13 +2147,16 @@ def _journal_groups(snapshot, clock=None):
     snippet. None when no journal was read.
     """
     memory = _get(snapshot, "memory")
-    if not isinstance(memory, Mapping):
-        return None
-    if memory.get("journal_available") is False:
-        return None
-    by_repo = memory.get("by_repo")
-    if not isinstance(by_repo, Mapping):
-        return None
+    by_repo = {key: list(value or []) for key, value in (memory.get("by_repo") or {}).items()} if isinstance(memory, Mapping) else {}
+    # Work records are a read-only supplement; they are never inserted into
+    # the memory DB or reclassified as decisions.
+    for row in _work_journal_rows(snapshot):
+        repo = row["project"] or UNKNOWN_REPO
+        by_repo.setdefault(repo, []).append({"id": row["artifact_id"] + ":" + row["revision_id"],
+            "ts": row["at"], "action": "work-record", "type": "journal-entry",
+            "headline": row["title"], "project": repo})
+    if not by_repo:
+        return {} if isinstance(memory, Mapping) and memory.get("journal_available") else None
     grouped = {}
     seen = set()
     for repo, events in by_repo.items():
@@ -2155,7 +2171,7 @@ def _journal_groups(snapshot, clock=None):
                 continue
             if identity:
                 seen.add(identity)
-            action = "saved" if action_name in _SAVED else "changed"
+            action = "recorded" if action_name == "work-record" else "saved" if action_name in _SAVED else "changed"
             snippet = _memory_text(event.get("headline") or event.get("snippet"))
             project_source = _text(event.get("project"))
             if project_source and "/" in project_source:
@@ -2880,6 +2896,11 @@ def _seat_view(tag, repo, harness, sid, entries, now, now_text=None, ended=False
             "kind": item["kind"], "connection": item["connection"], "note": None,
             "card": bool(item["card"] and item["card"].get("status") == "available"),
             "detail": full, "title": title})
+        record_entry = item.get("entry") or next((entry for entry in entries
+            if entry.get("sid") == item.get("sid") and entry.get("harness") == item.get("harness")), {})
+        if record_entry.get("journal_records"):
+            generations[-1]["journal_records"] = record_entry["journal_records"]
+            generations[-1]["detail"] = True
         marks.append([_text(item["harness"]) or "·", item["kind"]])
         if full and item["card"] and "lines" in card:
             row = {"gen": card.get("generation") or len(generations), "harness": _text(item["harness"]),
@@ -3225,6 +3246,9 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "last_good": bool(_get(peer_observation, "last_good", default=False)),
     }
     system["project_memory"] = _project_memory(snapshot, routes, session_rows, journal)
+    work_records = _work_journal_rows(snapshot)
+    if work_records:
+        system["journal_records"] = work_records
     system["task_summary"] = _current_task_summary(
         accepted_detail, session_rows, session_index, routes)
     if answered:

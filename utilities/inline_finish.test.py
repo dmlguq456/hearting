@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -331,7 +332,6 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.prompt = self.base / "task.md"
         self.prompt.write_text("Exercise the direct inline finish transaction.\n", encoding="utf-8")
         compose = [sys.executable, str(ROOT / "utilities/capability-route.py"), "compose",
-                   *( ["--start"] if self.non_git and self.started else [] ),
                    "--slug", "inline-finish-test", *self.CAMPAIGN_ARGUMENTS,
                    "--shape", "direct", "--capability", self.CAPABILITY, "--capability-mode", self.CAPABILITY_MODE,
                    "--intensity", "direct", "--cwd", str(self.repo),
@@ -342,15 +342,23 @@ class PublicInlineFinishTest(unittest.TestCase):
         composed = subprocess.run(compose, cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
         self.assertEqual(composed.returncode, 0, composed.stderr)
         route_receipt = json.loads(composed.stdout)
-        if self.non_git:
-            route_path_line = next((line for line in composed.stderr.splitlines() if line.startswith("route_file=")), None)
-            self.assertIsNotNone(route_path_line, composed.stderr)
-            self.route_file = Path(route_path_line.split("=", 1)[1])
-        else:
-            self.route_file = Path(route_receipt["route_file"])
+        self.route_file = Path(route_receipt["route_file"])
         self.route = json.loads(self.route_file.read_text(encoding="utf-8"))
+        # These are the historical cycle/v1 transaction tests. Reconstruct a
+        # pre-journal seal (including its hash-derived ID), even for an old
+        # route whose start never prepared a cycle. Fresh v2 public routes are
+        # covered by artifact_journal.test.py without this fixture conversion.
+        old_route_id = self.route["route_id"]
+        self.route.pop("artifact_storage_contract_version", None)
+        self.route["route_hash"] = CAP.route_hash(self.route)
+        self.route["route_id"] = "rt-" + self.route["route_hash"].split(":", 1)[1][:16]
+        old_path = self.route_file
+        self.route_file = old_path.with_name(self.route["route_id"] + ".json")
+        self.route_file.write_text(json.dumps(self.route))
+        if old_path != self.route_file:
+            old_path.unlink()
         start_output = composed.stdout + composed.stderr
-        if self.started and not self.non_git:
+        if self.started:
             started = subprocess.run([sys.executable, str(ROOT / "utilities/capability-route.py"), "start",
                                       "--route", str(self.route_file), "--jobs", str(self.jobs)],
                                      cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
@@ -388,6 +396,10 @@ class PublicInlineFinishTest(unittest.TestCase):
         return []
 
     def tearDown(self):
+        lock = self.root / ".runtime/artifact-entrance-refresh.lock"
+        if lock.exists():
+            with lock.open("rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -771,6 +783,16 @@ class PublicInlineFinishTest(unittest.TestCase):
         self.assertEqual(composed.returncode, 0, composed.stderr)
         fixture.route_file = Path(json.loads(composed.stdout)["route_file"])
         fixture.route = json.loads(fixture.route_file.read_text(encoding="utf-8"))
+        # Parent/child v1 manifest compatibility uses the same historical
+        # seal as the surrounding fixture, rather than a fresh journal route.
+        fixture.route.pop("artifact_storage_contract_version", None)
+        fixture.route["route_hash"] = CAP.route_hash(fixture.route)
+        fixture.route["route_id"] = "rt-" + fixture.route["route_hash"].split(":", 1)[1][:16]
+        old_path = fixture.route_file
+        fixture.route_file = old_path.with_name(fixture.route["route_id"] + ".json")
+        fixture.route_file.write_text(json.dumps(fixture.route))
+        if old_path != fixture.route_file:
+            old_path.unlink()
         started = subprocess.run([*capability_route, "start", "--route", str(fixture.route_file),
                                   "--jobs", str(self.jobs)],
                                  cwd=self.repo, env=os.environ.copy(), capture_output=True, text=True)
