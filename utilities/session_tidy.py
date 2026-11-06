@@ -2933,12 +2933,14 @@ def last_human_prompt_seq(seat: Seat) -> int:
 # Turns the runtime itself starts: a finished background task (Claude ``<task-notification>``,
 # Codex ``<subagent_notification>``), a message from another session of the same user
 # (Claude ``<agent-message>`` with its fixed framing) and runtime ``<system-reminder>`` text.
-# OpenCode v2 emits synthetic subagent/shell results with these fixed attributes.
+# OpenCode v2 inserts command/description raw, including quotes and angle brackets.
+# Its native opener ends with a quote, greater-than sign and newline.
 _RUNTIME_BLOCK = re.compile(
     r'<(task-notification|subagent_notification|agent-message|system-reminder'
-    r'|subagent(?= sessionID="[^"\r\n]+" state="(?:completed|error|cancelled)" description=")'
-    r'|shell(?= id="[^"\r\n]+" state="(?:completed|error|cancelled)" command="))'
-    r'''\b(?:[^>"']|"[^"]*"|'[^']*')*>(?P<body>.*?)</\1>''', re.S)
+    r'|(?P<opencode>subagent(?= sessionID="[^"\r\n]+" state="(?:completed|error|cancelled)" description=")'
+    r'|shell(?= id="[^"\r\n]+" state="(?:completed|error|cancelled)" command=")))'
+    r'''(?(opencode)\b.*?">\r?\n|\b(?:[^>"']|"[^"]*"|'[^']*')*>)'''
+    r'(?P<body>.*?)</\1>', re.S)
 _PEER_FRAMING = (
     re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
     # The fixed one-line paragraph, up to its fixed last sentence and no further.
@@ -2975,6 +2977,10 @@ def prompt_first_line(text: str) -> str:
         for block in _RUNTIME_BLOCK.finditer(value):
             kind = block.group(1)
             body = block.group("body").strip()
+            if block.group("opencode") and re.search(r'">\r?\n.*?">\r?\n', block.group(0), re.S):
+                # A raw field and output can contain the same delimiter.
+                # Without a unique boundary the displayed first line is unknown.
+                body = "?"
             if kind == "task-notification":
                 summary = re.search(r"<summary>(.*?)</summary>", body, re.S)
                 if summary:

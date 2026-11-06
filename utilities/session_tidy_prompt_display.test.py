@@ -169,6 +169,54 @@ class PromptDisplayTests(unittest.TestCase):
         self.assertEqual(len(line), st.PROMPT_LINE_CHARS)
         self.assertTrue(line.endswith("…"))
 
+    def test_opencode_raw_native_fields_keep_the_human_frontier_and_show_the_body(self):
+        # These are the installed producer templates, with no XML escaping.
+        shell_commands = ("printf '\"'", 'printf "%s" "a > b"',
+                          'printf "%s" "a > b"\nprintf done')
+        notices = [
+            f'<shell id="fixture" state="completed" command="{command}">\nACTUAL OUTPUT\n</shell>'
+            for command in shell_commands
+        ] + [
+            f'<subagent sessionID="child" state="completed" description="{description}">\n'
+            'ACTUAL OUTPUT\n</subagent>'
+            for description in ('Review "', 'Review "a > b"')
+        ]
+        for index, notice in enumerate(notices):
+            for style, delivered in enumerate((
+                notice,
+                '<pasted_content id="n">\n' + notice + '\n</pasted_content id="n">',
+                '<pasted_content id="n">\n' + notice + '\n</pasted_content>',
+            )):
+                with self.subTest(index=index, style=style):
+                    sid = f"native-raw-{index}-{style}"
+                    original = self.prompt("Original person input", "opencode", sid)["human"]
+                    seat = self.seat("opencode", sid)
+                    frontier = st.real_prompt_frontier(seat, "opencode", sid)
+                    value = self.prompt(delivered, "opencode", sid, now=1010)
+                    self.assertEqual(value["human"], original)
+                    self.assertEqual(st.real_prompt_frontier(seat, "opencode", sid), frontier)
+                    self.assertEqual(value["received"][-1]["source"], "notification")
+                    self.assertEqual(value["received"][-1]["text"], "ACTUAL OUTPUT")
+                    for framed in ("My instruction\n" + delivered, delivered + "\nMy instruction"):
+                        self.assertEqual(st.runtime_turn_source(framed), "")
+
+    def test_ambiguous_raw_native_delimiters_preserve_the_human_and_show_unknown(self):
+        def envelope(command, output):
+            return (f'<shell id="fixture" state="completed" command="{command}">\n'
+                    f'{output}\n</shell>')
+        # Two different command/output pairs produce the same native text.
+        notice = envelope("printf one", '<row a="v">\nACTUAL OUTPUT')
+        self.assertEqual(notice, envelope('printf one">\n<row a="v', "ACTUAL OUTPUT"))
+        sid = "native-ambiguous"
+        original = self.prompt("Original person input", "opencode", sid)["human"]
+        seat = self.seat("opencode", sid)
+        frontier = st.real_prompt_frontier(seat, "opencode", sid)
+        value = self.prompt(notice, "opencode", sid, now=1010)
+        self.assertEqual(value["human"], original)
+        self.assertEqual(st.real_prompt_frontier(seat, "opencode", sid), frontier)
+        self.assertEqual(value["received"][-1]["source"], "notification")
+        self.assertEqual(value["received"][-1]["text"], "?")
+
     def test_verified_peer_and_self_request_do_not_replace_the_human(self):
         self.prompt("original", now=1000)
         origin = {"kind": "peer", "harness": "claude", "session_id": "prompt-session",
