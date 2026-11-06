@@ -968,7 +968,16 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
             self.assertFalse(self.admission(sibling['node']).gate_unmet)
         for leg in first['legs']:
             self.assertEqual(self.admission(leg['node']).budget.verdict_rounds, 1)
+        # An owner-recorded revision alone is not a correction: the reviewed
+        # source is byte-identical, so the same start refuses without spending
+        # a round and leaves the original FAIL and its sibling untouched.
         self.prompt.write_text('Closure after an actual mixed PASS/FAIL group.')
+        refused = self.assert_atomic_refusal(reason='review-subject-unchanged')
+        self.assertEqual(refused['next_action'], 'correct-and-restart', refused)
+        self.assertEqual(refused['started'], '0', refused)
+        # The real correction changes the reviewed source; only then does the
+        # same start open the closure round for both the FAIL and its peer.
+        (self.repo / 'x').write_text('source B\n')
         second = self.launch()
         self.assertEqual(second['newly_started'], 2, second)
         self.settle(second)
