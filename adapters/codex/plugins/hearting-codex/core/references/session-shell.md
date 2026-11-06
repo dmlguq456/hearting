@@ -17,6 +17,9 @@ one verified transport for a message; an uncertain submission never triggers
 an alternate send. Codex keeps its native queue and exact receive evidence.
 Native start, prompt and turn-completion callbacks update display identity and
 state for Claude and Codex alike; they never replace the Codex queue with input.
+The native callback supplies its session ID before a passive registry may exist.
+Its nearest verified native process and birth must still belong to this wrapped
+terminal; a worker or service callback cannot select another terminal's session.
 
 `Ctrl+]` or Fleet's exact-session display request expands the same session's
 routes, question list, received peer context and last real human input. The

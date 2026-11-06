@@ -262,15 +262,17 @@ def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
     if not endpoint or not token or harness not in HARNESSES or not _SID.fullmatch(sid or ""):
         return
     import session_tidy
-    from fleet.process_identity import current_launch_context
-    from fleet.collectors.procscan import invocation_mode
+    from pane_ownership import _caller_runtime
     if session_tidy.is_worker(env):
         return
-    owner = current_launch_context(harness, sid)
-    if owner is None or invocation_mode(harness, owner.get("argv")) != "session":
+    # The official callback is the SID source. A native registry can appear
+    # after SessionStart, so requiring its prior SID would lose that first
+    # report forever. The host separately checks this owner's exact PTY.
+    owner, service = _caller_runtime(os.getpid(), harness)
+    if owner is None or service:
         return
-    me = process(owner["pid"])
-    if me is None or me["start"] != str(owner["proc_start"]):
+    me = process(owner[0])
+    if me is None or me["start"] != str(owner[5]):
         return
     import time
     req = {"op": "event", "harness": harness, "sid": sid, "event": event,
