@@ -2634,28 +2634,10 @@ Keep work in this session's route by default; start another interactive session
 (`peer-steward start`) only for long work that needs its own human answers or
 recovery, because each one adds a seat, a model context, and supervision.
 
-**Optional session shell.** Hearting may wrap an interactive native terminal
-with a collapsed status line and a read-only bottom panel. Installation leaves
-this feature off; enabling it is a separate user choice. Noninteractive commands
-and an unavailable shell runtime execute the original CLI without starting a
-second native session. Herdr, cmux and tmux remain optional attachments.
-
-The delivery address is the exact `(harness, native session ID)`, never a pane
-or a display tag. A Fleet tag selects that identity once; subsequent tag or
-attachment changes cannot retarget a retained message. The shell publishes its
-current native selection and process birth through the existing session record.
-An idle wake requires the same live identity, an empty composer, no open form,
-and an unchanged input generation. Human drafts and concurrent typing survive
-the operation. Unknown readiness retains the existing pending delivery. Select
-one verified transport for a message; an uncertain submission never triggers
-an alternate send. Codex keeps its native queue and exact receive evidence.
-
-`Ctrl+]` or Fleet's exact-session display request expands the same session's
-routes, question list, received peer context and last real human input. The
-panel reads common projections, opens questions in Fleet, and edits no answer.
-It neither creates questions nor changes claims, receipts, approvals or route
-authority. Fleet's absence does not prevent an existing peer runner from
-waking a shell. Shell display and input transport add no model instructions.
+**Optional session shell.** An opt-in PTY attachment supplies a collapsed status
+line, a read-only panel and guarded idle wake. Its exact-session transport and
+input-preservation contract is in [session-shell](references/session-shell.md).
+The default remains off; Codex keeps native queue delivery.
 
 | Question | Existing identifier |
 |---|---|
