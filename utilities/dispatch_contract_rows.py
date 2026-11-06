@@ -167,6 +167,13 @@ def _resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) 
                     and not _detached_group_drain_receipt(metadata))
     if not residue and not lost_watcher:
         return {**result, "reason": "residue-receipt-absent"}
+    if not residue:
+        # The ordinary process judgment also owns host/boot identity. PID
+        # namespace numbers alone can coincide across hosts; an empty local
+        # scan cannot override its foreign or unknown process verdict.
+        governed = attempt_process_quiescence(metadata, terminal_receipt=False)
+        if governed.state != "quiescent":
+            return {**result, "state": governed.state, "reason": governed.reason}
     if (process_namespace_identity() != metadata.get("pid_observer_ns")
             or (not residue and metadata.get("pid_ns") != metadata.get("pid_observer_ns"))
             or not attempt_scan_namespace_authority(metadata)):

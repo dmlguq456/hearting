@@ -717,6 +717,8 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.jobs.write_text(self.missing_watcher_row())
         original = self.jobs.read_bytes()
         cases = [
+            ("foreign-or-unknown-host", "attempt_process_quiescence",
+             D.ProcessQuiescence("unverifiable", "process-boot-unverifiable")),
             ("watcher-live", "process_observation", ("present", "42", "S")),
             ("watcher-unreadable", "process_observation", ("inaccessible", "", "")),
             ("foreign-namespace", "attempt_scan_namespace_authority", False),
@@ -725,6 +727,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             ("descendant-live", "attempt_tagged_descendants", D.ProcessGroupObservation("populated", ((4242, "42", "S"),))),
         ]
         for name, helper, result in cases:
+            self.jobs.write_bytes(original)
             with self.subTest(case=name), patch_split(D, helper, return_value=result):
                 recovery = D.resolve_residue_drain(self.jobs, "att-missing-watcher", apply=True)
                 self.assertFalse(recovery.get("changed"), recovery)
