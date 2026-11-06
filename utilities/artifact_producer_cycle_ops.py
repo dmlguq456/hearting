@@ -440,7 +440,12 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
     `_read_manifest_raw` result, `None` for none) and its `manifest_digest` are what a reconcile read
     before it took the lock; left out, the folder's manifest is read here."""
     cycle_id = record["cycle_id"]
-    target_campaign_dir = new_directory.parent
+    import artifact_request
+    anchor = artifact_request.scope_anchor(new_directory) if record.get("request_binding") else None
+    if anchor is not None and artifact_request.execution_dir(root, record, anchor=anchor) != new_directory:
+        raise ProducerError("record-locator-invalid", str(new_directory))
+    target_campaign_dir = anchor.parent if anchor is not None else new_directory.parent
+    new_locator = anchor.name if anchor is not None else new_directory.name
     target = _read_json(target_campaign_dir / "campaign.json")
     if target is None or not artifact_identity.is_well_formed(target.get("campaign_id"), "campaign"):
         raise ProducerError("campaign-unknown", target_campaign_dir.name)
@@ -458,16 +463,19 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
             operation="move", field="campaign", before={"value": old_campaign_id},
             after={"value": new_campaign_id}, reason=reason, now=now, by=by))
         changed += [old_campaign_id, new_campaign_id]
-    if updated.get("locator") != new_directory.name:
+    if updated.get("locator") != new_locator:
         if old_campaign_id == new_campaign_id:
-            before_path = _cycle_rel(root, new_directory.parent / str(record.get("locator") or cycle_id))
+            before_directory = (old_campaign_folder or target_campaign_dir) / str(record.get("locator") or cycle_id)
+            if anchor is not None:
+                before_directory = before_directory / Path(*artifact_request.EXECUTIONS) / cycle_id
+            before_path = _cycle_rel(root, before_directory)
             lines.append(_command_line(
                 command=command, stamp=stamp, target_type="cycle", target_id=cycle_id, target_path=where,
                 operation="move", field="path", before={"value": before_path}, after={"value": where},
                 reason=reason, now=now, by=by))
         base = artifact_locator.locator_base(started, record.get("slug") or "") if started else ""
-        updated["locator"] = new_directory.name
-        updated["locator_suffix"] = _locator_suffix(base, new_directory.name)
+        updated["locator"] = new_locator
+        updated["locator_suffix"] = _locator_suffix(base, new_locator)
         changed.append(new_campaign_id)
     if parent is not _UNSET and parent != record.get("parent_cycle_id"):
         updated["parent_cycle_id"] = parent
@@ -528,6 +536,15 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
         _write_cycle_record(root, written, exclusive=False)
         if _closed_record(record):
             _swap_index_path_locked(root, cycle_id, where, index=index)
+    # An explicit request-folder move already moved these bytes. Apply the
+    # same existing metadata/history operation to each logical scope too.
+    if command == "cycle-move" and (old_campaign_id != new_campaign_id or record.get("locator") != new_locator):
+        for member in artifact_request.members(root, new_directory):
+            child = read_cycle_record(root, member.name)
+            _, touched = _adopt_location_locked(
+                root, child, member, command=command, stamp=stamp, reason=reason, now=now,
+                by=by, old_campaign_folder=old_campaign_folder)
+            changed += touched
     return written, list(dict.fromkeys(changed))
 
 
@@ -599,6 +616,8 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
             new_parent = parent
         target = _resolve_campaign_argument(root, campaign) if campaign is not None else None
         source = cycle_dir(root, old_campaign_id, cycle_id, record)
+        import artifact_request
+        member_ids = [path.name for path in artifact_request.members(root, source)]
         destination = source
         if target is not None and target["campaign_id"] != old_campaign_id:
             artifact_locator.prepare_index_update(root, [old_campaign_id, target["campaign_id"]])
@@ -634,7 +653,7 @@ def cycle_move(root: Path, cycle_id: Optional[str] = None, *, campaign: Optional
     finally:
         artifact_admission._release_lock(root, lock_fd)
     if old_campaign_id != written["campaign_id"]:
-        _drop_group_membership(root, old_campaign_id, [cycle_id])
+        _drop_group_membership(root, old_campaign_id, [cycle_id, *member_ids])
     return {"status": "moved", "cycle_id": cycle_id, "campaign_id": written["campaign_id"],
             "parent_cycle_id": written.get("parent_cycle_id"), "cycle_dir": str(destination)}
 
@@ -727,7 +746,10 @@ def _reparent_children_locked(root: Path, deleted_ids: Sequence[str], *, command
             except (ProducerError, artifact_locator.LocatorError):
                 folder = None
         row: Dict[str, Any] = {"cycle_id": child_id, "before": before, "after": after}
-        if folder is not None and folder.is_dir() and (folder.parent / "campaign.json").is_file():
+        import artifact_request
+        anchor = artifact_request.scope_anchor(folder) if folder is not None else None
+        campaign_folder = anchor.parent if anchor is not None else folder.parent if folder is not None else None
+        if folder is not None and folder.is_dir() and (campaign_folder / "campaign.json").is_file():
             _written, touched = _adopt_location_locked(
                 root, child, folder, command=command, stamp=stamp, reason=reason, now=now, by=by, parent=after)
             stale += touched
@@ -768,33 +790,60 @@ def delete_cycle(root: Path, cycle_id: str, *, reason: Optional[str] = None, now
         except (ProducerError, artifact_locator.LocatorError):
             directory = None
         finishing = bool(record.get("deleted_at"))
-        if finishing and (directory is None or not directory.exists()):
+        already_gone = finishing and (directory is None or not directory.exists())
+        if already_gone and record.get("route_capability") != "route-frame":
             return {"status": "already-deleted", "cycle_id": cycle_id}
         campaign_id = record["campaign_id"]
-        if not finishing:
-            where = _last_known_path(root, record, _cycle_rel(root, directory) if directory is not None else "")
-            digest = record.get("manifest_digest")
-            if directory is not None:
-                _preserve_current_manifest(root, record, directory)
-                found = _read_manifest_raw(directory)
+        affected = {cycle_id: (record, directory)}
+        import artifact_request
+        if directory is not None and directory.is_dir():
+            for member in artifact_request.members(root, directory, include_deleted=True):
+                affected[member.name] = (read_cycle_record(root, member.name), member)
+        if already_gone and record.get("route_capability") == "route-frame":
+            # All member tombstones precede physical removal. A retry after
+            # removal can finish index/list cleanup from those existing rows.
+            for child in list_cycle_records(root):
+                if (child.get("deleted_at") and child.get("deleted_by") == "delete"
+                        and (child.get("request_binding") or {}).get("cycle_id") == cycle_id):
+                    affected[child["cycle_id"]] = (child, None)
+        deleted_ids = list(affected)
+        campaigns = list(dict.fromkeys(item[0]["campaign_id"] for item in affected.values()))
+        # Preserve every closed envelope before deleting the shared folder;
+        # deleting the frame is not completion of a member's route or work.
+        for cid in sorted(affected, key=lambda cid: (cid == cycle_id, cid)):
+            current, folder = affected[cid]
+            if current.get("deleted_at"):
+                continue
+            where = _last_known_path(root, current, _cycle_rel(root, folder) if folder is not None else "")
+            digest = current.get("manifest_digest")
+            if folder is not None:
+                _preserve_current_manifest(root, current, folder)
+                found = _read_manifest_raw(folder)
                 if found is not None:
                     digest = artifact_manifest.manifest_digest(found[1])
-            _tombstone_cycle_locked(root, record, where=where, command="delete", stamp=stamp, reason=reason,
-                                    now=now, by="human", digest=digest)
+            _tombstone_cycle_locked(root, current, where=where, command="delete", stamp=stamp, reason=reason,
+                                   now=now, by="human", digest=digest)
         if directory is not None:
             _remove_folder(root, directory)
-        campaign = read_campaign(root, campaign_id)
-        if campaign is not None and cycle_id in campaign.get("cycles", []):
-            _write_campaign(root, dict(campaign, cycles=[c for c in campaign["cycles"] if c != cycle_id]), exclusive=False)
-        _retire_rows(root, [cycle_id])
+        for cid in campaigns:
+            campaign = read_campaign(root, cid)
+            if campaign is not None and any(c in deleted_ids for c in campaign.get("cycles", [])):
+                _write_campaign(root, dict(campaign, cycles=[c for c in campaign["cycles"] if c not in deleted_ids]), exclusive=False)
+        _retire_rows(root, deleted_ids)
         reparented, touched = _reparent_children_locked(
-            root, [cycle_id], command="delete", stamp=stamp, reason=reason, now=now, by="human")
-        artifact_locator.update_indexes(root, list(dict.fromkeys([campaign_id] + touched)))
-        _flush_cycle_pending_locked(root, cycle_id)
+            root, deleted_ids, command="delete", stamp=stamp, reason=reason, now=now, by="human")
+        artifact_locator.update_indexes(root, list(dict.fromkeys(campaigns + touched)))
+        for cid in deleted_ids:
+            _flush_cycle_pending_locked(root, cid)
     finally:
         artifact_admission._release_lock(root, lock_fd)
-    _drop_group_membership(root, campaign_id, [cycle_id])
+    for cid in campaigns:
+        _drop_group_membership(root, cid, deleted_ids)
+    if already_gone:
+        return {"status": "already-deleted", "cycle_id": cycle_id}
     done = {"status": "deleted", "cycle_id": cycle_id, "campaign_id": campaign_id}
+    if len(deleted_ids) > 1:
+        done["deleted_cycle_ids"] = deleted_ids
     return dict(done, reparented=reparented) if reparented else done
 
 
@@ -955,7 +1004,9 @@ def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -
         if isinstance(campaign.get("locator"), str) and campaign["locator"] != folder.name:
             changes["campaign_paths"].append((campaign_id, folder))
     for cycle_id, folder in sorted(scan.cycles.items()):
-        if published.get(cycle_id) == _cycle_rel(root, folder):
+        import artifact_request
+        anchor = artifact_request.scope_anchor(folder)
+        if published.get(cycle_id) == _cycle_rel(root, folder) and anchor is None:
             continue
         record = read_cycle_record(root, cycle_id)
         if record is not None and record.get("deleted_at"):
@@ -966,12 +1017,9 @@ def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -
             continue
         if record is None:
             continue
-        if record.get("request_binding"):
-            # A logical scope's basename is its ID, not its request locator.
-            # Membership was verified by the scan; do not rename its record.
-            continue
+        expected_locator = anchor.name if anchor is not None else folder.name
         if record.get("campaign_id") != scan.folder_campaign[cycle_id] or (
-                isinstance(record.get("locator"), str) and record["locator"] != folder.name):
+                isinstance(record.get("locator"), str) and record["locator"] != expected_locator):
             changes["cycle_moves"].append((cycle_id, folder))
     if scan.complete:
         for identifier in sorted(published):
@@ -1046,8 +1094,6 @@ def reconcile_root(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]
                         published[record["campaign_id"]] = str(Path(where).parent)
             scan = _scan_layout(root)
             _observe_root_controls(root, scan, now=now)
-            if scan.mapping(root) == published:
-                return {"status": "unchanged"}
             changes = _hand_changes(root, scan, published)
             if not any(changes.values()):
                 return {"status": "unchanged"}
@@ -1092,7 +1138,9 @@ def _revive_cycle_locked(root: Path, record: Mapping[str, Any], folder: Path, *,
         root, revived, folder, command="reconcile", stamp=stamp, reason="reconcile", now=now, by=by,
         old_campaign_folder=old_campaign_folder, index=index, manifest=found,
         manifest_digest=manifest_digest)
-    _edit_campaign_members(root, folder.parent, cycle_id, joining=True)
+    import artifact_request
+    anchor = artifact_request.scope_anchor(folder)
+    _edit_campaign_members(root, anchor.parent if anchor is not None else folder.parent, cycle_id, joining=True)
     line = _command_line(
         command="reconcile", stamp=stamp, target_type="cycle", target_id=cycle_id, target_path=where,
         operation="update", field="path", before={"value": None}, after={"value": where},

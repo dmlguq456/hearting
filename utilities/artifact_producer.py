@@ -708,6 +708,11 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
     route = load_route(root, route_file)
     if start:
         context = (route.get("work_request") or {}).get("workflow_group_context")
+        if context:
+            existing = route_cycle_for(root, route)
+            if (existing and existing.get("request_binding")
+                    and context.get("campaign_id") != existing["campaign_id"]):
+                context = None  # the existing user move withdrew the former campaign group
         selection = {}
         if context:
             from work_start import group_context_matches_campaign
@@ -1252,6 +1257,12 @@ def _begin_cycle_record(
             resumable = None  # a deleted folder is never resumed; the route's next cycle is a new one
         if resume_only and resumable is None:
             raise ProducerError("producer-binding-required", "route-cycle-absent")
+        if resumable is not None and resumable.get("request_binding"):
+            # Campaign/parent changes are existing organization operations,
+            # not new source authority. Keep the admitted cycle after a move.
+            if campaign_id is None:
+                campaign_id, campaign_key = resumable["campaign_id"], None
+            parent_cycle_id = resumable.get("parent_cycle_id")
         campaign: Optional[Dict[str, Any]] = None
         parent = None
         campaign_reopen_event_id = None
@@ -1311,7 +1322,7 @@ def _begin_cycle_record(
             except artifact_workflow_groups.WorkflowGroupError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
         if campaign is not None:
-            if request_binding and request_binding["campaign_id"] != campaign["campaign_id"]:
+            if resumable is None and request_binding and request_binding["campaign_id"] != campaign["campaign_id"]:
                 raise ProducerError("request-campaign-mismatch", campaign["campaign_id"])
             if campaign.get("state") == "satisfied":
                 try:

@@ -12,6 +12,15 @@ import route_plan
 EXECUTIONS = ("_internal", "executions")
 
 
+def scope_anchor(path):
+    """Physical shape only; callers still verify the record/marker identity."""
+    path = Path(path)
+    if (path.parent.name == EXECUTIONS[1] and path.parent.parent.name == EXECUTIONS[0]
+            and locator._CYCLE_ID.fullmatch(path.name)):
+        return path.parents[2]
+    return None
+
+
 def _safe(root, path):
     from artifact_journal import safe_path
     return safe_path(root, path)
@@ -97,7 +106,7 @@ def execution_dir(root, record, *, anchor=None):
     decision = decision if decision.is_absolute() else root / decision
     expected = root / saved["path"] / "artifacts" / route_plan.RECORD_RELATIVE
     if (any(saved.get(key) != sealed[key] for key in ("decision", "digest", "index"))
-            or decision != expected or saved["campaign_id"] != record.get("campaign_id")
+            or decision != expected
             or not locator._CYCLE_ID.fullmatch(record["cycle_id"])):
         raise ValueError("request-execution-binding-mismatch")
     if anchor is None:
@@ -116,7 +125,7 @@ def execution_dir(root, record, *, anchor=None):
     return _safe(root, Path(anchor) / Path(*EXECUTIONS) / record["cycle_id"])
 
 
-def members(root, directory, *, strict=True):
+def members(root, directory, *, strict=True, include_deleted=False):
     """Only verified direct members of a request; unknown directories stay unknown."""
     directory = Path(directory)
     # Existing arbitrary internal support (including symlinks) is not a
@@ -141,7 +150,7 @@ def members(root, directory, *, strict=True):
             continue
         record = locator.read_cycle_record(root, path.name)
         try:
-            if record and not record.get("deleted_at") and execution_dir(root, record, anchor=directory) == path:
+            if record and (include_deleted or not record.get("deleted_at")) and execution_dir(root, record, anchor=directory) == path:
                 marker = locator.read_cycle_binding(path)
                 if marker and marker["cycle_id"] == path.name and marker["campaign_id"] == record["campaign_id"]:
                     yield path

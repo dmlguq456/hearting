@@ -297,6 +297,91 @@ class RequestFolderTest(S.SourceRepoStartBase):
         self.assertTrue(repeated["replay"])
         self.assertEqual(len(artifact_journal.read_day(self.root / binding["path"])["rows"]), 1)
 
+    def completed_request(self):
+        leg, path, _ = self.selected([S.CODE_STAGED])
+        record = self.cycle(leg)
+        frame = self.cycle(self.route)
+        directory = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"])
+        self.write_output({"cycle_dir": str(directory)}, "plans/final_report.md", b"complete\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=record["cycle_id"])
+        return frame, record
+
+    def target_campaign(self):
+        route = S.T.compile_for("direct", self.root, slug="target", campaign_key="target-campaign")
+        path = Path(S.L.admit_runtime_route(self.root, route).route_file)
+        return self.begin_route(route, path)
+
+    def test_cross_campaign_request_move_updates_every_logical_member(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        source = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        destination = P.campaign_dir(self.root, target["campaign_id"]) / source.name
+        source.rename(destination)
+        result = P.reconcile_root(self.root)
+        self.assertNotEqual(result["status"], "skipped", result)
+        self.assertEqual(P.read_cycle_record(self.root, record["cycle_id"])["campaign_id"], target["campaign_id"])
+        self.assertNotIn(record["cycle_id"], P.read_campaign(self.root, frame["campaign_id"])["cycles"])
+        self.assertIn(record["cycle_id"], P.read_campaign(self.root, target["campaign_id"])["cycles"])
+        self.assertEqual(P.finalize(self.root, cycle_id=record["cycle_id"])["status"], "already-sealed")
+
+    def test_deleting_request_preserves_member_history_and_settles_its_deleted_record(self):
+        frame, record = self.completed_request()
+        snapshots = {p.name: p.read_bytes() for p in S.L.manifest_snapshot_dir(self.root, record["cycle_id"]).glob("*.json")}
+        P.delete_cycle(self.root, frame["cycle_id"], reason="delete this physical request fixture")
+        self.assertTrue(P.read_cycle_record(self.root, record["cycle_id"]).get("deleted_at"))
+        self.assertNotIn(record["cycle_id"], P.read_campaign(self.root, frame["campaign_id"])["cycles"])
+        self.assertEqual(snapshots, {p.name: p.read_bytes() for p in S.L.manifest_snapshot_dir(self.root, record["cycle_id"]).glob("*.json")})
+        self.assertEqual(P.finalize(self.root, cycle_id=record["cycle_id"])["status"], "already-sealed")
+
+    def test_explicit_request_move_updates_every_member_and_keeps_original_snapshots(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        snapshots = {p.name: p.read_bytes() for p in S.L.manifest_snapshot_dir(self.root, record["cycle_id"]).glob("*.json")}
+        P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"], reason="move request fixture")
+        self.assertEqual(P.read_cycle_record(self.root, record["cycle_id"])["campaign_id"], target["campaign_id"])
+        self.assertIn(record["cycle_id"], P.read_campaign(self.root, target["campaign_id"])["cycles"])
+        for name, raw in snapshots.items():
+            self.assertEqual((S.L.manifest_snapshot_dir(self.root, record["cycle_id"]) / name).read_bytes(), raw)
+        self.assertEqual(P.finalize(self.root, cycle_id=record["cycle_id"])["status"], "already-sealed")
+
+    def test_moved_open_member_resumes_same_cycle_in_current_campaign(self):
+        leg, path, _ = self.selected([S.CODE_STAGED])
+        record = self.cycle(leg)
+        frame = self.cycle(self.route)
+        target = self.target_campaign()
+        P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        try:
+            resumed = self.begin_route(leg, path)
+        except P.ProducerError as exc:
+            resumed = {"status": exc.code}
+        self.assertEqual(resumed["status"], "resumed", resumed)
+        self.assertEqual(resumed["cycle_id"], record["cycle_id"])
+        self.assertEqual(resumed["campaign_id"], target["campaign_id"])
+
+    def interrupted_delete(self, *, after_removal):
+        import artifact_admission
+        frame, record = self.completed_request()
+        real = P._remove_folder
+        def fail(root, directory):
+            if after_removal:
+                real(root, directory)
+            raise RuntimeError("interrupted-delete")
+        with S.patch_split(P, "_remove_folder", side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, "interrupted-delete"):
+                P.delete_cycle(self.root, frame["cycle_id"])
+        self.assertTrue(P.read_cycle_record(self.root, record["cycle_id"]).get("deleted_at"))
+        P.delete_cycle(self.root, frame["cycle_id"])
+        self.assertNotIn(record["cycle_id"], artifact_admission.load_index(self.root).cycles)
+        self.assertNotIn(record["cycle_id"], P.read_campaign(self.root, frame["campaign_id"])["cycles"])
+        self.assertTrue(P.finalize(self.root, cycle_id=record["cycle_id"])["deleted"])
+
+    def test_request_delete_resumes_before_physical_removal(self):
+        self.interrupted_delete(after_removal=False)
+
+    def test_request_delete_resumes_after_physical_removal(self):
+        self.interrupted_delete(after_removal=True)
+
 
 if __name__ == "__main__":
     unittest.main()
