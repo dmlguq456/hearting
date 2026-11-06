@@ -98,7 +98,7 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     y = _section(grid, x, right, y + 1, ui_text("fleet.repo.routes"), str(len(current)))
     if current:
         y = _draw_route_subset(grid, scoped_vm, current, x, y, bottom,
-                              view_key="repo:" + ident, state=nav, no_repo_group=True)
+                              view_key="repo:" + ident, state=nav)
     else:
         grid.put(x + 3, y, ui_text("fleet.repo.no_routes"), "dim", limit=right)
         y += 1

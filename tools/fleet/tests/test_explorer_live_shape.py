@@ -69,8 +69,21 @@ REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions"))
 
 def repo_status(value):
     """The optional per-project status line (D4 #3): counts, optional texts and the stale flag."""
-    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale"}:
+    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale", "campaigns"}:
         return False
+    campaigns = value.get("campaigns", ())
+    if not isinstance(campaigns, (list, tuple)) or len(campaigns) > 3:
+        return False
+    for row in campaigns:
+        texts = {"title", "line", "path", "name", "relative", "campaign", "doc_age"}
+        if (not isinstance(row, dict) or set(row) - texts - {"mtime", "stale", "decisions", "next"}
+                or any(row[key] is not None and not isinstance(row[key], str) for key in texts & set(row))
+                or row.get("mtime") is not None and type(row["mtime"]) not in (int, float)
+                or type(row.get("stale", False)) is not bool):
+            return False
+        if any(not isinstance(row.get(key, ()), (list, tuple))
+               or any(not isinstance(item, str) for item in row.get(key, ())) for key in ("decisions", "next")):
+            return False
     return (all(type(value[key]) is int and value[key] >= 0 for key in REPO_STATUS_COUNT & set(value))
             and all(value[key] is None or isinstance(value[key], str) for key in REPO_STATUS_TEXT & set(value))
             and type(value.get("stale", False)) is bool)
@@ -155,6 +168,10 @@ def conform(live, samples, path, problems):
                 if not repo_status(live[key]):
                     problems.append(f"{path}.status: invalid optional status shape")
                 continue
+            if path == "repos[]" and key == "done_result":
+                if live[key] is not None and not isinstance(live[key], str):
+                    problems.append(f"{path}.done_result: expected optional outcome string")
+                continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.session_tag: expected optional string")
@@ -238,6 +255,19 @@ class SectionShapes(unittest.TestCase):
             with self.subTest(section=section):
                 self.assertTrue(self.live[section], f"live {section} is empty — the sample has no source")
                 self.check(section)
+
+    def test_campaign_summary_extension_is_bounded_and_typed(self):
+        row = {"campaign": "v4", "line": "Remaining work", "mtime": 1.0,
+               "doc_age": "1m", "stale": False, "decisions": [], "next": []}
+        self.assertTrue(repo_status({"campaigns": [row]}))
+        self.assertFalse(repo_status({"campaigns": [row] * 4}))
+        self.assertFalse(repo_status({"campaigns": [dict(row, line={"unreadable": True})]}))
+
+    def test_repo_outcome_extension_rejects_an_object(self):
+        problems = []
+        conform([{"id": "demo", "done_result": {"status": "success"}}],
+                [self.fixture["repos"]], "repos", problems)
+        self.assertTrue(any("done_result" in message for message in problems))
 
     def test_answered_records_are_the_recorded_user_answers_and_have_the_fixture_shape(self):
         from tools.fleet.refresh import LiveSnapshot
