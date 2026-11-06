@@ -165,7 +165,9 @@ version is kept beside it as `AGENTS.md.edited-<time>`.
 On Codex, Hearting writes into a file of yours only when you keep a non-empty
 `~/.codex/AGENTS.override.md`: Codex reads only that one global file, so
 Hearting appends its instructions below your text in one marked block. Update
-replaces only that block and uninstall removes it.
+replaces only that block and uninstall removes it; a missing or empty override
+is never created. Background workers on every runtime also get your global
+rules.
 
 ## Is Windows supported?
 

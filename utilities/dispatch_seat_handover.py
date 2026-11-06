@@ -448,6 +448,7 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
 
 def _seat_graph(rows_by_key, edges):
     qualified = {((h, origin), (h, target)) for h, origin, target in edges}
+    merge_edges = set(qualified)
     vertices = {vertex for pair in qualified for vertex in pair}
     legacy = set()
     for rows in rows_by_key.values():
@@ -466,16 +467,25 @@ def _seat_graph(rows_by_key, edges):
                 vertices.add(origin)
     for sid, target in legacy:
         origins = {vertex for vertex in vertices if vertex[1] == sid}
-        qualified.update((origin, target) for origin in origins or {("", sid)})
-    return tuple(sorted(qualified)), _unresolved_vertices(qualified)
+        pairs = {(origin, target) for origin in origins or {("", sid)}}
+        qualified.update(pairs)
+        if len(origins) > 1:
+            # An unqualified legacy source cannot choose between harnesses.
+            merge_edges.update(pairs)
+    # Retired work may join an existing holder and its normal tidy suffix.
+    # This converges notices; it does not merge native conversation history.
+    # Forks/cycles still use every edge, and exact jobs keep their own bindings.
+    return tuple(sorted(qualified)), _unresolved_vertices(qualified, merge_edges=merge_edges)
 
 
-def _unresolved_vertices(qualified):
+def _unresolved_vertices(qualified, *, merge_edges=None):
     """Forks block their ancestors; merges and cycles block their component.
 
     Kahn elimination visits every edge, including cycles through a fork. Any
     remainder belongs to a component containing a cycle; propagation below
     intentionally invalidates that entire component, including its tails.
+    The notice overlay limits merge detection to conversation edges and
+    ambiguous legacy origins, allowing accepted retire fan-in only.
     """
     outgoing, incoming, adjacent = {}, {}, {}
     for origin, target in qualified:
@@ -490,7 +500,12 @@ def _unresolved_vertices(qualified):
             degree[target] -= 1
             if degree[target] == 0:
                 ready.append(target)
-    invalid = {v for v in adjacent if degree[v] or len(incoming.get(v, ())) > 1}
+    merge_incoming = incoming
+    if merge_edges is not None:
+        merge_incoming = {}
+        for origin, target in merge_edges:
+            merge_incoming.setdefault(target, set()).add(origin)
+    invalid = {v for v in adjacent if degree[v] or len(merge_incoming.get(v, ())) > 1}
     pending = list(invalid)
     while pending:
         for neighbor in adjacent.get(pending.pop(), ()):

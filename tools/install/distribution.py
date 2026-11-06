@@ -6004,7 +6004,7 @@ PERMISSION_NOTICE = (
     "note: background Claude workers run in bypass mode unless "
     "headless.claude_permission_mode is allowlist in\n"
     "      ${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml "
-    "(see README.md#permissions)"
+    "(see FAQ.md#what-permissions-do-background-workers-have)"
 )
 
 

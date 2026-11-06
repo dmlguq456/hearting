@@ -33,7 +33,7 @@ directory is on your `PATH`.
 
 The installer prints one note you should read: background Claude workers run
 in bypass mode by default, and the same note names the file that switches them
-to allowlist mode. See [Permissions](README.md#permissions). If you also install
+to allowlist mode. See the [FAQ](FAQ.md#what-permissions-do-background-workers-have). If you also install
 OpenCode and keep Claude Code user rules, another note says those rules now
 apply in OpenCode too; the same section says how to turn that off.
 

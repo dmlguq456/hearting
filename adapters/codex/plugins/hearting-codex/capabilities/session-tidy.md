@@ -55,6 +55,8 @@ wrapper as user input. Keep this classification after booking expiry. A newer
 compaction boundary cancels an unsent idle booking; pre-compaction usage cannot
 qualify the shortened conversation. Only an actual new user prompt rearms it.
 Use the existing session ledger and booking; add no gate or state store.
+Unresolved clear lineage does not block this same-session operation. A source
+with a confirmed successor remains ineligible.
 
 At the due time, the existing helper requests one marked card reply, with no
 Skill or tool call. The common turn-end observer stores that reply as the exact
@@ -135,8 +137,13 @@ both previous-conversation display and pending-result delivery. A resume that
 moves panes remains connected by its recorded session id. A fork leaves its
 source and ancestors unresolved; independent descendants retain their own
 confirmed suffix and directly started jobs. Reverse discovery stops before an
-unresolved origin. A merge, self-loop, or cycle invalidates its whole connected
-component. Incomplete observation cannot grant authority. Open records stored under a predecessor's
+unresolved origin. A merge in that conversation lineage, self-loop, or cycle
+invalidates its whole connected component. Accepted retire transfers also name
+notice recipients, rather than previous conversations: several retired sources
+may converge on one recipient without making that recipient or its normal tidy
+suffix ambiguous. Different forward recipients, cycles and a legacy source
+whose harness is ambiguous remain unresolved. Exact registered-job ownership
+keeps its separate binding checks. Incomplete observation cannot grant authority. Open records stored under a predecessor's
 session key may be delivered to the unique confirmed same-harness chain end,
 while storage, delivery id, claim, and acknowledgement stay under the original
 key. An explicit registered-job binding to another recipient takes precedence.
@@ -275,6 +282,17 @@ until that session's native consumer records the exact reference. Unsupported
 native wake keeps the existing pending delivery for the next native callback;
 it does not read or send the target's composer. Clear retains its existing
 foreground, form, draft, and successor checks.
+
+A peer held during the idle card turn or compaction retains its existing
+message obligation. Completing the exact session's compaction wakes that
+carrier without a status or continue prompt. The existing booking serializes
+input admission: a claimed compaction defers peer input until its boundary;
+peer input admitted first follows the ordinary new-input rules. The completed
+booking and unchanged prompt frontier can corroborate idle after compaction
+when a pane's working label lags; identity, foreground, form and draft checks
+still apply. Activity after the actual native compaction boundary remains busy,
+even if the booking's completion is recorded later; an unknown boundary keeps
+the normal working guard. Claude, Codex and OpenCode use this same rule.
 
 The optional seat-lineage reader is a read-only projection of existing ledger,
 card history and transcript locations. Card injection may include one
