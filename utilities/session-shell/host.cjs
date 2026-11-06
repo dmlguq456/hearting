@@ -59,6 +59,7 @@ function sameTerminal(pid, root) {
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
 let lastEnter = -1, submitted = -1, currentDelivery, held = [], heldBytes = 0;
 let expanded = false, relay = false, paste = false, keyTail = '', cursorVisible = true;
+let screenRevision = 0;
 let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError;
 const deliveries = new Map(), calls = new Map(), watchers = new Map();
@@ -78,7 +79,9 @@ function source(op, extra={}) {
     const id=++callID;
     const timer=setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve,timer});
-    backend.stdin.write(JSON.stringify({id,op,binding:binding(),...extra})+'\n');
+    const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
+    if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
+    backend.stdin.write(frame);
   });
 }
 function emit(value) { process.stdout.write(value); }
@@ -196,6 +199,31 @@ function releaseHeld() {
   const saved=held;held=[];heldBytes=0;process.stdin.resume();
   for(const data of saved)userInput(data);
 }
+function screenSnapshot() {
+  const lines=[],buffer=terminal.buffer.active;
+  for(let y=0;y<terminal.rows;y++){
+    const line=buffer.getLine(buffer.viewportY+y),runs=[];
+    for(let x=0;x<terminal.cols;x++){
+      const cell=line?.getCell(x);if(!cell||!cell.getWidth())continue;
+      const dim=!!cell.isDim(),text=cell.getChars()||' ',previous=runs[runs.length-1];
+      if(previous&&previous[1]===dim)previous[0]+=text;else runs.push([text,dim]);
+    }
+    lines.push(runs);
+  }
+  return lines;
+}
+async function refreshReadiness() {
+  // A previous empty frame cannot acknowledge bytes still waiting inside the
+  // native input loop. Only untouched startup or an exact submitted frontier
+  // can be corroborated by the screen/native-idle observation.
+  const inputSettled=epoch===0||(submitted>=0&&submitted===epoch);
+  if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return;}
+  const before=epoch,selected=selection,revision=screenRevision;
+  const result=await source('readiness',{screen:screenSnapshot(),state});
+  if(before!==epoch||selected!==selection||revision!==screenRevision||currentDelivery){empty=false;return;}
+  empty=result.ok===true&&result.ready===true;
+  if(empty&&state!=='idle'){state='idle';queueProjection();}
+}
 function userInput(data) {
   if(!data.length)return;
   if(data.length===1&&data[0]===0x1d&&!paste&&!currentDelivery){expanded=!expanded;applyLayout();return;}
@@ -236,22 +264,24 @@ async function lifecycle(req) {
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
     if(currentDelivery){deliveries.set(currentDelivery,'submitted');currentDelivery=undefined;releaseHeld();rebuildDisplay();}
-  } else if(req.event==='stop') { state='idle';empty=submitted>=0&&epoch===submitted; }
+  } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
+  else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
   projection();return {ok:true,...status()};
 }
 async function request(req) {
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
-  if(req.op==='status')return {ok:true,...status()};
+  if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
   if(req.op==='panel'){expanded=req.expanded===true;applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
   if(deliveries.has(req.ref))return {ok:true,duplicate:true,state:deliveries.get(req.ref)};
   const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&!currentDelivery&&terminal.modes.bracketedPasteMode;
   if(!safe())return {ok:false,reason:'not-idle-empty',not_started:true};
-  const selected=selection,data=await source('payload',{ref:req.ref,claim:req.claim});
-  if(!data.ok||selected!==selection||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
+  const selected=selection,revision=screenRevision;
+  const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
+  if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
   currentDelivery=req.ref;state='submitting';empty=false;epoch++;lastEnter=epoch;
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
@@ -296,7 +326,7 @@ server.listen(socketPath,()=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
   emit('\x1b[?1049h\x1b[2J');
-  terminal.onData(data=>child.write(data));terminal.onWriteParsed(schedule);
+  terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
   child.onData(data=>{if(relay)emit(data);else terminal.write(data);});
   process.stdin.on('data',userInput);
   process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;if(relay)child.resize(cols,rows);else applyLayout();});

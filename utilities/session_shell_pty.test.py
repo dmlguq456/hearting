@@ -15,12 +15,17 @@ ROOT=Path(__file__).resolve().parents[1]
 
 FAKE_NATIVE=r"""
 import json,os,socket,subprocess,sys,time,tty
+from pathlib import Path
 sid=sys.argv[1]
 def event(kind,identity=sid):
     raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
     request={'op':'event','event':kind,'harness':'claude','sid':identity,
         'pid':os.getpid(),'start':start,'token':os.environ['HEARTING_SHELL_TOKEN'],
         'seq':time.monotonic_ns()//1000}
+    registry=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/str(os.getpid())
+    registry=registry.with_suffix('.json');registry.parent.mkdir(parents=True,exist_ok=True)
+    registry.write_text(json.dumps({'pid':os.getpid(),'procStart':start,'sessionId':identity,
+        'status':'busy' if kind=='prompt' else 'idle'}))
     with socket.socket(socket.AF_UNIX) as channel:
         channel.settimeout(5);channel.connect(os.environ['HEARTING_SHELL_SOCKET'])
         channel.sendall((json.dumps(request)+'\n').encode());channel.recv(8192)
@@ -28,7 +33,7 @@ if '--headless-event' in sys.argv:
     event('start',sid+'-child');raise SystemExit()
 tty.setraw(0)
 began=time.monotonic();event('start');delay=(time.monotonic()-began)*1000
-print('ACK_MS='+str(delay)+'\r\nREADY\r\n> ',end='',flush=True)
+print('\x1b[?2004hACK_MS='+str(delay)+'\r\nREADY\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
 pending=''
 while True:
     data=os.read(0,65536)
@@ -42,7 +47,8 @@ while True:
             subprocess.run([sys.executable,__file__,sid,'--headless-event'],
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
         event('stop')
-        print('\r\nDONE_'+line+'\r\n> '+pending,end='',flush=True)
+        print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
+        if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
 """
 
 HOST_LAUNCHER=r"""
@@ -95,11 +101,17 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);barrier=undefined;}
  const file=path.join(cfg.registry,'claude','session-shell-'+child.pid+'.json');
  await existing(file);
- await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
+ if(cfg.scenario!=='initial'){
+   await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
+ }
  if(cfg.scenario==='mixed'){
    await rpc(cfg.inlet,{batch:Buffer.from('second\rdraft').toString('base64')});await waitFor(/DONE_second/);
  }else if(cfg.scenario==='child'){
    await rpc(cfg.inlet,{batch:Buffer.from('spawn-child\r').toString('base64')});await waitFor(/DONE_spawn-child/);
+ }else if(cfg.scenario==='form'){
+   await rpc(cfg.inlet,{batch:Buffer.from('form\r').toString('base64')});await waitFor(/Do you want to proceed/);
+ }else if(cfg.scenario==='unpainted-draft'){
+   await rpc(cfg.inlet,{batch:Buffer.from('unpainted draft').toString('base64')});
  }
  const displayLag=[];
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
@@ -131,6 +143,7 @@ class SessionShellPTYTest(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('shell_loop_isolation',ROOT/'tools/run-tests.py')
         runner=importlib.util.module_from_spec(spec);sys.modules[spec.name]=runner;spec.loader.exec_module(runner)
         cls.env=runner.build_isolated_env(cls.root,repo_root=ROOT)
+        cls.env['CLAUDE_CONFIG_DIR']=str(cls.root/'native-claude')
         cls.env['npm_config_cache']=str(cls.root/'npm-cache')
         cls.env['npm_config_devdir']=str(cls.root/'node-gyp')
         cls.env['npm_config_userconfig']=str(cls.root/'npmrc');(cls.root/'npmrc').write_text('')
@@ -208,6 +221,19 @@ class SessionShellPTYTest(unittest.TestCase):
         print(json.dumps({'event':'session-shell-record-update','lag_ms':result['display_lag_ms']}))
         self.assertEqual(len(result['display_lag_ms']),4)
         self.assertLess(max(result['display_lag_ms']),500)
+
+    def test_new_idle_session_has_a_verified_empty_composer_before_its_first_prompt(self):
+        result=self.run_loop('initial')
+        self.assertEqual(result['status']['state'],'idle')
+        self.assertTrue(result['status']['empty'])
+
+    def test_a_form_appearing_after_stop_is_not_an_empty_ready_composer(self):
+        result=self.run_loop('form')
+        self.assertFalse(result['status']['empty'])
+
+    def test_a_draft_waiting_for_native_paint_is_not_proved_empty_by_the_old_screen(self):
+        result=self.run_loop('unpainted-draft')
+        self.assertFalse(result['status']['empty'])
 
 
 if __name__=='__main__':unittest.main()

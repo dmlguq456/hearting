@@ -372,6 +372,38 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             *question_lines[:3], *peers, human_line]}
 
 
+def _input_readiness(binding, request):
+    """Use the ordinary form/draft judgment on this PTY's parsed native cells."""
+    from peer_steward_duties import _screen_ready
+    screen = request.get("screen")
+    if not isinstance(screen, list) or len(screen) > 256:
+        return {"ok": False, "reason": "screen-unavailable"}
+    lines, count = [], 0
+    for runs in screen:
+        if not isinstance(runs, list):
+            return {"ok": False, "reason": "screen-unavailable"}
+        line = []
+        for run in runs:
+            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
+                    or type(run[1]) is not bool):
+                return {"ok": False, "reason": "screen-unavailable"}
+            count += len(run[0])
+            if count > 64 * 1024:
+                return {"ok": False, "reason": "screen-unavailable"}
+            line.extend((char, run[1]) for char in run[0])
+        lines.append(line)
+    reason = _screen_ready(binding["harness"], lines)
+    idle = request.get("state") == "idle"
+    if binding["harness"] == "claude":
+        from fleet import session_registry
+        record = session_registry.read("claude", binding["native_pid"])
+        idle = bool(record and record.get("pid") == binding["native_pid"]
+                    and str(record.get("procStart")) == binding["native_start"]
+                    and record.get("sessionId") == binding["sid"] and record.get("status") == "idle")
+    return {"ok": True, "idle": idle, "ready": idle and reason is None and valid_binding(binding),
+            "reason": reason or (None if idle else "native-idle-unobserved")}
+
+
 def _backend_operation(request: dict) -> dict:
     op = request.get("op")
     binding = request.get("binding") or {}
@@ -399,7 +431,12 @@ def _backend_operation(request: dict) -> dict:
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, state=request.get("state", "unknown"), expanded=request.get("expanded") is True)}
+    if op == "readiness":
+        return _input_readiness(binding, request)
     if op == "payload":
+        readiness = _input_readiness(binding, request)
+        if not readiness.get("ready"):
+            return {"ok": False, "reason": readiness.get("reason") or "not-idle-empty"}
         peer = _peer_message()
         row = peer._read_pending(request.get("ref"))
         claim = request.get("claim")

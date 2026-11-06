@@ -197,6 +197,19 @@ class SessionShellTest(unittest.TestCase):
         self.assertIn("◑ ?", text)
         self.assertIn("› 나: 아직 없음", result["lines"])
 
+    def test_readiness_requires_the_exact_native_idle_record_and_known_empty_screen(self):
+        from fleet import session_registry
+        row = self.binding()
+        native = {"pid": row["native_pid"], "procStart": row["native_start"], "sessionId": row["sid"], "status": "idle"}
+        screen = [[["❯ ", False]], [["──────────────────", False]]]
+        with mock.patch.object(session_registry, "read", return_value=native):
+            self.assertTrue(shell._input_readiness(row, {"screen": screen})["ready"])
+            self.assertFalse(shell._input_readiness(row, {"screen": [[["unrecognized UI", False]]]})["ready"])
+        for observed in (None, {**native, "procStart": native["procStart"] + "0"},
+                         {**native, "sessionId": "another-native-session"}, {**native, "status": "busy"}):
+            with self.subTest(native=observed), mock.patch.object(session_registry, "read", return_value=observed):
+                self.assertFalse(shell._input_readiness(row, {"screen": screen, "state": "idle"})["ready"])
+
     def test_codex_stop_reports_completion_to_its_wrapped_display(self):
         path = Path(__file__).resolve().parents[1] / "adapters/codex/hooks/stop-lifecycle.py"
         spec = importlib.util.spec_from_file_location("shell_codex_stop_fixture", path)
