@@ -6254,7 +6254,7 @@ class LocatorDateDuplicationTest(ProducerTestBase):
 
 
 class RouteLaunchContextTest(ProducerTestBase):
-    def test_direct_start_returns_one_real_cycle_even_with_foreign_inherited_env(self):
+    def test_direct_start_returns_own_journal_even_with_foreign_inherited_env(self):
         import work_start
         self.activate()
         from route_identity import route_hash, route_id_from_hash
@@ -6269,8 +6269,14 @@ class RouteLaunchContextTest(ProducerTestBase):
             second = work_start.start_work(route, path, self.jobs)
         self.assertEqual(first["state"], "inline", first)
         self.assertEqual(second["artifact_env"], first["artifact_env"])
-        self.assertEqual(len(list(P.list_cycle_records(self.root))), 1)
-        self.assertTrue(Path(first["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"]).is_dir())
+        self.assertEqual(list(P.list_cycle_records(self.root)), [])
+        self.assertEqual(first["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"], "")
+        self.assertEqual(first["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"], "")
+        import artifact_journal
+        binding = artifact_journal.target(self.root, route["route_id"])
+        self.assertEqual(binding["route_hash"], route["route_hash"])
+        self.assertEqual(first["artifact_env"]["AGENT_ARTIFACT_JOURNAL"], str(self.root / binding["path"]))
+        self.assertFalse(Path(first["artifact_env"]["AGENT_ARTIFACT_JOURNAL"]).exists())
 
     def test_route_launch_prepares_exact_context_once_without_copied_env(self):
         self.activate()

@@ -445,3 +445,7 @@ tool-deferred	web-bundle
 utility-deferred	artifact_directory_bundle.py
 utility-deferred	codex_shared_daemon_live_driver.py
 utility-deferred	retained_review_completion.test.py
+utility-deferred	artifact_journal.py
+utility-deferred	artifact_journal_migration.py
+utility-deferred	artifact-journal.py
+utility-deferred	journal_finish.py

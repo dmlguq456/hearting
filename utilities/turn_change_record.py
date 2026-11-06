@@ -68,7 +68,7 @@ CHECKPOINT_TIMEOUT = 120
 CLOCK_SLACK = 2.0
 APPENDED = "auto-record-turns.md"
 # The open turn's start snapshot kept at the next start for its late end step.
-PRIOR_KEYS = ("turn_started_at", "top", "root", "head", "entries", "native_anchor", "entries_total", "source_total", "entries_truncated", "tail_digest")
+PRIOR_KEYS = ("turn_started_at", "turn_started_iso", "top", "root", "head", "entries", "native_anchor", "entries_total", "source_total", "entries_truncated", "tail_digest")
 GATE_VALUE = (f"{MARK}: changes observed at turn end and recorded after the fact; "
               "this gate was not assessed")
 # Byte code Python writes beside sources; untracked, it is never a reason for a record.
@@ -658,7 +658,17 @@ def _work(env, harness: str, sid: str, root: str) -> Path:
 def settle(route_file: str, work: Path, env) -> dict:
     """Close the composed route: ``finish`` with the evidence, else ``close`` (recorded
     unproven). Nothing here raises; ``closed`` says whether it is closed now."""
-    if _outcome_file(route_file).is_file():
+    def settled_outcome():
+        if not _outcome_file(route_file).is_file():
+            return False
+        try:
+            import inline_finish
+            root = Path(route_file).parent.parent.parent
+            slot = inline_finish.pending_state(root, Path(route_file).stem)
+            return slot is None or slot.get("state") == "finished"
+        except (OSError, ValueError):
+            return False
+    if settled_outcome():
         return {"closed": True, "closed_by": "already"}
     evidence, summary = work / "evidence.md", work / "summary.txt"
     finished = None
@@ -673,7 +683,7 @@ def settle(route_file: str, work: Path, env) -> dict:
     except OSError:
         line = "Automatic record"
     closed = _run(_route_command("close", "--route", route_file, "--summary", line), env, FINISH_TIMEOUT)
-    if closed.returncode == 0 or _outcome_file(route_file).is_file():
+    if closed.returncode == 0 or settled_outcome():
         # No cycle took the evidence: keep it beside the route, where later turns are appended.
         try:
             if not kept_record(route_file).exists():
@@ -693,8 +703,9 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
     work = _work(env, harness, sid, root)
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     source = list(dict.fromkeys(path for item in items for path in item.get("source", [])))
-    (work / "evidence.md").write_text(
-        _bounded(record_header(harness, sid, top) + _batch_evidence(items)), encoding="utf-8")
+    from journal_finish import automatic_evidence
+    (work / "evidence.md").write_text(automatic_evidence(harness, sid, items,
+        _bounded(record_header(harness, sid, top) + _batch_evidence(items))), encoding="utf-8")
     shown = ", ".join(source[:5]) + (", …" if len(source) > 5 else "")
     (work / "summary.txt").write_text(
         f"Automatic record: turn change counts {[i.get('source_count', len(i['source'])) for i in items]} "
@@ -708,7 +719,12 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
     child_env = _child_env(env, harness, sid)
     fresh = [path for item in items for path in item.get("fresh", [])] or source
     slug = gate._slug_word("auto-" + (Path(fresh[0]).stem if fresh else "truncated-turn"))
-    composed = _run(_route_command("compose", "--shape", "direct", "--cwd", str(top), "--unassigned",
+    campaign = None
+    if env.get("AGENT_ARTIFACT_CAMPAIGN_ID"):
+        import artifact_producer
+        campaign = artifact_producer.read_campaign(Path(root), env["AGENT_ARTIFACT_CAMPAIGN_ID"])
+    selection = ["--campaign-key", campaign["key"]] if campaign and campaign.get("key") != "_unassigned" else ["--unassigned"]
+    composed = _run(_route_command("compose", "--shape", "direct", "--cwd", str(top), *selection,
                                    "--slug", slug, "--parent-harness", harness,
                                    "--prompt-file", str(work / "request.md"),
                                    "--spec-read", GATE_VALUE, "--drift-verdict", GATE_VALUE,
@@ -742,6 +758,12 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
     """Append later turns to the session's closed automatic record for this folder: one
     file in the same cycle, then the producer's own checkpoint publishes it; a record
     without a cycle (closed by ``close``) keeps them beside its route."""
+    import artifact_journal
+    binding = artifact_journal.target(root, entry["route_id"])
+    if binding:
+        from journal_finish import record_items
+        written = record_items(root, binding, {"harness": harness, "sid": sid}, items)
+        return {"ok": True, "file": written[-1]["reference"] if written else None, "storage_kind": "journal"}
     sections = _bounded(_batch_evidence(items), EVIDENCE_LIMIT-1) + "\n"
     directory = None
     if entry.get("closed_by") != "close":
@@ -1067,7 +1089,7 @@ def _retire_prior(state, harness, sid, env):
         + "Listed paths (bounded):\n" + "\n".join(listed) + "\n")
     root, top = before.get("root") or "", before.get("top") or before.get("capture_cwd") or ""
     item = {"id": f"{before['turn_started_at']:.6f}", "root": root, "top": top,
-            "began": before["turn_started_at"], "ended": event["at"], **meta,
+            "began": before["turn_started_at"], "at": before.get("turn_started_iso"), "ended": event["at"], **meta,
             "source": listed, "fresh": _sample_paths(path for path in paths if path not in prev),
             "observations": observation, "section": _bounded(observation + "\n" + detail),
             "completed_observation": True, "supplement": before.get("record_mode") != "record",
@@ -1145,7 +1167,8 @@ def turn_start(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None
         state.pop("record_mode", None)
         state.update(harness=harness, session_id=sid, top=None, root="", head="", entries=None,
                      native_anchor=None, capture_cwd=os.path.abspath(cwd),
-                     turn_started_at=now, turn_ended_at=None, start_pending=True)
+                     turn_started_at=now, turn_started_iso=datetime.fromtimestamp(now).astimezone().isoformat(),
+                     turn_ended_at=None, start_pending=True)
         result["state"] = "start-pending"
 
     if _update(path, reserve) is None or result["state"] != "start-pending":
@@ -1227,8 +1250,9 @@ def turn_end(harness: str, sid: str, cwd: str, env, *, now=None, recorder=None, 
             pending = state.setdefault("pending", [])
             observations = observation_section(harness, sid, before, payload, until)
             item = {
-                "id": f"{began:.6f}", "root": root, "top": top, "began": began, "ended": now,
-                **meta, "source": _sample_paths(source), "observations": observations,
+                "id": f"{began:.6f}", "root": root, "top": top, "began": began,
+                "at": before.get("turn_started_iso"), "ended": now,
+                **meta, "source": _sample_paths(source), "commits": commits, "observations": observations,
                 "fresh": _sample_paths(p for p in source if p not in (before.get("entries") or {})),
                 "section": _bounded(observations + "\n" + turn_section(harness, sid, top_path, source, commits,
                     before, after, began, now, overlap, env, meta))}
@@ -1400,12 +1424,23 @@ def supplementary_records(harness, sid, cwd, env=None):
         return []
     state = _read(state_path(env, harness, sid))
     top = gate._work_tree(Path(os.path.realpath(cwd or "/")))
-    if top is None or state.get('top') != str(top):
-        return []
+    if top is None:
+        top = Path(os.path.realpath(cwd or "/"))
+    if state.get('top') != str(top):
+        state = {}  # journal reads remain possible after session state expires
     rows = []
     root = gate.folder_root(top, env)
+    if root:
+        import artifact_journal
+        shared = artifact_journal.rows(Path(root), session={"harness": harness, "sid": sid}, limit=200)
+        for row in shared["rows"][-3:]:
+            rows.append({**row, "harness": harness, "session_id": sid,
+                         "reference": str(Path(root) / row["record_target"]),
+                         "record_saved": True, "ended": datetime.fromisoformat(
+                             row["at"].replace("Z", "+00:00")).timestamp(),
+                         "summary": row["title"], "coverage": shared["coverage"]})
     for entry in [(state.get('records') or {}).get(root, {})]:
-        if entry.get('last_turn'):
+        if entry.get('last_turn') and not any(row.get("route_id") == entry.get("route_id") for row in rows):
             rows.append({'harness': harness, 'session_id': sid, 'route_id': entry.get('route_id'),
                          'reference': entry.get('route_file'), 'record_saved': bool(entry.get('closed')),
                          **entry['last_turn']})

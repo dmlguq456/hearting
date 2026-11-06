@@ -313,6 +313,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     reason = route_format.contract_reason(route) or route_format.scope_reason(route)
     if reason:
         raise ValueError(reason)
+    storage_version = route.get("artifact_storage_contract_version", 1)
+    if type(storage_version) is not int or storage_version not in {1, 2}:
+        raise ValueError("artifact-storage-version-unsupported")
     if route.get("route_hash") != route_hash(route):
         note_same_work_drift("route-hash-mismatch")
     if route.get("route_id") != "rt-"+route["route_hash"].split(":",1)[1][:16]:

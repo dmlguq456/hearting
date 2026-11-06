@@ -717,9 +717,13 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
             intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs,
-            sibling_looked=sibling_looked, **selection)["env"]
+            sibling_looked=sibling_looked, journal_target=not require_cycle, **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
+        import artifact_journal
+        binding = artifact_journal.target(root, route["route_id"])
+        if binding:
+            return artifact_journal.environment(root, binding)
         return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (
             "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
             "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR")}}
@@ -1129,6 +1133,7 @@ def _begin_cycle_record(
     jobs: Optional[Path] = None,
     owner_attempt_id: Optional[str] = None,
     resume_only: bool = False,
+    journal_target: bool = False,
 ) -> Dict[str, Any]:
     dispatch_terminal_commit.require_current_cleanup("producer-begin", jobs=jobs)
     root = Path(root).resolve()
@@ -1179,11 +1184,8 @@ def _begin_cycle_record(
         if require_cycle:
             raise ProducerError("cutover-inactive", "activation required before cycle issuance")
         return {
-            "status": "legacy-compat",
-            "layout": "legacy",
-            "route_id": route["route_id"],
-            "reason": "cutover-inactive",
-            "env": {"AGENT_ARTIFACT_ROOT": str(root)},
+            "status": "legacy-compat", "layout": "legacy", "route_id": route["route_id"],
+            "reason": "cutover-inactive", "env": {"AGENT_ARTIFACT_ROOT": str(root)},
             "legacy_fallback": fallback,
         }
     # active, or just bootstrapped: fall through to the existing cycle path.
@@ -1437,6 +1439,15 @@ def _begin_cycle_record(
                 changed = True
             if changed:
                 _write_campaign(root, campaign, exclusive=False)
+        if (journal_target and route.get("artifact_storage_contract_version", 1) == 2
+                and intensity == "direct" and not require_cycle and route.get("capability") != "autopilot-spec"
+                and node_id is None and not binding_owner):
+            import artifact_journal
+            binding = artifact_journal.prepare_locked(root, route, campaign,
+                campaign_dir(root, campaign["campaign_id"], campaign), at=started_on)
+            artifact_locator.update_indexes(root, [campaign["campaign_id"]])
+            return {"status": "prepared", "layout": "journal", "campaign_id": campaign["campaign_id"],
+                    "env": artifact_journal.environment(root, binding), "journal_target": binding}
         new_cycle_id = alloc.allocate("cycle")
         while ((head.has_prefixed_stable_id(new_cycle_id) if head is not None
                 else new_cycle_id in index.stable_ids)
@@ -1766,6 +1777,8 @@ def require_cycle_output(
             record = candidates[0] if candidates else None
     if record is None:
         return None
+    if record.get("journal_migration"):
+        raise ProducerError("cycle-consolidated-to-journal", record["cycle_id"])
     if route_id and not lineage_checked and record.get("route_id") != route_id:
         raise ProducerError("cycle-route-binding-mismatch", f"cycle={record['cycle_id']} route={route_id}")
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)

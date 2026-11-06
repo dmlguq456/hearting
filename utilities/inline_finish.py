@@ -96,7 +96,7 @@ def _read(path: Path):
         return None
     except (OSError, ValueError, UnicodeError) as exc:
         raise InlineFinishError("finish-intent-corrupt") from exc
-    if not isinstance(row, dict) or row.get("schema") != "inline_finish_v1":
+    if not isinstance(row, dict) or row.get("schema") not in {"inline_finish_v1", "inline_finish_v2"}:
         raise InlineFinishError("finish-intent-corrupt")
     return row
 
@@ -457,6 +457,17 @@ def finish(args, route: Mapping[str, Any], route_file: Path, api, *, _admission=
     node = nodes[-1]
     if not isinstance(node, dict) or not node.get("id"):
         raise InlineFinishError("finish-terminal-node-missing")
+    import artifact_journal
+    journal_target = artifact_journal.target(root, route["route_id"])
+    existing_cycle = artifact_producer.route_cycle_for(root, route)
+    if (route.get("artifact_storage_contract_version", 1) == 2
+            and journal_target is None and existing_cycle is None and route.get("capability") != "autopilot-spec"
+            and not pending_state(root, route["route_id"]) and not api.outcome_path(route_file).exists()):
+        artifact_producer.prepare_route_artifact_env(route_file, start=True, jobs=jobs, require_cycle=False)
+        journal_target = artifact_journal.target(root, route["route_id"])
+    if journal_target is not None and existing_cycle is None:
+        import journal_finish
+        return journal_finish.finish(args, route, route_file, api, (_choice, jobs, inherited_jobs), journal_target)
     base = root / ".runtime" / "inline-finish" / "v1" / route["route_id"]
     state_path, lock_path = base / "finish.json", base / "finish.lock"
     prior_state = _read(state_path)

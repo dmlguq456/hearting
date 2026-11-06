@@ -802,7 +802,7 @@ activation and judgment failures retain their exemptions.
 
 At turn end the existing detached recorder stores changes, bounded native
 command termination facts, and the final reply with source references. It uses
-the existing automatic direct route in the unassigned container and appends
+the existing automatic direct route in its associated campaign (otherwise the unassigned container) and appends
 later changing turns. Open explicit workflows also retain bounded exact-session observations for
 Fleet and continuation, without closing or taking over their routes. The route-side
 `.held.md` has a 256 KiB total cap as well as its 64 KiB append cap; oldest
@@ -1090,7 +1090,7 @@ index, or flushing history.
 A session finishes its explicitly composed `direct` inline route to record real evidence.
 The tiny-fix path has no agent-facing finish command; its recorder saves the evidence.
 Supply a readable, nonempty regular file anywhere, or an http(s) URL, and the
-final summary; finish records that evidence inside the route's own cycle (a
+final summary. A new small direct route records evidence in its campaign daily journal, binding an immutable entry revision with a versioned receipt. Existing cycle-bound routes keep their cycle proof. Planned/shared-spec work retains cycles. For a cycle-bound route, finish records that evidence inside the route's own cycle (a
 file byte for byte, a URL as a one-line record) under a runtime name, and that
 copy is what the terminal proof, manifest and producer binding name. If the
 route has no cycle yet because its start was interrupted, finish prepares it
@@ -1574,7 +1574,7 @@ Code uses sibling `spec/` and `plans/` buckets.
 
 Numeric prefixes such as `00_`, `01_`, `02_`, and `05_` are retired. Use plain names inside `spec/`, separating user-facing files from machine-oriented `_internal/`. The spec transaction helper snapshots the exact prior `prd.md` automatically whenever an existing PRD changes, regardless of intensity; initial creation and no-op updates do not allocate a version. See `CONVENTIONS §§5 and 6.5`.
 
-**Producer lifecycle (W7C).** Every folder above is a bucket inside one producer cycle once the write-cutover is active: `begin` issues the campaign/cycle/producer IDs before the first write, artifacts land under `campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/…`, stage workers join the owner's open cycle through the `AGENT_ARTIFACT_*` environment, and `finalize` commits `manifest.json` after route closure. Before that, `artifact_producer.py checkpoint` publishes a live open cycle's interim manifest — the same schema with `cycle.state: open` — at `.runtime/artifact-producer/v1/open-manifests/<cyc>.json`; stage completion, supervisor polls and session turn ends trigger it automatically (at most once per 15 minutes per cycle, weights and oversized trees excluded), and `finalize` keeps its artifact IDs, then removes it. Legacy top-level writes are allowed only in the pre-activation compatibility window. See `core/CORE.md §3`.
+**Producer lifecycle (W7C).** Except small-work daily journals, every process folder above is a bucket inside one producer cycle once the write-cutover is active: `begin` issues the campaign/cycle/producer IDs before the first write, artifacts land under `campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/…`, stage workers join the owner's open cycle through the `AGENT_ARTIFACT_*` environment, and `finalize` commits `manifest.json` after route closure. Before that, `artifact_producer.py checkpoint` publishes a live open cycle's interim manifest — the same schema with `cycle.state: open` — at `.runtime/artifact-producer/v1/open-manifests/<cyc>.json`; stage completion, supervisor polls and session turn ends trigger it automatically (at most once per 15 minutes per cycle, weights and oversized trees excluded), and `finalize` keeps its artifact IDs, then removes it. Legacy top-level writes are allowed only in the pre-activation compatibility window. See `core/CORE.md §3`.
 
 ## 6.1. Cross-Project Continuity Layer
 
@@ -1622,3 +1622,5 @@ A received completion is a responsibility to read the exact result and perform
 the already approved review/follow-through this turn, or run its existing
 registered continuation. Receipt, queue consumption and ACK are not execution.
 Report when work actually started, including any delay before a user reminder.
+
+Small direct/automatic storage follows CONVENTIONS “Small-work daily journal”: results remain in place, process evidence stays in the daily file, and saved records do not certify unobserved test results. Explicit consolidation/restore uses the common journal tool and preserves historical receipt identities.

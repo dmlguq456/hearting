@@ -939,10 +939,10 @@ def gate_mark(record, node_id, home=None, state_roots=None):
     if not isinstance(evidence, dict) or not os.path.isabs(str(evidence.get("path", ""))):
         return None
     try:
-        with open(evidence["path"], "rb") as handle:
-            if hashlib.sha256(handle.read()).hexdigest() != evidence.get("sha256"):
-                return None
-    except OSError:
+        from fleet.explorer.output import utility
+        if utility("dispatch_contract_gates").evidence_digest(evidence["path"]) != evidence.get("sha256"):
+            return None
+    except (OSError, ValueError):
         return None
     if node.get("kind") == "resource-runner":
         if (

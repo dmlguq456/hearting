@@ -944,3 +944,31 @@ node, exact attempt, execution-surface, and evidence bound, so a stale dispatch
 row or a same-evidence retry with different attempt axes is not completion.
 
 Lab full-run entry requires a current hash-bound smoke attestation. Reports with media use `capabilities/report-manifest.schema.json` as the shared report manifest: each audio sample has 1:1 waveform/spectrogram/playback media, hashes and visual evidence are bound, and the house audio parameters are 48 kHz with the full 0–24 kHz band. Its optional `bundle` block declares representation `format` separately from semantic `roles` (`canonical`/`summary`/`interactive`/`navigation`), one shared `title`, and one `primary_representation_id`: summary statistics bind to the primary plus every canonical/summary representation, media links bind to interactive ones, and equivalence is declared only through `bundle.equivalence_groups` with a shared title and declared ordered section identity — never inferred from filename, extension, or coexistence. A manifest without `bundle` is classified `legacy/unspecified` and keeps the version-1 both-outputs rule unchanged.
+
+### Small-work daily journal
+
+A new direct inline route and automatic turn records use the campaign's
+`journals/YYYY-MM-DD.md`, without a cycle or a finish-evidence directory.
+Existing cycle bindings retain their v1 lifecycle. Planned work, shared-spec
+transactions and dispatched work retain cycles. A journal entry is an artifact
+with opaque artifact/revision IDs; its immutable revision digest, rather than
+the mutable day file, binds completion. Entries retain original session, turn,
+time and offset, observed changes, checks and actual results. Saved does not
+mean tests passed. Long evidence and corrections stay in that same file.
+
+Results stay at their project locations. Plans, reviews, preimages and history
+stay in `.agent_reports`. Each entry records result locations and versions
+(Git commit, verified copy/hash, or explicitly unknown). Common readers expose
+`result_targets` beside `record_target`; they never move or open a result on read.
+A correction records actor, source, time, reason and prior revision; manual file
+drift is not a confirmed user correction. Historical completion remains bound
+to its original revision while readers distinguish current evidence state.
+
+`artifact-journal.py dry-run|apply|restore` consolidates only verified small,
+closed direct/automatic cycles. It backs up the whole original and affected
+metadata before cleanup. Live, ambiguous, unsupported or changed candidates are
+preserved individually. Original session record locks precede producer admission
+and journal locks; state locks are short. Restore resumes its existing operation,
+uses staging identity as well as bytes, and changes only its own entries/keys.
+No user project is migrated automatically. Request-folder sharing, legacy-root
+aliases, shared revision deltas and Cairn integration are separate follow-ups.

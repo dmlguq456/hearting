@@ -752,8 +752,11 @@ class EndToEndTest(Fixture):
         self.assertEqual(list((self.root / "campaigns" / "2026-10-01_payments-migration").iterdir()), [])
         outcome = json.loads(Path(entry["route_file"]).with_suffix(".outcome.json").read_text())
         self.assertTrue(outcome["terminal_gate_proven"])
-        evidence = Path(outcome["terminal_gates"]["inline"]["evidence"])
-        self.assertIn("greet.py | 2 +-", evidence.read_text())
+        import artifact_journal as journal
+        evidence = outcome["terminal_gates"]["inline"]["evidence"]
+        self.assertIn("greet.py | 2 +-", journal.read_reference(evidence)["body"])
+        self.assertEqual(len(list((self.root / "campaigns").glob("*/journals/*.md"))), 1)
+        self.assertEqual(list((self.root / "campaigns").glob("*/*/.cycle.json")), [])
         ledger = [json.loads(line) for line in
                   (self.ledgers / "claude" / f"{SID}.jsonl").read_text().splitlines()]
         self.assertEqual([(line["event"], line["campaign_key"], line.get("automatic")) for line in ledger],
@@ -761,17 +764,13 @@ class EndToEndTest(Fixture):
 
         result = self.turn(lambda: (self.repo / "README.md").write_text("notes, revised\n"))
         self.assertEqual(result["state"], "appended", result)
-        appended = evidence.parents[1] / T.APPENDED
-        self.assertIn("README.md", appended.read_text())
+        day = journal.split_reference(evidence)[0]
+        appended = journal.read_day(day)
+        self.assertEqual(len(appended["rows"]), 2)
+        self.assertIn("README.md", appended["rows"][-1]["body"])
         self.assertEqual(len(list((self.root / ".runtime" / "routes").glob("rt-*.outcome.json"))), 1)
 
-        sys.path.insert(0, str(HERE))
-        import artifact_workflow_group_review as review
-        cycle_id = json.loads(Path(entry["route_file"]).read_text())["route_id"]
-        cycle = next(row for row in review.producer.list_cycle_records(self.root)
-                     if row.get("route_id") == cycle_id)
-        chosen = review.select_targets(self.root, None, cycles=[cycle["cycle_id"]], auto=True)
-        self.assertIn({"cycle_id": cycle["cycle_id"], "reason": "automatic-record"}, chosen.skipped)
+        self.assertEqual(list((self.root / ".runtime/artifact-producer/v1/cycles").glob("*.json")), [])
         print(f"\nturn_change_record end-to-end record seconds={elapsed:.2f}", file=sys.stderr)
 
     def test_a_route_left_open_by_a_failed_close_is_closed_at_the_next_turn(self):

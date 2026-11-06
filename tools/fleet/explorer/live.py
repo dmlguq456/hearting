@@ -2140,13 +2140,20 @@ def _journal_groups(snapshot, clock=None):
     snippet. None when no journal was read.
     """
     memory = _get(snapshot, "memory")
-    if not isinstance(memory, Mapping):
-        return None
-    if memory.get("journal_available") is False:
-        return None
-    by_repo = memory.get("by_repo")
-    if not isinstance(by_repo, Mapping):
-        return None
+    by_repo = {key: list(value or []) for key, value in (memory.get("by_repo") or {}).items()} if isinstance(memory, Mapping) else {}
+    # Work records are a read-only supplement; they are never inserted into
+    # the memory DB or reclassified as decisions.
+    for session in _records(_get(snapshot, "sessions", default=())):
+        chain = _get(session, "route_chain") or {}
+        for row in chain.get("automatic_records") or ():
+            if row.get("kind") != "journal-entry":
+                continue
+            repo = _get(session, "cwd") or UNKNOWN_REPO
+            by_repo.setdefault(repo, []).append({"id": row["artifact_id"] + ":" + row["revision_id"],
+                "ts": row["at"], "action": "work-record", "type": "journal-entry",
+                "headline": row["title"], "project": repo})
+    if not by_repo:
+        return {} if isinstance(memory, Mapping) and memory.get("journal_available") else None
     grouped = {}
     seen = set()
     for repo, events in by_repo.items():
@@ -2161,7 +2168,7 @@ def _journal_groups(snapshot, clock=None):
                 continue
             if identity:
                 seen.add(identity)
-            action = "saved" if action_name in _SAVED else "changed"
+            action = "recorded" if action_name == "work-record" else "saved" if action_name in _SAVED else "changed"
             snippet = _memory_text(event.get("headline") or event.get("snippet"))
             project_source = _text(event.get("project"))
             if project_source and "/" in project_source:
@@ -2886,6 +2893,8 @@ def _seat_view(tag, repo, harness, sid, entries, now, now_text=None, ended=False
             "kind": item["kind"], "connection": item["connection"], "note": None,
             "card": bool(item["card"] and item["card"].get("status") == "available"),
             "detail": full, "title": title})
+        if (item.get("entry") or {}).get("journal_records"):
+            generations[-1]["journal_records"] = item["entry"]["journal_records"]
         marks.append([_text(item["harness"]) or "·", item["kind"]])
         if full and item["card"] and "lines" in card:
             row = {"gen": card.get("generation") or len(generations), "harness": _text(item["harness"]),
