@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from tools.fleet.config import ui_text
 from tools.fleet.explorer.frame import draw, measure_pane_max
 from tools.fleet.explorer import live
 from tools.fleet.explorer.state import NavState, reduce
@@ -165,6 +166,18 @@ class RepoPageTest(unittest.TestCase):
                 text = pane(draw(self.vm, self.state, cols, 90, beat=1))
                 sessions = text.split("── SESSIONS", 1)[1]
                 self.assertIn("human-line", sessions)
+
+    def test_resume_notice_and_repo_last_input_both_survive_the_rebase(self):
+        session = dict(self.vm.sessions[0], restart="stopped", state="idle")
+        vm = replace(self.vm, sessions=(session,))
+        for cols in (80, 100, 140, 168):
+            with self.subTest(cols=cols):
+                sessions = pane(draw(vm, self.state, cols, 90, beat=1)).split("── SESSIONS", 1)[1]
+                lines = sessions.splitlines()
+                notice = next(i for i, line in enumerate(lines) if ui_text("fleet.resume.stopped") in line)
+                prompt = next(i for i, line in enumerate(lines) if "human-line" in line)
+                if cols == 80:
+                    self.assertNotEqual(notice, prompt)
 
     def test_narrow_long_cjk_page_keeps_sidebar_and_renderer_does_no_source_reads(self):
         project = {"counts": {"doing": 1}, "open": [("doing", "11-06", "긴 제목" * 1000)]}
