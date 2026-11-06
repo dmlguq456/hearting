@@ -9,8 +9,10 @@ recently and open it, without any external tool.  The same computation feeds
 
 What this module never does: it never creates, moves, renames, or deletes a
 campaign, a cycle, a manifest, or any document, and it never creates a symbolic
-link.  Its writes are exactly the four entrance files above plus, once ever,
+link. Refresh writes the four entrance files above plus, once ever,
 `<root>/.runtime/artifact-entrance.json` (the first user-facing cycle record).
+Seal requests also use two locks and one coalesced pending record under
+`<root>/.runtime/`; the finite refresh worker consumes that record and exits.
 
 Determinism: identical root content and the same declared language produce
 byte-identical files.  No wall clock, host name, user name, or absolute path is
@@ -31,6 +33,7 @@ file format, file name or location for such rows.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import hashlib
 import os
@@ -48,6 +51,7 @@ import artifact_locator  # noqa: E402
 import artifact_meta  # noqa: E402
 import artifact_producer_store as store  # noqa: E402
 from artifact_producer_manifest import artifact_audience, resolve_placed_output  # noqa: E402
+from detached_lifetime import bind as end_with_test  # noqa: E402
 
 try:  # tools/i18n is a sibling of utilities/ in every checkout and release
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "i18n"))
@@ -450,12 +454,11 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         chosen = _representative(rows)
         if chosen is None:
             continue
-        document = resolve_placed_output(cycle_path / chosen["path"])
-        if not document.is_file() or document.is_symlink():
+        document = _document_path(root, _cycle_locator(cycle_path, root) + "/" + chosen["path"],
+                                  placed=True)
+        if document is None:
             continue
-        document_rel = _nfc(document.relative_to(root).as_posix()) if document.is_relative_to(root) else ""
-        if not document_rel:
-            continue
+        document_rel = _nfc(document.relative_to(root).as_posix())
         date = _display_date((record or {}).get("sealed_on") or cycle.get("started_on"), date_key)
         locator = _cycle_locator(cycle_path, root)
         title_fallback = ""
@@ -495,16 +498,8 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
     return snapshot
 
 
-def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
-    """One validated non-cycle row, or None when any required part is missing or unsafe."""
-    if not isinstance(raw, Mapping):
-        return None
-    kind, date, title, doc = (raw.get("kind"), raw.get("date"), raw.get("title"), raw.get("doc_path"))
-    if not all(isinstance(value, str) for value in (kind, date, title, doc)):
-        return None
-    kind, date, title, doc = _nfc(kind).strip(), _nfc(date), _nfc(title).strip(), _nfc(doc)
-    if not kind or kind == "cycle" or not title or not _DATE_FULL.match(date):
-        return None
+def _document_path(root: Path, doc: str, *, placed: bool = False) -> Optional[Path]:
+    """A regular document under root, without traversal or any symlink component."""
     if not doc or doc.startswith("/") or "\\" in doc or "\x00" in doc:
         return None
     parts = doc.split("/")
@@ -516,9 +511,27 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
             path = path / part
             if path.is_symlink():
                 return None
-        if not path.is_file():
+        if placed:
+            path = resolve_placed_output(path)
+            return _document_path(root, path.relative_to(root).as_posix())
+        if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
             return None
-    except OSError:
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return path
+
+
+def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
+    """One validated non-cycle row, or None when any required part is missing or unsafe."""
+    if not isinstance(raw, Mapping):
+        return None
+    kind, date, title, doc = (raw.get("kind"), raw.get("date"), raw.get("title"), raw.get("doc_path"))
+    if not all(isinstance(value, str) for value in (kind, date, title, doc)):
+        return None
+    kind, date, title, doc = _nfc(kind).strip(), _nfc(date), _nfc(title).strip(), _nfc(doc)
+    if not kind or kind == "cycle" or not title or not _DATE_FULL.match(date):
+        return None
+    if _document_path(root, doc) is None:
         return None
     summary = raw.get("summary", "")
     extra = raw.get("extra", 0)
@@ -786,6 +799,65 @@ def render_all_html(snapshot: Dict[str, Any], t) -> str:
 # ---------------------------------------------------------------------------
 
 
+def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
+    """Coalesce seal requests into one finite worker, following human_wait's fd handoff.
+
+    The short request lock covers only pending state and worker ownership, never
+    scanning or rendering. The worker relinquishes ownership under that same
+    lock, so a request arriving as it exits cannot be stranded.
+    """
+    root = Path(root).absolute()
+    if not root.is_dir():
+        return
+    runtime = root / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    with open(runtime / "artifact-entrance-request.lock", "a+b") as request:
+        fcntl.flock(request, fcntl.LOCK_EX)
+        store._write_atomic(runtime / "artifact-entrance-pending.json",
+                            store._json_bytes({"cycle_id": cycle_id or ""}))
+        fd = os.open(runtime / "artifact-entrance-refresh.lock",
+                     os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            code = ("import sys; from pathlib import Path; "
+                    "sys.path.insert(0, sys.argv[1]); import artifact_entrance as e; "
+                    "e._refresh_requested(Path(sys.argv[2]), int(sys.argv[3]))")
+            end_with_test(subprocess.Popen(
+                [sys.executable, "-c", code, str(Path(__file__).resolve().parent), str(root), str(fd)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, pass_fds=(fd,), start_new_session=True))
+        finally:
+            # Do not LOCK_UN: the child inherits this same locked description.
+            os.close(fd)
+
+
+def _refresh_requested(root: Path, fd: int) -> None:
+    """Consume pending requests without sleeping or holding the request lock over a refresh."""
+    runtime = root / ".runtime"
+    pending = runtime / "artifact-entrance-pending.json"
+    try:
+        while root.is_dir():
+            with open(runtime / "artifact-entrance-request.lock", "a+b") as request:
+                fcntl.flock(request, fcntl.LOCK_EX)
+                if not pending.exists():
+                    # Serialize exit with request_refresh's ownership check.
+                    os.close(fd)
+                    fd = -1
+                    return
+                demand = store._read_json(pending) or {}
+                pending.unlink()
+            try:
+                refresh(root, cycle_id=demand.get("cycle_id"))
+            except Exception as exc:  # best effort, including a follow-up request
+                print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _has_marker(data: bytes) -> bool:
     """The generator's first line; an HTML file keeps `<!DOCTYPE html>` above it."""
     lines = [line.decode("utf-8", "replace").strip() for line in data.split(b"\n", 3)[:2]]
@@ -1024,7 +1096,10 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
             print(t("open.ambiguous"), file=sys.stderr)
             return 1
         chosen = matches[0]
-    target = root / chosen["doc_path"]
+    target = _document_path(root, chosen["doc_path"])
+    if target is None:
+        print(t("open.not_found", query=selector), file=sys.stderr)
+        return 1
     print(str(target))
     url = _show_viewer(root, target, t)
     _open_externally(url or target)

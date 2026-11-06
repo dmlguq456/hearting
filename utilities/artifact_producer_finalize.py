@@ -583,16 +583,14 @@ def _finalize(
 
 
 def finalize(root: Path, *, cycle_id: str, **kwargs: Any) -> Dict[str, Any]:
-    """Seal one cycle, then refresh the derived read entrance outside the admission lock.
+    """Seal one cycle and request a best-effort entrance refresh without waiting.
 
-    `_finalize` has already released the admission lock and returned its result
-    here, so the entrance costs the seal nothing.  The entrance is a projection of
-    the sealed root, never part of the seal: a failure prints one warning line on
-    stderr and the seal result is returned unchanged."""
+    The entrance worker runs outside the admission lock and the caller's stack;
+    neither a slow refresh nor its failure changes the seal result."""
     result = _finalize(root, cycle_id=cycle_id, **kwargs)
     try:
         import artifact_entrance  # lazy: the seal never depends on the entrance
-        artifact_entrance.refresh(Path(root), cycle_id=cycle_id)
+        artifact_entrance.request_refresh(Path(root), cycle_id=cycle_id)
     except Exception as exc:  # noqa: BLE001 -- the entrance never changes or fails a seal
         print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
     return result
