@@ -58,14 +58,23 @@ while True:
 HOST_LAUNCHER=r"""
 const fs=require('node:fs'),net=require('node:net');
 const cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
-process.env.HEARTING_SHELL_START_FD=String(fs.openSync(cfg.startFile,'w'));
-require(cfg.host);
-const inlet=net.createServer(socket=>{let raw='';socket.on('data',data=>{
- raw+=data;if(!raw.includes('\n'))return;
- const input=JSON.parse(raw.split('\n')[0]);
- process.stdin.emit('data',Buffer.from(input.batch,'base64'));socket.end('{}\n');
-});});
-inlet.listen(cfg.inlet);
+if(process.argv.includes(cfg.host)){
+ const report=error=>fs.appendFileSync(cfg.diagnostic,String(error?.stack||error)+'\n');
+ process.on('uncaughtException',report);process.on('unhandledRejection',report);
+ const cp=require('node:child_process'),spawn=cp.spawn;
+ cp.spawn=function(file,args,options){
+  if(args?.some(arg=>String(arg).endsWith('/session_shell.py'))){const child=spawn(file,args,{...options,stdio:['pipe','pipe','pipe']});child.stderr.on('data',data=>fs.appendFileSync(cfg.diagnostic,data));return child;}
+  return spawn(file,args,options);
+ };
+ process.env.HEARTING_SHELL_PYTHON=cfg.backend;
+ fs.writeFileSync(cfg.hostPidFile,String(process.pid));
+ const inlet=net.createServer(socket=>{let raw='';socket.on('data',data=>{
+  raw+=data;if(!raw.includes('\n'))return;
+  const input=JSON.parse(raw.split('\n')[0]);
+  process.stdin.emit('data',Buffer.from(input.batch,'base64'));socket.end('{}\n');
+ });});
+ inlet.listen(cfg.inlet);
+}
 """
 
 DRIVER=r"""
@@ -94,17 +103,20 @@ function existing(file){return new Promise((resolve,reject)=>{
 });}
 (async()=>{try{
  if(cfg.barrier)barrier=fs.openSync(cfg.barrier,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);
- child=pty.spawn(process.execPath,[cfg.launcher,'claude',cfg.python,cfg.fake,cfg.sid],
+ child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:100,rows:30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
-        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo}});
+        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher}});
  child.onData(text=>{raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
  await waitFor(/READY/);
  const ack=Number(raw.match(/ACK_MS=([0-9.]+)/)[1]);
  if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);barrier=undefined;}
- const file=path.join(cfg.registry,'claude','session-shell-'+child.pid+'.json');
+ await existing(cfg.hostPidFile);const hostPID=Number(fs.readFileSync(cfg.hostPidFile,'utf8'));
+ const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
+ // A published identity is not yet a completed display/readiness observation.
+ await waitFor(/7d [0-9?]/);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -125,6 +137,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    await waitFor(/PEER_NO_CALLBACK/);
  }
  const displayLag=[];
+ // Registry publication precedes the first complete display observation.
+ if(cfg.scenario==='display')await waitFor(/7d [0-9?]/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    fs.writeFileSync(cfg.title+'.new',JSON.stringify({title,ts:Date.now()/1000}));fs.renameSync(cfg.title+'.new',cfg.title);
@@ -135,6 +149,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
+   if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
    if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);}
    if(child&&alive){
      const exitFD=fs.openSync(cfg.exit_fifo,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(exitFD,Buffer.from('q'));fs.closeSync(exitFD);
@@ -160,6 +175,8 @@ class SessionShellPTYTest(unittest.TestCase):
         runner=importlib.util.module_from_spec(spec);sys.modules[spec.name]=runner;spec.loader.exec_module(runner)
         cls.env=runner.build_isolated_env(cls.root,repo_root=ROOT)
         cls.env['CLAUDE_CONFIG_DIR']=str(cls.root/'native-claude')
+        policy=Path(cls.env.get('XDG_CONFIG_HOME') or Path(cls.env['HOME'])/'.config')/'hearting/session-shell.json'
+        policy.parent.mkdir(parents=True,exist_ok=True);policy.write_text('{"enabled":true}');policy.chmod(0o600)
         cls.env['npm_config_cache']=str(cls.root/'npm-cache')
         cls.env['npm_config_devdir']=str(cls.root/'node-gyp')
         cls.env['npm_config_userconfig']=str(cls.root/'npmrc');(cls.root/'npmrc').write_text('')
@@ -194,6 +211,8 @@ class SessionShellPTYTest(unittest.TestCase):
             Path(backend).chmod(0o700)
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
+                'entry':str(ROOT/'utilities/session-shell/entry.py'),'hostPidFile':str(directory/'host-pid'),
+                'diagnostic':str(directory/'display-errors'),
                 'launcher':str(self.launcher),'python':sys.executable,'fake':str(self.fake),'sid':sid,
                 'project':str(self.project),'backend':backend,'barrier':str(barrier) if barrier else None,
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),

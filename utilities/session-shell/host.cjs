@@ -29,7 +29,7 @@ let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const terminal = new Terminal({cols, rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
-const incarnation = crypto.randomBytes(24).toString('hex'), token = crypto.randomBytes(32).toString('hex');
+const incarnation = crypto.randomBytes(24).toString('hex'), token = process.env.HEARTING_SHELL_TOKEN;
 function processRow(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return null;
   try {
@@ -62,17 +62,18 @@ let expanded = false, relay = false, paste = false, keyTail = '', cursorVisible 
 let screenRevision = 0;
 let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError;
-const deliveries = new Map(), calls = new Map(), watchers = new Map();
+const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
-    native_pid:native?.pid,native_start:native?.start,socket:socketPath};
+    native_pid:native?.pid,native_start:native?.start,socket:socketPath,
+    broker_pid:Number(process.env.HEARTING_SHELL_BROKER_PID),broker_start:process.env.HEARTING_SHELL_BROKER_START};
 }
 function identity() {
   const b = binding(); delete b.schema; delete b.socket; return b;
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste,alive:live(),expanded,held_bytes:heldBytes,projection_state:sourceError?"unavailable":"current"}; }
+function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste,alive:live(),expanded,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if (!backend || backend.exitCode !== null || !sid) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
@@ -124,7 +125,8 @@ function render() {
   } catch { rawRelay(); }
 }
 function displayLines(lines,height,done) {
-  const vt=new Terminal({cols,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});
+  if(displayVTs.size>=4){rawRelay();return;}
+  const vt=new Terminal({cols,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});displayVTs.add(vt);
   vt.loadAddon(new Unicode11Addon());vt.unicode.activeVersion='11';
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
   const paint=line=>Array.isArray(line)?line.map(part=>{
@@ -133,15 +135,19 @@ function displayLines(lines,height,done) {
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
-  vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
-    done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)));vt.dispose();schedule();
-  });
+  try{vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
+    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)));}
+    catch{rawRelay();}
+    finally{displayVTs.delete(vt);vt.dispose();}
+    schedule();
+  });}catch{displayVTs.delete(vt);vt.dispose();rawRelay();}
 }
 function rebuildDisplay() {
+  if(relay||ended)return;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   const line=footerSegments.length?[...footerSegments,{text:extra}]:[(footer||`하팅 · ${harness} · 세션 확인 중`)+extra];
   displayLines([footerSegments.length?line:line[0]],1,lines=>{footerLast='\0';displayFooter=lines[0];});
-  if(expanded)displayLines(panelLines.length?panelLines:[`하팅 · ${harness}  Ctrl+] 접기`],height(),lines=>{panelRows=lines;});
+  if(expanded)displayLines(panelLines.length?panelLines:['?'],height(),lines=>{panelRows=lines;});
 }
 // Footer is serialized once by the scratch VT; child parser state stays untouched.
 let displayFooter='';
@@ -151,7 +157,7 @@ function applyLayout() {
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 function queueProjection() {
-  if(ended||projectionTimer)return;
+  if(ended||relay||projectionTimer)return;
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
 function observeFiles(paths) {
@@ -180,11 +186,11 @@ function observeFiles(paths) {
   return changed;
 }
 async function projection() {
-  if(!sid||ended)return;if(projecting){projectionPending=true;return;}
+  if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const data=await source('projection',{columns:cols,state,expanded});
-    if(selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
+    if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
     const key=JSON.stringify([data.footer,data.segments,data.lines,cols,expanded,currentDelivery,heldBytes]);
@@ -192,9 +198,23 @@ async function projection() {
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
-  if(relay||ended)return;relay=true;state='unknown';empty=false;
-  emit('\x1b[0m\x1b[?25h\x1b[?1049l');child.resize(cols,rows);
+  if(relay||ended)return;
+  if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
+  clearTimeout(frameTimer);clearTimeout(projectionTimer);frameTimer=projectionTimer=undefined;
+  try{terminal.dispose();}catch{}
+  for(const vt of displayVTs)try{vt.dispose();}catch{}
+  displayVTs.clear();
+  for(const row of watchers.values())row.watch.close();watchers.clear();
+  try{emit('\x1b[0m\x1b[?25h\x1b[2J\x1b[H');}catch{}
+  try{child?.resize(cols,rows);}catch{}
 }
+// A display exception never owns the lifetime of the native terminal.
+function displayFailure(){if(relay)process.exit(1);rawRelay();}
+process.on('uncaughtException',displayFailure);
+process.on('unhandledRejection',displayFailure);
+process.stdout.on('error',()=>process.exit(1));
+process.stdin.on('error',()=>process.exit(1));
+
 function releaseHeld() {
   const saved=held;held=[];heldBytes=0;process.stdin.resume();
   for(const data of saved)userInput(data);
@@ -226,9 +246,13 @@ async function refreshReadiness() {
 }
 function userInput(data) {
   if(!data.length)return;
+  if(currentDelivery){
+    epoch+=data.length;empty=false;held.push(Buffer.from(data));heldBytes+=data.length;
+    if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
+  }
+  if(relay){child.write(data);return;}
   if(data.length===1&&data[0]===0x1d&&!paste&&!currentDelivery){expanded=!expanded;applyLayout();return;}
   const previous=epoch;epoch+=data.length;empty=false;
-  if(currentDelivery){held.push(Buffer.from(data));heldBytes+=data.length;if(heldBytes>=65536)process.stdin.pause();rebuildDisplay();return;}
   for(let offset=0;offset<data.length;offset++) {
     const c=String.fromCharCode(data[offset]);
     if(keyTail){keyTail+=c;if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
@@ -273,6 +297,7 @@ async function request(req) {
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
   if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
+  if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
@@ -318,28 +343,30 @@ server.on('error',()=>{if(!activated)bypass();else{state='unknown';empty=false;}
 server.listen(socketPath,()=>{
   fs.chmodSync(socketPath,0o600);
   try {
-    child=pty.spawn(command[0],command.slice(1),{name:process.env.TERM||'xterm-256color',cols,rows:rows-1,cwd:process.cwd(),
-      env:{...process.env,HEARTING_SHELL_SOCKET:socketPath,HEARTING_SHELL_TOKEN:token}});
+    const broker=processRow(Number(process.env.HEARTING_SHELL_BROKER_PID));
+    if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
+    child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
+      Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD));
     native=processRow(child.pid);rootNative=native;
   } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
   // The parent may only fall back before this boundary. A failed display keeps
   // this same native child; no second CLI is ever started.
-  startupResult('STARTED');activated=true;process.stdin.setRawMode(true);process.stdin.resume();
+  startupResult('STARTED');activated=true;process.stdin.resume();
   backend=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
-  backend.on('error',()=>{});backend.stdin.on('error',()=>{});
+  backend.on('error',rawRelay);backend.on('exit',rawRelay);backend.stdin.on('error',()=>{});
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
   emit('\x1b[?1049h\x1b[2J');
   terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
-  child.onData(data=>{if(relay)emit(data);else terminal.write(data);});
+  child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
-  process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;if(relay)child.resize(cols,rows);else applyLayout();});
+  process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}});
   child.onExit(async event=>{
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     server.close();await source('unregister');backend?.stdin.end();
-    process.stdin.setRawMode(false);emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
+    emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
     fs.rmSync(socketPath,{force:true});process.exit(event.exitCode);
   });
   rebuildDisplay();schedule();

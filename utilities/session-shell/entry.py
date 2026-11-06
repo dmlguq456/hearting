@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -69,28 +69,21 @@ def main(argv=None):
             original()
     except (OSError, ValueError, subprocess.SubprocessError):
         original()
-    # The short, private pathname fits Linux AF_UNIX even with long HOME paths.
+    # The launcher owns the PTY. A display worker only borrows its descriptor.
+    import pty_owner
+    size = os.get_terminal_size(1)
+    if size.columns < 20 or size.lines < 8:
+        original()
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
-        read_fd, write_fd = os.pipe()
         env = dict(os.environ, HEARTING_SHELL_DIRECTORY=directory,
-                   HEARTING_SHELL_START_FD=str(write_fd), HEARTING_SHELL_PYTHON=sys.executable,
-                   NODE_PATH=str(assets / "node_modules"))
-        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+                   HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
+                   HEARTING_SHELL_TOKEN=secrets.token_hex(32),
+                   HEARTING_SHELL_PYTHON=sys.executable, NODE_PATH=str(assets / "node_modules"))
         try:
-            try:
-                child = subprocess.Popen([node, str(Path(__file__).with_name("host.cjs")), harness, *wrapped_command(harness, command)],
-                                         env=env, pass_fds=(write_fd,))
-            except OSError:
-                os.close(read_fd);os.close(write_fd);signal.signal(signal.SIGINT, previous);original()
-            os.close(write_fd)
-            with os.fdopen(read_fd) as stream:
-                result = stream.readline(32).strip()
-            code = child.wait()
-            if result == "BYPASS":
-                signal.signal(signal.SIGINT, previous);original()
-            return code if code >= 0 else 128 - code
-        finally:
-            signal.signal(signal.SIGINT, previous)
+            return pty_owner.run(harness, command, wrapped_command(harness, command), node,
+                                 Path(__file__).with_name("host.cjs"), env, directory)
+        except pty_owner.BeforeStartError:
+            original()
 
 
 if __name__ == "__main__":

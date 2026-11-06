@@ -65,6 +65,15 @@ class SessionShellTest(unittest.TestCase):
         path.write_text(json.dumps(row)); path.chmod(0o600)
         return path
 
+    def test_a_broker_can_own_the_native_and_display_as_separate_children(self):
+        row=self.binding();display=self.child()
+        row.update(host_pid=display.pid,host_start=shell.process(display.pid)["start"],
+                   broker_pid=os.getpid(),broker_start=shell.process(os.getpid())["start"])
+        self.assertTrue(shell.valid_binding(row))
+        self.assertFalse(shell.valid_binding({**row,"broker_start":row["broker_start"]+"0"}))
+        self.assertFalse(shell.valid_binding({**row,"broker_pid":display.pid,
+                                             "broker_start":row["host_start"]}))
+
     def test_absent_policy_is_disabled_without_creating_any_file(self):
         self.assertEqual(shell.policy(), (False, "disabled"))
         self.assertFalse(shell.policy_path().exists())

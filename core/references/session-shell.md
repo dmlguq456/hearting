@@ -15,6 +15,11 @@ and an unchanged input generation. Human drafts and concurrent typing survive
 the operation. Keyboard bytes remain ordered behind the admitted paste and its
 Enter, and are released once Enter is written even if a lifecycle callback is
 lost. That transport boundary never acknowledges peer consumption.
+The launcher retains the PTY master and original native process outside the
+display worker. VT, scratch-display, layout and display-host failures degrade
+to a plain relay of that same process; they never restart the CLI or request
+manual recovery. Normal key bytes still go directly from the display worker
+to the same PTY, without an extra broker hop.
 Unknown readiness retains the existing pending delivery. Select
 one verified transport for a message; an uncertain submission never triggers
 an alternate send. Codex keeps its native queue and exact receive evidence.

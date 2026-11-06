@@ -20,6 +20,7 @@ import safe_fs
 
 START = b"# >>> hearting session shell >>>"
 END = b"# <<< hearting session shell <<<"
+NO_FINAL_LF = START + b" no-final-lf"
 MARKER = "# hearting-session-shell "
 HARNESSES = ("claude", "codex", "opencode")
 
@@ -86,18 +87,23 @@ def _profile(enabled, *, dry_run=False):
     data = before.payload if before.kind == "file" else b""
     line = ("set -gx PATH " + shlex.quote(str(_bin())) + " $PATH\n") if fish else (
         "export PATH=" + shlex.quote(str(_bin())) + ':"$PATH"\n')
-    block = START + b"\n" + line.encode() + END + b"\n"
     starts, ends = data.count(START), data.count(END)
     if starts != ends or starts > 1:
         raise ValueError("changed session shell profile block preserved")
     if starts:
         a = data.index(START); b = data.index(END, a) + len(END)
-        if a and data[a-1:a] != b"\n" or data[a:b] != block.rstrip(b"\n"):
+        joined = data[a:].startswith(NO_FINAL_LF + b"\n")
+        block = (NO_FINAL_LF if joined else START) + b"\n" + line.encode() + END
+        if (a and data[a-1:a] != b"\n") or data[a:b] != block:
             raise ValueError("changed session shell profile block preserved")
         if data[b:b+1] == b"\n": b += 1
-        after = data if enabled else data[:a] + data[b:]
+        # The owned marker records only the separator this block introduced.
+        cut = a-1 if joined and a else a
+        after = data if enabled else data[:cut] + data[b:]
     else:
-        after = data + (b"" if not data or data.endswith(b"\n") else b"\n") + block if enabled else data
+        joined = bool(data and not data.endswith(b"\n"))
+        block = (NO_FINAL_LF if joined else START) + b"\n" + line.encode() + END + b"\n"
+        after = data + (b"\n" if joined else b"") + block if enabled else data
     if after != data and not dry_run:
         _write(path, after, before.mode or 0o600, expected=before)
     return {"path": str(path), "changed": after != data}

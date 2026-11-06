@@ -51,6 +51,14 @@ class SessionShellInstallTest(unittest.TestCase):
         self.assertEqual(self.profile.read_bytes(), before)
         self.assertEqual({p: p.read_bytes() for p in self.native.iterdir()}, natives)
 
+    def test_enable_and_disable_restore_a_profile_without_its_own_final_lf(self):
+        before = b"alias keep='printf keep'"
+        self.profile.write_bytes(before)
+        install.set_enabled(True)
+        install.set_enabled(True)  # Repeated ensure preserves the separator provenance.
+        install.set_enabled(False)
+        self.assertEqual(self.profile.read_bytes(), before)
+
     def test_changed_launcher_is_preserved_before_any_profile_or_policy_change(self):
         target = install._bin() / "claude";target.parent.mkdir(parents=True)
         target.write_bytes(b"#!/bin/sh\n# user-owned command\n")

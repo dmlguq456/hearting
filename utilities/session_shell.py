@@ -111,10 +111,16 @@ def valid_binding(value: dict, *, harness: str | None = None, sid: str | None = 
             or "\0" in value["socket"] or len(os.fsencode(value["socket"])) >= 104):
         return False
     host, native = process(value.get("host_pid")), process(value.get("native_pid"))
-    return bool(host and native and host["start"] == value.get("host_start")
-                and native["start"] == value.get("native_start")
-                and host["pid"] != native["pid"]
-                and _descends(native["pid"], host["pid"]))
+    if not (host and native and host["start"] == value.get("host_start")
+            and native["start"] == value.get("native_start") and host["pid"] != native["pid"]):
+        return False
+    if "broker_pid" in value or "broker_start" in value:
+        owner = process(value.get("broker_pid"))
+        return bool(owner and owner["start"] == value.get("broker_start")
+                    and host["parent"] == owner["pid"] and native["pid"] != owner["pid"]
+                    and _descends(native["pid"], owner["pid"]))
+    return _descends(native["pid"], host["pid"])
+
 
 
 def read_binding(path: Path, *, harness: str | None = None, sid: str | None = None) -> dict | None:
@@ -158,6 +164,8 @@ def control(binding: dict, operation: str, **fields) -> dict:
         return {"ok": False, "reason": "attachment-changed", "not_started": True}
     identity = {key: binding[key] for key in
                 ("harness", "sid", "incarnation", "host_pid", "host_start", "native_pid", "native_start")}
+    if "broker_pid" in binding:
+        identity.update(broker_pid=binding["broker_pid"], broker_start=binding["broker_start"])
     request = {**fields, "op": operation, **identity}
     raw = (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
     if len(raw) > MAX_CONTROL_BYTES:
