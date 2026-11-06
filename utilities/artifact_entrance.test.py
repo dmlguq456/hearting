@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import artifact_entrance as E  # noqa: E402
+import artifact_nofollow as nofollow  # noqa: E402
 
 SERIAL = itertools.count(1)
 
@@ -429,7 +430,7 @@ class CyclePathTests(EntranceFixture):
         self.cycle("2026-01-02_one", "2026-01-02_alpha",
                    [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
         self.assertEqual(self.rows()[0]["title"], "Safe")
-        with mock.patch.object(E, "check_nofollow_platform", side_effect=RuntimeError("no")):
+        with mock.patch.object(nofollow, "check_nofollow_platform", side_effect=RuntimeError("no")):
             row = self.rows()[0]
         self.assertEqual(row["summary"], "")
         self.assertNotEqual(row["title"], "Safe")

@@ -202,12 +202,21 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(status, 404); self.assertNotIn(b'EXTERNAL_SENTINEL', body)
 
 
-    def test_helpers_are_the_shared_entrance_ones(self):
-        # The viewer opens through artifact_entrance; only hidden-name policy is its own.
-        with mock.patch.object(V.entrance, 'open_relative', side_effect=FileNotFoundError) as shared:
+    def test_helpers_are_the_shared_nofollow_ones(self):
+        # The viewer opens through artifact_nofollow; only hidden-name policy is its own.
+        with mock.patch.object(V.nofollow, 'open_relative', side_effect=FileNotFoundError) as shared:
             self.assertEqual(self.request('/campaigns')[0], 404)
         shared.assert_called()
         self.assertEqual(shared.call_args.args[2], V.HIDDEN)
+
+    def test_viewer_imports_no_producer_modules(self):
+        code = ('import sys; sys.path.insert(0, sys.argv[1]); import artifact_viewer; '
+                'bad = [m for m in ("artifact_entrance", "artifact_meta", "artifact_producer_store", '
+                '"artifact_producer_manifest") if m in sys.modules]; '
+                'print(",".join(bad)); sys.exit(1 if bad else 0)')
+        done = subprocess.run([sys.executable, '-I', '-S', '-c', code, str(Path(V.__file__).resolve().parent)],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual((done.returncode, done.stdout.strip(), done.stderr.strip()), (0, '', ''))
 
     def test_bind_failure_closes_root_fd_once_and_reports_busy(self):
         import errno

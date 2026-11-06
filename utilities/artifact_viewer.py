@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote_to_bytes, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import artifact_entrance as entrance
+import artifact_nofollow as nofollow
 from artifact_markdown import render_markdown
 
 PORT = 8765
@@ -35,12 +35,12 @@ def root_key(root):
 
 
 def open_root(root):
-    return entrance.open_root(root)
+    return nofollow.open_root(root)
 
 
 def open_relative(root_fd, parts):
     """Return an already-authorized fd. Never reopen a validated pathname."""
-    return entrance.open_relative(root_fd, parts, HIDDEN)
+    return nofollow.open_relative(root_fd, parts, HIDDEN)
 
 
 def parse_target(raw):
