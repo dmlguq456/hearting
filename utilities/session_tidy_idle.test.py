@@ -71,6 +71,48 @@ class IdleObserverTests(unittest.TestCase):
             self.assertIsNone(clear.read_reservation(seat.key))
             helper.assert_not_called()
 
+    def test_conflicting_predecessors_do_not_block_same_session_idle_booking(self):
+        import dispatch_seat_handover as handover
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "herdr_command", return_value="fake"), \
+                mock.patch.object(clear, "_start_helper", return_value=12345):
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            for origin in ("prior-left", "prior-right"):
+                st._append_ledger_entry(seat, dict(event="succession", source="tidy-clear",
+                    harness="claude", sid="sid-A", ts=1, **{"from": origin}))
+            self.assertEqual(handover.resolve_recipient("seat-successor",
+                harness="claude", session="sid-A").state, "unreadable")
+            self.assertEqual(clear._clear_lineage_reason("claude", "sid-A"), "lineage-unresolved")
+            self.assertEqual(self.observe_claude(), "booking=scheduled")
+            req = clear.read_reservation(seat.key)
+            self.assertEqual((req["sid"], req["clear_command"], req["idle"]["due_at"]),
+                             ("sid-A", "compact", 4240))
+
+    def test_retire_convergence_recovers_on_read_without_rewriting_history(self):
+        import dispatch_seat_handover as handover
+        with self.iso.patched_environ(self.extra):
+            for legacy in (False, True):
+                with self.subTest(legacy=legacy):
+                    suffix = str(legacy)
+                    holder, current, retired = (name + suffix for name in ("holder-", "current-", "retired-"))
+                    seat = st.Seat("pane", "converging-" + suffix)
+                    for harness, origin, target in (("claude", "prior-" + suffix, holder),
+                                                   ("claude", holder, current),
+                                                   ("codex", "retire-prior-" + suffix, retired)):
+                        st._append_ledger_entry(seat, dict(event="succession", source="tidy-clear",
+                            harness=harness, sid=target, ts=1, **{"from": origin}))
+                    origin = retired if legacy else {"harness": "codex", "sid": retired}
+                    st._append_ledger_entry(seat, dict(event="handover", source="retire",
+                        harness="claude", sid=holder, ts=2, bindings=[], **{"from": origin}))
+                    path = st._ledger_path(seat)
+                    before = path.read_bytes()
+                    for _ in range(2):
+                        result = handover.resolve_recipient("seat-successor", harness="claude", session=current)
+                        self.assertEqual((result.state, result.session_id), ("no-handover", current))
+                        self.assertEqual(clear._clear_lineage_reason("claude", current), "")
+                        self.assertEqual(clear._clear_lineage_reason("codex", retired), "session-handed-over")
+                    self.assertEqual(path.read_bytes(), before)
+
     def test_stop_payload_uses_exact_turn_and_duplicate_does_not_extend_due_time(self):
         with self.iso.patched_environ(self.extra), \
              mock.patch.object(clear, "herdr_command", return_value=str(self.iso.root / "fake-herdr")), \
@@ -427,6 +469,28 @@ class IdleObserverTests(unittest.TestCase):
                    "transcript_path": self.transcript("sid-A", 200000), "turn_id": "turn-tidy",
                    "last_assistant_message": reply}
         return idle.observe_payload("claude", payload)
+
+    def test_idle_card_acceptance_uses_same_session_policy_with_conflicting_lineage(self):
+        import session_tidy_runner as runner
+        import human_wait_state
+        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "herdr_command", return_value="fake"), \
+                mock.patch.object(clear, "_start_helper", return_value=12345), \
+                mock.patch.object(human_wait_state, "_request_producer"), \
+                mock.patch.object(st, "now_epoch", return_value=4241):
+            seat, _claim, _text = self._requested()
+            for origin in ("earlier-left", "earlier-right"):
+                st._append_ledger_entry(seat, dict(event="succession", source="tidy-clear",
+                    harness="claude", sid="sid-A", ts=1, **{"from": origin}))
+            context = clear.idle_context_for_enqueue(seat, "claude", "sid-A")
+            st.write_card(seat, "claude", "sid-A", "saved card", cwd=str(self.cwd),
+                          prompt_seq=st.read_prompt_seq(seat))
+            queue = runner.enqueue_item(seat, "claude", "sid-A", str(self.cwd),
+                                        operation_id=context["identity"], start=False)
+            self.assertEqual(clear.schedule_for_enqueue(seat, "claude", "sid-A", str(self.cwd),
+                idle_context=context, operation_id=context["identity"], queue_id=queue["id"]), "clear=scheduled")
+            req = clear.read_reservation(seat.key)
+            self.assertEqual((req["idle_request"]["state"], req["clear_command"], req["followup_kind"]),
+                             ("accepted", "compact", "none"))
 
     def test_stop_takes_a_marked_reply_as_the_card_and_queues_once(self):
         import session_tidy_runner as runner

@@ -278,6 +278,17 @@ def _clear_lineage_reason(harness: str, sid: str) -> str:
     return "session-handed-over" if result.state == "confirmed" else "lineage-unresolved"
 
 
+def _idle_lineage_reason(harness: str, sid: str) -> str:
+    """Same-session card/compact needs no clear lineage; known old sources stay blocked.
+
+    The existing transport checks the exact native session and empty input at
+    send time. Unresolved clear ancestry must not permanently disable that work.
+    """
+    from dispatch_seat_handover import resolve_recipient
+    result = resolve_recipient("seat-successor", harness=harness, session=sid)
+    return "session-handed-over" if result.state == "confirmed" else ""
+
+
 @contextlib.contextmanager
 def _booking_lock(seat: "st.Seat", *, wait: Optional[float] = None):
     """Keep fresh lineage validation and booking mutation together across panes.
@@ -376,7 +387,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         return "booking=off"
     if tokens < policy["min_tokens"]:
         return "booking=skipped reason=below-threshold"
-    reason = _clear_lineage_reason(harness, sid)
+    reason = _idle_lineage_reason(harness, sid)
     if reason:
         return f"booking=skipped reason={reason}"
     seat = st.resolve_seat(harness, cwd or None, sid=sid)
@@ -402,7 +413,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         return "booking=skipped reason=not-rearmed"
     identity = hashlib.sha256(f"{harness}\0{sid}\0{sequence}\0{event_id}".encode("utf-8")).hexdigest()
     with _booking_lock(seat, wait=lock_wait):
-        reason = _clear_lineage_reason(harness, sid)
+        reason = _idle_lineage_reason(harness, sid)
         if reason:
             return f"booking=skipped reason={reason}"
         existing = read_reservation(seat.key)
@@ -843,14 +854,15 @@ def _accept_idle_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, idle
         return "clear=skipped reason=idle-request-not-eligible"
     try:
         with _booking_lock(seat, wait=lock_wait):
-            reason = _clear_lineage_reason(harness, sid)
+            req = read_reservation(seat.key)
+            origin = (req or {}).get("origin")
+            reason = (_idle_lineage_reason(harness, sid) if origin == "idle"
+                      else _clear_lineage_reason(harness, sid))
             if reason:
                 return f"clear=skipped reason={reason}"
-            req = read_reservation(seat.key)
             request = (req or {}).get("idle_request") if isinstance((req or {}).get("idle_request"), dict) else {}
             arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
             compact = (req or {}).get("compact") if isinstance((req or {}).get("compact"), dict) else {}
-            origin = (req or {}).get("origin")
             expected_identity = ((req.get("idle") or {}).get("identity") if origin == "idle"
                                  else compact.get("identity"))
             if not queue_id or not operation_id or operation_id != expected_identity:
@@ -990,6 +1002,10 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
     if opt_out:
         cancel(seat)
         return "clear=off"
+    if idle_context is not None:
+        return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
+                                    operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
+                                    no_continue=no_continue)
     reason = _clear_lineage_reason(harness, sid)
     if reason:
         existing = read_reservation(seat.key)
@@ -999,10 +1015,6 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
             return ("clear=off" if existing.get("status") == "cancelled"
                     else f"clear=completed reason={existing.get('status') or 'terminal'}")
         return f"clear=skipped reason={reason}"
-    if idle_context is not None:
-        return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
-                                    operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
-                                    no_continue=no_continue)
     compact = None
     if compact_context is not None:
         card = st.read_latest_card(seat)

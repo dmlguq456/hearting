@@ -3096,6 +3096,16 @@ class ConsumedClearLineageRegressionTest(TidyCase):
         self.helpers.assert_not_called()
         self.assertIsNone(clear.read_reservation(self.seat.key))
 
+    def test_retired_work_convergence_does_not_block_current_clear_and_handover(self):
+        st._append_ledger_entry(self.seat, dict(event="succession", source="tidy-clear",
+            harness="claude", sid="source-A", ts=0.1, **{"from": "earlier-source"}))
+        self.assertIsNotNone(self.handover.record_retire_handover(
+            "retired-source", "codex", "source-A", "claude", successor_seat=self.seat,
+            jobs=self.iso.root / "absent-jobs.log", now=0.2))
+        self.handed_over()
+        self.assertEqual(clear._clear_lineage_reason("claude", "source-A"), "session-handed-over")
+        self.assertEqual(clear._clear_lineage_reason("claude", "successor-B"), "")
+
     def test_old_source_new_compact_manual_and_idle_acceptance_skip_but_queue_remains(self):
         self.handed_over()
         for context in (None, {"identity": "new-compact", "trigger": "auto", "transcript": ""}):
