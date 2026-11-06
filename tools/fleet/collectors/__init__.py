@@ -1043,6 +1043,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         peer = None
     collect_all.last_peer_messages = peer
 
+    if not fast_first:
+        try:
+            from . import prompt_inputs
+            prompt_inputs.enrich(sessions)
+        except Exception:
+            pass
+
     # F-25: drop cross-tick hysteresis entries for rows that no longer exist. Runs after
     # BOTH sessions and jobs are classified — sweeping earlier would evict live job keys.
     try:

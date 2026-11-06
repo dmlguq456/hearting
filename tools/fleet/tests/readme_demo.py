@@ -149,6 +149,17 @@ def snapshot(now=None, workdir=None):
     sessions, jobs = attach_projections(
         sessions, jobs, node_evidence=evidence, now=now, spec_markers={}, capability_groundings={})
     by_sid = {s.session_id: s for s in sessions}
+    for session in sessions:
+        session._prompt_display = {"human": None, "human_state": "none", "received": []}
+    for index, (sid, text) in enumerate((
+        ("readme-claude-api", "Keep the rate limit per API key"),
+        ("readme-codex-api", "Add a test for the retry header"),
+        ("readme-oc-ml", "Try four data-loader workers"),
+    )):
+        by_sid[sid]._prompt_display = {"human_state": "known", "human": {
+            "sequence": 1, "at": now - (index + 1) * 60, "text": text},
+            "received": [{"source": "peer", "sender": "Codex [b2]", "at": now - 30,
+                          "text": "The regression test is ready"}]}
     api_session = by_sid["readme-claude-api"]
     codex = by_sid["readme-codex-api"]
     api_session.peer_last_sent = {"to_name": "web-api", "to_session_id": "readme-codex-api",

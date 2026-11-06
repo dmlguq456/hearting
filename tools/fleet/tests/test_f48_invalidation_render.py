@@ -103,10 +103,14 @@ class InvalidationRenderTest(unittest.TestCase):
         self.assertNotEqual(render._GLYPH_KEY["blocked"], render._GLYPH_KEY["dead"])
 
     def test_public_json_contains_only_interaction_metadata(self):
+        session = self.session()
+        session._prompt_display = {"human_state": "known", "human": {
+            "text": "private human first line"}, "received": [{"text": "private peer line"}]}
+        self.assertNotIn("private human first line", repr(session))
         with mock.patch.object(fleetmod, "_collect_memory", return_value=None), \
              mock.patch.object(fleetmod, "_collect_route", return_value=[]), \
              mock.patch.object(fleetmod, "_collect_governor", return_value=None):
-            output = json.loads(fleetmod._snapshot_json([self.session()], []))
+            output = json.loads(fleetmod._snapshot_json([session], []))
         public = output["sessions"][0]
         self.assertEqual(public["interaction_state"]["kind"], "decision")
         self.assertEqual(public["state_evidence"]["inputs"]["interaction_wait"]["kind"],

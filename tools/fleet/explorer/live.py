@@ -340,6 +340,38 @@ def _delivery_panes(snapshot):
     return found
 
 
+def _last_input(display, now):
+    """Presentation of a decided frontier, with a fresh age and no text classification."""
+    display = display if isinstance(display, Mapping) else {}
+    human = display.get("human")
+    if not isinstance(human, Mapping):
+        return ui_text("fleet.input.none" if display.get("human_state") == "none"
+                       else "fleet.input.unknown")
+    at = _num(human.get("at"))
+    age = "·"
+    if at is not None:
+        seconds = max(0, int(now - at))
+        scale, unit = ((86400, "days") if seconds >= 86400 else (3600, "hours")
+                       if seconds >= 3600 else (60, "minutes") if seconds >= 60 else (1, "seconds"))
+        age = ui_text("fleet.input.age_" + unit, count=seconds // scale)
+    return ui_text("fleet.input.value", age=age, text=human.get("text") or "·")
+
+
+def _received_inputs(display, tags=None):
+    display = display if isinstance(display, Mapping) else {}
+    rows = []
+    for item in reversed(tuple(display.get("received") or ())[-8:]):
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("sender") or "runtime")
+        tag = re.search(r"\[([0-9a-f]{2})\]", name, re.I)
+        harness, sid = item.get("sender_harness"), item.get("sender_session_id")
+        sender = (tags or {}).get((harness, sid)) if isinstance(harness, str) and isinstance(sid, str) else None
+        sender = sender or (tag.group(1) if tag else name)
+        rows.append("⇄ [%s] %s %s" % (sender, _clock(item.get("at")) or "·", item.get("text") or "·"))
+    return rows
+
+
 def _session_records(snapshot, now, resolver):
     used, rows, by_key = set(), [], {}
     delivery_panes = _delivery_panes(snapshot)
@@ -376,6 +408,8 @@ def _session_records(snapshot, now, resolver):
             "title": _text(_get(session, "title", "name")),
             "context": context, "window": window,
             "now": _text(_get(session, "summary", "now")),
+            "last_input": _last_input(_get(session, "_prompt_display"), now),
+            "received_inputs": [],
             "ask": _ask_kind(session) if state == "blocked" else None,
             "age": age, "repo": repo, "repo_id": repo,
             "branch": _text(_get(session, "branch")),
@@ -393,6 +427,12 @@ def _session_records(snapshot, now, resolver):
         by_key[tag] = {"session": session, "sid": sid, "interaction": interaction,
                        "ids": tuple(i for i in (sid, *(_get(session, "session_aliases") or ())) if _text(i)),
                        "chain": chain_routes - {None}}
+    tags = {(info["session"].harness if hasattr(info["session"], "harness") else
+             _get(info["session"], "harness"), sid): tag
+            for tag, info in by_key.items() for sid in info["ids"]}
+    for row in rows:
+        row["received_inputs"] = _received_inputs(
+            _get(by_key[row["tag"]]["session"], "_prompt_display"), tags)
     return rows, by_key
 
 
