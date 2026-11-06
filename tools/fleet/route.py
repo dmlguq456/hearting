@@ -940,7 +940,8 @@ def gate_mark(record, node_id, home=None, state_roots=None):
         return None
     try:
         from fleet.explorer.output import utility
-        if utility("dispatch_contract_gates").evidence_digest(evidence["path"]) != evidence.get("sha256"):
+        resolved = utility("artifact_journal_migration").evidence_path(record, evidence["path"])
+        if utility("dispatch_contract_gates").evidence_digest(resolved) != evidence.get("sha256"):
             return None
     except (OSError, ValueError):
         return None

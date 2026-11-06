@@ -25,11 +25,10 @@ list is full or `MAX_MANIFESTS` is reached (a full scan is never done).
 Row sources: every recent row carries an internal `kind` (not rendered); rows
 built from cycle folders are `"cycle"`.  `ROW_SOURCES` is the one place where
 rows that are not cycle folders can join the recent list.  It is an ordered
-tuple of callables, empty by default; each takes the artifact root and returns
+tuple of callables including the common daily-journal reader; each takes the artifact root and returns
 rows (`kind`, `date`, `title`, `doc_path`, optional `summary`/`extra`/
 `cycle_id`/`cycle_path`).  `scan` merges the valid rows before the sort and the
-limit; an invalid row or a source that raises is skipped.  This module names no
-file format, file name or location for such rows.
+limit; an invalid row or a source that raises is skipped.  Daily-journal identity, revision, coverage, anchors and result targets are retained; their format is owned by artifact_journal, not this renderer.
 """
 from __future__ import annotations
 
@@ -69,7 +68,12 @@ SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
 
 # Hook for rows that are not cycle folders (see the module header).
-ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = ()
+def _daily_journals(root):
+    from artifact_journal import entrance_snapshot
+    return entrance_snapshot(root)
+
+
+ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals,)
 _DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
@@ -484,8 +488,8 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             group["doc_cycles"] += 1
             group["docs"].append({"title": title, "path": document_rel})
 
-    recent.extend(_source_rows(root))
-    recent.sort(key=lambda row: (_desc(row["date"]), row["cycle_id"] or row["doc_path"], row["doc_path"]))
+    recent.extend(_source_rows(root, statuses=snapshot.setdefault("source_status", [])))
+    recent.sort(key=lambda row: (_desc(row.get("at") or row["date"]), row["cycle_id"] or row["doc_path"], row["doc_path"]))
     snapshot["recent"] = recent[:recent_limit]
     groups = []
     for row in snapshot["all_campaigns"]:
@@ -538,7 +542,7 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
     for key in ("cycle_id", "cycle_path"):
         value = raw.get(key, "")
         ids.append(_nfc(value) if isinstance(value, str) else "")
-    return {
+    row = {
         "kind": kind,
         "cycle_id": ids[0],
         "cycle_path": ids[1],
@@ -549,14 +553,36 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
         "extra": extra if isinstance(extra, int) and not isinstance(extra, bool) and extra > 0 else 0,
         "selected_by": "source",
     }
+    if kind == "journal-entry":
+        from artifact_journal import is_well_formed
+        if not (is_well_formed(raw.get("artifact_id", ""), "artifact")
+                and is_well_formed(raw.get("revision_id", ""), "artifact_revision")):
+            return None
+        anchor = raw["artifact_id"] + "-" + raw["revision_id"]
+        if raw.get("anchor") != anchor or raw.get("record_target") != doc + "#" + anchor:
+            return None
+        row.update({key: raw.get(key) for key in ("artifact_id", "revision_id", "anchor", "record_target",
+            "campaign_id", "route_id", "session", "turn", "at", "status", "coverage", "checks", "digest",
+            "results_total", "results_coverage")})
+        row["result_targets"] = list(raw.get("result_targets") or [])
+    return row
 
 
-def _source_rows(root: Path) -> List[Dict[str, Any]]:
+def _source_rows(root: Path, *, statuses=None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for source in ROW_SOURCES:
         try:
-            candidates = list(source(root))
+            result = source(root)
+            if isinstance(result, Mapping) and "rows" in result:
+                if statuses is not None:
+                    statuses.append({"kind": result.get("kind"), "coverage": result.get("coverage", "unknown"),
+                                     "errors": result.get("errors") or []})
+                candidates = result["rows"]
+            else:
+                candidates = list(result)
         except Exception:
+            if statuses is not None:
+                statuses.append({"kind": "source", "coverage": "unknown", "errors": ["source-unreadable"]})
             continue  # the entrance never fails because of a source
         for raw in candidates:
             try:
@@ -615,7 +641,23 @@ def _md_href(path: str) -> str:
 
 
 def _href(path: str) -> str:
-    return quote(_nfc(path), safe="/.")
+    return quote(_nfc(path), safe="/.#:%")
+
+
+def _record_target(row):
+    return row.get("record_target") or row["doc_path"]
+
+
+def _result_links(row):
+    # Availability was judged by the same journal reader, against this
+    # entry's execution folder. No renderer performs its own path inference.
+    return [item for item in (row.get("result_targets") or [])[:3]
+            if isinstance(item, Mapping) and item.get("availability") == "available"
+            and isinstance(item.get("href"), str) and item["href"].startswith("file://")]
+
+
+def _partial_sources(snapshot):
+    return any(row.get("coverage") != "complete" for row in snapshot.get("source_status") or [])
 
 
 def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
@@ -623,12 +665,18 @@ def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     for number, row in enumerate(snapshot["recent"], start=1):
         suffix = f"  ({t('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         where = f"  — `{_md_href(row['cycle_path'])}`" if row["cycle_path"] else ""
-        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_md_href(row['doc_path'])}>)"
+        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_md_href(_record_target(row))}>)"
                      f"{where}{suffix}")
+        if row["kind"] == "journal-entry":
+            links = [f"[{t('entrance.open_record')}](<{_md_href(_record_target(row))}>)"]
+            links += [f"[{t('entrance.open_result')}](<{item['href']}>)" for item in _result_links(row)]
+            lines.append("   " + " · ".join(links) + " · " + _md_text(str(row.get("status") or "unknown")))
         if row["summary"]:
             lines.append(f"   {_md_text(row['summary'])}")
     if not lines:
         lines.append(t("entrance.empty"))
+    if _partial_sources(snapshot):
+        lines.append(t("entrance.partial"))
     return lines
 
 
@@ -749,10 +797,17 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
         summary = f"<br><span class=\"meta\">{_escape(row['summary'])}</span>" if row["summary"] else ""
         where = f" &#183; {_escape(row['cycle_path'])}" if row["cycle_path"] else ""
         body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
-                    f'<a href="{_href(row["doc_path"])}">{_escape(row["title"])}</a>'
-                    f'<span class="meta">{where}{suffix}</span>{summary}</li>')
+                    f'<a href="{_href(_record_target(row))}">{_escape(row["title"])}</a>'
+                    f'<span class="meta">{where}{suffix}</span>{summary}')
+        if row["kind"] == "journal-entry":
+            links = [f'<a href="{_href(_record_target(row))}">{_escape(t("entrance.open_record"))}</a>']
+            links += [f'<a href="{_href(item["href"])}">{_escape(t("entrance.open_result"))}</a>' for item in _result_links(row)]
+            body.append('<br>' + ' &#183; '.join(links) + ' &#183; ' + _escape(row.get("status") or "unknown"))
+        body[-1] += '</li>'
     if not snapshot["recent"]:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
+    if _partial_sources(snapshot):
+        body.append(f"<li>{_escape(t('entrance.partial'))}</li>")
     body.extend(["</ol>", f"<h2>{_escape(t('entrance.recent_campaigns'))}</h2>", "<ul>"])
     for row in snapshot["campaigns"]:
         parts = [t("entrance.cycles", count=_count(row["cycles"]))]
@@ -979,7 +1034,9 @@ def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
     for number, row in enumerate(rows, start=1):
         suffix = f"  ({_translator()('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         print(f"{number}. {row['date']}  {row['title']}{suffix}")
-        print(f"   {row['doc_path']}")
+        print(f"   {_record_target(row)}")
+        for item in _result_links(row):
+            print(f"   {_translator()('entrance.open_result')}: {item['path']}")
 
 
 def _open_externally(path: Path) -> None:
@@ -1000,7 +1057,10 @@ def _open_externally(path: Path) -> None:
 def _command_reports(root: Path) -> int:
     result = refresh(root)
     t = _translator()
-    rows = recent_rows(root)
+    snapshot = scan(root)
+    rows = snapshot["recent"]
+    if _partial_sources(snapshot):
+        print(t("entrance.partial"))
     if not rows:
         print(t("reports.empty"))
     else:
@@ -1046,8 +1106,9 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
     if target is None:
         print(t("open.not_found", query=selector), file=sys.stderr)
         return 1
-    print(str(target))
-    _open_externally(target)
+    anchor = chosen.get("anchor")
+    print(str(target) + ("#" + anchor if anchor else ""))
+    _open_externally(target.as_uri() + "#" + anchor if anchor else target)
     return 0
 
 

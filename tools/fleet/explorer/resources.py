@@ -288,6 +288,13 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
                              when, text, column=column,
                              key="soft" if saved else "now_sub",
                              mark=("+", "done") if saved else ("·", "dim"))
+        work = [row for row in (vm.system or {}).get("journal_records", ()) if row.get("project") == name]
+        if work and y < grid.rows - 6:
+            record = max(work, key=lambda row: str(row.get("at") or ""))
+            targets = [ui_text("entrance.open_record") + ": " + str(record.get("reference") or record.get("record_target"))]
+            targets += [ui_text("entrance.open_result") + ": " + str(row["path"])
+                        for row in (record.get("result_targets") or [])[:1]]
+            y = _memory_line(grid, x, y, right, None, None, " · ".join(targets), column=column)
 
 
 def draw_system(grid: CellGrid, vm, state=None, x=34, y=3):

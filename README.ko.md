@@ -286,7 +286,7 @@ GitHub Release와 HTTPS에 기대며, 별도 서명은 없습니다.
 
 일은 대화 기록만이 아니라 읽을 수 있는 파일로 남습니다. 프로젝트마다 산출물
 루트 `.agent_reports/`가 하나 있고, 모든 하네스와 그 프로젝트의 모든 git
-worktree가 함께 씁니다. 요청 하나가 작업 한 회차(cycle)이고
+worktree가 함께 씁니다. 계획이 필요한 요청 하나가 작업 한 회차(cycle)이고
 `campaigns/<campaign>/<cycle>/artifacts/`에 남습니다. campaign은 관련된 요청을
 묶으며, 새 프로젝트는 폴더 이름으로 하나를 엽니다.
 
@@ -296,6 +296,14 @@ worktree가 함께 씁니다. 요청 하나가 작업 한 회차(cycle)이고
 | `research/`, `analysis_project/`, `analysis/` | 코드, 논문, 문서에 대한 조사와 분석 |
 | `spec/` | 설계도 구성 요소. 현재 판은 `.agent_reports/shared/spec/`에서 함께 쓰고, 개정하면 이전 판을 남깁니다 |
 | `documents/`, `experiments/` | 작성한 문서, 실험 준비와 결과 |
+
+작은 직접 작업과 자동 턴 기록은 `campaigns/<campaign>/journals/YYYY-MM-DD.md`
+하루 일지에 모입니다. 별도 cycle이나 완료 근거 폴더를 만들지 않습니다. 결과물은
+프로젝트 제자리에 두고, 기록에는 위치·판과 실제 관측한 검사를 남깁니다. 저장됨이
+시험 통과를 뜻하지는 않습니다. 공통 목록은 결과물 열기와 기록 보기를 함께 제공합니다.
+기존 작은 cycle은 `hearting run artifact-journal dry-run --artifact-root <루트>`로
+후보를 확인하고, 명시적인 `apply --cycle <ID>`와 `restore --cycle <ID>`로 백업·통합·복원합니다.
+진행 중이거나 출처·구성이 불분명한 작업은 보존합니다.
 
 campaign은 현황 페이지 하나(cycle의 `artifacts/` 안 `STATUS.md`)를 둘 수
 있습니다. 하팅이 만들지는 않습니다. Fleet는 그 한 줄 요약을 프로젝트 줄에 보여

@@ -1950,9 +1950,6 @@ def evidence_currency(
             return older
     evidence_record = marker.get("evidence")
     from codex_dispatch_terminal import artifact_declared_verdict
-    if (isinstance(evidence_record, dict) and not owner_closure_shape(marker)
-            and artifact_declared_verdict(Path(str(evidence_record.get("path", "")))) in {"BLOCKED", "FAIL"}):
-        return GateCurrency("integrity-broken:identity-mismatch", "completion-evidence-verdict-not-pass")
     if not isinstance(evidence_record, dict):
         return GateCurrency("integrity-broken:identity-mismatch", "completion-marker-evidence-missing")
     evidence_path_str = str(evidence_record.get("path") or "")
@@ -1968,6 +1965,13 @@ def evidence_currency(
     evidence_path = Path(evidence_path_str) if evidence_path_str else None
     if evidence_path is None or not evidence_path.is_absolute():
         return GateCurrency("completion-evidence-unreadable", "completion-evidence-unreadable")
+    try:
+        from artifact_journal_migration import evidence_path as historical_evidence_path
+        evidence_path = historical_evidence_path(route, evidence_path)
+    except (OSError, ValueError):
+        return GateCurrency("completion-evidence-unreadable", "completion-evidence-unreadable")
+    if (not owner_closure_shape(marker) and artifact_declared_verdict(evidence_path) in {"BLOCKED", "FAIL"}):
+        return GateCurrency("integrity-broken:identity-mismatch", "completion-evidence-verdict-not-pass")
     if not os.path.lexists(evidence_path):
         # Keep the same recorded-move resolution as evidence_digest before
         # classifying an absent original locator as deleted evidence.

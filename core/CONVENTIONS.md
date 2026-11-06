@@ -970,5 +970,5 @@ metadata before cleanup. Live, ambiguous, unsupported or changed candidates are
 preserved individually. Original session record locks precede producer admission
 and journal locks; state locks are short. Restore resumes its existing operation,
 uses staging identity as well as bytes, and changes only its own entries/keys.
-No user project is migrated automatically. Request-folder sharing, legacy-root
+Automatic candidates with an unknown saved writer protocol or ambiguous session owner are preserved. Busy record/finish locks skip only that candidate. No user project is migrated automatically. Request-folder sharing, legacy-root
 aliases, shared revision deltas and Cairn integration are separate follow-ups.

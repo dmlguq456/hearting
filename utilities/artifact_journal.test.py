@@ -109,6 +109,22 @@ class EntryTest(unittest.TestCase):
         day.write_text(day.read_text() + J.START + "{bad -->\nbroken\n" + J.END)
         self.assertEqual(J.read_day(day)["coverage"], "partial")
 
+    def test_A14_bounded_latest_reader_keeps_the_newest_entry(self):
+        self.add("a"); self.add("b"); latest = self.add("c")
+        day = self.root / self.binding["path"]
+        bounded = J.read_day(day, limit=1, newest=True)
+        self.assertEqual(bounded["coverage"], "partial")
+        self.assertEqual(bounded["rows"][0]["revision_id"], latest["revision_id"])
+
+    def test_A07_evidence_whitespace_and_embedded_record_markers_remain_exact(self):
+        text = "원문  \n\n" + J.START + "not a new row -->\n" + J.END + "trailing spaces  "
+        row = J.append(self.root, self.binding, origin={"literal": True}, summary="literal evidence", body=text)
+        read = J.read_reference(row["reference"])
+        self.assertEqual(read["body"], text)
+        day = J.read_day(J.split_reference(row["reference"])[0])
+        self.assertEqual(day["coverage"], "complete")
+        self.assertEqual(len(day["rows"]), 1)
+
     def test_A15_result_locations_and_versions_not_mtime_inference(self):
         result = Path(self.tmp.name) / "paper.txt"
         result.write_text("paper")
@@ -131,6 +147,64 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         with self.assertRaises(ValueError):
             J.safe_path(self.root, self.root / "../escape")
+
+    def test_A12_A16_common_entrance_keeps_ids_anchors_versions_dual_links(self):
+        import artifact_entrance as entrance
+        result = Path(self.tmp.name) / "paper.txt"
+        result.write_text("result stays here")
+        route = self.root / ".runtime/routes/rt-abcd.json"
+        route.parent.mkdir(parents=True)
+        route.write_text(json.dumps({"cwd": self.tmp.name}))
+        first = self.add(results=F.result_versions(self.tmp.name, ["paper.txt", "missing"], []))
+        snapshot = entrance.scan(self.root)
+        self.assertEqual(snapshot["totals"]["cycles"], 0)
+        row = snapshot["recent"][0]
+        self.assertEqual(row["artifact_id"], first["artifact_id"])
+        self.assertEqual(row["revision_id"], first["revision_id"])
+        self.assertEqual(row["status"], "recorded")
+        self.assertEqual(row["coverage"], "complete")
+        self.assertEqual(row["result_targets"][0]["version"]["kind"], "sha256")
+        self.assertEqual(row["result_targets"][0]["availability"], "available")
+        self.assertEqual(row["result_targets"][1]["version"], {"kind": "unknown"})
+        t = lambda key, **kw: {"entrance.open_record": "기록 보기", "entrance.open_result": "결과물 열기"}.get(key, key)
+        markdown = entrance.render_markdown(snapshot, t)
+        html = entrance.render_html(snapshot, t)
+        self.assertIn("기록 보기", markdown); self.assertIn("결과물 열기", markdown)
+        self.assertIn(row["record_target"], markdown)
+        self.assertIn(result.as_uri(), html)
+        self.assertIn("#" + row["anchor"], html)
+        result.unlink()
+        missing = entrance.scan(self.root)["recent"][0]
+        self.assertEqual(missing["result_targets"][0]["availability"], "missing")
+        self.assertEqual(result.exists(), False)
+
+    def test_A14_corrupt_day_does_not_become_an_empty_complete_entrance(self):
+        import artifact_entrance as entrance
+        entry = self.add()
+        day = J.split_reference(entry["reference"])[0]
+        day.write_text("damaged file")
+        snapshot = entrance.scan(self.root)
+        self.assertEqual(snapshot["recent"], [])
+        self.assertTrue(entrance._partial_sources(snapshot))
+
+    def test_A13_fleet_memory_history_use_same_rows_without_memory_writes(self):
+        sys.path.insert(0, str(HERE.parent / "tools"))
+        from fleet.explorer import live
+        from types import SimpleNamespace
+        entry = self.add(session={"harness": "codex", "sid": "sid"})
+        rows = J.rows(self.root)["rows"]
+        snapshot = {"sessions": [{"cwd": self.tmp.name, "route_chain": {"automatic_records": rows}}]}
+        before = json.dumps(snapshot, sort_keys=True)
+        records = live._work_journal_rows(snapshot)
+        self.assertEqual(records[0]["artifact_id"], entry["artifact_id"])
+        self.assertEqual(records[0]["record_target"], rows[0]["record_target"])
+        memory = live._journal_groups(snapshot, 1793977198)
+        self.assertEqual(next(iter(memory.values()))[0][1][1], "recorded")
+        self.assertEqual(json.dumps(snapshot, sort_keys=True), before)
+        seat, generations, cards = live._seat_view("test", "project", "codex", "sid", [
+            {"harness": "codex", "sid": "sid", "source": "start", "started_at": 1793977198,
+             "journal_records": rows}], 1793977198)
+        self.assertEqual(generations[-1]["journal_records"][0]["artifact_id"], entry["artifact_id"])
 
 
 class CompletionTest(turns.EndToEndTest):
@@ -166,6 +240,7 @@ class CompletionTest(turns.EndToEndTest):
         days = list((self.root / "campaigns").glob("*/journals/*.md"))
         self.assertEqual(len(days), 1)
         self.assertEqual(len(J.read_day(days[0])["rows"]), 2)
+        self.assertEqual(len(J.rows(self.root, session={"harness": "claude", "sid": turns.SID})["rows"]), 2)
         self.assertEqual(list((self.root / "campaigns").glob("*/*/.cycle.json")), [])
         for receipt in receipts:
             self.assertEqual(J.revision_digest(receipt["entries"][0]["path"]), receipt["entries"][0]["digest"])
@@ -183,6 +258,29 @@ class CompletionTest(turns.EndToEndTest):
                 self.assertTrue(receipt["replay"])
                 day = J.split_reference(receipt["entries"][0]["path"])[0]
                 self.assertEqual(len([r for r in J.read_day(day)["rows"] if r["route_id"] == Path(route).stem]), 1)
+
+    def test_A07_explicit_negative_verdict_keeps_existing_completion_refusal(self):
+        route, work, env, command = self.direct("failed-explicit")
+        (work / "evidence.md").write_text("# Verdict: FAIL\nCheck failed\n")
+        result = turns.T._run(command, env, 60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("completion-evidence-verdict-not-pass", result.stderr)
+        self.assertIsNone(inline_finish.pending_state(self.root, Path(route).stem))
+
+    def test_A02_unclaimed_evidence_update_keeps_artifact_and_records_revision_provenance(self):
+        route, work, env, command = self.direct("before-claim-update")
+        first = turns.T._run(command, {**env, "HEARTING_INLINE_FINISH_CRASH_AT": "before-claim"}, 60)
+        self.assertNotEqual(first.returncode, 0)
+        day = next((self.root / "campaigns").glob("*/journals/*.md"))
+        original = J.read_day(day)["rows"][0]
+        (work / "evidence.md").write_text("Updated exact evidence before any finish claim\n")
+        done = turns.T._run(command, env, 60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        receipt = turns.T._last_json(done.stdout)
+        updated = J.read_reference(receipt["entries"][0]["path"])
+        self.assertEqual(updated["artifact_id"], original["artifact_id"])
+        self.assertEqual(updated["previous_revision"], original["revision_id"])
+        self.assertEqual(updated["correction"]["actor"], {"harness": "claude", "sid": turns.SID})
 
     def test_A10_new_journal_reuses_source_commit_and_scope_refusals(self):
         route, work, env, command = self.direct("scope-check")
@@ -209,6 +307,57 @@ class CompletionTest(turns.EndToEndTest):
         self.assertEqual(inline_finish.pending_state(self.root, entry["route_id"])["state"], "finished")
         self.assertFalse(work.exists())
 
+    def test_A08_repeated_journal_write_failure_retains_observation_for_recovery(self):
+        first = self.turn(lambda: (self.repo / "greet.py").write_text('print("Hello")\n'))
+        turns.T.turn_start("claude", turns.SID, str(self.repo), self.env)
+        (self.repo / "README.md").write_text("retain this observation")
+        path = turns.T.state_path(self.env, "claude", turns.SID)
+        with mock.patch.object(J, "atomic", side_effect=PermissionError("unwritable")):
+            turns.T.turn_end("claude", turns.SID, str(self.repo), self.env)
+            for _ in range(turns.T.MAX_ATTEMPTS):
+                turns.T._record_pass(path, "claude", turns.SID, self.env, turns.T.record, turns.T.append, 0, 0)
+        pending = turns.T._read(path)["pending"]
+        self.assertEqual(len(pending), 1)
+        self.assertIn("README.md", pending[0]["section"])
+        self.assertTrue(pending[0]["completed_observation"])
+        turns.T._record_pass(path, "claude", turns.SID, self.env, turns.T.record, turns.T.append, 0, 0)
+        self.assertEqual(turns.T._read(path)["pending"], [])
+
+    def test_A11_automatic_record_preserves_explicit_campaign_context(self):
+        path, work, env, command = self.direct("associated-campaign")
+        result = turns.T._run(command, env, 60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        binding = J.target(self.root, Path(path).stem)
+        self.env["AGENT_ARTIFACT_CAMPAIGN_ID"] = binding["campaign_id"]
+        automatic = self.turn(lambda: (self.repo / "greet.py").write_text('print("Hello")\n'))
+        entry = automatic["records"][str(self.root)]
+        route = json.loads(Path(entry["route_file"]).read_text())
+        self.assertEqual(route["campaign_key"], "journal-example")
+        self.assertEqual(J.target(self.root, entry["route_id"])["campaign_id"], binding["campaign_id"])
+
+    def test_A15_direct_dirt_is_not_reported_as_the_starting_commit_version(self):
+        path, work, env, command = self.direct("uncommitted-result")
+        (self.repo / "greet.py").write_text('print("uncommitted result")\n')
+        result = turns.T._run(command, env, 60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = turns.T._last_json(result.stdout)
+        entry = J.read_reference(receipt["entries"][0]["path"])
+        self.assertEqual(entry["results"][0]["version"], {"kind": "unknown"})
+        self.assertEqual(entry["results"][0]["observed_commit"], receipt["commit"])
+
+    def test_A15_non_git_direct_keeps_result_location_with_unknown_version_and_no_init(self):
+        import shutil
+        shutil.rmtree(self.repo / ".git")
+        path, work, env, command = self.direct("existing-non-git")
+        result = turns.T._run(command, env, 60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = turns.T._last_json(result.stdout)
+        self.assertIsNone(receipt["commit"])
+        entry = J.read_reference(receipt["entries"][0]["path"])
+        self.assertEqual(entry["results"][0]["path"], str(self.repo))
+        self.assertEqual(entry["results"][0]["version"], {"kind": "unknown"})
+        self.assertFalse((self.repo / ".git").exists())
+
     def test_A01_A09_two_turns_one_file_zero_cycles_real_finish_v2(self):
         first = self.turn(lambda: (self.repo / "greet.py").write_text('print("Hello")\n'))
         self.assertEqual(first["state"], "recorded", first)
@@ -228,6 +377,18 @@ class CompletionTest(turns.EndToEndTest):
         supplements = turns.T.supplementary_records("claude", turns.SID, str(self.repo), self.env)
         self.assertTrue(all(row["kind"] == "journal-entry" for row in supplements))
         self.assertTrue(all(row["record_target"] and row["result_targets"] for row in supplements))
+
+    def test_A04_real_parallel_sessions_do_not_share_a_finish_or_lose_a_record(self):
+        sids = ["parallel-one", "parallel-two"]
+        for sid in sids:
+            turns.T.turn_start("claude", sid, str(self.repo), self.env)
+        (self.repo / "greet.py").write_text('print("Hello")\n')
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda sid: turns.T.turn_end("claude", sid, str(self.repo), self.env), sids))
+        self.assertTrue(all(row["records"][str(self.root)]["closed"] for row in results), results)
+        self.assertEqual(len({row["records"][str(self.root)]["route_id"] for row in results}), 2)
+        for sid in sids:
+            self.assertEqual(len(J.rows(self.root, session={"harness": "claude", "sid": sid})["rows"]), 1)
 
     def test_A02_A08_finish_resume_after_each_effect(self):
         first = self.turn(lambda: (self.repo / "greet.py").write_text('print("Hello")\n'))
@@ -269,9 +430,11 @@ class MigrationTest(turns.EndToEndTest):
         record = self.legacy()
         source = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"], record)
         before = M.inventory(source)
+        full_before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         result = M.dry_run(self.root, self.env)
         self.assertTrue(result["candidates"][0]["eligible"], result)
         self.assertEqual(M.inventory(source), before)
+        self.assertEqual({str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, full_before)
         (source / "artifacts/plans").mkdir()
         (source / "artifacts/plans/plan.md").write_text("planned work")
         skipped = M.candidate(self.root, record["cycle_id"], self.env)
@@ -364,6 +527,24 @@ class MigrationTest(turns.EndToEndTest):
         with self.assertRaisesRegex(ValueError, "destination-conflict"):
             M.restore(self.root, cid, self.env)
 
+    def test_M09_old_proof_uses_its_backup_when_external_data_reuses_the_old_spelling(self):
+        from dispatch_contract_gates import evidence_currency
+        import capability_route_close as closing
+        record = self.legacy(); cid = record["cycle_id"]
+        route = json.loads(Path(record["route_file"]).read_text())
+        slot = inline_finish.pending_state(self.root, record["route_id"])
+        source = P.cycle_dir(self.root, record["campaign_id"], cid)
+        old = source / "artifacts" / slot["intent"]["evidence_path"]
+        M.apply(self.root, cid, self.env)
+        old.parent.mkdir(parents=True)
+        old.write_text("# Verdict: FAIL\nExternal new material; do not read as the old proof\n")
+        with mock.patch.dict(os.environ, turns.T._child_env(self.env, "claude", turns.SID), clear=True):
+            observed = closing.terminal_gate_observation(route)
+        self.assertTrue(observed["inline"]["passed"], observed)
+        self.assertIn("External new material", old.read_text())
+        with self.assertRaisesRegex(ValueError, "destination-conflict"):
+            M.restore(self.root, cid, self.env)
+
     def test_M14_M16_late_turn_enqueue_during_each_apply_boundary_keeps_original_lock(self):
         record = self.legacy(); cid = record["cycle_id"]
         source = P.cycle_dir(self.root, record["campaign_id"], cid, record)
@@ -413,6 +594,11 @@ class MigrationTest(turns.EndToEndTest):
 
     def test_M02_M03_M13_skip_open_large_unknown_but_do_not_stop_other_cycles(self):
         record = self.legacy(); cid = record["cycle_id"]
+        state_path = turns.T.state_path(self.env, "claude", turns.SID)
+        state_bytes = state_path.read_bytes()
+        turns.T._update(state_path, lambda state: state["records"][str(self.root)].pop("writer_protocol", None))
+        self.assertIn("protocol-unsupported", M.candidate(self.root, cid, self.env)["reason"])
+        state_path.write_bytes(state_bytes)
         route, work, env, command = CompletionTest.direct(self, "unrelated-open")
         data = json.loads(Path(route).read_text())
         opened = P.begin(self.root, route_file=Path(route), capability=data["capability"], intensity="direct", require_cycle=True)
@@ -512,6 +698,41 @@ class MigrationTest(turns.EndToEndTest):
         automatic = [r for r in rows if "Automatic record" in r["title"]]
         self.assertEqual(len(automatic), 1)
         self.assertEqual(automatic[0]["session"], {"harness": "claude", "sid": turns.SID})
+
+    def test_A12_recently_closed_keeps_user_text_and_links_exact_journal_entries(self):
+        record = self.legacy()
+        page = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"]) / "artifacts/STATUS.md"
+        page.write_text("# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n")
+        for n in range(2):
+            turns.T.turn_start("codex", "journal-writer", str(self.repo), self.env)
+            (self.repo / "README.md").write_text("result " + str(n))
+            result = turns.T.turn_end("codex", "journal-writer", str(self.repo), self.env)
+            self.assertIn(result["state"], {"recorded", "appended"})
+        text = page.read_text()
+        self.assertIn("## Next\n- person's judgment", text)
+        self.assertIn("View record", text)
+        self.assertIn("Open result", text)
+        self.assertIn("#art_", text)
+
+    def test_M16_late_end_during_restore_resolves_target_after_original_record_lock(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        source = P.cycle_dir(self.root, record["campaign_id"], cid)
+        for point in ("after-restore-publish-effect", "after-restore-metadata-effect"):
+            with self.subTest(point=point):
+                M.apply(self.root, cid, self.env)
+                turns.T.turn_start("claude", turns.SID, str(self.repo), self.env)
+                def late(where):
+                    if where == point:
+                        (self.repo / "README.md").write_text("restore late " + point)
+                        turns.T.turn_end("claude", turns.SID, str(self.repo), self.env, _record_wait=0)
+                with mock.patch.object(M, "_fault", side_effect=late):
+                    M.restore(self.root, cid, self.env)
+                path = turns.T.state_path(self.env, "claude", turns.SID)
+                self.assertTrue(turns.T._read(path)["pending"])
+                turns.T._record_pass(path, "claude", turns.SID, self.env, turns.T.record, turns.T.append, 0, 0)
+                self.assertFalse(turns.T._read(path)["pending"])
+                self.assertIn("README.md", (source / "artifacts" / turns.T.APPENDED).read_text())
+                self.assertEqual(len(list((self.root / "campaigns").glob("*/*/.cycle.json"))), 1)
 
 
 if __name__ == "__main__":

@@ -97,7 +97,8 @@ def _owners(root, route_id, env):
             state = turns._read(path)
             entry = (state.get("records") or {}).get(str(root), {})
             if entry.get("route_id") == route_id:
-                owners.append({"harness": harness, "sid": path.stem, "path": str(path)})
+                owners.append({"harness": harness, "sid": path.stem, "path": str(path),
+                               "writer_protocol": entry.get("writer_protocol")})
     return owners
 
 
@@ -114,6 +115,9 @@ def candidate(root, cycle_id, env=None):
             raise J.JournalError("not-an-unmigrated-closed-cycle")
         route_path = J.safe_path(root, Path(record["route_file"]), missing=False)
         route = _json(route_path)
+        import route_identity
+        if route_identity.route_hash(route) != route.get("route_hash"):
+            raise J.JournalError("route-identity-unknown")
         if (route.get("effective_intensity") != "direct" or (route.get("selection") or {}).get("shape") != "direct"
                 or route.get("execution_topology") != "inline" or route.get("parent_cycle_id")):
             raise J.JournalError("not-small-direct-shape")
@@ -129,6 +133,10 @@ def candidate(root, cycle_id, env=None):
         owners = _owners(root, route["route_id"], env)
         if automatic and not owners:
             raise J.JournalError("automatic-writer-owner-unknown")
+        if automatic and len(owners) != 1:
+            raise J.JournalError("automatic-writer-owner-ambiguous")
+        if automatic and any(owner["writer_protocol"] != "journal-v1" for owner in owners):
+            raise J.JournalError("automatic-writer-protocol-unsupported")
         directory = P.cycle_dir(root, record["campaign_id"], cycle_id, record)
         J.safe_path(root, directory, missing=False)
         image = inventory(directory)
@@ -163,8 +171,26 @@ def _record_locks(owners):
     with contextlib.ExitStack() as stack:
         for path in sorted({str(turns._record_lock(Path(owner["path"]))) for owner in owners}):
             lock = stack.enter_context(open(path, "a+b"))
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise J.JournalError("migration-writer-busy-preserved") from exc
         yield
+
+
+@contextlib.contextmanager
+def _writer_locks(root, choice):
+    # Explicit finish/review updates use their existing finish lock. Automatic
+    # writers already take record -> finish -> admission in this same order.
+    with _record_locks(choice["owners"]):
+        path = J.safe_path(root, Path(root) / ".runtime/inline-finish/v1" /
+                           choice["route"]["route_id"] / "finish.lock", missing=False)
+        with path.open("r+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise J.JournalError("migration-finish-busy-preserved") from exc
+            yield
 
 
 @contextlib.contextmanager
@@ -220,7 +246,7 @@ def apply(root, cycle_id, env=None):
     if not choice["eligible"]:
         return {"state": "skipped", "cycle_id": cycle_id, "reason": choice.get("reason")}
     # A late writer and orphan carrier take this SAME original-session lock.
-    with _record_locks(choice["owners"]):
+    with _writer_locks(root, choice):
         with _admission(root):
             path, op = _operation(root, cycle_id)
             if op is None:
@@ -276,6 +302,7 @@ def apply(root, cycle_id, env=None):
                 _fault("before-entry")
                 row = J.append(root, binding, origin={"migration": op["operation_id"], "cycle": cycle_id},
                     summary=choice["record"].get("title") or "Consolidated direct record", body="\n".join(texts),
+                    results=[{"path": choice["route"]["cwd"], "version": {"kind": "unknown"}, "source": "legacy-record"}],
                     at=choice["at"], session=({"harness": choice["owners"][0]["harness"], "sid": choice["owners"][0]["sid"]}
                                              if choice["owners"] else {}))
                 _fault("after-entry-effect")
@@ -309,6 +336,7 @@ def apply(root, cycle_id, env=None):
                 op.update(state="committed"); _save(path, op); _fault("after-commit")
         # The backup is verified; retired is a second preserved original, not a
         # writable target. Keeping it makes interruption recovery non-destructive.
+        J.publish_views(root)
         return {"state": op["state"], "operation_id": op["operation_id"], "entries": op["entries"]}
 
 
@@ -339,7 +367,7 @@ def restore(root, cycle_id, env=None):
     if op["state"] not in {"committed", "restoring"}:
         raise J.JournalError("migration-apply-incomplete")
     choice = op["candidate"]
-    with _record_locks(choice["owners"]):
+    with _writer_locks(root, choice):
         home = path.parent
         source = J.safe_path(root, root / choice["source"])
         backup = home / "backup"
@@ -420,6 +448,7 @@ def restore(root, cycle_id, env=None):
                 _fault("after-restore-metadata-effect")
                 state.update(phase="metadata-restored"); _save(path, op); _fault("after-restore-metadata")
             op.update(state="restored"); _save(path, op); _fault("after-restore-complete")
+        J.publish_views(root)
         return {"state": "restored", "operation_id": op["operation_id"], "replay": False}
 
 
@@ -434,20 +463,51 @@ def resolve_backup(root, record):
     return path
 
 
+def evidence_path(route, path):
+    """Resolve an old inline proof by its exact finish's cycle identity.
+
+    A newly created file at a retired spelling is not the old cycle's proof.
+    This lookup reads two small existing records, never an operation's large
+    day preimage or a root-wide backup census.
+    """
+    import inline_finish
+    import artifact_producer_store as store
+    if not isinstance(route.get("artifact_root"), str) or not Path(route["artifact_root"]).is_absolute():
+        return Path(path)
+    root = Path(route["artifact_root"])
+    slot = inline_finish.pending_state(root, route["route_id"])
+    if not slot or slot.get("schema") != "inline_finish_v1":
+        return Path(path)
+    intent = slot.get("intent") or {}
+    record = store.read_cycle_record(root, intent.get("cycle_id", ""))
+    migration = (record or {}).get("journal_migration")
+    if not migration:
+        return Path(path)
+    if intent.get("route_hash") != route["route_hash"]:
+        raise J.JournalError("migration-evidence-identity-mismatch")
+    source = root / migration["source"]
+    try:
+        relative = Path(path).relative_to(source)
+    except ValueError as exc:
+        raise J.JournalError("migration-evidence-scope-mismatch") from exc
+    return J.safe_path(root, resolve_backup(root, record) / relative, missing=False)
+
+
 def resolve_old_path(path):
     path = Path(path)
     for parent in path.parents:
-        if parent.name not in {".agent_reports", ".claude_reports"}:
+        if not (parent / HOME).is_dir():
             continue
-        for op_path in (parent / HOME).glob("*/*/operation.json"):
-            op = _json(op_path)
-            if op.get("state") not in {"committed", "restoring"}:
+        import artifact_producer_store as store
+        for record in store.list_cycle_records(parent):
+            migration = record.get("journal_migration")
+            if not migration:
                 continue
-            source = parent / op["candidate"]["source"]
+            source = parent / migration["source"]
             try:
                 rel = path.relative_to(source)
             except ValueError:
                 continue
-            backup = J.safe_path(parent, op_path.parent / "backup" / rel, missing=False)
+            backup = J.safe_path(parent, resolve_backup(parent, record) / rel, missing=False)
             return backup
     return path

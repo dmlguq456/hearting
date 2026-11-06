@@ -1403,11 +1403,15 @@ def resolve_historical(root, identifier, *, max_hops=8):
             from artifact_journal_migration import resolve_backup
             migration = record["journal_migration"]
             backup = resolve_backup(root, record)
-            return {"resolution": "journal", "migration_state": "committed",
+            operation_path = backup.parent / "operation.json"
+            operation = (_read_json(operation_path) or {}) if operation_path.stat().st_size <= 1024 * 1024 else {}
+            state = operation.get("state", "unknown")
+            return {"resolution": "journal", "migration_state": state,
                     "original": {"artifact_root": str(root), "campaign_id": record["campaign_id"],
                                  "cycle_id": identifier, "locator": migration["source"]},
                     "canonical": migration["entry"], "absolute": str(backup),
-                    "provenance": [{"operation_id": migration["operation_id"], "state": "committed"}]}
+                    "provenance": [{"operation_id": migration["operation_id"], "state": state}],
+                    "preserved_original": str(backup.parent / "retired") if state != "committed" else None}
     original = {"artifact_root": str(root), "campaign_id": None, "cycle_id": None, "locator": None}
     current, requested = root, identifier
     chain, seen = [], set()

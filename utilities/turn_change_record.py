@@ -712,7 +712,7 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
         f"({len(source)} sampled paths) during a {harness} turn without a route "
         f"({shown})\n", encoding="utf-8")
     (work / "request.md").write_text(
-        f"Intent: Hearting automatic record of the files this {harness} session changed in this "
+        f"Intent: Hearting automatic record of the files this {harness} session {sid} changed in this "
         f"folder during turns without a route.\nScope: {shown}\n"
         "Done: the changed files and a diff summary are kept as this route's evidence.\n",
         encoding="utf-8")
@@ -738,7 +738,8 @@ def record(harness, sid, top: Path, root: str, items, env, remember=None) -> dic
     settled = settle(route_file, work, child_env)
     if settled.get("closed"):
         shutil.rmtree(work, ignore_errors=True)  # the cycle or the kept record holds the evidence
-    return {"ok": True, "route_file": route_file, "route_id": Path(route_file).stem, **settled}
+    return {"ok": True, "route_file": route_file, "route_id": Path(route_file).stem,
+            "writer_protocol": "journal-v1", **settled}
 
 
 def _cycle_dir(root: str, entry: dict):
@@ -762,8 +763,14 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
     binding = artifact_journal.target(root, entry["route_id"])
     if binding:
         from journal_finish import record_items
-        written = record_items(root, binding, {"harness": harness, "sid": sid}, items)
-        return {"ok": True, "file": written[-1]["reference"] if written else None, "storage_kind": "journal"}
+        try:
+            written = record_items(root, binding, {"harness": harness, "sid": sid}, items)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "reason": "journal-unavailable", "detail": type(exc).__name__,
+                    "preserve_observation": True}
+        artifact_journal.publish_views(Path(root), written)
+        return {"ok": True, "file": written[-1]["reference"] if written else None, "storage_kind": "journal",
+                "writer_protocol": "journal-v1"}
     sections = _bounded(_batch_evidence(items), EVIDENCE_LIMIT-1) + "\n"
     directory = None
     if entry.get("closed_by") != "close":
@@ -776,7 +783,7 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
             _keep(entry["route_file"], sections)
         except OSError as exc:
             return {"ok": False, "reason": "kept-record-unwritable", "detail": type(exc).__name__}
-        return {"ok": True, "file": str(kept_record(entry["route_file"]))}
+        return {"ok": True, "file": str(kept_record(entry["route_file"])), "writer_protocol": "journal-v1"}
     target = directory / "artifacts" / APPENDED
     target.parent.mkdir(parents=True, exist_ok=True)
     head = "" if target.exists() else (record_header(harness, sid, top).split("\n\n", 1)[0] + "\n\n"
@@ -785,7 +792,7 @@ def append(harness, sid, top: Path, root: str, entry: dict, items, env) -> dict:
         stream.write(_bounded(head + _batch_evidence(items), EVIDENCE_LIMIT-1) + "\n")
     _run([str(UTILITIES / "artifact_producer.py"), "checkpoint", "--trigger", "explicit",
           "--artifact-root", root, "--cycle", cycle_id], _child_env(env, harness, sid), CHECKPOINT_TIMEOUT)
-    return {"ok": True, "cycle_id": cycle_id, "file": str(target)}
+    return {"ok": True, "cycle_id": cycle_id, "file": str(target), "writer_protocol": "journal-v1"}
 
 
 # ----------------------------------------------------------------------- turns
@@ -1009,6 +1016,11 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                 _apply_close(state, tried)
                 records_now = state.setdefault("records", {})
                 for root, ids, count, created, outcome in outcomes:
+                    if outcome.get("preserve_observation"):
+                        for row in state.get("pending") or []:
+                            if row.get("id") in ids:
+                                row["completed_observation"] = True
+                                row["journal_retry"] = True
                     if outcome.get("ok"):
                         state["pending"] = [row for row in state.get("pending") or [] if row.get("id") not in ids]
                         if created and outcome.get("route_file"):
@@ -1020,6 +1032,8 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                         elif not created and root in records_now:
                             records_now[root]["turns"] = int(records_now[root].get("turns") or 0) + count
                         entry = records_now.get(root)
+                        if entry and outcome.get("writer_protocol"):
+                            entry["writer_protocol"] = outcome["writer_protocol"]
                         root_items = [item for item in pending if item['root'] == root and item['id'] in ids]
                         if entry and root_items:
                             item = max(root_items, key=lambda row: row.get('began') or 0)
@@ -1042,6 +1056,8 @@ def _record_pass(path: Path, harness: str, sid: str, env, recorder, appender, no
                                              "dropped_turns": len(state["pending"])-len(retained),
                                              "retained_unknown": sum(item.get("turn_count",1) for item in retained)}
                     for item in retained:
+                        if item.get("journal_retry"):
+                            continue  # keep this exact observation for the normal writer's next retry
                         item["supplement"] = True
                         item["source_count"], item["tail_unknown"] = None, True
                         item["section"] = _bounded("Automatic record could not be completed; coverage unknown.\n" + item["section"])
@@ -1438,7 +1454,15 @@ def supplementary_records(harness, sid, cwd, env=None):
                          "reference": str(Path(root) / row["record_target"]),
                          "record_saved": True, "ended": datetime.fromisoformat(
                              row["at"].replace("Z", "+00:00")).timestamp(),
-                         "summary": row["title"], "coverage": shared["coverage"]})
+                         "summary": row.get("summary") or row["title"], "coverage": shared["coverage"],
+                         "changed_files": row["checks"].get("changed_files") if row["checks"].get("changed_files") is not None
+                             else row["checks"].get("sampled_files", "?"),
+                         "changed_files_exact": row["checks"].get("changed_files") is not None})
+        if shared["coverage"] != "complete" and not shared["rows"]:
+            rows.append({"kind": "journal-source", "harness": harness, "session_id": sid,
+                         "reference": str(Path(root) / "campaigns"), "record_saved": False,
+                         "status": "unknown", "coverage": shared["coverage"], "ended": 0,
+                         "summary": "Journal source is partial or unreadable"})
     for entry in [(state.get('records') or {}).get(root, {})]:
         if entry.get('last_turn') and not any(row.get("route_id") == entry.get("route_id") for row in rows):
             rows.append({'harness': harness, 'session_id': sid, 'route_id': entry.get('route_id'),

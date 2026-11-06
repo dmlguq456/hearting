@@ -125,16 +125,15 @@ def day_lock(root, path):
 def _render(row):
     meta = {k: v for k, v in row.items() if k != "body"}
     return (f'<a id="{row["artifact_id"]}-{row["revision_id"]}"></a>\n'
-            + START + canonical(meta).decode() + " -->\n" + row["body"] + END).encode()
+            + START + canonical(meta).decode() + " -->\n" + row["body"]
+            + ("\n" if "body_chars" in row else "") + END).encode()
 
 
 def _body(text):
-    # Evidence may contain copies of earlier journal records.
-    return str(text).replace("<!-- hearting-journal", "&lt;!-- hearting-journal").replace(
-        "<!-- /hearting-journal", "&lt;!-- /hearting-journal").rstrip() + "\n"
+    return str(text)
 
 
-def read_day(path, *, limit=READ_ROWS, byte_limit=READ_BYTES):
+def read_day(path, *, limit=READ_ROWS, byte_limit=READ_BYTES, newest=False):
     """Bounded read; malformed/drifted/partial are explicit, never an empty success."""
     path = Path(path)
     result = {"rows": [], "coverage": "complete", "errors": []}
@@ -147,9 +146,11 @@ def read_day(path, *, limit=READ_ROWS, byte_limit=READ_BYTES):
         if len(raw) > byte_limit:
             result["coverage"] = "partial"
             raw = raw[:byte_limit]
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8", errors="replace" if newest and result["coverage"] == "partial" else "strict")
     except (OSError, ValueError, UnicodeError) as exc:
         return {**result, "coverage": "unknown", "errors": [type(exc).__name__]}
+    if START not in text and result["coverage"] == "complete" and not re.fullmatch(r"# Work journal \d{4}-\d{2}-\d{2}\s*", text):
+        return {**result, "coverage": "unknown", "errors": ["journal-format-unknown"]}
     pos, identities = 0, set()
     while True:
         start = text.find(START, pos)
@@ -163,12 +164,25 @@ def read_day(path, *, limit=READ_ROWS, byte_limit=READ_BYTES):
             break
         try:
             row = json.loads(text[start + len(START):header])
-            row["body"] = text[header + 5:end]
+            if "body_chars" in row:
+                size = row["body_chars"]
+                if type(size) is not int or not 0 <= size <= WRITE_BYTES:
+                    raise JournalError("entry-body-length-invalid")
+                body_end = header + 5 + size
+                if not text.startswith("\n" + END, body_end):
+                    raise JournalError("entry-body-length-drift")
+                row["body"] = text[header + 5:body_end]
+                end = body_end + 1
+            else:  # the early v1 spelling used escaped reserved comments
+                row["body"] = text[header + 5:end]
             if (row.get("schema") != "journal-entry/v1"
                     or not is_well_formed(row.get("artifact_id", ""), "artifact")
                     or not is_well_formed(row.get("revision_id", ""), "artifact_revision")
-                    or row.get("digest") != digest(row)):
+                    or row.get("digest") != digest(row)
+                    or not isinstance(row.get("summary"), str) or not isinstance(row.get("origin"), dict)
+                    or not isinstance(row.get("results"), list) or not isinstance(row.get("checks"), dict)):
                 raise JournalError("entry-integrity-drift")
+            datetime.fromisoformat(row["at"].replace("Z", "+00:00"))
             key = (row["artifact_id"], row["revision_id"])
             if key in identities:
                 raise JournalError("entry-identity-duplicate")
@@ -179,6 +193,11 @@ def read_day(path, *, limit=READ_ROWS, byte_limit=READ_BYTES):
             result["errors"].append(str(exc)[:100])
         pos = end + len(END)
         if len(result["rows"]) >= limit:
+            if newest:
+                if len(result["rows"]) > limit:
+                    result["rows"] = result["rows"][-limit:]
+                    result["coverage"] = "partial"
+                continue
             if START in text[pos:]:
                 result["coverage"] = "partial"
             break
@@ -213,6 +232,50 @@ def read_reference(value):
 
 def revision_digest(value):
     return read_reference(value)["digest"]
+
+
+def result_targets(root, entry):
+    """Observe link availability within the recorded execution folder.
+
+    A recorded commit/hash is history, not a claim that current bytes still
+    have that version. Large lists remain bounded and explicitly unobserved.
+    """
+    scope = None
+    try:
+        route_path = safe_path(root, Path(root) / ".runtime/routes" / (entry["route_id"] + ".json"), missing=False)
+        if route_path.stat().st_size <= 1024 * 1024:
+            scope = Path(json.loads(route_path.read_text())["cwd"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    result = []
+    for index, raw in enumerate(entry.get("results") or []):
+        if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
+            continue
+        row = {**raw, "version": raw.get("version") or {"kind": "unknown"},
+               "availability": "unknown", "current_version": "not-observed"}
+        path = Path(raw["path"])
+        scopes = [scope] if scope else []
+        if Path(root).name in {".agent_reports", ".claude_reports"}:
+            scopes.append(Path(root).parent)
+        if scopes and index < 3 and path.is_absolute():
+            try:
+                allowed = next((base for base in scopes if path.is_relative_to(base)), None)
+                if allowed is None or path.is_relative_to(root):
+                    raise JournalError("result-outside-project")
+                safe_path(allowed, path, missing=False)
+                fd = directory_fd(path.parent)
+                try:
+                    mode = os.stat(path.name, dir_fd=fd, follow_symlinks=False).st_mode
+                    if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+                        row.update(availability="available", href=path.as_uri())
+                finally:
+                    os.close(fd)
+            except FileNotFoundError:
+                row["availability"] = "missing"
+            except (OSError, ValueError):
+                row["availability"] = "unavailable"
+        result.append(row)
+    return result
 
 
 def _target_path(root, route_id):
@@ -278,7 +341,9 @@ def append(root, binding, *, origin, body, summary, session=None, turn=None, at=
         if existing["coverage"] != "complete":
             raise JournalError("journal-incomplete-preserved")
         prior = [r for r in existing["rows"] if r["origin"] == origin]
-        data = {"summary": str(summary), "body": body, "checks": checks or {"state": "unknown"},
+        if prior and session is not None and prior[-1].get("session") != session:
+            raise JournalError("journal-origin-owner-conflict")
+        data = {"summary": str(summary), "body": body, "body_chars": len(body), "checks": checks or {"state": "unknown"},
                 "results": results or [], "status": status}
         if prior and all(prior[-1].get(k) == v for k, v in data.items()):
             return {**prior[-1], "reference": reference(path, prior[-1]), "replay": True}
@@ -308,7 +373,11 @@ def rows(root, *, session=None, limit=READ_ROWS):
     root = Path(root)
     result = {"rows": [], "coverage": "complete", "errors": []}
     scanned = 0
-    for campaign in iter_campaign_dirs(root):
+    try:
+        campaigns = list(iter_campaign_dirs(root))
+    except (OSError, ValueError) as exc:
+        return {"rows": [], "coverage": "unknown", "errors": [type(exc).__name__]}
+    for campaign in campaigns:
         folder = campaign / "journals"
         try:
             safe_path(root, folder)
@@ -319,10 +388,11 @@ def rows(root, *, session=None, limit=READ_ROWS):
         for path in paths:
             scanned += 1
             if scanned > 128:
+                result["rows"].sort(key=lambda row: row["at"])
                 return {**result, "coverage": "partial", "errors": [*result["errors"], "scan-limit"]}
             try:
                 safe_path(root, path, missing=False)
-                day = read_day(path, limit=max(1, limit - len(result["rows"])))
+                day = read_day(path, limit=READ_ROWS, newest=True)
             except (OSError, ValueError) as exc:
                 day = {"rows": [], "coverage": "unknown", "errors": [type(exc).__name__]}
             if day["coverage"] != "complete":
@@ -331,7 +401,7 @@ def rows(root, *, session=None, limit=READ_ROWS):
             latest = {}
             for entry in day["rows"]:
                 latest[entry["artifact_id"]] = entry
-            for entry in latest.values():
+            for entry in sorted(latest.values(), key=lambda row: row["at"], reverse=True):
                 if session and entry.get("session") != session:
                     continue
                 anchor = entry["artifact_id"] + "-" + entry["revision_id"]
@@ -339,12 +409,44 @@ def rows(root, *, session=None, limit=READ_ROWS):
                 result["rows"].append({"kind": "journal-entry", "artifact_id": entry["artifact_id"],
                     "revision_id": entry["revision_id"], "digest": entry["digest"], "path": rel,
                     "anchor": anchor, "record_target": rel + "#" + anchor,
-                    "result_targets": entry.get("results") or [], "title": entry["summary"],
+                    "result_targets": result_targets(root, entry)[:3], "results_total": len(entry.get("results") or []),
+                    "results_coverage": "partial" if len(entry.get("results") or []) > 3 else "complete",
+                    "title": entry["summary"][:256],
+                    "summary": entry["body"].encode("utf-8")[:6000].decode("utf-8", "ignore"),
                     "campaign_id": entry["campaign_id"], "route_id": entry["route_id"],
                     "session": entry["session"], "turn": entry["turn"], "at": entry["at"],
                     "status": entry["status"], "coverage": day["coverage"], "checks": entry["checks"]})
             if len(result["rows"]) >= limit:
                 result["rows"] = result["rows"][:limit]
+                result["rows"].sort(key=lambda row: row["at"])
                 result["coverage"] = "partial"
                 return result
+    result["rows"].sort(key=lambda row: row["at"])
     return result
+
+
+def entrance_snapshot(root):
+    snapshot = rows(root, limit=200)
+    return {**snapshot, "kind": "journal-entry", "rows": [{**row,
+        "date": row["at"][:10], "doc_path": row["path"],
+        "summary": "Record saved; test verdict is recorded separately."}
+        for row in reversed(snapshot["rows"])]}
+
+
+def publish_views(root, entries=()):
+    """Refresh existing derived views after storage; failures never undo it.
+
+    Called by the existing recorder process, not a new hook, watcher or model.
+    No admission/state/day lock is held while rendering projections.
+    """
+    try:
+        import artifact_entrance
+        artifact_entrance.refresh(Path(root))
+    except Exception:  # noqa: BLE001 -- a derived view is never a completion gate
+        pass
+    try:
+        import status_board
+        for row in entries:
+            status_board.note_journal_entry(Path(root), row)
+    except Exception:  # noqa: BLE001 -- optional existing page, never created
+        pass

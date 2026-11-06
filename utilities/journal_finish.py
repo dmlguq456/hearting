@@ -6,8 +6,10 @@ import fcntl
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 
 import artifact_journal as journal
 
@@ -30,9 +32,9 @@ def dated(binding, at):
     return result
 
 
-def record_items(root, binding, session, items):
+def record_items(root, binding, session, items, *, summary=None):
     found = []
-    for item in items:
+    for index, item in enumerate(items):
         at = item.get("at") or datetime.fromtimestamp(item["began"]).astimezone().isoformat()
         results = result_versions(item.get("top"), item.get("source") or [], item.get("commits") or [])
         origin = {"route": binding["route_id"], "session": session, "turn": item["id"]}
@@ -44,9 +46,11 @@ def record_items(root, binding, session, items):
             origin=origin,
             session=session, turn=item["id"], at=at,
             body=item.get("section") or "Observation unavailable\n",
-            summary=f"Automatic record: turn {at}",
+            summary=(summary if index == 0 and summary is not None else
+                     previous[-1]["summary"] if previous else f"Automatic record: turn {at}"),
             checks={"state": "observed" if item.get("observations") else "unknown",
-                    "source": "native-turn-bounds", "verdict": "not-assessed"},
+                    "source": "native-turn-bounds", "verdict": "not-assessed",
+                    "changed_files": item.get("source_count"), "sampled_files": len(item.get("source") or [])},
             status="unknown" if item.get("tail_unknown") else "recorded", results=results,
             correction={"actor": session, "reason": "native-observation-update",
                         "source": {"turn": item["id"], "began": item["began"], "ended": item.get("ended")}})
@@ -62,10 +66,23 @@ def result_versions(top, paths, commits):
         row = {"path": str(path), "version": {"kind": "unknown"}}
         try:
             # No symlink traversal or large result read on the Stop path.
-            if not path.is_symlink() and path.is_file() and path.stat().st_size <= 1024 * 1024:
-                row["version"] = {"kind": "sha256", "value": hashlib.sha256(path.read_bytes()).hexdigest(),
-                                  "source": "record-time-read"}
-        except OSError:
+            journal.safe_path(Path(top or "/"), path, missing=False)
+            parent = journal.directory_fd(path.parent)
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            finally:
+                os.close(parent)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if stat.S_ISREG(info.st_mode) and info.st_size <= 1024 * 1024:
+                    raw = stream.read(1024 * 1024 + 1)
+                    after = os.fstat(stream.fileno())
+                    if (len(raw) == info.st_size and len(raw) <= 1024 * 1024
+                            and (info.st_mtime_ns, info.st_ctime_ns, info.st_ino) ==
+                                (after.st_mtime_ns, after.st_ctime_ns, after.st_ino)):
+                        row["version"] = {"kind": "sha256", "value": hashlib.sha256(raw).hexdigest(),
+                                          "source": "record-time-read"}
+        except (OSError, ValueError):
             pass
         row["observed_commits"] = commits
         result.append(row)
@@ -78,12 +95,17 @@ def finish(args, route, route_file, api, admission, binding):
     from capability_route_markers import write_completion_marker
     from route_authority import decide_continuation
     import artifact_lifecycle
+    from dispatch_parent_completion import interactive_parent_identity
     root = Path(route["artifact_root"])
     root_identity = artifact_lifecycle.read_root_identity(root)
     if root_identity is None:
         raise inline.InlineFinishError("finish-artifact-root-identity-missing")
     node = route["nodes"][-1]
     sid = admission[0].census
+    harness, caller_sid = interactive_parent_identity(os.environ)
+    caller = {"harness": harness, "sid": caller_sid}
+    if caller_sid != sid:
+        raise inline.InlineFinishError("finish-caller-harness-invalid")
     base = root / ".runtime/inline-finish/v1" / route["route_id"]
     state_path, lock_path = base / "finish.json", base / "finish.lock"
     base.mkdir(parents=True, exist_ok=True)
@@ -114,7 +136,8 @@ def finish(args, route, route_file, api, admission, binding):
         if prior:
             intent = prior["intent"]
             if (intent["route_hash"] != route["route_hash"] or prior["claimant_session"] != sid
-                    or intent["artifact_root_id"] != root_identity.artifact_root_id):
+                    or intent["artifact_root_id"] != root_identity.artifact_root_id
+                    or intent.get("claimant_identity") != caller):
                 raise inline.InlineFinishError("finish-intent-conflict")
             if prior["state"] != "finished":
                 # A pending finish must still have the exact supplied bytes.
@@ -139,6 +162,8 @@ def finish(args, route, route_file, api, admission, binding):
                 raise inline.InlineFinishError("finish-summary-invalid")
             try:
                 text = evidence.decode("utf-8")
+                if "\0" in text:
+                    raise UnicodeError("binary evidence")
             except UnicodeError:
                 text = "## Binary evidence\n\n```base64\n" + base64.b64encode(evidence).decode() + "\n```\n"
             if source_sha:
@@ -146,15 +171,25 @@ def finish(args, route, route_file, api, admission, binding):
                 if not inline._on_a_branch(cwd, commit):
                     raise inline.InlineFinishError("finish-commit-drift")
             from turn_change_record import is_automatic_route
+            from codex_dispatch_terminal import artifact_declared_verdict
+            if (not is_automatic_route(route) and not inline._evidence_url(str(args.evidence))
+                    and artifact_declared_verdict(Path(args.evidence)) in {"FAIL", "BLOCKED"}):
+                raise inline.InlineFinishError("completion-evidence-verdict-not-pass")
             if is_automatic_route(route) and text.startswith(AUTO):
                 end = text.index(" -->\n")
                 auto = json.loads(text[len(AUTO):end])
-                records = record_items(root, binding, auto["session"], auto["items"])
+                if auto["session"] != caller:
+                    raise inline.InlineFinishError("finish-intent-conflict")
+                records = record_items(root, binding, auto["session"], auto["items"], summary=summary_text)
             else:
-                results = [{"path": str(route.get("cwd")), "version": {"kind": "commit", "value": commit}}] if commit else []
+                committed_result = bool(commit and not dirt and
+                    "unchanged-starting-tree" not in (observation or {}).get("warnings", []))
+                results = [{"path": str(cwd or route.get("cwd")),
+                            "version": {"kind": "commit", "value": commit} if committed_result else {"kind": "unknown"},
+                            "observed_commit": commit, "source": "finish-result-selection"}]
                 records = [journal.append(root, binding, origin={"route": route["route_id"], "node": node["id"]},
-                    session={"harness": route.get("parent_harness", "unknown"), "sid": sid},
-                    summary=summary_text, body=text, results=results)]
+                    session=caller, summary=summary_text, body=text, results=results,
+                    correction={"actor": caller, "source": str(args.evidence), "reason": "unclaimed-evidence-update"})]
             if not records:
                 raise inline.InlineFinishError("finish-evidence-empty")
             current = json.loads(Path(route_file).read_text())
@@ -162,10 +197,12 @@ def finish(args, route, route_file, api, admission, binding):
                 raise inline.InlineFinishError("finish-route-drift")
             intent = {"storage_kind": "journal", "route_id": route["route_id"], "route_hash": route["route_hash"],
                       "artifact_root_id": root_identity.artifact_root_id, "evidence_source": str(args.evidence),
+                      "claimant_identity": caller,
                       "campaign_id": binding["campaign_id"], "terminal_node": node["id"],
                       "entries": [{"path": r["reference"], "digest": r["digest"]} for r in records],
                       "evidence_sha256": inline._digest(evidence), "summary_sha256": inline._digest(summary),
-                      "summary": summary_text, "commit": commit}
+                      "summary": summary_text[:1000], "summary_in_entry": len(summary_text) > 1000,
+                      "commit": commit}
             prior = {"schema": "inline_finish_v2", "inline_finish_id": inline._digest(journal.canonical(intent)),
                      "claimant_session": sid, "intent": intent, "state": "claimed"}
             inline._fault("before-claim"); inline._atomic(state_path, prior); inline._fault("after-claim")
@@ -191,7 +228,8 @@ def finish(args, route, route_file, api, admission, binding):
                         expected_producer_binding_digest=binding_digest)
         if prior["state"] == "node-completed":
             inline._fault("before-close")
-            api.close_route(route, route_file, intent["commit"], intent["summary"], allow_unproven=False, **expected)
+            close_summary = records[0]["summary"] if intent.get("summary_in_entry") else intent["summary"]
+            api.close_route(route, route_file, intent["commit"], close_summary, allow_unproven=False, **expected)
             inline._fault("after-close-write")
             prior.update(state="route-closed"); inline._atomic(state_path, prior); inline._fault("after-close")
         outcome = json.loads(api.outcome_path(route_file).read_bytes())
@@ -215,8 +253,9 @@ def finish(args, route, route_file, api, admission, binding):
                       "at": datetime.now().astimezone().isoformat()}
             # Follow-up evidence stays in the same journal, never a sidecar.
             journal.append(root, binding, origin={"route": route["route_id"], "follow_up": commit},
-                summary=summary.decode(), body=summary.decode(), session={"sid": sid},
-                results=[{"path": str(route["cwd"]), "version": {"kind": "commit", "value": commit}}])
+                summary=summary.decode(), body=summary.decode(), session=caller,
+                results=[{"path": str(cwd), "version": {"kind": "commit", "value": commit}}])
             prior.setdefault("updates", []).append(update); inline._atomic(state_path, prior)
+        journal.publish_views(root)
         return {**prior["receipt"], "commit": inline.recorded_head(prior)[0], "replay": replay, "unscoped_tracked_dirt": dirt,
                 "commit_observation": observation, "updates": prior.get("updates") or []}
