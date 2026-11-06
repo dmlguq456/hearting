@@ -559,7 +559,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
                 and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
                 and r.get("state") not in ("released", "superseded")
-                and int(r.get("sent_seq", -1)) >= generation]
+                and int(r.get("source_seq", r.get("sent_seq", -1))) >= generation]
         if sent:
             return "booking=skipped reason=not-rearmed"
         unclaimed = same_idle and existing.get("status") == "reserved" and not existing.get("idle_request")
@@ -659,7 +659,7 @@ def recheck_idle_input(path, expected: dict, *, now: Optional[float] = None):
 
 def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[float] = None,
                           _sending_claim: Optional[dict] = None):
-    """Validate one idle or compact-origin card request before its main-session prompt."""
+    """Validate one idle or compact-origin card request before preparing its card."""
     observed_now = now
     now = st.now_epoch() if now is None else now
     req, seat, reason = _booking_at(Path(path))
@@ -762,6 +762,17 @@ def claim_idle_card_request(path, nonce: Optional[str] = None):
             return None, reason
         token = secrets.token_hex(12)
         sent_seq = st.read_prompt_seq(seat)
+        if req.get("origin") == "idle":
+            # This claims background card work, not a prompt or its arrival.
+            claim = {"state": "preparing", "source": "memory-helper", "claim_id": "idle-card-" + req["nonce"], "nonce": req["nonce"],
+                     "source_seq": sent_seq, "at": st.now_epoch()}
+            st._append_ledger_entry(seat, {"ts": st.now_epoch(), "event": "tidy-claim",
+                "harness": req["harness"], "sid": req["sid"], "origin": "idle",
+                "source": "memory-helper", "claim_id": claim["claim_id"], "source_seq": sent_seq, "nonce": req["nonce"],
+                "operation_id": req["idle"]["identity"], "state": "preparing"})
+            req["idle_request"] = claim
+            _write_reservation(req)
+            return req, ""
         claim = {"state": "sending", "nonce": req["nonce"], "token": token, "sent_seq": sent_seq,
                  "at": st.now_epoch(), "text_digest": hashlib.sha256(
                      idle_card_request_text(req).encode("utf-8")).hexdigest()}
@@ -785,9 +796,15 @@ def release_unsent_idle_request(claim: dict) -> bool:
         req = read_reservation(key)
         if (not req or req.get("nonce") != claim.get("nonce")
                 or req.get("idle_request") != claim.get("idle_request")
-                or (req.get("idle_request") or {}).get("state") != "sending"):
+                or (req.get("idle_request") or {}).get("state") not in {"sending", "preparing"}):
             return False
         held = req["idle_request"]
+        if held.get("source") == "memory-helper":
+            st._append_ledger_entry(_booked_seat(req, key), {
+                "ts": st.now_epoch(), "event": "tidy-claim", "state": "released",
+                "harness": req["harness"], "sid": req["sid"], "origin": "idle",
+                "source": "memory-helper", "claim_id": held["claim_id"],
+                "source_seq": held["source_seq"], "nonce": req["nonce"]})
         st.record_tidy_claim(_booked_seat(req, key), harness=str(req.get("harness") or ""),
                              sid=str(req.get("sid") or ""),
                              claim_id=str(held.get("token") or ""), nonce=str(req.get("nonce") or ""),
@@ -1766,6 +1783,9 @@ def _card_unchanged_reason(req: dict, card, sequence: int) -> str:
 
 def _accepted_queue_relation(req: dict, seat: "st.Seat") -> Optional[bool]:
     """Validate the full card/claim/operation/queue relation before an automatic clear."""
+    if (req.get("idle_request") or {}).get("source") == "memory-helper":
+        import session_tidy_idle_card
+        return session_tidy_idle_card.accepted(req, seat)
     acceptance = req.get("acceptance")
     required = {"schema", "nonce", "claim_id", "operation_id", "queue_id", "seat_key",
                 "harness", "sid", "arrival_seq", "card_generation", "source_generation"}
@@ -2442,13 +2462,18 @@ def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], d
 
 
 def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float], None]) -> str:
-    """Wait on the existing booking until its one main-session card enqueue is durable."""
+    """Wait on the existing booking until its card acceptance is durable."""
     path = reservation_path(seat_key)
     while True:
         held = read_reservation(seat_key)
         if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
             return "superseded"
         request = held.get("idle_request") if isinstance(held.get("idle_request"), dict) else {}
+        if request.get("source") == "memory-helper" and request.get("state") != "accepted":
+            import session_tidy_runner as runner
+            item = runner.read_item(str(held.get("queue_id") or "")) if held.get("queue_id") else None
+            if not item or item.get("status") in {"failed", "notified"}:
+                return "failed"
         if request.get("state") in ("arrived", "sent"):
             arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
             identity = ((held.get("idle") or {}).get("identity") if held.get("origin") == "idle"
@@ -2495,6 +2520,11 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         if not req or req.get("nonce") != nonce or req.get("status") != "reserved":
             return "superseded"
         request = req.get("idle_request") if isinstance(req.get("idle_request"), dict) else {}
+        if request.get("source") == "memory-helper":
+            accepted = _wait_idle_card_acceptance(seat_key, nonce, sleep)
+            if accepted in {"accepted", "superseded"}:
+                return accepted
+            return "skipped" if _finish(seat_key, nonce, "skipped", "idle-card-not-accepted") else "superseded"
         if request.get("state") in ("sending", "arrived", "sent", "accepted"):
             accepted = _wait_idle_card_acceptance(seat_key, nonce, sleep)
             if accepted == "unverified":

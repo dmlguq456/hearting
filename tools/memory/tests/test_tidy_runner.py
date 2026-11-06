@@ -123,6 +123,8 @@ FAKE_FINISHER = textwrap.dedent('''\
                "actions": spec.get("actions", [])}
         if "related" in spec:
             doc["related_existing_ids"] = spec["related"]
+        if "card" in spec:
+            doc["card"] = spec["card"]
         open(output, "w").write(json.dumps(doc))
     elif mode == "symlink":
         os.symlink(spec["target"], output)
@@ -383,6 +385,126 @@ class RunnerCase(unittest.TestCase):
 
     def watermark(self, sid, harness="claude"):
         return st.read_json(self.state / "watermarks" / f"{harness}-{st._digest(sid, size=16)}.json")
+
+class IdleBackgroundCardRunTest(RunnerCase):
+    def prepare_idle(self, sid, body=None):
+        import session_tidy_clear as clear
+        import session_tidy_idle_card as cards
+        seat = st.resolve_seat("claude", str(self.cwd), sid=sid)
+        st.run_hook("claude", "start", sid, cwd=str(self.cwd))
+        st.run_hook("claude", "prompt", sid, cwd=str(self.cwd), prompt_text="Original goal stays")
+        if body:
+            st.write_card(seat, "claude", sid, body, cwd=str(self.cwd))
+        self.assertEqual(clear.observe_idle_event("claude", sid, str(self.cwd), event_id="finished-turn",
+            tokens=600000, now=1000), "booking=scheduled")
+        req = clear.read_reservation(seat.key)
+        req["idle"]["due_at"] = st.now_epoch() - 1
+        req["deadline"] = st.now_epoch() + 300
+        clear._write_reservation(req)
+        claim, reason = clear.claim_idle_card_request(clear.reservation_path(seat.key), req["nonce"])
+        self.assertEqual(reason, "")
+        with mock.patch.object(runner, "_start_queued", side_effect=lambda item: item):
+            accepted, reason = cards.enqueue(claim)
+        self.assertTrue(accepted, reason)
+        req = clear.read_reservation(seat.key)
+        return seat, req, runner.read_item(req["queue_id"])
+
+    def test_one_existing_worker_saves_the_full_card_applies_memory_and_injects_next_input(self):
+        import session_tidy_clear as clear
+        import tidy_transcripts as tt
+        sid = "hidden-memory"
+        original = "2026-11-06 user: preserve the original goal and spec/project/prd.md"
+        self.transcript(sid, [claude_row("user", original, str(self.cwd))])
+        with self.iso.patched_environ(self.env()):
+            old = tt.read_pending("claude", sid, str(self.projects / f"{sid}.jsonl"))
+            tt.mark_applied("claude", sid, old)
+        with (self.projects / f"{sid}.jsonl").open("a") as f:
+            f.write(json.dumps(claude_row("user", "New approved storage decision", str(self.cwd))) + "\n")
+        previous = "## 원래 목표\n" + original + "\n## 사용자 원문\n" + ("Keep this dated requirement exactly.\n" * 400) + "FULL-HISTORY-END"
+        body = "\n\n".join("## " + field + "\n" + (original if i == 0 else "none")
+                               for i, field in enumerate(st.CARD_FIXED_FIELDS))
+        self.scenario([{"mode": "ok", "card": body, "actions": [
+            {"kind": "add", "type": "decision", "tier": "durable", "body": "Hidden helper keeps the new storage decision."}]}])
+        with self.iso.patched_environ(self.env()), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(clear, "_idle_route_reason", return_value=""):
+            seat, req, item = self.prepare_idle(sid, previous)
+            sequence = st.read_prompt_seq(seat)
+            runner.process_item(item)
+            self.assertEqual(runner.read_item(item["id"])["status"], "notified", runner.read_item(item["id"]))
+            data = self.saved_input()
+            self.assertIn("FULL-HISTORY-END", data["idle_card"]["previous_card"])
+            text = data["idle_card"]["conversation"]
+            if data["idle_card"]["append_caller_session_text"]:
+                text += next(row["text"] for row in data["sessions"] if row["sid"] == sid)
+            self.assertIn(original, text)
+            self.assertNotIn(original, data["sessions"][0]["text"])
+            self.assertEqual(len(self.calls()), 1)
+            self.assertEqual(st.read_prompt_seq(seat), sequence)
+            self.assertEqual(st.read_latest_card(seat)["body"], body)
+            self.assertTrue(clear._accepted_queue_relation(clear.read_reservation(seat.key), seat))
+            self.assertIn("Hidden helper keeps the new storage decision.", " ".join(row[3] for row in self.records().values()))
+            self.assertFalse(tt.read_pending("claude", sid, str(self.projects / f"{sid}.jsonl")).text)
+            sent, deferred = [], []
+            st.run_hook("claude", "start", sid, source="compact", cwd=str(self.cwd), render_context=False)
+            st.run_hook("claude", "prompt", sid, cwd=str(self.cwd), prompt_text="Next task",
+                        emit=sent.append, deferred=deferred)
+            self.assertIn(original, "\n".join(sent))
+            st.apply_deferred(deferred)
+            self.assertNotIn(body, "\n".join(self.notices()))
+
+    def test_missing_card_does_not_discard_valid_memory_or_authorize_compaction(self):
+        import session_tidy_clear as clear
+        sid = "hidden-no-card"
+        self.transcript(sid, [claude_row("user", "Keep the storage decision", str(self.cwd))])
+        self.scenario([{"mode": "ok", "actions": [
+            {"kind": "add", "type": "decision", "tier": "durable", "body": "Memory survives a missing card."}]}])
+        with self.iso.patched_environ(self.env()), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(clear, "_idle_route_reason", return_value=""):
+            seat, req, item = self.prepare_idle(sid)
+            runner.process_item(item)
+            self.assertEqual(runner.read_item(item["id"])["status"], "notified", runner.read_item(item["id"]))
+            self.assertIn("Memory survives a missing card.", " ".join(row[3] for row in self.records().values()))
+            self.assertIsNone(st.read_latest_card(seat))
+            self.assertFalse(clear._accepted_queue_relation(clear.read_reservation(seat.key), seat))
+
+
+    def test_memory_failure_after_card_save_keeps_the_same_accepted_card(self):
+        import session_tidy_clear as clear
+        sid = "hidden-memory-failure"
+        self.transcript(sid, [claude_row("user", "Keep the original goal", str(self.cwd))])
+        self.scenario([{"mode": "ok", "card": "## 원래 목표\nKeep the original goal", "actions": []}])
+        with self.iso.patched_environ(self.env()), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(clear, "_idle_route_reason", return_value=""):
+            seat, req, item = self.prepare_idle(sid)
+            with mock.patch.object(runner, "apply_actions", side_effect=runner.RunnerFailure("fixture apply failure")):
+                runner.process_item(item)
+            self.assertEqual(runner.read_item(item["id"])["status"], "failed")
+            self.assertIn("Keep the original goal", st.read_latest_card(seat)["body"])
+            self.assertTrue(clear._accepted_queue_relation(clear.read_reservation(seat.key), seat))
+
+    def test_a_new_input_during_the_worker_keeps_memory_but_rejects_its_old_card(self):
+        import session_tidy_clear as clear
+        sid = "hidden-late-worker"
+        self.transcript(sid, [claude_row("user", "A durable approved choice", str(self.cwd))])
+        self.scenario([{"mode": "ok", "card": "stale card", "actions": [
+            {"kind": "add", "type": "decision", "tier": "durable", "body": "The old approved choice remains durable."}]}])
+        with self.iso.patched_environ(self.env()), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(clear, "_idle_route_reason", return_value=""):
+            seat, req, item = self.prepare_idle(sid)
+            validate = runner.validate_actions
+            def new_input(*args):
+                validate(*args)
+                st.run_hook("claude", "prompt", sid, cwd=str(self.cwd), prompt_text="New unrelated work")
+            with mock.patch.object(runner, "validate_actions", side_effect=new_input):
+                runner.process_item(item)
+            self.assertEqual(runner.read_item(item["id"])["status"], "notified", runner.read_item(item["id"]))
+            self.assertIsNone(st.read_latest_card(seat))
+            self.assertIn("The old approved choice remains durable.", " ".join(row[3] for row in self.records().values()))
+
 
 
 class EnqueueTest(RunnerCase):

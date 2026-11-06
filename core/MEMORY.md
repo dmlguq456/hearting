@@ -62,13 +62,14 @@
 
 Sections §7.1–§7.3 define the semantic/mechanical mutation boundary; §7.4 defines agent-initiated retrieval.
 
-The main session authors its own card from the conversation it already holds.
-Keep the four continuation fields first, then add a few lines for today's work
-(with PR, installed version or result path) and short user instructions with
-their finished, remaining or deferred status. Aim for at most about 90 lines;
-the existing bounded start preview and full-card path remain the read surfaces.
-The tidy worker's partial-read coverage describes its memory input, not the
-main-authored card.
+Manual and handoff cards remain main-authored. Automatic idle cards use the
+existing memory helper's same input/output, with its deep editor role unchanged.
+The external card follows `capabilities/session-tidy.md`'s Card Format, preserving
+its core, selected module, dated user wording and PRD references. Its complete
+previous card and recorded caller conversation are separate from the memory
+worker's unread ranges; memory coverage never describes the whole card. Save the
+card before native compaction so the next input receives it. Existing bounded
+previews and full-card history remain the read surfaces.
 
 ### §7.1. Semantic Decisions Belong to the Agent
 

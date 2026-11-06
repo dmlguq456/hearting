@@ -319,6 +319,7 @@ utility-deferred	session_notice.py
 utility-deferred	session_supervisor_decisions.py
 utility-deferred	session_tidy.py
 utility-deferred	session_tidy_clear.py
+utility-deferred	session_tidy_idle_card.py
 utility-deferred	session_tidy_native.py
 utility-deferred	session_tidy_runner.py
 utility-deferred	spec-transaction.py
