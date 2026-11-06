@@ -101,6 +101,7 @@ def input_context(item: dict, sessions: list[dict]) -> dict | None:
     if shared_tail:
         conversation = conversation[:-len(tail)]
     return {"previous_card": previous.get("body", ""), "conversation": conversation,
+            "card_format": st.card_format.policy(),
             "append_caller_session_text": shared_tail, "coverage": transcripts.describe_coverage(chunk),
             "partial": bool(not chunk.eof or chunk.skipped_oversize), "source": str(source),
             "writing_guide": st.card_format.writing_guide(

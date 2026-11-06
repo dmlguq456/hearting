@@ -422,7 +422,7 @@ class IdleBackgroundCardRunTest(RunnerCase):
             f.write(json.dumps(claude_row("user", "New approved storage decision", str(self.cwd))) + "\n")
         previous = "## 원래 목표\n" + original + "\n## 사용자 원문\n" + ("Keep this dated requirement exactly.\n" * 400) + "FULL-HISTORY-END"
         body = "\n\n".join("## " + field + "\n" + (original if i == 0 else "none")
-                               for i, field in enumerate(st.CARD_FIXED_FIELDS))
+                               for i, field in enumerate(row["label"] for row in st.card_format.fields()))
         self.scenario([{"mode": "ok", "card": body, "actions": [
             {"kind": "add", "type": "decision", "tier": "durable", "body": "Hidden helper keeps the new storage decision."}]}])
         with self.iso.patched_environ(self.env()), \
@@ -434,6 +434,7 @@ class IdleBackgroundCardRunTest(RunnerCase):
             self.assertEqual(runner.read_item(item["id"])["status"], "notified", runner.read_item(item["id"]))
             data = self.saved_input()
             self.assertIn("FULL-HISTORY-END", data["idle_card"]["previous_card"])
+            self.assertEqual(data["idle_card"]["card_format"], st.card_format.policy())
             text = data["idle_card"]["conversation"]
             if data["idle_card"]["append_caller_session_text"]:
                 text += next(row["text"] for row in data["sessions"] if row["sid"] == sid)

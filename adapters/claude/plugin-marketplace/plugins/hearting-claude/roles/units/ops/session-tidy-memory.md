@@ -26,8 +26,8 @@ question-tool answers (`user_choices`, already recorded by code — never re-add
 waiting answers (`pending_decisions`), related active records of this project
 (`existing_records`: id, tier, headline, excerpt), at most five duplicate-group signals
 (`duplicate_groups`), and the caller's card (`card`). An automatic idle batch
-also provides `idle_card`: the complete previous card, caller conversation and
-the existing card-writing guide. Use that context to preserve the original goal,
+also provides `idle_card`: the portable `card_format` policy, complete previous
+card, caller conversation and the existing card-writing guide. Use that context to preserve the original goal,
 dated user wording, requirements/PRD locations and unfinished obligations.
 When `append_caller_session_text` is true, append the caller's `sessions[].text`
 to `idle_card.conversation`; that tail is shared with the existing memory input.
