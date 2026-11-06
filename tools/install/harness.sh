@@ -67,6 +67,19 @@ if [ "${1:-}" = run ]; then
   echo "harness: no utility named $name under $AGENT_HOME/utilities" >&2
   exit 2
 fi
+
+# `hearting reports` / `hearting open`: the artifact read entrance, the same
+# launcher in every runtime (`bootstrap.py` links `hearting` and `harness` to
+# this one script). No adapter-specific copy exists.
+case "${1:-}" in
+  reports|open)
+    if [ ! -f "$AGENT_HOME/utilities/artifact_entrance.py" ]; then
+      echo "harness: the artifact entrance is missing ($AGENT_HOME/utilities/artifact_entrance.py)" >&2
+      exit 2
+    fi
+    exec "$PY" "$AGENT_HOME/utilities/artifact_entrance.py" "$@"
+    ;;
+esac
 if [ ! -f "$INSTALLER_PY" ]; then echo "harness: installer.py was not found ($INSTALLER_PY)." >&2; exit 1; fi
 
 exec "$PY" "$INSTALLER_PY" "$@"

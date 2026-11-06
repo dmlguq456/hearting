@@ -309,6 +309,11 @@ A campaign can keep one status page, `STATUS.md` in a cycle's `artifacts/`;
 Hearting never creates it. Fleet shows its one-line summary on the project's
 line, and each request that closes adds a line under "Recently closed".
 
+The root's `README.md` (open `index.html` in a browser) collects the most recent
+results and campaigns with relative links, and Hearting rewrites it at every
+publish. `hearting reports` prints the same list, and `hearting open <number or
+words>` opens one result.
+
 To follow a request while it runs:
 
 ```bash

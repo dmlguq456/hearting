@@ -183,6 +183,45 @@ shows.
   on it, and nothing checks freshness. Fleet shows the age in front of a document older
   than three days.
 
+### Root `README.md` / `index.html` — the read entrance
+
+Four files directly under the artifact root, written by `utilities/artifact_entrance.py`:
+`README.md` and `index.html` (the entrance) and `all-campaigns.md` / `all-campaigns.html`
+(every campaign). They are a derived reading surface, not canonical records: admission,
+census and residue never take them as input, and deleting them is safe — the next publish
+recreates them. They are classified `C-RT` in `core/CORE.md` §3.
+
+- **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
+  `hearting reports` or `hearting open` runs. No other write path touches them.
+- **Content.** The 20 most recent user-facing documents (date, title, one-line summary,
+  "+N more"), the 10 most recent campaigns with their cycle count, latest date and work
+  record count, a link to the full campaign list, the root totals, and a link to the ID
+  index `campaigns/INDEX.md`. Every link is a relative path; there is no absolute path,
+  host name, user name, script or external resource in either file.
+- **Reading rule.** A document row marked `audience: "user"` is user-facing; a row without
+  that key (an older sealed cycle) follows the same name rule described above. The
+  representative document per cycle is ranked by name only (`현황.md`/`STATUS.md`, then
+  `final_report.*`, `report.*`, `summary.md`, `audit-report.md`, `prd.md`), never by a
+  manifest `primary`. Manifests are read newest first, up to 300 or 16 MiB each; there is
+  no full scan and no cache.
+- **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
+  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same list.
+- **Commands.** `hearting reports` prints the same numbered list in the terminal and
+  `hearting open <number|words>` opens one result or, with no argument, the browser
+  entrance. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
+  every runtime and are not installer subcommands.
+- **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
+  file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
+  symbolic link at that name, is never overwritten, followed, or moved — it stays its
+  owner's. Rewriting is byte-deterministic: identical root content and declared language
+  produce identical bytes.
+- **First record.** When a root first shows a user-facing document, one call with a
+  cycle id writes `.runtime/artifact-entrance.json`
+  (`{"schema": 1, "first_cycle_id", "first_cycle_path"}`) once; it is never rewritten. A
+  completion summary whose primary report lies in that cycle adds one "Artifact list:
+  `<root>/README.md`" line above its artifact line. Only the first user-facing cycle
+  qualifies, so a root whose entrance was made by hand from the CLI stays quiet.
+
 ## Internal files (no reader duty)
 
 - `.runtime/artifact-producer/v1/artifact-meta-state.json` (`artifact-meta-state/v1`):

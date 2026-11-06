@@ -865,6 +865,11 @@ class ClassifyRootTest(ProducerTestBase):
         target.write_text("x", encoding="utf-8")
         self.assertEqual(P.classify_root(self.root)["state"], "inactive-with-legacy")
 
+    def test_entrance_names_only_root_is_inactive_empty(self):
+        for name in P.ENTRANCE_NAMES:
+            (self.root / name).write_text("x\n", encoding="utf-8")
+        self.assertEqual(P.classify_root(self.root)["state"], "inactive-empty")
+
     def test_symlink_counts_as_content_and_is_not_followed(self):
         outside = Path(self._tmp.name) / "outside-target"
         outside.mkdir()
@@ -1265,6 +1270,46 @@ class CheckWriteTest(ProducerTestBase):
 
 
 class FinalizeTest(ProducerTestBase):
+    def test_finalize_writes_the_root_read_entrance_after_the_seal(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
+        self.close(route, route_file)
+        sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed", sealed)
+        entrance = self.root / "README.md"
+        self.assertTrue(entrance.is_file())
+        import artifact_entrance
+        self.assertEqual(entrance.read_text(encoding="utf-8").splitlines()[0],
+                         artifact_entrance.MARKER)
+        self.assertIn("final_report.md", entrance.read_text(encoding="utf-8"))
+
+    def test_re_finalize_of_a_sealed_cycle_refreshes_the_entrance(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "final_report.md", b"# First\n\nBody.\n")
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        cycle = Path(result["cycle_dir"])
+        (cycle / "artifacts" / "summary.md").write_text("# One line\n\nLater.\n", encoding="utf-8")
+        again = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertIn(again["status"], {"sealed", "already-sealed", "refreshed"}, again)
+        import artifact_entrance
+        self.assertEqual(artifact_entrance.recent_rows(self.root)[0]["extra"], 1)
+
+    def test_an_entrance_failure_never_changes_the_seal(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
+        self.close(route, route_file)
+        stderr = io.StringIO()
+        with mock.patch("artifact_entrance.refresh", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(stderr):
+            sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed", sealed)
+        self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
+        self.assertFalse((self.root / "README.md").exists())
+
     def test_shared_path_corpus_runs_producer_final_collection(self):
         rows = [row for row in _CORPUS.SHARED_PATH_CORPUS if row[0] in {"payload", "locator"}]
         for namespace, relative, kind, _prospective, allowed, reason, public_reasons in rows:

@@ -301,6 +301,11 @@ campaign은 현황 페이지 하나(cycle의 `artifacts/` 안 `STATUS.md`)를 �
 있습니다. 하팅이 만들지는 않습니다. Fleet는 그 한 줄 요약을 프로젝트 줄에 보여
 주고, 요청이 마감될 때마다 "Recently closed" 아래에 한 줄이 더해집니다.
 
+산출물 루트의 `README.md`(브라우저에서는 `index.html`)가 최근 결과와 campaign을
+상대 링크로 모아 보여 주며, 하팅이 발행할 때마다 다시 씁니다. `hearting reports`가
+같은 목록을 터미널에 보여 주고, `hearting open <번호 또는 검색어>`가 결과 하나를
+엽니다.
+
 진행 중인 요청을 따라가려면:
 
 ```bash

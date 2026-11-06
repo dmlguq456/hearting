@@ -323,6 +323,13 @@ class ScanAndPredicateTests(Fixture):
 
 
 class ProposalValidateTests(Fixture):
+    def test_entrance_files_are_not_loose_inventory(self):
+        for name in P.ENTRANCE_NAMES:
+            self.w(name, "x\n")
+        inventory = W._build_loose_inventory(self.root)
+        self.assertEqual([row["source_locator"] for row in inventory["entries"]
+                          if row["source_locator"] in P.ENTRANCE_NAMES], [])
+
     def _verdict(self, proposal):
         lump_inventory = W.scan_lumps(self.root, root_slug=self.root_slug)
         loose_inventory = W._build_loose_inventory(self.root)

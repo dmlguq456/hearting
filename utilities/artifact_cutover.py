@@ -572,6 +572,8 @@ def build_closeout_residue_plan(
     for path in sorted(root.iterdir(), key=lambda item: item.name):
         if path.name == ".pipeline-lock":
             continue
+        if path.name in P.ENTRANCE_NAMES:
+            continue  # derived read entrance: not residue, never moved
         if path.is_symlink():
             if path.name not in DECLARED_TOP_LEVEL:
                 blockers.append({"path": path.name, "reason": "top-level-symlink"})
