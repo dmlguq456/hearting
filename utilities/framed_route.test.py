@@ -500,7 +500,23 @@ class RegistryRegistrationTest(unittest.TestCase):
             return value
         layout = restore(registry)
         self._assert_audit_report_delta_and_restore(layout)
+        self._assert_draft_project_scope_delta_and_restore(layout)
         return layout
+
+    def _assert_draft_project_scope_delta_and_restore(self, registry):
+        # Authenticate the intentional project-document placement delta before
+        # comparing the earlier framed-recipe baseline for every other field.
+        draft = next(r for r in registry["recipes"] if r["capability"] == "autopilot-draft")
+        self.assertEqual(draft["quick"]["write_scope"], [
+            "target-artifact", "documents/<cycle>/**", "analysis/**", "strategy/**", "assets/**",
+            "draft/**", "reviews/**", "final/**", "pipeline_summary.md", "pipeline_state.yaml"])
+        draft["quick"]["write_scope"] = ["documents/<cycle>/**"]
+        for node in draft["standard_plus"]["nodes"]:
+            if node["id"] in {"draft-production", "finalize"}:
+                expected = (["draft/**"] if node["id"] == "draft-production"
+                            else ["final/**", "pipeline_summary.md"])
+                self.assertEqual(node["write_scope"], ["target-artifact", *expected])
+                node["write_scope"] = expected
 
     def _assert_audit_report_delta_and_restore(self, registry):
         # Audit report authoring intentionally moves the default report unit to
