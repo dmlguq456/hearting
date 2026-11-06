@@ -3,6 +3,7 @@
 folder, never in the way."""
 import importlib.util
 import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -731,7 +732,19 @@ class EndToEndTest(Fixture):
     def turn(self, change):
         T.turn_start("claude", SID, str(self.repo), self.env)
         change()
-        return T.turn_end("claude", SID, str(self.repo), self.env)
+        result = T.turn_end("claude", SID, str(self.repo), self.env)
+        self.wait_for_entrance()
+        return result
+
+    def wait_for_entrance(self):
+        lock = self.root / ".runtime/artifact-entrance-refresh.lock"
+        if lock.exists():
+            with lock.open("rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+
+    def tearDown(self):
+        self.wait_for_entrance()
+        super().tearDown()
 
     def test_one_closed_unassigned_record_that_later_turns_append_to(self):
         started = time.monotonic()

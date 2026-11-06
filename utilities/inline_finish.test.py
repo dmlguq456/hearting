@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -395,6 +396,10 @@ class PublicInlineFinishTest(unittest.TestCase):
         return []
 
     def tearDown(self):
+        lock = self.root / ".runtime/artifact-entrance-refresh.lock"
+        if lock.exists():
+            with lock.open("rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
         for key, value in self.old_env.items():
             if value is None:
                 os.environ.pop(key, None)

@@ -441,7 +441,7 @@ def publish_views(root, entries=()):
     """
     try:
         import artifact_entrance
-        artifact_entrance.refresh(Path(root))
+        artifact_entrance.request_refresh(Path(root))
     except Exception:  # noqa: BLE001 -- a derived view is never a completion gate
         pass
     try:
