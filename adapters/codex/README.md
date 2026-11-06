@@ -596,3 +596,12 @@ See the [Codex shell command guide](https://developers.openai.com/cookbook/examp
 ## Runtime compaction tidy
 
 Codex `PostCompact` may join the existing tidy clear flow only for an explicitly automatic event with a verified main pane and transcript-confirmed turn completion. Because remote-V2 supplies no usable summary, the bounded helper sends one claim-bound request to that exact idle pane; the main session writes a real card and enqueues the matching operation before snapshot or clear. Uncertain sends, changed input/target, manual or unknown compaction, workers, and unsupported seats remain queue-only. Codex uses its verified pane transport; this adds no native attachment path. Compact-origin continuation keeps its existing behavior.
+
+
+Session-local route badges are unavailable in Codex 0.163.0: the official
+[`/statusline` footer](https://learn.chatgpt.com/docs/developer-commands#configure-footer-items-with-statusline)
+selects built-in items and exposes no arbitrary cache/script text item. Hearting
+therefore keeps Fleet OVERVIEW as the route display. A terminal-side integration
+could read the same derived cache, but is outside Codex's native footer. Hearting
+does not rewrite thread titles, emit hook labels, or inject route text into model input. Claude and OpenCode use native
+human-visible display interfaces where supported.

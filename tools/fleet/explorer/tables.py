@@ -1,5 +1,6 @@
 """Overview and list-view tables for the immutable explorer projection."""
 from collections.abc import Mapping
+from .live import current_route_counts
 from .grid import CellGrid
 from .style import recede_key
 
@@ -125,14 +126,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     repos = tuple(vm.repos or ())
     sessions = tuple(vm.sessions or ())
     route_rows = [route for route in vm.routes if route.get("session_tag")]
-    current_routes = {}
-    open_current_routes = set()
-    for route in route_rows:
-        if route.get("current") is True:
-            tag = route["session_tag"]
-            current_routes[tag] = current_routes.get(tag, 0) + 1
-            if route.get("state") not in ("done", "stale"):
-                open_current_routes.add(tag)
+    current_routes, open_current_routes = current_route_counts(route_rows)
     # The ROUTES summary and RECENT stay in view under a long session list: the page
     # viewport pins them to its bottom edge and only the sessions above them scroll.
     # A short screen keeps fewer RECENT rows (at least one) before it gives the pin up.

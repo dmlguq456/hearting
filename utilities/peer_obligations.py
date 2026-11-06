@@ -399,7 +399,7 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
                              exact_arguments: bool = False,
                              argument_variants: Iterable[Iterable[str]] = (),
                              service_current_option: str = "--service-current",
-                             replace_checkout: bool = False):
+                             replace_checkout: bool = False, process_check=None):
     """Stop one exact old observer after proving its same-install duty lock.
 
     Returns ``current`` for an already-current observer, ``replaced`` after
@@ -421,7 +421,7 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         if not callable(getattr(signal, "pidfd_send_signal", None)):
             return False
         pid = int(pid)
-        if pid <= 0:
+        if pid <= 1:
             return False
         expected_start = pid_start
         lock = Path(lock_path).resolve(strict=True)
@@ -455,6 +455,8 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
                 if namespace != os.stat("/proc/self/ns/pid").st_ino:
                     return None
                 proc = Path("/proc") / str(pid)
+                if proc.stat().st_uid != os.getuid():
+                    return None
                 argv = proc.joinpath("cmdline").read_bytes().decode().rstrip("\0").split("\0")
                 if len(argv) < 3:
                     return None
@@ -576,6 +578,8 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
                 except (ValueError, IndexError, OSError):
                     return None
                 if held_path != lock or not _process_holds_flock(pid, lock, lock_fd_number):
+                    return None
+                if process_check is not None and not process_check(pid):
                     return None
                 if source_root == target_root and not dev_checkout:
                     return ("current", None)
