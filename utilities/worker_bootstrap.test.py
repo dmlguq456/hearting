@@ -2147,5 +2147,39 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--max-bytes") + 1], "6144")
 
 
+class BlockerAwaitsPersonTest(unittest.TestCase):
+    """An unfinished handoff continues unless a clause still asks a person for a decision."""
+
+    def test_implementation_work_and_negated_requests_do_not_wait(self):
+        for blocker in ("remaining implementation unfinished",
+                        "No user decision needed; remaining implementation unfinished",
+                        "remaining implementation: user input validation is unfinished",
+                        "operator precedence parsing is unfinished", "approval is not required, work unfinished",
+                        "사용자 승인 불필요; 구현 미완"):
+            with self.subTest(blocker=blocker):
+                self.assertFalse(W.blocker_awaits_person(blocker))
+
+    def test_real_decision_requests_still_wait(self):
+        for blocker in ("Decision needed: choose the migration behavior", "Choice pending", "approval required",
+                        "awaiting user approval", "waiting for the supervisor's answer", "need user input",
+                        "cannot proceed without user approval", "사용자 승인 필요", "결정 대기",
+                        "No test ran. User decision needed", "unfinished and requires approval"):
+            with self.subTest(blocker=blocker):
+                self.assertTrue(W.blocker_awaits_person(blocker))
+
+    def test_declined_handoff_names_the_runnable_continuation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "handoff.md"
+            artifact.write_text("partial\n", encoding="utf-8")
+            route = {"cwd": tmp}
+            meta = {"attempt_id": "att-1", "review_artifact_b64": __import__("base64").b64encode(str(artifact).encode()).decode()}
+            fields = W.blocked_handoff_followup(route, {"id": "execute"}, meta, Path(tmp) / "jobs.log", Path(tmp) / "route.json")
+            text = W.continuation_followup_text(fields)
+        self.assertIn("att-1", text)
+        self.assertIn(str(artifact), text)
+        self.assertIn("--node execute --start", text)
+        self.assertIn("--prompt-file <task-file>", text)
+
+
 if __name__ == "__main__":
     unittest.main()

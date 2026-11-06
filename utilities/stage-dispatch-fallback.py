@@ -2536,8 +2536,12 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     if (node.get("completion_gate") == "code-execute" and prior_rows and not semantic_predecessor
             and readable_result(prior_rows[-1]) == "BLOCKED"
             and not (request_task and new_owner_request(prior_rows[-1], jobs=args.jobs, task=request_task))):
+        from worker_bootstrap import blocked_handoff_followup, continuation_followup_text
+        guidance = continuation_followup_text(
+            blocked_handoff_followup(route, node, prior_rows[-1], args.jobs, args.route))
         return fail("prior-result-requires-inspection", 78, child_spawned="0",
-                    next_action="inspect-done-failure")
+                    next_action="inspect-done-failure",
+                    **({"continuation_followup": guidance} if guidance else {}))
     args.automatic_retry_of = retry_predecessor(
         prior_rows, jobs=args.jobs, task=request_task)
     if semantic_predecessor:

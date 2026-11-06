@@ -1880,13 +1880,15 @@ class FallbackTest(unittest.TestCase):
         mock.patch.object(terminal,"inspect_terminal_attempt",return_value={"state":"valid","artifact_state":"readable","verdict":"BLOCKED"}), \
         mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"remaining implementation unfinished"}), \
         patch_split(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")):
-    for blocker in ("need user decision", "Decision needed: choose migration behavior", "Choice pending"):
+    for blocker in ("need user decision", "Decision needed: choose migration behavior", "Choice pending",
+                     "approval required", "awaiting user approval", "waiting for the supervisor's answer", "사용자 승인 필요"):
      blocked_out=io.StringIO()
      with mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":blocker}), \
           mock.patch.object(sys,"argv",common+["--start"]), contextlib.redirect_stdout(blocked_out):
       blocked_code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
      self.assertEqual(blocked_code,78,blocked_out.getvalue())
      self.assertIn("reason=prior-result-requires-inspection",blocked_out.getvalue())
+     self.assertIn("--prompt-file <task-file>",blocked_out.getvalue())
      self.assertEqual(calls,[])
      self.assertEqual(self.jobs.read_bytes(),original)
     for action in ("--register","--start"):

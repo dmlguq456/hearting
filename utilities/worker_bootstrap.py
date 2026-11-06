@@ -786,6 +786,28 @@ def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidenc
             + (f" --reviewed-evidence {shlex.quote(str(reviewed_evidence))}" if reviewed_evidence else ""))
 
 
+_PERSON = r"(?:human|person|user|supervisor|operator)(?:'s)?"
+_DECISION = r"(?:decision|choice|approval|permission|clarification|confirmation|answer|response|guidance)"
+_AWAITS_PERSON = re.compile(
+    # A request: a waiting word, then a decision noun or a person left holding the question.
+    rf"\b(?:await(?:ing)?|need|needs|requires?|required|ask|asking|pending|waiting for)\b.{{0,48}}\b(?:{_DECISION}\b|{_PERSON}(?=\s*$|\s+(?:input\s*$|to\b|whether\b|which\b|if\b|for\b)))"
+    rf"|\b{_PERSON}\s.{{0,48}}\b{_DECISION}\b"
+    r"|\b(?:decision|choice|approval|permission|clarification|confirmation)\b.{0,32}\b(?:needed|need(?:s|ed)?|required|pending|outstanding|unresolved|undecided|awaited|missing)\b"
+    r"|\b(?:pending|outstanding|unresolved|undecided|awaiting|need(?:s|ed)?|requires?|required)\b.{0,32}\b(?:decision|choice|approval|permission|clarification|confirmation)\b"
+    r"|(?:사용자|사람|감독|운영자).{0,32}(?:응답|답변|승인|결정|판단|선택|확인)|(?:승인|권한|결정|판단|선택).{0,20}(?:필요|대기|부족|미정)"
+    r"|(?:응답|답변|회답|회신).{0,20}(?:필요|대기|미정)|질문.*(?:응답|답변).*(?:필요|대기)", re.I)
+# "No user decision needed", "approval is not required": the wording is there, the request is not.
+_NEGATED_NEED = re.compile(
+    rf"\b(?:no|not|never|nothing)\s+(?:(?:{_PERSON}|{_DECISION}|input|any|a|the|is|are|be|further|additional)\s+){{0,3}}(?:need(?:s|ed)?|requires?|required|necessary)\b"
+    r"|불필요|필요\s*없|필요하지\s*않", re.I)
+
+
+def blocker_awaits_person(text) -> bool:
+    """True when a clause of the blocker line still asks a person for a decision, approval or answer."""
+    return any(_AWAITS_PERSON.search(clause) for clause in re.split(r"[;,.\n]+", str(text or ""))
+               if not _NEGATED_NEED.search(clause))
+
+
 def incomplete_continuation_eligible(route, node, metadata, jobs, parent_attempt_id):
     """Judge an exact incomplete handoff using existing terminal and liveness evidence."""
     from codex_dispatch_terminal import inspect_terminal_attempt, inspect_terminal_log
@@ -802,13 +824,7 @@ def incomplete_continuation_eligible(route, node, metadata, jobs, parent_attempt
             artifact_root_metadata=exact.get("artifact_root") or route.get("artifact_root"), artifact_binding=exact)
         envelope = inspect_terminal_log(exact.get("log_file")) or {}
         blocker = str(envelope.get("blocker") or "")
-        human = re.search(
-            r"\b(?:await(?:ing)?|need|requires?|required|ask|pending|waiting for)\b.{0,48}\b(?:human|person|user|supervisor|operator|approval|permission|clarification|decision|response|answer|guidance)\b"
-            r"|\b(?:human|person|user|supervisor|operator)\b.{0,48}\b(?:decision|approval|answer|response|confirmation|input|guidance)\b"
-            r"|\b(?:decision|choice|approval|permission|clarification|confirmation)\b.{0,32}\b(?:needed|need(?:s|ed)?|required|pending|outstanding|unresolved|undecided|awaited|missing)\b"
-            r"|\b(?:pending|outstanding|unresolved|undecided|awaiting|need(?:s|ed)?|requires?|required)\b.{0,32}\b(?:decision|choice|approval|permission|clarification|confirmation)\b"
-            r"|(?:사용자|사람|감독|운영자).{0,32}(?:응답|답변|승인|결정|판단|선택|확인)|(?:승인|권한|결정|판단|선택).{0,20}(?:필요|대기|부족|미정)"
-            r"|(?:응답|답변|회답|회신).{0,20}(?:필요|대기|미정)|질문.*(?:응답|답변).*(?:필요|대기)", blocker, re.I)
+        human = blocker_awaits_person(blocker)
         facts = {"identity": (exact.get("route_id") == route.get("route_id")
                               and exact.get("route_hash") == route.get("route_hash")
                               and exact.get("route_node") == node.get("id")
@@ -980,7 +996,20 @@ def continuation_followup_text(fields):
     if fields.get("kind") == "unfinished":
         return (f"Incomplete attempt {fields['attempt']}: read {bounded(fields['artifact'])} and continue its remaining work "
                 f"with the same start: {command(fields['command'])}")
+    if fields.get("kind") == "decision":
+        return (f"Incomplete attempt {fields['attempt']} stopped at a point that needs a person: read {bounded(fields['artifact'])}, "
+                f"get the decision, then continue with the same start and a task file that records it: {command(fields['command'])}")
     return ""
+
+
+def blocked_handoff_followup(route, node, metadata, jobs, route_file):
+    """Advisory fields for a BLOCKED execute handoff the same start declined to continue by itself."""
+    try:
+        artifact = attempt_outcome(route, metadata).get("artifact") or "its recorded result"
+        return {"kind": "decision", "attempt": metadata["attempt_id"], "artifact": artifact,
+                "command": route_start_command(route_file, node["id"], jobs=jobs) + " --prompt-file <task-file>"}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
 
 
 def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
