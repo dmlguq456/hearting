@@ -231,12 +231,14 @@ class NoticeTest(unittest.TestCase):
         self.path.with_suffix(".outcome.json").write_text(json.dumps(dict(
             route_id="rt-notice", route_hash=self.route["route_hash"], terminal_gate_proven=proven)))
 
-    def seed(self, action="inspect-done-failure"):
+    def seed(self, action="inspect-done-failure", *, carrier="claude-parent-runtime",
+             delivery_id="delivery-notice"):
         receipt = {"schema_version": 2, "state": "attention", "parent_attempt_id": "att-owner",
             "job_registry": str(self.jobs), "delivery_classification": "attention", "children": [{
                 "attempt_id": "att-owner", "status": "done", "readiness": "ready", "reason": str(self.artifact),
-                "required_action": action, "harness": "claude", "delivery_classification": "attention"}]}
-        return pending.create(self.root, delivery_id="delivery-notice", recipient_kind="claude-parent-runtime",
+                "required_action": action, "harness": self.meta.get("harness", "claude"),
+                "delivery_classification": "attention"}]}
+        return pending.create(self.root, delivery_id=delivery_id, recipient_kind=carrier,
             recipient_key="parent", session_generation="", session_generation_supported="0",
             attempt_ids=["att-owner"], parent_attempt_id="att-owner", route_id="rt-notice", route_node="frame",
             receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt), row_revisions={"att-owner": "1"})
@@ -255,6 +257,60 @@ class NoticeTest(unittest.TestCase):
         self.assertEqual(sweep.sweep_deliver(self.root, "claude-parent-runtime", "parent")[0], [])
         record = pending.read(self.root, "parent", "delivery-notice")
         self.assertEqual(record["state"], "rejected")
+
+    def test_explicit_unproven_close_retires_repeated_runtime_failure(self):
+        from harness_capabilities import parent_completion
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                carrier = parent_completion(harness)["carrier"]
+                outcome_path = self.path.with_suffix(".outcome.json")
+                outcome_path.unlink(missing_ok=True)
+                self.meta.update(workflow_completion="runtime-v1", harness=harness,
+                                 parent_completion_delivery=carrier, note="dead-worker-fail", failure_class="fail")
+                self.write_row()
+                delivery_id = "delivery-closed-" + harness
+                self.seed(carrier=carrier, delivery_id=delivery_id)
+                first, _ = sweep.sweep_deliver(self.root, carrier, "parent")
+                self.assertEqual(len(first), 1)
+                original_row = self.jobs.read_bytes()
+                # The close is the delegator's handling receipt, even if the
+                # asynchronous carrier never acquired a native transport ACK.
+                outcome = dict(route_id=self.route["route_id"], route_hash=self.route["route_hash"],
+                               terminal_gate_proven=False, closed_at="2026-11-06T09:33:38Z",
+                               summary="Superseded by the accepted plan; original FAIL retained.")
+                outcome_path.write_text(json.dumps(outcome))
+                repeated, _ = sweep.sweep_deliver(
+                    self.root, carrier, "parent",
+                    now_ns=time.monotonic_ns() + int((sweep.DELIVER_LEASE_SECONDS + 1) * 1e9))
+                self.assertEqual(repeated, [])
+                stored = pending.read(self.root, "parent", delivery_id)
+                self.assertEqual(stored["state"], "rejected")
+                self.assertIsNone(stored["acked_at_ns"])
+                self.assertEqual(json.loads(outcome_path.read_text()), outcome)
+                self.assertEqual(self.jobs.read_bytes(), original_row)
+
+    def test_unproven_close_keeps_unknown_automatic_foreign_and_new_conflict_notices(self):
+        self.meta["workflow_completion"] = "runtime-v1"
+        self.write_row()
+        record = self.seed()
+        outcome_path = self.path.with_suffix(".outcome.json")
+        outcome = dict(route_id=self.route["route_id"], route_hash=self.route["route_hash"],
+                       terminal_gate_proven=False, closed_at="2026-11-06T09:33:38Z")
+        for changed in (dict(outcome, closed_at=None), dict(outcome, autoclose={"reason": "idle"})):
+            with self.subTest(outcome=changed):
+                outcome_path.write_text(json.dumps(changed))
+                self.assertTrue(notice.notice_is_current(record, jobs=self.jobs))
+        outcome_path.write_text(json.dumps(outcome))
+        self.assertTrue(notice.notice_is_current(dict(record, route_id="rt-foreign"), jobs=self.jobs))
+        for flag in ("terminal_conflict", "terminal_conflict_pending"):
+            with self.subTest(flag=flag):
+                self.meta[flag] = "1"
+                self.write_row()
+                self.assertTrue(notice.notice_is_current(record, jobs=self.jobs))
+                self.meta.pop(flag)
+        self.write_row()
+        self.jobs.write_text(self.jobs.read_text().replace("\tdone\t", "\trunning\t", 1))
+        self.assertTrue(notice.notice_is_current(record, jobs=self.jobs))
 
     def test_closed_success_still_delivers_first_completion(self):
         self.seed("advance-completed")

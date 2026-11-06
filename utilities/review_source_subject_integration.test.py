@@ -38,6 +38,25 @@ DISPATCH_NODE = _load("dispatch_node_source_subject_fixture", "utilities/dispatc
 
 
 class SourceSubjectIntegrationTest(unittest.TestCase):
+    def test_native_fallback_without_a_proven_reviewer_completes_degraded(self):
+        node = self.review_node
+        for surface in ("claude-subagent", "codex-native-subagent"):
+            for claim in (None, {"kind": "native-subagent", "transcript": str(self.base / "missing.txt")}):
+                with self.subTest(surface=surface, claim=bool(claim)):
+                    attempt = "att-native-degraded-" + surface + ("-invalid" if claim else "-absent")
+                    evidence = self.artifact_root / (attempt + ".md")
+                    evidence.write_text("Fresh limited review: " + attempt + "\n", encoding="utf-8")
+                    metadata = {**self._metadata(node, attempt, "review"),
+                                "registered_worker": "0", "transport": "headless",
+                                "execution_surface": surface, "fallback_hop": "native-subagent"}
+                    marker = ROUTE_WRITER._publish_completion_locked(
+                        self.route, node, node["id"], evidence, jobs=self.jobs,
+                        attempt_id=attempt, attempt_metadata=metadata, review_claim=claim)
+                    self.assertEqual(marker["reviewer_kind"], "owner-inline")
+                    self.assertEqual(marker["review_independence"], "degraded")
+                    self.assertEqual(marker["execution_surface"], surface)
+                    self.assertEqual(self.currency(marker).state, "current")
+
     def test_custom_registry_fallback_preserves_aba_currentness(self):
         self.select_custom_registry()
         node = self.review_node

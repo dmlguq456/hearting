@@ -361,10 +361,14 @@ def bound_route(metadata: dict, jobs: Path, expected_id: str = "", *, observer=N
     return Path(path), route
 
 
-def route_obligation_closed(metadata: dict, jobs: Path) -> bool:
+def route_obligation_outcome(metadata: dict, jobs: Path) -> dict | None:
     bound = bound_route(metadata, jobs)
     outcome = closed_outcome(*bound) if bound else None
-    return bool(outcome and not outcome.get("finish_pending"))
+    return outcome if outcome and not outcome.get("finish_pending") else None
+
+
+def route_obligation_closed(metadata: dict, jobs: Path) -> bool:
+    return route_obligation_outcome(metadata, jobs) is not None
 
 
 def framed_decision_consumed(record: dict, metadata: dict, jobs: Path) -> bool:
@@ -635,8 +639,16 @@ def notice_is_current(record: dict, *, jobs: Path | None = None, notice_context=
             if exact_completion_already_received(record, meta, jobs):
                 continue
             current = True
-        elif route_obligation_closed(meta, jobs):
+        elif (outcome := route_obligation_outcome(meta, jobs)) is not None:
             if meta.get("workflow_completion") == "runtime-v1":
+                # An explicit unproven close is the parent's disposition of
+                # the old failure, not a successful runtime/cycle receipt.
+                if (status == "done" and outcome.get("terminal_gate_proven") is False
+                        and outcome.get("closed_at") and not outcome.get("autoclose")
+                        and record.get("route_id") == outcome.get("route_id")
+                        and not meta.get("terminal_conflict")
+                        and not meta.get("terminal_conflict_pending")):
+                    continue
                 from dispatch_supervision import _recorded_completion_result
                 completion = {"job_registry": str(jobs), "recipient_thread_id": meta.get("parent_sid"),
                               "monitored_attempt_ids": [meta.get("attempt_id")]}

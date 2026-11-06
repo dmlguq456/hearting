@@ -1398,6 +1398,14 @@ Runtime completion carriers report a bounded native log line for skipped deliver
 claims and prompt admission, with the session and reason. Observing transport never
 changes the settled result or grants another execution.
 
+An exact explicit route close with an unproven terminal gate is a recorded
+disposition, not successful verification. Once that close handles an ended
+attempt's failure notice, the common carrier retires the same notice through
+its existing resolved-obligation path, even when runtime-v1 has no successful
+cycle receipt. It preserves the FAIL/unverified outcome and creates no PASS
+or recipient ACK. A first successful result, an unfinished close, automatic
+closure, and new conflicts retain their existing delivery and settlement rules.
+
 An accepted Claude native wake is also retained as the existing outer manager's
 registered-batch duty. If its hook exits before delivery, that task runner checks
 the same current attempt and pending notice and hands it to the existing peer

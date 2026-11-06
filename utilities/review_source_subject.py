@@ -1297,7 +1297,7 @@ def _inline_provenance_valid(marker: dict, manifest_sha256: str | None = None) -
     if kind == "owner-inline":
         return (marker.get("review_independence") == "degraded"
                 and marker.get("reviewer_identity") == attempt
-                and marker.get("execution_surface") == "inline")
+                and marker.get("execution_surface") in {"inline", "claude-subagent", "codex-native-subagent"})
     return (marker.get("review_independence") == "independent"
             and marker.get("execution_surface") in {"inline", "claude-subagent", "codex-native-subagent"}
             and bool(marker.get("reviewer_identity"))
