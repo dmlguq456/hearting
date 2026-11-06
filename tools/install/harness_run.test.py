@@ -75,6 +75,7 @@ class HarnessEntranceTest(unittest.TestCase):
                 self.assertEqual(done.stdout.split(), ["entrance", *argv])
 
     def test_a_missing_entrance_module_is_a_typed_refusal(self):
+        # destructive-ok: reason=remove the fixture entrance module to test the launcher's refusal; boundary=one fixture file under self.home in this test TemporaryDirectory
         (self.home / "utilities/artifact_entrance.py").unlink()
         done = launch("reports", env={"AGENT_HOME": str(self.home)})
         self.assertEqual(done.returncode, 2)
