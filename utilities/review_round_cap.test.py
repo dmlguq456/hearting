@@ -381,6 +381,16 @@ class RoundBudgetTest(unittest.TestCase):
         self.assertEqual(budget.verdict_rounds, 1)
         self.assertEqual(budget.state, "admit")
 
+    def test_content_changes_do_not_restart_the_verdictless_lineage_bound(self):
+        node = {"id": "post-deploy-verify", "kind": "review-worker", "unit": "qa/test"}
+        rows = [row("done", "dead-worker-blocked", failure_class="blocked",
+                    extra={"attempt_id": f"att-blocked-{index}",
+                           "_review_subject_digest": str(index) * 64}) for index in (1, 2)]
+        budget = CAP.round_budget(route("standard", cap=2), node, rows,
+                                  source_subject_digest="3" * 64)
+        self.assertEqual((budget.state, budget.verdictless_streak, budget.verdict_rounds),
+                         ("verdictless-bound", 2, 0))
+
     def test_a_sd153_6_live_and_unsettled_rows_block_admission(self):
         live = [row("open", "")]
         unsettled = [(("done"), {"classifier_source": "registered-wrapper-completion-transient-v1"})]

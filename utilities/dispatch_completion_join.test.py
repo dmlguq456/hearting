@@ -657,6 +657,82 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(saved.status, "open")
         self.assertEqual(saved.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
 
+    def missing_watcher_row(self):
+        fields = self.residue_row(attempt="att-missing-watcher", with_envelope=True).strip().split("\t")
+        metadata = D.parse_registry_metadata(fields[5])
+        for key in tuple(metadata):
+            if key.startswith(("group_reap_", "attempt_descendant_")) or key == "launch_outcome":
+                metadata.pop(key)
+        metadata.update(reap_watch="post-exit", reap_watch_pid="99999995")
+        fields[5] = ",".join(f"{key}={value}" for key, value in metadata.items())
+        return "\t".join(fields) + "\n"
+
+    def test_join_settles_when_the_post_exit_watcher_disappeared_without_a_receipt(self):
+        # A real harmless process stays alive until its watcher has exited.
+        worker = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                  stdin=subprocess.PIPE, start_new_session=True,
+                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-missing-watcher"})
+        try:
+            start = D.process_start_ticks(worker.pid)
+            watcher = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            watcher.wait(timeout=3)
+            self.assertIsNone(worker.poll())
+            fields = self.missing_watcher_row().strip().split("\t")
+            metadata = D.parse_registry_metadata(fields[5])
+            metadata.update(pid=str(worker.pid), pid_start=start, pgid=str(worker.pid),
+                            reap_watch_pid=str(watcher.pid))
+            fields[5] = ",".join(f"{key}={value}" for key, value in metadata.items())
+            self.jobs.write_text("\t".join(fields) + "\n")
+            worker.communicate(input=b"", timeout=3)
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait(timeout=3)
+            if worker.stdin and not worker.stdin.closed:
+                worker.stdin.close()
+        child = JOIN.current_attempt_row(self.jobs, "att-missing-watcher")
+        stalled = D.attempt_process_quiescence(child.metadata, terminal_receipt=True)
+        self.assertEqual(stalled.reason, "post-exit-receipt-incomplete")
+        with mock.patch.object(JOIN.subprocess, "run") as run:
+            recovery = JOIN.recover_receiptless_attempt(self.jobs, child)
+        self.assertTrue(recovery.get("changed"), recovery)
+        run.assert_not_called()  # no replacement, cancellation or manual watcher command
+        fresh = JOIN.current_attempt_row(self.jobs, child.attempt_id)
+        self.assertEqual(fresh.metadata["launch_outcome"], "governed-process-group-drained")
+        self.assertEqual(D.attempt_process_quiescence(fresh.metadata, terminal_receipt=True).state, "quiescent")
+
+        def settle(_jobs, current):
+            self.assertEqual(current.attempt_id, child.attempt_id)
+            self.assertEqual(current.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
+            self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t")
+                                 .replace("note=,", "note=completed-subsession,"))
+            return {"attempt_id": current.attempt_id, "closed": True, "reason": "completed-subsession"}
+
+        with mock.patch.object(JOIN, "settle_finished_attempt", side_effect=settle):
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=2,
+                                      interval=0.01, recover_receiptless=True)
+        self.assertEqual(receipt["state"], "ready", receipt)
+
+    def test_missing_watcher_drain_keeps_live_unknown_and_foreign_process_guards(self):
+        self.jobs.write_text(self.missing_watcher_row())
+        original = self.jobs.read_bytes()
+        cases = [
+            ("foreign-or-unknown-host", "attempt_process_quiescence",
+             D.ProcessQuiescence("unverifiable", "process-boot-unverifiable")),
+            ("watcher-live", "process_observation", ("present", "42", "S")),
+            ("watcher-unreadable", "process_observation", ("inaccessible", "", "")),
+            ("foreign-namespace", "attempt_scan_namespace_authority", False),
+            ("group-live", "process_group_observation", D.ProcessGroupObservation("populated", ((4242, "42", "S"),))),
+            ("group-unreadable", "process_group_observation", D.ProcessGroupObservation("unverifiable", ())),
+            ("descendant-live", "attempt_tagged_descendants", D.ProcessGroupObservation("populated", ((4242, "42", "S"),))),
+        ]
+        for name, helper, result in cases:
+            self.jobs.write_bytes(original)
+            with self.subTest(case=name), patch_split(D, helper, return_value=result):
+                recovery = D.resolve_residue_drain(self.jobs, "att-missing-watcher", apply=True)
+                self.assertFalse(recovery.get("changed"), recovery)
+                self.assertEqual(self.jobs.read_bytes(), original)
+
     def test_join_proceeds_after_residue_drain_refresh(self):
         self.jobs.write_text(self.residue_row(with_envelope=True))
         before = JOIN.current_attempt_row(self.jobs, "att-residue")

@@ -1663,7 +1663,14 @@ class RepeatFailureTest(unittest.TestCase):
 
 
 class HandedOverChecksTest(unittest.TestCase):
-    """execute records what its environment cannot run; the later qa/test stage receives it (D1 seam 5)."""
+    """Checks unavailable upstream remain visible to the later verification stage."""
+
+    def test_accepted_unavailable_check_is_not_an_unconditional_blocked_retry(self):
+        self.write("dev_logs/step_01.md", "handed-over: `make legacy-fixture` (reason: release unavailable)\n")
+        prompt = W.handed_over_prompt(code_leg_route(), "test", str(self.output))
+        self.assertIn("unverified (reason), never PASS", prompt)
+        self.assertIn("user already accepted that limit", prompt)
+        self.assertIn("without repeating the unavailable check", prompt)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1767,9 +1774,9 @@ class HandedOverChecksTest(unittest.TestCase):
         self.write("dev_logs/step_01.md", "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n")
         test = assign("test")
         self.assertIn("Checks earlier stages handed over (their environment could not run them); "
-                      "run each as part of your verification.", test)
+                      "assess their available evidence and run checks whose result can still change the decision.", test)
         self.assertIn("- `pytest -k socket` (reason: loopback bind EPERM) [dev_logs/step_01.md]", test)
-        self.assertIn("leaves your verdict BLOCKED: repeat its handed-over line", test)
+        self.assertIn("A required unknown leaves the verdict BLOCKED.", test)
         self.assertLess(test.index("Completion precedence:"), test.index("Checks earlier stages handed over"))
         for other in ("execute", "impl-review", "report"):
             with self.subTest(node=other):

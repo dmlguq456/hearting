@@ -1622,7 +1622,8 @@ def reconcile(rows, args):
             })
             continue
         # The reap watcher seals `attempt-tagged-residue-v1` and exits, so
-        # nobody sees the survivors leave. Repeat its drain observation: when
+        # nobody sees the survivors leave. A watcher can also disappear before
+        # publishing any drain. Repeat the same observation in either case: when
         # group and tagged descendants are both empty it records the same clean
         # drain proof, and the existing completion writer runs unchanged. While
         # a survivor still runs the row classifies `active`; the same call then
@@ -1631,7 +1632,8 @@ def reconcile(rows, args):
             resolve_residue_drain(args.jobs, row["meta"]["attempt_id"], apply=args.apply)
             if (category in {"terminal-draining", "active"} and not only_exact_dead
                 and row.get("attempt_contract_status") == "current"
-                and tagged_residue_receipt(row["meta"]))
+                and (tagged_residue_receipt(row["meta"])
+                     or row["meta"].get("reap_watch") == "post-exit"))
             else None
         )
         if residue is not None and residue["state"] == "drained":

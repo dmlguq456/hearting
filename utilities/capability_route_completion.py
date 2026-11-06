@@ -636,7 +636,7 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
                               reviewed_input=reviewed_input)
             epoch = source_epoch(route, node, current["digest"],
                                  completion_dir(route["route_id"], jobs=jobs),
-                                 family=current.get("family", "source"))
+                                 family=current.get("family", "source"), jobs=jobs)
         except (SourceSubjectError, OSError, ValueError) as exc:
             refuse("source-subject-unverifiable", getattr(exc, "reason", str(exc)))
         if (binding is not None and (binding["subject_digest"] != current["digest"]

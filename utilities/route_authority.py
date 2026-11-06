@@ -910,8 +910,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             attempt in subject_attempts
             for attempt in (*tuple(revision.get("answers") or ()), *tuple(revision.get("supersedes") or ()))
         )] if source_aware else revisions
-        budget_kinds_for_streak = budget_kinds if source_aware else kinds
-        budget_rows_for_progress = budget_rows if source_aware else rows
+        # Content owns verdict budgets, not the stall bound. An edited brief
+        # cannot turn two launched BLOCKED rounds into a fresh registered try.
+        budget_kinds_for_streak = kinds
+        budget_rows_for_progress = rows
         streak = 0
         import route_parent_close
         for kind, (_status, row_meta) in zip(reversed(budget_kinds_for_streak),
@@ -2148,6 +2150,20 @@ def require_recovery_grant_addresses(candidate, history, *, route, access=None):
             writes.extend(targets.writable_roots)
         derived = EA.derive_task_access(route, context, writable=tuple(Path(value) for value in writes if value))
         writes.extend(derived.writable_roots); reads.extend(derived.read_roots)
+        # Every ordinary wrapper grants its optional project runtime as well.
+        # Derive it with the same pure resolver, never from candidate metadata.
+        # A previously sealed override still passes the ordinary path fence.
+        from worker_bootstrap import runtime_dir_candidate
+        runtime_values = {key: os.environ[key] for key in ("HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
+                          if key in os.environ}
+        historical_runtime = (history.get("resolved") or {}).get("runtime_dir")
+        if historical_runtime:
+            runtime_values["AGENT_RUNTIME_DIR"] = historical_runtime
+        runtime = runtime_dir_candidate(route["artifact_root"], runtime_values,
+            repository_kind="non-git" if route.get("source_commit") == "unversioned" else "git",
+            source_root=history["worktree"])
+        if runtime:
+            writes.append(runtime); reads.append(runtime)
         if access:
             request = EA.load_request(Path(access["request_path"]), context=context)
             if request.request_sha256 != access["request_sha256"]:

@@ -798,11 +798,27 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
     for row in [*initial_matches, *initial_history]:
         execution = row.get("execution") if isinstance(row, dict) else None
         if isinstance(execution, dict) and execution.get("kind") == "compute-hosts":
+            observation = RR.compute_execution_observation(row)
             captured_compute[row.get("run_id")] = {
-                "row": row, "state": RR.compute_execution_observation(row).get("state")}
+                "row": row, "state": observation.get("state"), "observation": observation}
     for armed_row, row in initial_history_pairs:
         if row.get("run_id") in captured_compute:
             captured_compute[row["run_id"]]["armed"] = armed_row
+    # resource_evidence may settle a local row. Observe it before either
+    # writer lock; the reservation below only consumes the unchanged tuple.
+    captured_rearm = None
+    if controller is not None and ledger:
+        primary = sup.read_armed(ledger).get(args.node)
+        if primary and primary.get("predecessor_kind") == "resource":
+            try:
+                old = json.loads(Path(primary["resource_registry"]).read_text())["runs"][primary["predecessor_id"]]
+                captured = captured_compute.get(old.get("run_id"))
+                evidence = sup.resource_evidence(
+                    primary, compute_observation=(captured or {}).get("observation"))
+                after = json.loads(Path(primary["resource_registry"]).read_text())["runs"][primary["predecessor_id"]]
+                captured_rearm = primary, evidence, after
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # No observation may relax the existing blocked-stage check.
 
     def exact_controller_history_self(armed_row, row):
         return (controller is not None
@@ -818,6 +834,15 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
             if (current != controller.expected or current.get("launch_state") != "queued"
                     or any(current.get(k) != placeholder.get(k) for k in keys)):
                 raise ValueError("resource-reservation-changed")
+            primary = sup.read_armed(ledger).get(args.node) if ledger else None
+            if captured_rearm and primary == captured_rearm[0]:
+                old = data["runs"].get(primary["predecessor_id"]) if Path(
+                    primary["resource_registry"]).resolve() == Path(registry).resolve() else (
+                        json.loads(Path(primary["resource_registry"]).read_text())["runs"].get(primary["predecessor_id"]))
+                if old != captured_rearm[2]:
+                    raise ValueError("resource-reservation-changed")
+                sup.reconcile_superseded_resource_stage(
+                    route, ledger, primary, candidate=current, observed_evidence=captured_rearm[1])
             if ledger and sup.resource_stage_blocked(ledger, args.node):
                 raise ValueError("resource-watch-binding-conflict")
             others = [row for key, row in data["runs"].items()
