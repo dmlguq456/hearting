@@ -34,8 +34,10 @@ waking a shell. Shell display and input transport add no model instructions.
 
 The approved common line orders folder, session title, branch, context percent,
 model/effort, weekly quota (`7d 60%`), open routes and answer waits. Narrow layouts
-shorten words before numeric values, routes and waits. `› 나` belongs in the
-expanded panel. Fleet owns the values, palette, glyph meanings, separators and
+shorten words before numeric values, routes and waits. The expanded panel uses
+Fleet's existing LAST INPUT presentation (`› 1m · first line`, `› ·`, `› ?`)
+for the common `prompt_display` result. Its title and guidance use Fleet's
+shared message catalog and language preference. Fleet owns the values, palette, glyph meanings, separators and
 unknown-value rules; a harness-specific statusline input is not their source.
 While wrapped, the former Hearting Claude/OpenCode decorations yield to this
 line. Unwrapped sessions keep their existing displays. Codex keeps native input,

@@ -217,7 +217,7 @@ class SessionShellTest(unittest.TestCase):
             result = shell.panel_projection("claude", "test-native-session")
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
         self.assertIn("◑ ?", text)
-        self.assertIn("› 나: 아직 없음", result["lines"])
+        self.assertIn("› ·", result["lines"])
 
     def test_readiness_requires_the_exact_native_idle_record_and_known_empty_screen(self):
         from fleet import session_registry

@@ -320,10 +320,12 @@ def _plain(value, limit=256):
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, state="unknown", expanded=False) -> dict:
     """Display only, using the same route/question and human-input sources."""
-    import datetime
+    import time
     registry_root()
     import human_wait_state
     import session_tidy
+    from fleet.config import ui_text
+    from fleet.explorer.live import _last_input
     from fleet.session_tags import assigned_tag
     from fleet.session_line import line_segments
     from fleet.palette import style_components
@@ -334,14 +336,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     ids = set(view.get("by_session", {}).get((harness, sid), ()))
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = getattr(session_tidy, "prompt_display", lambda *a, **k: {"human_state": "unknown"})(seat, harness, sid)
-    human = display.get("human") or {}
-    at = human.get("at")
-    try:
-        clock = datetime.datetime.fromtimestamp(float(at)).astimezone().strftime("%H:%M")
-    except (TypeError, ValueError, OverflowError):
-        clock = "--:--"
-    human_line = (f"› 나 {clock}: {_plain(human.get('text'))}" if display.get("human_state") == "known"
-                  else "› 나: 아직 없음" if display.get("human_state") == "none" else "› 나: 확인 안 됨")
+    human_line = _last_input(display, time.time())
     received = display.get("received") or []
     peers = ["⇄ " + _plain(row.get("sender") or row.get("sender_harness") or "peer") + ": " + _plain(row.get("text"), 160)
              for row in received[-2:]]
@@ -354,6 +349,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     segments = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                 for text, key in line_segments(values, columns)]
+    open_fleet = ui_text("fleet.session_panel.open_fleet")
+    title = ui_text("fleet.session_panel.title", tag=tag, harness=harness,
+                    collapse=ui_text("fleet.memory.collapse"))
     question_lines = []
     if expanded:
         import questions
@@ -363,17 +361,17 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                 continue
             description = questions.describe(item, now=time.time())
             rows = description.get("questions") or []
-            question_lines.extend(_plain(row.get("question")) or "사용자 답 대기" for row in rows)
+            question_lines.extend(_plain(row.get("question")) or ui_text("wait.title") for row in rows)
             if not rows:
-                question_lines.append(_plain(description.get("kind")) + " · Fleet에서 열기")
+                question_lines.append(_plain(description.get("kind")) + " · " + open_fleet)
             if len(question_lines) >= 3:
                 break
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
-            "watch": watched, "lines": [f"하팅 {tag} · {harness}  Ctrl+] 접기",
+            "watch": watched, "lines": [title,
             "ROUTES  " + (_plain(route) or "?"),
-            f"QUESTIONS {count if count is not None else '?'} · Fleet에서 열기",
+            f"QUESTIONS {count if count is not None else '?'} · {open_fleet}",
             *question_lines[:3], *peers, human_line]}
 
 

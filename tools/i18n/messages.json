@@ -542,6 +542,14 @@
    "en": "no seat · {error}",
    "ko": "seat 없음 · {error}"
   },
+  "fleet.session_panel.open_fleet": {
+   "en": "open in Fleet",
+   "ko": "Fleet에서 열기"
+  },
+  "fleet.session_panel.title": {
+   "en": "SESSION {tag} · {harness} · Ctrl+] {collapse}",
+   "ko": "세션 {tag} · {harness} · Ctrl+] {collapse}"
+  },
   "fleet.span.hour": {
    "en": "{count} hour",
    "ko": "{count}시간"
