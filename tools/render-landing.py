@@ -1543,7 +1543,7 @@ def render_index(d: dict) -> str:
   </div>
   <div class="note"><b>Read Permissions first.</b> Background Claude Code workers run in bypass mode by
   default, because nobody is there to answer a permission prompt. Sessions you start yourself keep your own
-  settings. <a href="{REPO_URL}#permissions">Permissions in the README &rarr;</a></div>
+  settings. <a href="{REPO_URL}/blob/main/FAQ.md#what-permissions-do-background-workers-have">Permissions in the FAQ &rarr;</a></div>
 </div></section>
 
 <section class="sec" id="map"><div class="wrap">
