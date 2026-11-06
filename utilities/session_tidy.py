@@ -2953,7 +2953,14 @@ _PROMPT_DISPLAY_UNREAD = object()
 def prompt_first_line(text: str) -> str:
     """Bound display text after source classification; this never decides its source."""
     import work_intent
-    value = runtime_prompt_text(text) if isinstance(text, str) else ""
+    value = text if isinstance(text, str) else ""
+    # Display uses the whole-paste grammar accepted by peer-message's reader.
+    # Keep runtime_prompt_text (claim/source authority) unchanged.
+    wrapped = re.fullmatch(
+        r'<pasted_content id="(?P<id>[^"\r\n]+)">\n?(?P<body>.*?)\n?'
+        r'</pasted_content(?: id="(?P=id)")?>', value.strip(), re.DOTALL)
+    if wrapped:
+        value = wrapped.group("body")
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())

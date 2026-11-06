@@ -71,6 +71,52 @@ class PromptDisplayTests(unittest.TestCase):
         self.assertEqual(result["human"]["text"], "original")
         self.assertEqual(result["received"][-1]["source"], "claim")
 
+    def test_whole_paste_envelopes_show_the_human_body_and_preserve_framing(self):
+        for harness in st.HARNESSES:
+            with self.subTest(harness=harness):
+                sid = "human-paste-" + harness
+                for closing in ('</pasted_content id="p">', '</pasted_content>'):
+                    wrapped = '<pasted_content id="p">\nHUMAN FIRST LINE\nsecond line\n' + closing
+                    value = self.prompt(wrapped, harness, sid, now=1000)
+                    self.assertEqual(value["human"]["source"], "real")
+                    self.assertEqual(value["human"]["text"], "HUMAN FIRST LINE")
+                    self.assertEqual(st.prompt_first_line("My framing\n" + wrapped), "My framing")
+                    self.assertEqual(st.prompt_first_line(wrapped + "\nMy framing"),
+                                     '<pasted_content id="p">')
+                wrong_id = '<pasted_content id="p">\nbody\n</pasted_content id="different">'
+                self.assertEqual(st.prompt_first_line(wrong_id), '<pasted_content id="p">')
+                self.assertEqual(st.prompt_first_line('<pasted_content id="p">body</pasted_content>'),
+                                 "body")
+
+    def test_sealed_short_peer_paste_forms_preserve_the_human_frontier(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_paste_display_peer_test",
+                                                     ROOT / "utilities/peer-message.py")
+        peer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = peer
+        spec.loader.exec_module(peer)
+        for harness in st.HARNESSES:
+            with self.subTest(harness=harness):
+                sid = "peer-paste-" + harness
+                human = self.prompt("Original person input", harness, sid, now=1000)["human"]
+                seat = self.seat(harness, sid)
+                frontier = st.real_prompt_frontier(seat, harness, sid)
+                text, _ref = peer.prepare_peer_message(
+                    "PEER FIRST LINE\nprivate second line",
+                    {"harness": "codex", "session_id": "paste-sender", "name": "Codex [ab]"},
+                    {"harness": harness, "session_id": sid}, defer=True)
+                for index, delivered in enumerate((text,
+                        '<pasted_content id="p">\n' + text + '\n</pasted_content id="p">',
+                        '<pasted_content id="p">\n' + text + '\n</pasted_content>')):
+                    with mock.patch.object(st, "resolve_seat", return_value=seat):
+                        st.run_hook(harness, "prompt", sid, cwd=str(self.cwd),
+                                    prompt_text=delivered, now=1010 + index)
+                    value = st.prompt_display(seat, harness, sid)
+                    self.assertEqual(value["human"], human)
+                    self.assertEqual(st.real_prompt_frontier(seat, harness, sid), frontier)
+                    self.assertEqual(value["received"][-1]["source"], "peer")
+                    self.assertEqual(value["received"][-1]["text"], "PEER FIRST LINE")
+
     def test_a_literal_approval_is_still_the_persons_input(self):
         result = self.prompt("진행")
         self.assertEqual(result["human"]["text"], "진행")
