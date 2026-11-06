@@ -69,10 +69,12 @@ Use the existing session ledger and booking; add no gate or state store.
 Unresolved clear lineage does not block this same-session operation. A source
 with a confirmed successor remains ineligible.
 
-At the due time, the existing helper requests one marked card reply, with no
-Skill or tool call. The common turn-end observer stores that reply as the exact
-native session's external handoff card and queues memory tidying once. The card
-must be saved before requesting native compaction: `/compact` in Claude and
+At the due time, the existing memory helper prepares the external handoff card
+and memory actions in the same private output. It reads the caller's conversation
+and complete previous card, follows the Card Format below, and keeps its existing
+deep editor role. The main conversation receives no card request or card-body
+reply. The runner saves the card for that exact native session before requesting
+native compaction: `/compact` in Claude and
 Codex, the equivalent command in OpenCode. Never use `/clear` or `/new` for idle
 tidy. Preserve scrollback, the native session and its background agents. Native
 background agents alone do not postpone idle tidy or select a special adapter
@@ -99,8 +101,9 @@ auto-compaction and restores its prior value on uninstall.
 
 When an exact native identity is available, each session keeps its own card independently of the current project or pane seat; one session never replaces another's card. A different native identity receives a card or result only through the existing confirmed lineage and receipt rules. Calls without an exact identity retain the shared project fallback behavior, with author checks and no inferred recipient.
 
-The main-authored card follows the single Card Format below, using the
-conversation it already holds. The core comes first; an automatically selected
+Every card follows the single Card Format below. Manual cards use the main
+session's conversation; automatic idle cards use the helper's recorded input.
+The core comes first; an automatically selected
 module follows. Dated user wording and PRD locations remain verbatim, including
 in the existing card history when they exceed the bounded display.
 
@@ -110,13 +113,12 @@ tool call (`utilities/session_tidy.py tidy`), followed by the command's short
 keep their existing meaning. Manual memory-tidy results retain their undo and
 partial-coverage details.
 
-An automatic idle request needs no Skill or tool. The main session replies once
-between the request's nonce markers. Its own turn-end evidence (Claude/Codex
-Stop `last_assistant_message`, or OpenCode's latest assistant message finished
-with `stop`) supplies the external card. An exact late response is retained
-without restoring permission to compact; a newer human prompt, another request's
-markers, or an incomplete response never authorizes compaction. Repeat callbacks
-reuse the card and existing memory queue. Idle memory work does not publish its
+Automatic idle work needs no main-session Skill, tool or model turn. Its existing
+booking and memory queue bind the helper output to the unchanged session,
+activity frontier and card generation. A late helper never replaces a newer
+manual card or writes after cancellation or new activity. Repeated callbacks
+reuse that same queue and accepted card. Memory application can finish after
+card persistence and does not hold up compaction when it fails. Idle work does not publish its
 internal operation/coverage/undo text as a second user notification. Only the
 saved-card plus native-compaction result emits the short human notice, through
 the existing adapter output and notice receipt handling, with no model turn.

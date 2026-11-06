@@ -11466,6 +11466,10 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
         import session_tidy as st
         import session_tidy_clear as clear
         self.st, self.clear = st, clear
+        import session_tidy_runner
+        worker = mock.patch.object(session_tidy_runner, "_start_queued", side_effect=lambda item: item)
+        worker.start()
+        self.addCleanup(worker.stop)
         # This transport fixture has a known observed seat and no registered
         # work. Census completeness is exercised in session_tidy_idle.test.py.
         routes = mock.patch.object(clear, "_idle_route_reason", return_value="")
@@ -11524,10 +11528,14 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
                     self.assertNotEqual(rc, 0)
                     self.assertNotIn("idle_request", self.clear.read_reservation(seat.key))
 
-    def test_claimed_request_sends_once_and_needs_the_exact_prompt_arrival_receipt(self):
+    def test_compact_origin_request_sends_once_and_needs_the_exact_prompt_arrival_receipt(self):
         seat, path = self.booking()
         self.seat_obj = seat
         req = self.clear.read_reservation(seat.key)
+        # Compact-origin main requests retain their exact native-arrival contract.
+        req.update(origin="compact", compact={"identity": "compact-event",
+            "card_request_required": True, "turn_end_observed": True})
+        self.clear._write_reservation(req)
         with patch_split(peer_steward, "_herdr_missing", return_value=False), \
              mock.patch.object(peer_steward, "_clear_look", return_value=(None,
                  {"pane": seat.pane, "harness": "claude", "session_id": "sid-A"}, [])), \
@@ -11546,6 +11554,24 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
         booking = self.clear.read_reservation(seat.key)
         self.assertEqual(booking["idle_request"]["state"], "sent")
         self.assertEqual(booking["idle_request"]["arrival"]["sid"], "sid-A")
+
+    def test_idle_card_queues_once_without_main_prompt_or_arrival(self):
+        import session_tidy_runner
+        seat, path = self.booking()
+        req = self.clear.read_reservation(seat.key)
+        rc, line, send = self.invoke(req)
+        self.assertEqual(rc, 0, line)
+        send.assert_not_called()
+        held = self.clear.read_reservation(seat.key)
+        self.assertEqual(held["idle_request"]["source"], "memory-helper")
+        self.assertEqual(held["idle_request"]["state"], "preparing")
+        self.assertNotIn("arrival", held["idle_request"])
+        item = session_tidy_runner.read_item(held["queue_id"])
+        self.assertEqual((item["harness"], item["sid"]), (req["harness"], req["sid"]))
+        rc, _line, send = self.invoke(req)
+        self.assertNotEqual(rc, 0)
+        send.assert_not_called()
+        self.assertEqual(self.clear.read_reservation(seat.key)["queue_id"], item["id"])
 
     def test_draft_or_other_opencode_session_sends_nothing(self):
         seat, path = self.booking()

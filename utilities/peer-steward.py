@@ -8507,7 +8507,7 @@ def cmd_clear(args):
 
 
 def cmd_idle_card_request(args):
-    """Send one claim-bound request to the exact idle main session to author its own card."""
+    """Prepare an idle card off-screen; retain old compact-origin prompt transport."""
     import session_tidy_clear as clear
     path = Path(args.request)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -8519,11 +8519,12 @@ def cmd_idle_card_request(args):
         receipt = (f"action=idle-card-request accepted={outcome} harness={harness} session={sid}"
                    + (f" reason={reason}" if reason else ""))
         try:
-            _record(to_harness=harness, to_name=args.target, kind="notice",
-                    summary_text="[notice] session-tidy idle card request", to_session_id=sid,
-                    to_pane=pane, ref=[], status="sent" if outcome == "true" else "unknown",
-                    receipt=receipt, from_identity=(sid, harness, _project_of((req or {}).get("cwd"))),
-                    from_name=_from_name(harness, sid))
+            if req and req.get("origin") != "idle":
+                _record(to_harness=harness, to_name=args.target, kind="notice",
+                        summary_text="[notice] session-tidy idle card request", to_session_id=sid,
+                        to_pane=pane, ref=[], status="sent" if outcome == "true" else "unknown",
+                        receipt=receipt, from_identity=(sid, harness, _project_of((req or {}).get("cwd"))),
+                        from_name=_from_name(harness, sid))
         except Exception:
             pass
         print(f"accepted={outcome} target={args.target} harness={harness} session={sid}"
@@ -8588,6 +8589,10 @@ def cmd_idle_card_request(args):
     if checked is None:
         clear.release_unsent_idle_request(claim)
         return finish("skipped", why)
+    if (claim.get("idle_request") or {}).get("source") == "memory-helper":
+        import session_tidy_idle_card
+        accepted, why = session_tidy_idle_card.enqueue(claim)
+        return finish("true" if accepted else "skipped", why)
     text = clear.idle_card_request_text(claim)
     checked, why = clear.recheck_idle_input(path, checked)
     if checked is None:
