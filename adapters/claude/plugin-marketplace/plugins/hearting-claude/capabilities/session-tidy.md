@@ -178,6 +178,16 @@ New notices retain a duty when written so an idle recipient can be woken.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
+### Read-only prompt display
+
+Fleet reuses the existing prompt-source judgment and exact native-session
+frontier. Keep a bounded first line and timestamp for the last real prompt and
+recent received peer/runtime/Hearting inputs in that same frontier. Generated
+inputs retain the last real prompt; an unknown or different session supplies no
+substitute. This is display data only: it changes no idle rearming, wait,
+claim, delivery or completion decision. Readers reuse file-generation caches
+and never rescan conversations on a rendering tick or create another store.
+
 ## Portable Procedure
 
 Modes are `정리` (default), `정리만` (keep this window), and `인계 <받을 세션>`

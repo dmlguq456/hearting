@@ -266,6 +266,42 @@
    "en": "no card text was kept before {when}.",
    "ko": "{when} 전에 남은 카드 본문이 없습니다."
   },
+  "fleet.input.age_days": {
+   "en": "{count}d ago",
+   "ko": "{count}일 전"
+  },
+  "fleet.input.age_hours": {
+   "en": "{count}h ago",
+   "ko": "{count}시간 전"
+  },
+  "fleet.input.age_minutes": {
+   "en": "{count}m ago",
+   "ko": "{count}분 전"
+  },
+  "fleet.input.age_seconds": {
+   "en": "{count}s ago",
+   "ko": "{count}초 전"
+  },
+  "fleet.input.label": {
+   "en": "INPUT",
+   "ko": "내 입력"
+  },
+  "fleet.input.none": {
+   "en": "› me: none",
+   "ko": "› 나 없음"
+  },
+  "fleet.input.received": {
+   "en": "RECEIVED",
+   "ko": "받은 메시지"
+  },
+  "fleet.input.unknown": {
+   "en": "› me: unknown",
+   "ko": "› 나 미확인"
+  },
+  "fleet.input.value": {
+   "en": "› me {age}: {text}",
+   "ko": "› 나 {age}: {text}"
+  },
   "fleet.install.after_dialog": {
    "en": "after the open dialog or input finishes",
    "ko": "확인 창·입력이 끝나면 넘어감"

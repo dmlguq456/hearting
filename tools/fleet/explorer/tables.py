@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from .live import current_route_counts
 from .grid import CellGrid
 from .style import recede_key
+from ..config import ui_text
 
 X = 34
 GAP = 3
@@ -117,7 +118,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()), (c["ctx"], "CTX"),
-                          *(([(c["now"], "NOW")] if c["now"] is not None else [])),
+                          *(([(c["now"], ui_text("fleet.input.label"))] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
         if label == "HARNESS" and harn_end is None:
             continue                      # a table this narrow has no room for the harness cell
@@ -269,12 +270,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             if c["now"] is not None:
                 now_start = x + c["now"]
                 now_end = x + use - AGE_W - GAP
-                ask = str(session.get("ask") or "")
-                if ask:
-                    ask_text = _clip(ask, max(0, now_end - now_start))
-                    grid.put(now_start, y, ask_text, "blocked", limit=now_end)
-                    now_start += len(ask_text) + 2
-                now_text = _clip(str(session.get("now") or ""), max(0, now_end - now_start))
+                now_text = _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                                 max(0, now_end - now_start))
                 now_key = "head" if session.get("state") in ("working", "blocked") else "title_dim"
                 grid.put(now_start, y, now_text, now_key,
                          limit=now_end)
@@ -520,6 +517,12 @@ def _session_unfold(grid, vm, x, use, y, session, c):
     now = session.get("now")
     for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
         grid.put(x_val, y, line, "now_sub" if now else "dim")
+        y += 1
+    received_label = ui_text("fleet.input.received")
+    message_x = max(x_val, x_lab + _seg_width(received_label) + 2)
+    grid.put(x_lab, y, received_label, "label", limit=right)
+    for line in session.get("received_inputs") or ("·",):
+        grid.put(message_x, y, _clip(str(line), max(0, right - message_x)), "soft", limit=right)
         y += 1
     system = vm.system if hasattr(vm.system, "get") else {}
     task = system.get("task_summary") if hasattr(system, "get") else None

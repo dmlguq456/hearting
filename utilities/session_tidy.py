@@ -2912,7 +2912,10 @@ def bump_prompt_seq(seat: Seat, harness: str, sid: str, now: float) -> int:
     previous = read_json(_prompt_seq_path(seat))
     seq = read_prompt_seq(seat) + 1
     prior_human = last_human_prompt_seq(seat) if isinstance(previous, dict) else 0
-    atomic_write_json(_prompt_seq_path(seat), {"schema": SCHEMA, "seq": seq, "at": now,
+    display = {key: previous[key] for key in ("last_human_prompt", "received_inputs")
+               if isinstance(previous, dict) and previous.get("harness") == harness
+               and previous.get("sid") == sid and key in previous}
+    atomic_write_json(_prompt_seq_path(seat), {**display, "schema": SCHEMA, "seq": seq, "at": now,
                                               "harness": harness, "sid": sid, "source": "pending",
                                               "last_human_seq": seq, "prior_human_seq": prior_human})
     return seq
@@ -2941,6 +2944,118 @@ _PEER_FRAMING = (
 # Prompt sources that are not the person: they answer no wait, rearm no idle tidy and keep
 # ``last_human_seq`` where it was.
 NON_HUMAN_SOURCES = frozenset({"notification", "peer", "runtime", "claim"})
+
+PROMPT_LINE_CHARS = 384
+RECEIVED_INPUTS_LIMIT = 8
+_PROMPT_DISPLAY_UNREAD = object()
+
+
+def prompt_first_line(text: str) -> str:
+    """Bound display text after source classification; this never decides its source."""
+    import work_intent
+    value = runtime_prompt_text(text) if isinstance(text, str) else ""
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+    line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
+    return line if len(line) <= PROMPT_LINE_CHARS else line[:PROMPT_LINE_CHARS - 1] + "…"
+
+
+def _received_prompt_line(prompt_text: str, origin: dict) -> str:
+    """Resolve a verified large-message preview once at arrival, never in Fleet."""
+    ref = origin.get("transfer_ref")
+    if isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{32}", ref):
+        try:
+            import importlib.util
+            path = Path(__file__).resolve().with_name("peer-message.py")
+            spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            payload = module.read_peer_payload(ref)
+            if isinstance(payload, dict) and isinstance(payload.get("body"), str):
+                return prompt_first_line(payload["body"])
+        except (OSError, ValueError, TypeError, ImportError, AttributeError):
+            pass
+    return prompt_first_line(prompt_text)
+
+
+def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
+                          prompt_text: str, now: float) -> None:
+    """Retain only the existing classifier's final result in its existing frontier."""
+    seat = session_seat(seat, harness, sid)
+    path = _prompt_seq_path(seat)
+    current = read_json(path)
+    if (not isinstance(current, dict) or current.get("harness") != harness
+            or current.get("sid") != sid or current.get("seq") != sequence):
+        return
+    source = current.get("source")
+    if source != "real" and source not in NON_HUMAN_SOURCES:
+        return
+    row = {"harness": harness, "sid": sid, "sequence": sequence, "at": now,
+           "text": prompt_first_line(prompt_text), "source": source}
+    if source == "real":
+        current["last_human_prompt"] = row
+    else:
+        origin = current.get("request_origin")
+        origin = origin if isinstance(origin, dict) else {}
+        row["text"] = _received_prompt_line(prompt_text, origin)
+        fallback = "하팅" if source == "claim" else "peer" if source == "peer" else "runtime"
+        row["sender"] = prompt_first_line(str(origin.get("name") or fallback))[:96]
+        if (origin.get("sender_harness") in HARNESSES
+                and isinstance(origin.get("sender_session_id"), str)):
+            row["sender_harness"] = origin["sender_harness"]
+            row["sender_session_id"] = origin["sender_session_id"][:160]
+        if origin.get("transfer_ref"):
+            row["ref"] = str(origin["transfer_ref"])[:96]
+        rows = current.get("received_inputs")
+        rows = [item for item in rows if isinstance(item, dict) and item.get("sequence") != sequence] \
+            if isinstance(rows, list) else []
+        current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
+    atomic_write_json(path, current)
+
+
+def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
+    """Read exact-session display facts, never a conversation or a new prompt judgment."""
+    current = prompt_state(session_seat(seat, harness, sid)) if current is _PROMPT_DISPLAY_UNREAD else current
+    empty = {"human": None, "human_state": "unknown", "received": []}
+    if (not isinstance(current, dict) or current.get("schema") != SCHEMA or current.get("harness") != harness
+            or current.get("sid") != sid or type(current.get("seq")) is not int):
+        return empty
+    sequence = current["seq"]
+    def valid(row):
+        return (isinstance(row, dict) and type(row.get("sequence")) is int
+                and row.get("harness") == harness and row.get("sid") == sid
+                and 0 < row["sequence"] <= sequence
+                and isinstance(row.get("at"), (int, float)) and not isinstance(row["at"], bool)
+                and math.isfinite(row["at"]) and row["at"] >= 0
+                and isinstance(row.get("text"), str) and len(row["text"]) <= PROMPT_LINE_CHARS
+                and all(char.isprintable() for char in row["text"]))
+    human = current.get("last_human_prompt")
+    human_seq = current.get("last_human_seq", current.get("seq", 0))
+    if type(human_seq) is not int or human_seq < 0:
+        return empty
+    if not (valid(human) and human.get("source") == "real" and human["sequence"] == human_seq):
+        human = None
+        # Older frontiers can quote their own exact human boundary, but cannot
+        # supply an earlier prompt whose text was not retained.
+        if (current.get("last_human_prompt") is None and current.get("source") == "real" and sequence == human_seq
+                and isinstance(current.get("request_excerpt"), str)):
+            candidate = {"harness": harness, "sid": sid, "sequence": sequence, "at": current.get("at"),
+                         "text": prompt_first_line(current["request_excerpt"]), "source": "real"}
+            human = candidate if valid(candidate) else None
+    received = [dict(item) for item in current.get("received_inputs", [])
+                if valid(item) and item.get("source") in NON_HUMAN_SOURCES] \
+        if isinstance(current.get("received_inputs"), list) else []
+    for item in received:
+        sender = item.get("sender")
+        item["sender"] = sender if (isinstance(sender, str) and len(sender) <= 96
+                                    and all(char.isprintable() for char in sender)) else "runtime"
+        if (item.get("sender_harness") not in HARNESSES
+                or not isinstance(item.get("sender_session_id"), str)):
+            item.pop("sender_harness", None)
+            item.pop("sender_session_id", None)
+    return {"human": dict(human) if human else None,
+            "human_state": "known" if human else "none" if human_seq == 0 else "unknown",
+            "received": received[-RECEIVED_INPUTS_LIMIT:]}
 
 
 def runtime_turn_source(prompt_text: str) -> str:
@@ -3406,6 +3521,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
                 if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
+            with contextlib.suppress(Exception):
+                record_prompt_display(seat, harness, sid, sequence, prompt_text, now)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same

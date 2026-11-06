@@ -1,0 +1,1 @@
+../../../../../tools/fleet/collectors/prompt_inputs.py
