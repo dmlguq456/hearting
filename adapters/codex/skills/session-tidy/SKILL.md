@@ -186,8 +186,9 @@ input admission: a claimed compaction defers peer input until its boundary;
 peer input admitted first follows the ordinary new-input rules. The completed
 booking and unchanged prompt frontier can corroborate idle after compaction
 when a pane's working label lags; identity, foreground, form and draft checks
-still apply, and later native activity remains busy. Claude, Codex and OpenCode
-use this same rule.
+still apply. Activity after the actual native compaction boundary remains busy,
+even if the booking's completion is recorded later; an unknown boundary keeps
+the normal working guard. Claude, Codex and OpenCode use this same rule.
 
 The optional seat-lineage reader is a read-only projection of existing ledger,
 card history and transcript locations. Card injection may include one

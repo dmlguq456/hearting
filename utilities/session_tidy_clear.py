@@ -222,15 +222,15 @@ def peer_input_state(harness: str, sid: str, pane: str, state: str) -> str:
 def _quiet_after_compact(req, seat):
     """A background notification can start a native turn without a user prompt.
 
-    Read only the existing transcript since the compact claim. A later native
-    user/assistant message restores the normal busy guard; preserved summary
-    rows and the compact command's own output are not new work.
+    Read only the existing transcript since the compact claim. Compare activity
+    with its native boundary, never the observer's later booking finish time.
+    Preserved summary rows and the compact command's output are not new work.
     """
     claim = req.get("clear_claim") or {}
     try:
         source = claim.get("transcript") or (st.session_summary(seat).get(
             (req["harness"], req["sid"])) or {}).get("transcript")
-        finished = float(req["finished"])
+        claimed_at = float(claim["at"])
         if not source or req["sid"] not in Path(source).name:
             return False
         offset = claim.get("offset", 0)
@@ -241,10 +241,19 @@ def _quiet_after_compact(req, seat):
             if not offset <= size <= offset + 8 * 1024 * 1024:
                 return False
             stream.seek(offset)
+            boundary, latest_activity = None, None
             for line in stream:
                 row = json.loads(line)
+                if row.get("isSidechain"):
+                    continue
+                if (row.get("type") == "system" and row.get("subtype") == "compact_boundary"
+                        and row.get("sessionId") in (None, req["sid"])):
+                    stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                    if boundary is None and stamp >= claimed_at:
+                        boundary = stamp
+                    continue
                 message = row.get("message") or {}
-                if row.get("isSidechain") or message.get("role") not in ("user", "assistant"):
+                if message.get("role") not in ("user", "assistant"):
                     continue
                 if row.get("isCompactSummary") or row.get("repeatsCompactSummary"):
                     continue
@@ -252,9 +261,8 @@ def _quiet_after_compact(req, seat):
                 if isinstance(content, str) and content.startswith("<local-command-"):
                     continue
                 stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
-                if stamp >= finished:
-                    return False
-        return True
+                latest_activity = stamp if latest_activity is None else max(latest_activity, stamp)
+        return boundary is not None and (latest_activity is None or latest_activity < boundary)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return False
 

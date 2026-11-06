@@ -11152,6 +11152,15 @@ class TidyDeferredPeerTest(_TmpRootMixin, unittest.TestCase):
                                               recipient, defer=True)
         return peer._read_pending(ref), text, recipient
 
+    def compact_claim(self, req, *, now=None):
+        from datetime import datetime, timezone
+        now = time.time() if now is None else now
+        transcript = self.tmp_root / (req["sid"] + ".jsonl")
+        transcript.write_text(json.dumps({"type": "system", "subtype": "compact_boundary",
+            "sessionId": req["sid"], "timestamp": datetime.fromtimestamp(now, timezone.utc).isoformat()}) + "\n")
+        return dict(state="sending", command="compact", at=now - 1,
+                    transcript=str(transcript), offset=0)
+
     @contextlib.contextmanager
     def transport(self, recipient, text, *, state="working"):
         peer = peer_steward.peer_message
@@ -11216,7 +11225,7 @@ class TidyDeferredPeerTest(_TmpRootMixin, unittest.TestCase):
                     self.submit(row, recipient, "working")
                     self.assertEqual(self.sent, [])
                     req.update(idle_request={"state": "accepted"},
-                               clear_claim={"state": "sending", "command": "compact"})
+                               clear_claim=self.compact_claim(req))
                     self.clear._write_reservation(req)
                     with mock.patch("shared_readiness.wake_runner") as wake, \
                          mock.patch.object(self.st, "resolve_seat", return_value=seat), \
@@ -11240,7 +11249,7 @@ class TidyDeferredPeerTest(_TmpRootMixin, unittest.TestCase):
             with self.subTest(harness=harness):
                 self.sent.clear()
                 seat, req = self.booking(harness)
-                req.update(status="compacted", finished=time.time(), clear_claim={"command": "compact"})
+                req.update(status="compacted", finished=time.time(), clear_claim=self.compact_claim(req))
                 self.clear._write_reservation(req)
                 row, text, recipient = self.pending(harness, req["sid"], seat.pane)
                 with self.transport(recipient, text):
@@ -11341,16 +11350,82 @@ class TidyDeferredPeerTest(_TmpRootMixin, unittest.TestCase):
 
     def test_native_background_turn_after_compact_is_not_a_stale_working_label(self):
         seat, req = self.booking("claude")
-        req.update(status="compacted", finished=time.time(), clear_claim={"command": "compact"})
+        req.update(status="compacted", finished=time.time(), clear_claim=self.compact_claim(req))
         self.clear._write_reservation(req)
         transcript = self.tmp_root / (req["sid"] + ".jsonl")
-        transcript.write_text(json.dumps({"type": "user",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 1)),
-            "message": {"role": "user", "content": "<task-notification>fixture</task-notification>"}}) + "\n")
+        with transcript.open("a") as stream:
+            stream.write(json.dumps({"type": "user",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 1)),
+                "message": {"role": "user", "content": "<task-notification>fixture</task-notification>"}}) + "\n")
         row, text, recipient = self.pending("claude", req["sid"], seat.pane)
         with self.transport(recipient, text):
             self.submit(row, recipient, "working")
         self.assertEqual(self.sent, [])
+
+    def test_native_turn_before_delayed_compact_completion_remains_busy(self):
+        from datetime import datetime, timezone
+        for active in (False, True):
+            with self.subTest(new_native_turn=active):
+                self.sent.clear()
+                seat, req = self.booking("claude")
+                base = time.time() - 20
+                claim = self.compact_claim(req, now=base + 1)
+                stamp = lambda offset: datetime.fromtimestamp(base + offset, timezone.utc).isoformat()
+                rows = [
+                    {"type": "user", "timestamp": stamp(-1),
+                     "message": {"role": "user", "content": "retained old history"}},
+                    {"type": "user", "timestamp": stamp(2), "isCompactSummary": True,
+                     "message": {"role": "user", "content": "preserved summary"}},
+                    {"type": "user", "timestamp": stamp(2), "repeatsCompactSummary": True,
+                     "message": {"role": "user", "content": "repeated summary"}},
+                    {"type": "user", "timestamp": stamp(2),
+                     "message": {"role": "user", "content": "<local-command-stdout>Compacted</local-command-stdout>"}},
+                ]
+                if active:
+                    rows.extend([
+                        {"type": "user", "timestamp": stamp(2), "message": {"role": "user",
+                         "content": "<task-notification>new native turn</task-notification>"}},
+                        {"type": "assistant", "timestamp": stamp(2.5),
+                         "message": {"role": "assistant", "content": [{"type": "text", "text": "working"}]}},
+                    ])
+                with open(claim["transcript"], "a") as stream:
+                    for row in rows:
+                        stream.write(json.dumps(row) + "\n")
+                card = self.st.write_card(seat, "claude", req["sid"], "saved card", prompt_seq=0)
+                req.update(card_generation=card["generation"], idle_request={"state": "accepted"},
+                           clear_claim=claim)
+                self.clear._write_reservation(req)
+                with mock.patch.object(self.st, "now_epoch", return_value=base + 3):
+                    self.assertEqual(self.clear._await_idle_compaction(seat.key, req["nonce"],
+                        sleep=lambda _: self.fail("unexpected wait")), "compacted")
+                self.assertEqual(self.st.read_prompt_seq(seat), 0)
+                row, text, recipient = self.pending("claude", req["sid"], seat.pane)
+                screen_guard = peer_steward._screen_ready
+                with self.transport(recipient, text), \
+                     mock.patch.object(peer_steward, "_screen_ready", side_effect=screen_guard), \
+                     mock.patch.object(peer_steward, "_read_screen",
+                                       return_value=peer_steward._screen_lines(CLAUDE_EMPTY)):
+                    self.submit(row, recipient, "working")
+                self.assertEqual(self.sent, [] if active else [text])
+
+    def test_completed_booking_without_a_current_native_boundary_keeps_working(self):
+        for boundary in ("missing", "before-claim", "other-session"):
+            with self.subTest(boundary=boundary):
+                seat, req = self.booking("claude")
+                claim = self.compact_claim(req, now=time.time() - 5)
+                transcript = Path(claim["transcript"])
+                if boundary == "missing":
+                    transcript.write_text("")
+                elif boundary == "before-claim":
+                    claim["at"] = time.time()
+                else:
+                    row = json.loads(transcript.read_text())
+                    row["sessionId"] = "another-session"
+                    transcript.write_text(json.dumps(row) + "\n")
+                req.update(status="compacted", finished=time.time(), clear_claim=claim)
+                self.clear._write_reservation(req)
+                self.assertEqual(self.clear.peer_input_state("claude", req["sid"], seat.pane, "working"),
+                                 "working")
 
     def test_old_queue_receipt_does_not_add_a_new_compaction_wait(self):
         seat, req = self.booking("claude")
