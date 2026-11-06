@@ -26,6 +26,9 @@ import dispatch_batch_obligations as batch_obligations
 from split_module_fixture import split_patch
 
 _HERE = Path(__file__).resolve().parent
+if str(_HERE.parent / "tools") not in sys.path:
+    sys.path.append(str(_HERE.parent / "tools"))
+import fixture_processes  # noqa: E402
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_obligation_test", str(_HERE / "peer-steward.py"))
 peer_steward = importlib.util.module_from_spec(_STEWARD_SPEC)
@@ -2430,6 +2433,9 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
     """Actual steward/controller recovery: fixture transport, death, restart, display."""
 
     def setUp(self):
+        # First registered, so it runs last: nothing this fixture started may
+        # outlive it (a held fake `herdr agent wait` blocks on a FIFO forever).
+        self.addCleanup(self._assert_no_survivors)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -2443,6 +2449,9 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
         fake.chmod(0o755)
         self.fifo = self.root / "release.fifo"
         os.mkfifo(self.fifo)
+        # Registered after the tmp-dir cleanup so it runs first (LIFO): observers
+        # and their native wait children are gone before their directory is.
+        self.addCleanup(fixture_processes.reap, str(self.root), fifo=str(self.fifo))
         self.session = "steward-obligation-1"
         self.saved_environ = dict(os.environ)
         self.addCleanup(self._restore_environ)
@@ -2458,6 +2467,12 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
 
     def _restore_herdr_session(self):
         peer_steward._HERDR_SESSION = self._old_herdr_session
+
+    def _assert_no_survivors(self):
+        survivors = fixture_processes.marked_processes(self.temp.name)
+        if survivors:
+            fixture_processes.reap(self.temp.name)
+            self.fail(f"fixture processes outlived the test: {sorted(survivors)}")
 
     def _reap_children(self):
         for pid in self._children:
@@ -2550,6 +2565,37 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
             self.fail("resumed observer is not alive")
         # Death never fulfills the duty: no terminal receipt was written.
         self.assertFalse((self.state / "peer-watches" / f"{watch_id}.receipt.json").exists())
+
+    def test_settling_dead_observers_watch_stops_its_recorded_native_wait(self):
+        watch_id, pid, _env = self._arm_watch(mode="held")
+        observation_path = self.state / "peer-watches" / f"{watch_id}.observation.json"
+        deadline = time.monotonic() + 10
+        wait_record = {}
+        while time.monotonic() < deadline:
+            with contextlib.suppress(OSError, ValueError):
+                wait_record = json.loads(observation_path.read_text(encoding="utf-8")).get(
+                    "native_wait") or {}
+            if wait_record.get("state") == "started":
+                break
+            time.sleep(0.02)
+        self.assertEqual(wait_record.get("state"), "started", wait_record)
+        wait_pid, wait_start = int(wait_record["pid"]), wait_record["pid_start"]
+        os.kill(pid, signal.SIGKILL)
+        self._wait_for_death(pid)
+        self.assertFalse(fixture_processes._gone(wait_pid, wait_start),
+                         "the native wait outlives its observer by design")
+
+        self._apply_fixture_env(mode="held")
+        self.assertTrue(peer_steward.settle_steward_exited_watch(watch_id))
+        receipt = self.state / "peer-watches" / f"{watch_id}.receipt.json"
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["state"],
+                         "steward-exited")
+        deadline = time.monotonic() + 5
+        while (not fixture_processes._gone(wait_pid, wait_start)
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        self.assertTrue(fixture_processes._gone(wait_pid, wait_start),
+                        "settling the watch left its native wait running")
 
     def test_pending_duties_reach_the_read_only_collector_body_free(self):
         watch_id, pid, _env = self._arm_watch(mode="held")
