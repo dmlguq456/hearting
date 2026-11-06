@@ -299,6 +299,124 @@ class RowRuleTests(EntranceFixture):
         self.assertEqual([row["cycle_id"] for row in rows], [late, tie_a, tie_b])
 
 
+class RowSourceTests(EntranceFixture):
+    """`ROW_SOURCES` is the only door for rows that are not cycle folders."""
+
+    def _plug(self, *sources):
+        saved = E.ROW_SOURCES
+        E.ROW_SOURCES = tuple(sources)
+        self.addCleanup(lambda: setattr(E, "ROW_SOURCES", saved))
+
+    def _note(self, rel="extra/note.md", text="# Note\n\nBody.\n"):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return rel
+
+    def _two_cycles(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Alpha\n\nBody.\n")], sealed_on="2026-01-02T00:00:00Z")
+        self.cycle("2026-01-06_two", "2026-01-06_beta",
+                   [("artifacts/final_report.md", "# Beta\n\nBody.\n")], sealed_on="2026-01-06T00:00:00Z")
+
+    def test_default_is_empty_and_an_empty_source_changes_no_byte(self):
+        self.assertEqual(E.ROW_SOURCES, ())
+        self._two_cycles()
+        self.refresh()
+        names = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")
+        before = {name: (self.root / name).read_bytes() for name in names}
+        self.assertTrue(all(row["kind"] == "cycle" for row in self.rows()))
+        self._plug(lambda root: [])
+        self.assertEqual(self.refresh()["status"], "unchanged")
+        self.assertEqual({name: (self.root / name).read_bytes() for name in names}, before)
+
+    def test_a_source_row_joins_entrance_reports_and_open_in_date_order(self):
+        self._two_cycles()
+        rel = self._note()
+        self._plug(lambda root: [{"kind": "note", "date": "2026-01-04", "title": "Day note",
+                                  "summary": "  one   line ", "doc_path": rel}])
+        self.refresh()
+        rows = self.rows()
+        self.assertEqual([row["date"] for row in rows], ["2026-01-06", "2026-01-04", "2026-01-02"])
+        self.assertEqual(rows[1]["kind"], "note")
+        self.assertEqual((rows[1]["cycle_id"], rows[1]["cycle_path"], rows[1]["extra"]), ("", "", 0))
+        self.assertEqual(rows[1]["summary"], "one line")
+        readme, page = self.entrance(), self.entrance("index.html")
+        self.assertIn("2. 2026-01-04  [Day note](<extra/note.md>)\n   one line", readme)
+        self.assertNotIn("``", readme)
+        self.assertIn('<a href="extra/note.md">Day note</a>', page)
+        self.assertNotIn("note</span>", page.replace("Day note", ""))
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_reports(self.root), 0)
+        self.assertIn("2. 2026-01-04  Day note", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_open(self.root, ["2"]), 0)
+        self.assertEqual(out.getvalue().strip(), str(self.root / rel))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(E._command_open(self.root, ["Day", "note"]), 0)
+        self.assertEqual(out.getvalue().strip(), str(self.root / rel))
+
+    def test_same_date_order_is_deterministic_with_mixed_rows(self):
+        self._two_cycles()
+        a, b = self._note("x/a.md"), self._note("x/b.md")
+        row = lambda rel: {"kind": "note", "date": "2026-01-06", "title": rel, "doc_path": rel}
+        self._plug(lambda root: [row(b), row(a)])
+        first = [r["doc_path"] for r in self.rows()]
+        self._plug(lambda root: [row(a), row(b)])
+        self.assertEqual([r["doc_path"] for r in self.rows()], first)
+        self.assertEqual(len(first), 4)
+
+    def test_invalid_rows_are_skipped(self):
+        self._two_cycles()
+        rel = self._note()
+        (self.root / "extra" / "link.md").symlink_to(self.root / rel)
+        (self.root / "linkdir").symlink_to(self.root / "extra")
+        base = {"kind": "note", "date": "2026-01-04", "title": "T", "doc_path": rel}
+        bad = [
+            {k: v for k, v in base.items() if k != "title"},
+            {k: v for k, v in base.items() if k != "date"},
+            {k: v for k, v in base.items() if k != "kind"},
+            {k: v for k, v in base.items() if k != "doc_path"},
+            dict(base, kind=""),
+            dict(base, kind="cycle"),
+            dict(base, date="2026-1-4"),
+            dict(base, title="  "),
+            dict(base, doc_path=str(self.root / rel)),
+            dict(base, doc_path="extra/../extra/note.md"),
+            dict(base, doc_path="../root/extra/note.md"),
+            dict(base, doc_path="extra/link.md"),
+            dict(base, doc_path="linkdir/note.md"),
+            dict(base, doc_path="extra/missing.md"),
+            dict(base, doc_path="extra"),
+            "not a mapping",
+        ]
+        self._plug(lambda root: bad)
+        self.assertEqual([row["kind"] for row in self.rows()], ["cycle", "cycle"])
+        self._plug(lambda root: bad + [base])
+        self.assertEqual(sorted(row["kind"] for row in self.rows()), ["cycle", "cycle", "note"])
+
+    def test_a_raising_source_is_skipped_and_the_rest_renders(self):
+        self._two_cycles()
+        rel = self._note()
+
+        def boom(root):
+            raise RuntimeError("source failed")
+
+        def lazy(root):
+            yield {"kind": "note", "date": "2026-01-04", "title": "Late", "doc_path": rel}
+            raise RuntimeError("fails after the first row")
+
+        self._plug(boom, lambda root: [{"kind": "note", "date": "2026-01-03", "title": "Kept", "doc_path": rel}], lazy)
+        self.assertEqual(self.refresh()["status"], "written")
+        self.assertEqual([row["title"] for row in self.rows()], ["Beta", "Kept", "Alpha"])
+        self.assertIn("Kept", self.entrance())
+
+
 class LimitTests(EntranceFixture):
     def test_recent_list_stops_at_twenty_and_campaigns_at_ten(self):
         for index in range(30):

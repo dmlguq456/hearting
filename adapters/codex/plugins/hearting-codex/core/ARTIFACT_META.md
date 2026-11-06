@@ -204,6 +204,8 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   `final_report.*`, `report.*`, `summary.md`, `audit-report.md`, `prd.md`), never by a
   manifest `primary`. Manifests are read newest first, up to 300 or 16 MiB each; there is
   no full scan and no cache.
+- **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
+  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same list.
 - **Commands.** `hearting reports` prints the same numbered list in the terminal and
   `hearting open <number|words>` opens one result or, with no argument, the browser
   entrance. Both names are reserved by the one launcher (`tools/install/harness.sh`) in

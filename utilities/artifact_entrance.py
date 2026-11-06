@@ -19,6 +19,15 @@ rendered; every link is a relative POSIX path from the root.
 Reading cost: directory enumeration reuses `artifact_locator.iter_campaign_dirs`
 and `iter_cycle_dirs`; manifests are read newest first, only until the recent
 list is full or `MAX_MANIFESTS` is reached (a full scan is never done).
+
+Row sources: every recent row carries an internal `kind` (not rendered); rows
+built from cycle folders are `"cycle"`.  `ROW_SOURCES` is the one place where
+rows that are not cycle folders can join the recent list.  It is an ordered
+tuple of callables, empty by default; each takes the artifact root and returns
+rows (`kind`, `date`, `title`, `doc_path`, optional `summary`/`extra`/
+`cycle_id`/`cycle_path`).  `scan` merges the valid rows before the sort and the
+limit; an invalid row or a source that raises is skipped.  This module names no
+file format, file name or location for such rows.
 """
 from __future__ import annotations
 
@@ -29,7 +38,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,6 +62,10 @@ MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
 SUMMARY_CHARS = 120
 MARKER = "<!-- hearting:artifact-entrance v1 -->"
+
+# Hook for rows that are not cycle folders (see the module header).
+ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = ()
+_DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
 FIRST_RECORD_REL = ".runtime/artifact-entrance.json"
@@ -221,7 +234,12 @@ def _summarize(text: str, *, html_document: bool) -> str:
     source = _summary_source_html(text) if html_document else _summary_source_markdown(text)
     if not source:
         return ""
-    collapsed = " ".join(_nfc(source).split())
+    return _clip(source)
+
+
+def _clip(text: str) -> str:
+    """Whitespace folded and cut at SUMMARY_CHARS code points, as every summary is."""
+    collapsed = " ".join(_nfc(text).split())
     if len(collapsed) <= SUMMARY_CHARS:
         return collapsed
     return collapsed[:SUMMARY_CHARS].rstrip() + "…"
@@ -447,6 +465,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             row["has_audience"] for row in rows if row.get("audience") == "user") else "name-rule"
         snapshot["selected_by"][selected_by] += 1
         recent.append({
+            "kind": "cycle",
             "cycle_id": cycle_id,
             "cycle_path": locator,
             "date": date,
@@ -461,7 +480,8 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             group["doc_cycles"] += 1
             group["docs"].append({"title": title, "path": document_rel})
 
-    recent.sort(key=lambda row: (_desc(row["date"]), row["cycle_id"]))
+    recent.extend(_source_rows(root))
+    recent.sort(key=lambda row: (_desc(row["date"]), row["cycle_id"] or row["doc_path"], row["doc_path"]))
     snapshot["recent"] = recent[:recent_limit]
     groups = []
     for row in snapshot["all_campaigns"]:
@@ -471,6 +491,67 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         groups.append(live)
     snapshot["campaigns"] = groups[:campaign_limit]
     return snapshot
+
+
+def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
+    """One validated non-cycle row, or None when any required part is missing or unsafe."""
+    if not isinstance(raw, Mapping):
+        return None
+    kind, date, title, doc = (raw.get("kind"), raw.get("date"), raw.get("title"), raw.get("doc_path"))
+    if not all(isinstance(value, str) for value in (kind, date, title, doc)):
+        return None
+    kind, date, title, doc = _nfc(kind).strip(), _nfc(date), _nfc(title).strip(), _nfc(doc)
+    if not kind or kind == "cycle" or not title or not _DATE_FULL.match(date):
+        return None
+    if not doc or doc.startswith("/") or "\\" in doc or "\x00" in doc:
+        return None
+    parts = doc.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    path = root
+    try:
+        for part in parts:
+            path = path / part
+            if path.is_symlink():
+                return None
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    summary = raw.get("summary", "")
+    extra = raw.get("extra", 0)
+    ids = []
+    for key in ("cycle_id", "cycle_path"):
+        value = raw.get(key, "")
+        ids.append(_nfc(value) if isinstance(value, str) else "")
+    return {
+        "kind": kind,
+        "cycle_id": ids[0],
+        "cycle_path": ids[1],
+        "date": date,
+        "title": " ".join(title.split()),
+        "summary": _clip(summary) if isinstance(summary, str) else "",
+        "doc_path": doc,
+        "extra": extra if isinstance(extra, int) and not isinstance(extra, bool) and extra > 0 else 0,
+        "selected_by": "source",
+    }
+
+
+def _source_rows(root: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for source in ROW_SOURCES:
+        try:
+            candidates = list(source(root))
+        except Exception:
+            continue  # the entrance never fails because of a source
+        for raw in candidates:
+            try:
+                row = _source_row(root, raw)
+            except Exception:
+                row = None
+            if row is not None:
+                rows.append(row)
+    return rows
 
 
 def _desc(value: str) -> "_Desc":
@@ -527,8 +608,9 @@ def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     lines: List[str] = []
     for number, row in enumerate(snapshot["recent"], start=1):
         suffix = f"  ({t('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
+        where = f"  — `{_md_href(row['cycle_path'])}`" if row["cycle_path"] else ""
         lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_md_href(row['doc_path'])}>)"
-                     f"  — `{_md_href(row['cycle_path'])}`{suffix}")
+                     f"{where}{suffix}")
         if row["summary"]:
             lines.append(f"   {_md_text(row['summary'])}")
     if not lines:
@@ -651,9 +733,10 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
     for row in snapshot["recent"]:
         suffix = f" &#183; {_escape(t('entrance.more', count=_count(row['extra'])))}" if row["extra"] else ""
         summary = f"<br><span class=\"meta\">{_escape(row['summary'])}</span>" if row["summary"] else ""
+        where = f" &#183; {_escape(row['cycle_path'])}" if row["cycle_path"] else ""
         body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
                     f'<a href="{_href(row["doc_path"])}">{_escape(row["title"])}</a>'
-                    f'<span class="meta"> &#183; {_escape(row["cycle_path"])}{suffix}</span>{summary}</li>')
+                    f'<span class="meta">{where}{suffix}</span>{summary}</li>')
     if not snapshot["recent"]:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
     body.extend(["</ol>", f"<h2>{_escape(t('entrance.recent_campaigns'))}</h2>", "<ul>"])
