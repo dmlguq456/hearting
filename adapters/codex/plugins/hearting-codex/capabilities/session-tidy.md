@@ -41,11 +41,14 @@ Existing manual session-tidy, clear and handoff behavior remains unchanged.
 
 Automatic idle tidy has one shared policy for Claude, Codex and OpenCode.
 The optional `${XDG_CONFIG_HOME:-~/.config}/hearting/session-tidy.json` keeps
-`idle.enabled=true`, `idle.wait_seconds=3240`, `idle.min_tokens=500000` and
+`idle.enabled=true`, `idle.wait_seconds=21600`, `idle.min_tokens=500000` and
 `idle.cache_margin_seconds=60` as its defaults. The existing
 `{"idle":{"enabled":false}}` switch disables it; installation never enables
 an operator-disabled policy. Unknown latest input usage is ineligible. The wait
 is a configured operating default, not a verified provider cache lifetime.
+The six-hour default tidies after the cache has cooled rather than just before
+expiry. `cache_margin_seconds` remains readable for compatibility and is recorded
+in the booking, but has no scheduling effect and does not shorten the wait.
 Idle means no activity for that wait, counted from the end of the latest user,
 peer, notification, completion or runtime-resume turn; Hearting's own tidy-request
 turn is excluded. The default context floor matches the recommendation notice's

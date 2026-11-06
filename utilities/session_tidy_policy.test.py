@@ -18,6 +18,16 @@ class SessionTidyPolicyTests(unittest.TestCase):
                 self.assertEqual(selected["min_tokens"], 500000)
             self.assertFalse(path.exists())
 
+    def test_default_idle_wait_is_six_hours_for_every_harness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "absent-config.json"
+            for harness in ("claude", "codex", "opencode"):
+                selected, reason = policy.idle_policy(harness, path=path)
+                self.assertEqual(reason, "")
+                self.assertEqual(selected["wait_seconds"], 21600)
+                self.assertEqual(selected["cache_margin_seconds"], 60)
+            self.assertFalse(path.exists())
+
     def test_absent_uses_defaults_without_creating_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hearting" / "session-tidy.json"

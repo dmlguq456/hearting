@@ -10,7 +10,7 @@ from typing import Mapping
 
 DEFAULT_IDLE = {
     "enabled": True,
-    "wait_seconds": 3240,
+    "wait_seconds": 21600,
     "min_tokens": 500000,
     "cache_margin_seconds": 60,
 }

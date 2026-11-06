@@ -46,6 +46,11 @@ class IdleObserverTests(unittest.TestCase):
         self.caller_patch.start()
         self.addCleanup(self.caller_patch.stop)
         self.started = []
+        # An explicit short wait keeps the existing clock fixtures readable.
+        # The product's unset six-hour default is exercised separately below.
+        config = self.iso.xdg_config / "hearting" / "session-tidy.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"idle": {"wait_seconds": 3240}}), encoding="utf-8")
 
     def transcript(self, sid: str, tokens: int | None):
         path = self.iso.root / f"{sid}.jsonl"
@@ -226,6 +231,26 @@ class IdleObserverTests(unittest.TestCase):
             self.assertEqual(held["idle"]["due_at"], 4240)
             self.assertEqual(clear.validate_idle_request(clear.reservation_path(seat.key),
                 held["nonce"], now=4241)[1], "")
+
+    def test_default_six_hour_wait_starts_after_the_latest_activity(self):
+        config = self.iso.xdg_config / "hearting" / "session-tidy.json"
+        # This compatibility margin is retained but must not shorten the wait.
+        config.write_text(json.dumps({"idle": {"cache_margin_seconds": 900}}), encoding="utf-8")
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.observe_claude(tokens=600000, now=1000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            first = clear.read_reservation(seat.key)
+            self.assertEqual(first["idle"]["due_at"], 1000 + 21600)
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+            self.observe_claude(tokens=600000, event_id="result-handled", now=3000)
+            held = clear.read_reservation(seat.key)
+            self.assertEqual((held["nonce"], held["idle"]["due_at"]), (first["nonce"], 3000 + 21600))
+            path = clear.reservation_path(seat.key)
+            for now in (3000 + 3240, 3000 + 21599):
+                self.assertEqual(clear.validate_idle_request(path, held["nonce"], now=now)[1], "not-due")
+            self.assertEqual(clear.validate_idle_request(path, held["nonce"], now=3000 + 21601)[1], "")
 
     def test_every_real_completed_turn_moves_the_existing_idle_window(self):
         with self.iso.patched_environ(self.extra), \
