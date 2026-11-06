@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -83,7 +84,7 @@ def _authorize_active_cleanup(root: Path, operation: str, target: Path, cycle_id
         raise ProducerError("cleanup-scope-violation", exc.detail) from exc
 
 
-def finalize(
+def _finalize(
     root: Path,
     *,
     cycle_id: str,
@@ -568,7 +569,7 @@ def finalize(
         if kept_scan is not None:
             _keep_prescan_digests(root, cycle_id, kept_scan)  # the first refresh need not hash it all again
         return sealed
-    return finalize(
+    return _finalize(
         root, cycle_id=cycle_id, state=state, primary=primary, publication=publication,
         allow_open_route=allow_open_route, allocator=alloc, now=now, crash_after_manifest=crash_after_manifest,
         exclude_hidden=exclude_hidden, adopt_root_outputs=adopt_root_outputs, abandon_reason=abandon_reason,
@@ -579,6 +580,20 @@ def finalize(
         _prescan=_prescan_cycle(root, cycle_id, unless_recorded=expected_binding,
                                 include_open=True, exclude_hidden=exclude_hidden,
                                 budget=_scan_budget))
+
+
+def finalize(root: Path, *, cycle_id: str, **kwargs: Any) -> Dict[str, Any]:
+    """Seal one cycle and request a best-effort entrance refresh without waiting.
+
+    The entrance worker runs outside the admission lock and the caller's stack;
+    neither a slow refresh nor its failure changes the seal result."""
+    result = _finalize(root, cycle_id=cycle_id, **kwargs)
+    try:
+        import artifact_entrance  # lazy: the seal never depends on the entrance
+        artifact_entrance.request_refresh(Path(root), cycle_id=cycle_id)
+    except Exception as exc:  # noqa: BLE001 -- the entrance never changes or fails a seal
+        print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
+    return result
 
 
 def _finalize_deleted_locked(root: Path, record: Mapping[str, Any], *, state: str, now: Optional[float],

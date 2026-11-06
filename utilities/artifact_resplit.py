@@ -1454,7 +1454,7 @@ def _build_loose_inventory(root: Path) -> Dict[str, Any]:
     entries: List[Tuple[str, Path]] = []
     for item in sorted(root.iterdir(), key=lambda p: p.name):
         name = item.name
-        if name.startswith(".") or name == "_scratch":
+        if P._is_runtime_owned_top_level(name):
             continue
         if item.is_symlink():
             continue
