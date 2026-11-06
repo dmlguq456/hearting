@@ -16,8 +16,27 @@ import artifact_producer
 
 CLI = [sys.executable, str(ROOT / "utilities/capability-route.py")]
 
+# Reconstruct an actual pre-journal compiler seal before compose admits or
+# starts it. The old reader/finish assertions below retain their v1 meaning;
+# fresh public CLI routes are tested separately with no compiler override.
+LEGACY_COMPOSE = '''import importlib.util,sys
+spec=importlib.util.spec_from_file_location('legacy_contract_cli',sys.argv[1])
+module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
+compose=module.compose_route
+def historical(**kwargs):
+    route=compose(**kwargs)
+    route.pop('artifact_storage_contract_version',None)
+    route['route_hash']=module.route_hash(route)
+    route['route_id']='rt-'+route['route_hash'].split(':',1)[1][:16]
+    return route
+module.compose_route=historical
+sys.argv=sys.argv[1:]
+raise SystemExit(module.main())
+'''
+
 
 class LegacyRootDirectRouteTest(unittest.TestCase):
+    historical = True
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="legacy-root-direct-")
         self.addCleanup(self.temp.cleanup)
@@ -55,6 +74,8 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
                               "--parent-harness", "codex"]
 
     def run_cli(self, argv):
+        if self.historical and len(argv) > 2 and argv[2] == "compose":
+            argv = [sys.executable, "-c", LEGACY_COMPOSE, *argv[1:]]
         return subprocess.run(argv, cwd=self.repo, env=self.env, capture_output=True, text=True)
 
     def test_compose_start_returns_legacy_compat_env_not_a_traceback(self):
@@ -91,7 +112,12 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
 
     def test_start_preserves_explicit_inactive_fallback_denial(self):
         self.env["AGENT_ARTIFACT_INACTIVE_FALLBACK"] = "deny"
-        denied = self.run_cli(self.compose + ["--start"])
+        composed = self.run_cli(self.compose)
+        self.assertEqual(composed.returncode, 0, composed.stderr)
+        route_file = json.loads(composed.stdout)["route_file"]
+        # Use the real CLI entrypoint for the refusal, including its typed
+        # ProducerError handler, after reconstructing the historical seal.
+        denied = self.run_cli(CLI + ["start", "--route", route_file, "--jobs", str(self.jobs)])
         self.assertEqual(denied.returncode, 64, denied.stderr)
         self.assertIn("cutover-inactive-fallback-denied", denied.stderr)
         self.assertNotIn("Traceback", denied.stderr)
@@ -129,6 +155,38 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
         self.assertEqual(denied.returncode, 64, denied.stderr)
         self.assertIn("finish-route-already-closed", denied.stderr)
         self.assertEqual(outcome.read_bytes(), before)
+
+
+class JournalRootDirectRouteTest(unittest.TestCase):
+    historical = False
+    setUp = LegacyRootDirectRouteTest.setUp
+    run_cli = LegacyRootDirectRouteTest.run_cli
+
+    def test_fresh_start_and_finish_use_a_journal_without_legacy_writes_or_activation(self):
+        # "deny" forbids writing the legacy fallback buckets. A fresh journal
+        # neither enables that fallback nor moves the existing legacy payload.
+        self.env["AGENT_ARTIFACT_INACTIVE_FALLBACK"] = "deny"
+        started = self.run_cli(self.compose + ["--start"])
+        self.assertEqual(started.returncode, 0, started.stderr)
+        receipt = json.loads(started.stdout.strip().splitlines()[-1])
+        route_file = Path(receipt["route_file"])
+        route = json.loads(route_file.read_text())
+        self.assertEqual(route["artifact_storage_contract_version"], 2)
+        self.assertEqual(receipt["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"], "")
+        execution = Path(route["cwd"])
+        (execution / "README.md").write_text("fixed\n")
+        subprocess.run(["git", "-C", str(execution), "commit", "-qam", "fix"], check=True)
+        summary = Path(self.temp.name) / "summary.md"
+        summary.write_text("Fixed the README.\n")
+        finished = self.run_cli(CLI + ["finish", "--route", str(route_file),
+            "--evidence", str(execution / "README.md"), "--summary-file", str(summary)])
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        done = json.loads(finished.stdout)
+        self.assertEqual(done["schema"], "finish_receipt_v2")
+        self.assertEqual(len(done["entries"]), 1)
+        self.assertEqual((self.root / "analysis_project/summary.md").read_text(), "legacy\n")
+        self.assertFalse(artifact_producer.cutover_path(self.root).exists())
+        self.assertEqual(list((self.root / "campaigns").glob("*/*/.cycle.json")), [])
 
 
 if __name__ == "__main__":
