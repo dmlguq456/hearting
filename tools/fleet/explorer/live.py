@@ -347,13 +347,7 @@ def _last_input(display, now):
     if not isinstance(human, Mapping):
         return ui_text("fleet.input.none" if display.get("human_state") == "none"
                        else "fleet.input.unknown")
-    at = _num(human.get("at"))
-    age = "·"
-    if at is not None:
-        seconds = max(0, int(now - at))
-        scale, unit = ((86400, "days") if seconds >= 86400 else (3600, "hours")
-                       if seconds >= 3600 else (60, "minutes") if seconds >= 60 else (1, "seconds"))
-        age = ui_text("fleet.input.age_" + unit, count=seconds // scale)
+    age = (_ago(human.get("at"), now) or "?").removesuffix(" ago")
     return ui_text("fleet.input.value", age=age, text=human.get("text") or "·")
 
 

@@ -146,6 +146,8 @@ working, idle, or waiting for you. Below it, one screen per question:
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
 
+LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
+
 ### Key screens
 
 <table>
