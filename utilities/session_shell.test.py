@@ -1,5 +1,8 @@
 """Private, real-process identity and local-control checks; no operating TUI."""
 from pathlib import Path
+from contextlib import ExitStack
+import importlib.util
+import io
 import json
 import os
 import signal
@@ -129,6 +132,34 @@ class SessionShellTest(unittest.TestCase):
         row = self.binding(); self.serve(row, change_reply=True)
         reply = shell.control(row, "panel", expanded=True)
         self.assertFalse(reply["ok"]); self.assertFalse(reply["not_started"])
+
+    def test_native_start_registers_claude_and_codex_display_identity(self):
+        import session_tidy
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness), mock.patch.object(shell, "lifecycle") as report:
+                sid = "00000000-0000-4000-8000-000000000052"
+                env = dict(os.environ, HEARTING_SHELL_SOCKET=str(self.root / "native.sock"),
+                           HEARTING_SHELL_TOKEN="synthetic-private-control-token")
+                session_tidy.run_hook(harness, "start", sid, source="resume",
+                                      cwd=str(self.root), env=env)
+                report.assert_called_once_with(harness, "start", sid, env=env)
+
+    def test_codex_stop_reports_completion_to_its_wrapped_display(self):
+        path = Path(__file__).resolve().parents[1] / "adapters/codex/hooks/stop-lifecycle.py"
+        spec = importlib.util.spec_from_file_location("shell_codex_stop_fixture", path)
+        stop = importlib.util.module_from_spec(spec); spec.loader.exec_module(stop)
+        sid = "00000000-0000-4000-8000-000000000052"
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.dict(os.environ, {"HEARTING_SHELL_SOCKET": str(self.root / "native.sock")}))
+            patches.enter_context(mock.patch.object(stop, "_worker", return_value=False))
+            patches.enter_context(mock.patch("sys.stdin", io.StringIO(json.dumps({"session_id": sid}))))
+            for target in ("session_tidy_idle.launch_observer", "session_summary_trigger.launch_trigger",
+                           "turn_change_record.launch", "artifact_checkpoint_trigger.launch_for_session",
+                           "fleet.interaction.clear_wait"):
+                patches.enter_context(mock.patch(target))
+            report = patches.enter_context(mock.patch.object(shell, "lifecycle"))
+            self.assertEqual(stop.main(), 0)
+            report.assert_called_once_with("codex", "stop", sid)
 
 
 if __name__ == "__main__":

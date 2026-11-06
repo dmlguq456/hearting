@@ -15,6 +15,8 @@ and an unchanged input generation. Human drafts and concurrent typing survive
 the operation. Unknown readiness retains the existing pending delivery. Select
 one verified transport for a message; an uncertain submission never triggers
 an alternate send. Codex keeps its native queue and exact receive evidence.
+Native start, prompt and turn-completion callbacks update display identity and
+state for Claude and Codex alike; they never replace the Codex queue with input.
 
 `Ctrl+]` or Fleet's exact-session display request expands the same session's
 routes, question list, received peer context and last real human input. The
