@@ -1278,6 +1278,32 @@ def source_epoch(route: dict, node: dict, digest: str, completion_dir: str | Pat
     return maximum + (digest != latest)
 
 
+def _inline_provenance_valid(marker: dict, manifest_sha256: str | None = None) -> bool:
+    subject = marker.get("source_subject") or {}
+    provenance = subject.get("inline_provenance")
+    if not isinstance(provenance, dict):
+        return False
+    kind = provenance.get("kind")
+    attempt = marker.get("attempt_id")
+    if (set(provenance) != {"kind", "attempt_id", "manifest_sha256"}
+            or kind not in {"owner-inline", "native-subagent"}
+            or not attempt or provenance.get("attempt_id") != attempt
+            or marker.get("reviewer_kind") != kind
+            or marker.get("registered_worker") is not False
+            or subject.get("binding_digest") is not None
+            or not re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("manifest_sha256", "")))
+            or (manifest_sha256 is not None and provenance["manifest_sha256"] != manifest_sha256)):
+        return False
+    if kind == "owner-inline":
+        return (marker.get("review_independence") == "degraded"
+                and marker.get("reviewer_identity") == attempt
+                and marker.get("execution_surface") == "inline")
+    return (marker.get("review_independence") == "independent"
+            and marker.get("execution_surface") in {"inline", "claude-subagent", "codex-native-subagent"}
+            and bool(marker.get("reviewer_identity"))
+            and re.fullmatch(r"[0-9a-f]{64}", str(marker.get("reviewer_identity_sha256", ""))) is not None)
+
+
 def _inline_evidence_subject_unchanged(route: dict, node: dict, evidence_sha256: str,
                                        digest: str, epoch: int,
                                        completion_dir: str | Path,
@@ -1289,7 +1315,7 @@ def _inline_evidence_subject_unchanged(route: dict, node: dict, evidence_sha256:
     for generation in _source_generations(route):
         candidate = next((item for item in generation.get("nodes", [])
                           if item.get("id") == node.get("id")
-                          and is_implementation_review(generation, item)), None)
+                          and item.get("kind") == "review-worker"), None)
         if candidate is None:
             continue
         node_id = str(candidate["id"])
@@ -1334,20 +1360,7 @@ def _inline_evidence_subject_unchanged(route: dict, node: dict, evidence_sha256:
                 else:
                     provenance_valid = True
                     if "inline_provenance" in subject:
-                        provenance = subject["inline_provenance"]
-                        provenance_valid = not (
-                            not isinstance(provenance, dict)
-                            or set(provenance) != {"kind", "attempt_id", "manifest_sha256"}
-                            or provenance.get("kind") != "owner-inline"
-                            or provenance.get("attempt_id") != marker["attempt_id"]
-                            or not re.fullmatch(r"[0-9a-f]{64}", str(
-                                provenance.get("manifest_sha256", "")))
-                            or marker.get("reviewer_kind") != "owner-inline"
-                            or marker.get("review_independence") != "degraded"
-                            or marker.get("reviewer_identity") != marker["attempt_id"]
-                            or marker.get("registered_worker") is not False
-                            or marker.get("execution_surface") != "inline"
-                        )
+                        provenance_valid = _inline_provenance_valid(marker)
                     if not provenance_valid:
                         unknown = True
                     elif subject["digest"] != digest or subject["epoch"] != epoch:
@@ -1368,9 +1381,27 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
                    attempt_metadata: dict | None = None, jobs: str | Path | None = None,
                    worktree: str | Path | None = None, completion_dir: str | Path,
                    owner_inline: bool = False,
+                   reviewer_kind: str | None = None,
                    evidence_sha256: str | None = None) -> dict | None:
-    """Subject fields to put on a newly published completion marker."""
+    """Subject fields for a fresh completion.
+
+    ``owner_inline`` also selects the existing native fallback path; its
+    reviewer kind and independent transcript identity remain distinct.
+    """
     reviewed_input = _review_input_binding(jobs, attempt_metadata)
+    if owner_inline and reviewed_input is None:
+        import review_input
+        if review_input.is_review_node(node):
+            from dispatch_contract import DispatchContractError
+            try:
+                reviewed_input = review_input.resolve_input(
+                    route, node, _currency_registry_path(route, completion_dir, jobs))
+            except DispatchContractError:
+                # No selected input was sealed for this unregistered attempt.
+                # A legacy/synthetic missing predecessor stays source-unknown;
+                # resolving a fresh binding is not another input gate. A bad
+                # existing binding raised above and is never hidden here.
+                reviewed_input = None
     if is_deploy_review(route, node) and not has_review_subject(route, node, jobs):
         return None  # A request without scoped inputs keeps its existing identity.
     family = _subject_family(route, node, reviewed_input)
@@ -1381,6 +1412,18 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
         family = "source"
     if family is None:
         return None
+    if owner_inline and attempt_id and node.get("kind") == "review-worker":
+        current = observe(route, node, worktree=worktree, jobs=jobs, reviewed_input=reviewed_input)
+        epoch = source_epoch(route, node, current["digest"], completion_dir, family=family)
+        if evidence_sha256 is not None:
+            _inline_evidence_subject_unchanged(
+                route, node, evidence_sha256, current["digest"], epoch, completion_dir, attempt_id)
+        return {"schema_version": SCHEMA_VERSION, "digest": current["digest"], "epoch": epoch,
+                **({"family": family} if family != "source" else {}),
+                **({"reviewed_input": {"path": reviewed_input["path"]}}
+                   if family.startswith("document:") else {}),
+                "inline_provenance": {"kind": reviewer_kind or "owner-inline",
+                    "attempt_id": attempt_id, "manifest_sha256": _sha(_canonical(current["manifest"]))}}
     if has_source_subject(route, node) and not (is_implementation_review(route, node)
                                                 or is_source_test(node)):
         current = observe(route, node, worktree=worktree)
@@ -1388,25 +1431,14 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
         return {"schema_version": SCHEMA_VERSION, "digest": current["digest"], "epoch": epoch,
                 "manifest_sha256": _sha(_canonical(current["manifest"]))}
     if is_implementation_review(route, node) or is_source_test(node):
-        if is_implementation_review(route, node) and owner_inline and attempt_id:
-            current = observe(route, node, worktree=worktree)
-            epoch = source_epoch(route, node, current["digest"], completion_dir)
-            if evidence_sha256 is not None:
-                _inline_evidence_subject_unchanged(
-                    route, node, evidence_sha256, current["digest"], epoch,
-                    completion_dir, attempt_id,
-                )
-            return {"schema_version": SCHEMA_VERSION, "digest": current["digest"],
-                    "epoch": epoch, "inline_provenance": {
-                        "kind": "owner-inline", "attempt_id": attempt_id,
-                        "manifest_sha256": _sha(_canonical(current["manifest"]))}}
         if not attempt_metadata:
             if is_source_test(node):
                 raise SourceSubjectError("review-source-binding-missing", str(attempt_id or ""))
             return None
         registered = attempt_metadata.get("registered_worker") in (True, 1, "1", "true")
         inline = (is_source_test(node) and not registered
-                  and attempt_metadata.get("execution_surface") == "inline")
+                  and attempt_metadata.get("execution_surface") in {
+                      "inline", "claude-subagent", "codex-native-subagent"})
         record = (read_binding(jobs, attempt_metadata, required=is_source_test(node) and not inline)
                   if jobs else None)
         if record is None:
@@ -1518,17 +1550,18 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
     reviewed_input = None
     attempt_id = marker.get("attempt_id")
     binding_digest = subject.get("binding_digest")
-    inline_review = implementation_review and "inline_provenance" in subject
+    inline_review = node.get("kind") == "review-worker" and "inline_provenance" in subject
     inline_test = (source_test and not binding_digest
                    and marker.get("registered_worker") is False
-                   and marker.get("execution_surface") == "inline")
+                   and marker.get("execution_surface") in {
+                       "inline", "claude-subagent", "codex-native-subagent"})
     if implementation_review and not binding_digest and not inline_review:
         return "superseded", "completion-review-source-binding-unknown"
     if source_test and not binding_digest and not inline_test:
         return "superseded", "completion-test-source-binding-unknown"
     record = None
     row = None
-    needs_binding = ((isinstance(family, str) and family.startswith("document:"))
+    needs_binding = not inline_review and ((isinstance(family, str) and family.startswith("document:"))
                      or family == "design-build"
                      or ((implementation_review or source_test) and not (inline_review or inline_test)))
     if needs_binding:
@@ -1583,8 +1616,16 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
             return "integrity-broken:identity-mismatch", prefix + "-binding-invalid"
     if isinstance(family, str) and family.startswith("document:"):
         try:
-            reviewed_input = _review_input_binding(jobs_path, row)
-        except SourceSubjectError as exc:
+            if inline_review:
+                selected_input = subject.get("reviewed_input")
+                if not isinstance(selected_input, dict):
+                    return "integrity-broken:identity-mismatch", "completion-review-input-binding-missing"
+                reviewed_input = review_input.resolve_input(
+                    route, node, _currency_registry_path(route, completion_dir, jobs),
+                    reviewed_evidence=selected_input.get("path"))
+            else:
+                reviewed_input = _review_input_binding(jobs_path, row)
+        except (SourceSubjectError, DispatchContractError):
             return "integrity-broken:identity-mismatch", "completion-review-subject-input-binding-invalid"
         if reviewed_input is None:
             return "integrity-broken:identity-mismatch", "completion-review-input-binding-missing"
@@ -1605,18 +1646,7 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
                   "completion-source-stale")
         return "superseded", reason
     if inline_review:
-        inline = subject["inline_provenance"]
-        if (not isinstance(inline, dict)
-                or set(inline) != {"kind", "attempt_id", "manifest_sha256"}
-                or inline.get("kind") != "owner-inline"
-                or not attempt_id or inline.get("attempt_id") != attempt_id
-                or inline.get("manifest_sha256") != _sha(_canonical(current["manifest"]))
-                or marker.get("reviewer_kind") != "owner-inline"
-                or marker.get("review_independence") != "degraded"
-                or marker.get("reviewer_identity") != attempt_id
-                or marker.get("registered_worker") is not False
-                or marker.get("execution_surface") != "inline"
-                or binding_digest is not None):
+        if not _inline_provenance_valid(marker, _sha(_canonical(current["manifest"]))):
             return "integrity-broken:identity-mismatch", "completion-review-inline-provenance-invalid"
     elif inline_test and subject.get("manifest_sha256") != _sha(_canonical(current["manifest"])):
         return "integrity-broken:identity-mismatch", "completion-test-source-manifest-invalid"

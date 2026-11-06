@@ -29,7 +29,7 @@ from route_authority import RELAUNCH_STABLE_KEYS as _RELAUNCH_STABLE_KEYS
 from dispatch_contract_base import (
     _cancellation_quiescence_receipt_record, _delivery_intent_values,
     _has_persisted_process_identity, _MODULE_ROOT, _updated_attempt_metadata,
-    ATTEMPT_DESCENDANT_PROOF, attempt_row_never_started, DispatchContractError, end_with_test,
+    ATTEMPT_DESCENDANT_PROOF, GROUP_REAP_PROOF, attempt_row_never_started, DispatchContractError, end_with_test,
     foreground_review_eligible, governance_environment, parse_registry_metadata,
     row_has_attempt, SealedForegroundOutcome,
 )
@@ -47,7 +47,7 @@ from dispatch_contract_process import (
     _detached_group_drain_receipt, _supervisor_lease_payload_matches, _tagged_residue_receipt,
     _terminal_cleanup_values, _validated_supervisor_lease_path, attempt_process_quiescence,
     attempt_scan_namespace_authority, attempt_tagged_descendants, CLEANUP_RECEIPT_TYPE,
-    process_group_observation, process_namespace_identity, process_start_ticks,
+    process_group_observation, process_namespace_identity, process_start_ticks, process_observation,
     prove_attempt_quiescence,
 )
 
@@ -124,7 +124,7 @@ def _resolve_attempt_cleanup(jobs: Path, attempt_id: str, *, apply: bool = False
 
 
 def resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) -> dict[str, object]:
-    """Repeat the reap watcher's drain observation for a residue-sealed open row."""
+    """Repeat the existing drain observation after residue or a lost reap watcher."""
     try:
         return _resolve_residue_drain(Path(jobs), attempt_id, apply=apply)
     except (OSError, ValueError, DispatchContractError) as error:
@@ -133,13 +133,16 @@ def resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) -
 
 
 def _resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) -> dict[str, object]:
-    """Observe a residue-sealed open row again; record the watcher's clean drain once it is empty.
+    """Repeat the watcher's clean drain for residue or a lost watcher.
 
     The watcher seals ``attempt-tagged-residue-v1`` and exits, so nobody sees
     the survivors leave. This makes the same group and tagged-descendant
     observation from the recording namespace and, only when both are empty,
-    writes the two keys the watcher itself writes for a clean drain. It creates
-    no new evidence kind; residue history stays on the row. Observations run
+    writes the fields the watcher itself writes for a clean drain. The same
+    observation repairs a detached attempt whose watcher exited before its
+    receipt: prove the recorded watcher is gone before scanning the full group
+    and tagged descendants. No new evidence kind is created; history stays.
+    Observations run
     outside the registry lock; the write is one compare-and-set.
     """
     matches = [line.split("\t") for line in jobs.read_text(encoding="utf-8").splitlines()
@@ -154,16 +157,38 @@ def _resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) 
     if fields[1] not in {"open", "running"}:
         return {**result, "reason": "residue-open-row-required"}
     validate_attempt_metadata(metadata)
-    if not _tagged_residue_receipt(metadata):
+    residue = _tagged_residue_receipt(metadata)
+    lost_watcher = (metadata.get("registered_worker") == "1"
+                    and metadata.get("pid_scope") == "namespace-local"
+                    and metadata.get("launch_lifecycle") == "detached"
+                    and metadata.get("reap_watch") == "post-exit"
+                    and str(metadata.get("reap_watch_pid", "")).isdecimal()
+                    and int(metadata["reap_watch_pid"]) > 0
+                    and not _detached_group_drain_receipt(metadata))
+    if not residue and not lost_watcher:
         return {**result, "reason": "residue-receipt-absent"}
-    if (process_namespace_identity() != metadata["pid_observer_ns"]
+    if (process_namespace_identity() != metadata.get("pid_observer_ns")
+            or (not residue and metadata.get("pid_ns") != metadata.get("pid_observer_ns"))
             or not attempt_scan_namespace_authority(metadata)):
         return {**result, "state": "unverifiable", "reason": "residue-observer-namespace-mismatch"}
     pid, pgid, start = metadata.get("pid", ""), metadata.get("pgid", ""), metadata.get("pid_start", "")
-    if not (pid.isdecimal() and pgid == pid and start):
+    if not (pid.isdecimal() and int(pid) > 0 and pgid == pid and start):
         return {**result, "state": "unverifiable", "reason": "residue-identity-invalid"}
-    if process_start_ticks(int(pid)) == start:
-        return {**result, "state": "live", "reason": "governed-leader-live"}
+    if residue:
+        if process_start_ticks(int(pid)) == start:
+            return {**result, "state": "live", "reason": "governed-leader-live"}
+    else:
+        visibility, observed_start, process_state = process_observation(int(pid))
+        if visibility == "inaccessible":
+            return {**result, "state": "unverifiable", "reason": "governed-leader-unverifiable"}
+        if visibility == "present" and observed_start == start and process_state != "Z":
+            return {**result, "state": "live", "reason": "governed-leader-live"}
+    if lost_watcher and not residue:
+        watcher_visibility, _watcher_start, watcher_state = process_observation(int(metadata["reap_watch_pid"]))
+        if watcher_visibility == "inaccessible":
+            return {**result, "state": "unverifiable", "reason": "reap-watcher-unverifiable"}
+        if watcher_visibility == "present" and watcher_state != "Z":
+            return {**result, "state": "live", "reason": "reap-watcher-live"}
     group = process_group_observation(int(pgid))
     descendants = attempt_tagged_descendants(metadata)
     if "unverifiable" in {group.state, descendants.state}:
@@ -178,11 +203,16 @@ def _resolve_residue_drain(jobs: Path, attempt_id: str, *, apply: bool = False) 
         return {**result, "state": "live", "reason": "governed-group-live"}
     values = {"attempt_descendant_proof": ATTEMPT_DESCENDANT_PROOF,
               "attempt_descendant_observer_ns": metadata["pid_observer_ns"]}
+    if not residue:
+        values.update(launch_outcome="governed-process-group-drained",
+                      group_reap_proof=GROUP_REAP_PROOF, group_reap_pgid=pgid)
+        values.update(_terminal_cleanup_values({**metadata, **values}))
     if not apply:
         return {**result, "state": "drained", "reason": "residue-drain-proof-available"}
     changed = annotate_attempt_row_if(jobs, attempt_id, values, lambda fresh: fresh == fields)
     return {**result, "state": "drained", "changed": changed,
-            "reason": "residue-drain-refreshed" if changed else "residue-row-changed"}
+            "reason": ("residue-drain-refreshed" if residue else "post-exit-drain-refreshed")
+                      if changed else "residue-row-changed"}
 
 
 def _retry_route_related(source, candidate) -> bool:

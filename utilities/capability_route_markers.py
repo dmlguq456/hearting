@@ -609,10 +609,9 @@ def write_completion_marker(
     )
     from review_source_subject import SourceSubjectError, is_implementation_review, marker_subject
     inline_review_write = (
-        is_implementation_review(route, node)
-        and review_identity.get("reviewer_kind") == "owner-inline"
+        node.get("kind") == "review-worker"
+        and review_identity.get("reviewer_kind") in {"owner-inline", "native-subagent"}
         and axes.get("registered_worker") is False
-        and axes.get("execution_surface") == "inline"
     )
     # An exact attempt replay is historical even after source drift. Every
     # writer path checks its immutable evidence/axes/history before asking for
@@ -630,6 +629,7 @@ def write_completion_marker(
                 route, node, attempt_id=attempt_id, attempt_metadata=attempt_metadata,
                 jobs=jobs, worktree=route.get("cwd"), completion_dir=directory,
                 owner_inline=inline_review_write,
+                reviewer_kind=review_identity.get("reviewer_kind"),
                 evidence_sha256=sha if inline_review_write else None,
             )
         except SourceSubjectError as exc:

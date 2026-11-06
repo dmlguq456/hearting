@@ -1147,6 +1147,47 @@ class Case5ReadRootsTest(unittest.TestCase):
     """Case 5: one read-only request is readable and unwritten on every harness (RA-7, stage 3);
     the grant records each runtime's guarantee."""
 
+    def test_cross_harness_recovery_keeps_the_ordinary_project_runtime(self):
+        wrapper = _load("recovery_runtime_opencode", "adapters/opencode/bin/dispatch-headless.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            worktree, artifact, install = root / "worktree", root / "project/.agent_reports", root / "install"
+            runtime = artifact.parent / ".agent_runtime"
+            for path in (worktree, artifact, install / "core", install / "utilities", runtime):
+                path.mkdir(parents=True)
+            history = {"harness": "claude", "worktree": str(worktree),
+                       "jobs": str(root / "state/jobs.log"), "argv": [],
+                       "resolved": {"runtime_dir": str(runtime), "worker_type": "owner"},
+                       "applied_permissions": {}}
+            route = {"cwd": str(worktree), "artifact_root": str(artifact), "work_request": {"text": ""},
+                     "route_id": "rt-runtime-fixture", "route_hash": "sha256:runtime-fixture"}
+            for version in ("1.19.0", "2.0.32"):
+                with self.subTest(version=version), mock.patch.dict(os.environ, {
+                        "OPENCODE_RUNTIME_VERSION": version, "OPENCODE_CONFIG_CONTENT": "{}"}):
+                    config = wrapper.scoped_external_directory_config(
+                        str(artifact), agent_home=install, worktree=str(worktree),
+                        execution_access_roots=(runtime,), selected_agent="build")
+                    candidate = {**history, "harness": "opencode", "launch_home": str(install),
+                                 "resolved": dict(history["resolved"]),
+                                 "applied_permissions": DR._applied_permissions(SimpleNamespace(
+                                     opencode_config_content=config, agent="build"))}
+                    try:
+                        RA.require_recovery_grant_addresses(candidate, history, route=route)
+                        RA.require_recovery_work(candidate, history, route=route, worker_type="owner")
+                    except DC.DispatchContractError as exc:
+                        self.fail(f"ordinary runtime grant was refused: {exc.reason}({exc.detail})")
+                    # Runtime metadata cannot authorize an arbitrary sibling.
+                    outside = root / "outside"
+                    unsafe = wrapper.scoped_external_directory_config(
+                        str(artifact), agent_home=install, worktree=str(worktree),
+                        execution_access_roots=(outside,), selected_agent="build")
+                    candidate["resolved"]["runtime_dir"] = str(outside)
+                    candidate["applied_permissions"] = DR._applied_permissions(SimpleNamespace(
+                        opencode_config_content=unsafe, agent="build"))
+                    with self.assertRaises(DC.DispatchContractError):
+                        RA.require_recovery_grant_addresses(candidate, history, route=route)
+            opencode_runtime.runtime_version.cache_clear()
+
     def test_read_roots_are_projected_on_every_runtime(self):
         request = ExecutionAccessRequest(
             writable_roots=(), read_roots=(Path("/nas/records"),), network_required=False,

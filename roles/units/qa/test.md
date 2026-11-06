@@ -35,8 +35,11 @@ not-observed-wrong.
 - **No target given**: use recent Git changes only when the task requests changed-code
   verification; otherwise report the missing input instead of inventing a target.
 - **Handed-over checks** listed in the assignment (`handed-over:` lines an earlier stage
-  could not run in its environment) are part of the target. One you cannot run either
-  leaves the verdict BLOCKED; repeat its line in the report for the owner.
+  could not run in its environment) are part of the target. Run those whose result can
+  still change the decision. If one is unavailable, repeat its line and exact reason as
+  **unverified**, never PASS. An unresolved required check leaves the verdict BLOCKED;
+  when the user has accepted that verification limit, retain it in the completion report
+  without repeating the unavailable check or treating it as a passing test.
 
 Before selecting checks, read available execution logs, independent review, prior test, and
 CI evidence. Reuse a result only when its source, target and scope, relevant inputs and

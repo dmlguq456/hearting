@@ -38,6 +38,160 @@ DISPATCH_NODE = _load("dispatch_node_source_subject_fixture", "utilities/dispatc
 
 
 class SourceSubjectIntegrationTest(unittest.TestCase):
+    def test_unbound_document_without_a_resolvable_producer_keeps_legacy_identity(self):
+        node = {"id": "plan-check", "kind": "review-worker", "unit": "qa/plan-review",
+                "completion_gate": "code-plan-check", "dispatch_depth": 2, "depends_on": ["plan"]}
+        self.route["nodes"] = [{"id": "plan", "kind": "pipeline-stage", "depends_on": []}, node]
+        marker = SUBJECT.marker_subject(self.route, node, attempt_id="att-legacy-unbound",
+            attempt_metadata={"registered_worker": "0", "execution_surface": "inline"},
+            owner_inline=True, jobs=self.jobs,
+            completion_dir=ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs))
+        self.assertIsNone(marker)
+
+    def test_native_source_test_fallback_is_test_owned_and_tracks_source(self):
+        node = self.test_node
+        for surface in ("claude-subagent", "codex-native-subagent"):
+            with self.subTest(surface=surface):
+                attempt = "att-test-" + surface
+                evidence = self.artifact_root / (attempt + ".md")
+                evidence.write_text("Executed the available checks; unavailable fixture remains unverified.\n",
+                                    encoding="utf-8")
+                metadata = {**self._metadata(node, attempt, "test"), "registered_worker": "0",
+                            "transport": "headless", "execution_surface": surface,
+                            "fallback_hop": "native-subagent"}
+                try:
+                    marker = ROUTE_WRITER._publish_completion_locked(
+                        self.route, node, node["id"], evidence, jobs=self.jobs,
+                        attempt_id=attempt, attempt_metadata=metadata)
+                except ValueError as exc:
+                    self.fail(f"native test fallback refused: {exc}")
+                path = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / (node["id"] + ".json")
+                self.assertEqual(DC.gate_currency(self.route, node, path, marker,
+                    observe=True, jobs=self.jobs).state, "current")
+                self.assertNotIn("review_independence", marker)
+                self.assertNotEqual(marker.get("stage_authority"), "owner-closure")
+
+    def test_document_design_and_source_fallbacks_share_currentness(self):
+        import artifact_producer
+
+        initial_route = dict(self.route)
+        plan = self.artifact_root / "plan.md"
+        plan.write_text("A bounded plan\n", encoding="utf-8")
+        build = {"id": "build", "kind": "pipeline-stage", "unit": "design/maker",
+                 "completion_gate": "design-build", "dispatch_depth": 2,
+                 "write_scope": ["designs/02_tokens/**"], "depends_on": []}
+        design = {"id": "visual-verify", "kind": "review-worker", "unit": "design/verifier",
+                  "completion_gate": "design-verify", "dispatch_depth": 2,
+                  "write_scope": ["designs/04_review/verify/**"], "depends_on": ["build"]}
+        document = {"id": "plan-check", "kind": "review-worker", "unit": "qa/plan-review",
+                    "completion_gate": "code-plan-check", "dispatch_depth": 2,
+                    "write_scope": ["_internal/reviews/plan-check/**"], "depends_on": [],
+                    "input_sources": {"plan.md": {"path": "plan.md"}}}
+        cycle_dir = self.base / "design-cycle"
+        tokens = cycle_dir / "artifacts/designs/02_tokens/tokens.json"
+        tokens.parent.mkdir(parents=True)
+        tokens.write_text('{"color":"blue"}\n', encoding="utf-8")
+        cases = [("source", initial_route["nodes"], self.review_node, self.repo / "engine.py"),
+                 ("document:plan", [document], document, plan),
+                 ("design-build", [build, design], design, tokens)]
+        for family, nodes, review, target in cases:
+            self.route = {**initial_route, "nodes": nodes}
+            self.route["route_hash"] = route_hash(self.route)
+            self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+            self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+            cycle = {"campaign_id": "camp_fixture", "cycle_id": "cyc_fixture",
+                     "route_id": self.route["route_id"]}
+            with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+                 patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir):
+                for kind in ("owner-inline", "native-subagent"):
+                    with self.subTest(family=family, reviewer=kind):
+                        attempt = "att-" + family.replace(":", "-") + "-" + kind
+                        evidence = self.artifact_root / (attempt + ".md")
+                        evidence.write_text(f"Reviewed {family} ({kind}); no failing findings.\n", encoding="utf-8")
+                        metadata = {**self._metadata(review, attempt, "owner"),
+                                    "registered_worker": "0", "transport": "interactive",
+                                    "execution_surface": "inline", "fallback_hop": "inline"}
+                        claim = {"kind": "native-subagent", "transcript": str(evidence)} if kind == "native-subagent" else None
+                        marker = ROUTE_WRITER._publish_completion_locked(
+                            self.route, review, review["id"], evidence, jobs=self.jobs,
+                            attempt_id=attempt, attempt_metadata=metadata, review_claim=claim)
+                        subject = marker.get("source_subject") or {}
+                        self.assertEqual(subject.get("family", "source") if subject else None, family)
+                        path = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / (review["id"] + ".json")
+                        self.assertEqual(DC.gate_currency(self.route, review, path, marker,
+                            observe=True, jobs=self.jobs).state, "current")
+                        broken = json.loads(json.dumps(marker))
+                        broken["source_subject"]["inline_provenance"]["attempt_id"] = "att-foreign"
+                        self.assertEqual(SUBJECT.marker_currency(self.route, review, broken,
+                            path.parent, jobs=self.jobs)[0], "integrity-broken:identity-mismatch")
+                target.write_bytes(target.read_bytes() + b"\nchanged\n")
+                self.assertEqual(DC.gate_currency(self.route, review, path, marker,
+                    observe=True, jobs=self.jobs).state, "superseded")
+
+    def test_artifact_fallback_closes_accepted_unknown_without_fabricating_pass(self):
+        setup = {"id": "release-setup", "kind": "pipeline-stage", "unit": "dev/backend",
+                 "completion_gate": "ship-setup", "dispatch_depth": 2,
+                 "write_scope": ["release-config/**"], "depends_on": []}
+        review = {"id": "post-deploy-verify", "kind": "review-worker", "unit": "qa/test",
+                  "completion_gate": "ship-post-deploy-verify", "dispatch_depth": 2,
+                  "inputs": ["release-config/**"], "depends_on": ["release-setup"]}
+        self.route.update(capability="autopilot-ship", nodes=[setup, review])
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.review_node = review
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+        config = self.artifact_root / "release-config" / "deploy.json"
+        config.parent.mkdir()
+        config.write_text('{"release":1}\n', encoding="utf-8")
+        for index in (1, 2):
+            self.prepare_review(f"att-blocked-{index}", note="dead-worker-blocked",
+                                extra={"failure_class": "blocked"})
+        before = self.jobs.read_bytes()
+        evidence = self.artifact_root / "completion.md"
+        evidence.write_text("# Verification\nunverified: legacy fixture unavailable; user accepted this limit.\n",
+                            encoding="utf-8")
+        transcript = self.base / "native-review.txt"
+        transcript.write_text("Reviewed release inputs; retained the accepted unknown.\n", encoding="utf-8")
+        for surface in ("inline", "claude-subagent", "codex-native-subagent"):
+            kind = "owner-inline" if surface == "inline" else "native-subagent"
+            with self.subTest(surface=surface):
+                attempt = "att-fallback-" + surface
+                metadata = {**self._metadata(review, attempt, "owner"),
+                            "registered_worker": "0", "transport": "interactive" if surface == "inline" else "headless",
+                            "execution_surface": surface,
+                            "fallback_hop": "inline" if surface == "inline" else "native-subagent"}
+                claim = ({"kind": kind, "transcript": str(transcript)}
+                         if kind == "native-subagent" else None)
+                marker, row = ROUTE_WRITER.complete_node(
+                    self.route, review, review["id"], evidence, jobs=self.jobs,
+                    attempt_id=attempt, explicit_attempt_metadata=metadata, review_claim=claim)
+                path = ROUTE_WRITER.completion_dir(self.route["route_id"], jobs=self.jobs) / (review["id"] + ".json")
+                currency = DC.gate_currency(self.route, review, path, marker, observe=True, jobs=self.jobs)
+                self.assertEqual(currency.state, "current", currency.reason)
+                self.assertEqual(marker["reviewer_kind"], kind)
+                self.assertEqual(marker["review_independence"],
+                                 "independent" if claim else "degraded")
+                self.assertEqual(marker["round_census"]["closure_class"], "review-verdictless-bound")
+                self.assertEqual(row["status"], "unregistered-complete")
+                self.assertEqual(self.jobs.read_bytes(), before)  # BLOCKED history is untouched
+                self.assertIn("unverified:", evidence.read_text())
+                config.write_text('{"release":2}\n', encoding="utf-8")
+                stale = DC.gate_currency(self.route, review, path, marker, observe=True, jobs=self.jobs)
+                self.assertEqual(stale.state, "superseded")
+                self.prepare_review("att-changed-" + surface, note="dead-worker-blocked",
+                                    extra={"failure_class": "blocked"})
+                config.write_text('{"release":1}\n', encoding="utf-8")
+                self.assertEqual(DC.gate_currency(self.route, review, path, marker,
+                    observe=True, jobs=self.jobs).state, "superseded")
+                with self.assertRaisesRegex(ValueError, "review-source-subject-changed-before-completion"):
+                    ROUTE_WRITER.complete_node(self.route, review, review["id"], evidence, jobs=self.jobs,
+                        attempt_id=attempt + "-rebind", explicit_attempt_metadata=metadata, review_claim=claim)
+                before = self.jobs.read_bytes()
+                # New review bytes can assess the returned content, old bytes cannot be rebound.
+                evidence = self.artifact_root / (surface + "-next.md")
+                evidence.write_text(f"# Verification\nunverified: accepted fixture limit, reviewed again ({surface}).\n",
+                                    encoding="utf-8")
+
     def test_design_review_subject_budget_and_marker_currentness_follow_build_content(self):
         import artifact_producer
 
