@@ -174,6 +174,65 @@ class ArtifactSnapshotTest(unittest.TestCase):
                      (cycle,Path("README.md")))
 
 
+class ProjectDocumentSnapshotTest(unittest.TestCase):
+ def setUp(self):
+  import importlib.util
+  self.temp=tempfile.TemporaryDirectory(prefix="project-document-"); self.addCleanup(self.temp.cleanup)
+  self.base=Path(self.temp.name); self.project=self.base/"project"; self.project.mkdir()
+  self.artifact=self.project/".agent_reports"; self.output=self.artifact/"campaigns/fixture/cycle/artifacts"
+  self.output.mkdir(parents=True)
+  spec=importlib.util.spec_from_file_location("project_document_snapshot",HELPER)
+  self.helper=importlib.util.module_from_spec(spec); spec.loader.exec_module(self.helper)
+  self.route={"route_id":"rt-project-doc","route_hash":"sha256:fixture","source_commit":"unversioned",
+              "capability":"autopilot-draft","effective_intensity":"direct","cwd":str(self.project),
+              "artifact_root":str(self.artifact),"nodes":[{"id":"inline","write_scope":["target-artifact","draft/**"]}]}
+  self.route_path=self.base/"route.json"; self.route_path.write_text(json.dumps(self.route))
+
+ def prepare(self,target):
+  import io,contextlib,artifact_producer
+  out=io.StringIO()
+  with patch_split(artifact_producer,"route_cycle_for",return_value={"cycle_id":"cyc-fixture"}), \
+       mock.patch.object(artifact_producer,"_cycle_artifacts_dir",return_value=self.output), \
+       mock.patch.dict(os.environ,{"GIT_CEILING_DIRECTORIES":str(self.base),"AGENT_ROUTE_FILE":"","AGENT_ROUTE_ID":""}), \
+       contextlib.redirect_stdout(out):
+   try:
+    from types import SimpleNamespace
+    code=self.helper.prepare(SimpleNamespace(artifact_root=str(self.artifact),target=str(target),
+                           route=str(self.route_path),route_id=self.route["route_id"],node="inline"))
+   except self.helper.SnapshotError as exc:
+    return 65,{"reason":str(exc)}
+  return code,json.loads(out.getvalue())
+
+ def test_new_non_git_document_starts_at_the_project_path_and_its_revision_stays_in_records(self):
+  target=self.project/"report.md"
+  code,receipt=self.prepare(target)
+  self.assertEqual(code,0,receipt)
+  self.assertEqual(receipt["reason"],"new-target")
+  self.assertFalse(target.exists())
+  target.write_text("first project draft\n")
+  code,receipt=self.prepare(target)
+  self.assertEqual(code,0,receipt)
+  snapshot=self.output/"_internal/versions/v1/report.md"
+  self.assertEqual(snapshot.read_text(),"first project draft\n")
+  self.assertEqual(receipt["target"],str(target.resolve()))
+  stored=json.loads((snapshot.parent/".snapshot-receipt.json").read_text())
+  self.assertEqual(stored["targets"]["report.md"]["path"],str(target.resolve()))
+  self.assertEqual(stored["targets"]["report.md"]["preimage_sha256"],receipt["preimage_sha256"])
+  target.write_text("integrated project report\n")
+  self.assertEqual(target.read_text(),"integrated project report\n")
+  self.assertFalse((self.project/"_internal").exists())
+  self.assertFalse((self.project/".git").exists())
+  self.assertFalse(list(self.base.glob("*-wt")))
+
+ def test_non_git_snapshot_does_not_expand_past_the_bound_project(self):
+  outside=self.base/"outside.md";outside.write_text("outside\n")
+  code,receipt=self.prepare(outside)
+  self.assertEqual(code,65)
+  self.assertIn("target-outside-artifact-root",receipt["reason"])
+  self.assertEqual(outside.read_text(),"outside\n")
+  self.assertFalse((self.output/"_internal").exists())
+
+
 import importlib.util, os
 _SPEC=importlib.util.spec_from_file_location("owner_preview_fixture_for_snapshot",Path(__file__).with_name("owner_preview_approval.test.py"))
 PRODUCER_FIXTURE=importlib.util.module_from_spec(_SPEC); _SPEC.loader.exec_module(PRODUCER_FIXTURE)

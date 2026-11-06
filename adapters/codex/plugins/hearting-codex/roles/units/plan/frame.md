@@ -140,6 +140,24 @@ created: {YYYY-MM-DD}
    during framing are in the route's retained corrections, carried into the
    interview and first leg without restarting the frame.
 
+   A non-Git folder does not imply code or one-change work. A report assembled
+   from existing materials and several writers normally uses
+   `analyze-project/doc` then `autopilot-draft/doc`: material review, outline
+   and responsibilities, drafts, integration, and review. Reuse known audience,
+   dates and assignments; ask only for missing content decisions in the same
+   interview. Do not ask whether to start Git or which capability to choose.
+   Keep artifact-only staged legs in the original folder and canonical artifact
+   root. Put document production and original-document edits in direct legs in
+   the current session when they need the non-Git project's files,
+   retaining the surrounding staged graph and existing `done_when`, `parallel`
+   and `hands_over` fields. Unreceived writer results remain unfinished.
+   HWPX and other format tools are production/check tools in draft or refine;
+   their use is not completion of the document workflow. Do not initialize Git,
+   allocate a `-wt` folder or create folder memory for these document tasks.
+   The result stays at the user's project location, defaulting to cwd; the
+   first draft is created there too. Cycle outputs are plans, material records,
+   reviews, pre-change copies and history with target/version references.
+
    ```yaml
    route_proposal_v1:
      summary: "one plain sentence: what runs, in which order"

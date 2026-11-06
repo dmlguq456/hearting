@@ -1959,12 +1959,10 @@ def main():
                         capability_source = "non-git-task-classification"
                 a.capability = capability if a.capability is None else a.capability
                 a.capability_mode = capability_mode
-                a.intensity = "direct"
-                a.graph, a.signal = None, []
-                a.profile_demands = a.explicit_profiles = a.profile = None
-                a.dispatch_evidence = a.registered_headless_evidence = None
-                a.children = None
-                pins = {}
+                # Direct is an execution choice, not permission to discard the
+                # caller's graph, profiles, pins or promotion/dispatch inputs.
+                # The ordinary compiler keeps their existing validity rules.
+                a.intensity = a.intensity or "direct"
                 a._non_git_mode_hint = (original_mode_hint if capability_unresolved else None)
                 non_git_decision["capability_unresolved"] = capability_unresolved
         pins,pin_warnings=_filter_top_pins(pins)

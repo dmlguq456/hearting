@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ordinary non-Git omitted-shape starts remain inline through normal finish."""
+"""Task meaning and sequence survive non-Git placement; small inline edits still finish."""
 import contextlib
 import importlib.util
 import io
@@ -45,10 +45,10 @@ module.main()
                 '--prompt-file','/dev/stdin','--spec-read','fixture','--drift-verdict','within-spec',
                 '--artifact-guard','fixture'],input=task,text=True,capture_output=True,timeout=30)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(json.loads(result.stdout),{'shape':'direct','text':task})
+            self.assertEqual(json.loads(result.stdout),{'shape':'framed','text':task})
             self.assertFalse((cwd/'.git').exists())
 
-    def selection(self, *, shape=None, task=None, git=False):
+    def selection(self, *, shape=None, task=None, git=False, capability="autopilot-research", mode="academic", graph=None, profile=None, parent=None):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); cwd = root/'project'; cwd.mkdir()
             (cwd/'notes.txt').write_text('Existing notes\n')
@@ -61,9 +61,13 @@ module.main()
                 observed.update(kwargs)
                 raise StopBeforeCompile()
             argv = ['capability-route.py','compose','--start','--cwd',str(cwd),
-                    '--artifact-root',str(root/'artifacts'),'--capability','autopilot-research',
-                    '--capability-mode','academic','--prompt-file',str(prompt),
+                    '--artifact-root',str(root/'artifacts'),'--prompt-file',str(prompt),
                     '--spec-read','fixture','--drift-verdict','within-spec','--artifact-guard','fixture']
+            if capability: argv.extend(['--capability', capability])
+            if mode: argv.extend(['--capability-mode', mode])
+            if graph: argv.extend(['--graph', graph])
+            if profile: argv.extend(['--profile', profile])
+            if parent: argv.extend(['--parent-harness', parent])
             if shape: argv.extend(['--shape',shape])
             with mock.patch.dict(os.environ, {'AGENT_DISPATCH_DEPTH':'0'}), \
                  mock.patch.object(sys, 'argv', argv), mock.patch.object(R, 'compose_route', side_effect=stop):
@@ -72,9 +76,35 @@ module.main()
             self.assertEqual((cwd/'notes.txt').read_text(), 'Existing notes\n')
             return observed
 
-    def test_default_selection_is_direct_with_explicit_capability_hint(self):
+    def test_complex_document_uses_the_same_frame_entry_in_every_folder_and_harness(self):
+        task = ("Prepare a joint results report from existing source files and three writers. "
+                "Inspect materials, agree the outline and assignments, collect drafts, "
+                "integrate the report and review it. Track missing contributions.")
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                selected = self.selection(task=task, capability=None, mode=None, parent=harness)
+                self.assertEqual(selected["shape"], "framed")
+                self.assertIsNone(selected["capability"])
+                self.assertEqual(selected["work_request"]["text"], task)
+                git_selected = self.selection(task=task, capability=None, mode=None, parent=harness, git=True)
+                self.assertEqual(selected["shape"], git_selected["shape"])
+
+    def test_non_git_frame_keeps_doc_capability_and_declared_stage_hints(self):
+        graph = "material-strategy,draft-production,quality-review,finalize"
+        selected = self.selection(capability="autopilot-draft", mode="doc", graph=graph, profile="deep")
+        self.assertEqual(selected["shape"], "framed")
+        self.assertEqual((selected["capability"], selected["capability_mode"]), ("autopilot-draft", "doc"))
+        self.assertEqual(selected["graph"], graph)
+        self.assertEqual(selected["profile"], "deep")
+
+    def test_explicit_non_git_direct_preserves_the_existing_profile_input(self):
+        selected = self.selection(shape="direct", capability="autopilot-refine", mode="default", profile="deep")
+        self.assertEqual(selected["shape"], "direct")
+        self.assertEqual(selected["profile"], "deep")
+
+    def test_default_selection_uses_frame_with_the_explicit_capability_hint(self):
         selected = self.selection()
-        self.assertEqual(selected['shape'], 'direct')
+        self.assertEqual(selected['shape'], 'framed')
         self.assertEqual(selected['capability'], 'autopilot-research')
         self.assertEqual(selected['capability_mode'], 'academic')
 
@@ -86,32 +116,45 @@ module.main()
         self.assertEqual(self.selection(shape='direct', task=task)['shape'], 'direct')
         self.assertEqual(self.selection(git=True)['shape'], 'framed')
 
-    def test_automatic_direct_has_one_line_card_and_finishes_without_git_or_worktree(self):
-        # Fail before any real CLI start if the old compiler would select a worker.
-        self.assertEqual(self.selection()['shape'], 'direct')
+    def test_new_document_is_produced_and_finished_at_its_project_path(self):
         fixture = F.PublicInlineFinishTest()
         fixture.non_git = True
-        fixture.CAPABILITY, fixture.CAPABILITY_MODE = 'autopilot-research', 'academic'
-        original = subprocess.run
-        def omit_shape(argv, *args, **kwargs):
-            if (isinstance(argv, list) and len(argv) > 2 and argv[2] == 'compose'
-                    and str(argv[1]).endswith('/utilities/capability-route.py')):
-                argv = list(argv)
-                for flag in ('--shape','--intensity'):
-                    index = argv.index(flag); del argv[index:index+2]
-            return original(argv, *args, **kwargs)
-        with mock.patch.object(subprocess,'run',side_effect=omit_shape):
-            fixture.setUp()
+        fixture.CAPABILITY, fixture.CAPABILITY_MODE = "autopilot-draft", "doc"
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        self.assertIn("target-artifact", fixture.route["nodes"][0]["write_scope"])
+        target = fixture.repo / "report.md"
+        target.write_text("A first draft written directly in the project.\n")
+        command = list(fixture.command)
+        command[command.index("--evidence") + 1] = str(target)
+        finished = subprocess.run(command, cwd=fixture.repo, env=fixture.env, capture_output=True, text=True)
+        self.assertEqual(finished.returncode, 0, finished.stderr + finished.stdout)
+        receipt = json.loads(finished.stdout)
+        self.assertIsNone(receipt["commit"])
+        self.assertEqual(target.read_text(), "A first draft written directly in the project.\n")
+        self.assertEqual(F.artifact_producer.read_cycle_record(fixture.root, fixture.cycle["cycle_id"])["state"], "sealed")
+        self.assertFalse((fixture.repo / ".git").exists())
+        self.assertFalse(list(fixture.base.glob("*-wt")))
+
+    def test_small_document_correction_finishes_without_git_or_worktree(self):
+        task = "Correct only the known typo in the existing document."
+        self.assertEqual(self.selection(shape="direct", capability="autopilot-refine", mode="default",
+                                        task=task)["shape"], "direct")
+        fixture = F.PublicInlineFinishTest()
+        fixture.non_git = True
+        fixture.CAPABILITY, fixture.CAPABILITY_MODE = "autopilot-refine", "default"
+        fixture.setUp()
         self.addCleanup(fixture.tearDown)
         route = fixture.route
         self.assertEqual(route['selection']['shape'], 'direct')
-        self.assertEqual(route['capability'], 'autopilot-research')
-        self.assertFalse(route.get('human_gates'))
+        self.assertEqual(route['capability'], 'autopilot-refine')
+        self.assertFalse(route.get('human_gate_bindings'))
         self.assertFalse((fixture.repo/'.git').exists())
         self.assertFalse(list(fixture.base.glob('*-wt')))
         self.assertEqual(route['cwd'], str(fixture.repo))
         import work_start
         inline = work_start.start_work(route, fixture.route_file, fixture.jobs)
+        self.assertEqual(inline['required_action'], 'execute-inline')
         self.assertNotIn('Commit source changes', inline['next_step'])
         card = F.CAP.compose_card(route, non_git_decision={'kind':'direct'})
         self.assertEqual(len(card.splitlines()), 1, card)

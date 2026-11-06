@@ -7560,7 +7560,7 @@ class ComposeRouteTest(TestRoute):
   diagnosis={"state":"non-git","cwd":cwd,"detail":"fatal: not a git repository"}
   direct=R._decide_non_git_compose(diagnosis,"direct",0,False,None)
   self.assertEqual(direct["kind"],"direct")
-  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None)["kind"],"direct")
+  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None)["kind"],"worker-candidate")
   self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None,new_repository=True)["kind"],"worker-candidate")
   for request_shape,depth,attempt in (("framed",0,False),("solo",0,False),
                                       (None,1,False),("direct",1,False),("direct",0,True)):

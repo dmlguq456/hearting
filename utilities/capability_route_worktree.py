@@ -135,11 +135,11 @@ def _compose_git_diagnosis(cwd):
 
 def _decide_non_git_compose(cwd_diagnosis, requested_shape,
                             dispatch_depth, registered_attempt, capability_hint, *, new_repository=False):
-    """The single compose-start decision for Git, non-Git direct, and non-Git refusal.
+    """Choose placement without changing the main session's work shape.
 
     `requested_shape` is the shape the start will run: a readable route-plan leg's own
-    shape, else `--shape`. An ordinary depth-zero non-Git start defaults to this
-    session; an explicitly named new repository keeps framed preparation."""
+    shape, else `--shape`. An omitted shape keeps the ordinary frame entry;
+    an explicit direct step stays in the current non-Git folder."""
     common = {"cwd": str(cwd_diagnosis.get("cwd") or ""),
               "capability_hint": capability_hint}
     state = cwd_diagnosis.get("state")
@@ -150,9 +150,7 @@ def _decide_non_git_compose(cwd_diagnosis, requested_shape,
         return {**common, "kind": "error", "detail": f"{common['cwd']}: {detail}"}
     t = UI_TEXT.translator()
     cause = t("route.nongit.cause", cwd=common['cwd'])
-    ordinary_inline = (requested_shape is None and dispatch_depth == 0
-                       and not registered_attempt and not new_repository)
-    if requested_shape != "direct" and not ordinary_inline:
+    if requested_shape != "direct":
         return {**common, "kind": "worker-candidate", "cause": cause,
                 "next": t("route.nongit.next_worker")}
     if dispatch_depth > 0 or registered_attempt:
@@ -162,7 +160,7 @@ def _decide_non_git_compose(cwd_diagnosis, requested_shape,
 
 
 def _classify_non_git_task(text):
-    """Conservative pure task-purpose classifier; called only for non-Git starts."""
+    """Legacy explicit-direct hint; main/frame owns purpose and sequence."""
     if not isinstance(text, str) or not text.strip():
         return None
     if re.search(r"(?:\b(?:not|don't|do not|without|instead of)\b|아니|않|말고|제외)", text, re.I):

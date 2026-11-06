@@ -2562,11 +2562,16 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                         "No payload rerun is authorized by a missing supervisor or exit proof."}
     if route["effective_intensity"] == "direct":
         from artifact_producer import prepare_route_artifact_env
+        from worker_bootstrap import plan_leg_prompt
         with frame_repository.for_route(route, path) as repository:
             repository.verify(route.get("cwd"))
         cwd = route.get("cwd") or os.getcwd()
+        task = request["text"]
+        plan = plan_leg_prompt(route, node_id="inline")
+        if plan:
+            task = task.rstrip() + "\n\n" + plan
         return {**result, "state": "inline", "required_action": "execute-inline",
-                "task": request["text"], "cwd": cwd,
+                "task": task, "cwd": cwd,
                 "next_step": f"Do this inline work in {cwd}. Then run finish for this route with the result evidence and summary.",
                 "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
     rows = _rows(jobs)
