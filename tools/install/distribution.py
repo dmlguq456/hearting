@@ -1122,6 +1122,22 @@ def _release_projection_referenced(target: Path) -> bool:
     return False
 
 
+def reconnect_cached_displays(active_root: str | Path) -> bool:
+    """Queue the existing activation callback; its child verifies outer commit."""
+    root = Path(active_root).resolve()
+    utility = root / "utilities" / "human_wait_state.py"
+    if not utility.is_file():
+        return False
+    try:
+        subprocess.Popen([sys.executable, str(utility), "--reconnect-cache"],
+            env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, start_new_session=True)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _activate_release(root: Path, runtimes: Iterable[str]) -> dict:
     selected = list(runtimes)
     if not selected:
@@ -5988,7 +6004,7 @@ PERMISSION_NOTICE = (
     "note: background Claude workers run in bypass mode unless "
     "headless.claude_permission_mode is allowlist in\n"
     "      ${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml "
-    "(see README.md#permissions)"
+    "(see FAQ.md#what-permissions-do-background-workers-have)"
 )
 
 

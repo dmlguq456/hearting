@@ -18,7 +18,7 @@
 <p align="center">
   <a href="#빠른-시작">빠른 시작</a> ·
   <a href="#fleet-모든-에이전트를-한-화면에서">Fleet</a> ·
-  <a href="#권한">권한</a> ·
+  <a href="FAQ.ko.md">자주 묻는 질문</a> ·
   <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet 둘러보기 ↗</a> ·
   <a href="https://dmlguq456.github.io/hearting/">웹사이트 ↗</a>
 </p>
@@ -27,7 +27,7 @@
 > 명령, 경로, 설정 키와 식별자는 영문 원문을 기준으로 합니다.
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet Explorer의 OVERVIEW: Claude Code, Codex, OpenCode의 세션 여덟 개를 네 프로젝트로 묶고, 프로젝트 줄마다 열린 요청, 답을 기다리는 질문, 최근 결과를 보여 준다. 세션마다 모델, 문맥 게이지, 지금 하는 일. 답을 기다리는 세션 하나, 단계 줄이 보이는 열린 요청 둘, 왼쪽 아래에 호스트별 CPU와 GPU 사용량." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet Explorer의 OVERVIEW: Claude Code, Codex, OpenCode의 세션 여덟 개를 네 프로젝트로 묶고, 프로젝트 줄마다 열린 요청, 답을 기다리는 질문, 최근 결과를 보여 준다. 세션마다 모델, 문맥 게이지, 나의 마지막 입력. 답을 기다리는 세션 하나, 단계 줄이 보이는 열린 요청 둘, 왼쪽 아래에 호스트별 CPU와 GPU 사용량." width="100%">
 </p>
 <p align="center"><sub>Fleet Explorer의 OVERVIEW: 세 하네스의 세션을 프로젝트별로 묶고, 프로젝트마다 현황 한 줄, 답을 기다리는 세션 하나, 진행 중인 요청 둘, 호스트별 GPU 사용량을 보여 줍니다. 합성 데모 데이터로 그렸습니다(<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 <p align="center"><a href="https://dmlguq456.github.io/hearting/fleet.html"><strong>Fleet 둘러보기 →</strong></a> 화면마다 큰 그림과 설명이 있고, 왜 믿을 수 있는지도 적혀 있습니다.</p>
@@ -45,7 +45,12 @@
   에이전트의 실력이 아니라 사용자가 요청한 내용에 묶여 있습니다.
 - **어디서든 하나의 방식.** Claude Code, Codex, OpenCode 어느 쪽이든, 하나만
   쓰든 셋을 같이 쓰든 같은 요청, 같은 단계, 같은 산출물, 같은 메모리로
-  일합니다. Fleet가 그 전부를 한 화면에서 보여 줍니다.
+  일합니다.
+- **모든 기록이 한 화면에.** 어느 하네스의 세션이든 같은 기록을 남깁니다.
+  세션마다 마지막으로 입력한 말, 프로젝트별 현황, 열린 요청과 그 단계, 사용자의 답을
+  기다리는 질문, 정한 것과 아직 남은 것이 모두 여기에 쌓입니다. Fleet가 이것을
+  터미널 한 화면에 보여 줍니다. 창마다 이전 세션과 세션이 쓰는 GPU도 함께
+  보이고, 하네스가 지원하면 기다리는 질문에 Fleet에서 바로 답할 수 있습니다.
 - **저비용 에이전트의 목발.** 하팅이 약한 모델을 똑똑하게 만들 수는 없습니다.
   대신 약한 모델도 사용자의 의도를 끝까지 수행하게 합니다. 강한 모델이 의도와
   계획을 정하고(*frame*), 싼 작업자가 작은 단위로 확인받으며 실행합니다
@@ -132,7 +137,7 @@
 
 | 화면 | 알려 주는 것 |
 |---|---|
-| **OVERVIEW** | 프로젝트별로 묶은 모든 세션. 프로젝트 줄마다 열린 요청, 사용자 답을 기다리는 질문, 남은 결정, 마지막 변화 시각이 보입니다. 세션마다 하네스, 모델, 남은 문맥, 지금 하는 일, 경과 시간. |
+| **OVERVIEW** | 프로젝트별로 묶은 모든 세션. 프로젝트 줄마다 열린 요청, 사용자 답을 기다리는 질문, 남은 결정, 마지막 변화 시각이 보입니다. 세션마다 하네스, 모델, 남은 문맥, 내가 마지막으로 입력한 말과 지난 시간. 펼치면 지금 하는 일과 받은 peer·runtime 메시지를 따로 보여 줍니다. |
 | **ROUTES** | 요청마다 단계 줄 `plan › execute › test › report`와 그 아래에서 도는 작업자. |
 | **QUESTIONS** | 사용자의 답이나 승인을 기다리는 모든 에이전트: 어느 세션이, 어떤 질문을, 어느 요청에서, 언제부터 묻는지. 오래된 대기는 답하거나 일이 끝날 때까지 목록에 남습니다. 하네스가 답 경로를 주면 Fleet에서 바로 답하고, 아니면 해당 세션으로 안내합니다. |
 | **RESOURCES** | 이 기계와 설정한 호스트의 CPU, 메모리, GPU별 사용량, 각 GPU 프로세스를 가진 세션. |
@@ -230,8 +235,8 @@ SHA-256을 확인합니다. 고른 하네스에 전체 기능 묶음을 바뀌�
 `runtime doctor`는 PyYAML이나 herdr처럼 빠진 선택 요소가 있으면 그것과, 그것
 없이 안 되는 일을 알려 줍니다.
 
-설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 첫 작업 전에
-[권한](#권한)을 읽어 주세요.
+설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 자세한 내용과 바꾸는 방법은
+[자주 묻는 질문](FAQ.ko.md#백그라운드-작업자는-어떤-권한을-갖나요)에 있습니다.
 
 ### 첫 작업
 
@@ -276,64 +281,6 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/download/vX.Y.Z/instal
 
 체크섬은 전송 중 손상이나 파일 손상을 잡습니다. 배포자 진위는 이 저장소의
 GitHub Release와 HTTPS에 기대며, 별도 서명은 없습니다.
-
-## 권한
-
-**백그라운드 Claude Code 작업자는 기본으로 bypass 모드로 돕니다.** 하팅이
-백그라운드로 분사한 작업자는 `--permission-mode bypassPermissions`로 시작합니다.
-권한 질문에 답할 사람이 없고, 거절이 이어지면 작업자가 일을 하다 멈추기
-때문입니다. 사용자가 직접 연 세션은 사용자의 하네스 권한 설정을 그대로 씁니다.
-
-allowlist 모드로 바꾸려면
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`을 고칩니다.
-이미 `headless:` 블록이 있으면 그 안의 값을 바꾸고, 없으면 아래 두 줄을
-추가합니다.
-
-```yaml
-headless:
-  claude_permission_mode: allowlist
-```
-
-- allowlist는 작업자를 `acceptEdits`와 제한된 도구 목록으로 돌립니다. 하팅
-  자체 도구, 읽기 전용 git, 시험 실행기, worktree와 산출물 루트 안의 편집만
-  허용합니다.
-- bypass를 쓸 수 없는 곳(root나 sudo로 실행, 또는 어느 Claude 설정 범위에든
-  `permissions.disableBypassPermissionsMode`가 있을 때)에서는 하팅이 알아서
-  allowlist로 바꾸고 실제로 쓴 모드를 기록합니다.
-- 파일이 잘못됐거나 읽을 수 없으면 배포 기본값인 bypass가 적용됩니다.
-  `hearting config status`로 파일이 읽혔는지 확인하세요. 기존 블록에 합치고,
-  `headless:` 키를 두 번 쓰거나 한 줄 `{…}` 형식으로 쓰지 마세요.
-  `DISPATCH_DEFAULTS_CONFIG`로 다른 파일을 가리킬 수 있습니다.
-- `peer-steward start`로 띄운 peer 세션도 기본은 bypass입니다. 같은 파일의
-  `steward:` 아래에 `child_permission_mode: inherit`를 두면 부모 세션의 모드를
-  따릅니다.
-- 이 설정은 Claude Code 작업자에만 적용됩니다. Codex 작업자는 Codex의
-  `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
-  사용자의 OpenCode 권한 설정에서 출발합니다.
-
-Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 짧게
-알립니다. 입력은 요구하지 않습니다.
-
-**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** 하팅은 OpenCode 전역
-`AGENTS.md`를 하팅 지침을 싣는 파일로 관리합니다. `~/.claude/rules/`(또는
-`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 그 규칙을 이 파일에서 하팅
-지침보다 앞에 싣습니다. 처음 그렇게 하는
-설치나 업데이트가 이 사실을 알립니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙
-파일은 읽기만 합니다. 그 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도
-전달됩니다. 끄려면 같은 `dispatch-defaults.yaml`에 아래 두 줄을 넣으세요. 다음
-설치, 업데이트, 또는 `hearting runtime refresh --runtime opencode`가 하팅 지침만
-있는 원래 상태로 되돌립니다.
-
-```yaml
-user_rules:
-  opencode: off
-```
-
-Codex는 전역 지침 파일을 하나만 읽습니다. 그래서 내용이 있는
-`~/.codex/AGENTS.override.md`를 직접 두고 있으면 하팅이 그 내용 아래에 표시된
-블록 하나로 자기 지침을 덧붙입니다. 업데이트는 그 블록만 바꾸고 제거하면 그
-블록만 지웁니다. 파일이 없거나 비어 있으면 만들지 않습니다. 모든 하네스의
-백그라운드 작업자도 사용자의 전역 규칙을 받습니다.
 
 ## 산출물과 현황
 
@@ -433,8 +380,9 @@ hearting model set claude context-window 800000
   데스크톱 세션은 질문 알림을 `notify-send`로도 받습니다. 둘 다 없으면 이 기능들은
   꺼지고 관련 hook은 조용히 끝나며, `hearting runtime doctor`가 무엇이 꺼졌는지
   알려 줍니다.
-- **Cairn** — 완성된 산출물을 읽는 선택 도구. 설정하지 않으면 스스로 사용 불가라고
-  알리며, 일반 작업에는 영향이 없습니다.
+- **외부 산출물 도구** — 원하면 완성된 산출물을 따로 연결한 도구(문서 열람기나
+  노트 앱 등)로 보낼 수 있습니다. 연결한 도구가 없으면 그 단계만 사용할 수 없다고
+  알리고, 일반 작업에는 영향이 없습니다.
 - **연산 호스트와 GPU** — `compute-hosts`는
   `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`을 읽고, 이 파일은
   주석 달린 예시로 만들어집니다. 호스트를 채우기 전에는 `template`로 표시되고,

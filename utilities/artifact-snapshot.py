@@ -81,7 +81,7 @@ def target_parts(artifact_root: Path, target: Path) -> tuple[Path,Path]:
 
 
 def worktree_target(artifact_root: Path, route: dict, target: Path) -> tuple[Path,Path] | None:
-    """A document in the route's own working-tree repository (README and the like).
+    """A document in the route's project, including a bound unversioned folder.
 
     Its pre-change copy is kept in the route's cycle, under the cycle's `artifacts/` as
     `_internal/versions/vN/<repository path>`; nothing is written into the repository. None when
@@ -92,9 +92,14 @@ def worktree_target(artifact_root: Path, route: dict, target: Path) -> tuple[Pat
         return None
     try:
         top=subprocess.run(["git","-C",cwd,"rev-parse","--show-toplevel"],capture_output=True,text=True,timeout=10)
-        if top.returncode!=0 or not top.stdout.strip():
-            return None     # not a repository: the ordinary outside-root refusal stands
-        repository=Path(top.stdout.strip()).resolve()
+        if top.returncode==0 and top.stdout.strip():
+            repository=Path(top.stdout.strip()).resolve()
+        else:
+            from dispatch_contract import diagnose_repository_start
+            if (route.get("source_commit")!="unversioned"
+                    or diagnose_repository_start(cwd).get("state")!="non-git"):
+                return None
+            repository=Path(cwd).resolve()
         relative=target.resolve(strict=False).relative_to(repository)
     except (OSError,ValueError,subprocess.SubprocessError):
         return None
@@ -332,11 +337,11 @@ def prepare(args) -> int:
         for version,row in rows:
             receipt=read_receipt(row/".snapshot-receipt.json")
             if receipt and receipt.get("route_id")==args.route_id and receipt.get("route_hash")==route.get("route_hash"):
-                matches.append((version,row))
+                matches.append((version,row,receipt))
         if len(matches)>1:
             raise SnapshotError("duplicate-route-snapshot-receipts")
         if matches:
-            version,version_dir=matches[0]
+            version,version_dir,receipt=matches[0]
         else:
             version=max((number for number,_ in rows),default=0)+1
             version_dir=versions/f"v{version}"
@@ -345,7 +350,11 @@ def prepare(args) -> int:
             exclusive_write(version_dir/".snapshot-receipt.json",(json.dumps(receipt,sort_keys=True)+"\n").encode())
         snapshot=version_dir/relative
         outcome=exclusive_write(snapshot,preimage)
-    emit({"status":"snapshot","snapshot":outcome,"route_id":args.route_id,"version":version,"path":str(snapshot),"preimage_sha256":hashlib.sha256(preimage).hexdigest()})
+        receipt.setdefault("targets",{})[relative.as_posix()]={"path":str(target.resolve()),
+            "preimage_sha256":hashlib.sha256(preimage).hexdigest()}
+        from artifact_producer_store import _write_atomic
+        _write_atomic(version_dir/".snapshot-receipt.json",(json.dumps(receipt,sort_keys=True)+"\n").encode())
+    emit({"status":"snapshot","snapshot":outcome,"route_id":args.route_id,"version":version,"path":str(snapshot),"target":str(target.resolve()),"preimage_sha256":hashlib.sha256(preimage).hexdigest()})
     return 0
 
 

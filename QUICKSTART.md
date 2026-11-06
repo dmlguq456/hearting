@@ -12,7 +12,8 @@ path to seeing it work.
   `python3-yaml`). The installer checks the Python version.
 - At least one agent CLI, installed and signed in: Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
-- You do not need herdr, Cairn, a NAS, remote memory exchange, or a GPU.
+- You do not need herdr, an outside artifact tool, a NAS, remote memory
+  exchange, or a GPU.
 
 Tested so far: CI checks the installation for Claude Code, Codex, and OpenCode
 on Ubuntu, and the measured runs below used Linux. macOS has not been checked end
@@ -32,7 +33,7 @@ directory is on your `PATH`.
 
 The installer prints one note you should read: background Claude workers run
 in bypass mode by default, and the same note names the file that switches them
-to allowlist mode. See [Permissions](README.md#permissions). If you also install
+to allowlist mode. See the [FAQ](FAQ.md#what-permissions-do-background-workers-have). If you also install
 OpenCode and keep Claude Code user rules, another note says those rules now
 apply in OpenCode too; the same section says how to turn that off.
 

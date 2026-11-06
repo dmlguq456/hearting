@@ -119,6 +119,96 @@ _DEGRADATION_REQUIRED = {"schema_version", "kind", "ts", "route_id", "route_node
                          "execution_surface", "writer"}
 
 
+# A display producer may request only exact session route families. The shared
+# RegistryView still owns the source generation; all job/evidence interpreters
+# below receive the same selected rows, without another full metadata copy.
+_ROUTE_DISPLAY_ROWS = ContextVar("fleet_route_display_rows", default=None)
+
+
+@contextlib.contextmanager
+def route_display_read_scope(sessions):
+    from .. import route_chain
+    aliases, route_ids, holders = set(), set(), set()
+    for session in sessions:
+        aliases.update(value for value in (session.session_id,
+                       *(getattr(session, "session_aliases", None) or ())) if value)
+        holders.update((session.harness, sid) for sid in
+                       (session.session_id, *(getattr(session, "session_aliases", None) or ())) if sid)
+        for line in route_chain.session_lines(session):
+            if line.get("route_id"):
+                route_ids.add(line["route_id"])
+    token = _ROUTE_DISPLAY_ROWS.set({"aliases": aliases, "routes": route_ids, "rows": {}, "sources": {}, "holders": holders})
+    try:
+        yield
+    finally:
+        _ROUTE_DISPLAY_ROWS.reset(token)
+
+
+def _prime_route_display_rows(paths, scope):
+    # Discover parent-owned route families across every registry before looking
+    # up their workers. A canonical child and legacy owner may be in different
+    # files; path precedence must not make the child disappear.
+    for path in paths:
+        key = os.path.abspath(path)
+        if key in scope["sources"]:
+            continue
+        try:
+            view = _dispatch_registry_cache.current_registry_view(Path(path))
+        except FileNotFoundError:
+            scope["sources"][key] = (None, {})
+            continue
+        chosen = {}
+        for sid in scope["aliases"]:
+            for record in view.completion_parent_records(sid):
+                chosen[record.order] = record
+        for record in view.records if scope["aliases"] else ():
+            if any(k in ("caller_sid", "parent_session_id") and v in scope["aliases"]
+                   for k, v in record._completion_pairs):
+                chosen[record.order] = record
+        # A steward can hand a route to another exact native session without
+        # rewriting its immutable parent row. Select through the same holder
+        # interpreter Fleet's parent-edge join uses, never through pane/cwd.
+        if scope["holders"]:
+            from . import _parent_read_context
+            from dispatch_seat_handover import resolve_recipient
+            context = _parent_read_context()
+            owners = {}
+            for record in view.answer_wait_owner_candidates():
+                owners[record.completion_metadata().get("attempt_id") or record.order] = record
+            for record in owners.values():
+                if record.order in chosen:
+                    continue
+                answer = resolve_recipient("job-holder", metadata=record.handover_metadata(),
+                                           jobs=path, read_context=context)
+                if (answer.harness, answer.session_id) in scope["holders"]:
+                    chosen[record.order] = record
+        for record in chosen.values():
+            meta = record.completion_metadata()
+            scope["routes"].update(meta[key] for key in ("route_id", "owner_route_id") if meta.get(key))
+        scope["sources"][key] = (view, chosen)
+
+
+def _route_display_rows(path, scope):
+    key = os.path.abspath(path)
+    if key not in scope["rows"]:
+        _prime_route_display_rows([path], scope)
+        view, candidates = scope["sources"][key]
+        chosen = dict(candidates)
+        if view is not None:
+            if scope["routes"]:
+                for record in view.route_alias_candidates(*scope["routes"]):
+                    chosen[record.order] = record
+            # Retain exact parent history for the existing extinction classifier.
+            parents = {record.completion_metadata().get("parent_attempt_id")
+                       for record in chosen.values()} - {None, ""}
+            for parent in parents:
+                for record in view.completion_attempt_records(parent):
+                    chosen[record.order] = record
+        scope["rows"][key] = tuple((record.order, record.fields, _registry_record_metadata(record))
+                                    for _, record in sorted(chosen.items()))
+    return scope["rows"][key]
+
+
 def _pinned_registry_lines(path):
     """Text lines of the registry generation pinned for this Fleet pass.
 
@@ -355,6 +445,8 @@ def _remember_registry_diagnostics(path, generation, error, malformed):
 
 
 def _registry_diagnostics(path):
+    if _ROUTE_DISPLAY_ROWS.get() is not None:
+        return None, 0  # scoped reads raise at the source; no retained full-row diagnostic
     absolute = os.path.abspath(os.fspath(path))
     with _PARSED_REGISTRY_CACHE_LOCK:
         key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
@@ -888,6 +980,9 @@ def parsed_registry_rows(path):
     callers read the path once. Metadata uses the existing pipe parser so current
     legacy and key/value forms retain their established meaning.
     """
+    display_scope = _ROUTE_DISPLAY_ROWS.get()
+    if display_scope is not None:
+        return _route_display_rows(path, display_scope)
     # Observe the pinned generation before asking for its text. Unchanged rows
     # and their diagnostics need no reconstruction of every historical raw line.
     if _dispatch_registry_cache.registry_scope_active():
@@ -5593,6 +5688,8 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     paths = _candidate_jobs_paths(jobs_path)
     split_registries = _validated_split_registry_paths(paths, session_rows=session_rows)
     paths.extend(split_registries)
+    if (display_scope := _ROUTE_DISPLAY_ROWS.get()) is not None:
+        _prime_route_display_rows(paths, display_scope)
     orphan_rows_cache = ({} if _dispatch_registry_cache.registry_scope_active()
                          else None)
     try:
@@ -5846,7 +5943,7 @@ _ARTIFACT_READ_CACHE = artifact_reader.ReadCache() if artifact_reader is not Non
 
 
 def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False,
-            session_observation=None):
+            session_observation=None, *, route_display=False):
     """One inventory observation per root/tick; unchanged records reuse it live."""
     from contextlib import ExitStack
     args = (jobs_path, harness_filter, session_rows, fast_first, session_observation)
@@ -5860,6 +5957,8 @@ def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fal
         # Include them in the existing observe-only pass, rather than walking
         # every process again for each notice before the old inner scope starts.
         stack.enter_context(process_table_scan_scope())
+        if route_display:
+            stack.enter_context(route_display_read_scope(session_rows))
         return _collect(*args)
 
 

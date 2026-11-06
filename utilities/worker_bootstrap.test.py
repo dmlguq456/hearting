@@ -870,6 +870,22 @@ class NodeScopeTest(unittest.TestCase):
         unbound = W.resolve_node_scope(route, "one-shot", {})
         self.assertIn("do not write durable artifacts", W.node_scope_prompt(unbound))
 
+    def test_project_document_target_and_process_records_have_distinct_locations(self):
+        node = {"id": "draft-production", "write_scope": ["target-artifact", "draft/**"],
+                "outputs": ["draft/**"]}
+        route = {"capability": "autopilot-draft", "cwd": "/project", "nodes": [node]}
+        scope = W.resolve_node_scope(route, "draft-production",
+                                     {"AGENT_ARTIFACT_OUTPUT_DIR": "/records/cycle/artifacts"})
+        prompt = W.node_scope_prompt(scope)
+        self.assertIn("project_document_root=/project", prompt)
+        self.assertIn("from the first draft", prompt)
+        self.assertIn("path and content version", prompt)
+        self.assertIn("/records/cycle/artifacts/draft/**", prompt)
+        self.assertNotIn("Source is read-only", prompt)
+        review = W.resolve_node_scope({**route, "nodes": [{"id": "review", "write_scope": ["reviews/**"]}]},
+                                      "review", {"AGENT_ARTIFACT_OUTPUT_DIR": "/records/cycle/artifacts"})
+        self.assertIn("Source is read-only", W.node_scope_prompt(review))
+
     def test_scope_resolves_from_producer_binding_without_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -18,13 +18,13 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#fleet-every-agent-on-one-screen">Fleet</a> ·
-  <a href="#permissions">Permissions</a> ·
+  <a href="FAQ.md">FAQ</a> ·
   <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet tour ↗</a> ·
   <a href="https://dmlguq456.github.io/hearting/">Website ↗</a>
 </p>
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and your last input; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
 <p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, each project's status on its own line, one session waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 <p align="center"><a href="https://dmlguq456.github.io/hearting/fleet.html"><strong>Take the Fleet tour →</strong></a> — every screen at full size, and why you can trust it.</p>
@@ -42,8 +42,13 @@ when the agent contributes little on its own.
   independently, so the work stays tied to what you asked rather than to how
   capable the agent happens to be.
 - **One way of working everywhere.** The same requests, stages, artifacts, and
-  memory on Claude Code, Codex, and OpenCode — one of them or all three. Fleet
-  watches all of them in one view.
+  memory on Claude Code, Codex, and OpenCode — one of them or all three.
+- **Everything on record, in one view.** Sessions on every runtime write to the
+  same records: what each session is doing, where each project stands, which
+  requests are open and at which stage, which questions wait for your answer,
+  and what was decided or left open. Fleet shows all of it on one terminal
+  screen, with each terminal's earlier sessions and the GPU each session holds,
+  and you can answer a waiting question from there when the runtime allows it.
 - **A crutch for low-cost agents.** Hearting cannot make a weak model smarter.
   It lets one carry out your intent anyway: a capable model settles the intent
   and the plan (the *frame*), and cheaper workers carry it out in small,
@@ -135,7 +140,7 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, what it is doing now, and for how long. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and received peer/runtime messages. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
@@ -234,8 +239,9 @@ paths until that directory is on your `PATH`.
 `runtime doctor` also names an optional piece that is missing, such as PyYAML
 or herdr, and what does not work without it.
 
-The installer prints a note about the default worker permissions. Read
-[Permissions](#permissions) before your first task.
+The installer prints a note about the default worker permissions. The
+[FAQ](FAQ.md#what-permissions-do-background-workers-have) explains them and how
+to change them.
 
 ### First task
 
@@ -283,65 +289,6 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/download/vX.Y.Z/instal
 The checksum detects transfer or asset corruption. Publisher authenticity
 rests on this repository's GitHub Releases over HTTPS; there is no separate
 signature.
-
-## Permissions
-
-**Background Claude Code workers run in bypass mode by default.** Workers that
-Hearting dispatches in the background start with
-`--permission-mode bypassPermissions`, because nobody is there to answer a
-permission prompt and a run of denials would stop the worker mid-task.
-Sessions you start yourself keep your own runtime permission settings.
-
-To use allowlist mode instead, edit
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`. Change
-the value inside its existing `headless:` block, or add both lines if there is
-no such block:
-
-```yaml
-headless:
-  claude_permission_mode: allowlist
-```
-
-- Allowlist runs workers with `acceptEdits` and a bounded tool list:
-  Hearting's own utilities, read-only git, test runners, and edits inside the
-  worktree and the artifact root.
-- Where bypass cannot apply — running as root or under sudo, or
-  `permissions.disableBypassPermissionsMode` set in any Claude settings scope —
-  Hearting switches to allowlist on its own and records the mode it used.
-- If the file is invalid or unreadable, the shipped default, bypass, applies.
-  `hearting config status` shows whether your file was read. Merge into an
-  existing block; do not add a second `headless:` key or an inline `{…}`
-  mapping. `DISPATCH_DEFAULTS_CONFIG` points to a different file.
-- Peer sessions started with `peer-steward start` also default to bypass; set
-  `child_permission_mode: inherit` under `steward:` in the same file to keep
-  the parent's mode.
-- This setting covers Claude Code workers only. Codex workers run in Codex's
-  `workspace-write` sandbox without approval prompts; OpenCode workers start
-  from your own OpenCode permission configuration.
-
-A first install that includes Claude Code prints a short note with this default
-and the file that changes it; it asks for no input.
-
-**Your Claude Code user rules also apply in OpenCode.** Hearting manages
-OpenCode's global `AGENTS.md` for its own instructions. When `~/.claude/rules/`
-(or `$CLAUDE_CONFIG_DIR/rules/`) holds rule files, Hearting puts those rules
-before its instructions in that file, and the install or update that starts it
-says so. Rules limited to certain paths are
-left out, and the rule files are only read. The rule text then also reaches
-the model provider your OpenCode uses. To stop it, add these two lines to the
-same `dispatch-defaults.yaml`; the next install, update, or
-`hearting runtime refresh --runtime opencode` puts the plain instructions back:
-
-```yaml
-user_rules:
-  opencode: off
-```
-
-Codex reads only one global instruction file, so if you keep your own
-`~/.codex/AGENTS.override.md` with text in it, Hearting adds its instructions
-below your text in one marked block. Update replaces only that block and
-uninstall removes it; a missing or empty override is never created. Background
-workers on every runtime also get your global rules.
 
 ## Artifacts and status
 
@@ -447,8 +394,10 @@ None of these is needed for the basic workflow.
   question notifications through `notify-send`. Without either, these are off,
   the related hooks exit quietly, and `hearting runtime doctor` says what is
   off.
-- **Cairn** — an optional reader for finished artifacts. When it is not set up
-  it reports itself unavailable; ordinary work is unaffected.
+- **Outside artifact tool** — optionally, Hearting can send finished artifacts
+  to a separate tool you connect, such as a document reader or notes app. With
+  none connected, that step reports itself unavailable; ordinary work is
+  unaffected.
 - **Compute hosts and GPUs** — `compute-hosts` reads
   `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, seeded as a
   commented template. Until you fill in a host it reports `template`, and a

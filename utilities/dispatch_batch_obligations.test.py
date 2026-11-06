@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -1253,6 +1254,273 @@ class BatchObligationTest(unittest.TestCase):
         self.assertEqual(settle.call_count, 2)
         run()
         self.assertEqual(settle.call_count, 2)
+
+    def test_registered_redrive_shares_retry_memory_with_external_settlement(self):
+        import dispatch_terminal_commit as terminal
+
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        slot = self.base / "slot"
+        slot.mkdir()
+        state_file = slot / "terminal-commit.json"
+        state_file.write_text('{"state":"owner-envelope-sealed"}\n', encoding="utf-8")
+        observed_dependencies = getattr(obligations, "_observed_dependencies", None)
+        dependencies = (observed_dependencies(
+            (state_file, slot / "campaign-goal.json"))
+            if observed_dependencies is not None else
+            (state_file, slot))
+        writes = []
+
+        def exclusive_replay():
+            writes.append(True)
+            try:
+                terminal._atomic_json(state_file, {"state": "claimed"}, exclusive=True)
+            except FileExistsError:
+                pass
+            return state_file
+
+        context_type = getattr(obligations, "OwnerSettlementReadContext", None)
+        if context_type is None:
+            with mock.patch("dispatch_terminal_commit.owner_completion_state",
+                            return_value=PENDING), \
+                 mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+                 mock.patch("dispatch_completion_join.materialize_after_terminal_close") as external_settle:
+                exclusive_replay()
+                obligations._resume_owner_settlements(self.jobs)
+            self.assertEqual(len(writes) + external_settle.call_count, 1,
+                             "R4_NO_REPLAY_BEFORE_DUE")
+            return
+
+        context, clock, state, external_settle, _lease = self._settlement_fixture(
+            PENDING, dependencies=dependencies)
+        related = ()
+        record = registry_cache.registry_view(self.jobs).settlement_owner_candidates()[0]
+        metadata, raw = record.completion_metadata(), record.raw
+
+        with mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               create=True,
+                               return_value=dependencies), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            if not hasattr(context, "registered_owner_redrive"):
+                # Portable baseline path: model the existing registered
+                # materializer, then run its independent external consumer.
+                exclusive_replay()
+                obligations._resume_owner_settlements(self.jobs, context=context)
+                self.assertEqual(len(writes) + external_settle.call_count, 1,
+                                 "R4_NO_REPLAY_BEFORE_DUE")
+                return
+            deferred = context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, related, lease_held=False,
+                materialize=exclusive_replay)
+            self.assertFalse(deferred)
+            self.assertEqual(writes, [True])
+            # The external consumer sees the post-attempt generations and keeps
+            # the same owner visible without replaying the materializer.
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertTrue(signatures)
+            self.assertEqual(external_settle.call_count, 0)
+            self.assertEqual(state.call_count, 1)
+            self.assertEqual(writes, [True])
+            self.assertTrue(context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, related, lease_held=False,
+                materialize=exclusive_replay), "R4_NO_REPLAY_BEFORE_DUE")
+            self.assertEqual(writes, [True])
+            clock[0] += 599.9
+            self.assertTrue(context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, related, lease_held=False,
+                materialize=exclusive_replay), "R4_NO_REPLAY_BEFORE_DUE")
+            self.assertEqual(writes, [True])
+            clock[0] += 0.1
+            self.assertFalse(context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, related, lease_held=False,
+                materialize=exclusive_replay))
+            self.assertEqual(writes, [True, True])
+
+    def test_registered_redrive_observes_same_pass_dependency_change(self):
+        rows = {attempt: self._runtime_owner_row(attempt) for attempt in ("att-a", "att-b")}
+        self.jobs.write_text("\n".join(rows.values()) + "\n", encoding="utf-8")
+        view = registry_cache.registry_view(self.jobs)
+        records = {record.completion_metadata()["attempt_id"]: record
+                   for record in view.settlement_owner_candidates()}
+        dependencies = {}
+        for attempt in rows:
+            path = self.base / attempt
+            path.write_text("before", encoding="utf-8")
+            dependencies[attempt] = (path,)
+        context = obligations.OwnerSettlementReadContext()
+        context._clock = lambda: 1000.0
+        self.addCleanup(context.close)
+        attempts = []
+
+        def replay(attempt):
+            attempts.append(attempt)
+
+        def run(attempt):
+            record = records[attempt]
+            return context.registered_owner_redrive(
+                self.jobs, record.status, record.raw, record.completion_metadata(), (),
+                lease_held=False, materialize=lambda: replay(attempt))
+
+        with mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               side_effect=lambda _jobs, _status, metadata:
+                                   dependencies[metadata["attempt_id"]]), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state",
+                        return_value=PENDING):
+            self.assertFalse(run("att-a"))
+            self.assertFalse(run("att-b"))
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            dependencies["att-a"][0].write_text("changed", encoding="utf-8")
+            self.assertFalse(run("att-a"))
+            self.assertTrue(run("att-b"))
+            obligations._resume_owner_settlements(self.jobs, context=context)
+
+        self.assertEqual(attempts, ["att-a", "att-b", "att-a"])
+
+    def test_materialization_exception_stays_unknown_until_retry_time(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        context, clock, _state, _settle, _lease = self._settlement_fixture(
+            PENDING, dependencies=(dependency,))
+        record = registry_cache.registry_view(self.jobs).settlement_owner_candidates()[0]
+        metadata, raw = record.completion_metadata(), record.raw
+        retries = []
+
+        def fail_once():
+            raise OSError("temporary materialization failure")
+
+        with mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            with self.assertRaisesRegex(OSError, "temporary materialization failure"):
+                context.registered_owner_redrive(
+                    self.jobs, "done", raw, metadata, (), lease_held=False,
+                    materialize=fail_once)
+            self.assertTrue(context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, (), lease_held=False,
+                materialize=lambda: retries.append("too-early")))
+            self.assertEqual(retries, [])
+            clock[0] += 60.0
+            self.assertFalse(context.registered_owner_redrive(
+                self.jobs, "done", raw, metadata, (), lease_held=False,
+                materialize=lambda: retries.append("due")))
+
+        self.assertEqual(retries, ["due"])
+
+    def test_shared_owner_retry_observes_changed_inputs(self):
+        import dispatch_terminal_commit as terminal
+
+        if not hasattr(obligations, "_owner_unsettled_dependency_paths"):
+            self.skipTest("baseline has no unsettled dependency calculation")
+
+        cases = ("owner-row", "related-child", "lease-held-released",
+                 "terminal-claim", "campaign-goal", "parent-close-journal")
+        for case in cases:
+            for phase in ("same-pass", "between-passes"):
+                with self.subTest(input=case, phase=phase):
+                    self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+                    context = obligations.OwnerSettlementReadContext()
+                    context._clock = lambda: 1000.0
+                    self.addCleanup(context.close)
+                    row = registry_cache.registry_view(
+                        self.jobs).settlement_owner_candidates()[0]
+                    metadata, raw = row.completion_metadata(), row.raw
+                    related = (type("Related", (), {"order": 1, "status": "open",
+                                                      "raw": "child-before"})(),)
+                    dep_dir = self.base / ("dependency-" + case + "-" + phase)
+                    dep_dir.mkdir()
+                    if case == "parent-close-journal":
+                        dep = dep_dir / "journal.jsonl"
+                        dep.write_text('{"seq":1}\n', encoding="utf-8")
+                        paths = (dep,)
+                    elif case in {"terminal-claim", "campaign-goal"}:
+                        dep = dep_dir / ("terminal-claim.json" if case == "terminal-claim"
+                                         else "campaign-goal.json")
+                        paths = (dep_dir,)
+                    else:
+                        dep = dep_dir / "owner-state.json"
+                        dep.write_text("before", encoding="utf-8")
+                        paths = (dep,)
+                    materializations = []
+
+                    def attempt(current_raw=raw, current_related=related):
+                        return context.registered_owner_redrive(
+                            self.jobs, "done", current_raw, metadata, current_related,
+                            lease_held=False,
+                            materialize=lambda: materializations.append(case))
+
+                    with mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                                           return_value=paths), \
+                         mock.patch.object(terminal, "owner_completion_state", return_value=PENDING):
+                        self.assertFalse(attempt())
+                        self.assertTrue(attempt(), "same pass must defer the second consumer")
+                        self.assertEqual(len(materializations), 1)
+                        if phase == "between-passes":
+                            context._end_unsettled_pass(self.jobs)
+                        next_raw, next_related = raw, related
+                        if case == "owner-row":
+                            next_raw = raw + ",updated=1"
+                        elif case == "related-child":
+                            next_related = (type("Related", (), {"order": 1, "status": "open",
+                                                                 "raw": "child-after"})(),)
+                        elif case == "lease-held-released":
+                            self.assertIsNone(context.unsettled_current(
+                                self.jobs, "done", raw, metadata, related,
+                                lambda _jobs, _meta: True))
+                        elif case in {"terminal-claim", "campaign-goal"}:
+                            dep.write_text("created", encoding="utf-8")
+                            stamp = dep_dir.stat()
+                            os.utime(dep_dir, ns=(stamp.st_atime_ns,
+                                                  stamp.st_mtime_ns + 1_000_000))
+                        elif case == "parent-close-journal":
+                            with dep.open("a", encoding="utf-8") as stream:
+                                stream.write('{"seq":2}\n')
+                            stamp = dep.stat()
+                            os.utime(dep, ns=(stamp.st_atime_ns,
+                                              stamp.st_mtime_ns + 1_000_000))
+                        else:
+                            dep.write_text("after", encoding="utf-8")
+                            stamp = dep.stat()
+                            os.utime(dep, ns=(stamp.st_atime_ns,
+                                              stamp.st_mtime_ns + 1_000_000))
+                        self.assertFalse(attempt(next_raw, next_related),
+                                         "changed inputs must release the next consumer")
+                        self.assertEqual(len(materializations), 2)
+                        self.assertTrue(attempt(next_raw, next_related),
+                                        "the unchanged owner remains deferred after retry")
+        import dispatch_contract
+        import workflow_state
+
+        route_id = "rt-dependency-fixture"
+        attempt_id = "att-dependency-fixture"
+        route_file = self.base / "route.json"
+        route_file.write_text(json.dumps({
+            "route_id": route_id,
+            "nodes": [{"id": "finish", "terminal": True}],
+        }), encoding="utf-8")
+        request = terminal.TerminalCommitRequest(
+            route_file, attempt_id, self.jobs, self.base / "artifacts")
+        slot = terminal.terminal_slot(request.artifact_root, route_id, attempt_id)
+        slot.mkdir(parents=True)
+        state_file = terminal._commit_state_path(request)
+        state_file.write_text('{"state":"pending"}\n', encoding="utf-8")
+        claim = dispatch_contract.terminal_claim_path(self.jobs, route_id, attempt_id)
+        claim.parent.mkdir(parents=True)
+        claim.write_text('{"state":"claimed"}\n', encoding="utf-8")
+        ledger_root, _source = workflow_state.ledger_root_for(self.jobs)
+        journal = ledger_root / route_id / "journal.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text('{"seq":1}\n', encoding="utf-8")
+        metadata = {"attempt_id": attempt_id, "owner_route_id": route_id,
+                    "parent_close_route_id": route_id}
+
+        with mock.patch.object(terminal, "_historical_request", return_value=request):
+            paths = obligations._owner_unsettled_dependency_paths(
+                self.jobs, "done", metadata)
+
+        self.assertIn(claim, paths, "terminal claim must be observed")
+        self.assertIn(journal, paths, "parent-close journal must be observed")
+        self.assertIn(slot, paths, "missing goal must observe its nearest existing parent")
+        self.assertNotIn(terminal.campaign_goal_path(request), paths)
 
     def test_parent_ended_duty_waits_dormant_until_recipient_returns(self):
         args = Namespace(**vars(self.args))

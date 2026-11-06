@@ -3203,7 +3203,13 @@ not-applicable, pending or unknown observation while the owner row, its related
 rows, its identified dependencies and its supervisor lease remain unchanged,
 until that owner's bounded retry time (at most ten minutes); a changed input is
 observed on the next pass, and a deferred unfinished settlement stays in the
-runner's outer signature. This is a scheduling optimization: it does not
+runner's outer signature. Registered missing-record recovery and the external
+owner-settlement pass share that retry memory for an owner, so one pass cannot
+repeat the same terminal materialization through both paths. The attempt's own
+writes become the generation baseline after it finishes; later input changes
+remain visible to the next consumer. Pending records and current recipient,
+claim, and acknowledgement checks are still read on every pass. This is a
+scheduling optimization: it does not
 satisfy delivery, inspection, claim, mutation, or completion authority.
 Missing, unreadable, unstable, or untracked dependencies require a fresh
 observation before a settled result is reused and remain unknown until that

@@ -3096,6 +3096,16 @@ class ConsumedClearLineageRegressionTest(TidyCase):
         self.helpers.assert_not_called()
         self.assertIsNone(clear.read_reservation(self.seat.key))
 
+    def test_retired_work_convergence_does_not_block_current_clear_and_handover(self):
+        st._append_ledger_entry(self.seat, dict(event="succession", source="tidy-clear",
+            harness="claude", sid="source-A", ts=0.1, **{"from": "earlier-source"}))
+        self.assertIsNotNone(self.handover.record_retire_handover(
+            "retired-source", "codex", "source-A", "claude", successor_seat=self.seat,
+            jobs=self.iso.root / "absent-jobs.log", now=0.2))
+        self.handed_over()
+        self.assertEqual(clear._clear_lineage_reason("claude", "source-A"), "session-handed-over")
+        self.assertEqual(clear._clear_lineage_reason("claude", "successor-B"), "")
+
     def test_old_source_new_compact_manual_and_idle_acceptance_skip_but_queue_remains(self):
         self.handed_over()
         for context in (None, {"identity": "new-compact", "trigger": "auto", "transcript": ""}):
@@ -3175,6 +3185,8 @@ class ClearBookingLineageRaceTest(TidyCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(self.library())
+        # Isolate the lineage writers from the synthetic seat's route census.
+        self.stack.enter_context(mock.patch.object(clear, "_idle_route_reason", return_value=""))
         self.stack.enter_context(mock.patch.object(clear, "herdr_command", return_value="/bin/true"))
         self.helpers = self.stack.enter_context(mock.patch.object(clear, "_ensure_helper", return_value=(True, "")))
         self.stack.enter_context(mock.patch.object(runner, "_start_queued", side_effect=lambda item: item))
@@ -3195,7 +3207,7 @@ class ClearBookingLineageRaceTest(TidyCase):
             def book():
                 with mock.patch.object(st, "resolve_seat", return_value=seat):
                     return clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
-                                                    tokens=200000, now=10)
+                                                    tokens=500000, now=10)
         else:
             def book():
                 return st._enqueue_tidy(seat, harness, sid, str(self.cwd),
@@ -3211,7 +3223,7 @@ class ClearBookingLineageRaceTest(TidyCase):
         if kind == "idle-accept":
             with mock.patch.object(st, "resolve_seat", return_value=seat):
                 self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
-                                                          tokens=200000), "booking=scheduled")
+                                                          tokens=500000), "booking=scheduled")
             req = clear.read_reservation(seat.key)
             req["idle_request"] = {"state": "arrived", "token": "race-claim", "text_digest": "race-digest",
                                    "arrival": {"sid": sid, "prompt_seq": 0}}

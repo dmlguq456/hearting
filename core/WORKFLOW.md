@@ -199,17 +199,24 @@ defaults to the named **Existing-result analysis** composition in
 `metrics → diagnose → report`, adding `independent-verify` at strong or higher
 with its declared group and automatic owner close. Include `eval-run` only when
 the request needs new raw results, using its existing inputs and write scope.
-In a Git folder, the parent chooses the capability: omitting `--capability` in ordinary compose
-uses the fixed `autopilot-code` default, not a classifier of the task text; framed work
-leaves that choice to its frame. An ordinary depth-0 `compose --start` in a non-Git
-folder with no shape runs directly in the current session without a start question,
-Git initialization or a worktree. Explicit shapes remain binding; an explicitly
-named new Git repository retains its existing framed preparation/approval path.
-Its task purpose selects the capability when
-clear; an explicit `--capability` and mode take precedence, and an unclear purpose is shown
-as unresolved while retaining the existing storage fallback. The session performs that
-capability's work and can close it through the normal inline `finish` path. Its
-one-line card says `git 아닌 폴더 — 이 세션이 직접 진행`.
+Choose capability and sequence from the goal in every folder. Git diagnosis
+decides source isolation and execution placement; it does not identify code work
+or prove that a task fits one inline result. Omitted shape uses the existing
+frame in both Git and non-Git folders. The frame selects the primary capability,
+parts, inputs and handoffs. A report assembled from existing materials,
+including mail and attachments, normally uses `autopilot-draft/doc` with
+`analyze-project/doc` for source analysis.
+
+A small, known document correction still uses the existing direct path in the
+current session, with the capability chosen by the main session and normal
+inline `finish`. It needs no frame pair, Git start question, initialization,
+worktree or folder memory. An explicit capability/mode and an approved
+route-plan remain binding. Legacy explicit direct starts may retain their
+conservative purpose hint or unresolved storage fallback; that fallback does
+not establish the work's meaning. A Git direct start retains its existing
+default. An explicitly requested new Git repository retains its ordinary
+preparation/approval path. No new classifier, question or required argument is
+introduced.
 Selection and compilation use the same task bytes, including a one-shot stdin input.
 An explicitly selected worker shape, including a route-plan leg whose own shape is not direct, is a
 worker request. In a non-Git folder, a compiled artifact-only worker route may run in the
@@ -242,10 +249,18 @@ a mode retains its existing deployment/release behavior (`default`).
 | "Write an independent presentation for the recipient" | `autopilot-draft` | New document goal, not file collection |
 | "Deploy the application to production" | `autopilot-ship` | Obtain deploy approval at route start; retain post-deploy verification |
 
-For the non-Git direct start only, task classification is conservative: clear research,
+For a legacy explicit non-Git direct start only, task classification is conservative: clear research,
 fixed-result evaluation, reusable code, document correction or drafting, project analysis,
 and packaging use their corresponding existing capabilities. Generic analysis, conflicting
 purposes, negation, and quoted examples stay unresolved; they add no required question or flag.
+
+For multi-step document work, keep the frame's capability, graph, inputs,
+outputs, writer responsibilities and unfinished handoffs in the existing route
+plan. Artifact-only stages may use the existing non-Git worker placement. A
+step that edits an original document stays in a direct leg in the current
+session; it does not collapse the other staged legs. Format tools such as HWPX
+belong to draft/refine production and checks. Running a format tool does not
+finish material review, integration or another person's missing draft.
 
 
 ### 0.2.1. Shape Before Preset (SD-135)
@@ -293,6 +308,11 @@ worktree needs only reading, editing, focused checking and an ordinary final
 reply. Existing turn hooks record it automatically; no task file, compose,
 finish, separate capability-info call, question or classification call is
 required. A new worktree or scope exploration uses the explicit route instead.
+
+Use the same scope judgment for a small non-Git document correction, through
+the existing direct compose/finish path in that folder. The main session
+chooses the existing capability; the person need not name one. Material
+collection, multiple drafts, integration and independent review use the frame.
 
 If the work grows, compose before the next expanded action. The new route
 links the current turn's start snapshot, observed changes and native evidence;

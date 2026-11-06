@@ -1467,10 +1467,12 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                     bindings=[bindings[0]] if kind == "explicit-merge" else [])
                 tidy._append_ledger_entry(tidy.Seat("pane", kind + "-hidden"), row)
                 if kind == "explicit-merge":
-                    # Seat provenance is ambiguous, but each exact job still has
-                    # one current holder. Discovery must use that job answer.
+                    # Accepted retired work joins the same notice endpoint;
+                    # each exact job must still resolve its own binding.
                     self.assertEqual(handover.resolve_recipient("seat-successor",
-                        session=holder, harness="codex").state, "unreadable")
+                        session=holder, harness="codex").state, "confirmed")
+                    self.assertEqual(handover.resolve_recipient("seat-successor",
+                        session=holder, harness="codex").session_id, target)
                     self.assertEqual(len(handover._handover_binding_keys_for_session(jobs, target)), 13)
                     self.assertEqual(len(self.candidates(jobs, target)), 13)
                     for meta in _metas:
@@ -1672,6 +1674,21 @@ class ForkDescendantAuthorityTest(peer._TmpRootMixin, unittest.TestCase):
                 self.assertIn(("claude", sid), graph.unresolved)
                 self.assertIn(("claude", sid), graph.seat_unresolved)
             self.rows = original
+
+    def test_legacy_retire_with_two_possible_source_harnesses_stays_unreadable(self):
+        self.rows = [dict(event="succession", source="tidy-clear", harness=harness,
+                          sid="shared", ts=1, **{"from": "prior-" + harness})
+                     for harness in ("claude", "codex")]
+        self.rows.append(dict(event="handover", source="retire", harness="opencode",
+                              sid="recipient", ts=2, bindings=[], **{"from": "shared"}))
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                self.write_rows(reverse=reverse)
+                self.assertFalse(handover.lineage_graph().unresolved)
+                for harness, sid in (("claude", "shared"), ("codex", "shared"),
+                                     ("opencode", "recipient")):
+                    self.assertEqual(handover.resolve_recipient("seat-successor",
+                        harness=harness, session=sid).state, "unreadable")
 
     def test_warm_context_sees_hidden_fork_then_unreadable_and_recovery(self):
         meta = self.job("C", "warm")

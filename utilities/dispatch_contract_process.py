@@ -1386,7 +1386,7 @@ def scan_process_table() -> ProcessTableScan:
 
 @contextmanager
 def process_table_scan_scope():
-    """Fleet-only batch path: one ``/proc`` walk for every observation of one pass.
+    """Observe-only batch path: one ``/proc`` walk for observations in one scope.
 
     `attempt_tagged_descendants` and `process_group_observation` are single-shot
     probes for the moment before a quiescence verdict and are never meant for a

@@ -2943,7 +2943,7 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(pending.read(self.root, old, record["delivery_id"])["state"], "acked")
 
-    def _intermediate_retire_notice(self, harness, *, first_source):
+    def _intermediate_retire_notice(self, harness, *, first_source, converging=False):
         import dispatch_seat_handover as handover
         import dispatch_pending_delivery as pending
         import dispatch_session_sweep as sweep
@@ -2965,10 +2965,17 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         else:
             tidy._append_ledger_entry(seat, dict(event="handover", source="retire",
                 harness=harness, sid=intermediate, bindings=[binding], ts=1, **{"from": old}))
+        if converging:
+            # Independently retired work can join an existing clear-chain holder.
+            retired = prefix + "-retired"
+            tidy._append_ledger_entry(seat, dict(event="handover", source="retire",
+                harness=harness, sid=intermediate, bindings=[], ts=1.5, **{"from": retired}))
         # The inherited job's parent stays A even though this retire originates at B.
         tidy._append_ledger_entry(seat, dict(event="handover", source="retire",
             harness=harness, sid=current, bindings=[binding], ts=2, **{"from": intermediate}))
         for origin in (old, intermediate):
+            self.assertEqual(handover.resolve_recipient("seat-successor", session=origin,
+                             harness=harness).state, "confirmed")
             self.assertEqual(handover.session_successor(origin), (current, harness))
             self.assertEqual(handover.session_successor(origin, harness=harness), (current, harness))
         self.assertEqual(handover.effective_parent(meta, self.jobs), current)
@@ -2979,6 +2986,9 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             self.assertEqual(scopes[old], {meta["attempt_id"]})
             self.assertEqual(scopes[intermediate], frozenset(), "B grants notices, not A's jobs")
             self.assertTrue(scopes[intermediate].lineage_notice)
+            if converging:
+                self.assertEqual(scopes[retired], frozenset(), "Retire convergence grants no unbound jobs")
+                self.assertTrue(scopes[retired].lineage_notice)
             addressed, _count = sweep.addressed_records(self.root, record["recipient_kind"], current)
         self.assertEqual([(item[sweep.STORAGE_KEY], item["delivery_id"]) for item in addressed],
                          [(intermediate, record["delivery_id"])])
@@ -3017,6 +3027,11 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
             with self.subTest(harness=harness):
                 self._intermediate_retire_notice(harness, first_source="tidy-clear")
 
+    def test_accepted_retire_convergence_keeps_notice_storage_and_ack(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                self._intermediate_retire_notice(harness, first_source="tidy-clear", converging=True)
+
     def test_sid_only_successor_refuses_same_sid_in_two_qualified_incoming_targets(self):
         import dispatch_seat_handover as handover
         sid = "ambiguous-incoming-target"
@@ -3039,7 +3054,10 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
                     pairs.append({"fork": (middle, current + "-other"),
                                   "merge": (old + "-other", current), "cycle": (current, old)}[kind])
                 for ts, (origin, target) in enumerate(pairs):
-                    tidy._append_ledger_entry(seat, dict(event="handover", source="retire",
+                    # A true conversation merge has two ordinary incoming edges.
+                    # Accepted retire fan-in is covered by the delivery test above.
+                    source = "clear" if kind == "merge" and ts >= 1 else "retire"
+                    tidy._append_ledger_entry(seat, dict(event="handover", source=source,
                         harness="codex", sid=target, bindings=[], ts=ts, **{"from": origin}))
                 if kind == "unreadable":
                     tidy._ledger_path(seat).write_bytes(b"{unreadable")

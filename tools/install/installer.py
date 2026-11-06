@@ -1550,6 +1550,7 @@ def cmd_runtime(args):
         for active_root in activated_roots:
             runtime_activation.reconnect_peer_obligations(active_root)
             runtime_activation.reconnect_resource_observers(active_root)
+            distribution.reconnect_cached_displays(active_root)
         # A first install has no memory store, and mem refuses to create one at a
         # derived path: create it here, after the activation committed. Best
         # effort, so it can neither fail nor roll back the activation; importing

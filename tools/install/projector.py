@@ -465,6 +465,7 @@ _OPENCODE_FIXED_SYMLINKS = [
     ("agent-agents", "opencode_setting/opencode-agents"),
     ("agent-commands", "opencode_setting/opencode-commands"),
     ("tui/hearting-tui-identity.ts", "adapters/opencode/tui/hearting-tui-identity.ts"),
+    ("tui/hearting-route-status.tsx", "adapters/opencode/tui/hearting-route-status.tsx"),
     ("tui/hearting-owned-tui.json", "adapters/opencode/tui/owned-tui.json"),
     ("tui/hearting-owned-cli.json", "adapters/opencode/tui/owned-cli.json"),
 ]

@@ -509,6 +509,208 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
                                     "source": "owner-terminal", "attempt_id": "att-latest",
                                     "attempt_readiness": "quiescent", **values}}
 
+    def test_child_proof_batches_process_observations(self):
+        import dispatch_contract_process as process_module
+
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched", launch_claimed="0")
+        processes = [subprocess.Popen(["sleep", "30"], start_new_session=True)
+                     for _ in range(3)]
+        try:
+            children = []
+            for index, process in enumerate(processes):
+                identity = T.dispatch_contract.process_launch_identity(process.pid)
+                children.append(self.row(
+                    "done", f"att-child-{index}",
+                    owner_route_id=self.route["route_id"],
+                    owner_route_hash=self.route["route_hash"],
+                    launch_outcome="running", launch_claimed="1", **identity))
+            self.jobs.write_text("\n".join([latest, *children]) + "\n", encoding="utf-8")
+            with mock.patch.object(process_module, "scan_process_table",
+                                   wraps=process_module.scan_process_table) as scan:
+                proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+            self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
+            self.assertEqual(scan.call_count, 1, "R5_SCAN_ONCE")
+        finally:
+            for process in processes:
+                process.terminate()
+            for process in processes:
+                process.wait(timeout=5)
+
+    def test_child_proof_process_table_walks_do_not_grow_with_children(self):
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched", launch_claimed="0")
+        original_scandir = os.scandir
+        original_listdir = os.listdir
+        counts = {}
+        verdicts = {}
+
+        for child_count in (3, 6):
+            processes = [subprocess.Popen(["sleep", "30"], start_new_session=True)
+                         for _ in range(child_count)]
+            try:
+                children = []
+                for index, process in enumerate(processes):
+                    identity = T.dispatch_contract.process_launch_identity(process.pid)
+                    children.append(self.row(
+                        "done", f"att-quiet-child-{child_count}-{index}",
+                        owner_route_id=self.route["route_id"],
+                        owner_route_hash=self.route["route_hash"],
+                        launch_outcome="running", launch_claimed="1", **identity))
+                for process in processes:
+                    process.terminate()
+                for process in processes:
+                    process.wait(timeout=5)
+                self.jobs.write_text("\n".join([latest, *children]) + "\n",
+                                     encoding="utf-8")
+                counts[child_count] = 0
+
+                def count_proc_scandir(path="."):
+                    if Path(path) == Path("/proc"):
+                        counts[child_count] += 1
+                    return original_scandir(path)
+
+                def count_proc_listdir(path="."):
+                    if Path(path) == Path("/proc"):
+                        counts[child_count] += 1
+                    return original_listdir(path)
+
+                with mock.patch.object(os, "scandir", count_proc_scandir), \
+                     mock.patch.object(os, "listdir", count_proc_listdir):
+                    proof = T._prove_route_children(
+                        self.request(), self.route, self.owner_gate())
+                verdicts[child_count] = proof.status
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.terminate()
+                for process in processes:
+                    if process.poll() is None:
+                        process.wait(timeout=5)
+
+        self.assertEqual(verdicts, {3: "proved", 6: "proved"})
+        self.assertGreater(counts[3], 0, "quiet child proof must observe /proc")
+        print(f"R5 quiet child proof /proc enumerations: N=3:{counts[3]} N=6:{counts[6]}")
+        self.assertEqual(counts[3], counts[6], "R5_QUIET_PROC_ENUMERATIONS_SCALE_WITH_CHILDREN")
+
+    def test_child_proof_without_process_probes_does_not_scan(self):
+        import dispatch_contract_process as process_module
+
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched", launch_claimed="0")
+        cases = (
+            (latest + "\n", self.owner_gate()),
+            (latest + "\n" + self.row(
+                "done", "att-unlaunched", launch_claimed="0",
+                note="completed-marker", failure_class="pass",
+                launch_outcome="never-launched") + "\n", self.owner_gate()),
+            (self.row("done", "att-child", owner_route_id=self.route["route_id"],
+                      owner_route_hash=self.route["route_hash"]) + "\n",
+             {"owner-terminal": {"passed": False}}),
+        )
+        for rows, gates in cases:
+            with self.subTest(rows=rows[-70:]):
+                self.jobs.write_text(rows, encoding="utf-8")
+                with mock.patch.object(process_module, "scan_process_table",
+                                       wraps=process_module.scan_process_table) as scan, \
+                     mock.patch.object(T.dispatch_contract, "attempt_process_quiescence",
+                                       wraps=T.dispatch_contract.attempt_process_quiescence) as probe:
+                    T._prove_route_children(self.request(), self.route, gates)
+                self.assertEqual(probe.call_count, 0, "R5_NO_PROBE_NO_SCAN")
+                self.assertEqual(scan.call_count, 0, "R5_NO_PROBE_NO_SCAN")
+
+    def test_repeated_child_proofs_take_fresh_process_scans(self):
+        import dispatch_contract_process as process_module
+
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched", launch_claimed="0")
+        process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            identity = T.dispatch_contract.process_launch_identity(process.pid)
+            child = self.row("done", "att-child", owner_route_id=self.route["route_id"],
+                             owner_route_hash=self.route["route_hash"],
+                             launch_outcome="running", launch_claimed="1", **identity)
+            self.jobs.write_text(latest + "\n" + child + "\n", encoding="utf-8")
+            with mock.patch.object(process_module, "scan_process_table",
+                                   wraps=process_module.scan_process_table) as scan:
+                T._prove_route_children(self.request(), self.route, self.owner_gate())
+                T._prove_route_children(self.request(), self.route, self.owner_gate())
+            self.assertEqual(scan.call_count, 2,
+                             "each proof starts with a fresh process observation")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_locked_child_proof_takes_a_fresh_process_scan(self):
+        import dispatch_contract_process as process_module
+
+        owner_row = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                             owner_route_hash=self.route["route_hash"],
+                             note="completed-marker", failure_class="pass",
+                             launch_outcome="never-launched", launch_claimed="0")
+        self.jobs.write_text(owner_row + "\n", encoding="utf-8")
+        process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        identity = T.dispatch_contract.process_launch_identity(process.pid)
+        live_child = self.row(
+            "done", "att-live-at-lock", owner_route_id=self.route["route_id"],
+            owner_route_hash=self.route["route_hash"], dispatch_depth="2",
+            worker_type="stage", parent_attempt_id="att-latest",
+            launch_outcome="running", launch_claimed="1", **identity)
+        original_lock = T._jobs_lock
+        lock_entered = []
+        closed = []
+
+        @contextlib.contextmanager
+        def lock_boundary(jobs):
+            with original_lock(jobs) as lock:
+                lock_entered.append(True)
+                with Path(jobs).open("a", encoding="utf-8") as stream:
+                    stream.write(live_child + "\n")
+                yield lock
+
+        def exact_gate():
+            gate = self.owner_gate()["owner-terminal"]
+            gate.update({"node_id": "owner-terminal", "completion_gate": "owner-terminal/v1",
+                         "marker_digest": "sha256:" + "1" * 64,
+                         "evidence_digest": "sha256:" + "2" * 64})
+            return {"owner-terminal": gate}
+
+        owner = owner_route_binding.OwnerRouteBinding(
+            str(self.route_file), self.route["route_id"], self.route["route_hash"])
+        services = T.TerminalCommitServices(
+            close_route=lambda *args, **kwargs: closed.append("close"),
+            finalize_exact_cycle=lambda *args, **kwargs: closed.append("finalize"),
+            seal_envelope=lambda **kwargs: closed.append("envelope"))
+        try:
+            with mock.patch.object(T, "verify_request_identity"), \
+                 patch_split(T, "validate_owner_route", return_value=owner), \
+                 patch_split(T, "producer_lifecycle_applies", return_value=False), \
+                 patch_split(T, "_jobs_lock", side_effect=lock_boundary), \
+                 patch_split(T, "_route_module") as route_module, \
+                 mock.patch.object(process_module, "scan_process_table",
+                                   wraps=process_module.scan_process_table) as scan:
+                route_module.return_value.terminal_gate_observation.side_effect = (
+                    lambda *_args, **_kwargs: exact_gate())
+                self.assertEqual(T.prove_terminal_authority(self.request()).status, "proved")
+                result = T.settle_terminal_commit(self.request(), services)
+            self.assertEqual(lock_entered, [True])
+            self.assertEqual((result.result, result.reason),
+                             ("recoverable", "child-not-quiescent"))
+            self.assertEqual(scan.call_count, 1,
+                             "quiet outer proof skips scan; lock reproof observes the new live child")
+            self.assertEqual(closed, [])
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
     def test_earlier_owner_with_live_process_blocks_latest_quiescent_owner(self):
         process = subprocess.Popen(["sleep", "30"], start_new_session=True)
         try:

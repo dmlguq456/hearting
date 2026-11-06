@@ -52,6 +52,13 @@ Compose before scope grows. Other work starts with:
 hearting run capability-route compose --start --prompt-file <task>
 ```
 
+Choose purpose and sequence in every folder; Git status changes placement only.
+Small non-Git document corrections use direct in place; multi-step document
+work uses the frame, retaining known deadlines and writer responsibilities.
+Keep code and document results at their stated project path (default cwd),
+from the first draft; keep plans, reviews, versions and target references in
+`.agent_reports`.
+
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
 `AGENT_HOME`, else the installed release. Flags are hints unless the person
 or a frame already chose the shape; honor it, using `--shape staged --graph

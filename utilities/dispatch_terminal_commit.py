@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import artifact_lifecycle
 import route_identity
@@ -1396,15 +1396,23 @@ def _prove_route_children(request, route, gates, *, registry_rows=None):
         "gates": {key: gate for key, gate in gates.items() if gate.get("source") != "owner-terminal"}})
     if not choice.allowed:
         return _proof_failure("terminal-attempt-not-pass")
-    for status, meta, fields in related:
-        never_started = status == "done" and dispatch_contract.attempt_row_never_started(fields)
-        choice = decide_continuation(action="terminal-child", status=status, metadata=meta,
-            facts={"contradiction": status == "done" and dispatch_contract.completed_marker_verdict_contradicts(meta),
-                   "never_started": never_started,
-                   "process": None if never_started else
-                       dispatch_contract.attempt_process_quiescence(meta, terminal_receipt=True)})
-        if not choice.allowed:
-            return _proof_failure(choice.reason, choice.detail or None)
+    scan_scope_open = False
+    with ExitStack() as stack:
+        for status, meta, fields in related:
+            never_started = status == "done" and dispatch_contract.attempt_row_never_started(fields)
+            process = None
+            if not never_started:
+                if not scan_scope_open:
+                    stack.enter_context(dispatch_contract.process_table_scan_scope())
+                    scan_scope_open = True
+                process = dispatch_contract.attempt_process_quiescence(
+                    meta, terminal_receipt=True)
+            choice = decide_continuation(action="terminal-child", status=status, metadata=meta,
+                facts={"contradiction": status == "done" and dispatch_contract.completed_marker_verdict_contradicts(meta),
+                       "never_started": never_started,
+                       "process": process})
+            if not choice.allowed:
+                return _proof_failure(choice.reason, choice.detail or None)
     # Retry timestamps record history. Real rows and the shared jobs-lock
     # terminal claim decide what remains active and fence every later start.
     return TerminalProof("proved")

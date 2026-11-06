@@ -639,6 +639,73 @@ class PlanFixture(S.StartBase):
         return RP.read_route_plan(f"{self.decision_path}#{index}", self.root)
 
 
+class NonGitDocumentPlanTest(PlanFixture):
+    """Synthetic coordination plan; no contributor or model process is launched."""
+
+    def readiness(self, frame_route, jobs):
+        return {"tuples": [{**T.nested("claude", "codex"), "checked_worktree": frame_route["cwd"]}],
+                "candidates": T.registered_headless()["candidates"]}
+
+    def setUp(self):
+        project = tempfile.TemporaryDirectory(prefix="joint-report-project-")
+        self.addCleanup(project.cleanup)
+        self.project = Path(project.name).resolve()
+        self.LEGS = [
+            {"capability": "analyze-project", "mode": "doc", "shape": "staged", "graph": ["analyze"],
+             "why": "Inspect source materials", "hands_over": ["material inventory with source references"]},
+            {"capability": "autopilot-draft", "mode": "doc", "shape": "staged",
+             "graph": ["material-strategy", "strategy-review"], "why": "Outline and writer assignments",
+             "hands_over": ["approved outline; writer responsibilities; draft deadline before integration deadline"]},
+            {"capability": "autopilot-draft", "mode": "doc", "shape": "direct",
+             "why": "Collect individual drafts and integrate the project report with the format tool",
+             "parallel": ["writer A chapter", "writer B chapter", "writer C chapter"],
+             "done_when": ["Every expected writer contribution is received", "report.md contains the integrated draft"],
+             "verify": "Check the integrated document, not just successful format-tool execution",
+             "hands_over": ["report.md path and content version; unresolved evidence references"]},
+            {"capability": "autopilot-draft", "mode": "doc", "shape": "staged",
+             "graph": ["quality-review", "fact-verify"], "why": "Review the integrated report",
+             "done_when": ["Review covers the integrated document and all writer contributions"]},
+        ]
+        self.LEGS = [{**leg, "cwd": str(self.project)} for leg in self.LEGS]
+        super().setUp()
+
+    def test_materials_outline_drafts_integration_review_survive_the_approved_non_git_plan(self):
+        import work_start as W
+        self.assertNotEqual(self.record_data["decision"]["selected"], "none", self.record_data["decision"])
+        routes = []
+        parent = self.record_data["decision"]["frame_route"]["cycle_id"]
+        for index, leg in enumerate(self.LEGS):
+            args = RP.leg_arguments(leg)
+            route = R.compose_route(**args, slug=f"joint-report-{index}",
+                artifact_root=self.root, spec_read="fixture", campaign_key="framed-key",
+                parent_cycle_id=parent, route_plan=self.binding(index),
+                dispatch_evidence={"tuples": [{**T.nested("claude", "codex"), "checked_worktree": str(self.project)}]},
+                registered_headless_evidence=T.registered_headless(),
+                work_request={"text": "Coordinate the joint report from materials to review", "owner_harness": None})
+            routes.append(route)
+            R.verify_route(route, self.project)
+            self.assertEqual(route["source_commit"], "unversioned")
+            self.assertEqual(route["cwd"], str(self.project))
+            self.assertEqual(RP.leg_plan(route)["leg"]["why"], leg["why"])
+        self.assertEqual([route["capability"] for route in routes], ["analyze-project"] + ["autopilot-draft"] * 3)
+        self.assertEqual(routes[1]["composed_recipe"]["compose"]["graph"], ["material-strategy", "strategy-review"])
+        self.assertIn("material-strategy-alternative", [node["id"] for node in routes[1]["nodes"]])
+        self.assertEqual(routes[3]["composed_recipe"]["compose"]["graph"], ["quality-review", "fact-verify"])
+        path = Path(S.L.admit_runtime_route(self.root, routes[2]).route_file)
+        receipt = W.start_work(routes[2], path, self.jobs,
+                               run=mock.Mock(side_effect=AssertionError("no model launch")))
+        self.assertEqual(receipt["required_action"], "execute-inline")
+        self.assertIn("writer C chapter", receipt["task"])
+        self.assertIn("Every expected writer contribution is received", receipt["task"])
+        self.assertIn("writer responsibilities", receipt["task"])
+        self.assertIn("content version", receipt["task"])
+        projected = RP.project_next_leg(routes[2], parent)
+        self.assertEqual(projected["index"], 3)
+        self.assertEqual(projected["leg"]["graph"], ["quality-review", "fact-verify"])
+        self.assertFalse((self.project / ".git").exists())
+        self.assertFalse(list(self.project.parent.glob(self.project.name + "-wt*")))
+
+
 class RoutePlanArgumentTest(PlanFixture):
     def test_the_argument_reads_a_selected_record_and_its_leg(self):
         binding = self.binding(1)

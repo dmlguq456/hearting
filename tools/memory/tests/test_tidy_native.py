@@ -15,7 +15,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-sys.path[:0] = [str(HERE), str(ROOT / "utilities")]
+sys.path[:0] = [str(HERE), str(ROOT / "utilities"), str(ROOT)]
 from tidy_isolation import isolated_env
 import session_tidy as st
 import session_tidy_clear as clear
@@ -234,6 +234,19 @@ class NativeScreenTest(unittest.TestCase):
 
 class NativeCommandTest(NativeCase):
     def prepare_transport(self):
+        from tools.fleet import collectors
+        from tools.fleet.model import Session
+        from tools.fleet.refresh import LiveSnapshot
+        # The Python fixture process represents this observed native session;
+        # it is not itself a Claude process for the real census to discover.
+        def observed_routes(**kwargs):
+            return LiveSnapshot(sessions=[Session(harness="claude", session_id=self.record["sessionId"],
+                pid=self.own[0], liveness=self.record["status"])],
+                observations={"basic": {"state": "ok", "all_new": True,
+                    "generation_identity": "native-fixture"},
+                    "required-details": {"state": "ok", "all_new": True,
+                        "generation_identity": "native-fixture"}})
+        self.patch(collectors, "collect_all", side_effect=observed_routes)
         proc = mock.Mock(); proc.poll.return_value = None
         @contextlib.contextmanager
         def attached(_target):

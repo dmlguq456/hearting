@@ -10,8 +10,8 @@ from typing import Mapping
 
 DEFAULT_IDLE = {
     "enabled": True,
-    "wait_seconds": 3240,
-    "min_tokens": 200000,
+    "wait_seconds": 21600,
+    "min_tokens": 500000,
     "cache_margin_seconds": 60,
 }
 MAX_CONFIG_BYTES = 64 * 1024

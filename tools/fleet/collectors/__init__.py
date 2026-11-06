@@ -472,7 +472,7 @@ def _session_census_observation(sessions, herdr_observed):
 
 
 def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                 include_report_verification=True):
+                 include_report_verification=True, route_sessions=None):
     """Return (sessions, jobs).
 
     harness_filter: optional iterable of harness names (fleet + dispatch both honor it).
@@ -485,6 +485,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     """
     job_key = (str(jobs_path or os.environ.get("AGENT_DISPATCH_JOBS") or ""),
                tuple(sorted(harness_filter or ())))
+    if route_sessions is not None:
+        job_key += (tuple(sorted(route_sessions)),)
     observations = {}
     sessions = procscan.scan(harness_filter=harness_filter)
 
@@ -865,10 +867,21 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         pass
 
+    # A session display asks the existing collector/projector for only its
+    # native identities. No display request is evidence of existence/liveness.
+    if route_sessions is not None:
+        requested = set(route_sessions)
+        sessions = [session for session in sessions if any(
+            (session.harness, sid) in requested for sid in
+            (session.session_id, *(getattr(session, "session_aliases", None) or ())))]
+        if not sessions:
+            return LiveSnapshot(sessions=[], jobs=[], resources=[],
+                                observations={"basic": {"all_new": True}})
+
     # --- dispatch section ---
     herdr_session_observation = _session_census_observation(sessions, herdr_observed)
     jobs = []
-    previous = _JOB_OBSERVATIONS.get(job_key)
+    previous = _JOB_OBSERVATIONS.get(job_key) if route_sessions is None else None
     job_error = None
     node_evidence, degradations, pending_delivery, malformed = {}, {}, None, 0
     try:
@@ -876,6 +889,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         jobs = dispatch.collect(jobs_path=jobs_path, harness_filter=harness_filter,
                                 session_rows=sessions,
                                 session_observation=herdr_session_observation,
+                                **({"route_display": True} if route_sessions is not None else {}),
                                 **({"fast_first": True} if fast_first else {}))
         if answer_waits is not None:
             by_attempt = {}
@@ -1029,6 +1043,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         peer = None
     collect_all.last_peer_messages = peer
 
+    if not fast_first:
+        try:
+            from . import prompt_inputs
+            prompt_inputs.enrich(sessions)
+        except Exception:
+            pass
+
     # F-25: drop cross-tick hysteresis entries for rows that no longer exist. Runs after
     # BOTH sessions and jobs are classified — sweeping earlier would evict live job keys.
     try:
@@ -1091,7 +1112,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         reason=(None if details_ready else
                 "required-detail-pass-not-run" if fast_first else "required-detail-source-incomplete"),
         all_new=details_ready, observed_at=_time.time())
-    if job_error is None:
+    if job_error is None and route_sessions is None:
         # Cache projected rows, not a reference later mutated by another reader.
         _JOB_OBSERVATIONS[job_key] = _copy_job_observation_fallback(
             dispatch_rows, node_evidence, degradations, pending_delivery, malformed)
@@ -1101,7 +1122,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
 
 def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                include_report_verification=True):
+                include_report_verification=True, route_sessions=None):
     """Run one Fleet observation with shared artifact, admission and registry inputs."""
     from contextlib import ExitStack
     from . import dispatch
@@ -1118,7 +1139,8 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_fi
         stack.enter_context(dispatch_registry_cache.registry_read_scope())
         return _collect_all(
             harness_filter, jobs_path, usage, fast_first,
-            include_report_verification=include_report_verification)
+            include_report_verification=include_report_verification,
+            route_sessions=route_sessions)
 
 
 collect_all.last_resource_jobs = []

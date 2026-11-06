@@ -4647,12 +4647,17 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
         require_process_session=True, target_observation=(state, ident))
     if current is None:
         return identity_error or "target-identity-unverified", None
+    from session_tidy_clear import peer_input_state
+    state, _source = _effective_retire_state(state, ident)
+    state = peer_input_state(harness, expected_sid, expected_pane, state)
     # A Codex thread with no first turn has no state yet; its empty composer,
     # checked below, is the evidence that it is waiting for input.
     settled = ("idle", "done", "unknown") if fresh_ok else ("idle", "done")
     if state not in settled:
         return "native-state-" + str(state), None
     current_state, current_pane = _agent_state(target)
+    current_state, _source = _effective_retire_state(current_state, ident)
+    current_state = peer_input_state(harness, expected_sid, expected_pane, current_state)
     if current_state not in settled or current_pane != expected_pane:
         return "target-state-changed", None
     if current_state == "unknown":
@@ -5690,7 +5695,8 @@ def _resume_ordinary_notice_obligation(duty, store):
     _resume_session_notice_obligations([duty], store)
 
 
-def _resume_registered_obligation(duty, store, *, read_context=None):
+def _resume_registered_obligation(duty, store, *, read_context=None,
+                                  settlement_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
     intent = duty.get("intent") or {}
     from harness_capabilities import parent_completion
@@ -5809,6 +5815,7 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
             return
         delivery_id = row.metadata.get("delivery_id", "")
         record = pending.read(jobs.parent, storage_recipient, delivery_id)
+        redrive_performed = False
         if record is None:
             terminal_state = peer_obligations._registered_terminal_state(
                 jobs.parent, storage_recipient, delivery_id, row.attempt_id,
@@ -5821,7 +5828,42 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
             # missing exact record; _reconcile_obligations backs off an unknown
             # duty if this bounded recovery attempt still cannot restore source.
             from dispatch_completion_join import materialize_after_terminal_close
-            materialize_after_terminal_close(jobs, row.attempt_id)
+            materialize = lambda: materialize_after_terminal_close(jobs, row.attempt_id)
+            owner_meta = row.metadata
+            if (settlement_context is not None and row.status == "done"
+                    and owner_meta.get("worker_type") == "owner"
+                    and owner_meta.get("workflow_completion") == "runtime-v1"):
+                from dispatch_contract import supervisor_lease_is_held
+                lease_held = supervisor_lease_is_held(jobs, owner_meta)
+                if not lease_held:
+                    from dispatch_registry_cache import registry_view
+                    view = registry_view(jobs, append_only=True)
+                    related = view.completion_related(
+                        row.attempt_id,
+                        owner_meta.get("owner_route_id") or owner_meta.get("route_id", ""),
+                        owner_meta.get("owner_route_hash") or owner_meta.get("route_hash", ""))
+                    def refresh_owner_observation():
+                        fresh = current_attempt_row(jobs, row.attempt_id)
+                        if fresh is None:
+                            return None
+                        fresh_view = registry_view(jobs, append_only=True)
+                        fresh_related = fresh_view.completion_related(
+                            fresh.attempt_id,
+                            fresh.metadata.get("owner_route_id") or
+                            fresh.metadata.get("route_id", ""),
+                            fresh.metadata.get("owner_route_hash") or
+                            fresh.metadata.get("route_hash", ""))
+                        return fresh.status, fresh.raw, fresh.metadata, fresh_related
+                    redrive_deferred = settlement_context.registered_owner_redrive(
+                        jobs, row.status, row.raw, owner_meta, related,
+                        lease_held=False, materialize=materialize,
+                        refresh=refresh_owner_observation)
+                    redrive_performed = not redrive_deferred
+                # The helper either performed this materialization or deferred
+                # it; this duty must not perform a second copy.
+                materialize = None
+            if materialize is not None:
+                materialize()
             record = pending.read(jobs.parent, storage_recipient, delivery_id)
             expected_digest = row.metadata.get("delivery_receipt_digest")
             expected_revision = row.metadata.get("delivery_row_revision")
@@ -5841,8 +5883,12 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
                 store.update(duty["id"], state="unknown",
                              observation={**observation,
                                           "reason": "completion-delivery-record-unavailable",
-                                          "delivery_id": delivery_id})
+                                          "delivery_id": delivery_id},
+                             skip_unchanged=True)
                 return
+            if redrive_performed and settlement_context is not None:
+                # The exact record is now present and has passed recovery validation.
+                settlement_context.forget_unsettled_owner(jobs, row.attempt_id)
         if record and record.get("state") in {"acked", "rejected", "expired"}:
             if record.get("state") == "acked" and _resume_native_receiving_turn(
                     duty, store, row, record, recipient_sid, storage_recipient):
@@ -6554,7 +6600,8 @@ def _reconcile_external_obligations(store, *, service_current=None, snapshot=Non
 
 
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
-                           notice_selection=None, runner_incarnation=None):
+                           notice_selection=None, runner_incarnation=None,
+                           settlement_context=None):
     """Advance only the accepted duties owned by this runner."""
     if duties is None:
         duties = _runner_duties(store, store.list())
@@ -6611,7 +6658,9 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                             duty, store, read_context=read_context,
                             persist_followup=True, runner_lock_held=True)
             elif kind == "registered-batch":
-                _resume_registered_obligation(duty, store, read_context=read_context)
+                _resume_registered_obligation(
+                    duty, store, read_context=read_context,
+                    settlement_context=settlement_context)
             elif kind == "steward-check":
                 _steward_check_module().advance(duty, store)
         except Exception as exc:
@@ -7404,7 +7453,8 @@ def cmd_obligation_runner(args):
         _reconcile_obligations(store, duties, read_context=read_context,
                                retry_state=duty_retry_state,
                                notice_selection=notice_selection,
-                               runner_incarnation=runner_incarnation)
+                               runner_incarnation=runner_incarnation,
+                               settlement_context=settlement_context)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
@@ -7551,6 +7601,10 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
     if not transfer_ref:
         return "peer-ref-unavailable", "unverified", "private-pending", "peer-ref-unavailable"
     resolved_target, t_sid, target_pane, state_before = target, sid, pane, state
+    from session_tidy_clear import peer_input_state
+    state_before, _source = _effective_retire_state(state_before,
+        {"harness": harness, "session_id": t_sid, "pane": target_pane})
+    state_before = peer_input_state(harness, t_sid, target_pane, state_before)
     outcome, verify, reason = "queued", "native-callback", None
     direct_reason = None
     if no_trailer:
@@ -8378,16 +8432,25 @@ def cmd_clear(args):
     req, why = clear.validate_request(args.request, args.nonce)
     if req is None:
         return finish("skipped", why, agent)
-    reason, agent, lines = _clear_look(target, req)   # the look immediately before the one send
-    if reason:
-        return finish(_look_outcome(reason), reason, agent)
-    req, why = clear.claim_clear(args.request, args.nonce)
+    lines = _lines
+
+    def ready(current):
+        nonlocal agent, lines
+        reason, agent, lines = _clear_look(target, current)
+        return reason
+
+    # The final look and compact claim share the existing booking lock with
+    # peer admission. No native I/O or receipt waits hold that lock.
+    req, why = clear.claim_clear(args.request, args.nonce, ready=ready)
     if req is None:
-        return finish("skipped", why, agent)
+        return finish(_look_outcome(why), why, agent)
     compacting = (req.get("clear_claim") or {}).get("command") == "compact"
     if compacting:
         command = clear.COMPACT_COMMAND     # background agents keep running in the same session
     before = _codex_footer_threads(lines) if harness == "codex" else set()
+    req, why = clear.recheck_idle_input(args.request, req)
+    if req is None:
+        return finish("skipped", why, agent)
     rc, payload = _herdr_prompt(target, command, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc is None:
         return finish("failed", "herdr-invocation-failed", agent)
@@ -8488,6 +8551,10 @@ def cmd_idle_card_request(args):
         clear.release_unsent_idle_request(claim)
         return finish("skipped", why)
     text = clear.idle_card_request_text(claim)
+    checked, why = clear.recheck_idle_input(path, checked)
+    if checked is None:
+        clear.release_unsent_idle_request(claim)
+        return finish("skipped", why)
     rc, payload = _herdr_prompt(args.target, text, wait=True, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc != 0:
         reason = "herdr-invocation-failed" if rc is None else _herdr_error_reason(payload, rc)

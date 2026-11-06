@@ -169,6 +169,120 @@ def _write_reservation(data: dict) -> None:
     st.atomic_write_json(reservation_path(data["seat"]["key"]), data)
 
 
+def _peer_seat(harness: str, sid: str):
+    return st.Seat("native", st._native_session_key(harness, sid), harness=harness, sid=sid)
+
+
+def _idle_peer_booking(req, harness, sid):
+    return (isinstance(req, dict) and req.get("origin") == "idle"
+            and (req.get("harness"), req.get("sid")) == (harness, sid))
+
+
+@contextlib.contextmanager
+def peer_input_slot(harness: str, sid: str):
+    """Serialize existing peer claims with this session's idle compact claim.
+
+    Hold only across claim publication, never a native RPC or its receipt.
+    Sessions without an idle booking retain their ordinary delivery path.
+    """
+    if harness not in st.HARNESSES or not isinstance(sid, str) or not sid:
+        yield ""
+        return
+    seat = _peer_seat(harness, sid)
+    if not _idle_peer_booking(read_reservation(seat.key), harness, sid):
+        yield ""
+        return
+    with st.seat_lock(seat.key):
+        req = read_reservation(seat.key)
+        reason = ""
+        if _idle_peer_booking(req, harness, sid) and req.get("status") in ("reserved", "unverified"):
+            request = req.get("idle_request") or {}
+            if request.get("arrival") and request.get("state") != "accepted":
+                reason = "tidy-card-turn"
+            elif (req.get("clear_claim") or {}).get("command") == "compact":
+                reason = "session-compacting"
+        yield reason
+
+
+def peer_input_state(harness: str, sid: str, pane: str, state: str) -> str:
+    """Corroborate a stale working label from the existing completed booking."""
+    if state != "working" or harness != "claude" or not isinstance(sid, str) or not sid:
+        return state
+    seat = _peer_seat(harness, sid)
+    req = read_reservation(seat.key)
+    if (_idle_peer_booking(req, harness, sid) and req.get("status") == "compacted"
+            and (req.get("clear_claim") or {}).get("command") == "compact"
+            and (not pane or (req.get("seat") or {}).get("pane") == pane)
+            and req.get("prompt_seq") == st.read_prompt_seq(seat)
+            and _quiet_after_compact(req, seat)):
+        return "idle"
+    return state
+
+
+def _quiet_after_compact(req, seat):
+    """A background notification can start a native turn without a user prompt.
+
+    Read only the existing transcript since the compact claim. Compare activity
+    with its native boundary, never the observer's later booking finish time.
+    Preserved summary rows and the compact command's output are not new work.
+    """
+    claim = req.get("clear_claim") or {}
+    try:
+        source = claim.get("transcript") or (st.session_summary(seat).get(
+            (req["harness"], req["sid"])) or {}).get("transcript")
+        claimed_at = float(claim["at"])
+        if not source or req["sid"] not in Path(source).name:
+            return False
+        offset = claim.get("offset", 0)
+        if type(offset) is not int or offset < 0:
+            return False
+        with open(source, "rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if not offset <= size <= offset + 8 * 1024 * 1024:
+                return False
+            stream.seek(offset)
+            boundary, latest_activity = None, None
+            for line in stream:
+                row = json.loads(line)
+                if row.get("isSidechain"):
+                    continue
+                if (row.get("type") == "system" and row.get("subtype") == "compact_boundary"
+                        and row.get("sessionId") in (None, req["sid"])):
+                    stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                    if boundary is None and stamp >= claimed_at:
+                        boundary = stamp
+                    continue
+                message = row.get("message") or {}
+                if message.get("role") not in ("user", "assistant"):
+                    continue
+                if row.get("isCompactSummary") or row.get("repeatsCompactSummary"):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and content.startswith("<local-command-"):
+                    continue
+                stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                latest_activity = stamp if latest_activity is None else max(latest_activity, stamp)
+        return boundary is not None and (latest_activity is None or latest_activity < boundary)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
+def _peer_inputs(req):
+    from dispatch_seat_handover import _peer_message
+    return _peer_message().pending_messages({"harness": req["harness"], "session_id": req["sid"]})
+
+
+def _wake_peer_inputs(req):
+    """Wake the retained runner, without sending any synthetic prompt."""
+    with contextlib.suppress(Exception):
+        if not _peer_inputs(req):
+            return
+        import peer_obligations
+        import shared_readiness
+        peer_obligations.ensure_normal_runner()
+        shared_readiness.wake_runner(peer_obligations.ObligationStore().root)
+
+
 def _remove_reservation(seat_key: str) -> None:
     with contextlib.suppress(OSError):
         os.unlink(reservation_path(seat_key))
@@ -278,6 +392,17 @@ def _clear_lineage_reason(harness: str, sid: str) -> str:
     return "session-handed-over" if result.state == "confirmed" else "lineage-unresolved"
 
 
+def _idle_lineage_reason(harness: str, sid: str) -> str:
+    """Same-session card/compact needs no clear lineage; known old sources stay blocked.
+
+    The existing transport checks the exact native session and empty input at
+    send time. Unresolved clear ancestry must not permanently disable that work.
+    """
+    from dispatch_seat_handover import resolve_recipient
+    result = resolve_recipient("seat-successor", harness=harness, session=sid)
+    return "session-handed-over" if result.state == "confirmed" else ""
+
+
 @contextlib.contextmanager
 def _booking_lock(seat: "st.Seat", *, wait: Optional[float] = None):
     """Keep fresh lineage validation and booking mutation together across panes.
@@ -357,8 +482,29 @@ def _await_idle_compaction(seat_key: str, nonce: str, sleep) -> str:
         sleep(min(1.0, max(0, float(req["deadline"]) - st.now_epoch())))
 
 
+def _idle_route_reason(harness: str, sid: str) -> str:
+    """Use the statusline/Fleet projection for this exact session's registered work."""
+    try:
+        root = str(HERE.parent)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from tools.fleet.collectors import collect_all
+        from tools.fleet.explorer.live import session_route_status
+        from tools.fleet.refresh import required_details_all_new
+        snapshot = collect_all(harness_filter={harness}, route_sessions=[(harness, sid)],
+                               include_report_verification=False)
+        observed = any(row.harness == harness and sid in (
+            row.session_id, *(getattr(row, "session_aliases", None) or ())) for row in snapshot.sessions)
+        if (not observed or snapshot.observations.get("basic", {}).get("all_new") is not True
+                or not required_details_all_new(snapshot.observations)):
+            return "route-observation-unavailable"
+        return "route-active" if harness + "\0" + sid in session_route_status(snapshot) else ""
+    except Exception:
+        return "route-observation-unavailable"
+
+
 def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provider: str = "",
-                       model: str = "", tokens: int, now: Optional[float] = None,
+                       model: str = "", tokens: Optional[int], now: Optional[float] = None,
                        lock_wait: Optional[float] = None, proven_seat=None) -> str:
     """Durably book one token-qualified idle window for an exact main session turn."""
     import hashlib
@@ -367,16 +513,12 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
     now = st.now_epoch() if now is None else float(now)
     if harness not in ("claude", "codex", "opencode") or not sid or not event_id:
         return "booking=skipped reason=invalid-idle-identity"
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
-        return "booking=skipped reason=usage-unknown"
     policy, config_reason = idle_policy(harness, provider or None)
     if config_reason or policy is None:
         return f"booking=skipped reason={config_reason or 'config-invalid'}"
     if not policy["enabled"]:
         return "booking=off"
-    if tokens < policy["min_tokens"]:
-        return "booking=skipped reason=below-threshold"
-    reason = _clear_lineage_reason(harness, sid)
+    reason = _idle_lineage_reason(harness, sid)
     if reason:
         return f"booking=skipped reason={reason}"
     seat = st.resolve_seat(harness, cwd or None, sid=sid)
@@ -388,66 +530,137 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
     if not ((seat.kind == "pane" and seat.pane)
             or (harness == "claude" and seat.kind == "native" and seat.native)):
         return "booking=skipped reason=exact-pane-unavailable"
-    prompt_state = st.prompt_state(seat)
-    sequence = st.read_prompt_seq(seat)
-    frontier = st.real_prompt_frontier(seat, harness, sid)
-    generation = int((frontier or {}).get("sequence", 0))
-    if sequence and not frontier:
-        return "booking=skipped reason=not-rearmed"
-    sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
-            and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
-            and r.get("state") not in ("released", "superseded")
-            and int(r.get("sent_seq", -1)) >= generation]
-    if sent:
-        return "booking=skipped reason=not-rearmed"
-    identity = hashlib.sha256(f"{harness}\0{sid}\0{sequence}\0{event_id}".encode("utf-8")).hexdigest()
+    route_reason = _idle_route_reason(harness, sid)
     with _booking_lock(seat, wait=lock_wait):
-        reason = _clear_lineage_reason(harness, sid)
+        reason = _idle_lineage_reason(harness, sid)
         if reason:
             return f"booking=skipped reason={reason}"
         existing = read_reservation(seat.key)
         old_idle = (existing or {}).get("idle") if isinstance((existing or {}).get("idle"), dict) else {}
-        if existing and old_idle.get("identity") == identity:
-            if existing.get("status") == "reserved":
-                nonce = str(existing.get("nonce") or "")
-                # Duplicate Stop/status delivery never moves the original deadline.
-            else:
-                return f"booking=skipped reason=event-{existing.get('status') or 'terminal'}"
+        sequence = st.read_prompt_seq(seat)
+        frontier = st.real_prompt_frontier(seat, harness, sid)
+        generation = int((frontier or {}).get("sequence", 0))
+        same_idle = (existing and existing.get("origin") == "idle"
+                     and (existing.get("harness"), existing.get("sid")) == (harness, sid))
+        request = ((existing or {}).get("idle_request")
+                   if isinstance((existing or {}).get("idle_request"), dict) else {})
+        prompt = st.prompt_state(seat) or {}
+        own_request_turn = (request and prompt.get("source") == "claim"
+                            and prompt.get("claim_id") == request.get("token"))
+        if (same_idle and existing.get("status") == "reserved" and request
+                and not own_request_turn
+                and event_id not in (old_idle.get("event_id"), old_idle.get("activity_event_id"))):
+            # A claimed request already spends this user interval. Cancel the
+            # remaining input rather than compact just after a peer's new work.
+            old_idle.update(activity_event_id=event_id, activity_at=now)
+            existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
+            _write_reservation(existing)
+            return "booking=skipped reason=not-rearmed"
+        sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
+                and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
+                and r.get("state") not in ("released", "superseded")
+                and int(r.get("sent_seq", -1)) >= generation]
+        if sent:
+            return "booking=skipped reason=not-rearmed"
+        unclaimed = same_idle and existing.get("status") == "reserved" and not existing.get("idle_request")
+        if unclaimed and generation == int(old_idle.get("user_generation", 0)):
+            # Reuse this unspent user interval, nonce and helper. Even a turn
+            # without usage postponed the window; it cannot create a new one.
+            previous_event = old_idle.get("activity_event_id", old_idle.get("event_id"))
+            if event_id not in (previous_event, old_idle.get("event_id")):
+                due_at = max(float(old_idle.get("due_at", 0)), now + float(policy["wait_seconds"]))
+                old_idle.update(activity_event_id=event_id, activity_at=now, due_at=due_at,
+                                min_tokens=policy["min_tokens"], wait_seconds=policy["wait_seconds"])
+                if type(tokens) is int and tokens >= 0:
+                    old_idle["tokens"] = tokens
+                existing.update(idle=old_idle, prompt_seq=sequence,
+                                deadline=due_at + IDLE_CARD_WINDOW_SEC)
+                _write_reservation(existing)
+            nonce = str(existing["nonce"])
         else:
-            if existing and existing.get("status") == "reserved":
-                return "booking=skipped reason=booking-pending"
-            if (existing and existing.get("origin") == "idle"
-                    and existing.get("harness") == harness and existing.get("sid") == sid
-                    and generation <= int((existing.get("idle") or {}).get("user_generation", 0))):
+            if route_reason:
+                return f"booking=skipped reason={route_reason}"
+            if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+                return "booking=skipped reason=usage-unknown"
+            if tokens < policy["min_tokens"]:
+                return "booking=skipped reason=below-threshold"
+            if sequence and not frontier:
                 return "booking=skipped reason=not-rearmed"
-            card = st.read_latest_card(seat)
-            card_generation = int(card.get("generation", 0) or 0) if card else 0
-            due_at = now + float(policy["wait_seconds"])
-            nonce = secrets.token_hex(8)
-            booking = {
-                "schema": SCHEMA, "nonce": nonce, "status": "reserved", "created": now,
-                "deadline": due_at + IDLE_CARD_WINDOW_SEC,
-                "seat": _booking_seat_fields(seat, harness, sid),
-                "harness": harness, "sid": sid, "cwd": cwd,
-                "card_generation": card_generation, "prompt_seq": sequence,
-                "continue_off": True, "origin": "idle", "followup_kind": "none", "clear_command": "compact",
-                "snapshot_state": "deferred", "idle": {
-                    "identity": identity, "event_id": event_id, "provider": provider or "unknown",
-                    "model": model or "unknown", "tokens": tokens, "min_tokens": policy["min_tokens"],
-                    "wait_seconds": policy["wait_seconds"], "cache_margin_seconds": policy["cache_margin_seconds"],
-                    "cache_ttl": "unknown", "due_at": due_at, "user_generation": generation,
-                    "compaction": compaction_position(seat, harness, sid),
-                }}
-            _write_reservation(booking)
+            identity = hashlib.sha256(f"{harness}\0{sid}\0{sequence}\0{event_id}".encode("utf-8")).hexdigest()
+            if existing and old_idle.get("identity") == identity:
+                if existing.get("status") == "reserved":
+                    nonce = str(existing.get("nonce") or "")
+                    # Duplicate Stop/status delivery never moves the original deadline.
+                else:
+                    return f"booking=skipped reason=event-{existing.get('status') or 'terminal'}"
+            else:
+                if (existing and existing.get("status") == "reserved"
+                        and not (existing.get("origin") == "idle" and not existing.get("idle_request")
+                                 and generation > int(old_idle.get("user_generation", 0)))):
+                    return "booking=skipped reason=booking-pending"
+                if (existing and existing.get("origin") == "idle"
+                        and existing.get("harness") == harness and existing.get("sid") == sid
+                        and generation <= int((existing.get("idle") or {}).get("user_generation", 0))
+                        and existing.get("reason") not in ("route-active", "route-observation-unavailable")):
+                    return "booking=skipped reason=not-rearmed"
+                card = st.read_latest_card(seat)
+                card_generation = int(card.get("generation", 0) or 0) if card else 0
+                due_at = now + float(policy["wait_seconds"])
+                nonce = secrets.token_hex(8)
+                booking = {
+                    "schema": SCHEMA, "nonce": nonce, "status": "reserved", "created": now,
+                    "deadline": due_at + IDLE_CARD_WINDOW_SEC,
+                    "seat": _booking_seat_fields(seat, harness, sid),
+                    "harness": harness, "sid": sid, "cwd": cwd,
+                    "card_generation": card_generation, "prompt_seq": sequence,
+                    "continue_off": True, "origin": "idle", "followup_kind": "none", "clear_command": "compact",
+                    "snapshot_state": "deferred", "idle": {
+                        "identity": identity, "event_id": event_id,
+                        "activity_event_id": event_id, "activity_at": now, "provider": provider or "unknown",
+                        "model": model or "unknown", "tokens": tokens, "min_tokens": policy["min_tokens"],
+                        "wait_seconds": policy["wait_seconds"], "cache_margin_seconds": policy["cache_margin_seconds"],
+                        "cache_ttl": "unknown", "due_at": due_at, "user_generation": generation,
+                        "compaction": compaction_position(seat, harness, sid),
+                    }}
+                _write_reservation(booking)
+        if route_reason:
+            return f"booking=skipped reason={route_reason}"
     started, reason = _ensure_helper(seat.key, nonce, lock_wait=lock_wait)
     if not started:
         return f"booking=pending reason={reason}"
     return "booking=scheduled"
 
 
+def recheck_idle_input(path, expected: dict, *, now: Optional[float] = None):
+    """Retain this existing input claim only while its booking still matches.
+
+    This is a quick atomic-file read after slow observations and at the writer,
+    with no new state or nested lock: claim callers already hold the seat lock.
+    Native I/O and receipt waits must stay outside that lock.
+    """
+    if expected.get("origin") != "idle":
+        return expected, ""
+    current, _seat, reason = _booking_at(Path(path))
+    if current is None:
+        return None, reason
+    if current.get("nonce") != expected.get("nonce") or current.get("status") != "reserved":
+        return None, "superseded"
+    now = st.now_epoch() if now is None else now
+    if now < float((current.get("idle") or {}).get("due_at", 0) or 0):
+        return None, "not-due"
+    if now > float(current.get("deadline", 0) or 0):
+        return None, "expired"
+    fields = ("origin", "harness", "sid", "seat", "prompt_seq", "card_generation", "deadline",
+              "idle", "idle_request", "clear_claim", "acceptance", "operation_id", "queue_id")
+    if any(current.get(key) != expected.get(key) for key in fields):
+        return None, "booking-changed"
+    return current, ""
+
+
 def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[float] = None,
                           _sending_claim: Optional[dict] = None):
     """Validate one idle or compact-origin card request before its main-session prompt."""
+    observed_now = now
     now = st.now_epoch() if now is None else now
     req, seat, reason = _booking_at(Path(path))
     if req is None:
@@ -465,6 +678,9 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
     if now > float(req.get("deadline", 0) or 0):
         return None, "expired"
     if req.get("origin") == "idle":
+        reason = _idle_route_reason(req["harness"], req["sid"])
+        if reason:
+            return None, reason
         if compaction_position(seat, req["harness"], req["sid"]) != idle.get("compaction", ""):
             return None, "compacted"
         from session_tidy_idle import _tokens_and_provider
@@ -472,7 +688,8 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         # Legacy fixture bookings have no transcript; production bookings always carry their history.
         if transcript or req["harness"] == "opencode":
             tokens, _provider, _model = _tokens_and_provider(req["harness"], {}, req["sid"], transcript)
-            if tokens is None or tokens < int(idle.get("min_tokens", 200000)):
+            from session_tidy_policy import DEFAULT_IDLE
+            if tokens is None or tokens < int(idle.get("min_tokens", DEFAULT_IDLE["min_tokens"])):
                 return None, "usage-unknown" if tokens is None else "below-threshold"
     sequence, booked = st.read_prompt_seq(seat), int(req.get("prompt_seq", -1))
     if sequence != booked and not _only_notifications_since(seat, booked, sequence):
@@ -487,7 +704,7 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         return None, "idle-request-already-claimed"
     if _sending_claim is not None and held != _sending_claim:
         return None, "booking-changed"
-    return req, ""
+    return recheck_idle_input(path, req, now=observed_now)
 
 
 def reply_card_guide(nonce: str, t=None, context: Optional[dict] = None) -> str:
@@ -843,14 +1060,15 @@ def _accept_idle_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, idle
         return "clear=skipped reason=idle-request-not-eligible"
     try:
         with _booking_lock(seat, wait=lock_wait):
-            reason = _clear_lineage_reason(harness, sid)
+            req = read_reservation(seat.key)
+            origin = (req or {}).get("origin")
+            reason = (_idle_lineage_reason(harness, sid) if origin == "idle"
+                      else _clear_lineage_reason(harness, sid))
             if reason:
                 return f"clear=skipped reason={reason}"
-            req = read_reservation(seat.key)
             request = (req or {}).get("idle_request") if isinstance((req or {}).get("idle_request"), dict) else {}
             arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
             compact = (req or {}).get("compact") if isinstance((req or {}).get("compact"), dict) else {}
-            origin = (req or {}).get("origin")
             expected_identity = ((req.get("idle") or {}).get("identity") if origin == "idle"
                                  else compact.get("identity"))
             if not queue_id or not operation_id or operation_id != expected_identity:
@@ -990,6 +1208,10 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
     if opt_out:
         cancel(seat)
         return "clear=off"
+    if idle_context is not None:
+        return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
+                                    operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
+                                    no_continue=no_continue)
     reason = _clear_lineage_reason(harness, sid)
     if reason:
         existing = read_reservation(seat.key)
@@ -999,10 +1221,6 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
             return ("clear=off" if existing.get("status") == "cancelled"
                     else f"clear=completed reason={existing.get('status') or 'terminal'}")
         return f"clear=skipped reason={reason}"
-    if idle_context is not None:
-        return _accept_idle_enqueue(seat, harness, sid, cwd, idle_context,
-                                    operation_id=operation_id, queue_id=queue_id, lock_wait=lock_wait,
-                                    no_continue=no_continue)
     compact = None
     if compact_context is not None:
         card = st.read_latest_card(seat)
@@ -1613,12 +1831,17 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
     so both judge the same facts: the file is the seat's own booking, it is unexpired, no
     prompt was submitted since it was made, and the card is still the booked generation.
     """
+    observed_now = now
     now = st.now_epoch() if now is None else now
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
     if (nonce and req.get("nonce") != nonce) or req.get("status") != "reserved":
         return None, "superseded"
+    if req.get("origin") == "idle":
+        reason = _idle_route_reason(req["harness"], req["sid"])
+        if reason:
+            return None, reason
     if (req.get("origin") == "idle"
             and compaction_position(seat, req["harness"], req["sid"])
             != (req.get("idle") or {}).get("compaction", "")):
@@ -1648,7 +1871,7 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
                        and compact.get("turn_end_observed") is True else compact_observation(req))
         if observation.get("state") != "ready":
             return None, "compact-unknown" if observation.get("state") == "unknown" else "compact-pending"
-    return req, ""
+    return recheck_idle_input(path, req, now=observed_now)
 
 
 def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time.sleep,
@@ -1678,7 +1901,7 @@ def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time
         sleep(min(1.0, remaining))
 
 
-def claim_clear(path, nonce: Optional[str] = None):
+def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
     """Atomically consume the one clear send before the steward/native writer acts."""
     req, seat, reason = _booking_at(Path(path))
     if req is None:
@@ -1693,6 +1916,23 @@ def claim_clear(path, nonce: Optional[str] = None):
                 transcript, offset = str(found), found.stat().st_size
     with st.seat_lock(seat.key):
         req, reason = validate_request(path, nonce)
+        if req is None:
+            return None, reason
+        if req.get("origin") == "idle":
+            # A peer claim and this claim take the same seat lock before their
+            # metadata locks. The first writer owns input until its normal
+            # receipt/new-prompt observation, rather than racing /compact.
+            from dispatch_contract import process_identity_disposition
+            if any(isinstance(row.get("rpc_claim"), dict)
+                   and process_identity_disposition((row["rpc_claim"]).get("pid", 0),
+                       (row["rpc_claim"]).get("start", "")) != "dead"
+                   for row in _peer_inputs(req)):
+                return None, "peer-input-pending"
+        if ready is not None:
+            reason = ready(req)
+            if reason:
+                return None, reason
+        req, reason = recheck_idle_input(path, req)
         if req is None:
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
@@ -2070,7 +2310,8 @@ def _set_successor_prompt_frontier(req: dict, sid: str) -> None:
                     "session": {"harness": harness, "sid": str(req.get("sid") or "")}}
 
 
-def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observed: str = "") -> bool:
+def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observed: str = "",
+            expected_idle_due: Optional[float] = None) -> bool:
     """Record how the booking ended -- only while it is still this helper's -- and leave the
     one result line for anything but a clear.  The notice is written after the seat lock is
     released (``write_notice`` takes it itself)."""
@@ -2078,6 +2319,9 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         req = read_reservation(seat_key)
         if not req or req.get("nonce") != nonce or req.get("status") not in ("reserved", "unverified"):
             return False
+        if (expected_idle_due is not None
+                and float((req.get("idle") or {}).get("due_at", 0)) != expected_idle_due):
+            return False  # A completed turn moved the window after the helper's read.
         now = st.now_epoch()
         if reason == NOTIFICATION_TURN:
             outcome = "cancelled"
@@ -2101,6 +2345,7 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             st.write_notice(_booked_seat(req, seat_key), st._ui_translator()("tidy.idle.completed"),
                             author_harness=req["harness"], author_sid=req["sid"],
                             notice_id="idle:" + nonce)
+            _wake_peer_inputs(req)
         return True
     if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):
@@ -2261,22 +2506,31 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         due = float(idle.get("due_at", 0) or 0)
         now = st.now_epoch()
         if now > float(req.get("deadline", 0) or 0):
-            return "skipped" if _finish(seat_key, nonce, "skipped", waited or "expired") else "superseded"
+            if _finish(seat_key, nonce, "skipped", waited or "expired", expected_idle_due=due):
+                return "skipped"
+            continue
         if now < due:
-            # The same absolute due_at survives interruptions and duplicate events.
+            # Activity may have moved this deadline; always reread the booking.
             sleep(min(30.0, due - now))
             continue
         checked, reason = validate_idle_request(path, nonce)
         if checked is None:
+            if reason == "not-due":
+                continue
             if reason == "superseded":
                 return "superseded"
-            return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
+            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due):
+                return "skipped"
+            continue
         seat = checked.get("seat") or {}
         target = str(seat.get("pane") or (f"native:{(seat.get('native') or {}).get('job')}"
                                            if seat.get("kind") == "native" else ""))
         verdict = _run_idle_card_request(path, nonce, target)
         if verdict.get("accepted") != "true":
             held = read_reservation(seat_key) or {}
+            if (verdict.get("reason") == "not-due" and held.get("nonce") == nonce
+                    and held.get("status") == "reserved"):
+                continue
             request = held.get("idle_request") if isinstance(held.get("idle_request"), dict) else {}
             if request.get("state") in ("sending", "arrived", "accepted", "unverified"):
                 if request.get("state") == "unverified":
@@ -2288,7 +2542,9 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
                 sleep(min(5.0, max(0.0, float(req.get("deadline", 0) or 0) - st.now_epoch())))
                 continue
             reason = verdict.get("reason") or "idle-card-not-accepted"
-            return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
+            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due):
+                return "skipped"
+            continue
         accepted = _wait_idle_card_acceptance(seat_key, nonce, sleep)
         if accepted == "accepted":
             return accepted

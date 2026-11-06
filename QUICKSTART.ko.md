@@ -14,7 +14,7 @@
   Python 버전은 설치기가 확인합니다.
 - 설치하고 로그인한 에이전트 CLI 하나 이상: Claude Code, Codex, OpenCode.
   Claude Code만 있어도 됩니다.
-- herdr, Cairn, NAS, 원격 메모리 교환, GPU는 필요 없습니다.
+- herdr, 외부 산출물 도구, NAS, 원격 메모리 교환, GPU는 필요 없습니다.
 
 지금까지 확인한 범위: CI가 Ubuntu에서 Claude Code·Codex·OpenCode용 설치를 확인하고,
 아래 실측은 Linux에서 했습니다. macOS는 처음부터 끝까지 확인하지 않았고,
@@ -33,7 +33,7 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/latest/download/instal
 
 설치기는 꼭 읽어야 할 안내를 하나 출력합니다. 백그라운드 Claude 작업자는 기본으로
 bypass 모드로 돌고, 같은 안내가 allowlist로 바꾸는 파일을 알려 줍니다.
-[권한](README.ko.md#권한)을 참고하세요. OpenCode도 설치하고 Claude Code 사용자
+[자주 묻는 질문](FAQ.ko.md#백그라운드-작업자는-어떤-권한을-갖나요)을 참고하세요. OpenCode도 설치하고 Claude Code 사용자
 규칙이 있으면, 그 규칙이 이제 OpenCode에도 적용된다는 안내가 하나 더 나옵니다. 끄는
 법은 같은 절에 있습니다.
 

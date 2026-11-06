@@ -64,6 +64,20 @@ def _stubbed_runtime_projection():
 
 
 class PeerReconnectTest(unittest.TestCase):
+    def test_committed_install_reconnects_cached_displays_using_the_new_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            utility = root / "utilities/human_wait_state.py"
+            utility.parent.mkdir()
+            utility.touch()
+            with mock.patch.object(installer.distribution.subprocess, "Popen") as launch:
+                self.assertTrue(installer.distribution.reconnect_cached_displays(root))
+                args, kwargs = launch.call_args
+                self.assertEqual(args[0], [sys.executable, str(utility), "--reconnect-cache"])
+                self.assertEqual(kwargs["env"]["AGENT_HOME"], str(root))
+                launch.side_effect = OSError("fixture spawn failure")
+                self.assertFalse(installer.distribution.reconnect_cached_displays(root))
+
     def test_activation_reconnects_resources_using_the_new_release(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -266,18 +280,22 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
 
     def test_activation_reconnects_once_and_rollback_never_reconnects(self):
         with _stubbed_runtime_projection() as mocks, \
-             mock.patch.object(runtime_activation, "reconnect_peer_obligations") as reconnect:
+             mock.patch.object(runtime_activation, "reconnect_peer_obligations") as reconnect, \
+             mock.patch.object(installer.distribution, "reconnect_cached_displays") as cache_reconnect:
             mocks["activate"].return_value["active_root"] = "/fixture/release"
             result = installer.cmd_runtime(self._args("activate"))
             self.assertEqual(result["exit"], installer.EXIT_OK)
             reconnect.assert_called_once_with("/fixture/release")
+            cache_reconnect.assert_called_once_with("/fixture/release")
         os.environ["HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER"] = "1"
         with _stubbed_runtime_projection() as mocks, \
-             mock.patch.object(runtime_activation, "reconnect_peer_obligations") as reconnect:
+             mock.patch.object(runtime_activation, "reconnect_peer_obligations") as reconnect, \
+             mock.patch.object(installer.distribution, "reconnect_cached_displays") as cache_reconnect:
             mocks["refresh"].return_value["active_root"] = "/fixture/release"
             result = installer.cmd_runtime(self._args("refresh"))
             self.assertEqual(result["exit"], installer.EXIT_BLOCKED)
             reconnect.assert_not_called()
+            cache_reconnect.assert_not_called()
 
     def test_injected_failure_after_launcher_retirement_restores_exact_prior_state(self):
         self._install_legacy_launcher()

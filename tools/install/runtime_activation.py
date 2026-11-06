@@ -1007,6 +1007,9 @@ def _linked_entries(
         entries.append(_entry(herdr_plugin, home / "plugins/herdr-agent-state.js", "hook_config", kind="copy"))
         tui_entry = source_root / "adapters/opencode/tui/hearting-tui-identity.ts"
         entries.append(_entry(tui_entry, home / "tui/hearting-tui-identity.ts", "hook_config"))
+        route_status = source_root / "adapters/opencode/tui/hearting-route-status.tsx"
+        if route_status.is_file():
+            entries.append(_entry(route_status, home / "tui/hearting-route-status.tsx", "hook_config"))
         tui_v2 = source_root / "adapters/opencode/plugins/hearting-tui-identity/tui.ts"
         entries.append(_opencode_v2_plugin_entry(
             tui_v2, tui_entry, home / "plugins/hearting-tui-identity/tui.ts",
