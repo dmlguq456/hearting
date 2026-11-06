@@ -2,9 +2,12 @@
 """Daily entry identity, real completion and consolidation/restore boundaries."""
 import concurrent.futures
 import contextlib
+import ctypes
+import errno
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -27,6 +30,49 @@ spec.loader.exec_module(turns)
 
 
 class EntryTest(unittest.TestCase):
+    def test_directory_fsync_unsupported_uses_checked_syncfs(self):
+        real_sync = os.fsync
+        def unsupported(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "directory fsync unsupported")
+            return real_sync(fd)
+        library = mock.Mock(syncfs=mock.Mock(return_value=0))
+        with mock.patch.object(os, "fsync", side_effect=unsupported), \
+                mock.patch.object(ctypes, "CDLL", return_value=library):
+            try:
+                J.atomic(self.root / "saved", b"durable")
+            except OSError as exc:
+                self.fail("directory sync should use the checked fallback: " + str(exc))
+        self.assertEqual((self.root / "saved").read_bytes(), b"durable")
+        library.syncfs.assert_called_once()
+
+    def test_sync_errors_are_not_reported_as_success(self):
+        for code in (errno.EIO, errno.ENOSPC, errno.EINVAL):
+            with self.subTest(file_error=code), \
+                    mock.patch.object(os, "fsync", side_effect=OSError(code, "file sync")), \
+                    mock.patch.object(ctypes, "CDLL") as library:
+                with self.assertRaises(OSError):
+                    J.atomic(self.root / "saved", b"must not publish")
+                library.assert_not_called()
+                self.assertFalse((self.root / "saved").exists())
+
+    def test_directory_fallback_failure_is_partial_not_silently_ignored(self):
+        real_sync = os.fsync
+        def unsupported(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "directory fsync unsupported")
+            return real_sync(fd)
+        def failed(fd):
+            ctypes.set_errno(errno.ENOSPC)
+            return -1
+        library = mock.Mock(syncfs=mock.Mock(side_effect=failed))
+        with mock.patch.object(os, "fsync", side_effect=unsupported), \
+                mock.patch.object(ctypes, "CDLL", return_value=library):
+            with self.assertRaises(OSError) as caught:
+                J.atomic(self.root / "saved", b"published but sync failed")
+        self.assertEqual(caught.exception.errno, errno.ENOSPC)
+        library.syncfs.assert_called_once()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -479,6 +525,159 @@ class CompletionTest(turns.EndToEndTest):
 class MigrationTest(turns.EndToEndTest):
     test_one_closed_unassigned_record_that_later_turns_append_to = None
     test_a_route_left_open_by_a_failed_close_is_closed_at_the_next_turn = None
+
+    def _interrupted_retire(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        with mock.patch.object(M, "_rename_no_replace", side_effect=OSError(errno.EINVAL, "retire")):
+            with self.assertRaises(OSError):
+                M.apply(self.root, cid, self.env)
+        path, op = M._operation(self.root, cid)
+        self.assertEqual(op["state"], "rebound")
+        return record, path, op
+
+    def test_retire_einval_same_apply_resumes_same_operation(self):
+        record, path, op = self._interrupted_retire()
+        result = M.apply(self.root, record["cycle_id"], self.env)
+        self.assertEqual(result["state"], "committed")
+        self.assertEqual(result["operation_id"], op["operation_id"])
+        self.assertEqual(len(J.rows(self.root)["rows"]), 1)
+        self.assertEqual(M.restore(self.root, record["cycle_id"], self.env)["state"], "restored")
+
+    def test_retire_einval_partial_restore_keeps_original_and_other_entries(self):
+        record, path, op = self._interrupted_retire()
+        source = self.root / op["candidate"]["source"]
+        identity = M.inventory(source)
+        binding = J.target(self.root, record["route_id"])
+        later = J.append(self.root, binding, origin={"unrelated": "later"}, summary="later", body="keep")
+        try:
+            result = M.restore(self.root, record["cycle_id"], self.env)
+        except ValueError as exc:
+            self.fail("partial apply must be restorable: " + str(exc))
+        self.assertEqual(result["state"], "restored")
+        self.assertEqual(result["operation_id"], op["operation_id"])
+        self.assertTrue(M._same_tree(source, identity, identity=True))
+        self.assertEqual(J.revision_digest(later["reference"]), later["digest"])
+        self.assertEqual(len(J.rows(self.root)["rows"]), 1)
+        self.assertIsNone(J.target(self.root, record["route_id"]))
+        self.assertTrue(M.restore(self.root, record["cycle_id"], self.env)["replay"])
+
+    def test_partial_restore_at_every_apply_boundary(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        points = ("before-backup", "after-backup", "before-entry", "after-entry-effect", "after-entry",
+                  "after-rebind-effect", "after-rebind", "before-retire", "after-retire-effect", "after-commit")
+        for point in points:
+            with self.subTest(point=point):
+                def crash(where):
+                    if where == point:
+                        raise RuntimeError(point)
+                with mock.patch.object(M, "_fault", side_effect=crash):
+                    with self.assertRaisesRegex(RuntimeError, point):
+                        M.apply(self.root, cid, self.env)
+                path, op = M._operation(self.root, cid)
+                try:
+                    result = M.restore(self.root, cid, self.env)
+                except (OSError, ValueError) as exc:
+                    self.fail("restore must undo interrupted " + point + ": " + str(exc))
+                self.assertEqual(result["operation_id"], op["operation_id"])
+                self.assertEqual(result["state"], "restored")
+                self.assertTrue(M._same_tree(self.root / op["candidate"]["source"], op["candidate"]["image"]))
+                self.assertEqual(J.rows(self.root)["rows"], [])
+                self.assertNotIn("journal_migration", P.read_cycle_record(self.root, cid))
+
+    def test_partial_restore_interrupts_and_resumes_without_replacing_original(self):
+        record, path, op = self._interrupted_retire()
+        source = self.root / op["candidate"]["source"]
+        def crash(point):
+            if point == "after-restore-entry-effect":
+                raise RuntimeError("restore interrupted")
+        with mock.patch.object(M, "_fault", side_effect=crash):
+            try:
+                M.restore(self.root, record["cycle_id"], self.env)
+            except RuntimeError:
+                pass
+            except ValueError as exc:
+                self.fail("partial restore did not reach undo: " + str(exc))
+            else:
+                self.fail("expected interruption after own entry removal")
+        self.assertEqual(M.restore(self.root, record["cycle_id"], self.env)["state"], "restored")
+        self.assertTrue(M._same_tree(source, op["candidate"]["image"], identity=True))
+
+    def test_partial_restore_preserves_replacement_source_even_with_same_bytes(self):
+        record, path, op = self._interrupted_retire()
+        source = self.root / op["candidate"]["source"]
+        source.rename(self.tmp / "original")
+        M.shutil.copytree(path.parent / "backup", source)
+        before = M.inventory(source)
+        with self.assertRaises(ValueError):
+            M.restore(self.root, record["cycle_id"], self.env)
+        self.assertEqual(M.inventory(source), before)
+        self.assertEqual(len(J.rows(self.root)["rows"]), 1)
+
+    def test_resumed_partial_restore_rejects_replacement_original(self):
+        record, path, op = self._interrupted_retire()
+        def crash(point):
+            if point == "before-restore-entry":
+                raise RuntimeError("before undo")
+        with mock.patch.object(M, "_fault", side_effect=crash):
+            with self.assertRaises(RuntimeError):
+                M.restore(self.root, record["cycle_id"], self.env)
+        source = self.root / op["candidate"]["source"]
+        source.rename(self.tmp / "original")
+        M.shutil.copytree(path.parent / "backup", source)
+        with self.assertRaisesRegex(ValueError, "destination-conflict"):
+            M.restore(self.root, record["cycle_id"], self.env)
+        self.assertEqual(len(J.rows(self.root)["rows"]), 1)
+
+    def test_directory_fsync_fallback_covers_the_whole_migration(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        real_sync = os.fsync
+        def unsupported(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "directory fsync unsupported")
+            return real_sync(fd)
+        def rename(*args):
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+        library = mock.Mock(renameat2=mock.Mock(side_effect=rename), syncfs=mock.Mock(return_value=0))
+        with mock.patch.object(os, "fsync", side_effect=unsupported), \
+                mock.patch.object(ctypes, "CDLL", return_value=library):
+            self.assertEqual(M.apply(self.root, cid, self.env)["state"], "committed")
+            self.assertEqual(M.restore(self.root, cid, self.env)["state"], "restored")
+        self.assertGreater(library.syncfs.call_count, 10)
+
+    def test_unsupported_noreplace_uses_common_fallback_for_apply_and_restore(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        def unsupported(*args):
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+        library = mock.Mock(renameat2=mock.Mock(side_effect=unsupported))
+        with mock.patch.object(ctypes, "CDLL", return_value=library):
+            try:
+                result = M.apply(self.root, cid, self.env)
+                restored = M.restore(self.root, cid, self.env)
+            except OSError as exc:
+                self.fail("NFS no-replace fallback missing: " + str(exc))
+        self.assertEqual((result["state"], restored["state"]), ("committed", "restored"))
+        self.assertGreaterEqual(library.renameat2.call_count, 2)
+
+    def test_delayed_apply_does_not_revive_or_replace_a_restored_operation(self):
+        record, path, op = self._interrupted_retire(); cid = record["cycle_id"]
+        original = M._writer_locks
+        successor = {}
+        @contextlib.contextmanager
+        def after_selection(root, choice):
+            with mock.patch.object(M, "_writer_locks", original):
+                M.restore(root, cid, self.env)
+                successor["result"] = M.apply(root, cid, self.env)
+                successor["path"], _ = M._operation(root, cid)
+                successor["bytes"] = successor["path"].read_bytes()
+            with original(root, choice):
+                yield
+        with mock.patch.object(M, "_writer_locks", after_selection):
+            result = M.apply(self.root, cid, self.env)
+        self.assertEqual(result["state"], "restored")
+        self.assertEqual(result["operation_id"], op["operation_id"])
+        self.assertEqual(successor["path"].read_bytes(), successor["bytes"])
 
     def legacy(self):
         real = turns.T._run

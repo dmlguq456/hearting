@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import ctypes
 from datetime import datetime
 import fcntl
 import hashlib
@@ -19,6 +18,7 @@ import shutil
 import stat
 
 import artifact_journal as J
+import atomic_publish
 from artifact_identity import IdAllocator, is_well_formed
 
 HOME = ".runtime/journal-migrations/v1"
@@ -82,7 +82,7 @@ def _sync_tree(path):
                 os.close(fd)
         fd = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            os.fsync(fd)
+            J.sync_directory(fd)
         finally:
             os.close(fd)
 
@@ -236,6 +236,18 @@ def _operation(root, cycle_id):
     return active[0] if active else (None, None)
 
 
+def _entry_arguments(choice, backup, operation_id, cycle_id):
+    texts = []
+    for name in sorted(choice["image"]["entries"]):
+        if name.startswith("artifacts/") and not name.endswith("/"):
+            texts.append(f"### Original {name}\n\n" + (backup / name).read_text())
+    return dict(origin={"migration": operation_id, "cycle": cycle_id},
+        summary=choice["record"].get("title") or "Consolidated direct record", body="\n".join(texts),
+        results=[{"path": choice["route"]["cwd"], "version": {"kind": "unknown"}, "source": "legacy-record"}],
+        at=choice["at"], session=({"harness": choice["owners"][0]["harness"], "sid": choice["owners"][0]["sid"]}
+                                 if choice["owners"] else {}))
+
+
 def apply(root, cycle_id, env=None):
     import artifact_producer as P
     root = Path(root).resolve()
@@ -248,7 +260,17 @@ def apply(root, cycle_id, env=None):
     # A late writer and orphan carrier take this SAME original-session lock.
     with _writer_locks(root, choice):
         with _admission(root):
-            path, op = _operation(root, cycle_id)
+            if op is not None:
+                # A selected retry must not adopt a successor created while it
+                # waited for the original writer lock, or revive a rollback.
+                current = _json(path)
+                if current["operation_id"] != op["operation_id"] or current["candidate"] != choice:
+                    raise J.JournalError("migration-operation-conflict")
+                op = current
+                if op["state"] in {"committed", "restoring", "restored"}:
+                    return {"state": op["state"], "operation_id": op["operation_id"]}
+            else:
+                path, op = _operation(root, cycle_id)
             if op is None:
                 fresh = candidate(root, cycle_id, env)
                 if not fresh["eligible"]:
@@ -292,19 +314,11 @@ def apply(root, cycle_id, env=None):
                     if "day_preimage" not in op:
                         op["day_preimage"] = _preimage(day)
                     _save(path, op)
-                texts = []
-                for name in sorted(choice["image"]["entries"]):
-                    if name.startswith("artifacts/") and not name.endswith("/"):
-                        texts.append(f"### Original {name}\n\n" + (backup / name).read_text())
                 binding = {"schema": "journal-target/v1", "route_id": choice["route"]["route_id"],
                     "route_hash": choice["route"]["route_hash"], "campaign_id": choice["record"]["campaign_id"],
                     "campaign_key": choice["campaign_key"], "at": choice["at"], "path": choice["journal"]}
                 _fault("before-entry")
-                row = J.append(root, binding, origin={"migration": op["operation_id"], "cycle": cycle_id},
-                    summary=choice["record"].get("title") or "Consolidated direct record", body="\n".join(texts),
-                    results=[{"path": choice["route"]["cwd"], "version": {"kind": "unknown"}, "source": "legacy-record"}],
-                    at=choice["at"], session=({"harness": choice["owners"][0]["harness"], "sid": choice["owners"][0]["sid"]}
-                                             if choice["owners"] else {}))
+                row = J.append(root, binding, **_entry_arguments(choice, backup, op["operation_id"], cycle_id))
                 _fault("after-entry-effect")
                 op.update(entries=[{"path": row["reference"], "digest": row["digest"],
                                     "artifact_id": row["artifact_id"], "revision_id": row["revision_id"]}], state="entry-written")
@@ -341,15 +355,14 @@ def apply(root, cycle_id, env=None):
 
 
 def _rename_no_replace(source, target):
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = libc.renameat2
-    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     source_fd, target_fd = J.directory_fd(Path(source).parent), J.directory_fd(Path(target).parent)
     try:
-        if rename(source_fd, os.fsencode(Path(source).name), target_fd, os.fsencode(Path(target).name), 1):
-            error = ctypes.get_errno()
-            raise OSError(error, os.strerror(error), str(target))
-        os.fsync(source_fd); os.fsync(target_fd)
+        # Both callers hold the existing admission lock. Reuse its common NFS
+        # fallback, anchored to the non-following directory descriptors.
+        atomic_publish.rename_directory_locked(
+            Path(f"/proc/self/fd/{source_fd}") / Path(source).name,
+            Path(f"/proc/self/fd/{target_fd}") / Path(target).name)
+        J.sync_directory(source_fd); J.sync_directory(target_fd)
     finally:
         os.close(source_fd); os.close(target_fd)
 
@@ -364,8 +377,6 @@ def restore(root, cycle_id, env=None):
         if done and _json(done[-1]).get("state") == "restored":
             return {"state": "restored", "operation_id": _json(done[-1])["operation_id"], "replay": True}
         raise J.JournalError("migration-operation-missing")
-    if op["state"] not in {"committed", "restoring"}:
-        raise J.JournalError("migration-apply-incomplete")
     choice = op["candidate"]
     with _writer_locks(root, choice):
         # Selection precedes the lock: another caller may have advanced or
@@ -379,15 +390,44 @@ def restore(root, cycle_id, env=None):
         op = current
         if op["state"] == "restored":
             return {"state": "restored", "operation_id": op["operation_id"], "replay": True}
-        if op["state"] not in {"committed", "restoring"}:
-            raise J.JournalError("migration-apply-incomplete")
+        if op["state"] not in {"prepared", "backed-up", "entry-written", "rebound", "committed", "restoring"}:
+            raise J.JournalError("migration-operation-state-invalid")
         home = path.parent
         source = J.safe_path(root, root / choice["source"])
         backup = home / "backup"
-        if not _same_tree(backup, choice["image"]):
+        if op["state"] != "restoring":
+            with _admission(root):
+                # Before retirement the original is still our owned tree. It
+                # needs no replacement or staging, including a failed backup.
+                original = op["state"] != "committed" and source.exists()
+                if original and not _same_tree(source, choice["image"], identity=True):
+                    raise J.JournalError("restore-destination-conflict")
+                if not original or op["state"] != "prepared":
+                    if not _same_tree(backup, choice["image"]):
+                        raise J.JournalError("migration-backup-drift")
+                # An append can be durable before its completion save. Recover
+                # only this operation's exact original row, never a correction.
+                if not op["entries"]:
+                    day = root / choice["journal"]
+                    with J.day_lock(root, day):
+                        parsed = J.read_day(day, limit=100000, byte_limit=J.WRITE_BYTES) if day.exists() else {"coverage": "complete", "rows": []}
+                        if parsed["coverage"] != "complete":
+                            raise J.JournalError("restore-journal-conflict")
+                        owned = [r for r in parsed["rows"] if r.get("origin", {}).get("migration") == op["operation_id"]]
+                        if owned:
+                            expected = {**_entry_arguments(choice, backup, op["operation_id"], cycle_id),
+                                "campaign_id": choice["record"]["campaign_id"], "route_id": choice["route"]["route_id"],
+                                "route_hash": choice["route"]["route_hash"], "checks": {"state": "unknown"},
+                                "status": "recorded", "previous_revision": None, "correction": None, "turn": None}
+                            if len(owned) != 1 or any(owned[0].get(k) != v for k, v in expected.items()):
+                                raise J.JournalError("restore-entry-conflict")
+                            row = owned[0]
+                            op["entries"] = [{"path": J.reference(day, row), **{k: row[k] for k in ("digest", "artifact_id", "revision_id")}}]
+                op.update(state="restoring", restore={"phase": "published" if original else "intent",
+                          **({"source_identity": choice["image"]["identity"]} if original else {})})
+                _save(path, op)
+        elif op["restore"]["phase"] in {"intent", "staged"} and not _same_tree(backup, choice["image"]):
             raise J.JournalError("migration-backup-drift")
-        if op["state"] == "committed":
-            op.update(state="restoring", restore={"phase": "intent"}); _save(path, op)
         state = op["restore"]
         if state["phase"] == "intent":
             stage = home / "restore-staging"
@@ -405,6 +445,14 @@ def restore(root, cycle_id, env=None):
             state.update(phase="staged", staging_identity=[stamp.st_dev, stamp.st_ino]); _save(path, op)
             _fault("after-restore-stage")
         with _admission(root):
+            if state["phase"] in {"published", "entry-restored"}:
+                # A resumed rollback must still address its own original or
+                # published staging, even if a different tree has equal bytes.
+                stamp = source.lstat()
+                expected_identity = state.get("source_identity", state.get("staging_identity"))
+                if (stat.S_ISLNK(stamp.st_mode) or not stat.S_ISDIR(stamp.st_mode)
+                        or [stamp.st_dev, stamp.st_ino] != expected_identity):
+                    raise J.JournalError("restore-destination-conflict")
             if state["phase"] == "staged":
                 _fault("before-restore-publish")
                 expected = {**choice["image"], "identity": state["staging_identity"]}
@@ -424,7 +472,7 @@ def restore(root, cycle_id, env=None):
             if state["phase"] == "published":
                 day = root / choice["journal"]
                 with J.day_lock(root, day):
-                    parsed = J.read_day(day, limit=100000, byte_limit=J.WRITE_BYTES)
+                    parsed = J.read_day(day, limit=100000, byte_limit=J.WRITE_BYTES) if day.exists() else {"coverage": "complete", "rows": []}
                     if parsed["coverage"] != "complete":
                         raise J.JournalError("restore-journal-conflict")
                     owned = {row["revision_id"]: row for row in op["entries"]}
@@ -432,23 +480,24 @@ def restore(root, cycle_id, env=None):
                         if row.get("origin", {}).get("migration") == op["operation_id"]:
                             if row["revision_id"] not in owned or row["digest"] != owned[row["revision_id"]]["digest"]:
                                 raise J.JournalError("restore-entry-conflict")
-                    raw = day.read_bytes()
+                    raw = day.read_bytes() if day.exists() else b""
                     # Remove only exact own blocks; all later entries and any
                     # unrelated prose retain their bytes, including anchors.
                     for row in parsed["rows"]:
                         if row["revision_id"] in owned:
                             raw = raw.replace(J._render(row), b"", 1)
                     _fault("before-restore-entry")
-                    J.atomic(day, raw)
+                    if day.exists():
+                        J.atomic(day, raw)
                     _fault("after-restore-entry-effect")
                 state.update(phase="entry-restored"); _save(path, op); _fault("after-restore-entry")
             if state["phase"] == "entry-restored":
                 record_path = P.cycle_record_path(root, cycle_id)
                 current = _json(record_path)
-                old = json.loads(base64.b64decode(op["record_preimage"]))
+                old = json.loads(base64.b64decode(op["record_preimage"])) if "record_preimage" in op else current
                 migration = current.get("journal_migration")
                 if migration is not None:
-                    if migration != op["record_migration_postimage"]:
+                    if migration != op.get("record_migration_postimage"):
                         raise J.JournalError("restore-record-conflict")
                     del current["journal_migration"]
                     # Preserve unrelated record fields that appeared later.
@@ -456,8 +505,9 @@ def restore(root, cycle_id, env=None):
                         J.atomic(record_path, base64.b64decode(op["record_preimage"]))
                     else:
                         _save(record_path, current)
-                _replace_key(J._target_path(root, choice["route"]["route_id"]),
-                             op["target_postimage"], op["target_preimage"])
+                if "target_postimage" in op:
+                    _replace_key(J._target_path(root, choice["route"]["route_id"]),
+                                 op["target_postimage"], op["target_preimage"])
                 _fault("after-restore-metadata-effect")
                 state.update(phase="metadata-restored"); _save(path, op); _fault("after-restore-metadata")
             op.update(state="restored"); _save(path, op); _fault("after-restore-complete")
