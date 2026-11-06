@@ -58,7 +58,9 @@ Each actual user-work interval permits one automatic request, including failed
 or uncertain requests. Runtime notifications, other sessions' messages, status
 lines and Hearting's own requests never rearm it. Other completed turns only move
 an unclaimed idle deadline; they do not create another automatic request in the
-same user-work interval. Recognize the runtime's
+same user-work interval. New activity after a request is claimed cancels its
+remaining automatic input without rearming the consumed interval; the saved
+card and memory work remain available. Recognize the runtime's
 transport wrapping of an exact recorded self-request without treating the
 wrapper as user input. Keep this classification after booking expiry. A newer
 compaction boundary cancels an unsent idle booking; pre-compaction usage cannot

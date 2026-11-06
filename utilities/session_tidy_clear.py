@@ -526,9 +526,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
     if not ((seat.kind == "pane" and seat.pane)
             or (harness == "claude" and seat.kind == "native" and seat.native)):
         return "booking=skipped reason=exact-pane-unavailable"
-    reason = _idle_route_reason(harness, sid)
-    if reason:
-        return f"booking=skipped reason={reason}"
+    route_reason = _idle_route_reason(harness, sid)
     with _booking_lock(seat, wait=lock_wait):
         reason = _idle_lineage_reason(harness, sid)
         if reason:
@@ -538,14 +536,28 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
         sequence = st.read_prompt_seq(seat)
         frontier = st.real_prompt_frontier(seat, harness, sid)
         generation = int((frontier or {}).get("sequence", 0))
+        same_idle = (existing and existing.get("origin") == "idle"
+                     and (existing.get("harness"), existing.get("sid")) == (harness, sid))
+        request = ((existing or {}).get("idle_request")
+                   if isinstance((existing or {}).get("idle_request"), dict) else {})
+        prompt = st.prompt_state(seat) or {}
+        own_request_turn = (request and prompt.get("source") == "claim"
+                            and prompt.get("claim_id") == request.get("token"))
+        if (same_idle and existing.get("status") == "reserved" and request
+                and not own_request_turn
+                and event_id not in (old_idle.get("event_id"), old_idle.get("activity_event_id"))):
+            # A claimed request already spends this user interval. Cancel the
+            # remaining input rather than compact just after a peer's new work.
+            old_idle.update(activity_event_id=event_id, activity_at=now)
+            existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
+            _write_reservation(existing)
+            return "booking=skipped reason=not-rearmed"
         sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
                 and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
                 and r.get("state") not in ("released", "superseded")
                 and int(r.get("sent_seq", -1)) >= generation]
         if sent:
             return "booking=skipped reason=not-rearmed"
-        same_idle = (existing and existing.get("origin") == "idle"
-                     and (existing.get("harness"), existing.get("sid")) == (harness, sid))
         unclaimed = same_idle and existing.get("status") == "reserved" and not existing.get("idle_request")
         if unclaimed and generation == int(old_idle.get("user_generation", 0)):
             # Reuse this unspent user interval, nonce and helper. Even a turn
@@ -562,6 +574,8 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                 _write_reservation(existing)
             nonce = str(existing["nonce"])
         else:
+            if route_reason:
+                return f"booking=skipped reason={route_reason}"
             if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
                 return "booking=skipped reason=usage-unknown"
             if tokens < policy["min_tokens"]:
@@ -605,6 +619,8 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                         "compaction": compaction_position(seat, harness, sid),
                     }}
                 _write_reservation(booking)
+        if route_reason:
+            return f"booking=skipped reason={route_reason}"
     started, reason = _ensure_helper(seat.key, nonce, lock_wait=lock_wait)
     if not started:
         return f"booking=pending reason={reason}"

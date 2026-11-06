@@ -252,6 +252,50 @@ class IdleObserverTests(unittest.TestCase):
                 self.assertEqual(clear.validate_idle_request(path, held["nonce"], now=now)[1], "not-due")
             self.assertEqual(clear.validate_idle_request(path, held["nonce"], now=3000 + 21601)[1], "")
 
+    def test_new_activity_after_claim_prevents_the_unsent_card_request(self):
+        clock = [1000.0]
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            req = clear.read_reservation(seat.key)
+            clock[0] = req["idle"]["due_at"] + 1
+            path = clear.reservation_path(seat.key)
+            claim, why = clear.claim_idle_card_request(path, req["nonce"])
+            self.assertEqual(why, "")
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+            clock[0] += 1
+            self.observe_claude(tokens=600000, event_id="peer-after-claim", now=clock[0])
+            checked, _reason = clear.validate_idle_request(path, req["nonce"],
+                                                          _sending_claim=claim["idle_request"])
+            self.assertIsNone(checked)
+            self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+            self.assertIn("not-rearmed", self.observe_claude(tokens=600000,
+                event_id="later-peer", now=clock[0] + 5000))
+
+    def test_route_observation_does_not_discard_activity_on_an_existing_window(self):
+        from tools.fleet import collectors
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(collectors, "collect_all", return_value=self.route_snapshot(opened=False)) as collect:
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            first = clear.read_reservation(seat.key)
+            for index, unavailable in enumerate((False, True), 1):
+                collect.return_value = self.route_snapshot()
+                collect.side_effect = OSError("fixture observation unavailable") if unavailable else None
+                ended = 1000 + index * 2000
+                self.observe_claude(tokens=600000, event_id=f"activity-{index}", now=ended)
+                held = clear.read_reservation(seat.key)
+                self.assertEqual((held["nonce"], held["idle"]["due_at"]),
+                                 (first["nonce"], ended + 3240))
+            collect.side_effect = None
+            collect.return_value = self.route_snapshot(opened=False)
+            self.assertEqual(clear.validate_idle_request(clear.reservation_path(seat.key),
+                first["nonce"], now=ended + 3239)[1], "not-due")
+
     def test_every_real_completed_turn_moves_the_existing_idle_window(self):
         with self.iso.patched_environ(self.extra), \
              mock.patch.object(clear, "_ensure_helper", return_value=(True, "")):
@@ -1135,6 +1179,28 @@ class UnifiedIdleTests(unittest.TestCase):
         self.assertIn("reply-card=accepted", st.accept_reply_card(harness, sid, str(self.cwd), response, seat=seat))
         self.assertTrue(st.card_text_path(seat).is_file())
         return seat, clear.read_reservation(seat.key), response
+
+    def test_new_activity_after_card_acceptance_prevents_compaction_for_every_harness(self):
+        import session_tidy_runner as runner
+        for harness in ("claude", "codex", "opencode"):
+            self.extra["HERDR_PANE_ID"] = "active-after-card:" + harness
+            clock = [1000.0]
+            with self.subTest(harness=harness), self.iso.patched_environ(self.extra), \
+                 mock.patch.object(clear, "_start_helper", return_value=12345), \
+                 mock.patch.object(runner, "start_detached", return_value=None), \
+                 mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+                sid = "active-after-card-" + harness
+                seat, req, _reply = self.accepted(harness, sid, clock)
+                st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text=IdleObserverTests.PEER)
+                clock[0] += 1
+                clear.observe_idle_event(harness, sid, str(self.cwd), event_id="peer-after-card",
+                                         tokens=600000, now=clock[0])
+                self.assertIsNone(clear.validate_request(clear.reservation_path(seat.key), req["nonce"])[0])
+                send = mock.Mock()
+                self.assertEqual(clear.run_helper(seat.key, req["nonce"], wait=lambda *_: "idle",
+                                                  steward=send), "superseded")
+                send.assert_not_called()
+                self.assertTrue(st.card_text_path(seat).is_file())
 
     def test_card_then_native_compact_once_for_every_harness_even_with_agents(self):
         import session_tidy_runner as runner
