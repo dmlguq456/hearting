@@ -1370,7 +1370,8 @@ class FinalizeTest(ProducerTestBase):
         def slow(*args, **kwargs):
             time.sleep(2)
             return original(*args, **kwargs)
-        with mock.patch.object(artifact_entrance.subprocess, "Popen", side_effect=spawn), \
+        with mock.patch.object(artifact_entrance, "in_test_process", return_value=False), \
+                mock.patch.object(artifact_entrance.subprocess, "Popen", side_effect=spawn), \
                 mock.patch.object(artifact_entrance, "refresh", side_effect=slow):
             start = time.monotonic()
             sealed = P.finalize(self.root, cycle_id=result["cycle_id"])

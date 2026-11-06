@@ -444,7 +444,8 @@ class RefreshWorkerTests(EntranceFixture):
                     child.kill()
                     child.wait(timeout=5)
         self.addCleanup(settle)
-        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+        with mock.patch.object(E, "in_test_process", return_value=False), \
+                mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
             start = time.monotonic()
             E.request_refresh(self.root, cycle_id="first")
             self.assertLess(time.monotonic() - start, 1.5)
@@ -475,7 +476,8 @@ class RefreshWorkerTests(EntranceFixture):
         self.assertTrue((self.root / "README.md").is_file())
         self.assertFalse((self.root / ".runtime/artifact-entrance-pending.json").exists())
         # A completed worker leaves no held lease or idle process.
-        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+        with mock.patch.object(E, "in_test_process", return_value=False), \
+                mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
             E.request_refresh(self.root, cycle_id="new-worker")
             self.assertEqual(children[-1].wait(timeout=10), 0)
         self.assertEqual(len(children), 2)
@@ -501,7 +503,8 @@ class RefreshWorkerTests(EntranceFixture):
                     child.kill()
                     child.wait(timeout=5)
         self.addCleanup(settle)
-        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+        with mock.patch.object(E, "in_test_process", return_value=False), \
+                mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
             E.request_refresh(self.root)
             self.assertEqual(children[-1].wait(timeout=10), 0)
             self.assertFalse((self.root / "README.md").exists())
