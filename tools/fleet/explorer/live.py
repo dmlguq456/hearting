@@ -1234,7 +1234,8 @@ def _repo_records(session_rows, routes, results=None, now=None):
         else:
             finished = next((r for r in routes if r["repo"] == repo and r["state"] == "done" and r["title"]), None)
             done, age = (finished["title"] if finished else None), None
-        repos.append({"id": repo, "name": repo, "done": done, "age": age})
+        repos.append({"id": repo, "name": repo, "done": done, "age": age,
+                      "done_result": result.get("result") if result else (finished or {}).get("outcome")})
     return repos
 
 
@@ -1290,6 +1291,10 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
                 "doc_age": _ago(doc_at, now),
                 "stale": bool(stale),
                 "changed": _ago(max(doc_at, done_at or 0), now)})
+            status["campaigns"] = [dict(item, doc_age=_ago(item.get("mtime"), now),
+                stale=bool(now is not None and _num(item.get("mtime")) is not None
+                           and now - item["mtime"] >= STATUS_STALE_DAYS * 86400))
+                for item in tuple(doc.get("campaigns") or ())[:3]]
         repo["status"] = status
 
 

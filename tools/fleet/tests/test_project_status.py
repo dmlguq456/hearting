@@ -207,6 +207,38 @@ class FindTest(unittest.TestCase):
         later = project_status.collect(cwds, now=self.now + project_status.INTERVAL + 1)
         self.assertEqual(later[str(self.project)]["line"], "백로그를 묶어 v4.0.0 정식 공개까지 간다.")
 
+    def test_campaign_documents_win_over_newer_legacy_copies_and_keep_three_campaigns(self):
+        for index in range(5):
+            campaign = self.root / "campaigns" / ("2026-11-06_stream-" + str(index))
+            _touch(campaign / "STATUS.md", "# Campaign " + str(index) + "\n\nSummary " + str(index),
+                   self.now - index * 10)
+            _touch(campaign / "2026-11-06_old" / "artifacts/STATUS.md", "# Cycle copy", self.now + 100)
+        _touch(self.root / "research/x/STATUS.md", "# Legacy copy", self.now + 100)
+        record = project_status.newest(str(self.root), now=self.now)
+        self.assertEqual(record["line"], "Summary 0")
+        self.assertEqual([row["campaign"] for row in record["campaigns"]],
+                         ["stream-0", "stream-1", "stream-2"])
+        self.assertTrue(all("campaigns" not in row for row in record["campaigns"]))
+
+    def test_campaign_status_reuses_scan_cache_and_new_files_appear_after_interval(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        _touch(campaign / "STATUS.md", "# Initial", self.now - 1)
+        first = project_status.collect([str(self.project)], now=self.now)
+        self.assertEqual(first[str(self.project)]["line"], "Initial")
+        _touch(campaign / "STATUS.md", "# Updated", self.now + 1)
+        held = project_status.collect([str(self.project)], now=self.now + 1)
+        self.assertEqual(held[str(self.project)]["line"], "Initial")
+        later = project_status.collect([str(self.project)], now=self.now + project_status.INTERVAL + 1)
+        self.assertEqual(later[str(self.project)]["line"], "Updated")
+
+    def test_editing_status_does_not_require_a_new_file_in_the_campaign_folder(self):
+        campaign = self.root / "campaigns/2026-09-01_stream"
+        _touch(campaign / "STATUS.md", "# Updated in place", self.now)
+        _age(campaign, self.now - 30 * 86400)
+        record = project_status.newest(str(self.root), now=self.now)
+        self.assertEqual(record["line"], "Updated in place")
+        self.assertEqual(record["campaigns"][0]["campaign"], "stream")
+
 
 class ProjectionTest(unittest.TestCase):
     def test_document_and_derived_status_on_repo_records(self):
@@ -288,8 +320,9 @@ class RenderTest(unittest.TestCase):
         self.assertIn("12m ago research/x/현황.md · 41m ago ✓ importer", shown[top + 3])
         header = next(y for y, row in enumerate(plain) if " ID " in row and "HARNESS" in row)
         pane = 32                                                     # the sidebar left of the pane is unchanged
-        self.assertEqual(shown[top + 5][pane:], plain[header][pane:])  # the page's table follows a blank row
-        self.assertNotIn("백로그", "".join(shown[top + 5:]))           # the page's own rule stays bare
+        new_header = next(y for y, row in enumerate(shown) if " ID " in row and "HARNESS" in row)
+        self.assertEqual(shown[new_header][pane:], plain[header][pane:])
+        self.assertTrue(any("OPEN WORK" in row or "백로그·진행" in row for row in shown[top + 4:new_header]))
 
 
 class SnapshotPlumbingTest(unittest.TestCase):
