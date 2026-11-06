@@ -606,6 +606,18 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         pass
 
+    # Resume attention is a read-only view of existing notice/ledger facts.
+    try:
+        import session_resume
+        for session in sessions:
+            try:
+                session._resume_attention = session_resume.status_for_session(
+                    session.harness, getattr(session, "session_id", None))
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                pass
+    except ImportError:
+        pass
+
     answer_waits = None
     fleet_answer_waits = None
     try:

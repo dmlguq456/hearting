@@ -596,6 +596,11 @@ def _prefill_live_inboxes(root, *, deadline_ns, expected_root_identity=None):
         if time.monotonic_ns() >= deadline_ns:
             result["skipped"] += 1
             continue
+        try:
+            import session_resume
+            session_resume.register(harness, session_id, source="resume", jobs=Path(root) / "jobs.log")
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            pass  # Existing pending state and the Fleet attention view remain.
         recorded = inbox.read_inbox(root, harness, session_id)
         current = False
         if recorded is not None:

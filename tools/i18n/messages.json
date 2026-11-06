@@ -1465,6 +1465,18 @@
   "wait.title": {
    "en": "◑ answer needed",
    "ko": "◑답변 필요"
+  },
+  "fleet.resume.stopped": {
+   "en": "stopped after restart",
+   "ko": "재시작 뒤 멈춤"
+  },
+  "resume.notice.subject": {
+   "en": "Interrupted session resume",
+   "ko": "세션 재시작으로 작업이 끊겼습니다"
+  },
+  "resume.notice.text": {
+   "en": "The session restarted while work was unfinished. Continue from the existing conversation and verify stopped background work before retrying it.",
+   "ko": "재시작으로 끊겼습니다. 기존 대화에서 하던 일을 이어 가세요. 중단된 백그라운드 작업은 상태를 확인한 뒤 다시 실행하세요."
   }
  }
 }

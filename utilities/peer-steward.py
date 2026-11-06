@@ -6739,7 +6739,18 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                         skip_unchanged=True)
                     continue
                 harness, recipient_sid = pair
-                if intent.get("kind") == "run-notice" and pair == ("opencode", storage_sid):
+                import session_resume
+                resume_notice = session_resume.is_resume(record)
+                if resume_notice:
+                    try:
+                        session_resume.current(record)
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                        store.update(duty["id"], state="pending", observation={
+                            **(duty.get("observation") or {}), "reason": "resume-source-pending"},
+                            skip_unchanged=True)
+                        continue
+                if (intent.get("kind") == "run-notice" and pair == ("opencode", storage_sid)
+                        and not resume_notice):
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "native-opencode-carrier-owns-notice"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},
@@ -6762,8 +6773,9 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
         except (TypeError, ValueError):
             return 1
 
+    import session_resume
     candidates.sort(key=lambda item: (item[1], item[3], _terminal_rank(item),
-                                      item[4]["delivery_id"]))
+                                      session_resume.is_resume(item[4]), item[4]["delivery_id"]))
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
@@ -6795,6 +6807,10 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
         selection["last_group"] = group_key
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
+    # Resume needs idle/empty; ordinary notices keep their existing steering
+    # policy. An obsolete resume must not hold a useful completion behind it.
+    resume_only = session_resume.is_resume(batch[0][4])
+    batch = [item for item in batch if session_resume.is_resume(item[4]) == resume_only]
     pending_transfers = []
     retargeted = {}
     folded = []
@@ -6865,6 +6881,15 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
             return
         if _resolve_target(pane)[:2] != (harness, recipient_sid):
             return
+        import session_resume
+        if any(session_resume.is_resume(item[4]) for item in batch):
+            refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+            if refusal:
+                for item in batch:
+                    store.update(item[0]["id"], state="pending", observation={
+                        **(item[0].get("observation") or {}), "reason": "resume-" + refusal},
+                        skip_unchanged=True)
+                return
         if pending_transfers:
             for message in pending_transfers:
                 _schedule_message_obligation(message, pane, pane)
@@ -6983,6 +7008,10 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                 source_jobs = peer_obligations._notice_duty_source(_duty, root)[3]
                 if not claimed_send_current(root, storage_sid, stored, owner, harness, recipient_sid,
                                             jobs=source_jobs):
+                    return
+            if any(session_resume.is_resume(entry[4]) for entry in claimed):
+                refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+                if refusal:
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer)

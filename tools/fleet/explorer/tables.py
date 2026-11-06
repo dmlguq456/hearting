@@ -175,6 +175,10 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             row_y = y
             if state.opened == tag:
                 grid.put(x, y, "▶", "soft")
+            restart_text = ""
+            restart_inline = False
+            if session.get("restart") == "stopped":
+                restart_text = ui_text("fleet.resume.stopped")
             status = session.get("state")
             marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
                                   "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
@@ -244,6 +248,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 # Reserve its cells before a long CJK title or branch is drawn.
                 if route_tail:
                     tail = route_tail
+                if restart_text and _seg_width(" " + restart_text) <= c["title_w"]:
+                    restart_inline = True
+                    tail = " " + restart_text + route_tail
                 room = max(0, c["title_w"] - _seg_width(tail))
                 title_text = _clip(title, room)
                 bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
@@ -254,8 +261,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                     # An open count pulses on the shared working beat between the bright and
                     # dark green of the g_work/g_work_off pair; its text stays, so the title
                     # and columns never move. A finished count stays a steady dim note.
-                    tail_key = "dim"
-                    if route_tail and tag in open_current_routes:
+                    tail_key = "g_idle" if session.get("restart") == "stopped" else "dim"
+                    if route_tail and tag in open_current_routes and session.get("restart") != "stopped":
                         tail_key = "g_work" if getattr(grid, "beat", 1) else "g_work_off"
                     grid.put(title_end, y, tail, tail_key, limit=x + c["title"] + c["title_w"])
             context = session.get("context")
@@ -276,6 +283,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 grid.put(now_start, y, now_text, now_key,
                          limit=now_end)
             y += 1
+            if restart_text and not restart_inline:
+                grid.put(x + IND + 3, y, restart_text, "g_idle", limit=right)
+                y += 1
             gpu_count = sum(1 for host in (vm.compute or ()) for gpu in host[5]
                             if tag in (gpu[7] or ()))
             if gpu_count > 1 and y < grid.rows - 5:

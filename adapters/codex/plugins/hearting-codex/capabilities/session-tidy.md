@@ -390,3 +390,14 @@ confirmed tidy edges advance a holder without another binding. Card delivery,
 explicit acceptance and physical retirement remain separate from this logical
 record. An unreadable graph waits with the existing controller and preserves
 the original storage and receipt identities.
+
+## Interrupted resume
+
+A native resume start is an observation of the same exact session, not a new
+user prompt. Positive unfinished-turn, stopped-background-task or open-work
+evidence may retain one ordinary restart notice in the existing courier.
+Completed sessions and sessions waiting for a person receive no automatic
+continue input. The existing current-session, idle, empty-composer and receipt
+checks own the send; ambiguous submission is not retried through another path.
+Fleet shows a retained interrupted resume when the courier cannot wake it.
+No additional queue, approval, operator input or helper daemon is introduced.
