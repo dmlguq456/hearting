@@ -79,6 +79,10 @@ background agents alone do not postpone idle tidy or select a special adapter
 path. A session responsible for an open registered route or owner/worker attempt
 is not idle: use the same route projection as its status line and Fleet to
 withhold both booking and input while that work remains open.
+An absent target session or incomplete route observation is unknown, so it
+withholds input too. After observations, recheck the current booking and its
+activity/claim before the existing writer sends; an old copy cannot permit a
+cancelled request.
 A running foreground turn, a nonempty composer or an open question/approval
 prevents either input. Physical binding and input readiness are transport safety
 only; success is established solely by the stored card and a later exact-session

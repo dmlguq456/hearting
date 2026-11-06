@@ -3185,6 +3185,8 @@ class ClearBookingLineageRaceTest(TidyCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(self.library())
+        # Isolate the lineage writers from the synthetic seat's route census.
+        self.stack.enter_context(mock.patch.object(clear, "_idle_route_reason", return_value=""))
         self.stack.enter_context(mock.patch.object(clear, "herdr_command", return_value="/bin/true"))
         self.helpers = self.stack.enter_context(mock.patch.object(clear, "_ensure_helper", return_value=(True, "")))
         self.stack.enter_context(mock.patch.object(runner, "_start_queued", side_effect=lambda item: item))

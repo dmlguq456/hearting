@@ -11461,6 +11461,11 @@ class IdleCardRequestTest(_TmpRootMixin, unittest.TestCase):
         import session_tidy as st
         import session_tidy_clear as clear
         self.st, self.clear = st, clear
+        # This transport fixture has a known observed seat and no registered
+        # work. Census completeness is exercised in session_tidy_idle.test.py.
+        routes = mock.patch.object(clear, "_idle_route_reason", return_value="")
+        routes.start()
+        self.addCleanup(routes.stop)
 
     def booking(self, harness="claude", sid="sid-A", pane="w1:pX"):
         st, clear = self.st, self.clear

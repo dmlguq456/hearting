@@ -490,9 +490,13 @@ def _idle_route_reason(harness: str, sid: str) -> str:
             sys.path.insert(0, root)
         from tools.fleet.collectors import collect_all
         from tools.fleet.explorer.live import session_route_status
+        from tools.fleet.refresh import required_details_all_new
         snapshot = collect_all(harness_filter={harness}, route_sessions=[(harness, sid)],
                                include_report_verification=False)
-        if snapshot.observations.get("basic", {}).get("all_new") is not True:
+        observed = any(row.harness == harness and sid in (
+            row.session_id, *(getattr(row, "session_aliases", None) or ())) for row in snapshot.sessions)
+        if (not observed or snapshot.observations.get("basic", {}).get("all_new") is not True
+                or not required_details_all_new(snapshot.observations)):
             return "route-observation-unavailable"
         return "route-active" if harness + "\0" + sid in session_route_status(snapshot) else ""
     except Exception:
@@ -627,9 +631,36 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
     return "booking=scheduled"
 
 
+def recheck_idle_input(path, expected: dict, *, now: Optional[float] = None):
+    """Retain this existing input claim only while its booking still matches.
+
+    This is a quick atomic-file read after slow observations and at the writer,
+    with no new state or nested lock: claim callers already hold the seat lock.
+    Native I/O and receipt waits must stay outside that lock.
+    """
+    if expected.get("origin") != "idle":
+        return expected, ""
+    current, _seat, reason = _booking_at(Path(path))
+    if current is None:
+        return None, reason
+    if current.get("nonce") != expected.get("nonce") or current.get("status") != "reserved":
+        return None, "superseded"
+    now = st.now_epoch() if now is None else now
+    if now < float((current.get("idle") or {}).get("due_at", 0) or 0):
+        return None, "not-due"
+    if now > float(current.get("deadline", 0) or 0):
+        return None, "expired"
+    fields = ("origin", "harness", "sid", "seat", "prompt_seq", "card_generation", "deadline",
+              "idle", "idle_request", "clear_claim", "acceptance", "operation_id", "queue_id")
+    if any(current.get(key) != expected.get(key) for key in fields):
+        return None, "booking-changed"
+    return current, ""
+
+
 def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[float] = None,
                           _sending_claim: Optional[dict] = None):
     """Validate one idle or compact-origin card request before its main-session prompt."""
+    observed_now = now
     now = st.now_epoch() if now is None else now
     req, seat, reason = _booking_at(Path(path))
     if req is None:
@@ -673,7 +704,7 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         return None, "idle-request-already-claimed"
     if _sending_claim is not None and held != _sending_claim:
         return None, "booking-changed"
-    return req, ""
+    return recheck_idle_input(path, req, now=observed_now)
 
 
 def reply_card_guide(nonce: str, t=None, context: Optional[dict] = None) -> str:
@@ -1800,6 +1831,7 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
     so both judge the same facts: the file is the seat's own booking, it is unexpired, no
     prompt was submitted since it was made, and the card is still the booked generation.
     """
+    observed_now = now
     now = st.now_epoch() if now is None else now
     req, seat, reason = _booking_at(Path(path))
     if req is None:
@@ -1839,7 +1871,7 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
                        and compact.get("turn_end_observed") is True else compact_observation(req))
         if observation.get("state") != "ready":
             return None, "compact-unknown" if observation.get("state") == "unknown" else "compact-pending"
-    return req, ""
+    return recheck_idle_input(path, req, now=observed_now)
 
 
 def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time.sleep,
@@ -1900,6 +1932,9 @@ def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
             reason = ready(req)
             if reason:
                 return None, reason
+        req, reason = recheck_idle_input(path, req)
+        if req is None:
+            return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
         if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):

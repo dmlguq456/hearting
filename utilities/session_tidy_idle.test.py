@@ -46,6 +46,16 @@ class IdleObserverTests(unittest.TestCase):
         self.caller_patch.start()
         self.addCleanup(self.caller_patch.stop)
         self.started = []
+        # These model-free panes have an explicit observed session, not a live
+        # process census. Route-specific tests replace this collector snapshot.
+        from tools.fleet import collectors
+        self.actual_collect_all = collectors.collect_all
+        def observed_routes(**kwargs):
+            harness, sid = kwargs["route_sessions"][0]
+            return IdleObserverTests.route_snapshot(self, harness, sid, opened=False)
+        collector = mock.patch.object(collectors, "collect_all", side_effect=observed_routes)
+        collector.start()
+        self.addCleanup(collector.stop)
         # An explicit short wait keeps the existing clock fixtures readable.
         # The product's unset six-hour default is exercised separately below.
         config = self.iso.xdg_config / "hearting" / "session-tidy.json"
@@ -150,7 +160,8 @@ class IdleObserverTests(unittest.TestCase):
             route_id="rt-fixture", attempt_id="att-fixture", parent_sid=sid,
             liveness="working" if opened else "done", work_projection=work)
         return LiveSnapshot(sessions=[session], jobs=[job], resources=[],
-                            observations={"basic": {"all_new": True}})
+                            observations={"basic": {"state": "ok", "all_new": True, "generation_identity": "fixture"},
+                                          "required-details": {"state": "ok", "all_new": True, "generation_identity": "fixture"}})
 
     def test_registered_route_badge_withholds_booking_for_all_harnesses(self):
         from tools.fleet import collectors
@@ -295,6 +306,181 @@ class IdleObserverTests(unittest.TestCase):
             collect.return_value = self.route_snapshot(opened=False)
             self.assertEqual(clear.validate_idle_request(clear.reservation_path(seat.key),
                 first["nonce"], now=ended + 3239)[1], "not-due")
+
+    def test_route_observation_requires_the_target_and_complete_current_details(self):
+        from tools.fleet import collectors
+        with self.iso.patched_environ(self.extra):
+            snapshot = self.route_snapshot(opened=False)
+            with mock.patch.object(collectors, "collect_all", return_value=snapshot):
+                self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "")
+                snapshot.sessions = []
+                with self.subTest(case="missing-target"):
+                    self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "route-observation-unavailable")
+            for details in ({}, {"state": "partial", "all_new": True, "generation_identity": "fixture"},
+                            {"state": "ok", "all_new": False, "generation_identity": "fixture"},
+                            {"state": "ok", "all_new": True, "generation_identity": "older"}):
+                snapshot = self.route_snapshot(opened=False)
+                snapshot.observations["required-details"] = details
+                with self.subTest(details=details), mock.patch.object(collectors, "collect_all", return_value=snapshot):
+                    self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "route-observation-unavailable")
+            snapshot = self.route_snapshot(sid="another-session", opened=False)
+            with self.subTest(case="other-target"), mock.patch.object(collectors, "collect_all", return_value=snapshot):
+                self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "route-observation-unavailable")
+            snapshot.sessions[0].session_aliases = ["sid-A"]
+            with mock.patch.object(collectors, "collect_all", return_value=snapshot):
+                self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "")
+
+    def test_actual_empty_census_is_unknown_before_dispatch_is_read(self):
+        from tools.fleet import collectors
+        from tools.fleet.collectors import dispatch
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(collectors, "collect_all", self.actual_collect_all), \
+             mock.patch.object(collectors.procscan, "scan", return_value=[]), \
+             mock.patch.object(dispatch, "collect", return_value=self.route_snapshot().jobs) as jobs:
+            self.assertEqual(clear._idle_route_reason("claude", "sid-A"), "route-observation-unavailable")
+            jobs.assert_not_called()
+
+    def test_activity_during_final_card_observation_never_reaches_the_transport(self):
+        import importlib.util
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("idle_observation_peer", ROOT / "utilities/peer-steward.py")
+        peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peer)
+        clock, reads = [1000.0], []
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            req = clear.read_reservation(seat.key)
+            clock[0] = req["idle"]["due_at"] + 1
+            def observation(*_args):
+                reads.append(True)
+                if len(reads) == 4:
+                    with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                        st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+                        self.observe_claude(tokens=600000, event_id="peer-during-observation", now=clock[0])
+                return ""
+            with mock.patch.object(clear, "_idle_route_reason", side_effect=observation), \
+                 mock.patch.object(peer, "_surface_missing", return_value=False), \
+                 mock.patch.object(peer, "_clear_look", return_value=("", {"session_id": "sid-A"}, [])), \
+                 mock.patch.object(peer, "_herdr_prompt", return_value=(0, {})) as send, \
+                 mock.patch.object(peer, "_record"), mock.patch.object(peer, "_from_name", return_value="fixture"), \
+                 mock.patch.object(peer, "_project_of", return_value="fixture"), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = peer.cmd_idle_card_request(SimpleNamespace(request=str(clear.reservation_path(seat.key)),
+                                                                  nonce=req["nonce"], target=self.pane))
+            self.assertEqual(len(reads), 4)
+            self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+            send.assert_not_called()
+            self.assertNotEqual(result, 0)
+
+    def test_activity_during_unclaimed_observation_defers_the_current_window(self):
+        clock, changed = [1000.0], []
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            req = clear.read_reservation(seat.key)
+            clock[0] = req["idle"]["due_at"] + 1
+            def observation(*_args):
+                if not changed:
+                    changed.append(True)
+                    with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                        self.observe_claude(tokens=600000, event_id="completed-during-observation", now=clock[0])
+                return ""
+            with mock.patch.object(clear, "_idle_route_reason", side_effect=observation):
+                checked, reason = clear.validate_idle_request(clear.reservation_path(seat.key), req["nonce"])
+            self.assertIsNone(checked)
+            self.assertEqual(reason, "not-due")
+            self.assertEqual(clear.read_reservation(seat.key)["nonce"], req["nonce"])
+
+    def test_activity_during_card_text_rendering_never_reaches_the_transport(self):
+        import importlib.util
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location("idle_rendering_peer", ROOT / "utilities/peer-steward.py")
+        peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peer)
+        clock, reads, changed = [1000.0], [], []
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            req = clear.read_reservation(seat.key)
+            clock[0] = req["idle"]["due_at"] + 1
+            render = clear.idle_card_request_text
+            def observation(*_args):
+                reads.append(True)
+                return ""
+            def text(current):
+                body = render(current)
+                if len(reads) >= 4 and not changed:
+                    changed.append(True)
+                    with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                        st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+                        self.observe_claude(tokens=600000, event_id="peer-during-rendering", now=clock[0])
+                return body
+            with mock.patch.object(clear, "_idle_route_reason", side_effect=observation), \
+                 mock.patch.object(clear, "idle_card_request_text", side_effect=text), \
+                 mock.patch.object(peer, "_surface_missing", return_value=False), \
+                 mock.patch.object(peer, "_clear_look", return_value=("", {"session_id": "sid-A"}, [])), \
+                 mock.patch.object(peer, "_herdr_prompt", return_value=(0, {})) as send, \
+                 mock.patch.object(peer, "_record"), mock.patch.object(peer, "_from_name", return_value="fixture"), \
+                 mock.patch.object(peer, "_project_of", return_value="fixture"), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                result = peer.cmd_idle_card_request(SimpleNamespace(request=str(clear.reservation_path(seat.key)),
+                                                                  nonce=req["nonce"], target=self.pane))
+            self.assertTrue(changed)
+            self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+            send.assert_not_called()
+            self.assertNotEqual(result, 0)
+
+    def test_native_card_writer_rechecks_after_rendering_before_pty_input(self):
+        from types import SimpleNamespace
+        import session_tidy_native as native
+        clock, reads, changed, writes = [1000.0], [], [], []
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.observe_claude(tokens=600000)
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            req = clear.read_reservation(seat.key)
+            req["seat"]["native"] = {"job": "private-fixture"}
+            clear._write_reservation(req)
+            clock[0] = req["idle"]["due_at"] + 1
+            render = clear.idle_card_request_text
+            def observation(*_args):
+                reads.append(True)
+                return ""
+            def text(current):
+                body = render(current)
+                if len(reads) >= 4 and not changed:
+                    changed.append(True)
+                    with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                        st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+                        self.observe_claude(tokens=600000, event_id="peer-before-pty-write", now=clock[0])
+                return body
+            def write(fd, data):
+                writes.append(data)
+                return len(data)
+            with mock.patch.object(clear, "_idle_route_reason", side_effect=observation), \
+                 mock.patch.object(clear, "idle_card_request_text", side_effect=text), \
+                 mock.patch.object(native, "idle_reason", return_value=""), \
+                 mock.patch.object(native, "attachment", return_value=contextlib.nullcontext((123, SimpleNamespace(poll=lambda: None)))), \
+                 mock.patch.object(native, "View") as view, \
+                 mock.patch.object(native, "os", SimpleNamespace(write=write)):
+                view.return_value.read.return_value = []
+                result = native.idle_card_request(req, clear.reservation_path(seat.key), req["nonce"],
+                                                 screen_ready=lambda *_: "")
+            self.assertTrue(changed)
+            self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+            self.assertEqual(writes, [])
+            self.assertEqual(result["accepted"], "skipped")
 
     def test_every_real_completed_turn_moves_the_existing_idle_window(self):
         with self.iso.patched_environ(self.extra), \
@@ -1201,6 +1387,67 @@ class UnifiedIdleTests(unittest.TestCase):
                                                   steward=send), "superseded")
                 send.assert_not_called()
                 self.assertTrue(st.card_text_path(seat).is_file())
+
+    def test_activity_during_compact_route_observation_is_rejected_for_every_harness(self):
+        import session_tidy_runner as runner
+        for harness in ("claude", "codex", "opencode"):
+            self.extra["HERDR_PANE_ID"] = "inside-observation:" + harness
+            clock, changed = [1000.0], []
+            with self.subTest(harness=harness), self.iso.patched_environ(self.extra), \
+                 mock.patch.object(clear, "_start_helper", return_value=12345), \
+                 mock.patch.object(runner, "start_detached", return_value=None), \
+                 mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+                sid = "inside-observation-" + harness
+                seat, req, _reply = self.accepted(harness, sid, clock)
+                def observation(*_args):
+                    if not changed:
+                        changed.append(True)
+                        with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                            st.run_hook(harness, "prompt", sid, cwd=str(self.cwd), prompt_text=IdleObserverTests.PEER)
+                            clear.observe_idle_event(harness, sid, str(self.cwd), event_id="activity-inside-observation",
+                                                     tokens=600000, now=clock[0])
+                    return ""
+                with mock.patch.object(clear, "_idle_route_reason", side_effect=observation):
+                    checked, _reason = clear.validate_request(clear.reservation_path(seat.key), req["nonce"])
+                self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+                self.assertIsNone(checked)
+
+    def test_native_compact_writer_rejects_cancellation_inside_the_final_observation(self):
+        from types import SimpleNamespace
+        import session_tidy_native as native
+        import session_tidy_runner as runner
+        clock, reads, writes = [1000.0], [], []
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_start_helper", return_value=12345), \
+             mock.patch.object(runner, "start_detached", return_value=None), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            seat, req, _reply = self.accepted("claude", "native-compact-fixture", clock)
+            req["seat"]["native"] = {"job": "private-fixture"}
+            clear._write_reservation(req)
+            def observation(*_args):
+                reads.append(True)
+                if len(reads) == 5:
+                    with mock.patch.object(clear, "_idle_route_reason", return_value=""):
+                        st.run_hook("claude", "prompt", req["sid"], cwd=str(self.cwd),
+                                    prompt_text=IdleObserverTests.PEER)
+                        clear.observe_idle_event("claude", req["sid"], str(self.cwd),
+                            event_id="peer-during-native-compact-observation", tokens=600000, now=clock[0])
+                return ""
+            def write(fd, data):
+                writes.append(data)
+                return len(data)
+            with mock.patch.object(clear, "_idle_route_reason", side_effect=observation), \
+                 mock.patch.object(native, "idle_reason", return_value=""), \
+                 mock.patch.object(native, "attachment", return_value=contextlib.nullcontext((123, SimpleNamespace(poll=lambda: None)))), \
+                 mock.patch.object(native, "View") as view, \
+                 mock.patch.object(native, "os", SimpleNamespace(write=write)):
+                view.return_value.read.return_value = []
+                result = native.command(req, clear.reservation_path(seat.key), req["nonce"],
+                                        continuing=False, screen_ready=lambda *_: "")
+            self.assertEqual(len(reads), 5)
+            self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
+            self.assertEqual(writes, [])
+            self.assertEqual(result["cleared"], "skipped")
 
     def test_card_then_native_compact_once_for_every_harness_even_with_agents(self):
         import session_tidy_runner as runner
