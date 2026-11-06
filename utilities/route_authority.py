@@ -2154,12 +2154,14 @@ def require_recovery_grant_addresses(candidate, history, *, route, access=None):
         # Derive it with the same pure resolver, never from candidate metadata.
         # A previously sealed override still passes the ordinary path fence.
         from worker_bootstrap import runtime_dir_candidate
-        runtime_values = {}
+        runtime_values = {key: os.environ[key] for key in ("HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
+                          if key in os.environ}
         historical_runtime = (history.get("resolved") or {}).get("runtime_dir")
         if historical_runtime:
             runtime_values["AGENT_RUNTIME_DIR"] = historical_runtime
         runtime = runtime_dir_candidate(route["artifact_root"], runtime_values,
-            repository_kind=route.get("repository_kind"), source_root=history["worktree"])
+            repository_kind="non-git" if route.get("source_commit") == "unversioned" else "git",
+            source_root=history["worktree"])
         if runtime:
             writes.append(runtime); reads.append(runtime)
         if access:
