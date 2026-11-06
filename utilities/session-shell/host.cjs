@@ -7,7 +7,7 @@ const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
 const args = process.argv.slice(2), harness = args.shift(), command = args;
-let activated = false, child, backend, server, cacheTimer, frameTimer, ended = false;
+let activated = false, child, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
   const fd = Number(process.env.HEARTING_SHELL_START_FD);
   fs.writeSync(fd, value + '\n'); fs.closeSync(fd);
@@ -59,9 +59,10 @@ function sameTerminal(pid, root) {
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
 let lastEnter = -1, submitted = -1, currentDelivery, held = [], heldBytes = 0;
 let expanded = false, relay = false, paste = false, keyTail = '', cursorVisible = true;
-let last = [], footer = '', footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
+let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError;
-const deliveries = new Map(), calls = new Map(); let callID = 0, projecting = false;
+const deliveries = new Map(), calls = new Map(), watchers = new Map();
+let callID = 0, projecting = false, projectionPending = false;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath};
@@ -123,13 +124,20 @@ function displayLines(lines,height,done) {
   const vt=new Terminal({cols,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});
   vt.loadAddon(new Unicode11Addon());vt.unicode.activeVersion='11';
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
-  vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${safe(s)}`).join(''),()=>{
+  const paint=line=>Array.isArray(line)?line.map(part=>{
+    const attrs=[0];
+    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
+    return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
+  }).join(''):safe(line);
+  vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
     done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)));vt.dispose();schedule();
   });
 }
 function rebuildDisplay() {
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
-  displayLines([(footer||`하팅 · ${harness} · 세션 확인 중`)+extra],1,lines=>{footerLast='\0';displayFooter=lines[0];});
+  const line=footerSegments.length?[...footerSegments,{text:extra}]:[(footer||`하팅 · ${harness} · 세션 확인 중`)+extra];
+  displayLines([footerSegments.length?line:line[0]],1,lines=>{footerLast='\0';displayFooter=lines[0];});
   if(expanded)displayLines(panelLines.length?panelLines:[`하팅 · ${harness}  Ctrl+] 접기`],height(),lines=>{panelRows=lines;});
 }
 // Footer is serialized once by the scratch VT; child parser state stays untouched.
@@ -137,14 +145,48 @@ let displayFooter='';
 function applyLayout() {
   if(relay)return;
   child.resize(cols,rows-height());terminal.resize(cols,rows-height());last=[];footerLast='\0';
-  emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();
+  emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
+}
+function queueProjection() {
+  if(ended||projectionTimer)return;
+  projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
+}
+function observeFiles(paths) {
+  const wanted=new Map();let changed=false;
+  for(const target of (Array.isArray(paths)?paths:[]).slice(0,64)){
+    if(typeof target!=='string'||!path.isAbsolute(target)||target.length>4096)continue;
+    let directory=path.dirname(target);
+    while(!fs.existsSync(directory)&&path.dirname(directory)!==directory)directory=path.dirname(directory);
+    if(!wanted.has(directory))wanted.set(directory,[]);wanted.get(directory).push(target);
+  }
+  for(const [directory,row] of watchers)if(!wanted.has(directory)){row.watch.close();watchers.delete(directory);changed=true;}
+  for(const [directory,targets] of wanted){
+    const existing=watchers.get(directory);
+    if(existing){if(JSON.stringify(existing.targets)!==JSON.stringify(targets))changed=true;existing.targets=targets;continue;}
+    try{
+      const row={targets};
+      row.watch=fs.watch(directory,(_event,name)=>{
+        const changed=name?path.join(directory,String(name)):directory;
+        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep)))queueProjection();
+      });
+      row.watch.on('error',()=>{row.watch.close();watchers.delete(directory);sourceError={reason:'file-observation-unavailable'};});
+      watchers.set(directory,row);
+      changed=true;
+    }catch{sourceError={reason:'file-observation-unavailable'};}
+  }
+  return changed;
 }
 async function projection() {
-  if(projecting||!sid||ended)return;projecting=true;const selected=selection;
-  const data=await source('projection');projecting=false;
-  if(selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
-  const key=JSON.stringify([data.footer,data.lines,cols,expanded,currentDelivery,heldBytes]);
-  if(key===projectionKey)return;projectionKey=key;footer=data.footer;panelLines=data.lines;rebuildDisplay();
+  if(!sid||ended)return;if(projecting){projectionPending=true;return;}
+  projecting=true;projectionPending=false;const selected=selection;
+  try{
+    const data=await source('projection',{columns:cols,state,expanded});
+    if(selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
+    // Close the read-before-watch gap once when the input set changes.
+    if(observeFiles(data.watch))projectionPending=true;
+    const key=JSON.stringify([data.footer,data.segments,data.lines,cols,expanded,currentDelivery,heldBytes]);
+    if(key===projectionKey)return;projectionKey=key;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;rebuildDisplay();
+  }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
   if(relay||ended)return;relay=true;state='unknown';empty=false;
@@ -187,7 +229,8 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';panelLines=[];
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];
+    for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
   if(req.event==='prompt'||req.event==='submit') {
@@ -258,9 +301,11 @@ server.listen(socketPath,()=>{
   process.stdin.on('data',userInput);
   process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;if(relay)child.resize(cols,rows);else applyLayout();});
   child.onExit(async event=>{
-    ended=true;clearTimeout(frameTimer);clearInterval(cacheTimer);server.close();await source('unregister');backend?.stdin.end();
+    ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
+    for(const row of watchers.values())row.watch.close();watchers.clear();
+    server.close();await source('unregister');backend?.stdin.end();
     process.stdin.setRawMode(false);emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
     fs.rmSync(socketPath,{force:true});process.exit(event.exitCode);
   });
-  rebuildDisplay();schedule();cacheTimer=setInterval(projection,1000);
+  rebuildDisplay();schedule();
 });

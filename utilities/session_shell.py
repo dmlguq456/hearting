@@ -312,19 +312,21 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
-def panel_projection(harness: str, sid: str) -> dict:
+def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
+                     columns=100, state="unknown", expanded=False) -> dict:
     """Display only, using the same route/question and human-input sources."""
     import datetime
     registry_root()
     import human_wait_state
     import session_tidy
     from fleet.session_tags import assigned_tag
+    from fleet.session_line import line_segments
+    from fleet.palette import style_components
+    from fleet.session_view import observe
     # The producer owns route/question interpretation; no Fleet collection here.
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
     ids = set(view.get("by_session", {}).get((harness, sid), ()))
-    questions = [_plain(row.get("question") or "사용자 답 대기")
-                 for row in view.get("items", ()) if row.get("id") in ids and not row.get("stale")]
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = getattr(session_tidy, "prompt_display", lambda *a, **k: {"human_state": "unknown"})(seat, harness, sid)
     human = display.get("human") or {}
@@ -333,16 +335,41 @@ def panel_projection(harness: str, sid: str) -> dict:
         clock = datetime.datetime.fromtimestamp(float(at)).astimezone().strftime("%H:%M")
     except (TypeError, ValueError, OverflowError):
         clock = "--:--"
-    human_line = f"› 나 {clock}: {_plain(human.get('text'))}" if display.get("human_state") == "known" else "› 나: 확인 안 됨"
+    human_line = (f"› 나 {clock}: {_plain(human.get('text'))}" if display.get("human_state") == "known"
+                  else "› 나: 아직 없음" if display.get("human_state") == "none" else "› 나: 확인 안 됨")
     received = display.get("received") or []
     peers = ["⇄ " + _plain(row.get("sender") or row.get("sender_harness") or "peer") + ": " + _plain(row.get("text"), 160)
              for row in received[-2:]]
     tag = assigned_tag(harness, sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
-    count = len(ids)
-    footer = " · ".join(x for x in (tag, _plain(route), f"질문 {count}" if count else "", human_line) if x)
-    return {"footer": footer, "lines": [f"하팅 {tag} · {harness}  Ctrl+] 접기", "ROUTES  " + (_plain(route) or "열린 route 없음"),
-            f"QUESTIONS {count} · Fleet에서 열기", *questions[:3], *peers, human_line]}
+    count = counts[1] if counts is not None else None
+    values, watched = observe(harness, native_pid, native_start, sid) if native_pid else ({}, [])
+    values.update(harness=harness, tag=tag, state=state, route_label=_plain(route), answer_wait=count)
+    no_color = "NO_COLOR" in os.environ
+    colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+    segments = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
+                for text, key in line_segments(values, columns)]
+    question_lines = []
+    if expanded:
+        import questions
+        import time
+        for item in view.get("items", ()):
+            if item.get("id") not in ids or item.get("stale"):
+                continue
+            description = questions.describe(item, now=time.time())
+            rows = description.get("questions") or []
+            question_lines.extend(_plain(row.get("question")) or "사용자 답 대기" for row in rows)
+            if not rows:
+                question_lines.append(_plain(description.get("kind")) + " · Fleet에서 열기")
+            if len(question_lines) >= 3:
+                break
+    watched.extend((str(human_wait_state._cache_path()),
+                    str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
+    return {"footer": "".join(row["text"] for row in segments), "segments": segments,
+            "watch": watched, "lines": [f"하팅 {tag} · {harness}  Ctrl+] 접기",
+            "ROUTES  " + (_plain(route) or ("열린 route 없음" if counts is not None else "확인 안 됨")),
+            f"QUESTIONS {count if count is not None else '?'} · Fleet에서 열기",
+            *question_lines[:3], *peers, human_line]}
 
 
 def _backend_operation(request: dict) -> dict:
@@ -366,7 +393,12 @@ def _backend_operation(request: dict) -> dict:
     if op == "register":
         return {"ok": publish_binding(binding)}
     if op == "projection":
-        return {"ok": True, **panel_projection(harness, sid)}
+        columns = request.get("columns", 100)
+        if type(columns) is not int or not 20 <= columns <= 10000:
+            return {"ok": False, "reason": "invalid-display-size"}
+        return {"ok": True, **panel_projection(harness, sid,
+            native_pid=binding["native_pid"], native_start=binding["native_start"],
+            columns=columns, state=request.get("state", "unknown"), expanded=request.get("expanded") is True)}
     if op == "payload":
         peer = _peer_message()
         row = peer._read_pending(request.get("ref"))

@@ -101,9 +101,15 @@ function existing(file){return new Promise((resolve,reject)=>{
  }else if(cfg.scenario==='child'){
    await rpc(cfg.inlet,{batch:Buffer.from('spawn-child\r').toString('base64')});await waitFor(/DONE_spawn-child/);
  }
+ const displayLag=[];
+ if(cfg.scenario==='display')for(let index=0;index<4;index++){
+   const title='event-title-'+index,before=process.hrtime.bigint();
+   fs.writeFileSync(cfg.title+'.new',JSON.stringify({title,ts:Date.now()/1000}));fs.renameSync(cfg.title+'.new',cfg.title);
+   await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
+ }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status}));
+ console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);}
@@ -145,10 +151,11 @@ class SessionShellPTYTest(unittest.TestCase):
         sid='00000000-0000-4000-8000-000000000052'
         import time
         cache=Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits'
-        cache.mkdir(parents=True,exist_ok=True)
+        cache.mkdir(mode=0o700,parents=True,exist_ok=True);cache.chmod(0o700)
         key='claude\0'+sid;now=time.time()
         (cache/'projection.json').write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],
             'by_session':{},'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}))
+        (cache/'projection.json').chmod(0o600)
         backend=sys.executable;barrier=None
         if blocked_backend:
             barrier=directory/'barrier';os.mkfifo(barrier,0o600)
@@ -160,6 +167,10 @@ class SessionShellPTYTest(unittest.TestCase):
                 'launcher':str(self.launcher),'python':sys.executable,'fake':str(self.fake),'sid':sid,
                 'project':str(self.project),'backend':backend,'barrier':str(barrier) if barrier else None,
                 'registry':str(self.registry),'scenario':scenario}
+        from fleet import titles
+        with mock.patch.dict(os.environ,self.env,clear=True):
+            title=Path(titles.sidecar_path(sid,'claude'))
+        title.parent.mkdir(parents=True,exist_ok=True);config['title']=str(title)
         configfile=directory/'config.json';configfile.write_text(json.dumps(config))
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
@@ -191,6 +202,12 @@ class SessionShellPTYTest(unittest.TestCase):
         result=self.run_loop('child')
         self.assertTrue(result['status']['ok'])
         self.assertEqual(result['status']['sid'],'00000000-0000-4000-8000-000000000052')
+
+    def test_record_changes_update_the_line_without_waiting_for_a_collection_tick(self):
+        result=self.run_loop('display')
+        print(json.dumps({'event':'session-shell-record-update','lag_ms':result['display_lag_ms']}))
+        self.assertEqual(len(result['display_lag_ms']),4)
+        self.assertLess(max(result['display_lag_ms']),500)
 
 
 if __name__=='__main__':unittest.main()

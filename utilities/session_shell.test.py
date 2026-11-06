@@ -165,6 +165,38 @@ class SessionShellTest(unittest.TestCase):
                 shell.lifecycle("claude", "stop", row["sid"], env={**env, **extra})
                 contact.assert_not_called()
 
+    def test_panel_and_collapsed_line_share_values_without_exposing_human_text_in_the_line(self):
+        import human_wait_state, session_tidy
+        from fleet import session_tags, session_view
+        row = self.binding()
+        observed = {"harness": "claude", "cwd": "/synthetic/hearting", "title": "Common title",
+                    "branch": "feature", "ctx_pct": 37, "model": "claude-opus", "effort": "high", "weekly_pct": 60}
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=((2, 1), "⏳ route 2")))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value={"items": [], "by_session": {("claude", row["sid"]): ["wait-one"]}}))
+            patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "known", "human": {"at": 123, "text": "A real person's private draft"}, "received": []}))
+            patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
+            patches.enter_context(mock.patch.object(session_view, "observe", return_value=(observed, [])))
+            with mock.patch.object(shell.os, "getppid", return_value=os.getpid()):
+                result = shell._backend_operation({"op": "projection", "binding": row, "columns": 240, "state": "idle"})
+        text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
+        fields = ("hearting", "Common title", "feature", "CTX 37%", "opus", "7d 60%", "⏳ route 2", "◑ 1")
+        for field in fields:
+            self.assertIn(field, text)
+        self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))
+        self.assertNotIn("private draft", text)
+        self.assertTrue(any("private draft" in line for line in result["lines"]))
+
+    def test_an_unobserved_question_projection_does_not_become_zero_waits(self):
+        import human_wait_state, session_tidy
+        with mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \
+                mock.patch.object(human_wait_state, "cached_view", return_value=None), \
+                mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "none"}):
+            result = shell.panel_projection("claude", "test-native-session")
+        text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
+        self.assertIn("◑ ?", text)
+        self.assertIn("› 나: 아직 없음", result["lines"])
+
     def test_codex_stop_reports_completion_to_its_wrapped_display(self):
         path = Path(__file__).resolve().parents[1] / "adapters/codex/hooks/stop-lifecycle.py"
         spec = importlib.util.spec_from_file_location("shell_codex_stop_fixture", path)
