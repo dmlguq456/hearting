@@ -7,7 +7,9 @@ No index or database is maintained beside the daily file.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 from datetime import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -62,6 +64,24 @@ def directory_fd(path, *, create=False):
     return parent_fd
 
 
+def sync_directory(fd):
+    """Keep durability on filesystems that cannot fsync directory descriptors."""
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if (exc.errno not in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}
+                or not stat.S_ISDIR(os.fstat(fd).st_mode)):
+            raise
+        sync = getattr(ctypes.CDLL(None, use_errno=True), "syncfs", None)
+        if sync is None:
+            raise exc
+        sync.argtypes = [ctypes.c_int]
+        sync.restype = ctypes.c_int
+        if sync(fd) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code)) from exc
+
+
 def atomic(path, raw):
     path = Path(path)
     parent_fd = directory_fd(path.parent, create=True)
@@ -74,7 +94,7 @@ def atomic(path, raw):
         if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino) or path.parent.is_symlink():
             raise JournalError("journal-parent-replaced")
         os.replace(tmp, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        sync_directory(parent_fd)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp, dir_fd=parent_fd)
