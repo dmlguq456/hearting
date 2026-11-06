@@ -2851,6 +2851,13 @@ def _watch_wakeup_signal(_signum, _frame):
             os.write(fd, b"w")
 
 
+def _kept_native_wait(paths):
+    """The recorded native wait a terminal request must keep for its settlement."""
+    current = _read_json(paths.observation)
+    wait_record = current.get("native_wait") if isinstance(current, dict) else None
+    return {"native_wait": wait_record} if isinstance(wait_record, dict) else {}
+
+
 def _write_terminal_watch_receipt(watch_id, arm, reason, *, watcher=None):
     """Settle one exact watch after its observer has the watch lock."""
     paths = _watch_paths(watch_id)
@@ -2883,6 +2890,11 @@ def _write_terminal_watch_receipt(watch_id, arm, reason, *, watcher=None):
     with contextlib.suppress(OSError, ValueError):
         shared_readiness.clear_watch_transition(
             peer_obligations.ObligationStore().root, watch_id)
+    # A dead observer leaves its native wait running; once the watch is settled
+    # nothing tracks it. Stop only that exact recorded wait (pid + start ticks).
+    wait_record = _kept_native_wait(paths).get("native_wait") or {}
+    if wait_record.get("state") == "started":
+        _stop_watch_wait(None, wait_record.get("pid"), wait_record.get("pid_start"))
     try:
         paths.observation.unlink()
     except FileNotFoundError:
@@ -2957,6 +2969,7 @@ def _settle_ended_seatless_recipient(watch_id, arm, root=None, *, census=None,
     server = current.get("server") or "default"
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": "steward-exited",
         "server": server,
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -2983,6 +2996,7 @@ def settle_steward_exited_watch(watch_id, *, reason="steward-exited"):
     expected = dict(arm.get("agent") or {})
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": reason,
         "server": arm.get("server") or "default",
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -3018,6 +3032,7 @@ def _settle_closed_watch(watch_id, arm, root=None, *, evidence=None, lock_held=F
     expected = dict(current.get("agent") or {})
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": reason,
         "server": current.get("server") or "default",
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -3057,6 +3072,7 @@ def _request_watch_terminal(identity, reason):
         paths = _watch_paths(watch_id, root)
         _write_json_atomic(paths.observation, {
             "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+            **_kept_native_wait(paths),
             "state": "terminal_pending", "reason": reason, "server": server,
             "agent": {key: agent.get(key, "-") for key in ("harness", "session_id", "pane")},
             "observed_ts": _utc_now(),
