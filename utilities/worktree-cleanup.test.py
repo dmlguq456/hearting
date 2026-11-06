@@ -258,16 +258,50 @@ class WorktreeCleanupTests(unittest.TestCase):
             CLEANUP.evaluate(path, self.fx.jobs, None)
         self.assertEqual(log.read_text().splitlines(), ["0"])
 
-    def test_private_process_view_preserves_real_unreadable_actor(self):
+    def test_private_process_view_excludes_kernel_hidden_actor_like_other_uid(self):
+        # The kernel reports a non-dumpable process's per-pid entries as root
+        # owned and hides its cwd from the same user. It is the same blind
+        # spot as an other-uid process: excluded, not a scan-wide unknown.
         path = self.fx.add_worktree('fixture-unreadable')
         with RawProcessTests.actor(self, path, unreadable=True) as process:
+            entry = Path('/proc') / str(process.pid)
             self.assertIn(str(process.pid), self.fx.actors.read_text().splitlines())
-            self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
-            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
+            self.assertFalse(CLEANUP.proc_is_gone(entry))
+            with self.assertRaises(PermissionError):
+                os.readlink(entry / 'cwd')
+            self.assertEqual(entry.stat().st_uid, os.geteuid())
+            self.assertNotEqual((entry / 'cwd').lstat().st_uid, os.geteuid())
+            self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
+            result = self.fx.cleanup(path)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('status=eligible', result.stdout)
+            self.assertIsNone(process.poll())
+
+    def test_kernel_hidden_actor_outside_target_does_not_block_apply(self):
+        path = self.fx.add_worktree('hidden-elsewhere')
+        with RawProcessTests.actor(self, self.fx.root, unreadable=True) as process:
             result = self.fx.cleanup(path, apply=True)
-            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-            self.assertIn('process-scan-unavailable', result.stdout)
-            self.assertTrue(path.is_dir())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('status=removed', result.stdout)
+            self.assertFalse(path.exists())
+            self.assertIsNone(process.poll())
+
+    def test_kernel_hidden_actor_outside_target_does_not_block_all_eligible(self):
+        registered = self.fx.add_worktree('hidden-registered')
+        self.fx.jobs.write_text(
+            f"2026-11-06T00:00:00Z\tdone\t{self.fx.repo}\t{registered}\t"
+            "hidden-registered\tattempt_schema_version=2,attempt_id=att-cleanup-hidden,"
+            "dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,"
+            "capability=autopilot-code,harness=codex\n",
+            encoding="utf-8",
+        )
+        with RawProcessTests.actor(self, self.fx.root, unreadable=True) as process:
+            result = self.fx.cleanup_all(apply=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('process-scan-unavailable', result.stdout)
+            self.assertFalse(registered.exists())
             self.assertIsNone(process.poll())
 
     def test_fixture_close_retains_live_actor_diagnostics_on_repeat(self):
@@ -1052,6 +1086,29 @@ class BatchCleanupTests(unittest.TestCase):
                 mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
                 mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
             self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+        # A refusal without the kernel's root-owned marking (an LSM or other
+        # unexplained denial) stays unknown.
+        (entry / "cwd").symlink_to(self.fx.repo)
+        self.assertEqual((entry / "cwd").lstat().st_uid, os.geteuid())
+        with mock.patch.object(Path, "iterdir", entries), \
+                mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
+                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
+            self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+        # A marked entry whose identity changed across the read stays unknown.
+        hidden = mock.Mock(st_uid=os.geteuid() + 1)
+        native_lstat = Path.lstat
+        def lstat(path):
+            return hidden if path == entry / "cwd" else native_lstat(path)
+        with mock.patch.object(Path, "iterdir", entries), \
+                mock.patch.object(Path, "lstat", lstat), \
+                mock.patch.object(CLEANUP, "read_proc_start", side_effect=["100", "200"]), \
+                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
+            self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+        with mock.patch.object(Path, "iterdir", entries), \
+                mock.patch.object(Path, "lstat", lstat), \
+                mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
+                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
+            self.assertEqual(CLEANUP.process_snapshot(), ("procfs", ()))
 
 
 class ProcStatTests(unittest.TestCase):
@@ -1149,14 +1206,21 @@ class RawProcessTests(unittest.TestCase):
             self.assert_kept(path, reason='active-process')
             self.assertIsNone(process.poll())
 
-    def test_raw_cli_keeps_real_unreadable_live_holder(self):
+    def test_raw_kernel_hidden_actor_is_excluded_like_other_uid(self):
         path = self.fx.add_worktree('raw-unreadable')
         with self.actor(path, unreadable=True) as process:
+            entry = Path('/proc') / str(process.pid)
             with self.assertRaises(PermissionError):
-                os.readlink(Path('/proc') / str(process.pid) / 'cwd')
-            self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
-            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
-            self.assert_kept(path, reason='process-scan-unavailable')
+                os.readlink(entry / 'cwd')
+            self.assertFalse(CLEANUP.proc_is_gone(entry))
+            self.assertNotEqual((entry / 'cwd').lstat().st_uid, os.geteuid())
+            native_entries = Path.iterdir
+            def entries(value):
+                return iter([entry]) if value == Path('/proc') else native_entries(value)
+            with mock.patch.object(Path, 'iterdir', entries):
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
+            kind, rows = CLEANUP.process_snapshot()
+            self.assertNotIn(process.pid, [pid for pid, _start, _cwd in rows])
             self.assertIsNone(process.poll())
 
     def test_raw_cli_keeps_live_thread_after_main_thread_exit(self):

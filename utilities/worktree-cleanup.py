@@ -667,6 +667,27 @@ def proc_is_gone(entry):
         return False
 
 
+def kernel_hidden_cwd(entry, pid, before):
+    """Whether a denied cwd read is the kernel's non-dumpable marking.
+
+    For a non-dumpable process (sshd session helpers, ``(sd-pam)``, keyring
+    daemons) Linux keeps ``/proc/<pid>`` owned by the euid but reports its
+    per-pid entries as root-owned (``task_dump_owner``), and refuses the cwd
+    read to the same user. Such a process is excluded like the other-uid
+    processes filtered above. Any other refusal, a failed lstat, or a changed
+    start tick stays unknown.
+    """
+    try:
+        if (entry / "cwd").lstat().st_uid == os.geteuid():
+            return False
+    except OSError:
+        return False
+    after = read_proc_start(pid)
+    if after is None:
+        return proc_is_gone(entry)
+    return after == before
+
+
 def process_snapshot():
     proc = Path("/proc")
     if proc.is_dir():
@@ -689,7 +710,12 @@ def process_snapshot():
                         continue
                     unknown = True
                     continue
-                raw_cwd = os.readlink(entry / "cwd")
+                try:
+                    raw_cwd = os.readlink(entry / "cwd")
+                except PermissionError:
+                    if not kernel_hidden_cwd(entry, pid, before):
+                        unknown = True
+                    continue
                 after = read_proc_start(pid)
                 if after is None and proc_is_gone(entry):
                     continue
