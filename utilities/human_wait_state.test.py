@@ -515,23 +515,47 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertIsNone(state._notification_delay(
             [{"source": "S3", "since": now - 73 * 3600, "stale": False}], now, enabled=True))
 
-    def test_idle_producer_sleeps_until_notification_boundary(self):
+    def _idle_producer(self, *, display_returns):
+        """Run an idle producer whose next notification boundary is an hour away.
+
+        Returns (sleeps, refreshes); the second wait stops the loop."""
         demand = state.state_root() / ".demand"
         demand.parent.mkdir(parents=True, exist_ok=True)
         demand.touch()
         os.utime(demand, (0, 0))
         now = 10_000.0
         cached = {"items": [{"source": "S3", "since": now, "stale": False}]}
-        class Slept(Exception):
+        sleeps = []
+
+        class Slept(BaseException):   # not swallowed by the loop's ``except Exception``
             pass
-        with mock.patch.object(state, "_refresh_cache"), \
+
+        def wait(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 1:
+                raise Slept()
+            if display_returns:
+                os.utime(demand, (now, now))
+
+        with mock.patch.object(state, "_refresh_cache") as refresh, \
              mock.patch.object(state, "_read_cache", return_value=cached), \
              mock.patch.object(state.shutil, "which", return_value="/bin/herdr"), \
              mock.patch.object(state.time, "time", return_value=now), \
-             mock.patch.object(state.time, "sleep", side_effect=Slept) as sleep, \
+             mock.patch.object(state.time, "sleep", side_effect=wait), \
              mock.patch.object(state.fcntl, "flock"), mock.patch.object(state.os, "close"):
-            state._producer_loop(123)
-        sleep.assert_called_once_with(3600.0)
+            with self.assertRaises(Slept):
+                state._producer_loop(123)
+        return sleeps, refresh.call_count
+
+    def test_idle_producer_wakes_every_30s_but_refreshes_only_at_its_boundary(self):
+        sleeps, refreshes = self._idle_producer(display_returns=False)
+        self.assertEqual(sleeps, [30.0, 30.0])
+        self.assertEqual(refreshes, 1)   # the first pass only; the boundary is an hour away
+
+    def test_idle_producer_refreshes_as_soon_as_a_display_returns(self):
+        sleeps, refreshes = self._idle_producer(display_returns=True)
+        self.assertEqual(sleeps, [30.0, 30.0])   # back on the live cadence
+        self.assertEqual(refreshes, 2)
 
     def _run_producer_with(self, *, during_refresh=None, during_sleep=None):
         """Run the real producer loop with an instant observation and an injected wait.
