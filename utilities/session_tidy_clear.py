@@ -169,6 +169,120 @@ def _write_reservation(data: dict) -> None:
     st.atomic_write_json(reservation_path(data["seat"]["key"]), data)
 
 
+def _peer_seat(harness: str, sid: str):
+    return st.Seat("native", st._native_session_key(harness, sid), harness=harness, sid=sid)
+
+
+def _idle_peer_booking(req, harness, sid):
+    return (isinstance(req, dict) and req.get("origin") == "idle"
+            and (req.get("harness"), req.get("sid")) == (harness, sid))
+
+
+@contextlib.contextmanager
+def peer_input_slot(harness: str, sid: str):
+    """Serialize existing peer claims with this session's idle compact claim.
+
+    Hold only across claim publication, never a native RPC or its receipt.
+    Sessions without an idle booking retain their ordinary delivery path.
+    """
+    if harness not in st.HARNESSES or not isinstance(sid, str) or not sid:
+        yield ""
+        return
+    seat = _peer_seat(harness, sid)
+    if not _idle_peer_booking(read_reservation(seat.key), harness, sid):
+        yield ""
+        return
+    with st.seat_lock(seat.key):
+        req = read_reservation(seat.key)
+        reason = ""
+        if _idle_peer_booking(req, harness, sid) and req.get("status") in ("reserved", "unverified"):
+            request = req.get("idle_request") or {}
+            if request.get("arrival") and request.get("state") != "accepted":
+                reason = "tidy-card-turn"
+            elif (req.get("clear_claim") or {}).get("command") == "compact":
+                reason = "session-compacting"
+        yield reason
+
+
+def peer_input_state(harness: str, sid: str, pane: str, state: str) -> str:
+    """Corroborate a stale working label from the existing completed booking."""
+    if state != "working" or harness != "claude" or not isinstance(sid, str) or not sid:
+        return state
+    seat = _peer_seat(harness, sid)
+    req = read_reservation(seat.key)
+    if (_idle_peer_booking(req, harness, sid) and req.get("status") == "compacted"
+            and (req.get("clear_claim") or {}).get("command") == "compact"
+            and (not pane or (req.get("seat") or {}).get("pane") == pane)
+            and req.get("prompt_seq") == st.read_prompt_seq(seat)
+            and _quiet_after_compact(req, seat)):
+        return "idle"
+    return state
+
+
+def _quiet_after_compact(req, seat):
+    """A background notification can start a native turn without a user prompt.
+
+    Read only the existing transcript since the compact claim. Compare activity
+    with its native boundary, never the observer's later booking finish time.
+    Preserved summary rows and the compact command's output are not new work.
+    """
+    claim = req.get("clear_claim") or {}
+    try:
+        source = claim.get("transcript") or (st.session_summary(seat).get(
+            (req["harness"], req["sid"])) or {}).get("transcript")
+        claimed_at = float(claim["at"])
+        if not source or req["sid"] not in Path(source).name:
+            return False
+        offset = claim.get("offset", 0)
+        if type(offset) is not int or offset < 0:
+            return False
+        with open(source, "rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if not offset <= size <= offset + 8 * 1024 * 1024:
+                return False
+            stream.seek(offset)
+            boundary, latest_activity = None, None
+            for line in stream:
+                row = json.loads(line)
+                if row.get("isSidechain"):
+                    continue
+                if (row.get("type") == "system" and row.get("subtype") == "compact_boundary"
+                        and row.get("sessionId") in (None, req["sid"])):
+                    stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                    if boundary is None and stamp >= claimed_at:
+                        boundary = stamp
+                    continue
+                message = row.get("message") or {}
+                if message.get("role") not in ("user", "assistant"):
+                    continue
+                if row.get("isCompactSummary") or row.get("repeatsCompactSummary"):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str) and content.startswith("<local-command-"):
+                    continue
+                stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00")).timestamp()
+                latest_activity = stamp if latest_activity is None else max(latest_activity, stamp)
+        return boundary is not None and (latest_activity is None or latest_activity < boundary)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
+def _peer_inputs(req):
+    from dispatch_seat_handover import _peer_message
+    return _peer_message().pending_messages({"harness": req["harness"], "session_id": req["sid"]})
+
+
+def _wake_peer_inputs(req):
+    """Wake the retained runner, without sending any synthetic prompt."""
+    with contextlib.suppress(Exception):
+        if not _peer_inputs(req):
+            return
+        import peer_obligations
+        import shared_readiness
+        peer_obligations.ensure_normal_runner()
+        shared_readiness.wake_runner(peer_obligations.ObligationStore().root)
+
+
 def _remove_reservation(seat_key: str) -> None:
     with contextlib.suppress(OSError):
         os.unlink(reservation_path(seat_key))
@@ -1690,7 +1804,7 @@ def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time
         sleep(min(1.0, remaining))
 
 
-def claim_clear(path, nonce: Optional[str] = None):
+def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
     """Atomically consume the one clear send before the steward/native writer acts."""
     req, seat, reason = _booking_at(Path(path))
     if req is None:
@@ -1707,6 +1821,20 @@ def claim_clear(path, nonce: Optional[str] = None):
         req, reason = validate_request(path, nonce)
         if req is None:
             return None, reason
+        if req.get("origin") == "idle":
+            # A peer claim and this claim take the same seat lock before their
+            # metadata locks. The first writer owns input until its normal
+            # receipt/new-prompt observation, rather than racing /compact.
+            from dispatch_contract import process_identity_disposition
+            if any(isinstance(row.get("rpc_claim"), dict)
+                   and process_identity_disposition((row["rpc_claim"]).get("pid", 0),
+                       (row["rpc_claim"]).get("start", "")) != "dead"
+                   for row in _peer_inputs(req)):
+                return None, "peer-input-pending"
+        if ready is not None:
+            reason = ready(req)
+            if reason:
+                return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
         if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):
@@ -2113,6 +2241,7 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             st.write_notice(_booked_seat(req, seat_key), st._ui_translator()("tidy.idle.completed"),
                             author_harness=req["harness"], author_sid=req["sid"],
                             notice_id="idle:" + nonce)
+            _wake_peer_inputs(req)
         return True
     if outcome not in ("cleared", "cancelled"):
         with contextlib.suppress(BaseException):

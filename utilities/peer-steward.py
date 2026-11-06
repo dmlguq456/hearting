@@ -4647,12 +4647,17 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
         require_process_session=True, target_observation=(state, ident))
     if current is None:
         return identity_error or "target-identity-unverified", None
+    from session_tidy_clear import peer_input_state
+    state, _source = _effective_retire_state(state, ident)
+    state = peer_input_state(harness, expected_sid, expected_pane, state)
     # A Codex thread with no first turn has no state yet; its empty composer,
     # checked below, is the evidence that it is waiting for input.
     settled = ("idle", "done", "unknown") if fresh_ok else ("idle", "done")
     if state not in settled:
         return "native-state-" + str(state), None
     current_state, current_pane = _agent_state(target)
+    current_state, _source = _effective_retire_state(current_state, ident)
+    current_state = peer_input_state(harness, expected_sid, expected_pane, current_state)
     if current_state not in settled or current_pane != expected_pane:
         return "target-state-changed", None
     if current_state == "unknown":
@@ -7551,6 +7556,10 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
     if not transfer_ref:
         return "peer-ref-unavailable", "unverified", "private-pending", "peer-ref-unavailable"
     resolved_target, t_sid, target_pane, state_before = target, sid, pane, state
+    from session_tidy_clear import peer_input_state
+    state_before, _source = _effective_retire_state(state_before,
+        {"harness": harness, "session_id": t_sid, "pane": target_pane})
+    state_before = peer_input_state(harness, t_sid, target_pane, state_before)
     outcome, verify, reason = "queued", "native-callback", None
     direct_reason = None
     if no_trailer:
@@ -8378,12 +8387,18 @@ def cmd_clear(args):
     req, why = clear.validate_request(args.request, args.nonce)
     if req is None:
         return finish("skipped", why, agent)
-    reason, agent, lines = _clear_look(target, req)   # the look immediately before the one send
-    if reason:
-        return finish(_look_outcome(reason), reason, agent)
-    req, why = clear.claim_clear(args.request, args.nonce)
+    lines = _lines
+
+    def ready(current):
+        nonlocal agent, lines
+        reason, agent, lines = _clear_look(target, current)
+        return reason
+
+    # The final look and compact claim share the existing booking lock with
+    # peer admission. No native I/O or receipt waits hold that lock.
+    req, why = clear.claim_clear(args.request, args.nonce, ready=ready)
     if req is None:
-        return finish("skipped", why, agent)
+        return finish(_look_outcome(why), why, agent)
     compacting = (req.get("clear_claim") or {}).get("command") == "compact"
     if compacting:
         command = clear.COMPACT_COMMAND     # background agents keep running in the same session

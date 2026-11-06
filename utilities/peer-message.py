@@ -2373,6 +2373,18 @@ def schedule_acceptance_reply(handoff_ref, sender, recipient):
 
 def reserve_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight",
                           allow_hook_context_recovery=False, claimant=None):
+    if not _valid_transfer_endpoint(recipient):
+        return None
+    from session_tidy_clear import peer_input_slot
+    with peer_input_slot(recipient["harness"], recipient["session_id"]) as blocked:
+        if blocked:
+            return None
+        return _reserve_pending_herdr(ref, recipient, receipt=receipt,
+            allow_hook_context_recovery=allow_hook_context_recovery, claimant=claimant)
+
+
+def _reserve_pending_herdr(ref, recipient, *, receipt,
+                           allow_hook_context_recovery=False, claimant=None):
     """Reserve an exact deferred row while retaining its pending state.
 
     Other senders and native callbacks cannot submit it again once it is
@@ -2685,12 +2697,19 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
     from codex_queue_delivery import send_at_least_once, QueueDeliveryError
     from codex_queue_dispatch import resolve_queue_socket
     from dispatch_contract import process_start_ticks, process_identity_disposition
+    from session_tidy_clear import peer_input_slot
+    initial_recipient = pending_delivery_recipient(_read_pending(ref) or {}) or {}
     token = secrets.token_hex(16)
-    with pending_lock(ref):
+    with peer_input_slot(initial_recipient.get("harness", "codex"),
+                         initial_recipient.get("session_id", "")) as blocked, pending_lock(ref):
+        if blocked:
+            return {"status": "queued", "reason": blocked}
         row = _read_pending(ref)
         if not row:
             return {"status": "unsupported", "reason": "peer-pending-missing"}
         recipient = pending_delivery_recipient(row)
+        if recipient != initial_recipient:
+            return {"status": "unverified", "reason": "peer-recipient-changed"}
         delivery_binding = pending_delivery_binding(row, include_acked=True)
         if row["state"] == "received":
             _observe_continue_receipt(recipient or {}, ref)
