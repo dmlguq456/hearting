@@ -28,6 +28,56 @@ def fixture_tempdir(stack):
 
 
 class OpenCodeV2PluginTest(unittest.TestCase):
+    def test_v2_compaction_ended_uses_the_existing_postcompact_callback(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is required")
+        with tempfile.TemporaryDirectory() as temporary:
+            script = r'''
+import assert from "node:assert/strict"
+import childProcess from "node:child_process"
+import { syncBuiltinESMExports } from "node:module"
+import { pathToFileURL } from "node:url"
+const calls = []
+childProcess.spawnSync = (_command, args, options) => {
+  calls.push({ args, body: options?.input || "" })
+  return { status: 0, stdout: args.includes("pending") ? "[]" : "{}", stderr: "" }
+}
+childProcess.spawn = () => ({ on() {}, unref() {}, stdin: { on() {}, end() {} } })
+syncBuiltinESMExports()
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+let drained
+const done = new Promise(resolve => { drained = resolve })
+const ctx = {
+  location: { directory: process.cwd() },
+  session: { hook: async () => {}, get: async ({ sessionID }) => ({
+    id: sessionID, title: "Main", parentID: null, directory: process.cwd(),
+  }) },
+  tool: { hook: async () => {} }, shell: { hook: async () => {} },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    yield { type: "session.compaction.ended", data: { sessionID: "ses_compact" } }
+    drained()
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+}
+const cleanup = await plugin.setup(ctx)
+try {
+  await done
+  const compact = calls.filter(call => call.args.includes("compact-after"))
+  assert.equal(compact.length, 1, JSON.stringify(calls))
+  assert.equal(JSON.parse(compact[0].body).sessionID, "ses_compact")
+  assert.ok(!calls.some(call => call.args.includes("continue")))
+} finally { await cleanup() }
+'''
+            env = dict(BASE_ENV, HOME=temporary, XDG_STATE_HOME=str(Path(temporary) / "state"),
+                       XDG_CONFIG_HOME=str(Path(temporary) / "config"), AGENT_HOME=str(ROOT),
+                       OPENCODE_VERSION="2.0.32",
+                       PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js"))
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=temporary,
+                                    env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_synchronous_completion_transport_preserves_existing_output_capacity(self):
         node = shutil.which("node")
         self.assertIsNotNone(node)
@@ -384,11 +434,12 @@ let writes = 0
 const traces = []
 let directoryReads = 0
 let messageReads = 0
+let nativeType = "idle"
 const nativeResponse = (data) => ({ data, response: { ok: true, status: 200 } })
 const ctx = { location: { directory: process.cwd() }, client: { app: { log: async (row) => traces.push(row.body.extra) }, session: {
   get: async () => nativeResponse({ id: sid, projectID: "fixture", directory: process.cwd(),
     slug: "fixture", title: "fixture", version: "1", time: { created: 1, updated: 1 } }),
-  status: async () => nativeResponse({ [sid]: { type: "idle" } }),
+  status: async () => nativeResponse({ [sid]: { type: nativeType } }),
   messages: async () => {
     messageReads++
     if (["dispatch-race", "quoted-dispatch-marker"].includes(process.env.CASE) && messageReads >= 2) {
@@ -421,8 +472,31 @@ const readTransfer = () => {
   return JSON.parse(result.stdout).find((candidate) => candidate.ref === process.env.TRANSFER_REF)
 }
 try {
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
-  if (process.env.CASE === "root-change") {
+  const compactCase = ["compact-resume", "compact-busy", "compact-blocked"].includes(process.env.CASE)
+  if (compactCase) {
+    await hooks.event({ event: { type: "session.status", properties: {
+      sessionID: sid, status: { type: "busy" },
+    } } })
+    nativeType = process.env.CASE === "compact-busy" ? "busy" : "idle"
+    if (process.env.CASE === "compact-blocked") {
+      await hooks.event({ event: { type: "permission.asked", properties: { sessionID: sid } } })
+    }
+    await hooks.event({ event: { type: "session.compacted", properties: { sessionID: sid } } })
+    if (process.env.CASE === "compact-busy") {
+      assert.equal(writes, 0, "compact callback overrode an actually busy native session")
+      nativeType = "idle"
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+    }
+    const expectedWrites = process.env.CASE === "compact-blocked" ? 0 : 1
+    assert.equal(writes, expectedWrites, "peer missed idle or entered a pending permission")
+    await hooks.event({ event: { type: "session.compacted", properties: { sessionID: sid } } })
+    assert.equal(writes, expectedWrites, "compact callback submitted the same peer twice")
+  } else {
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } })
+  }
+  if (compactCase) {
+    assert.equal(writes, process.env.CASE === "compact-blocked" ? 0 : 1)
+  } else if (process.env.CASE === "root-change") {
     assert.equal(writes, 0)
     const released = readTransfer()
     assert.equal(released.state, "pending")
@@ -456,7 +530,7 @@ try {
 } finally { hooks.dispose?.({ silent: true }) }
 '''
         for case in ("root-change", "begin-refused", "ambiguous", "dispatch-race",
-                     "quoted-dispatch-marker"):
+                     "quoted-dispatch-marker", "compact-resume", "compact-busy", "compact-blocked"):
             with self.subTest(case=case), ExitStack() as stack:
                 tmp = fixture_tempdir(stack)
                 root = Path(tmp)
@@ -605,6 +679,10 @@ print(json.dumps([row]))
                     elif case == "quoted-dispatch-marker":
                         self.assertEqual(pending.read(dispatch_root, sid,
                             "delivery-" + "d" * 32)["state"], "sent-ambiguous")
+                    elif case in ("compact-resume", "compact-busy"):
+                        self.assertIn(row["state"], {"queued", "unverified", "received"})
+                    elif case == "compact-blocked":
+                        self.assertEqual(row["state"], "pending")
                     else:
                         self.assertEqual(row["state"], "unverified")
 

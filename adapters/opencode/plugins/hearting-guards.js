@@ -595,6 +595,10 @@ async function afterCompact(ctx, event) {
   const info = await compactSessionInfo(ctx, sid)
   if (info?.parentID) return
   const result = runCompactHook("compact-after", { sessionID: sid, cwd: baseDir(ctx), worker: false })
+  // Compaction is a new observation boundary. Recheck the existing native SDK
+  // instead of retaining the card turn's cached busy status until another event.
+  if (pendingPeerStatus.get(sid) === "working") pendingPeerStatus.delete(sid)
+  await pendingPeerDelivery(ctx, sid)
   try {
     const emitted = JSON.parse(result || "{}")
     if (emitted.systemMessage) {
@@ -1368,7 +1372,8 @@ async function setupOpenCodeV2(ctx) {
         await withSession(sessionID, async (current) => {
           if (v2WorkerSessions.has(sessionID)) return
           const type = ["session.execution.succeeded", "session.execution.failed",
-            "session.execution.interrupted"].includes(native.type) ? "session.idle" : native.type
+            "session.execution.interrupted"].includes(native.type) ? "session.idle"
+            : native.type === "session.compaction.ended" ? "session.compacted" : native.type
           const event = { ...native, type, properties: { ...data,
             ...(native.type === "session.execution.started" ? { status: { type: "busy" } } : {}),
             ...(info ? { info } : {}), sessionID } }
