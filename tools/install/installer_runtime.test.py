@@ -932,5 +932,15 @@ class InstallPermissionNoticeTest(unittest.TestCase):
         self.assertNotIn("bypass", text)
 
 
+class InstallEntranceNoticeTest(unittest.TestCase):
+    """The install summary ends with where results land and how to open them."""
+
+    def test_the_entrance_line_names_the_artifact_place_and_the_command(self):
+        line = installer._ui_text("install.entrance")
+        self.assertTrue(line)
+        self.assertIn(".agent_reports/", line)
+        self.assertIn("hearting reports", line)
+
+
 if __name__ == "__main__":
     unittest.main()

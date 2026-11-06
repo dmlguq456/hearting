@@ -16,6 +16,13 @@ def run(*argv, env=None):
                           env={**base, **(env or {})}, check=False)
 
 
+def launch(*argv, env=None):
+    """Run the launcher without the `run` subcommand (`reports`, `open`, install...)."""
+    base = {k: v for k, v in os.environ.items() if k != "AGENT_HOME"}
+    return subprocess.run(["sh", str(LAUNCHER), *argv], text=True, capture_output=True,
+                          env={**base, **(env or {})}, check=False)
+
+
 class HarnessRunTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -45,6 +52,41 @@ class HarnessRunTest(unittest.TestCase):
                 done = run(name, env={"AGENT_HOME": str(self.home)})
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("harness:", done.stderr)
+
+
+class HarnessEntranceTest(unittest.TestCase):
+    """`hearting reports` / `hearting open` go through this one launcher in every runtime."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "core").mkdir()
+        (self.home / "core/CORE.md").write_text("x\n")
+        (self.home / "utilities").mkdir()
+        (self.home / "utilities/artifact_entrance.py").write_text(
+            "import sys\nprint('entrance', *sys.argv[1:])\n")
+
+    def test_reports_and_open_are_delegated_with_their_arguments(self):
+        for argv in (("reports",), ("open", "3"), ("open", "beta", "result")):
+            with self.subTest(argv=argv):
+                done = launch(*argv, env={"AGENT_HOME": str(self.home)})
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout.split(), ["entrance", *argv])
+
+    def test_a_missing_entrance_module_is_a_typed_refusal(self):
+        (self.home / "utilities/artifact_entrance.py").unlink()
+        done = launch("reports", env={"AGENT_HOME": str(self.home)})
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("artifact entrance is missing", done.stderr)
+
+    def test_the_real_repository_entrance_runs_against_a_temporary_root(self):
+        artifact_root = Path(self._tmp.name) / "reports"
+        artifact_root.mkdir()
+        done = launch("reports", env={"AGENT_ARTIFACT_ROOT": str(artifact_root)})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(str(artifact_root / "README.md"), done.stdout)
+        self.assertTrue((artifact_root / "README.md").is_file())
 
 
 if __name__ == "__main__":

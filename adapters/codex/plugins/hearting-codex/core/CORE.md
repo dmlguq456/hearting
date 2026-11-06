@@ -207,6 +207,7 @@ never orders a move or a delete.
 | `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
+| `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner and is never overwritten or moved) | `C-RT` |
 
 The following paths are a sealed-evidence exception set. These exact prefixes
 (and their descendants) or exact files take precedence over their parent

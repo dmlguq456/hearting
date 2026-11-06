@@ -66,7 +66,8 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 
 모든 하네스와 프로젝트의 모든 git worktree가 공유하는 계획, 근거, 결과, 인계를
 담습니다. 옛 `.claude_reports/` 폴더는 이전 이름으로 계속 읽힙니다. 작업이 막혀도
-이 폴더를 지우지 마세요.
+이 폴더를 지우지 마세요. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하면
+최근 결과를 볼 수 있습니다.
 
 ## hearting이나 fleet를 찾을 수 없다고 나옵니다
 

@@ -46,6 +46,19 @@ import model_settings
 from drivers import get_driver, RUNTIMES
 
 
+def _ui_text(key):
+    """One line from the shared catalog; English fallback when it is unavailable."""
+    try:
+        catalog = Path(__file__).resolve().parents[1] / "i18n"
+        if str(catalog) not in sys.path:
+            sys.path.insert(0, str(catalog))
+        import ui_text
+
+        return ui_text.text(key)
+    except Exception:  # a missing catalog never blocks an install
+        return None
+
+
 def _ensure_herdr_history_key(launcher_results, *, dry_run=False):
     row = next((item for item in launcher_results if item.get("name") == "hearting"), None)
     allowed = {"created", "unchanged", "migrated-legacy"}
@@ -531,6 +544,10 @@ def cmd_install(args):
         lines.extend("  " + line for line in user_config.lines(user_config_rows))
 
     exit_code = EXIT_BLOCKED if any_blocked else EXIT_FAIL if bootstrap_failed else EXIT_OK
+    if exit_code == EXIT_OK:
+        entrance = _ui_text("install.entrance")
+        if entrance:
+            lines.append(entrance)
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
             "drift": [], "exit": exit_code, "lines": lines, "environment": environment,
             "user_config": user_config_rows}

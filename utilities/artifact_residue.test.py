@@ -169,6 +169,17 @@ class ClassificationTests(ResidueFixture):
         self.assertEqual(plan["totals"]["files"], 14)
         self.assertEqual(plan["totals"]["movable"], 11)
 
+    def test_entrance_names_are_never_residue(self):
+        for name in P.ENTRANCE_NAMES:
+            (self.root / name).write_text("x\n", encoding="utf-8")
+        for name in P.ENTRANCE_NAMES:
+            self.assertTrue(RES._is_runtime_owned(name), name)
+        self.assertEqual(list(RES.iter_residue_files(self.root)), [])
+        plan = RES.build_plan(self.root)
+        self.assertEqual(plan["totals"]["files"], 0)
+        self.assertEqual(plan["empty_dirs"], [])
+        self.assertEqual(RES._prune_empty(self.root), [])
+
     def test_sealed_evidence_moves_and_map_is_repointed(self):
         evidence = C.SEALED_EVIDENCE_PATHS[2]  # plans/2026-08-25_artifact-knowledge-index-w7-e2-e3
         self.seed(f"{evidence}/evidence/note.md")
@@ -213,7 +224,7 @@ class ApplyTests(ResidueFixture):
         sealed, d1 = self._populate()
         before = _files(self.root)
         movable = [p for p in before if not p.startswith("campaigns/") and not p.startswith(".runtime/")
-                   and p not in {"spec/prd.md", "plans/.gitkeep"}]
+                   and p not in {"spec/prd.md", "plans/.gitkeep"} and p not in P.ENTRANCE_NAMES]
         result = self.apply()
         self.assertEqual(result["status"], "complete", result)
         report = result["report"]

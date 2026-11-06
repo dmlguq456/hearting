@@ -700,7 +700,12 @@ class ConcurrentSealTest(F.ProducerTestBase, IndexEquivalenceMixin):
             "print(result['status'])\n"
         ).format(utildir=str(Path(__file__).parent), barrier=str(barrier),
                  root=str(self.root), cycle_id=cycle_id)
-        return subprocess.Popen([sys.executable, "-c", script],
+        # A seal also triggers the detached workflow-group review. This test owns its
+        # temporary root and tears it down right after joining these two processes, so
+        # the background reviewer must not keep writing into it; convergence is what
+        # this test measures, not the reviewer.
+        env = {**os.environ, "HEARTING_WORKFLOW_GROUP_REVIEW": "off"}
+        return subprocess.Popen([sys.executable, "-c", script], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def test_two_processes_sealing_different_campaigns_converge(self):
@@ -793,6 +798,17 @@ class ScanCountTest(F.ProducerTestBase, IndexEquivalenceMixin):
     def setUp(self):
         super().setUp()
         self.activate()
+        # The seal path still never enumerates the root.  Since the derived read
+        # entrance is refreshed after `finalize` returned (outside the admission
+        # lock) and that projection enumerates campaigns by design, it is
+        # disabled here so these counters measure the seal alone; the entrance's
+        # own cost is measured in `utilities/artifact_entrance.test.py`.
+        import artifact_entrance
+
+        patcher = mock.patch.object(artifact_entrance, "refresh",
+                                    return_value={"status": "unchanged"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _sealed_cycle(self, slug, key):
         route, route_file = self.route(slug=slug, gate_source=slug)
@@ -955,7 +971,7 @@ _EXPECTED_WRITER_CENSUS = {
     ("artifact_producer_cycle_ops.py", "mark_cycle_superseded"): "incremental",
     ("artifact_producer_cycle_ops.py", "mark_campaign_superseded"): "incremental",
     ("artifact_producer_cycle_ops.py", "set_campaign_related"): "no-row-effect",
-    ("artifact_producer_finalize.py", "finalize"): "no-row-effect",  # the no-lineage cycle-record write
+    ("artifact_producer_finalize.py", "_finalize"): "no-row-effect",  # the no-lineage cycle-record write
     ("artifact_producer_finalize.py", "_recover_locked"): "no-row-effect",  # the dropped-record write
     ("artifact_producer_refresh.py", "_refresh_journal_resume"): "no-row-effect",  # pending history; row changes use _commit_sealed
     ("artifact_producer_history.py", "_observe_control_changes"): "no-row-effect",  # observation digests and pending history only

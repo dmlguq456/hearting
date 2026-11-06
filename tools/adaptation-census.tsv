@@ -105,6 +105,8 @@ utility-deferred	artifact_admission.py
 utility-deferred	artifact_checkpoint_trigger.py
 utility-deferred	artifact_cutover.py
 utility-deferred	artifact_cross_root_move.py
+utility-deferred	artifact_entrance.py
+utility-deferred	artifact_entrance.test.py
 utility-deferred	artifact_history.py
 utility-deferred	artifact_identity.py
 utility-deferred	artifact_index.py
