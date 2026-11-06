@@ -518,6 +518,10 @@
    "en": "could not read · {reason}",
    "ko": "읽지 못함 · {reason}"
   },
+  "fleet.resume.stopped": {
+   "en": "stopped after restart",
+   "ko": "재시작 뒤 멈춤"
+  },
   "fleet.route.no_stage_record": {
    "en": "could not read this route's stage record (no route record)",
    "ko": "이 route의 stage 기록을 읽지 못했습니다 (route 기록 없음)"
@@ -645,6 +649,14 @@
   "resource.unknown_duration": {
    "en": "unknown",
    "ko": "미상"
+  },
+  "resume.notice.subject": {
+   "en": "Interrupted session resume",
+   "ko": "세션 재시작으로 작업이 끊겼습니다"
+  },
+  "resume.notice.text": {
+   "en": "The session restarted while work was unfinished. Continue from the existing conversation and verify stopped background work before retrying it.",
+   "ko": "재시작으로 끊겼습니다. 기존 대화에서 하던 일을 이어 가세요. 중단된 백그라운드 작업은 상태를 확인한 뒤 다시 실행하세요."
   },
   "route.a.depends_on_work": {
    "en": "unconfirmed (depends on the work)",

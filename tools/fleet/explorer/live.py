@@ -413,6 +413,9 @@ def _session_records(snapshot, now, resolver):
             "generation": None, "last_clear": None,
             "running": _running(session), "gpu": None, "pane_meta": None, "pane_lines": [],
         }
+        if (_get(session, "_resume_attention") == "stopped"
+                and state not in ("working", "dead", "stale") and not record["ask"]):
+            record["restart"] = "stopped"
         rows.append(record)
         sid = _text(_get(session, "session_id", "sid", "id"))
         chain = _get(session, "route_chain")

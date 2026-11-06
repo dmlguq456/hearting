@@ -72,6 +72,7 @@ shared-utility-deferred	resource_resume.py
 shared-utility-deferred	review_input.py
 shared-utility-deferred	retained_review_completion.py
 shared-utility-deferred	review_watchdog.py
+shared-utility-deferred	session_resume.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
 shared-utility-deferred	session_card_format.py

@@ -7882,7 +7882,8 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
 
     def _run_notice_duty(self, harness, duty, *, fail_ack=False, forget_binding=False,
                          target_state="idle", target_sid=None,
-                         queue_accept_only=False, duties=None):
+                         queue_accept_only=False, duties=None, idle_guard=None, input_observer=None,
+                         native_queue_impl=None):
         import dispatch_pending_delivery as pending_delivery
         target_sid = target_sid or self.sid
         target_ident = {**self.ident, "harness": harness, "session_id": target_sid}
@@ -7894,6 +7895,8 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
         sends = []
         def native_receive(_pane, body, *, wait, timeout_ms, start_aware=False):
             self.assertFalse(wait)
+            if input_observer:
+                input_observer(harness, target_sid, body)
             sends.append(body)
             if fail_ack:
                 with mock.patch.object(pending_delivery, "ack_received",
@@ -7920,6 +7923,8 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                     peer_steward.peer_message._save_pending(dict(
                         current, state="queued", receipt="native-queue-accepted"))
                 return {"status": "queued", "reason": "fixture-native-queue-accepted"}
+            if input_observer:
+                input_observer(harness, target_sid, row["text"])
             rc = peer_steward.peer_message.receive_peer_message(
                 row["text"], {"harness": harness, "session_id": target_sid})
             self.assertEqual(rc, 0)
@@ -7942,7 +7947,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                 mock.patch.object(peer_steward, "_from_name", return_value="fixture-steward"), \
                 mock.patch.object(peer_steward, "_project_of", return_value=str(self.tmp_root)), \
                 mock.patch.object(peer_steward, "_native_idle_prompt_guard",
-                                  return_value=(None, "fixture-foreground-proof")), \
+                                  side_effect=idle_guard or (lambda *a, **k: (None, "fixture-foreground-proof"))), \
                 mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                   return_value={"pid": os.getpid(), "start": "fixture-start",
                                       "pid_namespace": self.ident["pid_namespace"],
@@ -7951,7 +7956,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                                   return_value=peer_steward._screen_lines(CLAUDE_SUGGESTION)), \
                 mock.patch.object(peer_steward, "_herdr_prompt", side_effect=native_receive), \
                 mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
-                                  side_effect=native_queue):
+                                  side_effect=native_queue_impl or native_queue):
             peer_steward._reconcile_obligations(
                 store, duties=peer_steward._runner_duties(store, duties or [duty]))
         return store, sends

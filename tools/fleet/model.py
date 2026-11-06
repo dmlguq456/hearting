@@ -513,6 +513,7 @@ class Session:
     session_reasoning_output_tokens: Optional[int] = None
     session_total_tokens: Optional[int] = None
     status: Optional[str] = None        # raw harness status (claude idle/shell/busy)
+    _resume_attention: Optional[str] = field(default=None, repr=False)
     task_lifecycle: Optional[str] = None  # exact Codex task_started/task_complete/turn_aborted
     # F-47 (v30) — owned exec evidence, additive. `exec_child` = what this session's
     # long-lived tool call is doing ({'pid','comm','kind','etime_s','leaf_etime_s',

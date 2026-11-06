@@ -216,3 +216,10 @@ instead exchanges in the background after a successful write and after a read th
 finds the last receive older than ten minutes (`tools/memory/README.md`). Worker
 sessions keep spec-read observations and liveness heartbeats but skip automatic
 memory context.
+
+### Native resume recovery
+
+The shared session hook records native resume starts and retains interrupted
+work through the existing ordinary notice courier. Claude, Codex and OpenCode
+use the same completion/user-wait exclusions and one-send semantics described
+in [session-tidy](../capabilities/session-tidy.md#interrupted-resume).

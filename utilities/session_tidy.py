@@ -1242,10 +1242,10 @@ def matching_tidy_claim(seat: Seat, harness: str, sid: str, prompt: str, sequenc
                default=None)
 
 
-def real_prompt_frontier(seat: Seat, harness: str, sid: str) -> Optional[dict]:
+def real_prompt_frontier(seat: Seat, harness: str, sid: str, *, raw: Optional[bytes] = None) -> Optional[dict]:
     """Latest actual user prompt for this exact session, independent of ledger throttling."""
     seat = session_seat(seat, harness, sid)
-    rows = [row for row in _read_ledger_lines(seat)
+    rows = [row for row in _read_ledger_lines(seat, raw=raw)
             if row.get("event") == "real-prompt" and row.get("harness") == harness and row.get("sid") == sid]
     return max(rows, key=lambda row: int(row.get("sequence", 0) or 0), default=None)
 
@@ -1361,7 +1361,7 @@ def _summarize_sessions(rows) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     for item in rows:
         if item.get("event") in {"handover", "succession", "steward-release", "tidy-claim",
-                                  "real-prompt", "native-address"}:
+                                  "real-prompt", "native-address", "resume-notice"}:
             # Relations, revocation and prompt provenance are not session activity.
             continue
         key = (str(item.get("harness") or ""), str(item["sid"]))
@@ -1404,7 +1404,7 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
             outgoing.setdefault((edge_harness, source), set()).add(target)
     for row in rows:
         name, session = str(row.get("harness") or ""), str(row.get("sid") or "")
-        if not name or not session or row.get("event") == "native-address":
+        if not name or not session or row.get("event") in {"native-address", "resume-notice"}:
             continue
         key = (name, session)
         edge = None if graph is not None else tidy_lineage_edge(row)
@@ -2045,7 +2045,7 @@ def session_start_context(harness: str, sid: str, pane: str, *, endpoint=None) -
 def record_event(seat: Seat, harness: str, sid: str, event: str, *, source: str = "",
                  transcript: str = "", cwd: str = "", now: Optional[float] = None,
                  bump_epoch: bool = False, compact_identity: str = "",
-                 resume_argv=None, launch_cwd: str = "",
+                 resume_argv=None, launch_cwd: str = "", launch_process=None,
                  compact_context: Optional[dict] = None,
                  card_generation: Optional[int] = None) -> dict:
     """Append one ledger line (caller holds the seat lock). Returns the session row."""
@@ -2063,6 +2063,10 @@ def record_event(seat: Seat, harness: str, sid: str, event: str, *, source: str 
         entry["source"] = source
     if event == "start" and source in {"startup", "resume", "select", "clear", "compact", "fork"}:
         entry["session_seq"] = max(1, int(now * 1_000_000))
+        entry["prompt_seq"] = read_prompt_seq(seat)
+        if (isinstance(launch_process, dict) and type(launch_process.get("pid")) is int
+                and launch_process["pid"] > 1 and str(launch_process.get("start", "")).isdigit()):
+            entry["launch_process"] = {"pid": launch_process["pid"], "start": str(launch_process["start"])}
     if event == "start" and isinstance(resume_argv, list):
         try:
             tools = str(Path(__file__).resolve().parents[1] / "tools")
@@ -2150,8 +2154,9 @@ def _fold_ledger(seat: Seat) -> None:
     claims: dict[str, dict] = {}
     real_frontiers: dict[tuple[str, str], dict] = {}
     native_addresses: dict[tuple[str, str], dict] = {}
+    resume_notices: dict[tuple[str, str], dict] = {}
     activity = [l for l in lines if l.get("event") not in {
-        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address"}]
+        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address", "resume-notice"}]
     for item in lines:
         if item.get("event") == "tidy-claim" and item.get("claim_id"):
             claims[str(item["claim_id"])] = item
@@ -2162,6 +2167,8 @@ def _fold_ledger(seat: Seat) -> None:
                 real_frontiers[key] = item
         elif item.get("event") == "native-address":
             native_addresses[(str(item.get("harness") or ""), str(item.get("sid") or ""))] = item
+        elif item.get("event") == "resume-notice":
+            resume_notices[(str(item.get("harness") or ""), str(item.get("sid") or ""))] = item
     claim_rows = sorted(claims.values(), key=lambda row: float(row.get("ts", 0) or 0))[-TIDY_CLAIM_KEEP_ROWS:]
     provenance = claim_rows + list(real_frontiers.values())
     recent = activity[-LEDGER_KEEP_RAW:]
@@ -2190,7 +2197,7 @@ def _fold_ledger(seat: Seat) -> None:
                 and latest_at >= float(row.get("latest_start_at", 0) or 0)):
             row.update(latest_start_source=latest_source, latest_start_at=latest_at,
                        start_seq=item.get("session_seq", item.get("start_seq")))
-            for field in ("resume_argv", "launch_cwd"):
+            for field in ("resume_argv", "launch_cwd", "launch_process", "prompt_seq"):
                 row.pop(field, None)
                 if field in item:
                     row[field] = item[field]
@@ -2199,7 +2206,7 @@ def _fold_ledger(seat: Seat) -> None:
                 row[field] = item[field]
     body = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n"
                     for r in list(folded.values()) + relations + provenance
-                    + list(native_addresses.values()) + recent)
+                    + list(native_addresses.values()) + list(resume_notices.values()) + recent)
     # Retained edges are bounded above; a fold that drops one changes reachability.
     dropped_edges = any(index not in keep_relation_indices for index, _row in handovers)
     try:
@@ -3388,7 +3395,12 @@ def run_hook(*args, **kwargs) -> str:
     taking it under the hook's would deadlock."""
     closed: list = []
     try:
-        return _run_hook(*args, _closed=closed, **kwargs)
+        result = _run_hook(*args, _closed=closed, **kwargs)
+        if len(args) >= 3 and args[1] == "start" and kwargs.get("source") == "resume":
+            with contextlib.suppress(Exception):
+                import session_resume
+                session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))
+        return result
     finally:
         if closed:
             with contextlib.suppress(BaseException):
@@ -3598,7 +3610,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 launch = None
         row = record_event(seat, harness, sid, event, source=source, transcript=transcript,
                            cwd=cwd, now=now, bump_epoch=compacting,
-                           resume_argv=(launch or {}).get("argv"),
+                           resume_argv=(launch or {}).get("argv"), launch_process=launch,
                            launch_cwd=(launch or {}).get("cwd") or "")
         sessions[(harness, sid)] = row
         if event == "compact":
