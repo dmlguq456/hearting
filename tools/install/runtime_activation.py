@@ -1014,6 +1014,8 @@ def _linked_entries(
         entries.append(_opencode_v2_plugin_entry(
             tui_v2, tui_entry, home / "plugins/hearting-tui-identity/tui.ts",
             marker=_OPENCODE_V2_TUI_IMPORT))
+        shell_tui = source_root / "adapters/opencode/tui/hearting-session-shell.js"
+        entries.append(_entry(shell_tui, home / "plugins/hearting-session-shell/tui.js", "hook_config", kind="copy"))
         herdr_tui = source_root / "adapters/opencode/tui/herdr-tui-session.js"
         entries.append(_entry(herdr_tui, home / "herdr-tui-session.js", "hook_config", kind="copy"))
         herdr_tui_v2 = source_root / "adapters/opencode/tui/herdr-opencode/tui.js"
