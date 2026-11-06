@@ -82,13 +82,13 @@ Python 3.11 이상과 그 인터프리터용 PyYAML(`python3 -m pip install --us
 `hearting runtime doctor`가 알려 줍니다. PyYAML이 없으면 계획 단계로 시작하는 일은
 계획 전에 멈추고, 한 번에 끝나는 direct 수정은 그대로 돕니다.
 
-## herdr, Cairn, NAS, GPU 없이 쓸 수 있나요?
+## herdr, NAS, GPU, 외부 산출물 도구 없이 쓸 수 있나요?
 
 네, 모두 선택 기능입니다. herdr가 없으면 peer 창, pane 제목, peer 전달, 자동
 `/clear`, 질문 알림은 tmux 안에서 일할 때 tmux로 합니다(데스크톱 세션은 질문
 알림을 `notify-send`로도 받습니다). 둘 다 없으면 이 기능들은 꺼지고 관련 hook은
-조용히 끝나며, `hearting runtime doctor`가 그렇다고 알려 줍니다. Cairn은
-준비되어 있지 않으면 사용할 수 없다고 알립니다. `compute-hosts`는 호스트를 지정하기
+조용히 끝나며, `hearting runtime doctor`가 그렇다고 알려 줍니다. 완성된 산출물을
+외부 도구로 보내는 단계는 연결한 도구가 없으면 사용할 수 없다고 알립니다. `compute-hosts`는 호스트를 지정하기
 전까지 주석 처리된 템플릿이고, 호스트 없이 연산을 요청하면 분명한 오류가 납니다.
 `~/.config/hearting/memory-sync.json`으로 교환을 설정하지 않으면 메모리는 로컬에만
 남습니다.

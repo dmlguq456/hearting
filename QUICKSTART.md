@@ -12,7 +12,8 @@ path to seeing it work.
   `python3-yaml`). The installer checks the Python version.
 - At least one agent CLI, installed and signed in: Claude Code, Codex, or
   OpenCode. Claude Code alone is enough.
-- You do not need herdr, Cairn, a NAS, remote memory exchange, or a GPU.
+- You do not need herdr, an outside artifact tool, a NAS, remote memory
+  exchange, or a GPU.
 
 Tested so far: CI checks the installation for Claude Code, Codex, and OpenCode
 on Ubuntu, and the measured runs below used Linux. macOS has not been checked end

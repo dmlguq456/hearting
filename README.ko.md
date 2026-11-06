@@ -428,8 +428,9 @@ hearting model set claude context-window 800000
   데스크톱 세션은 질문 알림을 `notify-send`로도 받습니다. 둘 다 없으면 이 기능들은
   꺼지고 관련 hook은 조용히 끝나며, `hearting runtime doctor`가 무엇이 꺼졌는지
   알려 줍니다.
-- **Cairn** — 완성된 산출물을 읽는 선택 도구. 설정하지 않으면 스스로 사용 불가라고
-  알리며, 일반 작업에는 영향이 없습니다.
+- **외부 산출물 도구** — 원하면 완성된 산출물을 따로 연결한 도구(문서 열람기나
+  노트 앱 등)로 보낼 수 있습니다. 연결한 도구가 없으면 그 단계만 사용할 수 없다고
+  알리고, 일반 작업에는 영향이 없습니다.
 - **연산 호스트와 GPU** — `compute-hosts`는
   `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`을 읽고, 이 파일은
   주석 달린 예시로 만들어집니다. 호스트를 채우기 전에는 `template`로 표시되고,

@@ -442,8 +442,10 @@ None of these is needed for the basic workflow.
   question notifications through `notify-send`. Without either, these are off,
   the related hooks exit quietly, and `hearting runtime doctor` says what is
   off.
-- **Cairn** — an optional reader for finished artifacts. When it is not set up
-  it reports itself unavailable; ordinary work is unaffected.
+- **Outside artifact tool** — optionally, Hearting can send finished artifacts
+  to a separate tool you connect, such as a document reader or notes app. With
+  none connected, that step reports itself unavailable; ordinary work is
+  unaffected.
 - **Compute hosts and GPUs** — `compute-hosts` reads
   `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`, seeded as a
   commented template. Until you fill in a host it reports `template`, and a

@@ -91,14 +91,14 @@ older than 3.11. It does not install PyYAML; `hearting runtime doctor` says
 when it is missing. Without it, work that starts with the planning step stops
 before planning, while a one-step direct change still runs.
 
-## Can I use it without herdr, Cairn, a NAS, or GPUs?
+## Can I use it without herdr, a NAS, GPUs, or an outside artifact tool?
 
 Yes; these are optional. Without herdr, peer windows, pane titles, peer
 delivery, automatic `/clear`, and question notifications use tmux when you
 work inside tmux (a desktop session also gets question notifications through
 `notify-send`); without either they are off, the related hooks exit quietly,
-and `hearting runtime doctor` says so. Cairn
-reports itself unavailable when it is not set up. `compute-hosts` stays a
+and `hearting runtime doctor` says so. Sending finished artifacts to an
+outside tool reports itself unavailable when none is connected. `compute-hosts` stays a
 commented template until you name a host, and a compute request without a host
 fails with a clear error. Memory stays local unless you configure an exchange
 in `~/.config/hearting/memory-sync.json`.
