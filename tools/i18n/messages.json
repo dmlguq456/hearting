@@ -530,6 +530,10 @@
    "en": "No artifact matches {query}.",
    "ko": "\"{query}\"에 해당하는 산출물이 없습니다."
   },
+  "open.viewer": {
+   "en": "Viewer: {url}",
+   "ko": "뷰어: {url}"
+  },
   "reports.empty": {
    "en": "No user-facing document yet.",
    "ko": "아직 사용자용 문서가 없습니다."
@@ -1421,6 +1425,34 @@
   "tidy.undo.takedown_failed": {
    "en": "could not take {record} out of use: {error}",
    "ko": "{record} 내리기 실패: {error}"
+  },
+  "viewer.busy": {
+   "en": "Port 8765 is already in use by another service or root.",
+   "ko": "8765 포트를 다른 서비스나 산출물 루트가 사용 중입니다."
+  },
+  "viewer.empty": {
+   "en": "No visible files.",
+   "ko": "표시할 파일이 없습니다."
+  },
+  "viewer.next": {
+   "en": "Next",
+   "ko": "다음"
+  },
+  "viewer.previous": {
+   "en": "Previous",
+   "ko": "이전"
+  },
+  "viewer.raw": {
+   "en": "View raw",
+   "ko": "원문 보기"
+  },
+  "viewer.start": {
+   "en": "Artifact viewer: {url}",
+   "ko": "산출물 뷰어: {url}"
+  },
+  "viewer.too_large": {
+   "en": "This document is too large to render.",
+   "ko": "문서가 너무 커서 표시할 수 없습니다."
   },
   "wait.no_question": {
    "en": "waiting for the user's answer",

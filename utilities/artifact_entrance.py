@@ -107,6 +107,7 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.rewrite": ("Hearting rewrites this file. Editing it is overwritten; "
                              "deleting it comes back at the next publish."),
         "entrance.empty": "No user-facing document yet.",
+        "open.viewer": "Viewer: {url}",
         "reports.empty": "No user-facing document yet.",
         "reports.foreign": "Kept an existing {name}: it carries no Hearting entrance marker.",
         "reports.entrance": "Entrance: {path}",
@@ -961,7 +962,7 @@ def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
         print(f"   {row['doc_path']}")
 
 
-def _open_externally(path: Path) -> None:
+def _open_externally(path: Path | str) -> None:
     if not sys.stdout.isatty():
         return
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
@@ -1004,6 +1005,7 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
     if not args:
         target = root / "index.html"
         print(str(target))
+        _show_viewer(root, target, t)
         return 0
     selector = " ".join(args)
     chosen: Optional[Dict[str, Any]] = None
@@ -1024,9 +1026,20 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
         chosen = matches[0]
     target = root / chosen["doc_path"]
     print(str(target))
-    _open_externally(target)
+    url = _show_viewer(root, target, t)
+    _open_externally(url or target)
     return 0
 
+
+def _show_viewer(root: Path, target: Path, t) -> Optional[str]:
+    try:
+        from artifact_viewer import viewer_url
+        url = viewer_url(root, target)
+        if url:
+            print(t("open.viewer", url=url))
+        return url
+    except Exception:
+        return None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

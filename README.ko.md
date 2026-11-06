@@ -305,6 +305,7 @@ campaign은 현황 페이지 하나(cycle의 `artifacts/` 안 `STATUS.md`)를 �
 상대 링크로 모아 보여 주며, 하팅이 발행할 때마다 다시 씁니다. `hearting reports`가
 같은 목록을 터미널에 보여 주고, `hearting open <번호 또는 검색어>`가 결과 하나를
 엽니다.
+선택 사항: `hearting view`로 로컬 뷰어를 열고 Ctrl-C로 끕니다. 실행 중에는 `hearting open`이 URL도 보여 줍니다.
 
 진행 중인 요청을 따라가려면:
 

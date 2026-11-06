@@ -313,6 +313,7 @@ The root's `README.md` (open `index.html` in a browser) collects the most recent
 results and campaigns with relative links, and Hearting rewrites it at every
 publish. `hearting reports` prints the same list, and `hearting open <number or
 words>` opens one result.
+Optional: run `hearting view` for a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs.
 
 To follow a request while it runs:
 

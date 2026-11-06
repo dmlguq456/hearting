@@ -222,6 +222,22 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
   `<root>/README.md`" line above its artifact line. Only the first user-facing cycle
   qualifies, so a root whose entrance was made by hand from the CLI stays quiet.
 
+### Optional local artifact viewer
+
+`hearting view` serves the existing entrance and artifact files read-only on
+`127.0.0.1:8765` in the foreground; Ctrl-C stops it. It uses only the Python
+standard library and never generates or updates the entrance. Directory browsing
+is available when the entrance is absent. HTTP access excludes `_internal`,
+`.runtime` and `_scratch` at every depth and rejects symbolic links and special
+files. Host and path validation and descriptor-relative no-follow reads protect
+the boundary. These HTTP exclusions do not change artifact classification.
+
+While a viewer for the same root is running, `hearting open` additionally shows
+its local URL. The original path remains available and all entrance operations
+continue without the optional viewer. Entrance files retain relative links. HTML
+is served unchanged in a sandbox; absolute filesystem links inside existing HTML
+are not rewritten. Markdown is rendered at its original URL with a raw view.
+
 ## Internal files (no reader duty)
 
 - `.runtime/artifact-producer/v1/artifact-meta-state.json` (`artifact-meta-state/v1`):

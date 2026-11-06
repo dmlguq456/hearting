@@ -624,6 +624,28 @@ class EntranceIntegrationTests(EntranceFixture):
                 self.assertEqual(render.call_count, 1, field)
             with mock.patch.object(E, 'scan', return_value=snapshot): E.refresh(self.root)
 
+    def test_open_live_missing_and_wrong_root(self):
+        import artifact_viewer as V
+        import threading
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        server = V.ViewerServer(self.root, 0)
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            real = V.viewer_url
+            with mock.patch.object(V, 'viewer_url', side_effect=lambda root, target: real(root, target, server.server_address[1])):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(E, '_open_externally') as opener:
+                    self.assertEqual(E._command_open(self.root, ['1']), 0)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[0].endswith('report.md'))
+                self.assertIn('http://127.0.0.1:', lines[1])
+                self.assertTrue(opener.call_args.args[0].startswith('http://'))
+                self.assertIsNone(real(self.base, self.root/'index.html', server.server_address[1]))
+            with mock.patch.dict(sys.modules, {'artifact_viewer': None}), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(E._command_open(self.root, []), 0)
+                self.assertEqual(out.getvalue().strip(), str(self.root/'index.html'))
+        finally:
+            server.shutdown(); thread.join(); server.server_close()
 
 
 class EntrancePerformanceTests(EntranceFixture):

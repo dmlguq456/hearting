@@ -72,6 +72,14 @@ fi
 # launcher in every runtime (`bootstrap.py` links `hearting` and `harness` to
 # this one script). No adapter-specific copy exists.
 case "${1:-}" in
+  view)
+    if [ ! -f "$AGENT_HOME/utilities/artifact_viewer.py" ]; then
+      echo "harness: the optional artifact viewer is missing" >&2
+      exit 2
+    fi
+    shift
+    exec "$PY" "$AGENT_HOME/utilities/artifact_viewer.py" "$@"
+    ;;
   reports|open)
     if [ ! -f "$AGENT_HOME/utilities/artifact_entrance.py" ]; then
       echo "harness: the artifact entrance is missing ($AGENT_HOME/utilities/artifact_entrance.py)" >&2

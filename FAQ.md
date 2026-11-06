@@ -75,6 +75,7 @@ It stores plans, evidence, results, and handoffs shared by every runtime and
 every git worktree of the project. An older `.claude_reports/` folder is still
 read as a legacy alias. Do not delete these folders to unblock a task. Open its
 `README.md`, or run `hearting reports`, to see the latest results.
+Optional: `hearting view` starts a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs.
 
 ## hearting or fleet is not found
 

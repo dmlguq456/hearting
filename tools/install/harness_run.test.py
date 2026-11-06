@@ -90,5 +90,19 @@ class HarnessEntranceTest(unittest.TestCase):
         self.assertTrue((artifact_root / "README.md").is_file())
 
 
+class HarnessViewerTest(HarnessEntranceTest):
+    def test_optional_viewer_delegation_and_missing(self):
+        viewer = self.home / 'utilities/artifact_viewer.py'
+        for runtime in ('claude', 'codex', 'opencode'):
+            viewer.write_text("import sys\nprint('viewer', *sys.argv[1:])\n")
+            done = launch('view', 'unexpected', env={'AGENT_HOME': str(self.home), 'TEST_RUNTIME': runtime})
+            self.assertEqual(done.returncode, 0)
+            self.assertEqual(done.stdout.strip(), 'viewer unexpected')
+        viewer.unlink()  # destructive-ok: own fixture in TemporaryDirectory
+        result = launch('view', env={'AGENT_HOME': str(self.home)})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('optional artifact viewer is missing', result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
