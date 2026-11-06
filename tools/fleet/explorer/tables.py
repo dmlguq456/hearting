@@ -272,8 +272,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 now_end = x + use - AGE_W - GAP
                 now_text = _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
                                  max(0, now_end - now_start))
-                now_key = "head" if session.get("state") in ("working", "blocked") else "title_dim"
-                grid.put(now_start, y, now_text, now_key,
+                # Input is muted grey; unfolded NOW keeps its existing white.
+                grid.put(now_start, y, now_text, "dim",
                          limit=now_end)
             y += 1
             gpu_count = sum(1 for host in (vm.compute or ()) for gpu in host[5]

@@ -2933,8 +2933,16 @@ def last_human_prompt_seq(seat: Seat) -> int:
 # Turns the runtime itself starts: a finished background task (Claude ``<task-notification>``,
 # Codex ``<subagent_notification>``), a message from another session of the same user
 # (Claude ``<agent-message>`` with its fixed framing) and runtime ``<system-reminder>`` text.
+# OpenCode v2 inserts command/description raw, including quotes and angle brackets.
+# Its native opener ends with a quote, greater-than sign and newline.
+# A later opener boundary cannot recover a missing close. Keep the first
+# boundary instead of rescanning the remaining body for every delimiter.
 _RUNTIME_BLOCK = re.compile(
-    r"<(task-notification|subagent_notification|agent-message|system-reminder)\b[^>]*>.*?</\1>", re.S)
+    r'<(task-notification|subagent_notification|agent-message|system-reminder'
+    r'|(?P<opencode>subagent(?= sessionID="[^"\r\n]+" state="(?:completed|error|cancelled)" description=")'
+    r'|shell(?= id="[^"\r\n]+" state="(?:completed|error|cancelled)" command=")))'
+    r'''(?(opencode)(?>\b.*?">\r?\n)|\b(?:[^>"']|"[^"]*"|'[^']*')*>)'''
+    r'(?P<body>.*?)</\1>', re.S)
 _PEER_FRAMING = (
     re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
     # The fixed one-line paragraph, up to its fixed last sentence and no further.
@@ -2948,6 +2956,9 @@ NON_HUMAN_SOURCES = frozenset({"notification", "peer", "runtime", "claim"})
 PROMPT_LINE_CHARS = 384
 RECEIVED_INPUTS_LIMIT = 8
 _PROMPT_DISPLAY_UNREAD = object()
+_PROMPT_PASTE_BLOCK = re.compile(
+    r'<pasted_content id="(?P<id>[^"\r\n]+)">\n?(?P<body>.*?)\n?'
+    r'</pasted_content(?: id="(?P=id)")?>', re.DOTALL)
 
 
 def prompt_first_line(text: str) -> str:
@@ -2956,11 +2967,42 @@ def prompt_first_line(text: str) -> str:
     value = text if isinstance(text, str) else ""
     # Display uses the whole-paste grammar accepted by peer-message's reader.
     # Keep runtime_prompt_text (claim/source authority) unchanged.
-    wrapped = re.fullmatch(
-        r'<pasted_content id="(?P<id>[^"\r\n]+)">\n?(?P<body>.*?)\n?'
-        r'</pasted_content(?: id="(?P=id)")?>', value.strip(), re.DOTALL)
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
     if wrapped:
         value = wrapped.group("body")
+    # Use the existing source grammar: human framing or quoted examples stay
+    # intact. This only selects display text, never prompt/claim authority.
+    for _ in range(4):
+        if not runtime_turn_source(value):
+            break
+        bodies = []
+        for block in _RUNTIME_BLOCK.finditer(value):
+            kind = block.group(1)
+            body = block.group("body").strip()
+            if block.group("opencode") and re.search(r'">\r?\n.*?">\r?\n', block.group(0), re.S):
+                # A raw field and output can contain the same delimiter.
+                # Without a unique boundary the displayed first line is unknown.
+                body = "?"
+            if kind == "task-notification":
+                summary = re.search(r"<summary>(.*?)</summary>", body, re.S)
+                if summary:
+                    body = summary.group(1)
+                else:
+                    # A summary-free notification can still contain plain text.
+                    body = re.sub(r"<(task-id|tool-use-id|output-file|status)>.*?</\1>",
+                                  "", body, flags=re.S)
+            elif kind == "subagent_notification":
+                try:
+                    notice = json.loads(body)
+                except (ValueError, RecursionError):
+                    notice = None
+                status = notice.get("status") if isinstance(notice, dict) else None
+                if isinstance(status, dict):
+                    body = next((status[key] for key in ("completed", "errored")
+                                 if isinstance(status.get(key), str)), body)
+            if body.strip():
+                bodies.append(body)
+        value = "\n".join(bodies)
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
@@ -3071,6 +3113,11 @@ def runtime_turn_source(prompt_text: str) -> str:
     if not isinstance(prompt_text, str):
         return ""
     prompt_text = runtime_prompt_text(prompt_text)
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(prompt_text.strip())
+    if wrapped:
+        prompt_text = wrapped.group("body")
+    if "</" not in prompt_text:
+        return ""  # No complete block exists; avoid retrying every opener.
     kinds = [match.group(1) for match in _RUNTIME_BLOCK.finditer(prompt_text)]
     if not kinds:
         return ""
@@ -3079,7 +3126,7 @@ def runtime_turn_source(prompt_text: str) -> str:
         rest = framing.sub("", rest)
     if rest.strip():
         return ""
-    if any(kind in ("task-notification", "subagent_notification") for kind in kinds):
+    if any(kind in ("task-notification", "subagent_notification", "subagent", "shell") for kind in kinds):
         return "notification"
     return "peer" if "agent-message" in kinds else "runtime"
 

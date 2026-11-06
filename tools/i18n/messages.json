@@ -339,24 +339,24 @@
    "ko": "{count}초 전"
   },
   "fleet.input.label": {
-   "en": "INPUT",
-   "ko": "내 입력"
+   "en": "LAST INPUT",
+   "ko": "LAST INPUT"
   },
   "fleet.input.none": {
-   "en": "› me: none",
-   "ko": "› 나 없음"
+   "en": "› ·",
+   "ko": "› ·"
   },
   "fleet.input.received": {
    "en": "RECEIVED",
-   "ko": "받은 메시지"
+   "ko": "RECEIVED"
   },
   "fleet.input.unknown": {
-   "en": "› me: unknown",
-   "ko": "› 나 미확인"
+   "en": "› ?",
+   "ko": "› ?"
   },
   "fleet.input.value": {
-   "en": "› me {age}: {text}",
-   "ko": "› 나 {age}: {text}"
+   "en": "› {age} · {text}",
+   "ko": "› {age} · {text}"
   },
   "fleet.install.after_dialog": {
    "en": "after the open dialog or input finishes",
