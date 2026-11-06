@@ -140,7 +140,7 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and received peer/runtime messages. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and the first lines of received peer/runtime messages, without notification wrappers. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |

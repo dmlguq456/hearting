@@ -57,6 +57,118 @@ class PromptDisplayTests(unittest.TestCase):
                 self.assertEqual([row["source"] for row in result["received"]],
                                  ["notification", "peer", "runtime"])
 
+    RUNTIME_NOTICES = (
+        ("claude", "<task-notification>\n실제 알림 본문\n</task-notification>", "실제 알림 본문"),
+        ("claude", '<task-notification>\n<task-id>background-1</task-id>\n'
+         '<tool-use-id>call-1</tool-use-id>\n<output-file>/private/task.output</output-file>\n'
+         '<status>completed</status>\n<summary>Background shell command finished\n'
+         'private second line</summary>\n</task-notification>',
+         "Background shell command finished"),
+        ("codex", '<subagent_notification>\n{"agent_id":"child-1",'
+         '"status":{"completed":"검토를 마쳤습니다.\\nprivate second line"}}\n'
+         '</subagent_notification>', "검토를 마쳤습니다."),
+        ("codex", '<subagent_notification>{"agent_id":"child-2",'
+         '"status":{"errored":"Worker stopped safely"}}</subagent_notification>',
+         "Worker stopped safely"),
+        ("opencode", '<subagent sessionID="child-1" state="completed" description="Review">\n'
+         'Review complete\nprivate second line\n</subagent>', "Review complete"),
+        ("opencode", '<shell id="shell-1" state="completed" command="printf done > result">\n'
+         'Command output first line\nprivate second line\n</shell>', "Command output first line"),
+        ("opencode", "<system-reminder>\nBackground command finished\n"
+         "private second line\n</system-reminder>", "Background command finished"),
+    )
+
+    def test_runtime_envelopes_show_the_body_instead_of_metadata(self):
+        for harness, text, expected in self.RUNTIME_NOTICES:
+            with self.subTest(harness=harness, expected=expected):
+                self.assertEqual(st.prompt_first_line(text), expected)
+                pasted = '<pasted_content id="n">\n' + text + '\n</pasted_content>'
+                self.assertEqual(st.prompt_first_line(pasted), expected)
+
+    def test_runtime_arrivals_preserve_the_human_and_reach_the_expanded_view(self):
+        from tools.fleet.explorer import live
+        from tools.fleet.model import Session
+        from tools.fleet.refresh import LiveSnapshot
+        for index, (harness, text, expected) in enumerate(self.RUNTIME_NOTICES):
+            with self.subTest(harness=harness, expected=expected):
+                sid = "runtime-notice-" + str(index)
+                original = self.prompt("Original human input", harness, sid)["human"]
+                seat = self.seat(harness, sid)
+                frontier = st.real_prompt_frontier(seat, harness, sid)
+                for wrapped in (text, '<pasted_content id="n">\n' + text + '\n</pasted_content id="n">',
+                                '<pasted_content id="n">\n' + text + '\n</pasted_content>'):
+                    display = self.prompt(wrapped, harness, sid, now=1010)
+                    self.assertEqual(display["human"], original)
+                    self.assertEqual(st.real_prompt_frontier(seat, harness, sid), frontier)
+                    self.assertIn(display["received"][-1]["source"], ("notification", "runtime"))
+                    self.assertEqual(display["received"][-1]["text"], expected)
+                row = Session(harness=harness, session_id=sid, session_tag="rt" + str(index),
+                              pid=123, cwd=str(self.cwd), liveness="idle",
+                              _prompt_display=display)
+                vm = live.build_view_model(LiveSnapshot(sessions=[row]), now=1060)
+                self.assertIn("Original human input", vm.sessions[0]["last_input"])
+                self.assertNotIn(expected, vm.sessions[0]["last_input"])
+                self.assertIn(expected, str(vm.sessions[0]["received_inputs"]))
+
+    def test_compound_runtime_blocks_skip_metadata_and_keep_literal_body_markup(self):
+        self.assertEqual(st.prompt_first_line(
+            '<task-notification><task-id>only-metadata</task-id><status>completed</status>'
+            '</task-notification>\n<system-reminder>Actual notice</system-reminder>'),
+            "Actual notice")
+        self.assertEqual(st.prompt_first_line(
+            '<system-reminder><task-notification><summary>Nested notice</summary>'
+            '</task-notification></system-reminder>'), "Nested notice")
+        self.assertEqual(st.prompt_first_line(
+            '<task-notification>\n<task-id>one</task-id>\nPlain body\n</task-notification>'),
+            "Plain body")
+        self.assertEqual(st.prompt_first_line(
+            '<system-reminder>Use <filename> as written</system-reminder>'),
+            "Use <filename> as written")
+        self.assertEqual(st.prompt_first_line(
+            '<subagent_notification>{bad JSON}</subagent_notification>'), "{bad JSON}")
+        self.assertEqual(st.prompt_first_line(
+            '<subagent_notification>{"agent_id":"a","status":{"completed":null}}'
+            '</subagent_notification>'), '{"agent_id":"a","status":{"completed":null}}')
+
+    def test_runtime_examples_with_human_framing_still_show_the_human(self):
+        for harness, text, expected in self.RUNTIME_NOTICES:
+            for framed in ("Please inspect this example\n" + text, text + "\nMy actual instruction"):
+                with self.subTest(harness=harness, starts=framed[:30]):
+                    self.assertEqual(st.runtime_turn_source(framed), "")
+                    display = self.prompt(framed, harness, "framed-" + harness)
+                    self.assertEqual(display["human"]["source"], "real")
+                    self.assertEqual(display["human"]["text"], framed.splitlines()[0])
+                    self.assertEqual(display["received"], [])
+        unknown = "<unknown-tag>\nDo not guess this wrapper\n</unknown-tag>"
+        self.assertEqual(st.prompt_first_line(unknown), "<unknown-tag>")
+        malformed = "<task-notification>\nunfinished"
+        self.assertEqual(st.prompt_first_line(malformed), "<task-notification>")
+
+    def test_opencode_results_require_the_native_envelope_and_keep_user_shell_framing(self):
+        for text in ('<subagent>Human XML example</subagent>',
+                     '<shell>Human XML example</shell>',
+                     '<subagent sessionID="child" state="unrecognized" description="Review">'
+                     'Not a known completion</subagent>',
+                     'The following shell command was executed by the user:\n'
+                     '<shell id="shell-1" state="completed" command="pwd">/project</shell>'):
+            with self.subTest(text=text[:50]):
+                result = self.prompt(text, "opencode", "human-shell")
+                self.assertEqual(st.runtime_turn_source(text), "")
+                self.assertEqual(result["human"]["source"], "real")
+                self.assertEqual(result["received"], [])
+
+    def test_runtime_body_is_redacted_and_bounded_after_unwrapping(self):
+        for text in ('<task-notification><summary>password=PRIVATE_SECRET\nsecond</summary></task-notification>',
+                     '<subagent_notification>{"agent_id":"child",'
+                     '"status":{"completed":"password=PRIVATE_SECRET"}}</subagent_notification>'):
+            with self.subTest(text=text[:30]):
+                self.assertNotIn("PRIVATE_SECRET", st.prompt_first_line(text))
+                self.assertNotIn("second", st.prompt_first_line(text))
+        text = '<system-reminder>\n' + "가" * 1000 + '\n</system-reminder>'
+        line = st.prompt_first_line(text)
+        self.assertEqual(len(line), st.PROMPT_LINE_CHARS)
+        self.assertTrue(line.endswith("…"))
+
     def test_verified_peer_and_self_request_do_not_replace_the_human(self):
         self.prompt("original", now=1000)
         origin = {"kind": "peer", "harness": "claude", "session_id": "prompt-session",
