@@ -133,6 +133,7 @@ def prepare_assets(*, dry_run=False):
         (stage / "ready.json").write_text(json.dumps({"key": target.name}))
         if target.exists():
             raise ValueError("incomplete session shell asset directory preserved")
+        # destructive-ok: reason=publish the prepared runtime assets; boundary=one private staging directory and its absent content-keyed cache destination
         os.rename(stage, target)
     return target
 
