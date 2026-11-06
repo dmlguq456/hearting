@@ -213,14 +213,15 @@ class CompletionTest(turns.EndToEndTest):
     test_one_closed_unassigned_record_that_later_turns_append_to = None
     test_a_route_left_open_by_a_failed_close_is_closed_at_the_next_turn = None
 
-    def direct(self, slug):
+    def direct(self, slug, *, capability=None, mode=None):
         work = self.tmp / slug
         work.mkdir()
         (work / "task.md").write_text("Known scoped direct request " + slug)
         (work / "evidence.md").write_text("Checks: synthetic command exit 0; scope verified\n")
         (work / "summary.md").write_text("Completed " + slug)
         env = turns.T._child_env(self.env, "claude", turns.SID)
-        result = turns.T._run(turns.T._route_command("compose", "--shape", "direct", "--cwd", str(self.repo),
+        selection = (["--capability", capability, "--capability-mode", mode] if capability else [])
+        result = turns.T._run(turns.T._route_command("compose", "--shape", "direct", *selection, "--cwd", str(self.repo),
             "--artifact-root", str(self.root), "--campaign-key", "journal-example", "--slug", slug,
             "--parent-harness", "claude", "--prompt-file", str(work / "task.md"),
             "--spec-read", "fixture", "--drift-verdict", "within-spec", "--artifact-guard", "fixture"), env, 60)
@@ -334,6 +335,47 @@ class CompletionTest(turns.EndToEndTest):
         route = json.loads(Path(entry["route_file"]).read_text())
         self.assertEqual(route["campaign_key"], "journal-example")
         self.assertEqual(J.target(self.root, entry["route_id"])["campaign_id"], binding["campaign_id"])
+
+    def test_A11_existing_legacy_payload_gets_new_journal_without_activation_or_migration(self):
+        legacy = self.root / "research/existing.md"
+        legacy.parent.mkdir(parents=True); legacy.write_bytes(b"existing legacy evidence\n")
+        path, work, env, command = self.direct("legacy-compatible-journal")
+        result = turns.T._run(command, env, 60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(turns.T._last_json(result.stdout)["schema"], "finish_receipt_v2")
+        self.assertEqual(legacy.read_bytes(), b"existing legacy evidence\n")
+        self.assertFalse(P.cutover_path(self.root).exists())
+        self.assertEqual(list((self.root / "campaigns").glob("*/*/.cycle.json")), [])
+
+    def test_A09_document_producer_keeps_cycle_snapshots_after_journal_start_preparation(self):
+        path, work, env, command = self.direct("project-document", capability="autopilot-draft", mode="doc")
+        route = json.loads(Path(path).read_text())
+        jobs = self.tmp / "jobs.log"
+        jobs.write_text("")
+        with mock.patch.dict(os.environ, self.env):
+            P.prepare_route_artifact_env(Path(path), start=True, jobs=jobs, require_cycle=False)
+        self.assertIsNotNone(J.target(self.root, route["route_id"]))
+        with mock.patch.dict(os.environ, self.env):
+            opened = P.begin(self.root, route_file=Path(path), capability="autopilot-draft",
+                             intensity="direct", require_cycle=True)
+        target = self.repo / "report.md"
+        target.write_text("first project draft\n")
+        snapshot = turns.T._run([str(HERE / "artifact-snapshot.py"), "prepare",
+            "--artifact-root", str(self.root), "--route", path, "--route-id", route["route_id"],
+            "--node", "inline", "--target", str(target)], env, 60)
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        receipt = turns.T._last_json(snapshot.stdout)
+        self.assertEqual(Path(receipt["path"]).read_text(), "first project draft\n")
+        self.assertTrue(Path(receipt["path"]).is_relative_to(Path(opened["cycle_dir"])))
+        target.write_text("integrated project report\n")
+        command[command.index("--evidence") + 1] = str(target)
+        finished = turns.T._run(command, env, 60)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        done = turns.T._last_json(finished.stdout)
+        self.assertEqual(done["schema"], "finish_receipt_v1")
+        self.assertEqual(done["cycle_id"], opened["cycle_id"])
+        self.assertEqual(target.read_text(), "integrated project report\n")
+        self.assertEqual(list((self.root / "campaigns").glob("*/journals/*.md")), [])
 
     def test_A15_direct_dirt_is_not_reported_as_the_starting_commit_version(self):
         path, work, env, command = self.direct("uncommitted-result")

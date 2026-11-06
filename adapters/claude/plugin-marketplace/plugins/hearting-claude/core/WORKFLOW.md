@@ -1090,7 +1090,11 @@ index, or flushing history.
 A session finishes its explicitly composed `direct` inline route to record real evidence.
 The tiny-fix path has no agent-facing finish command; its recorder saves the evidence.
 Supply a readable, nonempty regular file anywhere, or an http(s) URL, and the
-final summary. A new small direct route records evidence in its campaign daily journal, binding an immutable entry revision with a versioned receipt. Existing cycle-bound routes keep their cycle proof. Planned/shared-spec work retains cycles. For a cycle-bound route, finish records that evidence inside the route's own cycle (a
+final summary. A new small direct route records evidence in its campaign daily
+journal (CONVENTIONS “Small-work daily journal”), binding an immutable entry
+revision with a versioned receipt. Existing cycle-bound routes keep their cycle
+proof. Planned/shared-spec work retains cycles. For a cycle-bound route, finish
+records that evidence inside the route's own cycle (a
 file byte for byte, a URL as a one-line record) under a runtime name, and that
 copy is what the terminal proof, manifest and producer binding name. If the
 route has no cycle yet because its start was interrupted, finish prepares it
@@ -1623,4 +1627,3 @@ the already approved review/follow-through this turn, or run its existing
 registered continuation. Receipt, queue consumption and ACK are not execution.
 Report when work actually started, including any delay before a user reminder.
 
-Small direct/automatic storage follows CONVENTIONS “Small-work daily journal”: results remain in place, process evidence stays in the daily file, and saved records do not certify unobserved test results. Explicit consolidation/restore uses the common journal tool and preserves historical receipt identities.

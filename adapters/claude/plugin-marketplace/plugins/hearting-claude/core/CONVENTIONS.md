@@ -950,7 +950,7 @@ Lab full-run entry requires a current hash-bound smoke attestation. Reports with
 A new direct inline route and automatic turn records use the campaign's
 `journals/YYYY-MM-DD.md`, without a cycle or a finish-evidence directory.
 Existing cycle bindings retain their v1 lifecycle. Planned work, shared-spec
-transactions and dispatched work retain cycles. A journal entry is an artifact
+transactions, parent-cycle/workflow-group handoffs, scoped refine previews and dispatched work retain cycles. Journals can coexist with legacy payloads without activating or migrating their cycle cutover. A journal entry is an artifact
 with opaque artifact/revision IDs; its immutable revision digest, rather than
 the mutable day file, binds completion. Entries retain original session, turn,
 time and offset, observed changes, checks and actual results. Saved does not
@@ -959,7 +959,7 @@ mean tests passed. Long evidence and corrections stay in that same file.
 Results stay at their project locations. Plans, reviews, preimages and history
 stay in `.agent_reports`. Each entry records result locations and versions
 (Git commit, verified copy/hash, or explicitly unknown). Common readers expose
-`result_targets` beside `record_target`; they never move or open a result on read.
+`result_targets` beside `record_target`, with availability and recorded versions.
 A correction records actor, source, time, reason and prior revision; manual file
 drift is not a confirmed user correction. Historical completion remains bound
 to its original revision while readers distinguish current evidence state.
