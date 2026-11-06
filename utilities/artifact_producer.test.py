@@ -136,8 +136,39 @@ class ProducerTestBase(unittest.TestCase):
                     and key != "AGENT_DISPATCH_JOBS":
                 os.environ.pop(key, None)
         self.addCleanup(self._restore)
+        # Keep handles until their finite workers exit, rather than dropping a
+        # live Popen and letting fixture deletion race its writes.
+        import artifact_entrance
+        self._entrance_children = []
+        bind = artifact_entrance.end_with_test
+        def track(child):
+            self._entrance_children.append(child)
+            return bind(child)
+        patcher = mock.patch.object(artifact_entrance, "end_with_test", side_effect=track)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def wait_for_entrance(self):
+        # The inherited lock is held before finalize returns. Acquire it before
+        # deleting this fixture, including when finalize ran in another process.
+        lock = self.root / ".runtime/artifact-entrance-refresh.lock"
+        if not lock.exists():
+            return
+        deadline = time.monotonic() + 15
+        with lock.open("a+b") as handle:
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("entrance worker did not settle; keep fixture diagnostics")
+                    time.sleep(0.01)
 
     def _restore(self):
+        self.wait_for_entrance()
+        for child in self._entrance_children:
+            child.wait(timeout=5)
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -1277,6 +1308,7 @@ class FinalizeTest(ProducerTestBase):
         self.close(route, route_file)
         sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(sealed["status"], "sealed", sealed)
+        self.wait_for_entrance()
         entrance = self.root / "README.md"
         self.assertTrue(entrance.is_file())
         import artifact_entrance
@@ -1303,12 +1335,54 @@ class FinalizeTest(ProducerTestBase):
         self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
         self.close(route, route_file)
         stderr = io.StringIO()
-        with mock.patch("artifact_entrance.refresh", side_effect=RuntimeError("boom")), \
+        with mock.patch("artifact_entrance.request_refresh", side_effect=RuntimeError("boom")), \
                 contextlib.redirect_stderr(stderr):
             sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
         self.assertEqual(sealed["status"], "sealed", sealed)
         self.assertIn("artifact_entrance skipped error=RuntimeError", stderr.getvalue())
         self.assertFalse((self.root / "README.md").exists())
+
+    def test_finalize_returns_before_a_slow_entrance_refresh(self):
+        import artifact_entrance
+        self.activate()
+        route, route_file, result = self.begin()
+        self.write_output(result, "final_report.md", b"# Result\n\nBody.\n")
+        self.close(route, route_file)
+        popen = subprocess.Popen
+        children = []
+        def spawn(args, **kwargs):
+            args = list(args)
+            args[2] = "import time; time.sleep(2); " + args[2]
+            child = popen(args, **kwargs)
+            children.append(child)
+            return child
+        def settle():
+            for child in children:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        self.addCleanup(settle)
+        # Also delay an accidental in-process call, so the original synchronous
+        # finalize cannot pass this regression by avoiding the child entirely.
+        original = artifact_entrance.refresh
+        def slow(*args, **kwargs):
+            time.sleep(2)
+            return original(*args, **kwargs)
+        with mock.patch.object(artifact_entrance.subprocess, "Popen", side_effect=spawn), \
+                mock.patch.object(artifact_entrance, "refresh", side_effect=slow):
+            start = time.monotonic()
+            sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+            elapsed = time.monotonic() - start
+        self.assertEqual(sealed["status"], "sealed")
+        print(f"slow-entrance caller_seconds={elapsed:.6f} worker_delay_seconds=2", flush=True)
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(len(children), 1)
+        self.assertIsNone(children[0].poll())
+        self.assertFalse((self.root / "README.md").exists())
+        self.assertEqual(children[0].wait(timeout=10), 0)
+        self.assertTrue((self.root / "README.md").is_file())
 
     def test_shared_path_corpus_runs_producer_final_collection(self):
         rows = [row for row in _CORPUS.SHARED_PATH_CORPUS if row[0] in {"payload", "locator"}]
@@ -8387,6 +8461,11 @@ class SealBackgroundJobTest(ProducerTestBase):
 
     def setUp(self):
         super().setUp()
+        # These assertions count the workflow review launcher, not the
+        # independent entrance worker's use of the shared subprocess module.
+        entrance = mock.patch("artifact_entrance.request_refresh")
+        entrance.start()
+        self.addCleanup(entrance.stop)
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)

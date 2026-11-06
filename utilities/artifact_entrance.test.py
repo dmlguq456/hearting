@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Root read-entrance tests: determinism, ownership, read-only, rows, links, CLI."""
+import contextlib
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -8,8 +10,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -297,6 +302,213 @@ class RowRuleTests(EntranceFixture):
                    sealed_on="2026-01-04T00:00:00Z", cycle_id=tie_a)
         rows = self.rows()
         self.assertEqual([row["cycle_id"] for row in rows], [late, tie_a, tie_b])
+
+
+class CyclePathTests(EntranceFixture):
+    def _bad_locator(self, attack):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        cycle = self.root / "campaigns/2026-01-02_one/2026-01-02_alpha"
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "final_report.md").write_text("# OUTSIDE ROOT\n\nPrivate.\n")
+        document = cycle / "artifacts/final_report.md"
+        if attack == "traversal":
+            locator = "../../../../outside/final_report.md"
+        elif attack == "parent-link":
+            (cycle / "artifacts/jump").symlink_to(outside, target_is_directory=True)
+            locator = "artifacts/jump/final_report.md"
+        elif attack == "leaf-link":
+            document.unlink()
+            document.symlink_to(outside / "final_report.md")
+            locator = "artifacts/final_report.md"
+        else:
+            locator = str(outside / "final_report.md")
+        manifest = cycle / "manifest.json"
+        value = json.loads(manifest.read_text())
+        value["artifact_revisions"][0]["locator"]["path"] = locator
+        manifest.write_text(json.dumps(value))
+
+    def _assert_rejected(self, attack):
+        self._bad_locator(attack)
+        before = _tree(self.base)
+        with mock.patch.object(E, "_read_head", wraps=E._read_head) as read:
+            self.assertEqual(self.rows(), [])
+        read.assert_not_called()
+        self.assertEqual(_tree(self.base), before)
+        self.refresh()
+        for name in E.ENTRANCE_NAMES:
+            self.assertNotIn("OUTSIDE ROOT", self.entrance(name))
+            self.assertNotIn("outside/final_report.md", self.entrance(name))
+        with mock.patch.object(E, "_open_externally") as opener, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(E._command_open(self.root, ["1"]), 1)
+        opener.assert_not_called()
+
+    def test_traversal_locator_never_reads_links_or_opens_outside(self):
+        self._assert_rejected("traversal")
+
+    def test_parent_symlink_never_reads_links_or_opens_outside(self):
+        self._assert_rejected("parent-link")
+
+    def test_leaf_symlink_never_reads_links_or_opens_outside(self):
+        self._assert_rejected("leaf-link")
+
+    def test_absolute_locator_never_reads_links_or_opens_outside(self):
+        self._assert_rejected("absolute")
+
+    def test_open_rechecks_a_symlink_swapped_after_scan(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        rows = self.rows()
+        document = self.root / rows[0]["doc_path"]
+        outside = self.base / "private.md"
+        outside.write_text("# Private\n")
+        def swapped(_root):
+            document.unlink()
+            document.symlink_to(outside)
+            return rows
+        with mock.patch.object(E, "recent_rows", side_effect=swapped), \
+                mock.patch.object(E, "_open_externally") as opener, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(E._command_open(self.root, ["1"]), 1)
+        opener.assert_not_called()
+
+    def test_cycle_and_source_rows_share_containment_and_keep_normal_rows(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        (self.root / "note.md").write_text("# Note\n")
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "note.md").write_text("# Private\n")
+        (self.root / "jump").symlink_to(outside)
+        source = lambda _root: [dict(kind="note", date="2026-01-03", title="Note", doc_path=doc)
+                               for doc in ("../outside/note.md", "jump/note.md", "note.md")]
+        with mock.patch.object(E, "ROW_SOURCES", (source,)):
+            rows = self.rows()
+            self.assertEqual([row["kind"] for row in rows], ["note", "cycle"])
+            self.assertEqual(set(rows[0]), set(rows[1]))
+            self.refresh()
+            before = {name: (self.root / name).read_bytes() for name in E.ENTRANCE_NAMES}
+            self.assertEqual(self.refresh()["status"], "unchanged")
+            self.assertEqual(before, {name: (self.root / name).read_bytes() for name in E.ENTRANCE_NAMES})
+            with mock.patch.object(E, "_open_externally") as opener, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(E._command_open(self.root, ["2"]), 0)
+            opener.assert_called_once_with(self.root / rows[1]["doc_path"])
+
+    def test_placed_output_is_revalidated(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        outside = self.base / "final_report.md"
+        outside.write_text("# Private\n")
+        with mock.patch.object(E, "resolve_placed_output", return_value=outside):
+            self.assertEqual(self.rows(), [])
+        moved = self.root / "moved.md"
+        moved.write_text("# Moved\n")
+        with mock.patch.object(E, "resolve_placed_output", return_value=moved):
+            self.assertEqual(self.rows()[0]["title"], "Moved")
+
+
+class RefreshWorkerTests(EntranceFixture):
+    def test_slow_refresh_coalesces_concurrent_requests_and_exits(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        release = self.base / "release"
+        started = self.base / "started"
+        calls = self.base / "calls"
+        children = []
+        popen = subprocess.Popen
+        injected = ("import time\noriginal = e.refresh\n"
+                    "def slow(root, cycle_id=None):\n"
+                    f"    with open({str(calls)!r}, 'a') as log: log.write(str(cycle_id) + '\\n')\n"
+                    f"    Path({str(started)!r}).touch()\n"
+                    "    deadline = time.monotonic() + 10\n"
+                    f"    while not Path({str(release)!r}).exists():\n"
+                    "        if time.monotonic() > deadline: raise RuntimeError('fixture deadline')\n"
+                    "        time.sleep(0.01)\n"
+                    "    return original(root, cycle_id=cycle_id)\n"
+                    "e.refresh = slow\n")
+        def spawn(args, **kwargs):
+            args = list(args)
+            args[2] = args[2].replace("e._refresh_requested(", f"exec({injected!r}); e._refresh_requested(")
+            child = popen(args, **kwargs)
+            children.append(child)
+            return child
+        def settle():
+            release.touch()
+            for child in children:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        self.addCleanup(settle)
+        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+            start = time.monotonic()
+            E.request_refresh(self.root, cycle_id="first")
+            self.assertLess(time.monotonic() - start, 1.5)
+            deadline = time.monotonic() + 5
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(started.exists())
+            barrier = threading.Barrier(16)
+            errors = []
+            def request():
+                try:
+                    barrier.wait(timeout=5)
+                    E.request_refresh(self.root, cycle_id="follow-up")
+                except Exception as exc:
+                    errors.append(exc)
+            threads = [threading.Thread(target=request) for _ in range(16)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            self.assertFalse(errors)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(len(children), 1)
+            self.assertFalse((self.root / "README.md").exists())
+            release.touch()
+            self.assertEqual(children[0].wait(timeout=10), 0)
+        self.assertEqual(calls.read_text().splitlines(), ["first", "follow-up"])
+        self.assertTrue((self.root / "README.md").is_file())
+        self.assertFalse((self.root / ".runtime/artifact-entrance-pending.json").exists())
+        # A completed worker leaves no held lease or idle process.
+        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+            E.request_refresh(self.root, cycle_id="new-worker")
+            self.assertEqual(children[-1].wait(timeout=10), 0)
+        self.assertEqual(len(children), 2)
+
+    def test_refresh_failure_releases_worker_for_the_next_request(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        children = []
+        popen = subprocess.Popen
+        def spawn(args, **kwargs):
+            args = list(args)
+            if not children:
+                injected = "def broken(*args, **kwargs): raise RuntimeError('fixture refresh failure')\ne.refresh = broken\n"
+                args[2] = args[2].replace("e._refresh_requested(", f"exec({injected!r}); e._refresh_requested(")
+            child = popen(args, **kwargs)
+            children.append(child)
+            return child
+        def settle():
+            for child in children:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        self.addCleanup(settle)
+        with mock.patch.object(E.subprocess, "Popen", side_effect=spawn):
+            E.request_refresh(self.root)
+            self.assertEqual(children[-1].wait(timeout=10), 0)
+            self.assertFalse((self.root / "README.md").exists())
+            E.request_refresh(self.root)
+            self.assertEqual(children[-1].wait(timeout=10), 0)
+        self.assertEqual(len(children), 2)
+        self.assertTrue((self.root / "README.md").is_file())
 
 
 class RowSourceTests(EntranceFixture):

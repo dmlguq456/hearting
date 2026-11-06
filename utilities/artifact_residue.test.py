@@ -218,6 +218,9 @@ class ApplyTests(ResidueFixture):
         self.seed("spec/prd.md")
         self.seed("plans/.gitkeep", "")
         (self.root / "empty-shape").mkdir()
+        # Snapshot rollback authority only after the seed seal's derived
+        # entrance has settled; that worker is deliberately asynchronous.
+        self.wait_for_entrance()
         return sealed, d1
 
     def test_apply_moves_everything_movable_and_keeps_bytes(self):
