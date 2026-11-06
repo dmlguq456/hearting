@@ -3583,9 +3583,11 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                             and current.get("harness") == harness and current.get("sid") == sid):
                         current["request_excerpt"] = work_intent.prompt_excerpt(prompt_text)
                         atomic_write_json(boundary, current)
-                with contextlib.suppress(BaseException):
-                    import human_wait_state
-                    human_wait_state.close_signal(seat.key, sequence=sequence)
+                if isinstance(prompt_text, str) and prompt_text.strip():
+                    with contextlib.suppress(BaseException):
+                        import human_wait_state
+                        human_wait_state.close_signal(seat.key, sequence=sequence,
+                                                      harness=harness, session_id=sid)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)

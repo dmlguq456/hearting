@@ -326,13 +326,17 @@ def open_signal(harness: str, session_id: str, seat_key: str, text: str, *,
     return True
 
 
-def close_signal(seat_key: str, *, sequence: int | None = None) -> bool:
+def close_signal(seat_key: str, *, sequence: int | None = None,
+                 harness: str | None = None, session_id: str | None = None) -> bool:
     """Close only this exact seat, and never let an older input clear a newer wait."""
     path = _path(seat_key)
     try:
         current = _read(path)
         if current is None:
             return True
+        if ((harness is not None and current.get("harness") != harness)
+                or (session_id is not None and current.get("session_id") != session_id)):
+            return False
         if sequence is not None and int(current.get("sequence", 0)) > int(sequence):
             return False
         path.unlink()

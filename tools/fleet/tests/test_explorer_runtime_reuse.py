@@ -409,6 +409,29 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
             render._draw_explorer(SimpleNamespace(getmaxyx=lambda: (45, 140)), {}, frame=frame)
             self.assertEqual(render._EXPLORER_STATE.drag, ())
 
+    def test_painted_child_route_change_preserves_pending_session_gesture(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from tools.fleet import render
+        from tools.fleet.explorer.state import NavState
+        ref = "claude:full-sid"
+        old = ExplorerViewModel(source_records={"_detail_tags": {ref: "tag"},
+            "_detail_bindings": {ref: ("claude", "full-sid", "17", "start", (), "", "")}},
+            ordering={"repo_by_tag": {"tag": "repo"}, "tag_keys": {"tag": "sid:claude:full-sid"}})
+        drag = ("tree", "session", "tag", "tag", 2, 15, None, False, False,
+                render._explorer_gesture_binding(old, "tag"))
+        current = replace(old, source_records={"_detail_tags": {ref: "tag"},
+            "_detail_bindings": {ref: ("claude", "full-sid", "17", "start",
+                                       (("route", "attempt"),), "route", "attempt")}})
+        frame = ExplorerRuntime().loading_frame(140, 45)
+        with patch.object(render, "_EXPLORER_MODEL", current), \
+                patch.object(render, "_EXPLORER_STATE", NavState(drag=drag)), \
+                patch.object(render, "_EXPLORER_SIZE", None), \
+                patch.object(render, "_EXPLORER_ORDER", []), \
+                patch.object(render, "_draw_explorer_frame"):
+            render._draw_explorer(SimpleNamespace(getmaxyx=lambda: (45, 140)), {}, frame=frame)
+            self.assertEqual(render._EXPLORER_STATE.drag, drag)
+
 
 if __name__ == "__main__":
     unittest.main()

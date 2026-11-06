@@ -90,7 +90,12 @@ def _explorer_gesture_binding(model, tag):
     ordering = getattr(model, "ordering", None) or {}
     records = getattr(model, "source_records", None) or {}
     ref = next((ref for ref, value in records.get("_detail_tags", {}).items() if value == tag), None)
-    return ordering.get("tag_keys", {}).get(tag), records.get("_detail_bindings", {}).get(ref)
+    binding = records.get("_detail_bindings", {}).get(ref)
+    # Detail bindings also include child routes and attempts. Those change while
+    # the same process is being painted and must not cancel a pending click.
+    # Keep the native identity and process incarnation in the gesture fence.
+    incarnation = tuple(binding[:4]) if isinstance(binding, (tuple, list)) and len(binding) >= 4 else None
+    return ordering.get("tag_keys", {}).get(tag), incarnation
 
 
 def _explorer_key_name(ch, searching=False):

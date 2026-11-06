@@ -2001,6 +2001,13 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
         demand.start()
         self.addCleanup(demand.stop)
 
+        # These cases exercise the isolated S2/S3 workflow, not the host's
+        # unrelated live Codex processes or its PID namespace visibility.
+        rollouts = mock.patch.object(observation, "_codex_rollout_waits",
+                                     return_value={"complete": True, "pending": {}})
+        rollouts.start()
+        self.addCleanup(rollouts.stop)
+
         project_root = str(Path(__file__).resolve().parents[1])
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
