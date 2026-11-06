@@ -52,6 +52,7 @@ import artifact_meta  # noqa: E402
 import artifact_producer_store as store  # noqa: E402
 from artifact_producer_manifest import artifact_audience, resolve_placed_output  # noqa: E402
 from detached_lifetime import bind as end_with_test  # noqa: E402
+from artifact_checkpoint_trigger import in_test_process  # noqa: E402
 
 try:  # tools/i18n is a sibling of utilities/ in every checkout and release
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "i18n"))
@@ -808,6 +809,11 @@ def request_refresh(root: Path, cycle_id: Optional[str] = None) -> None:
     """
     root = Path(root).absolute()
     if not root.is_dir():
+        return
+    if in_test_process():
+        # A test process never spawns a detached child (the checkpoint trigger's
+        # rule); refreshing in place keeps its fixtures free of stray writers.
+        refresh(root, cycle_id=cycle_id)
         return
     runtime = root / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
