@@ -1,10 +1,12 @@
 """Repo detail reuses collected facts without turning memory updates into completed work."""
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from tools.fleet.explorer.frame import draw, measure_pane_max
+from tools.fleet.explorer import live
 from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
 
@@ -61,6 +63,57 @@ class RepoPageTest(unittest.TestCase):
         for value in ("foreign-route-sentinel", "foreign-work-sentinel", "foreign-journal-sentinel",
                       "memory-save-sentinel", "failed-result-sentinel", "backlog-item"):
             self.assertNotIn(value, text)
+
+    def recent_model(self, times, result=None):
+        entities = []
+        for index, at in enumerate(times):
+            completed = {"name": f"completed-route-{index}", "result": "success", "at": at,
+                         "route_id": f"rt-recent-{index}"}
+            record = {"cwd": "/synthetic/" + self.ident, "result": completed,
+                      "prompt": completed["name"]}
+            view = {"cwd": record["cwd"], "nodes": [{"id": "execute", "state": "done"}]}
+            projection = SimpleNamespace(route_id=completed["route_id"],
+                                         _route_view={"record": record, "view": view}, result=completed)
+            entities.append(SimpleNamespace(route_id=completed["route_id"], work_projection=projection))
+        routes, _ = live._route_records(SimpleNamespace(route_entities=entities), [], {},
+                                       lambda _cwd: self.ident, 1800000000)
+        # Collection order is first-seen, and age is execution duration, not completion time.
+        self.assertEqual([r["title"] for r in routes], [e.work_projection.result["name"] for e in entities])
+        for index, route in enumerate(routes):
+            route["age"] = f"{1000 - index}m"
+        repos = tuple(dict(row, status={}) for row in live._repo_records(
+            [], routes, {self.ident: result} if result else {}, 1800000000))
+        return replace(self.vm, repos=repos, routes=tuple(routes), sessions=(), system={})
+
+    def test_latest_completion_is_selected_before_the_three_result_limit(self):
+        times = [1799999600, 1799999700, 1799999800, 1799999900]
+        model = self.recent_model(times)
+        text = pane(draw(model, self.state, 168, 90, beat=1))
+        recent = text.split("── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+        self.assertIn("completed-route-3", recent)  # Independent review's original counterexample.
+        names = [f"completed-route-{i}" for i in (3, 2, 1)]
+        self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
+        self.assertNotIn("completed-route-0", recent)
+        self.assertEqual([route["result_at"] for route in model.routes], times)
+
+    def test_recorded_result_competes_by_completion_time_with_routes_and_unknowns(self):
+        model = self.recent_model([None, 50, 60, 70],
+                                  {"name": "recorded-result", "result": "success", "at": 90})
+        self.assertEqual(model.repos[0].get("done_at"), 90)
+        recent = pane(draw(model, self.state, 168, 90, beat=1)).split(
+            "── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+        names = ["recorded-result", "completed-route-3", "completed-route-2"]
+        self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
+        self.assertNotIn("completed-route-0", recent)
+        self.assertNotIn("completed-route-1", recent)
+
+    def test_unknown_completion_times_remain_unknown_and_equal_times_keep_order(self):
+        model = self.recent_model([True, float("nan"), "not-a-time", None])
+        self.assertTrue(all(route["result_at"] is None for route in model.routes))
+        recent = pane(draw(model, self.state, 168, 90, beat=1)).split(
+            "── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+        names = [f"completed-route-{i}" for i in (0, 1, 2)]
+        self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
 
     def test_existing_fold_and_sidebar_actions_and_scroll_reach_sessions(self):
         frame = draw(self.vm, self.state, 140, 30, beat=1)

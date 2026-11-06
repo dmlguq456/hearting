@@ -8,6 +8,7 @@ and an unknown value is ``None``. Additive route and question fields and the rep
 record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
 import unittest
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -155,6 +156,11 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
+            if (path, key) in (("routes[]", "result_at"), ("repos[]", "done_at")):
+                value = live[key]
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                    problems.append(f"{path}.{key}: expected optional finite completion timestamp")
+                continue
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
                                               "worker_context_index", "owner_waits"):
                 if not route_extension(key, live[key]):
@@ -268,6 +274,15 @@ class SectionShapes(unittest.TestCase):
         conform([{"id": "demo", "done_result": {"status": "success"}}],
                 [self.fixture["repos"]], "repos", problems)
         self.assertTrue(any("done_result" in message for message in problems))
+
+    def test_completion_timestamp_extensions_reject_guessed_or_malformed_values(self):
+        for section, key in (("repos", "done_at"), ("routes", "result_at")):
+            for value in (None, 0, 123.5, True, "1m", {}, float("nan")):
+                with self.subTest(section=section, value=value):
+                    problems = []
+                    conform([{key: value}], [self.fixture[section]], section, problems)
+                    self.assertEqual(bool(problems), value is not None and
+                                     (type(value) not in (int, float) or not math.isfinite(value)))
 
     def test_answered_records_are_the_recorded_user_answers_and_have_the_fixture_shape(self):
         from tools.fleet.refresh import LiveSnapshot

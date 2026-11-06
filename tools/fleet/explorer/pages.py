@@ -1,6 +1,7 @@
 """Bounded repo, session, route, and selected-history detail projections."""
 
 from collections.abc import Mapping
+import math
 from ..config import ui_text
 from .grid import cell_width
 from .grid import clip_cells as clip
@@ -37,6 +38,11 @@ def _section(grid, x, right, y, title, detail=""):
     for xx in range(min(right, cursor + 1), right):
         grid.put(xx, y, "─", "line")
     return y + 1
+
+
+def _result_time(value):
+    """Unknown completion time follows known times; duration text supplies no timestamp."""
+    return value if type(value) in (int, float) and math.isfinite(value) else -math.inf
 
 
 def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
@@ -106,15 +112,21 @@ def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     y = _section(grid, x, right, y + 1, ui_text("fleet.repo.recent"))
     recent = []
     if repo.get("done") and repo.get("done_result") == "success":
-        recent.append((repo.get("age"), str(repo["done"])))
+        recent.append((repo.get("done_at"), repo.get("age"), str(repo["done"])))
     for route in routes:
         if route.get("state") == "done" and route.get("outcome") == "success" and route.get("title"):
-            if not any(text == str(route["title"]) for _age, text in recent):
-                recent.append((route.get("age"), str(route["title"])))
-    for age, text in recent[:3]:
+            recent.append((route.get("result_at"), route.get("age"), str(route["title"])))
+    recent.sort(key=lambda item: _result_time(item[0]), reverse=True)
+    shown = set()
+    for _at, age, text in recent:
+        if text in shown:
+            continue
+        shown.add(text)
         grid.put(x + 3, y, clip((str(age) + "  " if age else "") + "✓ " + text,
                                 max(0, right - x - 3)), "now_sub", limit=right)
         y += 1
+        if len(shown) == 3:
+            break
     if not recent:
         grid.put(x + 3, y, ui_text("fleet.repo.no_recent"), "dim", limit=right)
         y += 1
