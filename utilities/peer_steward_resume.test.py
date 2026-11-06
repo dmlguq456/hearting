@@ -25,8 +25,8 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
     _notice=fixture.RetainedRunNoticeCarrierTest._notice
     _run_notice_duty=fixture.RetainedRunNoticeCarrierTest._run_notice_duty
 
-    def notice(self,harness):
-        key=session_resume.PREFIX+fixture.json.dumps([harness,self.sid,1])
+    def notice(self,harness,*,sequence=1):
+        key=session_resume.PREFIX+fixture.json.dumps([harness,self.sid,sequence])
         record=self._notice(harness,key=key)
         store=fixture.peer_steward.peer_obligations.ObligationStore(self.tmp_root)
         duty=next(row for row in store.list(kinds={'run-notice'})
@@ -121,6 +121,85 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
                     _store,sends=self._run_notice_duty(harness,duty,input_observer=observed_input)
                 self.assertEqual(len(sends),1)
                 self.assertEqual(pending.read(self.tmp_root,self.sid,record['delivery_id'])['state'],'acked')
+
+    def test_new_activity_during_each_late_idle_guard_prevents_native_input(self):
+        import session_tidy as tidy
+        import time
+        for harness in ('claude','codex','opencode'):
+            for boundary in ((2,) if harness == 'codex' else (2,3,4)):
+                with self.subTest(harness=harness,boundary=boundary):
+                    seat=session_resume._seat(harness,self.sid)
+                    source={'session_seq':boundary,'prompt_seq':tidy.read_prompt_seq(seat),'ts':time.time()}
+                    calls=[]
+                    def guard(*args,**kwargs):
+                        calls.append(1)
+                        if len(calls)==boundary:
+                            with tidy.session_state_lock(seat):
+                                tidy.bump_prompt_seq(seat,harness,self.sid,time.time())
+                        return None,'synthetic UI has not caught up'
+                    with mock.patch.object(session_resume,'_resume',return_value=source), \
+                         mock.patch.object(session_resume,'native_state',return_value='interrupted-turn'), \
+                         mock.patch.object(session_resume,'_human_wait',return_value=False):
+                        _record,duty=self.notice(harness,sequence=boundary)
+                        _store,sends=self._run_notice_duty(harness,duty,idle_guard=guard)
+                    self.assertGreaterEqual(len(calls),boundary)
+                    self.assertEqual(sends,[])
+
+    def test_new_activity_at_the_real_codex_before_add_boundary_prevents_input(self):
+        import codex_queue_delivery
+        import codex_queue_dispatch
+        import session_tidy as tidy
+        import time
+        actual_queue=fixture.peer_steward.peer_message.deliver_pending_codex
+        for sequence,changed in enumerate((False,True),1):
+            with self.subTest(changed=changed):
+                seat=session_resume._seat('codex',self.sid)
+                source={'session_seq':sequence,'prompt_seq':tidy.read_prompt_seq(seat),'ts':time.time()}
+                added=[]; before_add=[]
+                def send(*args,**kwargs):
+                    if kwargs['allow_add']:
+                        before_add.append(kwargs['thread_id'])
+                        if changed:
+                            with tidy.session_state_lock(seat):
+                                tidy.bump_prompt_seq(seat,'codex',self.sid,time.time())
+                        kwargs['before_add']()
+                        added.append(kwargs['thread_id'])
+                    return {'status':'queued'}
+                with mock.patch.object(session_resume,'_resume',return_value=source), \
+                     mock.patch.object(session_resume,'native_state',return_value='interrupted-turn'), \
+                     mock.patch.object(session_resume,'_human_wait',return_value=False), \
+                     mock.patch.object(codex_queue_dispatch,'resolve_queue_socket',return_value=self.tmp_root/'unused.sock'), \
+                     mock.patch.object(codex_queue_delivery,'send_at_least_once',side_effect=send):
+                    _record,duty=self.notice('codex',sequence=sequence)
+                    store,_sends=self._run_notice_duty('codex',duty,native_queue_impl=actual_queue)
+                    self.assertEqual(before_add,[self.sid])
+                    if changed:
+                        import dispatch_pending_delivery as pending
+                        record=pending.read(self.tmp_root,self.sid,_record['delivery_id'])
+                        self.assertEqual(record['state'],'sent-ambiguous')
+                        self.assertTrue(session_resume.current(record))
+                        self.assertFalse(session_resume.current(record,for_submission=True))
+                        ref=store.get(duty['id'])['observation']['transfer_ref']
+                        actual_queue(ref)
+                self.assertEqual(added,[] if changed else [self.sid])
+
+    def test_input_during_a_slow_source_observation_is_rechecked_before_submission(self):
+        import session_tidy as tidy
+        import time
+        for harness in ('claude','codex','opencode'):
+            with self.subTest(harness=harness):
+                with mock.patch.object(session_resume,'current',return_value=True):
+                    record,_duty=self.notice(harness)
+                seat=session_resume._seat(harness,self.sid)
+                source={'session_seq':1,'prompt_seq':tidy.read_prompt_seq(seat),'ts':time.time()}
+                def native(*args,**kwargs):
+                    with tidy.session_state_lock(seat):
+                        tidy.bump_prompt_seq(seat,harness,self.sid,time.time())
+                    return 'interrupted-turn'
+                with mock.patch.object(session_resume,'_resume',return_value=source), \
+                     mock.patch.object(session_resume,'native_state',side_effect=native), \
+                     mock.patch.object(session_resume,'_human_wait',return_value=False):
+                    self.assertFalse(session_resume.current(record,for_submission=True))
 
 
 

@@ -124,6 +124,49 @@ class ResumeFactsTest(_ResumeFixture):
                 self.assertEqual(resume.native_state('opencode','ses_native','',resumed_at=1793936400),expected)
                 read.assert_called_once_with('ses_native',shell_after_seq=0)
 
+    def test_codex_answered_old_marked_question_does_not_hide_new_interrupted_turn(self):
+        import session_resume as resume
+        question='[답변 필요] Synthetic previous choice?'
+        for kind in ('event','final'):
+            with self.subTest(question_record=kind):
+                sid='codex-answered-question-'+kind
+                old=({'type':'event_msg','payload':{'type':'task_complete','last_agent_message':question}}
+                    if kind=='event' else {'type':'response_item','payload':{'type':'message',
+                        'role':'assistant','channel':'final','content':[{'type':'output_text','text':question}]}})
+                path=self.transcript(sid,[old,
+                    {'type':'response_item','payload':{'type':'message','role':'user',
+                        'content':[{'type':'input_text','text':'Synthetic answer and next work'}]}},
+                    {'type':'event_msg','payload':{'type':'task_started','turn_id':'new-turn'}}])
+                actual=resume.native_state('codex',sid,path,resumed_at=1793936400)
+                before=self.notices.call_count
+                st.run_hook('codex','start',sid,source='resume',transcript=path,
+                            cwd=str(self.cwd),render_context=False,now=1793936400)
+                self.assertEqual(actual,'interrupted-turn')
+                self.assertEqual(self.notices.call_count-before,1)
+
+    def test_codex_current_marked_question_remains_a_wait_across_completion_records(self):
+        import session_resume as resume
+        question='[답변 필요] Synthetic current choice?'
+        final={'type':'response_item','payload':{'type':'message','role':'assistant','channel':'final',
+            'content':[{'type':'output_text','text':question}]}}
+        ended={'type':'event_msg','payload':{'type':'task_complete'}}
+        empty_final={'type':'response_item','payload':{'type':'message','role':'assistant',
+                                                     'channel':'final','content':[]}}
+        cases=([final],[{'type':'event_msg','payload':{'type':'task_complete','last_agent_message':question}}],
+               [final,ended],[final,ended,empty_final],
+               [final,{'type':'event_msg','payload':{'type':'task_complete','last_agent_message':'  \n'}}],
+               [final,{'type':'event_msg','payload':{'type':'task_started'}},final,ended])
+        for index,rows in enumerate(cases):
+            with self.subTest(index=index):
+                sid='codex-current-question-'+str(index)
+                path=self.transcript(sid,rows)
+                self.assertEqual(resume.native_state('codex',sid,path,resumed_at=1793936400),'human-wait')
+                before=self.notices.call_count
+                with mock.patch('session_resume.open_work',return_value=True):
+                    st.run_hook('codex','start',sid,source='resume',transcript=path,
+                                cwd=str(self.cwd),render_context=False,now=1793936400)
+                self.assertEqual(self.notices.call_count,before)
+
     def test_repeated_resume_starts_coalesce_until_actual_work(self):
         import session_resume as resume
         rows=[{'type':'assistant','message':{'stop_reason':'tool_use','content':[]}}]

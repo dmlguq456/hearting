@@ -142,20 +142,31 @@ def _read_native_state(harness, sid, transcript, *, resumed_at):
             if row.get("type") == "event_msg":
                 if kind in {"task_started", "turn_started", "turn_aborted", "task_aborted"}:
                     state = "interrupted-turn"
+                elif kind == "user_message":
+                    state = "interrupted-turn"
                 elif kind in {"task_complete", "turn_completed"}:
-                    if human_wait_state.marked_question(payload.get("last_agent_message", "")):
-                        return "human-wait"
-                    state, last_end = "completed", index
+                    final = payload.get("last_agent_message")
+                    if isinstance(final, str):
+                        final = final.strip()
+                    if final:
+                        state = "human-wait" if human_wait_state.marked_question(final) else "completed"
+                    elif state != "human-wait":
+                        state = "completed"
+                    last_end = index
             elif row.get("type") == "response_item":
                 if kind in {"function_call", "custom_tool_call"} and str(payload.get("name", "")).split(".")[-1] == "request_user_input":
                     questions.add(payload.get("call_id"))
                 elif kind in {"function_call_output", "custom_tool_call_output"}:
                     questions.discard(payload.get("call_id"))
+                elif kind == "message" and payload.get("role") == "user":
+                    state = "interrupted-turn"
                 elif kind == "message" and payload.get("role") == "assistant" and payload.get("channel") == "final":
                     text = "\n".join(p.get("text", "") for p in payload.get("content", ()) if isinstance(p, dict))
-                    if human_wait_state.marked_question(text):
-                        return "human-wait"
-                    state, last_end = "completed", index
+                    if text.strip():
+                        state = "human-wait" if human_wait_state.marked_question(text) else "completed"
+                    elif state != "human-wait":
+                        state = "completed"
+                    last_end = index
             if (row.get("type") == "response_item" and payload.get("role") == "assistant"
                     and (_epoch(row.get("timestamp")) or 0) >= resumed_at):
                 return "activity-after-resume"
@@ -334,14 +345,21 @@ def open_work(harness, sid):
     return bool(pending and inbox.is_current(pending, root)
                 and any(item.get("attempts") for item in pending.get("candidates", ())))
 
-def observation(harness, sid, resume, *, registered_work=None):
+def _prompt_after_resume(harness, sid, resume):
+    """The same quick frontier read before and after slow native observation."""
     import session_tidy as tidy
     seat = _seat(harness, sid)
     frontier = tidy.prompt_state(seat)
-    if (isinstance(frontier, dict) and (frontier.get("harness"), frontier.get("sid")) == (harness, sid)
+    return bool(isinstance(frontier, dict) and (frontier.get("harness"), frontier.get("sid")) == (harness, sid)
             and ((isinstance(resume.get("prompt_seq"), int) and isinstance(frontier.get("seq"), int)
                   and frontier["seq"] > resume["prompt_seq"])
-                 or isinstance(frontier.get("at"), (int, float)) and frontier["at"] > resume.get("ts", 0))):
+                 or isinstance(frontier.get("at"), (int, float)) and frontier["at"] > resume.get("ts", 0)))
+
+
+def observation(harness, sid, resume, *, registered_work=None):
+    import session_tidy as tidy
+    seat = _seat(harness, sid)
+    if _prompt_after_resume(harness, sid, resume):
         return "activity-after-resume"
     _observed, raw, _rows = _ledger(harness, sid)
     real = tidy.real_prompt_frontier(seat, harness, sid, raw=raw)
@@ -414,8 +432,12 @@ def is_resume(record):
     return isinstance(key, str) and key.startswith(PREFIX)
 
 
-def current(record):
-    """False is positively obsolete; unknown evidence retains the existing lease."""
+def current(record, *, for_submission=False):
+    """False is obsolete; unknown evidence retains the existing lease.
+
+    The existing first-write predicate requests a fresh source even for a
+    prepared ambiguous notice; accepted-input receipts remain settleable.
+    """
     key = (record.get("receipt") or {}).get("key") or ""
     try:
         harness, sid, sequence = json.loads(key[len(PREFIX):])
@@ -429,7 +451,7 @@ def current(record):
         return False
     resume = _resume(harness, sid)
     # Keep the exact receipt for a submission that already crossed I/O.
-    if record.get("state") in {"sent-ambiguous", "acked"}:
+    if not for_submission and record.get("state") in {"sent-ambiguous", "acked"}:
         return True
     if not resume:
         _target, _raw, rows = _ledger(harness, sid)
@@ -451,7 +473,12 @@ def current(record):
         return False
     if state not in NEEDS_WAKE:
         raise ValueError("resume-observation-" + state)
-    return True
+    # Match idle tidy's final atomic-file recheck: native observation above
+    # can block, so it must not be the last word on a person's input frontier.
+    latest = _resume(harness, sid)
+    if latest is None or latest.get("session_seq", 0) < sequence:
+        raise ValueError("resume-start-generation-unavailable")
+    return latest.get("session_seq") == sequence and not _prompt_after_resume(harness, sid, latest)
 
 
 def status_for_session(harness, sid):

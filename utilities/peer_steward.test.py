@@ -7882,7 +7882,8 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
 
     def _run_notice_duty(self, harness, duty, *, fail_ack=False, forget_binding=False,
                          target_state="idle", target_sid=None,
-                         queue_accept_only=False, duties=None, idle_guard=None, input_observer=None):
+                         queue_accept_only=False, duties=None, idle_guard=None, input_observer=None,
+                         native_queue_impl=None):
         import dispatch_pending_delivery as pending_delivery
         target_sid = target_sid or self.sid
         target_ident = {**self.ident, "harness": harness, "session_id": target_sid}
@@ -7955,7 +7956,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                                   return_value=peer_steward._screen_lines(CLAUDE_SUGGESTION)), \
                 mock.patch.object(peer_steward, "_herdr_prompt", side_effect=native_receive), \
                 mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
-                                  side_effect=native_queue):
+                                  side_effect=native_queue_impl or native_queue):
             peer_steward._reconcile_obligations(
                 store, duties=peer_steward._runner_duties(store, duties or [duty]))
         return store, sends

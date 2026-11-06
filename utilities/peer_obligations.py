@@ -1819,10 +1819,21 @@ def _retained_submission_current(message, members):
                     lease_seconds=30)
             except (OSError, ValueError, RuntimeError):
                 return False
-    return all(claimed_send_current(root, storage, record, owner,
+    if not all(claimed_send_current(root, storage, record, owner,
         recipient.get("harness"), recipient.get("session_id"), jobs=jobs,
         claim_states=("claimed", "sent-ambiguous"))
-        for record, root, storage, owner, jobs in members)
+        for record, root, storage, owner, jobs in members):
+        return False
+    # Native queue before_add/before_steer and guarded PTY writes already use
+    # this boundary. Receipt settlement is separate from permission to start
+    # the first write of a still-pending resume transfer.
+    import session_resume
+    try:
+        return all(not session_resume.is_resume(record)
+                   or session_resume.current(record, for_submission=True)
+                   for record, _root, _storage, _owner, _jobs in members)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
 
 
 def session_notice_submission_current(message):

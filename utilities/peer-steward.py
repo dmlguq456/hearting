@@ -7013,6 +7013,15 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                 refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
                 if refusal:
                     return
+                # As for idle tidy, re-read input authority after the slow
+                # physical observation, not just before it. The courier also
+                # rechecks this at its existing first-write boundary.
+                try:
+                    if any(not session_resume.current(entry[4], for_submission=True)
+                           for entry in claimed if session_resume.is_resume(entry[4])):
+                        return
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                    return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer)
             submitted = code in {0, 3}
