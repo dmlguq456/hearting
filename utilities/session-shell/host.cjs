@@ -248,14 +248,7 @@ async function refreshReadiness() {
   empty=result.ok===true&&result.ready===true;
   if(empty&&state!=='idle'){state='idle';queueProjection();}
 }
-function userInput(data) {
-  if(!data.length)return;
-  if(currentDelivery){
-    epoch+=data.length;empty=false;inputOwner.hold(data);heldBytes+=data.length;
-    if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
-  }
-  if(relay){child.write(data);return;}
-  if(data.length===1&&data[0]===0x1d&&!paste&&!currentDelivery){expanded=!expanded;applyLayout();return;}
+function observeInput(data) {
   const previous=epoch;epoch+=data.length;empty=false;
   for(let offset=0;offset<data.length;offset++) {
     const c=String.fromCharCode(data[offset]);
@@ -264,6 +257,16 @@ function userInput(data) {
     else if(c==='\x1b')keyTail=c;
     else if(!paste&&(c==='\r'||c==='\n'))lastEnter=previous+offset+1;
   }
+}
+function userInput(data) {
+  if(!data.length)return;
+  if(currentDelivery){
+    inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
+    if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
+  }
+  if(relay){child.write(data);return;}
+  if(data.length===1&&data[0]===0x1d&&!paste){expanded=!expanded;applyLayout();return;}
+  observeInput(data);
   child.write(data);
 }
 function exact(req) { const me=identity();return Object.keys(me).every(k=>req[k]===me[k])&&live(); }

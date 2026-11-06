@@ -128,13 +128,14 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('form\r').toString('base64')});await waitFor(/Do you want to proceed/);
  }else if(cfg.scenario==='unpainted-draft'){
    await rpc(cfg.inlet,{batch:Buffer.from('unpainted draft').toString('base64')});
- }else if(cfg.scenario==='missing-callback'){
+ }else if(cfg.scenario==='missing-callback'||cfg.scenario==='missing-callback-enter'){
    const cp=require('node:child_process');
-   const body="import json,sys;sys.path.insert(0,"+JSON.stringify(cfg.utilities)+");import session_shell as s;s.registry_root();p=s._peer_message();text,ref=p.prepare_peer_message('PEER_NO_CALLBACK',{'harness':'codex','session_id':'synthetic-sender'},{'harness':'claude','session_id':sys.argv[1]},defer=True);print(json.dumps(s.deliver_pending(ref,'claude',sys.argv[1])))";
-   const sent=JSON.parse(cp.execFileSync(cfg.python,['-c',body,cfg.sid],{env:{...process.env},encoding:'utf8'}));
+   const body="import json,sys;sys.path.insert(0,"+JSON.stringify(cfg.utilities)+");import session_shell as s;s.registry_root();p=s._peer_message();text,ref=p.prepare_peer_message('PEER_NO_CALLBACK '+sys.argv[2],{'harness':'codex','session_id':'synthetic-sender'},{'harness':'claude','session_id':sys.argv[1]},defer=True);print(json.dumps(s.deliver_pending(ref,'claude',sys.argv[1])))";
+   const sent=JSON.parse(cp.execFileSync(cfg.python,['-c',body,cfg.sid,cfg.scenario],{env:{...process.env},encoding:'utf8'}));
    if(!sent.ok)throw Error('synthetic admission failed '+JSON.stringify(sent));
-   await rpc(cfg.inlet,{batch:Buffer.from('held human').toString('base64')});
-   await waitFor(/PEER_NO_CALLBACK/);
+   await rpc(cfg.inlet,{batch:Buffer.from(cfg.scenario==='missing-callback-enter'?'held human\r':'held human').toString('base64')});
+   if(cfg.scenario==='missing-callback-enter')await waitFor(/DONE_held human/);
+   else await waitFor(/PEER_NO_CALLBACK/);
  }
  const displayLag=[];
  // Registry publication precedes the first complete display observation.
@@ -271,6 +272,10 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_a_draft_waiting_for_native_paint_is_not_proved_empty_by_the_old_screen(self):
         result=self.run_loop('unpainted-draft')
         self.assertFalse(result['status']['empty'])
+
+    def test_a_held_enter_still_advances_the_existing_input_frontier(self):
+        result=self.run_loop('missing-callback-enter')
+        self.assertTrue(result['status']['empty'],result['status'])
 
     def test_missing_native_callback_cannot_leave_human_keyboard_bytes_held(self):
         result=self.run_loop('missing-callback')
