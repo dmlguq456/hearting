@@ -7,12 +7,14 @@ import os
 import pty
 import selectors
 import signal
+import socket
 import struct
 import subprocess
 import sys
 import termios
 import time
 import tty
+from input_owner import InputOwner
 
 RELAY_RESET=b'\x1b[0m\x1b[?25h\x1b[2J\x1b[H'
 RESET=b'\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l'
@@ -37,17 +39,24 @@ def resize(master,rows,cols):
 def run(harness,original,wrapped,node,host_path,environment,directory):
     """The display borrows the master; this owner relays only after it exits."""
     pipes=[]
+    control=display_control=None;held_fd=None
     try:
         saved=termios.tcgetattr(0);blocking={fd:os.get_blocking(fd) for fd in (0,1)}
         size=os.get_terminal_size(1)
         for _ in range(4):pipes.extend(os.pipe())
+        control,display_control=socket.socketpair()
+        held_fd=os.memfd_create('hearting-held-input',os.MFD_CLOEXEC)
         native,master=pty.fork()
     except OSError as exc:
         for fd in pipes:os.close(fd)
+        for channel in (control,display_control):
+            if channel is not None:channel.close()
+        if held_fd is not None:os.close(held_fd)
         raise BeforeStartError(str(exc)) from exc
     go_r,go_w,ready_r,ready_w,status_r,status_w,wake_r,wake_w=pipes
     owned=set(pipes)
     if native==0:
+        control.close();display_control.close();os.close(held_fd)
         for fd in pipes:
             if fd!=go_r:os.close(fd)
         try:
@@ -67,6 +76,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
     owner_start=birth(os.getpid())
     env=dict(environment,HEARTING_SHELL_START_FD=str(ready_w),HEARTING_SHELL_PTY_FD=str(master),
              HEARTING_SHELL_NATIVE_PID=str(native),HEARTING_SHELL_PTY_EXIT_FD=str(status_r),
+             HEARTING_SHELL_INPUT_FD=str(display_control.fileno()),HEARTING_SHELL_HELD_FD=str(held_fd),
              HEARTING_SHELL_BROKER_PID=str(os.getpid()),HEARTING_SHELL_BROKER_START=owner_start)
     previous={}
     os.set_blocking(wake_r,False);os.set_blocking(wake_w,False);os.set_blocking(ready_r,False)
@@ -77,6 +87,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
         previous[sig]=signal.signal(sig,signal.SIG_IGN if sig==signal.SIGINT else wake)
     host=None;host_fd=None;native_code=None;deadline=None;started=False;relay=False;ready=b''
     incoming=bytearray();outgoing=bytearray();input_eof=False;master_eof=False;term_sent=False
+    writer=InputOwner(control,held_fd,incoming)
     selector=selectors.DefaultSelector();selector.register(wake_r,selectors.EVENT_READ)
     selector.register(ready_r,selectors.EVENT_READ)
     def close(fd):
@@ -115,11 +126,14 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
         # The display must not reset the outer TTY when it dies.
         tty.setraw(0,when=termios.TCSANOW)
         try:
-            host=subprocess.Popen([node,str(host_path),harness,*wrapped],env=env,pass_fds=(master,ready_w,status_r))
+            os.set_blocking(master,False)
+            host=subprocess.Popen([node,str(host_path),harness,*wrapped],env=env,
+                                  pass_fds=(master,ready_w,status_r,display_control.fileno(),held_fd))
             host_start=birth(host.pid);host_fd=os.pidfd_open(host.pid)
         except OSError:plain()
-        finally:close(ready_w);close(status_r)
+        finally:close(ready_w);close(status_r);display_control.close()
         while True:
+            writer.advance(time.monotonic())
             if native_code is None:
                 pid,status=os.waitpid(native,os.WNOHANG)
                 if pid:
@@ -136,14 +150,28 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
                     terminate_display()
                     if host_done and not outgoing:return native_code
             if relay:
-                interest(0,selectors.EVENT_READ if not input_eof and len(incoming)<LIMIT else 0)
+                interest(0,selectors.EVENT_READ if not input_eof and writer.ref is None and len(incoming)<LIMIT else 0)
                 interest(1,selectors.EVENT_WRITE if outgoing else 0)
-                interest(master,(selectors.EVENT_READ if not master_eof and len(outgoing)<LIMIT else 0)
-                         |(selectors.EVENT_WRITE if incoming else 0))
+            interest(master,(selectors.EVENT_READ if relay and not master_eof and len(outgoing)<LIMIT else 0)
+                     |(selectors.EVENT_WRITE if incoming else 0))
+            interest(control.fileno(),(selectors.EVENT_READ|(selectors.EVENT_WRITE if writer.responses else 0))
+                     if writer.connected else 0)
             timeout=max(0,deadline-time.monotonic()) if deadline is not None and not term_sent else None
-            for key,events in selector.select(timeout):
+            if writer.deadline is not None:
+                due=max(0,writer.deadline-time.monotonic());timeout=due if timeout is None else min(timeout,due)
+            # Process a queued native selection/submission cancellation before
+            # writing an Enter that became writable in the same observation.
+            for key,events in sorted(selector.select(timeout),key=lambda row:row[0].fd!=control.fileno()):
                 fd=key.fd
-                if fd==wake_r:
+                if fd==control.fileno():
+                    try:
+                        if events&selectors.EVENT_READ:writer.receive(time.monotonic())
+                        if events&selectors.EVENT_WRITE:writer.send()
+                    except (OSError,ValueError,KeyError,TypeError):
+                        try:control.shutdown(socket.SHUT_RDWR)
+                        except OSError:pass
+                        writer.disconnected()
+                elif fd==wake_r:
                     try:os.read(fd,4096)
                     except BlockingIOError:pass
                     if relay:
@@ -177,6 +205,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
                         try:written=os.write(master,incoming)
                         except BlockingIOError:continue
                         del incoming[:written]
+                        writer.written(written)
     finally:
         if native_code is not None:
             terminate_display()
@@ -184,6 +213,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
                 try:host.wait(timeout=2)
                 except subprocess.TimeoutExpired:pass  # Never escalate to SIGKILL.
         selector.close()
+        control.close();display_control.close();os.close(held_fd)
         for fd in (*owned,master):
             try:os.close(fd)
             except OSError:pass

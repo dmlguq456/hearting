@@ -20,6 +20,10 @@ display worker. VT, scratch-display, layout and display-host failures degrade
 to a plain relay of that same process; they never restart the CLI or request
 manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
+During an admitted paste, its delayed Enter and held human bytes belong to the
+retained PTY owner. The display publishes a held count only after those bytes
+are retained outside its own memory. Input returns to the direct path after
+the owner drains that transaction; host death cannot discard or replay it.
 Unknown readiness retains the existing pending delivery. Select
 one verified transport for a message; an uncertain submission never triggers
 an alternate send. Codex keeps its native queue and exact receive evidence.

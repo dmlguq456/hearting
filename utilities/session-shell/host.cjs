@@ -7,7 +7,7 @@ const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
 const args = process.argv.slice(2), harness = args.shift(), command = args;
-let activated = false, child, backend, server, projectionTimer, frameTimer, ended = false;
+let activated = false, child, inputOwner, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
   const fd = Number(process.env.HEARTING_SHELL_START_FD);
   fs.writeSync(fd, value + '\n'); fs.closeSync(fd);
@@ -57,7 +57,7 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
-let lastEnter = -1, submitted = -1, currentDelivery, held = [], heldBytes = 0;
+let lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
 let expanded = false, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
 let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
@@ -215,9 +215,13 @@ process.on('unhandledRejection',displayFailure);
 process.stdout.on('error',()=>process.exit(1));
 process.stdin.on('error',()=>process.exit(1));
 
-function releaseHeld() {
-  const saved=held;held=[];heldBytes=0;process.stdin.resume();
-  for(const data of saved)userInput(data);
+async function releaseHeld(ref,cancel=false) {
+  if(currentDelivery!==ref||releasing===ref)return;releasing=ref;
+  // No new direct writes may overtake keys the owner is still draining.
+  process.stdin.pause();
+  await inputOwner.release(ref,cancel);
+  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';}
+  releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
@@ -247,7 +251,7 @@ async function refreshReadiness() {
 function userInput(data) {
   if(!data.length)return;
   if(currentDelivery){
-    epoch+=data.length;empty=false;held.push(Buffer.from(data));heldBytes+=data.length;
+    epoch+=data.length;empty=false;inputOwner.hold(data);heldBytes+=data.length;
     if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
   }
   if(relay){child.write(data);return;}
@@ -272,7 +276,7 @@ async function lifecycle(req) {
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;
-    if(currentDelivery){currentDelivery=undefined;releaseHeld();}
+    if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
     // Display collection must never delay the native start hook or input.
     setImmediate(()=>{if(selected===selection)source('register').then(()=>projection());});
@@ -287,7 +291,7 @@ async function lifecycle(req) {
   }
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
-    if(currentDelivery){deliveries.set(currentDelivery,'submitted');currentDelivery=undefined;releaseHeld();rebuildDisplay();}
+    if(currentDelivery){deliveries.set(currentDelivery,'submitted');releaseHeld(currentDelivery,true);rebuildDisplay();}
   } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
   else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
@@ -310,15 +314,9 @@ async function request(req) {
   currentDelivery=req.ref;state='submitting';empty=false;epoch++;lastEnter=epoch;
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
-  // Native TUIs distinguish a paste event from a later Enter. Keyboard bytes
-  // remain ordered behind this paste and Enter, independently of callbacks.
-  child.write('\x1b[200~'+data.text+'\x1b[201~');
-  setTimeout(()=>{
-    if(!ended&&selection===selected&&currentDelivery===req.ref){
-      child.write('\r');deliveries.set(req.ref,'transport-submitted');
-      currentDelivery=undefined;state='unknown';releaseHeld();rebuildDisplay();
-    }
-  },50);
+  // The retained owner is the sole writer for this admitted paste/50ms Enter
+  // and shared held-byte buffer. A dead display cannot lose or replay them.
+  await inputOwner.begin(req.ref,data.text);
   rebuildDisplay();return {ok:true,state:'transport-accepted'};
 }
 terminal.parser.registerCsiHandler({prefix:'?',final:'h'},p=>{if(p.includes(25))cursorVisible=true;return false;});
@@ -347,6 +345,11 @@ server.listen(socketPath,()=>{
     if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
     child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
       Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD));
+    inputOwner=require('./input-owner.cjs')(Number(process.env.HEARTING_SHELL_INPUT_FD),
+      Number(process.env.HEARTING_SHELL_HELD_FD),ref=>{
+        if(deliveries.get(ref)!=='submitted')deliveries.set(ref,'transport-submitted');
+        releaseHeld(ref);
+      });
     native=processRow(child.pid);rootNative=native;
   } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
   // The parent may only fall back before this boundary. A failed display keeps

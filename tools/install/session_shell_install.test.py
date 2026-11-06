@@ -3,6 +3,7 @@ from pathlib import Path
 import importlib.util
 import os
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -58,6 +59,22 @@ class SessionShellInstallTest(unittest.TestCase):
         install.set_enabled(True)  # Repeated ensure preserves the separator provenance.
         install.set_enabled(False)
         self.assertEqual(self.profile.read_bytes(), before)
+
+    def test_disable_preserves_lines_appended_after_the_owned_block(self):
+        for suffix in (b"export AFTER=two\n", b"\nexport AFTER=two\n", b"# appended comment"):
+            with self.subTest(suffix=suffix):
+                self.profile.write_bytes(b"export BEFORE=one")
+                install.set_enabled(True)
+                with self.profile.open("ab") as stream:
+                    stream.write(suffix)
+                install.set_enabled(False)
+                self.assertEqual(self.profile.read_bytes(), b"export BEFORE=one\n" + suffix)
+                if b"AFTER" in suffix:
+                    result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c",
+                        'source "$1"; printf "%s|%s" "$BEFORE" "$AFTER"', "fixture", str(self.profile)],
+                        env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+                        capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout, "one|two")
 
     def test_changed_launcher_is_preserved_before_any_profile_or_policy_change(self):
         target = install._bin() / "claude";target.parent.mkdir(parents=True)

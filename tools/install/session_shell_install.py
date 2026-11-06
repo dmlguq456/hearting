@@ -98,7 +98,7 @@ def _profile(enabled, *, dry_run=False):
             raise ValueError("changed session shell profile block preserved")
         if data[b:b+1] == b"\n": b += 1
         # The owned marker records only the separator this block introduced.
-        cut = a-1 if joined and a else a
+        cut = a-1 if joined and a and b == len(data) else a
         after = data if enabled else data[:cut] + data[b:]
     else:
         joined = bool(data and not data.endswith(b"\n"))
