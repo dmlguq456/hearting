@@ -14,7 +14,7 @@ class OverviewLastInputTests(unittest.TestCase):
         session = Session(harness=harness, pid=123, cwd="/fixture/repo", session_id="exact-id",
                           session_tag="b6", liveness="working", title="v4 단장",
                           summary="Bash · current work", process_role="conversation")
-        session.prompt_display = {"human_state": "known",
+        session._prompt_display = {"human_state": "known",
             "human": {"sequence": 1, "at": now - 60, "text": text},
             "received": [{"source": "peer", "sender": "Codex [73]", "at": now - 10,
                           "text": "계획 2라운드 검토"}]}
@@ -36,16 +36,16 @@ class OverviewLastInputTests(unittest.TestCase):
 
     def test_absent_and_unavailable_inputs_are_distinct(self):
         snapshot = self.snapshot()
-        snapshot["sessions"][0].prompt_display = {"human": None, "human_state": "none", "received": []}
+        snapshot["sessions"][0]._prompt_display = {"human": None, "human_state": "none", "received": []}
         self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› 나 없음")
-        snapshot["sessions"][0].prompt_display = None
+        snapshot["sessions"][0]._prompt_display = None
         self.assertEqual(self.model(snapshot).sessions[0]["last_input"], "› 나 미확인")
 
     def test_received_sender_uses_the_exact_native_tag_instead_of_the_saved_name(self):
         snapshot = self.snapshot()
         snapshot["sessions"].append(Session(harness="codex", pid=456, cwd="/fixture/repo",
             session_id="sender-native", session_tag="52", liveness="idle", process_role="conversation"))
-        snapshot["sessions"][0].prompt_display["received"][0].update(
+        snapshot["sessions"][0]._prompt_display["received"][0].update(
             sender="name-without-a-tag", sender_harness="codex", sender_session_id="sender-native")
         row = next(row for row in self.model(snapshot).sessions if row["tag"] == "b6")
         self.assertTrue(row["received_inputs"][0].startswith("⇄ [52] "))
@@ -56,7 +56,7 @@ class OverviewLastInputTests(unittest.TestCase):
                 snapshot = self.snapshot(text="짧은 입력")
                 snapshot["sessions"][0].title = "제목이 잘리는 긴 작업 " * 30
                 short = draw(self.model(snapshot), NavState(), width, 45)
-                snapshot["sessions"][0].prompt_display["human"]["text"] = "긴 입력 " * 100
+                snapshot["sessions"][0]._prompt_display["human"]["text"] = "긴 입력 " * 100
                 long = draw(self.model(snapshot), NavState(), width, 45)
                 y = next(y for y, row in enumerate(short.cells) if "[b6]" in "".join(c[0] for c in row))
                 marker = next((x for x, cell in enumerate(short.cells[y]) if cell[0] == "›"), None)

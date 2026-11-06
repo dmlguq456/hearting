@@ -802,7 +802,10 @@ class OwnerPinChangeTest(unittest.TestCase):
             seq = session_tidy.read_prompt_seq(seat)
             marker = session_tidy.prompt_state(seat)
             self.assertEqual(marker["request_origin"]["transfer_ref"], ref)
-            self.assertNotIn(body, json.dumps(marker))
+            # Authority metadata stays body-free; bounded UI text belongs only
+            # to the private display projection in the same frontier record.
+            self.assertNotIn(body, json.dumps(marker["request_origin"]))
+            self.assertEqual(marker["received_inputs"][-1]["text"], body)
             expected = "peer:hearting-4d·" + ref
             self.assertEqual(router._turn_peer_source("codex", "codex-sid", "/w"), expected)
             with mock.patch.object(peer.time, "gmtime", return_value=time.gmtime(marker["at"])):

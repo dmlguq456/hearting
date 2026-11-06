@@ -257,9 +257,9 @@ def collect(harness_filter=None):
           cwd="/home/demo/degrade-project", liveness="working", depth=1),
     ]
     for index, session in enumerate(sessions):
-        session.prompt_display = {"human": None, "human_state": "none", "received": []}
+        session._prompt_display = {"human": None, "human_state": "none", "received": []}
         if not session.is_child and index < 3:
-            session.prompt_display = {"human_state": "known", "human": {
+            session._prompt_display = {"human_state": "known", "human": {
                 "sequence": 1, "at": time.time() - (index + 1) * 60,
                 "text": ("지금 모양은 유지하고 표시만 바꿔줘", "데모 슬라이드 순서를 바꿔줘", "회귀 시험도 함께 확인해줘")[index]},
                 "received": [{"source": "peer", "sender": "Codex [73]", "at": time.time() - 30,

@@ -130,18 +130,18 @@ class PromptDisplayTests(unittest.TestCase):
             "state": "ok", "generation_identity": "synthetic-basic", "all_new": True}})
         observed = details.enrich(basic, required_only=True)
         merged = details.merge(basic, observed)
-        self.assertIsNotNone(merged.sessions[0].prompt_display)
-        self.assertEqual(merged.sessions[0].prompt_display["human"]["text"],
+        self.assertIsNotNone(merged.sessions[0]._prompt_display)
+        self.assertEqual(merged.sessions[0]._prompt_display["human"]["text"],
                          "visible through the live detail path")
-        self.assertIsNone(basic.sessions[0].prompt_display)
+        self.assertIsNone(basic.sessions[0]._prompt_display)
         vm = live.build_view_model(merged, now=1060)
         self.assertIn("visible through the live detail path", vm.sessions[0]["last_input"])
         other = LiveSnapshot(sessions=[Session(harness="claude", session_id="other-session",
             session_tag="74", pid=123, proc_start="original", cwd=str(self.cwd), liveness="idle")])
-        self.assertIsNone(details.merge(other, observed).sessions[0].prompt_display)
+        self.assertIsNone(details.merge(other, observed).sessions[0]._prompt_display)
         with mock.patch.object(prompt_inputs, "read", side_effect=OSError("synthetic unreadable frontier")):
             unavailable = details.enrich(basic, required_only=True)
-        self.assertIsNone(details.merge(basic, unavailable).sessions[0].prompt_display)
+        self.assertIsNone(details.merge(basic, unavailable).sessions[0]._prompt_display)
 
     def test_missing_corrupt_replaced_and_legacy_frontiers_stay_honest(self):
         self.assertIsNone(prompt_inputs.read("claude", "prompt-session"))

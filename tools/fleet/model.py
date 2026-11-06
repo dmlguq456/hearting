@@ -579,8 +579,8 @@ class Session:
     # say who talked to you but never who you talked to. Same shape, `to_*` keys.
     peer_last_sent: Optional[dict] = None # {to_name, to_session_id, to_harness, kind, age_min}
     peer_obligations: Optional[list] = None # body-free pending watch/message/delay/retire status
-    # Bounded display facts from the shared prompt classifier's existing frontier.
-    prompt_display: Optional[dict] = None
+    # Private bounded display facts; excluded from public JSON/export and repr.
+    _prompt_display: Optional[dict] = field(default=None, repr=False)
     # Prior session ids this same live process still answers to after a resume/fork
     # (`session_registry.session_aliases`). DISPLAY JOIN ONLY — never a ledger address,
     # a `report-agent-session` value, or a completion/wake recipient.

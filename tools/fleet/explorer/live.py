@@ -408,7 +408,7 @@ def _session_records(snapshot, now, resolver):
             "title": _text(_get(session, "title", "name")),
             "context": context, "window": window,
             "now": _text(_get(session, "summary", "now")),
-            "last_input": _last_input(_get(session, "prompt_display"), now),
+            "last_input": _last_input(_get(session, "_prompt_display"), now),
             "received_inputs": [],
             "ask": _ask_kind(session) if state == "blocked" else None,
             "age": age, "repo": repo, "repo_id": repo,
@@ -432,7 +432,7 @@ def _session_records(snapshot, now, resolver):
             for tag, info in by_key.items() for sid in info["ids"]}
     for row in rows:
         row["received_inputs"] = _received_inputs(
-            _get(by_key[row["tag"]]["session"], "prompt_display"), tags)
+            _get(by_key[row["tag"]]["session"], "_prompt_display"), tags)
     return rows, by_key
 
 

@@ -910,7 +910,7 @@ def merge(basic, detail):
             previous = candidates[0]
             current = copy.copy(row)
             # Input text is live display data, outside the persisted continuation schema.
-            for field in _METADATA + _STEWARD_RELATIONS + ("prompt_display",):
+            for field in _METADATA + _STEWARD_RELATIONS + ("_prompt_display",):
                 observed = getattr(previous, field, None)
                 if observed is not None:
                     setattr(current, field, observed)
