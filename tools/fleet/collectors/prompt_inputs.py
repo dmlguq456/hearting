@@ -63,4 +63,7 @@ def read(harness, sid):
 def enrich(sessions):
     for session in sessions:
         # Display aliases describe other native identities, never their input.
-        session.prompt_display = read(session.harness, session.session_id)
+        try:
+            session.prompt_display = read(session.harness, session.session_id)
+        except Exception:
+            session.prompt_display = None

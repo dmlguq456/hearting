@@ -116,6 +116,33 @@ class PromptDisplayTests(unittest.TestCase):
         self.prompt("second", now=1010)
         self.assertEqual(prompt_inputs.read("claude", "prompt-session")["human"]["text"], "second")
 
+    def test_live_required_detail_and_merge_publish_the_exact_frontier(self):
+        from tools.fleet import details
+        from tools.fleet.explorer import live
+        from tools.fleet.model import Session
+        from tools.fleet.refresh import LiveSnapshot
+        self.prompt("visible through the live detail path")
+        row = Session(harness="claude", session_id="prompt-session", session_tag="73",
+                      pid=123, proc_start="original", cwd=str(self.cwd),
+                      liveness="idle", process_role="conversation")
+        basic = LiveSnapshot(sessions=[row], observations={"basic": {
+            "state": "ok", "generation_identity": "synthetic-basic", "all_new": True}, "required-details": {
+            "state": "ok", "generation_identity": "synthetic-basic", "all_new": True}})
+        observed = details.enrich(basic, required_only=True)
+        merged = details.merge(basic, observed)
+        self.assertIsNotNone(merged.sessions[0].prompt_display)
+        self.assertEqual(merged.sessions[0].prompt_display["human"]["text"],
+                         "visible through the live detail path")
+        self.assertIsNone(basic.sessions[0].prompt_display)
+        vm = live.build_view_model(merged, now=1060)
+        self.assertIn("visible through the live detail path", vm.sessions[0]["last_input"])
+        other = LiveSnapshot(sessions=[Session(harness="claude", session_id="other-session",
+            session_tag="74", pid=123, proc_start="original", cwd=str(self.cwd), liveness="idle")])
+        self.assertIsNone(details.merge(other, observed).sessions[0].prompt_display)
+        with mock.patch.object(prompt_inputs, "read", side_effect=OSError("synthetic unreadable frontier")):
+            unavailable = details.enrich(basic, required_only=True)
+        self.assertIsNone(details.merge(basic, unavailable).sessions[0].prompt_display)
+
     def test_missing_corrupt_replaced_and_legacy_frontiers_stay_honest(self):
         self.assertIsNone(prompt_inputs.read("claude", "prompt-session"))
         self.prompt("first")
