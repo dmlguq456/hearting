@@ -931,6 +931,17 @@ def _scan_layout(root: Path) -> _LayoutScan:
                 continue
             scan.cycles[cycle_id] = path
             scan.folder_campaign[cycle_id] = campaign_id
+            import artifact_request
+            for member in artifact_request.members(root, path):
+                member_id = member.name
+                if member_id in scan.cycles or member_id in scan.duplicates:
+                    scan.duplicates.add(member_id)
+                    scan.cycles.pop(member_id, None)
+                    scan.folder_campaign.pop(member_id, None)
+                    scan.complete = False
+                    continue
+                scan.cycles[member_id] = member
+                scan.folder_campaign[member_id] = campaign_id
     return scan
 
 
@@ -954,6 +965,10 @@ def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -
                 changes["cycle_revive"].append((cycle_id, folder))
             continue
         if record is None:
+            continue
+        if record.get("request_binding"):
+            # A logical scope's basename is its ID, not its request locator.
+            # Membership was verified by the scan; do not rename its record.
             continue
         if record.get("campaign_id") != scan.folder_campaign[cycle_id] or (
                 isinstance(record.get("locator"), str) and record["locator"] != folder.name):

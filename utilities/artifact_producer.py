@@ -1160,7 +1160,7 @@ def _begin_cycle_record(
         raise ProducerError("route-intensity-mismatch", f"{route['effective_intensity']}!={intensity}")
     journal_requested = (journal_target and route.get("artifact_storage_contract_version", 1) == 2
         and intensity == "direct" and not require_cycle and route.get("capability") != "autopilot-spec"
-        and not parent_cycle_id and not workflow_group_id
+        and (not parent_cycle_id or route.get("route_plan")) and not workflow_group_id
         and not (route.get("capability") == "autopilot-refine" and route.get("entry_scope_contract_version"))
         and node_id is None and not (owner_attempt_id or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")))
     node = _route_node(route, node_id)
@@ -1238,6 +1238,15 @@ def _begin_cycle_record(
         if resplit_lock.exists() or resplit_lock.is_symlink():
             detail = _read_json(resplit_lock)
             raise ProducerError("resplit-in-progress", json.dumps(detail or {}, sort_keys=True))
+        import artifact_request
+        request_note = None
+        try:
+            request_binding = artifact_request.binding_for_route(root, route)
+        except (ValueError, OSError, artifact_locator.LocatorError) as exc:
+            # Missing legacy/manual proof cannot grant a shared scope. The
+            # already admitted route can still use its ordinary independent
+            # cycle, with the unresolved association retained for inspection.
+            request_binding, request_note = None, str(exc)
         resumable = route_cycle_for(root, route)
         if resumable is not None and resumable.get("deleted_at"):
             resumable = None  # a deleted folder is never resumed; the route's next cycle is a new one
@@ -1302,6 +1311,8 @@ def _begin_cycle_record(
             except artifact_workflow_groups.WorkflowGroupError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
         if campaign is not None:
+            if request_binding and request_binding["campaign_id"] != campaign["campaign_id"]:
+                raise ProducerError("request-campaign-mismatch", campaign["campaign_id"])
             if campaign.get("state") == "satisfied":
                 try:
                     reopened = artifact_campaign._reopen_locked(
@@ -1339,6 +1350,22 @@ def _begin_cycle_record(
                     or (campaign_key is not None and campaign_key != bound_campaign.get("key"))
                     or (parent_cycle_id is not None and parent_cycle_id != record.get("parent_cycle_id"))):
                 raise ProducerError("cycle-campaign-selection-conflict", record["cycle_id"])
+            if record.get("request_binding"):
+                # Resume a begin interrupted after its durable record, without
+                # allocating a replacement cycle or touching sibling payloads.
+                directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+                binding = artifact_locator.read_cycle_binding(directory)
+                if binding is not None and (binding["cycle_id"] != record["cycle_id"]
+                        or binding["campaign_id"] != record["campaign_id"]):
+                    raise ProducerError("cycle-route-binding-mismatch", str(directory))
+                _ensure_dir(directory / "artifacts")
+                if record["cycle_id"] not in bound_campaign.get("cycles", []):
+                    bound_campaign["cycles"] = [*bound_campaign.get("cycles", []), record["cycle_id"]]
+                    _write_campaign(root, bound_campaign, exclusive=False)
+                if binding is None:
+                    _write_cycle_binding(directory, record["campaign_id"], record["cycle_id"],
+                                         started_on=record["started_on"])
+                    artifact_locator.update_indexes(root, [record["campaign_id"]])
             rebound = record.get("route_id") != route["route_id"]
             # D-120: only an owner `begin --route <continuation>` writes the
             # audit trail. A worker `begin --node` judges the same admission
@@ -1463,8 +1490,12 @@ def _begin_cycle_record(
             new_cycle_id = alloc.allocate("cycle")
         producer_id = alloc.allocate("producer")
         campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
-        cycle_locator, cycle_locator_suffix = artifact_locator.allocate_locator(
-            campaign_path, started_on, slug)
+        if request_binding:
+            cycle_locator = Path(request_binding["path"]).name
+            cycle_locator_suffix = ""
+        else:
+            cycle_locator, cycle_locator_suffix = artifact_locator.allocate_locator(
+                campaign_path, started_on, slug)
         record = {
             "schema_version": 1,
             "contract": CONTRACT,
@@ -1490,10 +1521,14 @@ def _begin_cycle_record(
             "slug_truncated": slug_truncated,
             "locator": cycle_locator,
             "locator_suffix": cycle_locator_suffix,
+            **({"request_binding": request_binding} if request_binding else {}),
+            **({"request_binding_note": request_note} if request_note else {}),
         }
         if shared_reference_pins is not None:
             record["shared_reference_pins"] = [dict(pin) for pin in shared_reference_pins]
         target = campaign_path / cycle_locator
+        if request_binding:
+            target = artifact_request.execution_dir(root, record)
         if target.exists():
             raise ProducerError("cycle-dir-exists", str(target))
         # Order: durable record first (crash before dir => recover drops the
@@ -1529,6 +1564,8 @@ def _begin_cycle_record(
             **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
                if campaign_reopen_event_id else {}),
             **_campaign_degradation(campaign),
+            **({"advisories": [{"reason": "request-grouping-unavailable", "detail": request_note}]}
+               if request_note else {}),
         }
     finally:
         artifact_admission._release_lock(root, lock_fd)
@@ -1791,10 +1828,21 @@ def require_cycle_output(
         raise ProducerError("cycle-route-binding-mismatch", f"cycle={record['cycle_id']} route={route_id}")
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
     output = directory / "artifacts"
+    import artifact_request
+    try:
+        owner = artifact_request.owning_scope(root, target)
+    except (ValueError, artifact_locator.LocatorError) as exc:
+        raise ProducerError("artifact-outside-bound-cycle", f"output_dir={output}: {exc}") from exc
+    if owner and owner[0] != record["cycle_id"]:
+        raise ProducerError("artifact-outside-bound-cycle",
+                            f"cycle={record['cycle_id']} output_dir={output} target-cycle={owner[0]}")
     try:
         relative = Path(target).resolve().relative_to(directory.resolve()).as_posix()
     except ValueError as exc:
         raise ProducerError("artifact-outside-bound-cycle", f"cycle={record['cycle_id']} output_dir={output}") from exc
+    if (record.get("route_capability") == "route-frame"
+            and Path(relative).parts[:2] == artifact_request.EXECUTIONS):
+        raise ProducerError("artifact-outside-bound-cycle", f"cycle={record['cycle_id']} output_dir={output}")
     if _payload_root(relative) is None:
         raise ProducerError("artifact-outside-bound-cycle", f"cycle={record['cycle_id']} output_dir={output}")
     return output
@@ -1829,11 +1877,13 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
         try:
             locator_mapping, _rows = artifact_locator.scan_index(root)
             target_resolved = Path(target).resolve(strict=False)
+            import artifact_request
+            scope = artifact_request.owning_scope(root, target_resolved)
             campaign_parts = rel.split("/")
             if len(campaign_parts) >= 3:
                 cycle_relative = "/".join(campaign_parts[:3])
-                cycle_id = next((identifier for identifier, path in locator_mapping.items()
-                                 if path == cycle_relative), None)
+                cycle_id = (scope[0] if scope else next((identifier for identifier, path in locator_mapping.items()
+                                 if path == cycle_relative), None))
                 cycle_record = read_cycle_record(root, cycle_id) if cycle_id else None
                 if cycle_record:
                     import inline_finish
@@ -1846,7 +1896,7 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
         except (OSError, ValueError) as exc:
             return {**base, "verdict":"deny", "reason":"finish-state-unreadable", "detail":str(exc), "layout":"cycle"}
         try:
-            require_cycle_output(
+            bound_output = require_cycle_output(
                 root, target, cycle_id=os.environ.get("AGENT_ARTIFACT_CYCLE_ID"),
                 # A node's active route is its write authority. The enclosing
                 # owner must not mask a foreign or invalid child route.
@@ -1860,6 +1910,9 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
             return {**base, "verdict": "deny", "reason": "campaign-record-machine-managed", "layout": "cycle"}
         artifacts_index = 4 if legacy else 3
         cycle_path = root.joinpath(*parts[:artifacts_index])
+        if bound_output is not None:
+            cycle_path = bound_output.parent
+            artifacts_index = len(cycle_path.relative_to(root).parts)
         campaign_path = root / "campaigns" / parts[1]
         campaign = _read_json(campaign_path / "campaign.json") or {}
         campaign_id = campaign.get("campaign_id")
@@ -1941,6 +1994,12 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
 
 def cycle_bucket(root: Path, target: Path) -> Optional[Tuple[str, str]]:
     """Return (bucket, cycle_id) for a path inside a cycle's artifacts."""
+    import artifact_request
+    owner = artifact_request.owning_scope(root, target)
+    if owner:
+        parts = Path(target).resolve(strict=False).relative_to(owner[1]).parts
+        if len(parts) >= 2 and parts[0] == "artifacts":
+            return parts[1], owner[0]
     rel = _relative(Path(root), Path(target))
     if rel is None:
         return None
