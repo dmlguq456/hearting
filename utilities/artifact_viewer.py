@@ -300,7 +300,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.send_header('Accept-Ranges', 'bytes')
         self.send_header('Content-Length', str(max(0, end-start+1)))
         if range_header is not None: self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-        if mime in ('text/html', 'image/svg+xml'): self.send_header('Content-Security-Policy', 'sandbox allow-scripts allow-popups')
+        # Any file may be interpreted as a document, including XML with an
+        # XSL stylesheet and MIME types supplied by the host's mime database.
+        # A response-wide policy avoids an incomplete active-MIME allowlist.
+        self.send_header('Content-Security-Policy', 'sandbox allow-scripts allow-popups')
         self.end_headers()
         if self.command == 'HEAD': return
         os.lseek(fd, start, os.SEEK_SET)

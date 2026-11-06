@@ -128,6 +128,30 @@ class ViewerTests(unittest.TestCase):
         result = self.request(prefix+'huge.md')[2]
         self.assertIn(b'?raw=1', result); self.assertLess(len(result), 1000)
 
+    def test_static_document_sandbox_including_xhtml_and_xml(self):
+        prefix = '/campaigns/camp/cycles/cycle/artifacts/'
+        policy = 'sandbox allow-scripts allow-popups'
+        for filename, expected_mime in (
+            ('active.xhtml', 'application/xhtml+xml'),
+            ('active.svg', 'image/svg+xml'),
+            ('active.xml', 'application/xml'),
+            ('active.html', 'text/html'),
+            ('unknown.unlisted-hearting-test', 'application/octet-stream'),
+        ):
+            body = b'<document>unchanged bytes</document>'
+            (self.folder/filename).write_bytes(body)
+            for method in ('GET', 'HEAD'):
+                with self.subTest(filename=filename, method=method):
+                    status, headers, data = self.request(prefix+filename, method)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(headers['Content-Type'], expected_mime)
+                    self.assertEqual(headers['Content-Security-Policy'], policy)
+                    self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+                    self.assertEqual(data, body if method == 'GET' else b'')
+        status, headers, data = self.request(prefix+'active.xhtml', headers={'Range': 'bytes=0-7'})
+        self.assertEqual((status, data), (206, b'<documen'))
+        self.assertEqual(headers['Content-Security-Policy'], policy)
+
     def test_live_probe_and_read_only(self):
         def inventory():
             return sorted((str(p.relative_to(self.root)), p.lstat().st_mode, p.lstat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() and not p.is_symlink() else '') for p in self.root.rglob('*'))

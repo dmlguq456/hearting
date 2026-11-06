@@ -375,8 +375,8 @@ class CyclePathTests(EntranceFixture):
         def swapped(_root):
             document.unlink()
             document.symlink_to(outside)
-            return rows
-        with mock.patch.object(E, "recent_rows", side_effect=swapped), \
+            return {}, {"recent": rows}
+        with mock.patch.object(E, "_refresh_and_snapshot", side_effect=swapped), \
                 mock.patch.object(E, "_open_externally") as opener, \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(E._command_open(self.root, ["1"]), 1)
