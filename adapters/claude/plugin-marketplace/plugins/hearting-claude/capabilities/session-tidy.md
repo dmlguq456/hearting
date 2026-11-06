@@ -41,15 +41,21 @@ Existing manual session-tidy, clear and handoff behavior remains unchanged.
 
 Automatic idle tidy has one shared policy for Claude, Codex and OpenCode.
 The optional `${XDG_CONFIG_HOME:-~/.config}/hearting/session-tidy.json` keeps
-`idle.enabled=true`, `idle.wait_seconds=3240`, `idle.min_tokens=200000` and
+`idle.enabled=true`, `idle.wait_seconds=3240`, `idle.min_tokens=500000` and
 `idle.cache_margin_seconds=60` as its defaults. The existing
 `{"idle":{"enabled":false}}` switch disables it; installation never enables
 an operator-disabled policy. Unknown latest input usage is ineligible. The wait
 is a configured operating default, not a verified provider cache lifetime.
+Idle means no activity for that wait, counted from the end of the latest user,
+peer, notification, completion or runtime-resume turn; Hearting's own tidy-request
+turn is excluded. The default context floor matches the recommendation notice's
+500,000-token value.
 
 Each actual user-work interval permits one automatic request, including failed
 or uncertain requests. Runtime notifications, other sessions' messages, status
-lines and Hearting's own requests never rearm it. Recognize the runtime's
+lines and Hearting's own requests never rearm it. Other completed turns only move
+an unclaimed idle deadline; they do not create another automatic request in the
+same user-work interval. Recognize the runtime's
 transport wrapping of an exact recorded self-request without treating the
 wrapper as user input. Keep this classification after booking expiry. A newer
 compaction boundary cancels an unsent idle booking; pre-compaction usage cannot
@@ -63,8 +69,11 @@ Skill or tool call. The common turn-end observer stores that reply as the exact
 native session's external handoff card and queues memory tidying once. The card
 must be saved before requesting native compaction: `/compact` in Claude and
 Codex, the equivalent command in OpenCode. Never use `/clear` or `/new` for idle
-tidy. Preserve scrollback, the native session and its background agents. Running
-background agents neither postpone idle tidy nor select a special adapter path.
+tidy. Preserve scrollback, the native session and its background agents. Native
+background agents alone do not postpone idle tidy or select a special adapter
+path. A session responsible for an open registered route or owner/worker attempt
+is not idle: use the same route projection as its status line and Fleet to
+withhold both booking and input while that work remains open.
 A running foreground turn, a nonempty composer or an open question/approval
 prevents either input. Physical binding and input readiness are transport safety
 only; success is established solely by the stored card and a later exact-session
