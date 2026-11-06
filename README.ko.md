@@ -18,7 +18,7 @@
 <p align="center">
   <a href="#빠른-시작">빠른 시작</a> ·
   <a href="#fleet-모든-에이전트를-한-화면에서">Fleet</a> ·
-  <a href="#권한">권한</a> ·
+  <a href="FAQ.ko.md">자주 묻는 질문</a> ·
   <a href="https://dmlguq456.github.io/hearting/fleet.html">Fleet 둘러보기 ↗</a> ·
   <a href="https://dmlguq456.github.io/hearting/">웹사이트 ↗</a>
 </p>
@@ -45,7 +45,12 @@
   에이전트의 실력이 아니라 사용자가 요청한 내용에 묶여 있습니다.
 - **어디서든 하나의 방식.** Claude Code, Codex, OpenCode 어느 쪽이든, 하나만
   쓰든 셋을 같이 쓰든 같은 요청, 같은 단계, 같은 산출물, 같은 메모리로
-  일합니다. Fleet가 그 전부를 한 화면에서 보여 줍니다.
+  일합니다.
+- **모든 기록이 한 화면에.** 어느 하네스의 세션이든 같은 기록을 남깁니다.
+  세션마다 지금 하는 일, 프로젝트별 현황, 열린 요청과 그 단계, 사용자의 답을
+  기다리는 질문, 정한 것과 아직 남은 것이 모두 여기에 쌓입니다. Fleet가 이것을
+  터미널 한 화면에 보여 줍니다. 창마다 이전 세션과 세션이 쓰는 GPU도 함께
+  보이고, 하네스가 지원하면 기다리는 질문에 Fleet에서 바로 답할 수 있습니다.
 - **저비용 에이전트의 목발.** 하팅이 약한 모델을 똑똑하게 만들 수는 없습니다.
   대신 약한 모델도 사용자의 의도를 끝까지 수행하게 합니다. 강한 모델이 의도와
   계획을 정하고(*frame*), 싼 작업자가 작은 단위로 확인받으며 실행합니다
@@ -230,8 +235,8 @@ SHA-256을 확인합니다. 고른 하네스에 전체 기능 묶음을 바뀌�
 `runtime doctor`는 PyYAML이나 herdr처럼 빠진 선택 요소가 있으면 그것과, 그것
 없이 안 되는 일을 알려 줍니다.
 
-설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 첫 작업 전에
-[권한](#권한)을 읽어 주세요.
+설치기가 작업자 기본 권한에 대한 안내를 출력합니다. 자세한 내용과 바꾸는 방법은
+[자주 묻는 질문](FAQ.ko.md#백그라운드-작업자는-어떤-권한을-갖나요)에 있습니다.
 
 ### 첫 작업
 
@@ -276,64 +281,6 @@ curl -fsSL https://github.com/dmlguq456/hearting/releases/download/vX.Y.Z/instal
 
 체크섬은 전송 중 손상이나 파일 손상을 잡습니다. 배포자 진위는 이 저장소의
 GitHub Release와 HTTPS에 기대며, 별도 서명은 없습니다.
-
-## 권한
-
-**백그라운드 Claude Code 작업자는 기본으로 bypass 모드로 돕니다.** 하팅이
-백그라운드로 분사한 작업자는 `--permission-mode bypassPermissions`로 시작합니다.
-권한 질문에 답할 사람이 없고, 거절이 이어지면 작업자가 일을 하다 멈추기
-때문입니다. 사용자가 직접 연 세션은 사용자의 하네스 권한 설정을 그대로 씁니다.
-
-allowlist 모드로 바꾸려면
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/dispatch-defaults.yaml`을 고칩니다.
-이미 `headless:` 블록이 있으면 그 안의 값을 바꾸고, 없으면 아래 두 줄을
-추가합니다.
-
-```yaml
-headless:
-  claude_permission_mode: allowlist
-```
-
-- allowlist는 작업자를 `acceptEdits`와 제한된 도구 목록으로 돌립니다. 하팅
-  자체 도구, 읽기 전용 git, 시험 실행기, worktree와 산출물 루트 안의 편집만
-  허용합니다.
-- bypass를 쓸 수 없는 곳(root나 sudo로 실행, 또는 어느 Claude 설정 범위에든
-  `permissions.disableBypassPermissionsMode`가 있을 때)에서는 하팅이 알아서
-  allowlist로 바꾸고 실제로 쓴 모드를 기록합니다.
-- 파일이 잘못됐거나 읽을 수 없으면 배포 기본값인 bypass가 적용됩니다.
-  `hearting config status`로 파일이 읽혔는지 확인하세요. 기존 블록에 합치고,
-  `headless:` 키를 두 번 쓰거나 한 줄 `{…}` 형식으로 쓰지 마세요.
-  `DISPATCH_DEFAULTS_CONFIG`로 다른 파일을 가리킬 수 있습니다.
-- `peer-steward start`로 띄운 peer 세션도 기본은 bypass입니다. 같은 파일의
-  `steward:` 아래에 `child_permission_mode: inherit`를 두면 부모 세션의 모드를
-  따릅니다.
-- 이 설정은 Claude Code 작업자에만 적용됩니다. Codex 작업자는 Codex의
-  `workspace-write` 샌드박스 안에서 승인 질문 없이 돌고, OpenCode 작업자는
-  사용자의 OpenCode 권한 설정에서 출발합니다.
-
-Claude Code를 포함해 처음 설치하면 설치기가 이 기본값과 이를 바꾸는 파일을 짧게
-알립니다. 입력은 요구하지 않습니다.
-
-**Claude Code 사용자 규칙은 OpenCode에도 적용됩니다.** 하팅은 OpenCode 전역
-`AGENTS.md`를 하팅 지침을 싣는 파일로 관리합니다. `~/.claude/rules/`(또는
-`$CLAUDE_CONFIG_DIR/rules/`)에 규칙 파일이 있으면 그 규칙을 이 파일에서 하팅
-지침보다 앞에 싣습니다. 처음 그렇게 하는
-설치나 업데이트가 이 사실을 알립니다. 특정 경로에만 적용되는 규칙은 빼고, 규칙
-파일은 읽기만 합니다. 그 결과 규칙 본문은 OpenCode가 쓰는 모델 제공자에게도
-전달됩니다. 끄려면 같은 `dispatch-defaults.yaml`에 아래 두 줄을 넣으세요. 다음
-설치, 업데이트, 또는 `hearting runtime refresh --runtime opencode`가 하팅 지침만
-있는 원래 상태로 되돌립니다.
-
-```yaml
-user_rules:
-  opencode: off
-```
-
-Codex는 전역 지침 파일을 하나만 읽습니다. 그래서 내용이 있는
-`~/.codex/AGENTS.override.md`를 직접 두고 있으면 하팅이 그 내용 아래에 표시된
-블록 하나로 자기 지침을 덧붙입니다. 업데이트는 그 블록만 바꾸고 제거하면 그
-블록만 지웁니다. 파일이 없거나 비어 있으면 만들지 않습니다. 모든 하네스의
-백그라운드 작업자도 사용자의 전역 규칙을 받습니다.
 
 ## 산출물과 현황
 
