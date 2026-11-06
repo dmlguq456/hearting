@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote_to_bytes, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifact_entrance as entrance
 from artifact_markdown import render_markdown
 
 PORT = 8765
@@ -33,46 +34,13 @@ def root_key(root):
     return hashlib.sha256(os.fsencode(os.path.realpath(root))).hexdigest()
 
 
-def _check_platform():
-    if not all(hasattr(os, name) for name in ('O_NOFOLLOW', 'O_DIRECTORY', 'O_NONBLOCK')) or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd:
-        raise RuntimeError('viewer requires no-follow descriptor-relative file access')
-
-
 def open_root(root):
-    """Open every component of the physical root without following links."""
-    _check_platform()
-    path = os.path.abspath(os.fspath(root))
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        for part in path.split('/')[1:]:
-            if not part: continue
-            new = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd); fd = new
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    return entrance.open_root(root)
 
 
 def open_relative(root_fd, parts):
     """Return an already-authorized fd. Never reopen a validated pathname."""
-    fd = os.dup(root_fd)
-    try:
-        for i, part in enumerate(parts):
-            if part in HIDDEN or part in ('', '.', '..') or '/' in part or '\\' in part:
-                raise FileNotFoundError
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-            if i != len(parts)-1:
-                flags |= os.O_DIRECTORY
-            new = os.open(part, flags, dir_fd=fd)
-            os.close(fd); fd = new
-        mode = os.fstat(fd).st_mode
-        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
-            raise FileNotFoundError
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    return entrance.open_relative(root_fd, parts, HIDDEN)
 
 
 def parse_target(raw):
@@ -172,7 +140,9 @@ class ViewerServer(ThreadingHTTPServer):
         try:
             super().__init__(('127.0.0.1', port), ViewerHandler)
         except BaseException:
-            os.close(self.root_fd)
+            # super().__init__ already ran server_close() on a bind failure.
+            if self.root_fd is not None:
+                os.close(self.root_fd); self.root_fd = None
             raise
 
     def server_close(self):

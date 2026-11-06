@@ -382,6 +382,58 @@ class CyclePathTests(EntranceFixture):
             self.assertEqual(E._command_open(self.root, ["1"]), 1)
         opener.assert_not_called()
 
+    def _swap_after_check(self, swap):
+        """Run `swap` once, right after _document_path accepts a document and before it is read."""
+        original = E._document_path
+        done = []
+
+        def checked(*args, **kwargs):
+            found = original(*args, **kwargs)
+            if found is not None and not done:
+                done.append(found)
+                swap(found)
+            return found
+        return mock.patch.object(E, "_document_path", side_effect=checked), done
+
+    def _assert_swap_unread(self, swap):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        patch, done = self._swap_after_check(swap)
+        with patch:
+            self.refresh()
+        self.assertTrue(done)
+        for name in E.ENTRANCE_NAMES:
+            self.assertNotIn("OUTSIDE_SENTINEL", self.entrance(name))
+
+    def test_leaf_swapped_for_a_link_after_the_check_is_never_read(self):
+        outside = self.base / "private.md"
+        outside.write_text("# OUTSIDE_SENTINEL title\n\nOUTSIDE_SENTINEL summary.\n")
+
+        def swap(document):
+            document.unlink()
+            document.symlink_to(outside)
+        self._assert_swap_unread(swap)
+
+    def test_ancestor_swapped_for_a_link_after_the_check_is_never_read(self):
+        outside = self.base / "outside-dir"
+        outside.mkdir()
+        (outside / "final_report.md").write_text("# OUTSIDE_SENTINEL title\n\nOUTSIDE_SENTINEL summary.\n")
+
+        def swap(document):
+            parent = document.parent
+            parent.rename(parent.with_name("artifacts-old"))
+            parent.symlink_to(outside, target_is_directory=True)
+        self._assert_swap_unread(swap)
+
+    def test_head_is_empty_without_the_no_follow_primitives(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        self.assertEqual(self.rows()[0]["title"], "Safe")
+        with mock.patch.object(E, "check_nofollow_platform", side_effect=RuntimeError("no")):
+            row = self.rows()[0]
+        self.assertEqual(row["summary"], "")
+        self.assertNotEqual(row["title"], "Safe")
+
     def test_cycle_and_source_rows_share_containment_and_keep_normal_rows(self):
         self.cycle("2026-01-02_one", "2026-01-02_alpha",
                    [("artifacts/final_report.md", "# Safe\n\nBody.\n")])

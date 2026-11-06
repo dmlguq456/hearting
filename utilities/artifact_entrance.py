@@ -38,6 +38,7 @@ import json
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -134,12 +135,85 @@ _fallback_translator.lang = "en"
 # ---------------------------------------------------------------------------
 
 
-def _read_head(path: Path) -> str:
+def check_nofollow_platform() -> None:
+    """Raise RuntimeError where no-follow, descriptor-relative access is missing."""
+    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")) \
+            or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd:
+        raise RuntimeError("no-follow descriptor-relative file access is unavailable")
+
+
+def open_root(root: Any) -> int:
+    """Open every component of the physical root without following links."""
+    check_nofollow_platform()
+    path = os.path.abspath(os.fspath(root))
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        with open(str(path), "rb") as handle:
-            raw = handle.read(HEAD_BYTES)
+        for part in path.split("/")[1:]:
+            if not part:
+                continue
+            new = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = new
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_relative(root_fd: int, parts: Sequence[str], hidden: Iterable[str] = ()) -> int:
+    """Return an already-authorized fd for a file or directory below root_fd.
+
+    Every component is opened relative to the previous descriptor with
+    O_NOFOLLOW, so a link swapped in after any earlier check is refused; the
+    result is a regular file or a directory.  A pathname is never reopened.
+    `hidden` names components the caller refuses (viewer policy).
+    """
+    hidden = frozenset(hidden)
+    fd = os.dup(root_fd)
+    try:
+        for i, part in enumerate(parts):
+            if part in hidden or part in ("", ".", "..") or "/" in part or "\\" in part:
+                raise FileNotFoundError
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            if i != len(parts) - 1:
+                flags |= os.O_DIRECTORY
+            new = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = new
+        mode = os.fstat(fd).st_mode
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise FileNotFoundError
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_head(root: Path, path: Path) -> str:
+    """The first HEAD_BYTES of a regular document, read from a no-follow fd.
+
+    Without the platform primitives, or when the document cannot be opened
+    that way, the head is empty (callers fall back to a generic title).
+    """
+    try:
+        parts = list(path.relative_to(root).parts)
+        root_fd = open_root(os.path.realpath(str(root)))
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    try:
+        fd = open_relative(root_fd, parts)
     except OSError:
         return ""
+    finally:
+        os.close(root_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, HEAD_BYTES)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
     return raw.decode("utf-8", "replace")
 
 
@@ -175,8 +249,7 @@ def _unescape(value: str) -> str:
     return html.unescape(value)
 
 
-def _document_title(path: Path, *, fallback: str) -> str:
-    text = _read_head(path)
+def _document_title(path: Path, text: str, *, fallback: str) -> str:
     lowered = path.name.casefold()
     if lowered.endswith((".html", ".htm")):
         found = _html_title(text)
@@ -465,7 +538,8 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         title_fallback = ""
         if record:
             title_fallback = str(record.get("title") or record.get("slug") or "").strip()
-        title = _document_title(document, fallback=_nfc(title_fallback or cycle_locator))
+        head = _read_head(root, document)
+        title = _document_title(document, head, fallback=_nfc(title_fallback or cycle_locator))
         extras = max(0, sum(1 for row in rows if row.get("audience") == "user") - 1)
         selected_by = "audience" if any(
             row["has_audience"] for row in rows if row.get("audience") == "user") else "name-rule"
@@ -476,7 +550,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             "cycle_path": locator,
             "date": date,
             "title": title,
-            "summary": _summarize(_read_head(document),
+            "summary": _summarize(head,
                                   html_document=document.name.casefold().endswith((".html", ".htm"))),
             "doc_path": document_rel,
             "extra": extras,

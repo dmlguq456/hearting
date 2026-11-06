@@ -202,6 +202,27 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(status, 404); self.assertNotIn(b'EXTERNAL_SENTINEL', body)
 
 
+    def test_helpers_are_the_shared_entrance_ones(self):
+        # The viewer opens through artifact_entrance; only hidden-name policy is its own.
+        with mock.patch.object(V.entrance, 'open_relative', side_effect=FileNotFoundError) as shared:
+            self.assertEqual(self.request('/campaigns')[0], 404)
+        shared.assert_called()
+        self.assertEqual(shared.call_args.args[2], V.HIDDEN)
+
+    def test_bind_failure_closes_root_fd_once_and_reports_busy(self):
+        import errno
+        busy = socket.socket(); busy.bind(('127.0.0.1', 0)); busy.listen(1)
+        try:
+            before = len(os.listdir('/proc/self/fd')) if os.path.isdir('/proc/self/fd') else None
+            with self.assertRaises(OSError) as caught:
+                V.ViewerServer(self.root, busy.getsockname()[1])
+            self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+            if before is not None:
+                self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        finally:
+            busy.close()
+
+
 class ProbeTests(unittest.TestCase):
     def test_root_refusal_and_arguments(self):
         for result, code in ((mock.Mock(returncode=7, stderr='refused', stdout=''), 7),
