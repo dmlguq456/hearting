@@ -286,9 +286,14 @@ async function request(req) {
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // Native TUIs distinguish a paste event from a later Enter. Keyboard bytes
-  // remain ordered behind this submission until the native prompt callback.
+  // remain ordered behind this paste and Enter, independently of callbacks.
   child.write('\x1b[200~'+data.text+'\x1b[201~');
-  setTimeout(()=>{if(!ended&&selection===selected&&currentDelivery===req.ref)child.write('\r');},50);
+  setTimeout(()=>{
+    if(!ended&&selection===selected&&currentDelivery===req.ref){
+      child.write('\r');deliveries.set(req.ref,'transport-submitted');
+      currentDelivery=undefined;state='unknown';releaseHeld();rebuildDisplay();
+    }
+  },50);
   rebuildDisplay();return {ok:true,state:'transport-accepted'};
 }
 terminal.parser.registerCsiHandler({prefix:'?',final:'h'},p=>{if(p.includes(25))cursorVisible=true;return false;});

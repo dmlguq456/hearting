@@ -243,15 +243,12 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     reserved = peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
     if reserved is None:
         return {"ok": False, "reason": "peer-delivery-already-claimed", "not_started": True}
-    claimed = peer.begin_pending_write(reserved, recipient=recipient, receipt="session-shell-inflight")
-    if claimed is None:
-        peer.release_pending_herdr_claim(reserved)
-        return {"ok": False, "reason": "peer-delivery-already-claimed", "not_started": True}
-    result = control(binding, "inject", ref=ref, claim=claimed["rpc_claim"], epoch=before.get("epoch"))
+    result = control(binding, "inject", ref=ref, claim=reserved["rpc_claim"], epoch=before.get("epoch"))
     if result.get("not_started") is True:
-        peer.release_unstarted_pending_write(claimed, receipt="session-shell-not-started")
+        if not peer.release_unstarted_pending_write(reserved, receipt="session-shell-not-started"):
+            peer.release_pending_herdr_claim(reserved, receipt="session-shell-not-started")
     elif result.get("ok"):
-        peer.mark_pending_prompt_queued(ref, claimed["rpc_claim"])
+        peer.mark_pending_prompt_queued(ref, reserved["rpc_claim"])
     return result
 
 
@@ -442,10 +439,9 @@ def _backend_operation(request: dict) -> dict:
         peer = _peer_message()
         row = peer._read_pending(request.get("ref"))
         claim = request.get("claim")
-        if (not row or row.get("state") != "unverified" or row.get("no_trailer")
+        if (not row or row.get("state") != "pending" or row.get("no_trailer")
                 or not isinstance(claim, dict) or row.get("rpc_claim") != claim
-                or not peer._pending_target_matches(row, {"harness": harness, "session_id": sid})
-                or not peer._registered_submission_current(row)):
+                or not peer._pending_target_matches(row, {"harness": harness, "session_id": sid})):
             return {"ok": False, "reason": "peer-claim-changed"}
         owner = process(claim.get("pid"))
         if not owner or owner["start"] != claim.get("start"):
@@ -454,6 +450,13 @@ def _backend_operation(request: dict) -> dict:
         if (not isinstance(text, str) or not text.strip() or len(text.encode()) > 32768
                 or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in text)):
             return {"ok": False, "reason": "unsafe-payload"}
+        # The source's existing first-write predicate belongs here, after the
+        # final native observation, while the reservation is still pending.
+        # The live sender owns this claim; the private parent owns this PTY.
+        begun = peer.begin_pending_write(row, recipient={"harness": harness, "session_id": sid},
+            receipt="session-shell-inflight", claimant={"pid": owner["pid"], "start": owner["start"]})
+        if begun is None:
+            return {"ok": False, "reason": "peer-claim-changed"}
         return {"ok": True, "text": text}
     return {"ok": False, "reason": "unknown-operation"}
 

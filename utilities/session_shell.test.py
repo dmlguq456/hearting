@@ -222,6 +222,42 @@ class SessionShellTest(unittest.TestCase):
             with self.subTest(native=observed), mock.patch.object(session_registry, "read", return_value=observed):
                 self.assertFalse(shell._input_readiness(row, {"screen": screen, "state": "idle"})["ready"])
 
+    def test_the_backend_begins_the_existing_pending_write_at_its_final_admission(self):
+        peer = shell._peer_message(); binding = self.binding(); root = self.root / "peer-state"
+        recipient = {"harness": "claude", "session_id": binding["sid"]}
+        with mock.patch.object(peer, "peer_state_root", return_value=root), \
+                mock.patch.object(peer, "steward_marker_roots", return_value=([root], "fixture")), \
+                mock.patch.object(shell.os, "getppid", return_value=os.getpid()), \
+                mock.patch.object(shell, "_input_readiness", return_value={"ok": True, "ready": True}):
+            _text, ref = peer.prepare_peer_message("queued-contract-fixture",
+                {"harness": "codex", "session_id": "synthetic-sender"}, recipient, defer=True)
+            reserved = peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
+            self.assertIsNotNone(reserved)
+            self.assertEqual(peer._read_pending(ref)["state"], "pending")
+            result = shell._backend_operation({"op": "payload", "binding": binding,
+                                               "ref": ref, "claim": reserved["rpc_claim"]})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(peer._read_pending(ref)["state"], "unverified")
+
+    def test_the_sender_keeps_a_reservation_pending_until_native_admission(self):
+        peer = shell._peer_message(); binding = self.binding(); root = self.root / "peer-state"
+        recipient = {"harness": "claude", "session_id": binding["sid"]}; observed = []
+        with mock.patch.object(peer, "peer_state_root", return_value=root), \
+                mock.patch.object(peer, "steward_marker_roots", return_value=([root], "fixture")), \
+                mock.patch.object(shell, "exact_binding", return_value=(binding, "")):
+            _text, ref = peer.prepare_peer_message("sender-contract-fixture",
+                {"harness": "codex", "session_id": "synthetic-sender"}, recipient, defer=True)
+            def native_control(_binding, operation, **_fields):
+                if operation == "status":return {"ok": True, "state": "idle", "empty": True, "epoch": 0}
+                observed.append(peer._read_pending(ref)["state"])
+                return {"ok": False, "not_started": True, "reason": "input-changed"}
+            with mock.patch.object(shell, "control", side_effect=native_control):
+                result = shell.deliver_pending(ref, "claude", binding["sid"])
+            self.assertTrue(result["not_started"])
+            self.assertEqual(observed, ["pending"])
+            row = peer._read_pending(ref)
+            self.assertEqual(row["state"], "pending");self.assertIsNone(row["rpc_claim"])
+
     def test_codex_stop_reports_completion_to_its_wrapped_display(self):
         path = Path(__file__).resolve().parents[1] / "adapters/codex/hooks/stop-lifecycle.py"
         spec = importlib.util.spec_from_file_location("shell_codex_stop_fixture", path)

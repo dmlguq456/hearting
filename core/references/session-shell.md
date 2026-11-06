@@ -12,7 +12,10 @@ attachment changes cannot retarget a retained message. The shell publishes its
 current native selection and process birth through the existing session record.
 An idle wake requires the same live identity, an empty composer, no open form,
 and an unchanged input generation. Human drafts and concurrent typing survive
-the operation. Unknown readiness retains the existing pending delivery. Select
+the operation. Keyboard bytes remain ordered behind the admitted paste and its
+Enter, and are released once Enter is written even if a lifecycle callback is
+lost. That transport boundary never acknowledges peer consumption.
+Unknown readiness retains the existing pending delivery. Select
 one verified transport for a message; an uncertain submission never triggers
 an alternate send. Codex keeps its native queue and exact receive evidence.
 Native start, prompt and turn-completion callbacks update display identity and

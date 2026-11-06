@@ -14,7 +14,7 @@ from unittest import mock
 ROOT=Path(__file__).resolve().parents[1]
 
 FAKE_NATIVE=r"""
-import json,os,socket,subprocess,sys,time,tty
+import json,os,select,socket,subprocess,sys,time,tty
 from pathlib import Path
 sid=sys.argv[1]
 def event(kind,identity=sid):
@@ -32,21 +32,25 @@ def event(kind,identity=sid):
 if '--headless-event' in sys.argv:
     event('start',sid+'-child');raise SystemExit()
 tty.setraw(0)
+exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
 began=time.monotonic();event('start');delay=(time.monotonic()-began)*1000
 print('\x1b[?2004hACK_MS='+str(delay)+'\r\nREADY\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
 pending=''
 while True:
+    readable,_,_=select.select([0,exit_fd],[],[])
+    if exit_fd in readable:break
     data=os.read(0,65536)
     if not data or data==b'\x03':break
     pending+=data.decode()
     while '\r' in pending:
         line,pending=pending.split('\r',1)
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
-        event('prompt')
+        callback_missing='PEER_NO_CALLBACK' in line
+        if not callback_missing:event('prompt')
         if line=='spawn-child':
             subprocess.run([sys.executable,__file__,sid,'--headless-event'],
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
-        event('stop')
+        if not callback_missing:event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
 """
@@ -92,7 +96,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.barrier)barrier=fs.openSync(cfg.barrier,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);
  child=pty.spawn(process.execPath,[cfg.launcher,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:100,rows:30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
-        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH}});
+        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo}});
  child.onData(text=>{raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
@@ -112,6 +116,13 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('form\r').toString('base64')});await waitFor(/Do you want to proceed/);
  }else if(cfg.scenario==='unpainted-draft'){
    await rpc(cfg.inlet,{batch:Buffer.from('unpainted draft').toString('base64')});
+ }else if(cfg.scenario==='missing-callback'){
+   const cp=require('node:child_process');
+   const body="import json,sys;sys.path.insert(0,"+JSON.stringify(cfg.utilities)+");import session_shell as s;s.registry_root();p=s._peer_message();text,ref=p.prepare_peer_message('PEER_NO_CALLBACK',{'harness':'codex','session_id':'synthetic-sender'},{'harness':'claude','session_id':sys.argv[1]},defer=True);print(json.dumps(s.deliver_pending(ref,'claude',sys.argv[1])))";
+   const sent=JSON.parse(cp.execFileSync(cfg.python,['-c',body,cfg.sid],{env:{...process.env},encoding:'utf8'}));
+   if(!sent.ok)throw Error('synthetic admission failed '+JSON.stringify(sent));
+   await rpc(cfg.inlet,{batch:Buffer.from('held human').toString('base64')});
+   await waitFor(/PEER_NO_CALLBACK/);
  }
  const displayLag=[];
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
@@ -125,7 +136,12 @@ function existing(file){return new Promise((resolve,reject)=>{
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);}
-   if(child&&alive){child.write('\x03');await Promise.race([exit,new Promise((_,reject)=>setTimeout(()=>reject(Error('owned native child did not exit')),5000))]);}
+   if(child&&alive){
+     const exitFD=fs.openSync(cfg.exit_fifo,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(exitFD,Buffer.from('q'));fs.closeSync(exitFD);
+     await new Promise((resolve,reject)=>{
+     const timeout=setTimeout(()=>reject(Error('owned native child did not exit')),5000);
+     exit.then(()=>{clearTimeout(timeout);resolve();});
+   });}
  }
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
 """
@@ -161,6 +177,7 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def run_loop(self,scenario,*,blocked_backend=False):
         directory=self.root/('case-'+scenario);directory.mkdir(mode=0o700)
+        exit_fifo=directory/'native-exit';os.mkfifo(exit_fifo,0o600)
         sid='00000000-0000-4000-8000-000000000052'
         import time
         cache=Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits'
@@ -179,7 +196,8 @@ class SessionShellPTYTest(unittest.TestCase):
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
                 'launcher':str(self.launcher),'python':sys.executable,'fake':str(self.fake),'sid':sid,
                 'project':str(self.project),'backend':backend,'barrier':str(barrier) if barrier else None,
-                'registry':str(self.registry),'scenario':scenario}
+                'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
+                'exit_fifo':str(exit_fifo)}
         from fleet import titles
         with mock.patch.dict(os.environ,self.env,clear=True):
             title=Path(titles.sidecar_path(sid,'claude'))
@@ -234,6 +252,10 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_a_draft_waiting_for_native_paint_is_not_proved_empty_by_the_old_screen(self):
         result=self.run_loop('unpainted-draft')
         self.assertFalse(result['status']['empty'])
+
+    def test_missing_native_callback_cannot_leave_human_keyboard_bytes_held(self):
+        result=self.run_loop('missing-callback')
+        self.assertEqual(result['status']['held_bytes'],0)
 
 
 if __name__=='__main__':unittest.main()
