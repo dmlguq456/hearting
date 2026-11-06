@@ -148,6 +148,19 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
 
+### Optional session panel
+
+`hearting session shell enable` enables a common status line and a read-only
+bottom panel for new Claude, Codex and OpenCode terminals. It is off by default;
+`hearting session shell status` reports the choice and `hearting session shell
+disable` restores native launch behavior. Existing sessions keep running.
+
+Press **Ctrl+]** inside a wrapped session to expand its route stages, questions,
+received peer messages and your last input. The same key on its session page in
+Fleet opens that exact session's panel. Answers stay in Fleet. Peer wake works
+without Herdr; Codex keeps its native queue. Native context remains as a fallback
+where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
+
 ### Key screens
 
 <table>

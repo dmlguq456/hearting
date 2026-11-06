@@ -128,6 +128,16 @@ class SessionShellTest(unittest.TestCase):
         self.assertEqual(received[0]["op"], "panel")
         self.assertEqual(received[0]["native_pid"], row["native_pid"])
 
+    def test_panel_request_uses_a_frozen_native_identity(self):
+        row = self.binding(); self.save(row)
+        received = self.serve(row) if hasattr(shell, "open_panel") else []
+        open_panel = getattr(shell, "open_panel", lambda *_: {"ok": False})
+        result = open_panel("claude", row["sid"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(received[0]["op"], "panel")
+        self.assertTrue(received[0]["expanded"])
+        self.assertEqual(received[0]["sid"], row["sid"])
+
     def test_changed_reply_is_ambiguous_and_never_claimed_not_started(self):
         row = self.binding(); self.serve(row, change_reply=True)
         reply = shell.control(row, "panel", expanded=True)

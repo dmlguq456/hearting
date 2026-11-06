@@ -3156,13 +3156,29 @@ def _explorer_click_current(size, snapshot):
                 and (getattr(frame, "rows", None), getattr(frame, "cols", None)) == tuple(size))
 
 
-def _explorer_apply_effects(effects, vm):
+def _explorer_open_shell_panel(effect, snapshot, vm):
+    if (_EXPLORER_REPLAY_ACTIVE or snapshot is None
+            or getattr(_EXPLORER_STATE, "scope", "") != "session:" + str(effect[1])):
+        return None
+    selected = _explorer_requests(snapshot, _EXPLORER_STATE, vm).get("session")
+    if selected is None:
+        return None
+    from .explorer.focus import utility
+    key = selected[0]
+    return utility("session_shell").open_panel(key.harness, key.sid)
+
+
+def _explorer_apply_effects(effects, vm, *, snapshot=None):
     """Run typed explorer effects and publish immediate action feedback."""
     from dataclasses import replace as _replace_state
     global _EXPLORER_STATE, _EXPLORER_MODEL, _EXPLORER_PUBLISHED_MODEL
     global _EXPLORER_COMPOSE_MODEL, _EXPLORER_RESULT
 
     effects = tuple(effects or ())
+    for effect in effects:
+        if effect and effect[0] == "shell.panel":
+            _explorer_open_shell_panel(effect, snapshot, vm)
+    effects = tuple(effect for effect in effects if not effect or effect[0] != "shell.panel")
     question_effects = tuple(effect for effect in effects
                              if effect and isinstance(effect[0], str)
                              and effect[0].startswith("questions."))
@@ -6533,7 +6549,7 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
                         _explorer_gesture_binding(_EXPLORER_MODEL, state.drag[2])))
                 _effects.extend(effects)
             _EXPLORER_STATE = state
-            _explorer_apply_effects(_effects, _EXPLORER_MODEL)
+            _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
         return
     from .explorer.state import models_finding
     editing = (state.view == "QUESTIONS" and _explorer_question_editing()) or models_finding(state)
@@ -6553,7 +6569,7 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             event["max_scroll"] = measure_pane_max(
                 _EXPLORER_MODEL, state, int(size[1]), int(size[0]))
         _EXPLORER_STATE, _effects = reduce(state, event, _EXPLORER_FRAME)
-        _explorer_apply_effects(_effects, _EXPLORER_MODEL)
+        _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
 
 
 def _explorer_note_earlier(before, key):

@@ -145,6 +145,19 @@
 
 LAST INPUT은 마지막으로 확인한 사람 입력을 `› 1m · …`로 보여 줍니다. `› ?`는 설치 전에 첫 줄이 남지 않았거나 해당 세션의 입력 기록을 읽을 수 없어 본문을 확인하지 못했다는 뜻이고, `› ·`는 기록된 사람 입력이 없다는 뜻입니다. 펼치면 NOW와 RECEIVED가 나옵니다.
 
+### 선택해서 쓰는 세션 패널
+
+`hearting session shell enable`로 새 Claude·Codex·OpenCode 터미널에 공통 상태줄과
+읽기 전용 하단 패널을 켭니다. 기본값은 꺼짐입니다. `hearting session shell status`로
+설정을 확인하고 `hearting session shell disable`로 원래 실행 방식으로 되돌립니다.
+이미 실행 중인 세션은 그대로 동작합니다.
+
+감싼 세션에서 **Ctrl+]**를 누르면 그 세션의 route 단계, 질문, 받은 peer 메시지와
+내 마지막 입력을 펼칩니다. Fleet의 해당 세션 페이지에서도 같은 키로 정확히 그
+세션의 패널을 엽니다. 답하기는 Fleet에서 합니다. Herdr 없이도 peer로 쉬는 세션을
+깨우며, Codex는 기존 native queue를 씁니다. 독립된 기록에서 문맥 값을 확인할 수
+없으면 native 문맥 표시를 함께 남깁니다. Herdr·cmux·tmux는 선택 사항입니다.
+
 ### 핵심 화면
 
 <table>

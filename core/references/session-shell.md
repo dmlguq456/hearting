@@ -47,3 +47,8 @@ lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.
 A value that cannot meet this is compared with retaining that native field.
+The first slice retains Claude's native context field because its independent
+transcript has no proven denominator. Its other Hearting decorations yield.
+Wrapped Codex keeps the official thread ID and native context fields through
+an invocation-only footer preference; stored settings and permission flags stay
+with their existing owner. OpenCode's Hearting route footer yields to the shell.

@@ -146,6 +146,12 @@ def exact_binding(harness: str, sid: str) -> tuple[dict | None, str]:
     return (rows[0], "") if len(rows) == 1 else (None, "attachment-ambiguous" if rows else "attachment-unavailable")
 
 
+def open_panel(harness: str, sid: str) -> dict:
+    """A display request keeps the caller's exact native address throughout."""
+    binding, reason = exact_binding(harness, sid)
+    return control(binding, "panel", expanded=True) if binding else {"ok": False, "reason": reason}
+
+
 def control(binding: dict, operation: str, **fields) -> dict:
     """One bounded request to the same live attachment, never a different fallback."""
     if not valid_binding(binding):
@@ -366,7 +372,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
             "watch": watched, "lines": [f"하팅 {tag} · {harness}  Ctrl+] 접기",
-            "ROUTES  " + (_plain(route) or ("열린 route 없음" if counts is not None else "확인 안 됨")),
+            "ROUTES  " + (_plain(route) or "?"),
             f"QUESTIONS {count if count is not None else '?'} · Fleet에서 열기",
             *question_lines[:3], *peers, human_line]}
 

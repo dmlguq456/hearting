@@ -42,6 +42,12 @@ def asset_root(node):
     return cache / "hearting" / "session-shell" / asset_key(node)
 
 
+def wrapped_command(harness, command):
+    if harness == "codex":
+        return [command[0], "-c", 'tui.status_line=["thread-id","context-used"]', *command[1:]]
+    return list(command)
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 2 or args[0] not in session_shell.HARNESSES:
@@ -72,7 +78,7 @@ def main(argv=None):
         previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             try:
-                child = subprocess.Popen([node, str(Path(__file__).with_name("host.cjs")), harness, *command],
+                child = subprocess.Popen([node, str(Path(__file__).with_name("host.cjs")), harness, *wrapped_command(harness, command)],
                                          env=env, pass_fds=(write_fd,))
             except OSError:
                 os.close(read_fd);os.close(write_fd);signal.signal(signal.SIGINT, previous);original()
