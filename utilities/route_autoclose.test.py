@@ -24,6 +24,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+import fixture_processes  # noqa: E402
 import artifact_producer  # noqa: E402
 from split_module_fixture import patch_split  # noqa: E402
 
@@ -101,6 +103,9 @@ class RouteAutocloseTest(unittest.TestCase):
     def tearDown(self):
         for proc in self.processes:
             proc.kill(); proc.wait()
+        # CLI completion may leave fixture-owned asynchronous receipt writers.
+        # Reuse the existing lifetime cleanup before deleting their state root.
+        fixture_processes.reap(str(self.base))
         self.temp.cleanup()
 
     # ---- drivers --------------------------------------------------------
