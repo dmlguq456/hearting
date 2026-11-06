@@ -32,6 +32,7 @@ file format, file name or location for such rows.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -811,27 +812,62 @@ def _first_cycle_record(root: Path, snapshot: Dict[str, Any], cycle_id: str) -> 
         pass  # the record is an optional notification, never part of the entrance
 
 
-def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
-    """Rewrite the four entrance files when their bytes differ; never touch anything else."""
+# Process-local hint only. Files are rechecked before reuse; no sidecar or persistent
+# state is created, and process startup always computes the pages normally.
+_ALL_PAGE_CACHE: Dict[str, Any] = {}
+
+
+def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
+    """Refresh once and return the same snapshot to the calling command."""
     root = Path(root)
     result: Dict[str, Any] = {
         "status": "skipped-no-root", "paths": [], "foreign": [], "created": [],
         "selected_by": {"audience": 0, "name-rule": 0},
     }
     if not root.is_dir():
-        return result
+        return result, None
     snapshot = scan(root)
     t = _translator()
     payloads = {
         "README.md": render_markdown(snapshot, t),
         "index.html": render_html(snapshot, t),
-        "all-campaigns.md": render_all_markdown(snapshot, t),
-        "all-campaigns.html": render_all_html(snapshot, t),
     }
+    # All page inputs, translations and renderer implementation determine reuse.
+    # The cached file bytes are compared as well, so foreign edits and missing
+    # files always go through the regular marker and symlink checks below.
+    cache_key = str(root.absolute())
+    try:
+        renderer_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        renderer_revision = None  # no reliable identity: render normally
+    fingerprint = json.dumps([snapshot["all_campaigns"], getattr(t, "lang", "en"),
+        [t(k, **fields) for k, fields in (
+            ("entrance.all_campaigns", {}), ("entrance.back", {}),
+            ("entrance.cycles", {"count": "123"}),
+            ("entrance.latest", {"date": "sample"}),
+            ("entrance.empty", {}), ("entrance.rewrite", {}))],
+        renderer_revision],
+        ensure_ascii=False, sort_keys=True)
+    cached = _ALL_PAGE_CACHE.get(cache_key)
+    reuse = bool(renderer_revision and cached and cached[0] == fingerprint)
+    if reuse:
+        try:
+            for name, data in cached[1].items():
+                path = root / name
+                if path.is_symlink() or not path.is_file() or path.read_bytes() != data:
+                    reuse = False
+                    break
+        except OSError:
+            reuse = False
+    if not reuse:
+        payloads["all-campaigns.md"] = render_all_markdown(snapshot, t)
+        payloads["all-campaigns.html"] = render_all_html(snapshot, t)
     written: List[str] = []
     foreign: List[str] = []
     created: List[str] = []
     for name in ENTRANCE_NAMES:
+        if name not in payloads:
+            continue
         path = root / name
         data = payloads[name].encode("utf-8")
         if os.path.islink(str(path)):
@@ -857,6 +893,22 @@ def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
             store._write_atomic(path, data)
             written.append(name)
             created.append(name)
+    if not reuse:
+        cached_pages = {}
+        for name in ("all-campaigns.md", "all-campaigns.html"):
+            path = root / name
+            data = payloads[name].encode("utf-8")
+            try:
+                if not path.is_symlink() and path.is_file() and path.read_bytes() == data and _has_marker(data):
+                    cached_pages[name] = data
+            except OSError:
+                pass
+        if renderer_revision and len(cached_pages) == 2:
+            if len(_ALL_PAGE_CACHE) >= 16 and cache_key not in _ALL_PAGE_CACHE:
+                _ALL_PAGE_CACHE.pop(next(iter(_ALL_PAGE_CACHE)))
+            _ALL_PAGE_CACHE[cache_key] = (fingerprint, cached_pages)
+        else:
+            _ALL_PAGE_CACHE.pop(cache_key, None)
     _first_cycle_record(root, snapshot, cycle_id or "")
     if written:
         status = "written"
@@ -871,7 +923,12 @@ def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
         "created": created,
         "selected_by": snapshot["selected_by"],
     })
-    return result
+    return result, snapshot
+
+
+def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
+    """Rewrite the entrance files when their bytes differ."""
+    return _refresh_and_snapshot(root, cycle_id)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -920,9 +977,9 @@ def _open_externally(path: Path) -> None:
 
 
 def _command_reports(root: Path) -> int:
-    result = refresh(root)
+    result, snapshot = _refresh_and_snapshot(root)
     t = _translator()
-    rows = recent_rows(root)
+    rows = snapshot["recent"] if snapshot else []
     if not rows:
         print(t("reports.empty"))
     else:
@@ -942,10 +999,11 @@ def _open_target(root: Path) -> Path:
 
 def _command_open(root: Path, args: Sequence[str]) -> int:
     t = _translator()
-    refresh(root)
-    rows = recent_rows(root)
+    _, snapshot = _refresh_and_snapshot(root)
+    rows = snapshot["recent"] if snapshot else []
     if not args:
-        print(str(_open_target(root)))
+        target = root / "index.html"
+        print(str(target))
         return 0
     selector = " ".join(args)
     chosen: Optional[Dict[str, Any]] = None
@@ -968,6 +1026,7 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
     print(str(target))
     _open_externally(target)
     return 0
+
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

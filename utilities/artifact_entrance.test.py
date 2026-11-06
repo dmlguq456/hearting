@@ -2,6 +2,14 @@
 """Root read-entrance tests: determinism, ownership, read-only, rows, links, CLI."""
 import hashlib
 import itertools
+import contextlib
+import copy
+import io
+import importlib.util
+import shutil
+import statistics
+import time
+from unittest import mock
 import json
 import os
 import re
@@ -583,6 +591,66 @@ class FirstCycleRecordTests(EntranceFixture):
         self.assertEqual(result["status"], "skipped-no-root")
         self.assertFalse(missing.exists())
 
+
+
+class EntranceIntegrationTests(EntranceFixture):
+    def test_one_scan_commands_and_reuse(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        with mock.patch.object(E, 'scan', wraps=E.scan) as scan, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            E._command_reports(self.root)
+            self.assertEqual(scan.call_count, 1)
+            scan.reset_mock(); E._command_open(self.root, [])
+            self.assertEqual(scan.call_count, 1)
+            scan.reset_mock(); E._command_open(self.root, ['not-found'])
+            self.assertEqual(scan.call_count, 1)
+        with mock.patch.object(E, 'render_all_markdown', wraps=E.render_all_markdown) as md, mock.patch.object(E, 'render_all_html', wraps=E.render_all_html) as ht:
+            before = [(self.root/n).read_bytes() for n in ('all-campaigns.md', 'all-campaigns.html')]
+            E.refresh(self.root)
+            self.assertEqual((md.call_count, ht.call_count), (0, 0))
+            self.assertEqual(before, [(self.root/n).read_bytes() for n in ('all-campaigns.md', 'all-campaigns.html')])
+            (self.root/'all-campaigns.md').unlink()  # destructive-ok: own temporary fixture
+            E.refresh(self.root)
+            self.assertEqual((md.call_count, ht.call_count), (1, 1))
+
+    def test_all_page_cache_invalidates_every_row_change(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        snapshot = E.scan(self.root)
+        self.assertTrue(snapshot['all_campaigns'])
+        with mock.patch.object(E, 'scan', return_value=snapshot): E.refresh(self.root)
+        for field, replacement in (('title', 'new title'), ('date', '2026-02-01'), ('cycles', 99), ('path', 'campaigns/other')):
+            changed = copy.deepcopy(snapshot); changed['all_campaigns'][0][field] = replacement
+            with mock.patch.object(E, 'scan', return_value=changed), mock.patch.object(E, 'render_all_html', wraps=E.render_all_html) as render:
+                E.refresh(self.root)
+                self.assertEqual(render.call_count, 1, field)
+            with mock.patch.object(E, 'scan', return_value=snapshot): E.refresh(self.root)
+
+
+
+class EntrancePerformanceTests(EntranceFixture):
+    def test_refresh_command_snapshot_benchmark(self):
+        # A sealed A source baseline, copied only to this test's private scratch.
+        for campaign in range(100):
+            for cycle in range(10):
+                self.cycle(f'2026-01-01_c{campaign:03}', f'2026-01-01_n{cycle:02}',
+                           [('artifacts/report.md', '# Result\nshort report')])
+        baseline_root = self.base/'baseline'; shutil.copytree(self.root, baseline_root)
+        original = subprocess.check_output(['git', 'show', 'a1f81c142:utilities/artifact_entrance.py'], text=True)
+        baseline_path = self.base/'baseline_entrance.py'; baseline_path.write_text(original)
+        spec = importlib.util.spec_from_file_location('baseline_entrance', baseline_path)
+        baseline = importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline)
+        observations = []
+        for name, module, root in [('baseline', baseline, baseline_root), ('current', E, self.root)]:
+            timings = []
+            with mock.patch.object(module, 'scan', wraps=module.scan) as scan, mock.patch.object(module, 'render_all_html', wraps=module.render_all_html) as render:
+                start = time.perf_counter(); module.refresh(root); first = time.perf_counter()-start
+                module.refresh(root)  # warm-up
+                scans_before, renders_before = scan.call_count, render.call_count
+                for _ in range(5):
+                    start = time.perf_counter(); module.refresh(root); timings.append(time.perf_counter()-start)
+                self.assertEqual(scan.call_count-scans_before, 5)
+                if name == 'current': self.assertEqual(render.call_count-renders_before, 0)
+                observations.append(f'{name} first={first:.4f}s warm median={statistics.median(timings):.4f}s min={min(timings):.4f}s max={max(timings):.4f}s scans={scan.call_count-scans_before} renders={render.call_count-renders_before}')
+        print('\n100x10 warm-cache benchmark: ' + '; '.join(observations))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
