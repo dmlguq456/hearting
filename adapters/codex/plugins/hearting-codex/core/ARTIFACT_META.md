@@ -132,13 +132,18 @@ strings). Without a project file the default display name is the project folder 
 ### `현황.md` / `STATUS.md` — the project status document
 
 One short page a person reads first to see where a project stands. Fleet puts its one
-line on the project's OVERVIEW rule and its parts at the top of the project page; Cairn
-pins it at the top of the project. Writing one is optional and nothing waits on it:
+line on the project's OVERVIEW rule and its parts at the top of the project page.
+Writing one is optional and nothing waits on it:
 without one, Fleet builds the line from the routes, questions and results it already
 shows.
 
-- **Where.** `campaigns/<campaign-locator>/<cycle-locator>/artifacts/현황.md` (or
-  `STATUS.md`), directly under the cycle's `artifacts/`. When `finalize` picks the
+- **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
+  the campaign folder. Fleet prefers these campaign pages, reads up to three newest
+  summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
+  page in place is observed even when the campaign directory's timestamp is old.
+- **Legacy documents.** With no campaign page, Fleet reads status documents directly
+  in a cycle's `artifacts/` and the legacy flat `research/<folder>/` copies. When
+  `finalize` picks the
   primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
   after the official spec PRD; an explicit `--primary` still wins), and its row carries
   `audience: "user"`, so Cairn's status row and Fleet's project line read the same file
@@ -146,9 +151,8 @@ shows.
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123). The most recently
-  modified one in the artifact root is the project's current status. Fleet also keeps
-  reading the legacy flat folder, `research/<folder>/현황.md`.
+  and edits it in place (a finalized cycle still takes writes, D-123). Fleet keeps the
+  most recently modified legacy document when no campaign page is available.
 - **Shape.** Markdown in the reader's language. Only the parts below are read; other
   sections are free.
 

@@ -8,6 +8,7 @@ and an unknown value is ``None``. Additive route and question fields and the rep
 record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
 import unittest
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -69,8 +70,21 @@ REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions"))
 
 def repo_status(value):
     """The optional per-project status line (D4 #3): counts, optional texts and the stale flag."""
-    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale"}:
+    if not isinstance(value, dict) or set(value) - REPO_STATUS_TEXT - REPO_STATUS_COUNT - {"stale", "campaigns"}:
         return False
+    campaigns = value.get("campaigns", ())
+    if not isinstance(campaigns, (list, tuple)) or len(campaigns) > 3:
+        return False
+    for row in campaigns:
+        texts = {"title", "line", "path", "name", "relative", "campaign", "doc_age"}
+        if (not isinstance(row, dict) or set(row) - texts - {"mtime", "stale", "decisions", "next"}
+                or any(row[key] is not None and not isinstance(row[key], str) for key in texts & set(row))
+                or row.get("mtime") is not None and type(row["mtime"]) not in (int, float)
+                or type(row.get("stale", False)) is not bool):
+            return False
+        if any(not isinstance(row.get(key, ()), (list, tuple))
+               or any(not isinstance(item, str) for item in row.get(key, ())) for key in ("decisions", "next")):
+            return False
     return (all(type(value[key]) is int and value[key] >= 0 for key in REPO_STATUS_COUNT & set(value))
             and all(value[key] is None or isinstance(value[key], str) for key in REPO_STATUS_TEXT & set(value))
             and type(value.get("stale", False)) is bool)
@@ -142,6 +156,11 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
+            if (path, key) in (("routes[]", "result_at"), ("repos[]", "done_at")):
+                value = live[key]
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                    problems.append(f"{path}.{key}: expected optional finite completion timestamp")
+                continue
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
                                               "worker_context_index", "owner_waits"):
                 if not route_extension(key, live[key]):
@@ -154,6 +173,10 @@ def conform(live, samples, path, problems):
             if path == "repos[]" and key == "status":
                 if not repo_status(live[key]):
                     problems.append(f"{path}.status: invalid optional status shape")
+                continue
+            if path == "repos[]" and key == "done_result":
+                if live[key] is not None and not isinstance(live[key], str):
+                    problems.append(f"{path}.done_result: expected optional outcome string")
                 continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
@@ -238,6 +261,28 @@ class SectionShapes(unittest.TestCase):
             with self.subTest(section=section):
                 self.assertTrue(self.live[section], f"live {section} is empty — the sample has no source")
                 self.check(section)
+
+    def test_campaign_summary_extension_is_bounded_and_typed(self):
+        row = {"campaign": "v4", "line": "Remaining work", "mtime": 1.0,
+               "doc_age": "1m", "stale": False, "decisions": [], "next": []}
+        self.assertTrue(repo_status({"campaigns": [row]}))
+        self.assertFalse(repo_status({"campaigns": [row] * 4}))
+        self.assertFalse(repo_status({"campaigns": [dict(row, line={"unreadable": True})]}))
+
+    def test_repo_outcome_extension_rejects_an_object(self):
+        problems = []
+        conform([{"id": "demo", "done_result": {"status": "success"}}],
+                [self.fixture["repos"]], "repos", problems)
+        self.assertTrue(any("done_result" in message for message in problems))
+
+    def test_completion_timestamp_extensions_reject_guessed_or_malformed_values(self):
+        for section, key in (("repos", "done_at"), ("routes", "result_at")):
+            for value in (None, 0, 123.5, True, "1m", {}, float("nan")):
+                with self.subTest(section=section, value=value):
+                    problems = []
+                    conform([{key: value}], [self.fixture[section]], section, problems)
+                    self.assertEqual(bool(problems), value is not None and
+                                     (type(value) not in (int, float) or not math.isfinite(value)))
 
     def test_answered_records_are_the_recorded_user_answers_and_have_the_fixture_shape(self):
         from tools.fleet.refresh import LiveSnapshot

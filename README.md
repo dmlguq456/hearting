@@ -148,6 +148,11 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
 
+Select a project in SESSIONS for its campaign status, backlog and work in progress,
+open requests and stages, completed results, recent small work records, and sessions.
+Open work uses the same records as MEMORY; saving a memory does not count as completing
+a task. Select a session to open its page, or expand its row in OVERVIEW.
+
 ### Optional session panel
 
 `hearting session shell enable` enables a common status line and a read-only
@@ -320,9 +325,10 @@ requests (a new project starts one named after its folder):
 | `spec/` | Blueprint components; the current revision is shared under `.agent_reports/shared/spec/`, and a revision keeps the previous one |
 | `documents/`, `experiments/` | Drafted documents; experiment setups and results |
 
-A campaign can keep one status page, `STATUS.md` in a cycle's `artifacts/`;
-Hearting never creates it. Fleet shows its one-line summary on the project's
-line, and each request that closes adds a line under "Recently closed".
+A campaign can keep a status page, `STATUS.md` directly in its folder;
+Hearting never creates it. Fleet prefers campaign status pages and falls back
+to older cycle or research status documents. The project page shows up to three
+campaign summaries; OVERVIEW keeps the project's one-line summary.
 
 The root's `README.md` (open `index.html` in a browser) collects the most recent
 results and campaigns with relative links, and Hearting rewrites it at every

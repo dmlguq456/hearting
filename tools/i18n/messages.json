@@ -518,6 +518,54 @@
    "en": "could not read · {reason}",
    "ko": "읽지 못함 · {reason}"
   },
+  "fleet.repo.journals": {
+   "en": "RECENT WORK",
+   "ko": "최근 작은 일"
+  },
+  "fleet.repo.no_journals": {
+   "en": "No observed work records yet.",
+   "ko": "아직 관측된 작은 일 기록 없음."
+  },
+  "fleet.repo.no_recent": {
+   "en": "No confirmed completed results.",
+   "ko": "확인된 완료 기록 없음."
+  },
+  "fleet.repo.no_routes": {
+   "en": "No open routes.",
+   "ko": "열린 route 없음."
+  },
+  "fleet.repo.no_sessions": {
+   "en": "No sessions.",
+   "ko": "세션 없음."
+  },
+  "fleet.repo.no_status": {
+   "en": "No status document.",
+   "ko": "현황 문서 없음."
+  },
+  "fleet.repo.no_work": {
+   "en": "No open work.",
+   "ko": "열린 일 없음."
+  },
+  "fleet.repo.open_work": {
+   "en": "OPEN WORK",
+   "ko": "백로그·진행"
+  },
+  "fleet.repo.recent": {
+   "en": "RECENT RESULTS",
+   "ko": "최근 처리"
+  },
+  "fleet.repo.routes": {
+   "en": "OPEN ROUTES",
+   "ko": "열린 route"
+  },
+  "fleet.repo.sessions": {
+   "en": "SESSIONS",
+   "ko": "세션"
+  },
+  "fleet.repo.status": {
+   "en": "STATUS",
+   "ko": "현황"
+  },
   "fleet.resume.stopped": {
    "en": "stopped after restart",
    "ko": "재시작 뒤 멈춤"

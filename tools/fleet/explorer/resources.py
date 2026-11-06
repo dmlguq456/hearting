@@ -219,6 +219,40 @@ def _memory_line(grid, x, y, right, label, when, text, key="soft", mark=None, co
     return y + 1
 
 
+def draw_open_work(grid, x, y, right, project, name, label, *, column=12,
+                   opened="", fold_key="memory:open", preview_rows=1):
+    """Reuse MEMORY's existing work counts, classifications, and fold rows."""
+    items = tuple(project.get("open") or ())
+    if items:
+        counts = project.get("counts") if isinstance(project.get("counts"), Mapping) else {}
+        grid.add_hit(y, x, right, ("fold", fold_key, name))
+        grid.put(x + 3, y, label, "label", limit=right)
+        cursor = x + column
+        more = "+" if project.get("limited") else ""
+        parts = [(ui_text("fleet.memory.count_doing", count=counts.get("doing", 0)), "g_spin_dim"),
+                 (ui_text("fleet.memory.count_waiting", count=counts.get("waiting", 0)), "lvl_y"),
+                 (ui_text("fleet.memory.count_open", count=counts.get("open", 0)) + more, "dim")]
+        if cell_width(" · ".join(text for text, _key in parts)) >= right - cursor:
+            parts = [(ui_text("fleet.memory.short_doing", count=counts.get("doing", 0)), "g_spin_dim"),
+                     (ui_text("fleet.memory.short_waiting", count=counts.get("waiting", 0)), "lvl_y"),
+                     (ui_text("fleet.memory.short_open", count=counts.get("open", 0)) + more, "dim")]
+        for part_index, (text, key) in enumerate(parts):
+            if part_index:
+                cursor = grid.put(cursor, y, " · ", "dim", limit=right)
+            zero = text.rsplit(" ", 1)[-1] == "0"           # a zero count is not highlighted
+            cursor = grid.put(cursor, y, text, "dim" if zero else key, limit=right)
+        toggle = ui_text("fleet.memory.collapse" if opened == name else "fleet.memory.expand")
+        if cursor + 2 + cell_width(toggle) < right - 1:
+            grid.put(right - 1 - cell_width(toggle), y, toggle, "soft", limit=right)
+        y += 1
+        for row in (items if opened == name else items[:preview_rows]):
+            stage, when, text = (tuple(row) + (None,) * 3)[:3]
+            word = OPEN_STAGE_WORDS.get(stage)
+            word = (ui_text(word[0]), word[1]) if word else (str(stage), "dim")
+            y = _memory_line(grid, x, y, right, None, when, text, mark=word, column=column)
+    return y
+
+
 def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
     """Per project: newest decisions, open work and recent changes, from stored headlines."""
     use = max(0, grid.cols - x - 2)
@@ -253,34 +287,8 @@ def draw_memory(grid: CellGrid, vm, state=None, x=34, y=3):
             when, text = (tuple(row) + (None,) * 2)[:2]
             y = _memory_line(grid, x, y, right, labels["fleet.memory.decisions"] if row_index == 0 else None,
                              when, text, column=column)
-        items = tuple(project.get("open") or ())
-        if items:
-            counts = project.get("counts") if isinstance(project.get("counts"), Mapping) else {}
-            grid.add_hit(y, x, right, ("fold", "memory:open", name))
-            grid.put(x + 3, y, labels["fleet.memory.open_work"], "label", limit=right)
-            cursor = x + column
-            more = "+" if project.get("limited") else ""
-            parts = [(ui_text("fleet.memory.count_doing", count=counts.get("doing", 0)), "g_spin_dim"),
-                     (ui_text("fleet.memory.count_waiting", count=counts.get("waiting", 0)), "lvl_y"),
-                     (ui_text("fleet.memory.count_open", count=counts.get("open", 0)) + more, "dim")]
-            if cell_width(" · ".join(text for text, _key in parts)) >= right - cursor:
-                parts = [(ui_text("fleet.memory.short_doing", count=counts.get("doing", 0)), "g_spin_dim"),
-                         (ui_text("fleet.memory.short_waiting", count=counts.get("waiting", 0)), "lvl_y"),
-                         (ui_text("fleet.memory.short_open", count=counts.get("open", 0)) + more, "dim")]
-            for part_index, (text, key) in enumerate(parts):
-                if part_index:
-                    cursor = grid.put(cursor, y, " · ", "dim", limit=right)
-                zero = text.rsplit(" ", 1)[-1] == "0"           # a zero count is not highlighted
-                cursor = grid.put(cursor, y, text, "dim" if zero else key, limit=right)
-            toggle = ui_text("fleet.memory.collapse" if opened == name else "fleet.memory.expand")
-            if cursor + 2 + cell_width(toggle) < right - 1:
-                grid.put(right - 1 - cell_width(toggle), y, toggle, "soft", limit=right)
-            y += 1
-            for row in (items if opened == name else items[:1]):
-                stage, when, text = (tuple(row) + (None,) * 3)[:3]
-                word = OPEN_STAGE_WORDS.get(stage)
-                word = (ui_text(word[0]), word[1]) if word else (str(stage), "dim")
-                y = _memory_line(grid, x, y, right, None, when, text, mark=word, column=column)
+        y = draw_open_work(grid, x, y, right, project, name, labels["fleet.memory.open_work"],
+                           column=column, opened=opened)
         for row_index, row in enumerate(recent[:2]):
             when, action, _kind, text = (tuple(row) + (None,) * 4)[:4]
             saved = action == "saved"
