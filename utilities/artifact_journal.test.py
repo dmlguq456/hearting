@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Daily entry identity, real completion and consolidation/restore boundaries."""
 import concurrent.futures
+import contextlib
 import importlib.util
 import json
 import os
@@ -186,6 +187,34 @@ class EntryTest(unittest.TestCase):
         snapshot = entrance.scan(self.root)
         self.assertEqual(snapshot["recent"], [])
         self.assertTrue(entrance._partial_sources(snapshot))
+
+    def test_A16_html_keeps_result_uri_encoding_and_record_fragment(self):
+        import artifact_entrance as entrance
+        from html.parser import HTMLParser
+        from urllib.parse import unquote, urlsplit
+
+        class Links(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.hrefs = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self.hrefs.extend(value for key, value in attrs if key == "href")
+
+        result = Path(self.tmp.name) / "paper #100%20 & 'quoted'.txt"
+        result.write_text("project result")
+        route = self.root / ".runtime/routes/rt-abcd.json"
+        route.parent.mkdir(parents=True)
+        route.write_text(json.dumps({"cwd": self.tmp.name}))
+        entry = self.add(results=F.result_versions(self.tmp.name, [result.name], []))
+        snapshot = entrance.scan(self.root)
+        links = Links()
+        links.feed(entrance.render_html(snapshot, entrance._translator()))
+        targets = [urlsplit(href) for href in links.hrefs]
+        self.assertIn(result, [Path(unquote(url.path)) for url in targets if url.scheme == "file"])
+        self.assertTrue(any(not url.scheme and self.root / unquote(url.path) == self.root / self.binding["path"]
+                            and url.fragment == entry["artifact_id"] + "-" + entry["revision_id"]
+                            for url in targets))
 
     def test_A13_fleet_memory_history_use_same_rows_without_memory_writes(self):
         sys.path.insert(0, str(HERE.parent / "tools"))
@@ -482,6 +511,84 @@ class MigrationTest(turns.EndToEndTest):
         skipped = M.candidate(self.root, record["cycle_id"], self.env)
         self.assertFalse(skipped["eligible"])
         self.assertIn("composition", skipped["reason"])
+
+    def _restore_after_intervening_writer(self, cid, intervene):
+        original = M._writer_locks
+
+        @contextlib.contextmanager
+        def before_lock(root, choice):
+            # Schedule real operations after selection and before the real lock.
+            with mock.patch.object(M, "_writer_locks", original):
+                intervene()
+            with original(root, choice):
+                yield
+
+        with mock.patch.object(M, "_writer_locks", before_lock):
+            try:
+                return M.restore(self.root, cid, self.env), None
+            except (OSError, ValueError) as exc:
+                return None, str(exc)
+
+    def test_M17_M19_delayed_restore_does_not_revive_a_replaced_operation(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        first = M.apply(self.root, cid, self.env)
+        later = {}
+
+        def intervene():
+            M.restore(self.root, cid, self.env)
+            later["result"] = M.apply(self.root, cid, self.env)
+            later["path"], _op = M._operation(self.root, cid)
+            later["bytes"] = later["path"].read_bytes()
+            later["record"] = P.cycle_record_path(self.root, cid).read_bytes()
+            later["target"] = J._target_path(self.root, record["route_id"]).read_bytes()
+
+        result, error = self._restore_after_intervening_writer(cid, intervene)
+        operations = [json.loads(p.read_text()) for p in (self.root / M.HOME / cid).glob("*/operation.json")]
+        self.assertEqual({op["operation_id"]: op["state"] for op in operations},
+                         {first["operation_id"]: "restored", later["result"]["operation_id"]: "committed"})
+        self.assertIsNone(error)
+        self.assertEqual(result["operation_id"], first["operation_id"])
+        self.assertTrue(result["replay"])
+        self.assertEqual(later["path"].read_bytes(), later["bytes"])
+        self.assertEqual(P.cycle_record_path(self.root, cid).read_bytes(), later["record"])
+        self.assertEqual(J._target_path(self.root, record["route_id"]).read_bytes(), later["target"])
+        retry = M.restore(self.root, cid, self.env)
+        self.assertEqual(retry["operation_id"], later["result"]["operation_id"])
+        self.assertEqual(retry["state"], "restored")
+
+    def test_M17_delayed_restore_replays_an_already_completed_operation(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        first = M.apply(self.root, cid, self.env)
+        completed = {}
+
+        def intervene():
+            M.restore(self.root, cid, self.env)
+            completed["path"] = self.root / M.HOME / cid / first["operation_id"] / "operation.json"
+            completed["bytes"] = completed["path"].read_bytes()
+
+        result, error = self._restore_after_intervening_writer(cid, intervene)
+        self.assertIsNone(error)
+        self.assertEqual(result, {"state": "restored", "operation_id": first["operation_id"], "replay": True})
+        self.assertEqual(completed["path"].read_bytes(), completed["bytes"])
+
+    def test_M17_delayed_restore_resumes_current_published_progress(self):
+        record = self.legacy(); cid = record["cycle_id"]
+        first = M.apply(self.root, cid, self.env)
+
+        def crash(point):
+            if point == "after-restore-publish-effect":
+                raise RuntimeError("interrupted publish")
+
+        def intervene():
+            with mock.patch.object(M, "_fault", side_effect=crash):
+                with self.assertRaisesRegex(RuntimeError, "interrupted publish"):
+                    M.restore(self.root, cid, self.env)
+
+        result, error = self._restore_after_intervening_writer(cid, intervene)
+        self.assertIsNone(error)
+        self.assertEqual(result["state"], "restored")
+        self.assertEqual(result["operation_id"], first["operation_id"])
+        self.assertIsNone(M._operation(self.root, cid)[1])
 
     def test_M05_M09_M10_backup_receipt_resolution_restore_preserves_later_entries(self):
         record = self.legacy(); cid = record["cycle_id"]

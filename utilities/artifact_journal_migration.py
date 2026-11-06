@@ -368,6 +368,19 @@ def restore(root, cycle_id, env=None):
         raise J.JournalError("migration-apply-incomplete")
     choice = op["candidate"]
     with _writer_locks(root, choice):
+        # Selection precedes the lock: another caller may have advanced or
+        # completed this exact operation, even applied a later one meanwhile.
+        # Resume our selected operation without reviving it or touching its
+        # successor, and keep the lock binding from the original selection.
+        current = _json(path)
+        if (current.get("operation_id") != op["operation_id"] or current.get("cycle_id") != cycle_id
+                or current.get("candidate") != choice):
+            raise J.JournalError("migration-operation-conflict")
+        op = current
+        if op["state"] == "restored":
+            return {"state": "restored", "operation_id": op["operation_id"], "replay": True}
+        if op["state"] not in {"committed", "restoring"}:
+            raise J.JournalError("migration-apply-incomplete")
         home = path.parent
         source = J.safe_path(root, root / choice["source"])
         backup = home / "backup"

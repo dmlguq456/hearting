@@ -13,7 +13,9 @@ import tempfile
 import threading
 import time
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -673,6 +675,30 @@ class LimitTests(EntranceFixture):
 
 
 class LinkTests(EntranceFixture):
+    def test_literal_filename_characters_open_exact_documents_in_html(self):
+        class Links(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.hrefs = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self.hrefs.extend(value for key, value in attrs if key == "href")
+
+        paths = []
+        for number, name in enumerate(("report#done.md", "report%20done.md", "보고서 #100%25.md")):
+            locator = f"2026-11-06_document-{number}"
+            self.cycle("2026-11-06_example", locator, [("artifacts/" + name, "report")], audience="user")
+            paths.append(self.root / "campaigns/2026-11-06_example" / locator / "artifacts" / name)
+        links = Links()
+        snapshot = E.scan(self.root)
+        self.assertEqual({self.root / row["doc_path"] for row in snapshot["recent"]}, set(paths))
+        links.feed(E.render_html(snapshot, E._translator()))
+        opened = {self.root / unquote(urlsplit(href).path) for href in links.hrefs
+                  if not urlsplit(href).scheme}
+        for path in paths:
+            with self.subTest(filename=path.name):
+                self.assertIn(path, opened)
+
     def test_every_relative_link_of_all_four_files_exists(self):
         self.cycle("2026-01-02_한글 캠페인", "2026-01-02_보고서 #1 100%",
                    [("artifacts/보고서 #1 100%.md", "# 이름 있는 문서\n\nBody.\n")])

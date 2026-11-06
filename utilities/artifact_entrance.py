@@ -641,11 +641,16 @@ def _md_href(path: str) -> str:
 
 
 def _href(path: str) -> str:
-    return quote(_nfc(path), safe="/.#:%")
+    return quote(_nfc(path), safe="/.")
 
 
 def _record_target(row):
     return row.get("record_target") or row["doc_path"]
+
+
+def _record_href(row):
+    path = _href(row["doc_path"])
+    return path + "#" + quote(row["anchor"], safe="") if row.get("anchor") else path
 
 
 def _result_links(row):
@@ -797,11 +802,12 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
         summary = f"<br><span class=\"meta\">{_escape(row['summary'])}</span>" if row["summary"] else ""
         where = f" &#183; {_escape(row['cycle_path'])}" if row["cycle_path"] else ""
         body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
-                    f'<a href="{_href(_record_target(row))}">{_escape(row["title"])}</a>'
+                    f'<a href="{_record_href(row)}">{_escape(row["title"])}</a>'
                     f'<span class="meta">{where}{suffix}</span>{summary}')
         if row["kind"] == "journal-entry":
-            links = [f'<a href="{_href(_record_target(row))}">{_escape(t("entrance.open_record"))}</a>']
-            links += [f'<a href="{_href(item["href"])}">{_escape(t("entrance.open_result"))}</a>' for item in _result_links(row)]
+            links = [f'<a href="{_record_href(row)}">{_escape(t("entrance.open_record"))}</a>']
+            # Result hrefs are already encoded file URIs from the common reader.
+            links += [f'<a href="{_escape(item["href"])}">{_escape(t("entrance.open_result"))}</a>' for item in _result_links(row)]
             body.append('<br>' + ' &#183; '.join(links) + ' &#183; ' + _escape(row.get("status") or "unknown"))
         body[-1] += '</li>'
     if not snapshot["recent"]:
