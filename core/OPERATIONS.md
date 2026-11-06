@@ -1785,6 +1785,14 @@ an unacknowledged success or failure remains recoverable from its original bindi
 next registration, with no lifetime receipt-count ceiling.
 The resource that supplies the declared stage outputs can complete the stage. Continuation retains that admitted resource identity and quiescence; it requires no model attempt sidecar for the resource prefix.
 
+When the common completion-currentness judgment supersedes that resource after
+an input correction, ordinary resource start/arm also reopens its cached stage
+and retires successor claims for the old execution. The existing journal keeps
+the old run, marker and claims. Settled successor attempts remain historical;
+live, unsettled or unobservable execution, unrelated failures and evidence-address
+conflicts retain their protections. A new run uses the ordinary resource and
+owner authority rather than another gate or a manual watch-file repair.
+
 For a retryable nonzero exit, the declared non-resource successor may start
 saved-only verification after the ordinary owner gate rechecks the exact failed
 run, sentinel, quiescence, run/config receipt and named output bytes. This

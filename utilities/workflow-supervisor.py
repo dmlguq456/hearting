@@ -1077,6 +1077,13 @@ def cmd_arm(args):
                                       "resource-operation-authorization-required"}:
                         raise SupervisorError("resource-watch-binding-conflict") from error
                     raise SupervisorError(str(error)) from error
+            if current:
+                primary = read_armed(ledger).get(args.node)
+                if primary is not None and primary.get("predecessor_kind") == "resource":
+                    captured = prior_observations.get(resource_watch_key(primary))
+                    observed = captured[1] if captured and captured[0] == primary else None
+                    reconcile_superseded_resource_stage(
+                        route, ledger, primary, candidate=resource, observed_evidence=observed)
             if current and record.get("resource_operation") is not None:
                 operation = record["resource_operation"]
                 prior_operation = next((prior for prior in current
@@ -1589,8 +1596,8 @@ def _owner_settlement_snapshot(route, ledger, armed, row=None):
     }
 
 
-def _successor_registry_snapshot_unstarted(route, armed):
-    """Return stable jobs bytes only when no declared successor has started."""
+def _successor_registry_snapshot(route, armed, *, allow_settled=False):
+    """Read an unchanged successor registry with no executing/uncertain child."""
     import dispatch_contract as DC
     try:
         jobs_path = Path(armed["jobs"])
@@ -1617,11 +1624,19 @@ def _successor_registry_snapshot_unstarted(route, armed):
         if metadata.get("route_hash") != route.get("route_hash"):
             return None
         if not never_started(fields[1], metadata):
-            return None
+            if (not allow_settled or fields[1] not in {"done", "cancelled", "killed"}
+                    or DC.terminal_conflict_pending(metadata)
+                    or metadata.get("note") == "completion-deferred"
+                    or DC.attempt_process_quiescence(metadata, terminal_receipt=True).state != "quiescent"):
+                return None
     try:
         return before if jobs_path.read_bytes() == before else None
     except OSError:
         return None
+
+
+def _successor_registry_snapshot_unstarted(route, armed):
+    return _successor_registry_snapshot(route, armed)
 
 
 def _legacy_poll_marker(route, armed, evidence):
@@ -1703,10 +1718,12 @@ def _legacy_continuation_attempt(armed, prior_row, candidate=None):
     return max(valid, key=lambda row: float(row.get("started_at", 0)))
 
 
-def _resume_legacy_resource_retraction(route, ledger, armed, event):
+def _resume_resource_retraction(route, ledger, armed, event, *,
+                                actor="resource-false-success-reconciliation",
+                                flag="resource_false_success_retracted", producer_actors=("poll",)):
     """Finish the existing legal recovery path after an interrupted journal append."""
     node_id = armed["node"]
-    evidence = {"resource_false_success_retracted": True,
+    evidence = {flag: True,
                 "resource_identity": event.get("resource_identity"),
                 "marker_sha256": event.get("marker_sha256"),
                 "retired_successor_claims": event.get("retired_successor_claims", [])}
@@ -1716,25 +1733,26 @@ def _resume_legacy_resource_retraction(route, ledger, armed, event):
         latest = next((entry for entry in reversed(ledger.journal())
                        if entry.get("node") == node_id and entry.get("state")), {})
         prior = latest.get("evidence") or {}
-        if (latest.get("actor") != "poll"
+        if (latest.get("actor") not in producer_actors
                 or prior.get("identity") != event.get("resource_identity")
-                or prior.get("awaiting_next_resource") is True):
+                or (flag == "resource_false_success_retracted"
+                    and prior.get("awaiting_next_resource") is True)):
             return False
         ledger.record(node_id, "FAILED_RETRYABLE", evidence=evidence,
-                      actor="resource-false-success-reconciliation")
+                      actor=actor)
         stage_state = "FAILED_RETRYABLE"
     if stage_state == "FAILED_RETRYABLE":
         latest = next((entry for entry in reversed(ledger.journal())
                        if entry.get("node") == node_id and entry.get("state")), {})
-        if (latest.get("actor") != "resource-false-success-reconciliation"
-                or (latest.get("evidence") or {}).get("resource_false_success_retracted") is not True):
+        if (latest.get("actor") != actor
+                or (latest.get("evidence") or {}).get(flag) is not True):
             return False
         ledger.record(node_id, "READY", evidence=evidence,
-                      actor="resource-false-success-reconciliation")
+                      actor=actor)
         stage_state = "READY"
     if stage_state == "READY":
         ledger.record(node_id, "RUNNING", evidence=evidence,
-                      actor="resource-false-success-reconciliation")
+                      actor=actor)
         stage_state = "RUNNING"
     if stage_state != "RUNNING":
         stage = ledger.state()["nodes"].get(node_id, {})
@@ -1744,25 +1762,113 @@ def _resume_legacy_resource_retraction(route, ledger, armed, event):
     workflow = ledger.state().get("workflow_state")
     if workflow in {"STAGE_SUCCEEDED", "NEXT_REGISTERED", "NEXT_RUNNING"}:
         ledger.set_workflow_state("FAILED_RETRYABLE", evidence=evidence,
-                                  actor="resource-false-success-reconciliation")
+                                  actor=actor)
         workflow = "FAILED_RETRYABLE"
     if workflow == "FAILED_RETRYABLE":
         latest = next((entry for entry in reversed(ledger.journal())
                        if entry.get("workflow_state")), {})
-        if ((latest.get("evidence") or {}).get("resource_false_success_retracted") is not True):
+        if ((latest.get("evidence") or {}).get(flag) is not True):
             workflow_evidence = latest.get("evidence") or {}
             if (latest.get("actor") != "poll"
                     or workflow_evidence.get("node") != node_id):
                 return False
             ledger.set_workflow_state("FAILED_RETRYABLE", evidence=evidence,
-                                      actor="resource-false-success-reconciliation")
+                                      actor=actor)
         ledger.set_workflow_state("READY", evidence=evidence,
-                                  actor="resource-false-success-reconciliation")
+                                  actor=actor)
         workflow = "READY"
     if workflow == "READY":
         ledger.set_workflow_state("RUNNING", evidence=evidence,
-                                  actor="resource-false-success-reconciliation")
+                                  actor=actor)
     return ledger.state()["nodes"].get(node_id, {}).get("state") == "RUNNING"
+
+
+def _resume_legacy_resource_retraction(route, ledger, armed, event):
+    return _resume_resource_retraction(route, ledger, armed, event)
+
+
+def reconcile_superseded_resource_stage(route, ledger, armed, *, candidate,
+                                         observed_evidence=None):
+    """Apply the common supersession judgment to the existing watch/claim cache."""
+    import dispatch_contract as DC
+    from route_authority import require_resource_predecessors
+    if (armed.get("predecessor_kind") != "resource"
+            or candidate.get("resource_policy") not in {"supervised-owner", "verified-resume"}
+            or candidate.get("run_id") == armed.get("predecessor_id")
+            or candidate.get("route") != armed.get("route_file")
+            or candidate.get("node") != armed.get("node")
+            or candidate.get("jobs") != armed.get("jobs")
+            or resource_continuation_cancelled(route, ledger)
+            or ledger.state().get("workflow_state") in {
+                "CANCELLED", "FAILED_TERMINAL", "COMPLETE", "BLOCKED_HUMAN_GATE"}):
+        return False
+    stage = ledger.state()["nodes"].get(armed["node"], {})
+    if stage.get("state") not in {"STAGE_SUCCEEDED", "FAILED_RETRYABLE", "READY", "RUNNING"}:
+        return False
+    latest = next((entry for entry in reversed(ledger.journal())
+                   if entry.get("node") == armed["node"] and entry.get("state")), {})
+    if (stage.get("state") == "STAGE_SUCCEEDED"
+            and latest.get("actor") not in {"owner-successor-start", "poll"}):
+        return False
+    if (stage.get("state") != "STAGE_SUCCEEDED"
+            and (latest.get("actor") != "resource-input-supersession"
+                 or (stage.get("evidence") or {}).get("resource_input_superseded") is not True)):
+        return False
+    if any(row.get("state") in WS.vocabulary()["failure_states"]
+           for node, row in ledger.state()["nodes"].items() if node != armed["node"]):
+        return False
+    node = WS.route_node(route, armed["node"])
+    path = route_module().completion_dir(route["route_id"], jobs=armed["jobs"]) / f"{armed['node']}.json"
+    try:
+        raw = path.read_bytes()
+        marker = json.loads(raw)
+        currency = DC.gate_currency(route, node, path, marker, observe=True, jobs=armed["jobs"])
+        if not DC.completion_superseded(currency):
+            return False
+        evidence = observed_evidence if observed_evidence is not None else resource_evidence(armed)
+        old = _checked_resource_row(armed, evidence, require_success=False) if evidence.get("terminal") else None
+        expected_identity = (stage.get("evidence") or {}).get(
+            "identity" if stage.get("state") == "STAGE_SUCCEEDED" else "resource_identity")
+        if (old is None or evidence.get("quiescent") is not True
+                or evidence.get("identity") != expected_identity
+                or marker.get("resource_execution_identity") not in (None, evidence["identity"])):
+            return False
+        existing_event = next((entry.get("evidence") or {} for entry in reversed(ledger.journal())
+            if entry.get("actor") == "resource-input-supersession"
+            and (entry.get("evidence") or {}).get("marker_sha256") == hashlib.sha256(raw).hexdigest()
+            and (entry.get("evidence") or {}).get("resource_identity") == evidence["identity"]), None)
+        if stage.get("state") != "STAGE_SUCCEEDED" and existing_event is None:
+            return False
+        observations = {old["run_id"]: {"row": old,
+            "state": (evidence.get("execution_observation") or {}).get("state") or evidence.get("liveness")}}
+        require_resource_predecessors([row for _, row in resource_predecessors(ledger, armed["node"])],
+                                      candidate, observations=observations)
+        jobs_bytes = _successor_registry_snapshot(route, armed, allow_settled=True)
+        if jobs_bytes is None:
+            return False
+        retired = []
+        for key, claim in ledger.claims().items():
+            if claim.get("predecessor") != armed["node"]:
+                continue
+            if (claim.get("route_id") != route["route_id"]
+                    or claim.get("predecessor_identity") != evidence["identity"]
+                    or claim.get("successor") not in armed.get("successors", [])):
+                return False
+            retired.append(key)
+        if (path.read_bytes() != raw or Path(armed["jobs"]).read_bytes() != jobs_bytes
+                or _checked_resource_row(armed, evidence, require_success=False) is None):
+            return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    event = existing_event or {"resource_identity": evidence["identity"],
+             "marker_sha256": hashlib.sha256(raw).hexdigest(),
+             "retired_successor_claims": retired, "next_resource": candidate.get("run_id"),
+             "reason": currency.reason}
+    if existing_event is None:
+        ledger.record_event(evidence=event, actor="resource-input-supersession")
+    return _resume_resource_retraction(route, ledger, armed, event,
+        actor="resource-input-supersession", flag="resource_input_superseded",
+        producer_actors=("owner-successor-start", "poll"))
 
 
 def reconcile_legacy_supervised_resource_success(route, ledger, armed, *, candidate=None,
