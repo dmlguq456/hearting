@@ -805,6 +805,8 @@ def incomplete_continuation_eligible(route, node, metadata, jobs, parent_attempt
         human = re.search(
             r"\b(?:await(?:ing)?|need|requires?|required|ask|pending|waiting for)\b.{0,48}\b(?:human|person|user|supervisor|operator|approval|permission|clarification|decision|response|answer|guidance)\b"
             r"|\b(?:human|person|user|supervisor|operator)\b.{0,48}\b(?:decision|approval|answer|response|confirmation|input|guidance)\b"
+            r"|\b(?:decision|choice|approval|permission|clarification|confirmation)\b.{0,32}\b(?:needed|need(?:s|ed)?|required|pending|outstanding|unresolved|undecided|awaited|missing)\b"
+            r"|\b(?:pending|outstanding|unresolved|undecided|awaiting|need(?:s|ed)?|requires?|required)\b.{0,32}\b(?:decision|choice|approval|permission|clarification|confirmation)\b"
             r"|(?:사용자|사람|감독|운영자).{0,32}(?:응답|답변|승인|결정|판단|선택|확인)|(?:승인|권한|결정|판단|선택).{0,20}(?:필요|대기|부족|미정)"
             r"|(?:응답|답변|회답|회신).{0,20}(?:필요|대기|미정)|질문.*(?:응답|답변).*(?:필요|대기)", blocker, re.I)
         facts = {"identity": (exact.get("route_id") == route.get("route_id")
