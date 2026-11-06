@@ -986,7 +986,7 @@ def seal_attempt(jobs: str | Path, route: dict, node: dict, attempt_id: str, *,
             raise SourceSubjectError("review-source-admission-subject-changed", attempt_id)
         expected_epoch = source_epoch(route, node, current["digest"],
                                       Path(jobs).resolve().parent / "completion" / route["route_id"],
-                                      family=current.get("family", "source"))
+                                      family=current.get("family", "source"), jobs=jobs)
         if (current["digest"] != predecessor["subject_digest"]
                 or current.get("family", "source") != predecessor.get("family", "source")
                 or expected_epoch != predecessor["source_epoch"]):
@@ -1005,7 +1005,7 @@ def seal_attempt(jobs: str | Path, route: dict, node: dict, attempt_id: str, *,
             "subject_digest": current["digest"],
             "family": current.get("family", "source"),
             "source_epoch": source_epoch(route, node, current["digest"], completion_dir,
-                                          family=current.get("family", "source")),
+                                          family=current.get("family", "source"), jobs=jobs),
             "scope": current["scope"], "manifest": current["manifest"],
             "provenance": current["provenance"],
         }
@@ -1088,7 +1088,7 @@ def validate_attempt(jobs: str | Path, fields: list[str], metadata: dict, *,
                       reviewed_input=reviewed_input)
     current_epoch = source_epoch(route, node, current["digest"],
                                   Path(jobs).resolve().parent / "completion" / route["route_id"],
-                                  family=record.get("family", "source"))
+                                  family=record.get("family", "source"), jobs=jobs)
     if current["digest"] != record["subject_digest"] or current_epoch != record["source_epoch"]:
         raise SourceSubjectError("review-source-subject-changed-before-launch", metadata.get("attempt_id", ""))
     return record
@@ -1155,7 +1155,7 @@ def _canonical_head(generation: dict, generation_dir: Path, node_id: str, candid
 
 
 def source_epoch(route: dict, node: dict, digest: str, completion_dir: str | Path,
-                 *, family: str = "source") -> int:
+                 *, family: str = "source", jobs: str | Path | None = None) -> int:
     """Predict the route-wide source epoch from append-only marker history.
 
     Epoch changes only when source content changes. Marker sequence, report
@@ -1197,7 +1197,7 @@ def source_epoch(route: dict, node: dict, digest: str, completion_dir: str | Pat
     # A registered subject is an observed generation even when its worker
     # never published a completion marker. This preserves A→B→A currentness
     # without changing any verdict count or inventing an unbound history row.
-    jobs_path = completion_root.parent / "jobs.log"
+    jobs_path = _currency_registry_path(route, completion_dir, jobs)
     route_by_id = {str(item.get("route_id")): item for item in generations}
     try:
         lines = jobs_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1414,7 +1414,7 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
         return None
     if owner_inline and attempt_id and node.get("kind") == "review-worker":
         current = observe(route, node, worktree=worktree, jobs=jobs, reviewed_input=reviewed_input)
-        epoch = source_epoch(route, node, current["digest"], completion_dir, family=family)
+        epoch = source_epoch(route, node, current["digest"], completion_dir, family=family, jobs=jobs)
         if evidence_sha256 is not None:
             _inline_evidence_subject_unchanged(
                 route, node, evidence_sha256, current["digest"], epoch, completion_dir, attempt_id)
@@ -1427,7 +1427,7 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
     if has_source_subject(route, node) and not (is_implementation_review(route, node)
                                                 or is_source_test(node)):
         current = observe(route, node, worktree=worktree)
-        epoch = source_epoch(route, node, current["digest"], completion_dir, family="source")
+        epoch = source_epoch(route, node, current["digest"], completion_dir, family="source", jobs=jobs)
         return {"schema_version": SCHEMA_VERSION, "digest": current["digest"], "epoch": epoch,
                 "manifest_sha256": _sha(_canonical(current["manifest"]))}
     if is_implementation_review(route, node) or is_source_test(node):
@@ -1447,11 +1447,11 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
                     raise SourceSubjectError("review-source-binding-missing", str(attempt_id or ""))
                 return None
             current = observe(route, node, worktree=worktree)
-            epoch = source_epoch(route, node, current["digest"], completion_dir)
+            epoch = source_epoch(route, node, current["digest"], completion_dir, jobs=jobs)
             return {"schema_version": SCHEMA_VERSION, "digest": current["digest"],
                     "epoch": epoch, "manifest_sha256": _sha(_canonical(current["manifest"]))}
         current = observe(route, node, worktree=worktree)
-        epoch = source_epoch(route, node, current["digest"], completion_dir)
+        epoch = source_epoch(route, node, current["digest"], completion_dir, jobs=jobs)
         if current["digest"] != record["subject_digest"] or epoch != record["source_epoch"]:
             raise SourceSubjectError("review-source-subject-changed-before-completion", str(attempt_id or ""))
         return {"schema_version": SCHEMA_VERSION, "digest": record["subject_digest"],
@@ -1465,7 +1465,7 @@ def marker_subject(route: dict, node: dict, *, attempt_id: str | None = None,
     if record.get("family", "source") != family:
         raise SourceSubjectError("review-source-binding-identity-mismatch", str(attempt_id or ""))
     current = observe(route, node, worktree=worktree, jobs=jobs, reviewed_input=reviewed_input)
-    epoch = source_epoch(route, node, current["digest"], completion_dir, family=family)
+    epoch = source_epoch(route, node, current["digest"], completion_dir, family=family, jobs=jobs)
     if current["digest"] != record["subject_digest"] or epoch != record["source_epoch"]:
         raise SourceSubjectError("review-source-subject-changed-before-completion", str(attempt_id or ""))
     return {"schema_version": SCHEMA_VERSION, "digest": record["subject_digest"],
@@ -1633,7 +1633,7 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
         current = observe(route, node, jobs=jobs, reviewed_input=reviewed_input)
         if current is None:
             return "superseded", "completion-review-subject-input-missing"
-        epoch = source_epoch(route, node, current["digest"], completion_dir, family=family)
+        epoch = source_epoch(route, node, current["digest"], completion_dir, family=family, jobs=jobs)
     except SourceSubjectError as exc:
         return "completion-evidence-unreadable", exc.reason
     if (subject.get("schema_version") != SCHEMA_VERSION

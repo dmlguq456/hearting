@@ -38,6 +38,25 @@ DISPATCH_NODE = _load("dispatch_node_source_subject_fixture", "utilities/dispatc
 
 
 class SourceSubjectIntegrationTest(unittest.TestCase):
+    def test_custom_registry_fallback_preserves_aba_currentness(self):
+        self.select_custom_registry()
+        node = self.review_node
+        evidence = self.artifact_root / "custom-inline.md"
+        evidence.write_text("Fresh owner review of source A\n", encoding="utf-8")
+        attempt = "att-custom-inline"
+        metadata = {**self._metadata(node, attempt, "owner"), "registered_worker": "0",
+                    "transport": "interactive", "execution_surface": "inline", "fallback_hop": "inline"}
+        marker = ROUTE_WRITER._publish_completion_locked(
+            self.route, node, node["id"], evidence, jobs=self.jobs,
+            attempt_id=attempt, attempt_metadata=metadata)
+        source = self.repo / "engine.py"
+        original = source.read_bytes()
+        source.write_bytes(b"value = 'B'\n")
+        self.prepare_review("att-custom-observed-B", note="dead-worker-blocked",
+                            extra={"failure_class": "blocked"})
+        source.write_bytes(original)
+        self.assertEqual(self.currency(marker).state, "superseded")
+
     def test_unbound_document_without_a_resolvable_producer_keeps_legacy_identity(self):
         node = {"id": "plan-check", "kind": "review-worker", "unit": "qa/plan-review",
                 "completion_gate": "code-plan-check", "dispatch_depth": 2, "depends_on": ["plan"]}
