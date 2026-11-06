@@ -3804,13 +3804,24 @@ def _producer_loop(fd: int) -> None:
                 continue
             if idle >= 600 and boundary is not None:
                 # With no live display demand, a notification is the only
-                # reason to retain the producer. Sleep until that boundary;
-                # the 30 second refresh cadence is for live demand only.
-                delay = max(1.0, boundary)
-            else:
-                delay = min(30.0, max(1.0, 600.0 - idle))
-                if boundary is not None:
-                    delay = min(delay, max(1.0, boundary))
+                # reason to retain the producer, so it refreshes at that
+                # boundary, not on the 30 second cadence. It still wakes every
+                # 30 seconds to notice a display coming back: this process holds
+                # the single-flight lock, so an hours-long sleep would leave that
+                # display with a stale board and no producer.
+                time.sleep(min(30.0, max(1.0, boundary)))
+                if not root.is_dir():
+                    return
+                try:
+                    returned = (root / ".demand").stat().st_mtime > demand
+                except OSError:
+                    returned = False
+                if returned or boundary <= 30.0:
+                    _refresh_cache()
+                continue
+            delay = min(30.0, max(1.0, 600.0 - idle))
+            if boundary is not None:
+                delay = min(delay, max(1.0, boundary))
             time.sleep(delay)
             if not root.is_dir():
                 return
