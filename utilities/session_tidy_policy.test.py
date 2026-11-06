@@ -9,6 +9,15 @@ import session_tidy_policy as policy
 
 
 class SessionTidyPolicyTests(unittest.TestCase):
+    def test_default_context_floor_matches_the_500k_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "absent-config.json"
+            for harness in ("claude", "codex", "opencode"):
+                selected, reason = policy.idle_policy(harness, path=path)
+                self.assertEqual(reason, "")
+                self.assertEqual(selected["min_tokens"], 500000)
+            self.assertFalse(path.exists())
+
     def test_absent_uses_defaults_without_creating_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hearting" / "session-tidy.json"
@@ -27,12 +36,12 @@ class SessionTidyPolicyTests(unittest.TestCase):
             other, other_reason = policy.idle_policy("claude", "bedrock", path=path)
             self.assertEqual(reason, other_reason, "")
             self.assertEqual((selected["wait_seconds"], selected["min_tokens"]), (200, 300000))
-            self.assertEqual((other["wait_seconds"], other["min_tokens"]), (100, 200000))
+            self.assertEqual((other["wait_seconds"], other["min_tokens"]), (100, 500000))
 
     def test_disabled_only_disables_idle_policy(self):
         parsed = policy.validate_document({"idle": {"enabled": False}})
         self.assertFalse(parsed["idle"]["enabled"])
-        self.assertEqual(parsed["idle"]["min_tokens"], 200000)
+        self.assertEqual(parsed["idle"]["min_tokens"], 500000)
 
     def test_rejects_bool_nan_bad_structures_and_nonpositive_wait(self):
         documents = (

@@ -3205,7 +3205,7 @@ class ClearBookingLineageRaceTest(TidyCase):
             def book():
                 with mock.patch.object(st, "resolve_seat", return_value=seat):
                     return clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
-                                                    tokens=200000, now=10)
+                                                    tokens=500000, now=10)
         else:
             def book():
                 return st._enqueue_tidy(seat, harness, sid, str(self.cwd),
@@ -3221,7 +3221,7 @@ class ClearBookingLineageRaceTest(TidyCase):
         if kind == "idle-accept":
             with mock.patch.object(st, "resolve_seat", return_value=seat):
                 self.assertEqual(clear.observe_idle_event(harness, sid, str(self.cwd), event_id="race-turn",
-                                                          tokens=200000), "booking=scheduled")
+                                                          tokens=500000), "booking=scheduled")
             req = clear.read_reservation(seat.key)
             req["idle_request"] = {"state": "arrived", "token": "race-claim", "text_digest": "race-digest",
                                    "arrival": {"sid": sid, "prompt_seq": 0}}
