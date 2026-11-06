@@ -144,6 +144,27 @@ class SessionShellTest(unittest.TestCase):
                                       cwd=str(self.root), env=env)
                 report.assert_called_once_with(harness, "start", sid, env=env)
 
+    def test_hook_reports_proven_native_owner_instead_of_its_helper_process(self):
+        row = self.binding(); received = self.serve(row)
+        owner = {"pid": row["native_pid"], "proc_start": row["native_start"], "argv": ["claude"]}
+        env = {"HEARTING_SHELL_SOCKET": row["socket"], "HEARTING_SHELL_TOKEN": "private-fixture"}
+        with mock.patch("fleet.process_identity.current_launch_context", return_value=owner):
+            shell.lifecycle("claude", "start", row["sid"], env=env)
+        self.assertEqual(received[0]["pid"], row["native_pid"])
+        self.assertNotEqual(received[0]["pid"], os.getpid())
+        self.assertEqual(received[0]["start"], row["native_start"])
+
+    def test_unknown_command_and_worker_callbacks_do_not_contact_the_host(self):
+        row = self.binding()
+        env = {"HEARTING_SHELL_SOCKET": row["socket"], "HEARTING_SHELL_TOKEN": "private-fixture"}
+        owner = {"pid": row["native_pid"], "proc_start": row["native_start"], "argv": ["claude", "mcp", "list"]}
+        for value, extra in ((None, {}), (owner, {}), (owner, {"AGENT_SESSION_ROLE": "worker"})):
+            with self.subTest(owner=value, env=extra), \
+                    mock.patch("fleet.process_identity.current_launch_context", return_value=value), \
+                    mock.patch.object(shell.socket, "socket") as contact:
+                shell.lifecycle("claude", "stop", row["sid"], env={**env, **extra})
+                contact.assert_not_called()
+
     def test_codex_stop_reports_completion_to_its_wrapped_display(self):
         path = Path(__file__).resolve().parents[1] / "adapters/codex/hooks/stop-lifecycle.py"
         spec = importlib.util.spec_from_file_location("shell_codex_stop_fixture", path)

@@ -49,7 +49,14 @@ function descends(pid, ancestor) {
   return false;
 }
 const host = processRow(process.pid);
-let native, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
+if (!host) bypass();
+function sameTerminal(pid, root) {
+  try {
+    const candidate = fs.statSync(`/proc/${pid}/fd/0`), original = fs.statSync(`/proc/${root}/fd/0`);
+    return candidate.isCharacterDevice() && original.isCharacterDevice() && candidate.rdev === original.rdev;
+  } catch { return false; }
+}
+let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
 let lastEnter = -1, submitted = -1, currentDelivery, held = [], heldBytes = 0;
 let expanded = false, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let last = [], footer = '', footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
@@ -150,26 +157,32 @@ function releaseHeld() {
 function userInput(data) {
   if(!data.length)return;
   if(data.length===1&&data[0]===0x1d&&!paste&&!currentDelivery){expanded=!expanded;applyLayout();return;}
-  epoch++;empty=false;
+  const previous=epoch;epoch+=data.length;empty=false;
   if(currentDelivery){held.push(Buffer.from(data));heldBytes+=data.length;if(heldBytes>=65536)process.stdin.pause();rebuildDisplay();return;}
-  for(const c of data.toString('utf8')) {
+  for(let offset=0;offset<data.length;offset++) {
+    const c=String.fromCharCode(data[offset]);
     if(keyTail){keyTail+=c;if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
       else if(keyTail.length>2&&/[\x40-\x7e]/.test(c)||keyTail.length>64)keyTail='';}
     else if(c==='\x1b')keyTail=c;
-    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=epoch;
+    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=previous+offset+1;
   }
   child.write(data);
 }
 function exact(req) { const me=identity();return Object.keys(me).every(k=>req[k]===me[k])&&live(); }
 async function lifecycle(req) {
   const reporter=processRow(req.pid);
-  if(req.token!==token||req.harness!==harness||!reporter||reporter.start!==req.start||!descends(req.pid,native.pid)
+  const root=rootNative&&processRow(rootNative.pid);
+  if(req.token!==token||req.harness!==harness||!reporter||reporter.start!==req.start
+     ||!root||root.start!==rootNative.start||!descends(req.pid,root.pid)||!sameTerminal(req.pid,root.pid)
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
-    sequence=req.seq;selection++;sid=req.sid;state='unknown';empty=false;submitted=-1;
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;
     if(currentDelivery){currentDelivery=undefined;releaseHeld();}
-    await source('register');await projection();return {ok:true};
+    const selected=selection;
+    // Display collection must never delay the native start hook or input.
+    setImmediate(()=>{if(selected===selection)source('register').then(()=>projection());});
+    return {ok:true};
   }
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
@@ -229,7 +242,7 @@ server.listen(socketPath,()=>{
   try {
     child=pty.spawn(command[0],command.slice(1),{name:process.env.TERM||'xterm-256color',cols,rows:rows-1,cwd:process.cwd(),
       env:{...process.env,HEARTING_SHELL_SOCKET:socketPath,HEARTING_SHELL_TOKEN:token}});
-    native=processRow(child.pid);
+    native=processRow(child.pid);rootNative=native;
   } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
   // The parent may only fall back before this boundary. A failed display keeps
   // this same native child; no second CLI is ever started.

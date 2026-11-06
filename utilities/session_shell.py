@@ -261,8 +261,16 @@ def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
     endpoint, token = env.get("HEARTING_SHELL_SOCKET"), env.get("HEARTING_SHELL_TOKEN")
     if not endpoint or not token or harness not in HARNESSES or not _SID.fullmatch(sid or ""):
         return
-    me = process(os.getpid())
-    if me is None:
+    import session_tidy
+    from fleet.process_identity import current_launch_context
+    from fleet.collectors.procscan import invocation_mode
+    if session_tidy.is_worker(env):
+        return
+    owner = current_launch_context(harness, sid)
+    if owner is None or invocation_mode(harness, owner.get("argv")) != "session":
+        return
+    me = process(owner["pid"])
+    if me is None or me["start"] != str(owner["proc_start"]):
         return
     import time
     req = {"op": "event", "harness": harness, "sid": sid, "event": event,
