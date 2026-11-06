@@ -2082,5 +2082,193 @@ console.log(JSON.stringify(calls[0]));
             os.close(fd)
 
 
+    def _start_cache_fixture(self, *, current=False, ignore_term=False, state_home=None, shared_fd=None):
+        """Only children started here can ever receive a real fixture signal."""
+        code_root = self.b if current else self.a
+        helper = code_root / "utilities/human_wait_state.py"
+        helper.write_text(
+            "import fcntl,os,signal,sys\nfrom pathlib import Path\n"
+            "fd=int(sys.argv[sys.argv.index('--lock-fd')+1])\n"
+            "fcntl.flock(fd,fcntl.LOCK_EX)\n"
+            "events=Path(os.environ['FIXTURE_CACHE_EVENTS'])\n"
+            "def term(sig,frame):\n"
+            " with events.open('a') as out: out.write(str(os.getpid())+' TERM\\n')\n"
+            + (" return\n" if ignore_term else " raise SystemExit(0)\n") +
+            "signal.signal(signal.SIGTERM,term)\n"
+            "Path(os.environ['FIXTURE_CACHE_READY']).write_text('ready')\n"
+            "sys.stdin.readline()\n", encoding="utf-8")
+        state_home = state_home or self.base / "xdg-state"
+        cache_root = self.base / "xdg-state/hearting/human-waits"
+        cache_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        lock = cache_root / ".projection.lock"
+        fd = shared_fd if shared_fd is not None else os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready = self.base / ("cache-ready-" + str(time.time_ns()))
+        env = {**os.environ, **self._environment(code_root), "XDG_STATE_HOME": str(state_home),
+               "FIXTURE_CACHE_EVENTS": str(self.base / "cache-events"), "FIXTURE_CACHE_READY": str(ready)}
+        child = subprocess.Popen([sys.executable, str(helper), "--refresh-cache", "--lock-fd", str(fd)],
+                                 env=env, pass_fds=(fd,), stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if shared_fd is None:
+            os.close(fd)
+        def cleanup():
+            if child.poll() is None:
+                try:
+                    child.stdin.write(b"exit\n")
+                    child.stdin.flush()
+                except BrokenPipeError:
+                    pass
+            child.wait(timeout=5)
+            child.stdin.close()
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            self.assertIsNone(child.poll())
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        return child, lock
+
+    def _publish_cache_fixture_install(self):
+        (self.b / "RELEASE_VERSION").write_text("v4.0.1\n")
+        receipt = self.base / "xdg-state/hearting/distribution.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({"schema": 1, "repository": "fixture/hearting",
+            "version": "v4.0.1", "archive_sha256": "a" * 64,
+            "release_root": str(self.b), "runtimes": ["claude"]}))
+
+    def _reconnect_cache_fixture(self, on_start=None, *, point_current=True):
+        import human_wait_state as cache
+        if point_current:
+            self._point_current(self.b)
+            self._publish_cache_fixture_install()
+        with mock.patch.object(cache, "__file__", str(self.b / "utilities/human_wait_state.py")), \
+             mock.patch.object(obligations, "__file__", str(self.b / "utilities/peer_obligations.py")), \
+             mock.patch.dict(os.environ, self._environment(self.b), clear=True), \
+             mock.patch.object(cache, "_ensure_producer", side_effect=on_start or (lambda: True)) as start:
+            result = cache.reconnect_cache_producer()
+            return result, start.call_count
+
+    def test_cache_activation_handoff_uses_one_pidfd_term_then_real_lock_release(self):
+        child, lock = self._start_cache_fixture()
+        def start():
+            fd = os.open(lock, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertIsNotNone(child.poll())
+                return True
+            finally:
+                os.close(fd)
+        self.assertEqual(self._reconnect_cache_fixture(start), (True, 1))
+        self.assertEqual((self.base / "cache-events").read_text(), str(child.pid) + " TERM\n")
+
+    def test_cache_activation_leaves_current_foreign_state_and_ambiguous_holders_alone(self):
+        for mode in ("current", "foreign-state", "ambiguous"):
+            with self.subTest(mode=mode):
+                # Each case has its own private fixture state and child lifecycle.
+                shared_fd = None
+                if mode == "ambiguous":
+                    folder = self.base / "xdg-state/hearting/human-waits"
+                    folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    shared_fd = os.open(folder / ".projection.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                child, lock = self._start_cache_fixture(current=mode == "current",
+                    state_home=self.base / "foreign" if mode == "foreign-state" else None,
+                    shared_fd=shared_fd)
+                other = None
+                if shared_fd is not None:
+                    other, _ = self._start_cache_fixture(shared_fd=shared_fd)
+                    os.close(shared_fd)
+                self.assertEqual(self._reconnect_cache_fixture(), (False, 0))
+                self.assertIsNone(child.poll())
+                self.assertFalse((self.base / "cache-events").exists())
+                for process in (child, other):
+                    if process is not None:
+                        process.stdin.write(b"exit\n")
+                        process.stdin.flush()
+                        process.wait(timeout=5)
+
+    def test_cache_activation_refuses_foreign_uid_without_signaling(self):
+        child, _ = self._start_cache_fixture()
+        from types import SimpleNamespace
+        original = Path.stat
+        def stat_path(path, *args, **kwargs):
+            if path == Path("/proc") / str(child.pid):
+                return SimpleNamespace(st_uid=os.getuid() + 1)
+            return original(path, *args, **kwargs)
+        with mock.patch.object(Path, "stat", stat_path):
+            self.assertEqual(self._reconnect_cache_fixture(), (False, 0))
+        self.assertIsNone(child.poll())
+        self.assertFalse((self.base / "cache-events").exists())
+
+    def test_cache_handoff_waits_for_committed_current_and_serializes_callbacks(self):
+        child, lock = self._start_cache_fixture()
+        self.assertEqual(self._reconnect_cache_fixture(point_current=False), (False, 0))
+        fd = os.open(lock.parent / ".demand.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertEqual(self._reconnect_cache_fixture(), (False, 0))
+        finally:
+            os.close(fd)
+        self.assertIsNone(child.poll())
+        self.assertFalse((self.base / "cache-events").exists())
+
+    def test_old_installer_activation_callback_waits_for_current_and_distribution_receipt(self):
+        import human_wait_state as cache
+        child, _ = self._start_cache_fixture()
+        sleeps = []
+        real_sleep = time.sleep
+        def commit(_seconds):
+            if _seconds != 0.05:
+                return real_sleep(_seconds)
+            self.assertIsNone(child.poll())
+            self.assertFalse((self.base / "cache-events").exists())
+            sleeps.append(_seconds)
+            # A switched pointer alone is not a committed distribution.
+            if len(sleeps) == 1:
+                self._point_current(self.b)
+            else:
+                self._publish_cache_fixture_install()
+        with mock.patch.object(cache, "__file__", str(self.b / "utilities/human_wait_state.py")), \
+             mock.patch.object(obligations, "__file__", str(self.b / "utilities/peer_obligations.py")), \
+             mock.patch.dict(os.environ, self._environment(self.b), clear=True), \
+             mock.patch.object(cache.time, "sleep", side_effect=commit), \
+             mock.patch.object(cache, "_ensure_producer", return_value=True) as start:
+            self.assertTrue(cache.reconnect_cache_producer(wait_for_commit=True))
+        self.assertEqual(len(sleeps), 2)
+        start.assert_called_once_with()
+        self.assertEqual((self.base / "cache-events").read_text(), str(child.pid) + " TERM\n")
+
+    def test_uncommitted_or_rolled_back_install_never_signals_a_cache_producer(self):
+        import human_wait_state as cache
+        child, _ = self._start_cache_fixture()
+        with mock.patch.object(cache, "__file__", str(self.b / "utilities/human_wait_state.py")), \
+             mock.patch.object(obligations, "__file__", str(self.b / "utilities/peer_obligations.py")), \
+             mock.patch.dict(os.environ, self._environment(self.b), clear=True), \
+             mock.patch.object(cache.time, "monotonic", side_effect=[0, 6]), \
+             mock.patch.object(cache, "_ensure_producer") as start:
+            self.assertFalse(cache.reconnect_cache_producer(wait_for_commit=True))
+        start.assert_not_called()
+        self.assertIsNone(child.poll())
+        self.assertFalse((self.base / "cache-events").exists())
+
+    def test_cache_activation_timeout_sends_no_second_signal_and_does_not_start(self):
+        child, _ = self._start_cache_fixture(ignore_term=True)
+        self.assertEqual(self._reconnect_cache_fixture(), (False, 0))
+        self.assertIsNone(child.poll())
+        self.assertEqual((self.base / "cache-events").read_text(), str(child.pid) + " TERM\n")
+
+    def test_observer_rejects_pid_boundaries_and_negative_process_group_before_pidfd(self):
+        child, lock = self._start_cache_fixture()
+        # Boundary inputs are validation values, never fabricated live-child PIDs.
+        with mock.patch.object(contract, "pidfd_open", side_effect=AssertionError("must not open a pidfd")), \
+             mock.patch.object(signal, "pidfd_send_signal") as send:
+            for invalid in (0, 1, -child.pid, False, str(-child.pid)):
+                self.assertFalse(obligations.replace_managed_observer(
+                    invalid, obligations._proc_start_identity(child.pid), lock,
+                    "utilities/human_wait_state.py", ("--refresh-cache",), self.current,
+                    lock_fd_option="--lock-fd", root=self.a, exact_arguments=True))
+            send.assert_not_called()
+        self.assertIsNone(child.poll())
+
+
 if __name__ == "__main__":
     unittest.main()

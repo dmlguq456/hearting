@@ -2991,6 +2991,50 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
     return seat_rows, generations, cards, dialogue, pane_read, raw
 
 
+def current_route_counts(routes):
+    """The one OVERVIEW title count/open rule, shared by session-local displays."""
+    counts, opened = {}, set()
+    for route in routes:
+        tag = route.get("session_tag")
+        if tag and route.get("current") is True:
+            counts[tag] = counts.get(tag, 0) + 1
+            if route.get("state") not in ("done", "stale"):
+                opened.add(tag)
+    return counts, opened
+
+
+def session_route_status(snapshot, now=None):
+    """Question-free labels from the same route records OVERVIEW consumes."""
+    now = time.time() if now is None else now
+    resolver = _resolver(snapshot)
+    rows, index = _session_records(snapshot, now, resolver)
+    routes, _ = _route_records(snapshot, rows, index, resolver, now)
+    counts, opened = current_route_counts(routes)
+    result = {}
+    for tag in opened:
+        stages = []
+        for route in routes:
+            if (route.get("session_tag") != tag or route.get("current") is not True
+                    or route.get("state") in ("done", "stale")):
+                continue
+            stage = route.get("worker_stage")
+            # Route ids are source text. Never pass terminal control sequences
+            # or unbounded content into a human-visible shell/TUI label.
+            if isinstance(stage, str) and re.fullmatch(r"[A-Za-z0-9_./-]{1,64}", stage):
+                if stage not in stages:
+                    stages.append(stage)
+        label = f"⏳ route {counts[tag]}"
+        if stages:
+            label += " · " + ", ".join(stages[:3])
+            if len(stages) > 3:
+                label += f" +{len(stages) - 3}"
+        session = index[tag]["session"]
+        harness = _get(session, "harness")
+        for sid in index[tag]["ids"]:
+            result[str(harness) + "\0" + sid] = label
+    return result
+
+
 def session_index(snapshot, now=None):
     """``{tag: {"harness", "sid", "ids", "session", "repo"}}`` for the main sessions, with the tags the
     explorer draws; the feed uses it to turn what the person opened back into the session to read."""

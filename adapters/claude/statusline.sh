@@ -385,7 +385,7 @@ if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
   segs_arr+=("${DIM}context${RST} ${cc}${fbar}${RST}${DIM}${ebar}${RST} ${cc}${S_CTX}%${RST}")
 fi
 
-# Fast, cached answer-wait badge. The detached refresh owns all registry/route
+# Fast, cached answer-wait and session route badges. The detached refresh owns all registry/route
 # reads; each statusline tick reads only the private derived cache.
 if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
   wait_helper=""
@@ -395,13 +395,17 @@ if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
     wait_helper="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../../utilities/human_wait_state.py"
   fi
   if [ -f "$wait_helper" ]; then
-    wait_counts=$(python3 "$wait_helper" --count claude "$S_SID" 2>/dev/null || true)
+    wait_display=$(python3 "$wait_helper" --statusline claude "$S_SID" 2>/dev/null || true)
+    wait_counts="${wait_display%%$'\n'*}"
+    route_label="${wait_display#*$'\n'}"
+    [ "$route_label" = "$wait_display" ] && route_label=""
     set -- $wait_counts
     if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
       wait_total="$1"
       [ "$wait_total" = "-1" ] && wait_total="?"
       segs_arr+=("${RED}◑답 대기 ${wait_total}${RST}")
     fi
+    [ -z "$route_label" ] || segs_arr+=("${YEL}${route_label}${RST}")
   fi
 fi
 

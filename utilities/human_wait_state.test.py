@@ -3129,5 +3129,110 @@ class WorkflowOwnerPersonContextTest(unittest.TestCase):
             raise OSError("lineage-directory-changed")
         self.assertIsNone(self.judge(unreadable))
 
+
+
+class SessionRouteDisplayCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(os.environ, XDG_STATE_HOME=self.tmp.name)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_wait_and_route_badges_share_one_read_and_keep_exact_sessions(self):
+        now = time.time()
+        self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now,
+            "route_status": {"claude\0sid-a": "⏳ route 2 · frame, execute"},
+            "route_sessions": ["claude\0sid-a", "claude\0sid-b"]}))
+        with mock.patch.object(state, "_read_cache", wraps=state._read_cache) as reader, \
+             mock.patch.object(state, "_request_producer") as request:
+            self.assertEqual(state.cached_statusline("claude", "sid-a"),
+                             ((0, 0), "⏳ route 2 · frame, execute"))
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(state.cached_statusline("claude", "sid-b"), ((0, 0), ""))
+            request.assert_not_called()
+            self.assertEqual(state.cached_statusline("codex", "sid-a"), ((0, 0), ""))
+            request.assert_called_once_with("codex", "sid-a")
+        with mock.patch.object(state.time, "time", return_value=now + 181), \
+             mock.patch.object(state, "_request_producer") as request:
+            self.assertEqual(state.cached_statusline("claude", "sid-a"), (None, ""))
+            request.assert_called_once_with("claude", "sid-a")
+
+    def test_returned_route_display_reuses_the_idle_single_flight_without_repeated_wakes(self):
+        # #1369's idle wake and the route consumer share one real flock/demand.
+        root = state.state_root()
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        demand = root / ".demand"
+        demand.touch()
+        os.utime(demand, (0, 0))
+        fd = os.open(root / ".projection.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        now = 10_000.0
+        sleeps, refreshes = [], []
+        class Finished(BaseException):
+            pass
+        def refresh():
+            requests = state._route_demands(now=now)
+            refreshes.append(dict(requests))
+            state.publish_cache({"items": [{"id": "S3:fixture", "source": "S3", "since": now,
+                "owner": {"harness": "claude", "session_id": "other-wait"}}],
+                "observed_at": now, "complete": True, "route_sessions": requests,
+                "route_status": {key: "⏳ route 1 · frame" for key in requests}})
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 1:
+                self.assertEqual(state.cached_statusline("claude", "sid-a"), ((1, 0), ""))
+                os.utime(demand, (now, now))
+                return
+            stamp = demand.stat().st_mtime_ns
+            for _ in range(20):
+                self.assertEqual(state.cached_statusline("claude", "sid-a"),
+                                 ((1, 0), "⏳ route 1 · frame"))
+            self.assertEqual(demand.stat().st_mtime_ns, stamp)
+            raise Finished()
+        with mock.patch.object(state, "_refresh_cache", side_effect=refresh), \
+             mock.patch.object(state, "_notification_available", return_value=True), \
+             mock.patch.object(state.time, "time", return_value=now), \
+             mock.patch.object(state.time, "sleep", side_effect=sleep), \
+             mock.patch.object(state.subprocess, "Popen") as launch:
+            with self.assertRaises(Finished):
+                state._producer_loop(fd)
+        self.assertEqual(sleeps, [30.0, 30.0])
+        self.assertEqual(refreshes, [{}, {"claude\0sid-a": now}])
+        launch.assert_not_called()
+
+    def test_active_display_renews_demand_even_while_projection_is_fresh(self):
+        now = time.time()
+        self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now,
+            "route_status": {"claude\0sid-a": "⏳ route 1 · frame"},
+            "route_sessions": {"claude\0sid-a": now - 61}}))
+        with mock.patch.object(state, "_request_producer") as request:
+            self.assertEqual(state.cached_statusline("claude", "sid-a"), ((0, 0), "⏳ route 1 · frame"))
+            request.assert_called_once_with("claude", "sid-a")
+
+    def test_existing_demand_marker_is_private_bounded_and_expires(self):
+        with mock.patch.object(state, "_ensure_producer"):
+            for index in range(70):
+                state._request_producer("opencode", "ses-" + str(index))
+        demands = state._route_demands()
+        self.assertEqual(len(demands), 64)
+        self.assertIn("opencode\0ses-69", demands)
+        self.assertEqual(stat.S_IMODE((state.state_root() / ".demand").stat().st_mode), 0o600)
+        self.assertEqual(state._route_demands(now=time.time() + 601), {})
+        self.assertFalse((state.state_root() / "route-status.json").exists())
+
+    def test_route_failure_does_not_erase_answer_wait_observation(self):
+        from tools.fleet import collectors
+        result = {"items": [], "complete": True, "observed_at": time.time()}
+        with mock.patch.object(state, "_route_demands", return_value={"claude\0sid-a": time.time()}), \
+             mock.patch.object(observation, "read_answer_waits", return_value=result), \
+             mock.patch.object(collectors, "collect_all", side_effect=OSError("unavailable")), \
+             mock.patch.object(state, "_notify_result"):
+            self.assertTrue(state._refresh_cache())
+        value = state._read_cache()
+        self.assertTrue(value["complete"])
+        self.assertEqual(value["route_status"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -38,6 +38,9 @@ _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
+_ROUTE_DEMAND_LIMIT = 64
+_ROUTE_DEMAND_MAX_BYTES = 32 * 1024
+_ROUTE_DEMAND_TTL = 600.0
 _SELECTED_DRAFT_MAX = 4096
 _SELECTED_RESPONSE_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
@@ -429,6 +432,8 @@ def publish_cache(result: dict) -> bool:
              "complete": bool(result.get("complete")), "total": current_total,
              "older": stale_total, "stale_total": stale_total, "ownerless": counts["ownerless"],
              "items": items, "by_session": by_session,
+             "route_status": result.get("route_status", {}),
+             "route_sessions": result.get("route_sessions", []),
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -3503,7 +3508,53 @@ def cached_count(harness: str, session_id: str, *, now: float | None = None,
     return total, len(counts.get(key, ()))
 
 
-def _request_producer():
+def cached_statusline(harness, session_id):
+    """One cache read for both badges; never imports the collection pipeline."""
+    value = _read_cache()
+    key = str(harness) + "\0" + str(session_id)
+    sessions = value.get("route_sessions", {}) if value else {}
+    if isinstance(sessions, dict):
+        demanded_at = sessions.get(key, 0)
+    else:
+        # Older derived snapshots may contain only the requested key list.
+        demanded_at = value["observed_at"] if value and isinstance(sessions, list) and key in sessions else 0
+    if (not isinstance(demanded_at, (int, float))
+            or time.time() - demanded_at >= _REQUEST_TTL):
+        _request_producer(harness, session_id)
+    if value is None:
+        return None, ""
+    total = int(value.get("total", 0)) if value.get("complete") else -1
+    count = len(value["by_session"].get(key, ()))
+    routes = value.get("route_status", {})
+    label = routes.get(key, "") if isinstance(routes, dict) else ""
+    if not isinstance(label, str) or len(label) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in label):
+        label = ""
+    return (total, count), label
+
+
+def _route_demands(now=None):
+    """Display interest only, in the existing demand marker, never route truth."""
+    now = time.time() if now is None else now
+    try:
+        marker = state_root() / ".demand"
+        info = marker.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_size > _ROUTE_DEMAND_MAX_BYTES):
+            return {}
+        value = json.loads(marker.read_text())
+        valid = {key: ts for key, ts in value.items()
+                if isinstance(key, str) and key.count("\0") == 1
+                and key.split("\0")[0] in ("claude", "codex", "opencode")
+                and 0 < len(key.split("\0")[1]) <= 256
+                and not any(ord(c) < 32 or ord(c) == 127 for c in key.replace("\0", ""))
+                and isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                and 0 <= now - ts < _ROUTE_DEMAND_TTL}
+        return dict(sorted(valid.items(), key=lambda item: item[1], reverse=True)[:_ROUTE_DEMAND_LIMIT])
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _request_producer(harness=None, session_id=None):
     root = state_root()
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -3523,14 +3574,22 @@ def _request_producer():
                 age = time.time() - marker.stat().st_mtime
             except OSError:
                 age = _REQUEST_TTL
-            if age >= _REQUEST_TTL:
+            demands = _route_demands() if harness and session_id else None
+            key = str(harness) + "\0" + str(session_id)
+            changed = demands is not None and time.time() - demands.get(key, 0) >= _REQUEST_TTL
+            if changed and harness in ("claude", "codex", "opencode") and _safe_native_ref(session_id):
+                demands[key] = time.time()
+                demands = dict(sorted(demands.items(), key=lambda item: item[1], reverse=True)[:_ROUTE_DEMAND_LIMIT])
+                _write(marker, demands)
+            elif age >= _REQUEST_TTL:
                 marker.touch(exist_ok=True)
+                marker.chmod(0o600)
         finally:
             os.close(demand_lock)
         now = time.time()
         cache = _read_cache(now=now)
         fresh = cache is not None and now - float(cache["observed_at"]) <= _REQUEST_TTL
-        if not fresh:
+        if not fresh or changed:
             _ensure_producer()
     except OSError:
         return
@@ -3563,6 +3622,125 @@ def _ensure_producer():
     return True
 
 
+def _cache_release_committed(code_root, observers):
+    """Use the existing current pointer and distribution receipt, not a new store."""
+    try:
+        if observers.installed_release(root=code_root) != code_root:
+            return False
+        distribution = observers._distribution_module(code_root)
+        receipt = distribution._load_state() if distribution else None
+        return bool(receipt and Path(receipt["release_root"]).resolve(strict=True) == code_root
+                    and receipt["version"] == (code_root / "RELEASE_VERSION").read_text().strip())
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        return False
+
+
+def reconnect_cache_producer(*, wait_for_commit=False):
+    """Install-time handoff through the existing managed observer lifecycle.
+
+    Ordinary render requests never call this. No new process ownership record
+    is needed: the existing private state root and actual flock identify duty.
+    """
+    import peer_obligations as observers
+    code_root = Path(__file__).resolve().parents[1]
+    binding = observers.managed_service_binding(code_root)
+    if not binding:
+        return False
+    if wait_for_commit:
+        # Older installers only know the activation callback. It runs before
+        # their outer current/state commit, so wait briefly in this detached
+        # child. A failed/rolled-back install never authorizes a signal.
+        deadline = time.monotonic() + 5.0
+        while not _cache_release_committed(code_root, observers):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+    if not _cache_release_committed(code_root, observers):
+        return False
+    root = state_root()
+    lock = root / ".projection.lock"
+    try:
+        for path, directory in ((root, True), (lock, False)):
+            info = path.lstat()
+            if (info.st_uid != os.getuid() or stat.S_ISLNK(info.st_mode)
+                    or (not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode))):
+                return False
+        root = root.resolve(strict=True)
+    except OSError:
+        return False
+
+    # Serialize handoffs with the existing display-demand lock. Two update
+    # callbacks must never send two signals to the same old producer. Render
+    # requests already use nonblocking acquisition, so they never wait here.
+    fd = None
+    try:
+        fd = os.open(root / ".demand.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        if os.fstat(fd).st_uid != os.getuid():
+            return False
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _reconnect_locked_cache_producer(root, lock, binding, code_root, observers)
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _reconnect_locked_cache_producer(root, lock, binding, code_root, observers):
+    def candidate(pid):
+        if pid <= 1:
+            return None
+        try:
+            proc = Path("/proc") / str(pid)
+            if proc.stat().st_uid != os.getuid():
+                return None
+            start = observers._proc_start_identity(pid)
+            argv = proc.joinpath("cmdline").read_bytes().decode().rstrip("\0").split("\0")
+            if (not start or len(argv) not in (3, 5)
+                    or Path(argv[1]).name != "human_wait_state.py" or argv[2] != "--refresh-cache"
+                    or len(argv) == 5 and (argv[3] != "--lock-fd" or not argv[4].isdecimal())):
+                return None
+            env = dict(item.split("=", 1) for item in
+                       proc.joinpath("environ").read_bytes().decode().split("\0") if "=" in item)
+            xdg = env.get("XDG_STATE_HOME")
+            if not xdg:
+                if not env.get("HOME"):
+                    return None
+                xdg = str(Path(env["HOME"]) / ".local/state")
+            if not Path(xdg).is_absolute() or (Path(xdg) / "hearting/human-waits").resolve() != root:
+                return None
+            fd = observers._find_held_lock_fd(pid, lock)
+            if (fd is None or len(argv) == 5 and argv[4] != fd
+                    or observers._proc_start_identity(pid) != start):
+                return None
+            return start, tuple(argv), fd
+        except (OSError, ValueError, IndexError, UnicodeError):
+            return None
+
+    found = []
+    try:
+        for proc in Path("/proc").iterdir():
+            if proc.name.isdecimal() and (proof := candidate(int(proc.name))) is not None:
+                found.append((int(proc.name), proof))
+    except OSError:
+        return False
+    if len(found) != 1:
+        return False
+    pid, proof = found[0]
+    # Revalidate the helper-specific UID/state/command/lock proof inside each
+    # common pidfd-bound inspection, immediately before its one SIGTERM.
+    result = observers.replace_managed_observer(
+        pid, proof[0], lock, "utilities/human_wait_state.py", ("--refresh-cache",),
+        binding, lock_fd_option="--lock-fd", root=code_root, exact_arguments=True,
+        process_check=lambda current_pid: (candidate(current_pid) == proof
+            and _cache_release_committed(code_root, observers)))
+    if result != "replaced" or not _cache_release_committed(code_root, observers):
+        return False
+    # _ensure_producer acquires the actual same flock before spawning. If a
+    # descriptor still holds it, leave it alone; never unlink the lock or KILL.
+    return _ensure_producer()
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
     try:
@@ -3573,6 +3751,23 @@ def _refresh_cache() -> bool:
         import human_gate_observation
         result = human_gate_observation.read_answer_waits(
             jobs_paths=dispatch.human_gate_registry_paths())
+        demands = _route_demands()
+        result["route_sessions"] = demands
+        result["route_status"] = {}
+        if demands:
+            try:
+                # Share registry generations with the answer-wait pass, and interpret
+                # only the native sessions the displays actually requested.
+                from tools.fleet.collectors import collect_all
+                from tools.fleet.explorer.live import session_route_status
+                requested = [tuple(key.split("\0", 1)) for key in demands]
+                snapshot = collect_all(harness_filter={h for h, _ in requested},
+                                       route_sessions=requested, include_report_verification=False)
+                if snapshot.observations.get("basic", {}).get("all_new") is True:
+                    result["route_status"] = {key: label for key, label in session_route_status(snapshot).items()
+                                              if key in demands}
+            except Exception:
+                pass  # route observation failure must not discard answer waits
         if not publish_cache(result):
             failure = {"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]}
@@ -3841,9 +4036,14 @@ def main(argv=None) -> int:
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-cache", action="store_true")
+    parser.add_argument("--reconnect-cache", action="store_true")
     parser.add_argument("--lock-fd", type=int)
     parser.add_argument("--count", nargs=2, metavar=("HARNESS", "SESSION"))
+    parser.add_argument("--statusline", nargs=2, metavar=("HARNESS", "SESSION"))
     args = parser.parse_args(argv)
+    if args.reconnect_cache:
+        reconnect_cache_producer(wait_for_commit=True)
+        return 0
     if args.refresh_cache:
         if args.lock_fd is not None:
             _producer_loop(args.lock_fd)
@@ -3859,7 +4059,11 @@ def main(argv=None) -> int:
             except (OSError, BlockingIOError):
                 pass
         return 0
-    if args.count:
+    if args.statusline:
+        counts, label = cached_statusline(*args.statusline)
+        print(("?" if counts[0] < 0 else str(counts[0])) + " " + str(counts[1]) if counts else "")
+        print(label)
+    elif args.count:
         value = cached_count(*args.count)
         if value is not None:
             print(("?" if value[0] < 0 else str(value[0])) + " " + str(value[1]))

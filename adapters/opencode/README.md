@@ -518,3 +518,23 @@ records as live. See [V2 Shell](https://opencode.ai/v2/docs/tools/#shell) and
 ## Runtime compaction tidy
 
 `experimental.session.compacting` appends shared six-field instructions to `output.context`; `session.compacted` fetches the matching completed assistant summary and its parent compaction part through the v1 client. Only a verified `auto=true` part with a nonempty summary successfully saved to the main session's own verified herdr pane can book the existing snapshot/clear/`이어서해` flow. The helper requires the latest ordinary assistant to finish after the matching user and a native idle observation after compaction, then refreshes the card with bounded recent conversation and the transcript path. It waits up to three hours. Manual/unknown parts, missing/empty summaries, failed card writes, project seats (no Herdr or tmux pane), and workers/sub-sessions remain queue-only; unknown session identity stays ledger-only.
+
+
+### Session route waiting
+
+OpenCode 2.0.32's official `prompt.footer.status` TUI slot displays
+`⏳ route N · stage` from the same current/open route projection as Fleet
+OVERVIEW. The existing terminal identity entry owns the slot and its cleanup.
+It reads Hearting's private display cache outside rendering; the existing
+answer-wait producer refreshes exact requested sessions every 30 seconds.
+Missing/stale data and sessions without an open current route show no badge.
+This adds no model input or server SDK calls.
+
+The interface was checked against the [official TUI plugin documentation](https://opencode.ai/v2/docs/build/plugins/cli/).
+
+After a managed install/update commits, the shared managed-observer lifecycle
+may hand off one exact old answer-wait cache producer to the activated release.
+It requires the same UID/state root, exact command and PID birth, and the actual
+projection flock. It sends one pidfd-bound SIGTERM and starts the new producer
+only after acquiring that lock; ambiguous/current/foreign/unverifiable or slow
+producers are left alone. Rendering never performs this handoff.

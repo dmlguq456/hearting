@@ -6,4 +6,11 @@
 // packages/tui/src/plugin/context.tsx). Runtime activation renders this file
 // with the activated bundle's absolute path; the relative import serves a
 // source checkout.
-export { default } from "../../tui/hearting-tui-identity.ts"
+import identity from "../../tui/hearting-tui-identity.ts"
+import { setupRouteStatus } from "../../tui/hearting-route-status.tsx"
+
+export default { ...identity, setup(context) {
+  const stopIdentity = identity.setup(context)
+  const stopRouteStatus = setupRouteStatus(context)
+  return () => { stopRouteStatus?.(); stopIdentity?.() }
+} }
