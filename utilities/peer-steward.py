@@ -8448,6 +8448,9 @@ def cmd_clear(args):
     if compacting:
         command = clear.COMPACT_COMMAND     # background agents keep running in the same session
     before = _codex_footer_threads(lines) if harness == "codex" else set()
+    req, why = clear.recheck_idle_input(args.request, req)
+    if req is None:
+        return finish("skipped", why, agent)
     rc, payload = _herdr_prompt(target, command, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc is None:
         return finish("failed", "herdr-invocation-failed", agent)
@@ -8548,6 +8551,10 @@ def cmd_idle_card_request(args):
         clear.release_unsent_idle_request(claim)
         return finish("skipped", why)
     text = clear.idle_card_request_text(claim)
+    checked, why = clear.recheck_idle_input(path, checked)
+    if checked is None:
+        clear.release_unsent_idle_request(claim)
+        return finish("skipped", why)
     rc, payload = _herdr_prompt(args.target, text, wait=True, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc != 0:
         reason = "herdr-invocation-failed" if rc is None else _herdr_error_reason(payload, rc)

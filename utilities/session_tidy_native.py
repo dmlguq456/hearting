@@ -328,6 +328,10 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 clear.COMPACT_COMMAND if compacting else "/clear")
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
+            if not continuing:
+                current, why = clear.recheck_idle_input(request_path, current)
+                if current is None:
+                    return result("skipped", why)
             try:
                 written = os.write(fd, data)
             except OSError:
@@ -395,6 +399,10 @@ def idle_card_request(req, request_path, nonce, *, screen_ready):
                     or str(reason or why).startswith("not-idle-")
                 return result("queued" if queued else "skipped", reason or why or "target-changed")
             data = (clear.idle_card_request_text(claim) + "\r").encode("utf-8")
+            current, why = clear.recheck_idle_input(request_path, current)
+            if current is None:
+                clear.release_unsent_idle_request(claim)
+                return result("skipped", why)
             try:
                 written = os.write(fd, data)
             except OSError as exc:
