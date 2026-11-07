@@ -143,7 +143,8 @@ Portable behavior contract = `roles/response-policy.md`.
 
 ## Claude Notes
 
-- Ask structured questions, including the §0.4 card, with `AskUserQuestion`
+- Register ordinary questions with `hearting run questions ask`; use the
+  shared response policy. Ask structured exceptions, including the §0.4 card, with `AskUserQuestion`
   (options 진행(권장) / 수정 / 중단); a plain-text card is the fallback.
 - CronCreate, ScheduleWakeup, Monitor, and backgrounded waits are not ways to
   watch Hearting work; the runtime hooks wake this session.

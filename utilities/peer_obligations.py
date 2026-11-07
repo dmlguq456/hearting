@@ -1735,9 +1735,33 @@ def _session_notice_delivery_bindings(message, roots=None, *, received_only=Fals
             record = _delivery_record_for_body(message, record, storage, original_body=original_body)
             if record is None:
                 continue
+            if "answer_binding" in record["receipt"]:
+                try:
+                    import human_wait_state as waits
+                    answer = record["receipt"]["answer_binding"]
+                    if any(recipient.get(key) != answer[key] for key in ("harness", "session_id")):
+                        continue
+                    # Even a copied notice key/marker is not a human answer.
+                    expected = session_notice.consumer_text(record["receipt"])
+                    body = original_body if original_body is not None else message.get("text")
+                    if message.get("body_ref") and original_body is None:
+                        body = module.read_peer_payload(message["ref"])["body"]
+                    if not isinstance(body, str) or expected not in body:
+                        continue
+                    waits.message_answer_body(answer)
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
             yield store, duty, record, root, storage, delivery_id
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return
+
+
+def message_question_bindings(message):
+    """Verified non-content provenance for a private answer payload, never a key heuristic."""
+    return [dict(record["receipt"]["answer_binding"])
+            for _store, _duty, record, _root, _storage, _delivery
+            in _session_notice_delivery_bindings(message)
+            if "answer_binding" in record["receipt"]]
 
 
 def _current_session_notice_bindings(message):
@@ -1748,8 +1772,10 @@ def _current_session_notice_bindings(message):
     recipient = message.get("to") or {}
     matches = list(_session_notice_delivery_bindings(message))
     count = 1 if binding.get("schema") == "retained-runtime-notice-v1" else len(binding.get("records") or ())
+    import session_notice
     if (not matches or len(matches) != count
             or any(record.get("state") not in pending.OPEN_STATES
+                   or not session_notice.notice_is_current(record)
                    or record_recipient_binding(record, storage, harness=recipient.get("harness"))
                       != (recipient.get("harness"), recipient.get("session_id"))
                    for _store, _duty, record, _root, storage, _delivery in matches)):
@@ -1945,6 +1971,14 @@ def acknowledge_session_notice_delivery(message, *, roots=None):
                 record = pending.ack_received(root, storage, delivery_id,
                     expected_identity=identity, acked_by="peer-received:" + message["ref"])
             except (OSError, ValueError, RuntimeError):
+                continue
+        if record.get("state") == "acked" and "answer_binding" in (record.get("receipt") or {}):
+            try:
+                import human_wait_state as waits
+                waits.complete_message_answer(record["receipt"], message.get("to") or {})
+            except (OSError, ValueError, TypeError, RuntimeError):
+                # The exact receipt remains immutable. Normal runner/receiver
+                # reobservation retries storage, never the native transmission.
                 continue
         if record.get("state") == "acked" and duty.get("state") not in {"complete", "cancelled"}:
             try:

@@ -3007,8 +3007,11 @@ def prompt_origin(text, harness, session_id):
                     or pending is None
                     or pending.get("producer_binding") != producer):
                 return None
-            return {**base, "kind": "runtime-completion", "name": "Hearting runtime",
-                    "producer_binding": dict(producer)}
+            from peer_obligations import message_question_bindings
+            answers = message_question_bindings(pending)
+            return {**base, "kind": "human-answer" if answers else "runtime-completion",
+                    "name": "Hearting runtime", "producer_binding": dict(producer),
+                    **({"question_answers": answers} if answers else {})}
 
         refs = transfer.get("refs") or []
         legacy_runtime = bool(pending and pending.get("dispatch_notice")) or any(
@@ -3896,6 +3899,18 @@ def settle_watch_transfers(watch_id, harness, sid):
 
 
 def receive_peer_message(text, recipient, project="", *, summary_text=""):
+    try:
+        return _receive_peer_message(text, recipient, project, summary_text=summary_text)
+    finally:
+        # Decision queue writes are outside the exact receiver's pending lock.
+        try:
+            import human_wait_state
+            human_wait_state.flush_message_decisions()
+        except Exception:
+            pass
+
+
+def _receive_peer_message(text, recipient, project="", *, summary_text=""):
     """Actual receiver observation; rendering a callback is never this boundary."""
     # A SID-less first-turn message is bound only after the native callback can
     # prove that the same foreground process admitted it. Pane reuse alone is
@@ -4878,6 +4893,12 @@ def _record(args, *, exact_receiver_evidence=None):
             if not _valid_runtime_producer_binding(
                     producer_binding, sender_endpoint, recipient_endpoint, list(args.ref or [])):
                 raise ValueError("peer-runtime-producer-binding-invalid")
+            from peer_obligations import message_question_bindings
+            if message_question_bindings({"producer_binding": producer_binding,
+                    "from": sender_endpoint, "to": recipient_endpoint,
+                    "refs": list(args.ref or []), "text": body, "body_sha256": body_sha256,
+                    "ref": getattr(args, "transfer_ref", None)}):
+                summary = "Question answer"
         kind = args.kind
         rec = {
             "schema_version": 1,

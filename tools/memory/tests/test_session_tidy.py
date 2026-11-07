@@ -396,6 +396,27 @@ class LegacyNativeMigrationAccessTest(TidyCase):
 
 class AnswerWaitHookTest(TidyCase):
 
+    def test_only_nonempty_prompt_from_exact_session_closes_marked_wait(self):
+        import human_wait_state
+        with self.library(), mock.patch.object(human_wait_state, "_request_producer"), \
+                mock.patch.object(human_wait_state, "_notify_item"):
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(harness=harness):
+                    sid = "wait-" + harness
+                    seat = st.resolve_seat(harness, str(self.cwd), sid=sid)
+                    self.assertTrue(human_wait_state.open_signal(
+                        harness, sid, seat.key, "[답변 필요] fixture", sequence=0))
+                    for text in ("", " \n\t"):
+                        st.run_hook(harness, "prompt", sid, cwd=str(self.cwd),
+                                    prompt_text=text, emit=lambda _text: None)
+                        self.assertEqual(human_wait_state.read_signals()[0]["session_id"], sid)
+                    st.run_hook(harness, "prompt", sid + "-other", cwd=str(self.cwd),
+                                prompt_text="answer to a different session", emit=lambda _text: None)
+                    self.assertEqual(human_wait_state.read_signals()[0]["session_id"], sid)
+                    st.run_hook(harness, "prompt", sid, cwd=str(self.cwd),
+                                prompt_text="actual answer", emit=lambda _text: None)
+                    self.assertEqual(human_wait_state.read_signals(), [])
+
     def test_start_does_not_replay_cached_own_seat_s4_after_close(self):
         import human_wait_state
         output = []

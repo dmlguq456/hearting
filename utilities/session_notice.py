@@ -35,12 +35,23 @@ def receipt_digest(receipt: dict) -> str:
 
 
 def validate(receipt: dict) -> dict:
-    if (not isinstance(receipt, dict) or set(receipt) != KEYS or receipt.get("kind") != KIND
+    if (not isinstance(receipt, dict) or set(receipt) not in (KEYS, KEYS | {"answer_binding"})
+            or receipt.get("kind") != KIND
             or receipt.get("schema_version") != 1
             or any(not isinstance(receipt[key], str) or not receipt[key]
                    for key in ("subject", "text", "required_action", "key"))
             or len(receipt["text"]) > MAX_TEXT):
         raise ValueError("notice-shape-invalid")
+    if "answer_binding" in receipt:
+        import human_wait_state as waits
+        binding = receipt["answer_binding"]
+        if (not waits.message_binding_valid(binding)
+                or receipt["key"] != "question-answer:" + binding["request_id"]
+                or receipt["subject"] != "Question answer" or receipt["text"] != "private-answer"
+                or receipt["required_action"] != "read-question-answer"):
+            raise ValueError("notice-answer-binding-invalid")
+    if len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")) > 2048:
+        raise ValueError("notice-receipt-too-large")
     return dict(receipt)
 
 
@@ -124,7 +135,7 @@ def pending_lineage(record, harness, storage, jobs=None):
 
 def notify(harness: str, session_id: str, *, key: str, subject: str, text: str,
            required_action: str = "read-notice", route_id: str = "route-free", jobs=None,
-           lineage=None) -> dict | None:
+           lineage=None, exact_text=False, answer_binding=None) -> dict | None:
     """Store one immutable notice and wake the existing normal runner."""
     from harness_capabilities import parent_completion
     carrier = parent_completion(harness).get("carrier")
@@ -135,9 +146,22 @@ def notify(harness: str, session_id: str, *, key: str, subject: str, text: str,
         return None
     jobs_path = raw_jobs.resolve(strict=False)
     binding = _lineage(lineage, harness, session_id)
-    receipt = validate({"schema_version": 1, "kind": KIND, "subject": subject,
-                        "text": " ".join(text.split())[:MAX_TEXT],
-                        "required_action": required_action, "key": key})
+    if exact_text:
+        import human_wait_state as waits
+        if waits._message_answer_error(text):
+            raise ValueError(waits._message_answer_error(text))
+        if (not answer_binding or answer_binding.get("harness") != harness
+                or answer_binding.get("session_id") != session_id
+                or waits.message_answer_body(answer_binding, current=True) != text):
+            raise ValueError("notice-answer-body-conflict")
+    elif answer_binding is not None:
+        raise ValueError("notice-answer-exact-text-required")
+    receipt = {"schema_version": 1, "kind": KIND, "subject": subject,
+               "text": "private-answer" if exact_text else " ".join(text.split())[:MAX_TEXT],
+               "required_action": required_action, "key": key}
+    if exact_text:
+        receipt["answer_binding"] = dict(answer_binding)
+    receipt = validate(receipt)
     digest = hashlib.sha256(f"{KIND}\0{key}".encode()).hexdigest()
     delivery_id = "delivery-" + digest
     root = jobs_path.parent
@@ -184,6 +208,16 @@ def render_text(receipt: dict) -> str:
     except ValueError:
         return "notice=unreadable"
     return f"{receipt['subject']}: {receipt['text']} (required_action={receipt['required_action']})"
+
+
+def consumer_text(receipt: dict) -> str:
+    """Only the private native payload resolves the answer body; summaries use render_text."""
+    receipt = validate(receipt)
+    if "answer_binding" not in receipt:
+        return render_text(receipt)
+    import human_wait_state as waits
+    body = waits.message_answer_body(receipt["answer_binding"])
+    return f"{receipt['subject']} (request={receipt['answer_binding']['request_id']}):\n{body}"
 
 
 def classify(receipt: dict) -> str:
@@ -299,6 +333,13 @@ def notice_is_current(record: dict, *, jobs=None, notice_context=None) -> bool:
     if receipt["key"].startswith("native-resume-v1:"):
         import session_resume
         return session_resume.current(record)
+    if "answer_binding" in receipt:
+        try:
+            import human_wait_state as waits
+            waits.message_answer_body(receipt["answer_binding"], current=True)
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
     if receipt["key"].startswith("steward-check:"):
         try:
             import steward_check

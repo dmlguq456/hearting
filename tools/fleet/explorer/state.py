@@ -319,7 +319,7 @@ def _question_choice_allowed(detail, question_id, answer):
 def _question_uses_workflow_transport(detail):
     native = detail.get("native_ref")
     return (isinstance(native, Mapping) and native.get("transport") in {
-        "hearting-owner-input", "hearting-human-gate", "hearting-answer-marker"})
+        "hearting-owner-input", "hearting-human-gate", "hearting-answer-marker", "hearting-message-answer"})
 
 
 def question_free_text_supported(detail, question_id):
