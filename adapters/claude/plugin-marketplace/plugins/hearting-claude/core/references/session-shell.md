@@ -49,7 +49,9 @@ typing, including digits, Enter, Tab and action letters, remains native outside
 that focus. The focused question editor uses existing `questions list/answer`
 choice, text and decision operations; original questions, exact binding, claims
 and receipts remain with that common API. Marked Codex questions use the same
-board, never a new question store. Route, peer, repo and tidy actions use their
+board, never a new question store. Runtime notices that carry these answers
+select the same verified native attachment before consulting optional panes;
+claims, producer bindings and exact-consumption receipts remain unchanged. Route, peer, repo and tidy actions use their
 existing entry points. A changed selection cannot retarget an in-flight action.
 Fleet's absence does not prevent an existing peer runner from
 waking a shell. Shell display and input transport add no model instructions.

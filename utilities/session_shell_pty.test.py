@@ -144,7 +144,9 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!(await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('block focus missing');
    await rpc(cfg.inlet,{batch:Buffer.from('123\t').toString('base64')});
    await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
-   if((await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('block focus retained');
+   const restored=await rpc(pinned.socket,{...pinned,op:'status'});
+   if(restored.focused)throw Error('block focus retained');
+   if(!restored.empty)throw Error('block-only keys poisoned the native submitted frontier');
    await rpc(cfg.inlet,{batch:Buffer.from('r1w2f3\r').toString('base64')});await waitFor(/DONE_r1w2f3/);
    if(/DONE_123/.test(raw))throw Error('focused keys leaked into native');
    if(cfg.scenario==='block-focus-batch'){await rpc(cfg.inlet,{batch:Buffer.from('\x1d123\t\x1dBATCH_PRESERVED\r').toString('base64')});await waitFor(/DONE_BATCH_PRESERVED/);}

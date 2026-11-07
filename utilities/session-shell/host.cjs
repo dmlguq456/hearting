@@ -57,7 +57,7 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
-let lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
+let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
 let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
@@ -305,7 +305,7 @@ async function refreshReadiness() {
   // A previous empty frame cannot acknowledge bytes still waiting inside the
   // native input loop. Only untouched startup or an exact submitted frontier
   // can be corroborated by the screen/native-idle observation.
-  const inputSettled=epoch===0||(submitted>=0&&submitted===epoch);
+  const inputSettled=nativeEpoch===0||(submitted>=0&&submitted===nativeEpoch);
   if(relay||paste||keyTail||currentDelivery||!sid||!inputSettled){empty=false;return;}
   const before=epoch,selected=selection,revision=screenRevision;
   const result=await source('readiness',{screen:screenSnapshot(),state});
@@ -314,7 +314,9 @@ async function refreshReadiness() {
   if(empty&&state!=='idle'){state='idle';queueProjection();}
 }
 function observeInput(data) {
-  const previous=epoch;epoch+=data.length;empty=false;
+  // All keys invalidate an in-flight observation, but only native-bound bytes
+  // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
+  const previous=nativeEpoch;epoch+=data.length;nativeEpoch+=data.length;empty=false;
   for(let offset=0;offset<data.length;offset++) {
     const c=String.fromCharCode(data[offset]);
     if(keyTail){keyTail+=c;if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
@@ -402,7 +404,7 @@ async function request(req) {
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';empty=false;epoch++;lastEnter=epoch;
+  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter

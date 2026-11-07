@@ -102,6 +102,9 @@ def observe(harness, pid, proc_start, sid):
     if read_proc_start(pid) != proc_start:
         return {}, []
     values = {name: getattr(sess, name) for name in ("cwd", "model", "effort", "ctx_pct")}
+    name_path = session_handle._session_name_registry_path(harness, sid)
+    if name_path:
+        paths.append(name_path)
     names = session_handle.resolve_display_inputs(harness, sid, pid=pid)
     title = session_handle.current_session_subject(names.get("runtime_name"), titles.last_title(sid, harness=harness))
     quota = dict(usage_cache.read(harness).get("payload") or {})
