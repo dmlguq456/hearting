@@ -400,10 +400,6 @@ every display. A message question closes on exact consumed answer receipt or
 nonempty direct human input for the same session and sequence, never on queue
 acceptance or elapsed time. Unsupported native surfaces retain their fallback.
 
-HISTORY presents bounded successful NOW changes at their original time, retaining
-the existing generations, cards and conversation access. Explicit Open pane uses
-an exact verified target; periodic pane observation stays read-only.
-
 Fleet's interactive view keeps shared status, usage, compute/GPU observations,
 and its controls outside the scrolling work-list viewport. The list body owns
 its offset, selection-follow, page movement, and wheel movement; the flat line
