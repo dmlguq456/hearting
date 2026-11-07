@@ -68,6 +68,7 @@ let actionWorker;
 const nativeDisplay=require('./native-display.cjs');
 let nativeContext;
 let displayValues={};
+let nativeFooter=null,paintedCommon=[];
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -84,7 +85,7 @@ function publishNativeDisplay() {
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !fleetView,alive:live(),expanded,focused:block.focused,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
-  if(op==='action')return readAction(extra);
+  if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
@@ -95,8 +96,8 @@ function source(op, extra={}) {
     backend.stdin.write(frame);
   });
 }
-function readAction(extra) {
-  // A person-requested ledger/repo read may be slow. It must not queue ahead
+function readAction(extra,operation='action') {
+  // A person-requested read or answer may be slow. It must not queue ahead
   // of event-driven values or readiness on the ordinary projection worker.
   if(actionWorker)return Promise.resolve({ok:false,reason:'action-pending'});
   return new Promise(resolve=>{
@@ -115,7 +116,7 @@ function readAction(extra) {
       raw+=bytes;if(Buffer.byteLength(raw)>65536){finish({ok:false,reason:'action-unavailable'});return;}
       if(raw.includes('\n'))try{finish(JSON.parse(raw.split('\n')[0]));}catch{finish({ok:false,reason:'action-unavailable'});}
     });
-    worker.stdin.end(JSON.stringify({op:'action',binding:binding(),...extra})+'\n');
+    worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
   });
 }
 function emit(value) { process.stdout.write(value); }
@@ -151,7 +152,7 @@ function render() {
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid);
+    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon);
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;publishNativeDisplay();if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
@@ -194,7 +195,7 @@ function displayLines(lines,height,done) {
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
   try{vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
-    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0));}
+    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0),Array.from({length:height},(_,y)=>vt.buffer.active.getLine(y)?.translateToString(true)||''));}
     catch{rawRelay();}
     finally{displayVTs.delete(vt);vt.dispose();}
     schedule();
@@ -215,7 +216,7 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
@@ -230,9 +231,9 @@ function rebuildDisplay() {
     }else lines=base;
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
-  displayLines(lines,expanded?height():1,(painted,lengths)=>{
+  displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:rows-height()+edit+1,col:Math.min(cols,lengths[edit]+1)}:null;
-    panelRows=painted;displayFooter=painted[0];footerLast='\0';rebuilding=false;
+    panelRows=painted;paintedCommon=plain;displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
   });
 }
@@ -310,9 +311,9 @@ async function projection() {
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,cols,expanded,currentDelivery,heldBytes]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,data.native_footer,cols,expanded,currentDelivery,heldBytes]);
     displayValues=data.native_display||{};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
@@ -428,6 +429,7 @@ async function lifecycle(req) {
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
+    nativeFooter=null;paintedCommon=[];
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
     displayValues={};
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);

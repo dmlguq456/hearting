@@ -170,6 +170,11 @@ you focus the block. Fleet can open that exact session's panel too. Peer wake wo
 without Herdr; Codex keeps its native queue. Native context remains as a fallback
 where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
 
+Wrapped Codex preserves its native shared-daemon startup. The unchanged managed
+footer can yield duplicate paint to the common area, including the exact thread ID.
+Custom, clipped or uncertain rows remain visible. Answers retain the existing
+queue and consumption receipts; an unproved native target stays pending.
+
 ### Key screens
 
 <table>

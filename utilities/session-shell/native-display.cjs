@@ -1,4 +1,5 @@
 'use strict';
+const fs=require('node:fs');
 // Only the visible native footer/sidebar. Never a readiness or identity claim.
 function observe(harness, lines, sid) {
   const valid=n=>Number.isFinite(n)&&n>=0&&n<=100;
@@ -12,7 +13,7 @@ function observe(harness, lines, sid) {
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
-    const m=line.match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\s*·.*?Context\s+(\d+(?:\.\d+)?)% used\s*$/i);
+    const m=line.match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\s*·.*?Context\s+(\d+(?:\.\d+)?)% used(?:\s*·|\s*$)/i);
     if(m&&(!sid||m[1]===sid)&&valid(Number(m[2])))return {percent:Number(m[2]),sid:m[1]};
   }
   if(harness==='opencode') {
@@ -27,13 +28,25 @@ function observe(harness, lines, sid) {
   return null;
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-function hiddenFooterRows(harness,lines,sid) {
+function hiddenFooterRows(harness,lines,sid,plan,painted=[]) {
   const found=[];
-  if(harness!=='codex')return new Set();
-  const exact=/^ *([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · Context (?:100|[1-9]?[0-9])% used *$/;
+  if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
+     ||!Array.isArray(plan.lines)||!plan.lines.length
+     ||!plan.lines.every((line,i)=>line.trimEnd()===painted[i]?.trimEnd()))return new Set();
+  try {
+    const s=fs.lstatSync(plan.config.path,{bigint:true});
+    const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
+    if(!s.isFile()||s.uid!==BigInt(process.getuid())||s.mode&0o022n
+       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return new Set();
+  }catch{return new Set();}
+  const expected=plan.fields.filter(field=>Array.isArray(field)&&field.length);
+  const exact=/^ +([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · .+$/;
   for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
     const match=lines[y].match(exact);
-    if(match&&(!sid||match[1]===sid)&&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
+    const fields=lines[y].trim().split(' · ').map(text=>text.replace(/\s+/g,' '));
+    if(match&&match[1]===sid&&fields.length===expected.length
+       &&fields.every((value,i)=>expected[i].includes(value))
+       &&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
   }
   return new Set(found.length===1?found:[]);
 }

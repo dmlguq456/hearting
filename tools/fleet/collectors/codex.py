@@ -1378,7 +1378,22 @@ def _daemon_read_pages(client, method, params, deadline, *, max_items):
     raise ValueError("Codex daemon page budget exhausted")
 
 
-def _daemon_thread_origins(environ):
+def _daemon_client_matches_service(client, expected_service):
+    """A callback may observe only the daemon which actually spawned it."""
+    import socket
+    import struct
+    from . import procscan
+    try:
+        pid, start = expected_service
+        peer_pid, uid, _gid = struct.unpack("3i", client.socket.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        return (peer_pid == pid and uid == os.geteuid()
+                and procscan.read_proc_start(pid) == str(start))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _daemon_thread_origins(environ, *, expected_service=None):
     """Read a complete loaded/source/status snapshot, caching only loaded threads.
 
     The only daemon calls are initialize, thread/loaded/list,
@@ -1412,6 +1427,8 @@ def _daemon_thread_origins(environ):
         from codex_queue_delivery import _connect
         deadline = time.monotonic() + _DAEMON_RPC_SECONDS
         client = _connect(endpoint, min(_DAEMON_RPC_TIMEOUT, _DAEMON_RPC_SECONDS))
+        if expected_service is not None and not _daemon_client_matches_service(client, expected_service):
+            raise OSError("Codex callback daemon identity changed")
     except Exception:
         _invalidate_daemon_cache(endpoint_path)
         if client is not None:
@@ -1677,13 +1694,14 @@ def _daemon_session_for_process(pid, environ=None, observation=None):
     return next(iter(candidates))
 
 
-def process_for_thread(thread_id, environ=None):
+def process_for_thread(thread_id, environ=None, *, expected_service=None):
     """Return the unique live root TUI PID/start owning ``thread_id``'s MCP origin."""
     if not isinstance(thread_id, str) or _sid("rollout-x-%s.jsonl" % thread_id) != thread_id:
         return None
     from . import procscan
     env = dict(environ or os.environ)
-    origins = _daemon_thread_origins(env)
+    origins = (_daemon_thread_origins(env, expected_service=expected_service)
+               if expected_service is not None else _daemon_thread_origins(env))
     row = origins.get(thread_id) if origins else None
     if not row:
         return None

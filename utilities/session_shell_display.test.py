@@ -73,14 +73,13 @@ class WrappedDisplayTest(unittest.TestCase):
         line=self.statusline(False,37)
         self.assertIn('Opus',line);self.assertIn('37%',line);self.assertIn('42%',line)
 
-    def test_codex_footer_changes_are_per_invocation_and_keep_original_arguments(self):
+    def test_codex_wrapper_keeps_native_shared_ingress_and_original_arguments(self):
         spec=importlib.util.spec_from_file_location('shell_display_entry',ROOT/'utilities/session-shell/entry.py')
         entry=importlib.util.module_from_spec(spec);spec.loader.exec_module(entry)
         original=['/synthetic/codex','--model','fixture','resume','native-session']
         transform=getattr(entry,'wrapped_command',lambda _harness,command:command)
         command=transform('codex',original)
-        self.assertIn('tui.status_line=["thread-id","context-used"]',command)
-        self.assertEqual(command[-len(original[1:]):],original[1:])
+        self.assertEqual(command,original)
         self.assertEqual(original,['/synthetic/codex','--model','fixture','resume','native-session'])
         for harness in ('claude','opencode'):
             self.assertEqual(transform(harness,original),original)
