@@ -309,6 +309,10 @@ def main(argv: list[str]) -> int:
         print(f"job_worktree={worktree}")
         print(f"job_slug={slug}")
         print(f"job_pipe={pipe}")
+        from worker_bootstrap import continuation_followup_for_row
+        guidance = continuation_followup_for_row(metadata, jobs)
+        if guidance:
+            print(f"continuation_followup={guidance}")
         terminal = terminal_results.get(metadata.get("attempt_id", ""))
         if terminal is not None:
             print(f"handoff_state={terminal['state']}")

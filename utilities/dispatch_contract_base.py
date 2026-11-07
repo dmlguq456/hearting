@@ -1256,6 +1256,7 @@ ROUTE_STATE_REFUSAL_REASONS = (
     "completion-evidence-superseded",
     "completion-evidence-revised-unrecorded",
     "review-round-budget-exhausted",
+    "review-subject-unchanged",
     "review-verdictless-bound",
     "round-unsettled",
     "resource-owner-stage-admission-blocked",
@@ -1388,6 +1389,8 @@ def route_state_next_action(reason: str, detail: str, route_file: str | None,
         )
     if reason == "review-round-budget-exhausted":
         return "close the node via owner-closure (review) or report the FAIL and open an SD-116 continuation (test)"
+    if reason == "review-subject-unchanged":
+        return "correct the blocking findings together, then repeat the same start for the closure check"
     if reason == "review-verdictless-bound":
         return "route the round through the sealed fallback chain's remaining unregistered hop (native-subagent, then owner-inline)"
     if reason == "round-unsettled":

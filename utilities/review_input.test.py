@@ -333,7 +333,9 @@ class ReviewInputTest(unittest.TestCase):
         self.assertFalse((self.root/'review-input-revisions').exists())
         for number in (1,2,3,4):
             current=dict(self.meta,attempt_id=f'att-next-{number}')
-            if number<=2:
+            # Only the first launch may judge these unchanged bytes; later
+            # starts return the existing blocking review without a new round.
+            if number==1:
                 R.validate_revision_admission(self.jobs,current,candidate)
             else:
                 self.assert_reason('reviewed-evidence-revision-not-admitted',
@@ -355,7 +357,7 @@ class ReviewInputTest(unittest.TestCase):
         preview = SimpleNamespace(**dict(self.meta, action='dry-run', jobs_path=self.jobs, command_attempt_id=None,
                                          reviewed_evidence=str(self.evidence), automatic_retry_of=None,
                                          parent_attempt_id=None, attempt_id='att-next'))
-        for count, state in ((0, 'admit'), (1, 'admit'), (2, 'exhausted')):
+        for count, state in ((0, 'admit'), (1, 'review-correction-required'), (2, 'exhausted')):
             self.rounds.clear(); self._sealed_verdict_rows(candidate, count)
             seen = []
             real = R._round_admission

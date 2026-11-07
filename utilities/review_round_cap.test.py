@@ -100,6 +100,37 @@ class ClassifyRoundRowTest(unittest.TestCase):
 
 
 class RoundBudgetTest(unittest.TestCase):
+    def test_open_blocking_subject_requires_change_without_spending_round(self):
+        node = {"id": "impl-review", "kind": "review-worker", "unit": "qa/code-review",
+                "completion_gate": "code-impl-review"}
+        blocked = row("done", "completed-review-blocking", failure_class="fail", extra={
+            "attempt_id": "att-A", "review_subject_digest": "subject-A"})
+        for revisions in ([], [{"answers": ["att-A"]}]):
+            decision = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+                rows=[blocked], revisions=revisions, facts={"source_subject_digest": "subject-A"})
+            self.assertEqual((decision.allowed, decision.reason, decision.budget.state,
+                              decision.budget.verdict_rounds),
+                             (False, "review-subject-unchanged", "review-correction-required", 1))
+        changed = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked], facts={"source_subject_digest": "subject-B"})
+        self.assertEqual((changed.allowed, changed.budget.round_kind), (True, "closure-check"))
+        blocked_b = row("done", "completed-review-blocking", failure_class="fail", extra={
+            "attempt_id": "att-B", "review_subject_digest": "subject-B"})
+        back_to_a = AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked, blocked_b], revisions=[{"answers": ["att-A"]}],
+            facts={"source_subject_digest": "subject-A"})
+        self.assertEqual((back_to_a.reason, back_to_a.budget.verdict_rounds), ("review-subject-unchanged", 1))
+        live = row("open", "", extra={"attempt_id": "att-live"})
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked, live], facts={"source_subject_digest": "subject-A"}).budget.state, "blocked-live")
+        death = row("done", "dead-worker-runtime-error", failure_class="runtime", extra={
+            "attempt_id": "att-death", "review_subject_digest": "subject-A"})
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=node,
+            rows=[blocked, death], facts={"source_subject_digest": "subject-A"}).budget.state, "admit")
+        legacy = row("done", "completed-review-blocking", failure_class="fail", extra={"attempt_id": "att-old"})
+        self.assertEqual(AUTH.decide_continuation(route(cap=2), action="round", node=review_node(),
+            rows=[legacy], facts={"source_subject_digest": "subject-A"}).budget.state, "admit")
+
     def test_no_start_census_retains_pending_and_reviewed_terminal_conflicts(self):
         import json
         for reviewed in (False, True):

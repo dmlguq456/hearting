@@ -784,11 +784,227 @@ def owner_inline_marker_prompt(args) -> str:
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
 
 
-def route_start_command(route_file, node_id: str) -> str:
+def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidence=None) -> str:
     """The exact command that starts `node_id` of a sealed route (text only; the start gate still decides)."""
     script = Path(__file__).resolve().with_name("stage-dispatch-fallback.py")
     return (f"python3 {shlex.quote(str(script))} --route {shlex.quote(str(route_file))} "
-            f"--node {shlex.quote(str(node_id))} --start")
+            f"--node {shlex.quote(str(node_id))} --start"
+            + (f" --jobs {shlex.quote(str(jobs))}" if jobs else "")
+            + (f" --reviewed-evidence {shlex.quote(str(reviewed_evidence))}" if reviewed_evidence else ""))
+
+
+def incomplete_handoff_settled(route, node, metadata, jobs, parent_attempt_id):
+    """True when an exact BLOCKED execute handoff is settled, quiescent and readable (advice only; wording is never read)."""
+    from codex_dispatch_terminal import inspect_terminal_attempt, inspect_terminal_log
+    from dispatch_attempt_policy import readable_result
+    from dispatch_contract import attempt_process_quiescence, terminal_conflict_pending
+    from route_authority import decide_continuation
+    try:
+        matching = [(s, m) for s, m in _lineage_rows(route, jobs).get(node["id"], ())
+                    if m.get("attempt_id") == metadata.get("attempt_id")]
+        if len(matching) != 1:
+            return False
+        status, exact = matching[0]
+        terminal = inspect_terminal_attempt(exact.get("log_file"), worktree=route.get("cwd"),
+            artifact_root_metadata=exact.get("artifact_root") or route.get("artifact_root"), artifact_binding=exact)
+        blocker = str((inspect_terminal_log(exact.get("log_file")) or {}).get("blocker") or "")
+        facts = {"identity": (exact.get("route_id") == route.get("route_id")
+                              and exact.get("route_hash") == route.get("route_hash")
+                              and exact.get("route_node") == node.get("id")
+                              and bool(parent_attempt_id) and exact.get("parent_attempt_id") == parent_attempt_id),
+                 "settled": status == "done" and not terminal_conflict_pending(exact),
+                 "quiescent": attempt_process_quiescence(exact, terminal_receipt=True).state == "quiescent",
+                 "readable": terminal.get("state") == "valid" and terminal.get("artifact_state") == "readable",
+                 "unfinished": readable_result(exact) == "BLOCKED" and terminal.get("verdict") == "BLOCKED" and bool(blocker)}
+        return decide_continuation(route, action="producing-continuation", node=node, facts=facts).allowed
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def correction_continuation_eligible(route, node, metadata, jobs, parent_attempt_id):
+    """A passed producer reopens only for an exact downstream blocking judgment."""
+    import review_round_cap as ROUND
+    from codex_dispatch_terminal import inspect_terminal_attempt
+    from dispatch_attempt_policy import committed_outcome, terminal_conflict_pending
+    from dispatch_contract import attempt_process_quiescence, evidence_digest, observe_terminal_review_failure
+    try:
+        rows = _lineage_rows(route, jobs)
+        found = [(s, m) for s, m in rows.get(node["id"], ()) if m.get("attempt_id") == metadata.get("attempt_id")]
+        if len(found) != 1:
+            return False
+        status, exact = found[0]
+        if (exact.get("route_id") != route.get("route_id") or exact.get("route_hash") != route.get("route_hash")
+                or not parent_attempt_id or exact.get("parent_attempt_id") != parent_attempt_id
+                or committed_outcome(status, exact) != "succeeded" or terminal_conflict_pending(exact)
+                or attempt_process_quiescence(exact, terminal_receipt=True).state != "quiescent"):
+            return False
+        lines = Path(jobs).read_text(encoding="utf-8").splitlines()
+        for judge in judging_stages(route, node["id"]):
+            worker = judge.get("worker_type") or ("review" if judge.get("kind") == "review-worker" else "test")
+            if judge.get("completion_gate") == "code-test":
+                failures = sum(1 for status, item in rows.get(judge["id"], ())
+                               if ROUND.classify_round_row(status, item, worker_type=worker) == "verdict"
+                               and ROUND.last_verdict_blocking([(status, item)], worker))
+                if route.get("effective_intensity") == "quick" or failures > 1:
+                    continue  # The existing one-pipeline-retry ceiling is spent.
+            judgment = ROUND.open_blocking_verdict(rows.get(judge["id"], ()), worker)
+            if not judgment or judgment.get("route_id") != route.get("route_id") or judgment.get("route_hash") != route.get("route_hash"):
+                continue
+            if attempt_process_quiescence(judgment, terminal_receipt=True).state != "quiescent":
+                continue
+            outcome = attempt_outcome(route, judgment)
+            artifact = Path(outcome["artifact"])
+            if judge.get("kind") == "review-worker":
+                observe_terminal_review_failure(route, judge, judgment["attempt_id"], artifact,
+                                                evidence_digest(artifact), lines)
+            else:
+                terminal = inspect_terminal_attempt(judgment.get("log_file"), worktree=route.get("cwd"),
+                    artifact_root_metadata=route.get("artifact_root"), artifact_binding=judgment)
+                if terminal.get("state") != "valid" or terminal.get("verdict") != "FAIL" or terminal.get("artifact_state") != "readable":
+                    continue
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return False
+
+
+def continuation_followup_fields(route, node, metadata, jobs, route_file):
+    """Project one exact terminal result into advisory continuation facts."""
+    import review_round_cap as ROUND
+    from dispatch_attempt_policy import readable_result
+    from dispatch_contract import evidence_digest, observe_terminal_review_failure
+    try:
+        attempt = metadata["attempt_id"]
+        if (metadata.get("route_id") != route.get("route_id")
+                or metadata.get("route_hash") != route.get("route_hash")
+                or metadata.get("route_node") != node.get("id")):
+            return {}
+        rows = Path(jobs).read_text(encoding="utf-8").splitlines()
+        outcome = attempt_outcome(route, metadata)
+        if node.get("kind") == "review-worker" and metadata.get("note") == ROUND.REVIEW_BLOCKING_NOTE:
+            artifact = Path(outcome["artifact"])
+            observe_terminal_review_failure(route, node, attempt, artifact, evidence_digest(artifact), rows)
+            reviewed = None
+            if metadata.get("review_input_digest"):
+                from review_input import read_binding
+                reviewed = read_binding(jobs, metadata)
+            from review_source_subject import read_binding as read_subject
+            subject = read_subject(jobs, metadata, required=False)
+            if subject is None and reviewed is None:
+                return {}
+            from review_input import has_plan_producer
+            explicit_input = reviewed["path"] if reviewed else None
+            if reviewed and has_plan_producer(route, node):
+                from dispatch_contract import resolve_dispatch_state_root
+                marker_path = (resolve_dispatch_state_root(Path(__file__).resolve().parents[1], Path(jobs))
+                               / "completion" / route["route_id"] / "plan.json")
+                try:
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    if marker.get("evidence", {}).get("path") == reviewed["path"]:
+                        explicit_input = None
+                except (OSError, ValueError, TypeError):
+                    pass  # Keep the bound explicit path when the producer cannot be identified.
+            start_node = node.get("parallel_anchor") or node["id"]
+            command = route_start_command(route_file, start_node, jobs=jobs, reviewed_evidence=explicit_input)
+            producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
+                         and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
+            source_review = bool(subject and subject.get("family") == "source")
+            targets = [reviewed["path"]] if reviewed else []
+            if (reviewed and subject and any(item.get("path") == "checklist.md"
+                    for item in subject.get("manifest", ()) if isinstance(item, dict))):
+                targets.append(str(Path(reviewed["path"]).parent / "checklist.md"))
+            return {"kind": "review", "attempt": attempt, "artifact": str(artifact),
+                    "target": ", ".join(targets),
+                    "source": source_review, "command": command,
+                    "producer_command": route_start_command(route_file, producers[-1]["id"], jobs=jobs)
+                        if source_review and producers else ""}
+        if node.get("completion_gate") == "code-test" and readable_result(metadata) == "FAIL" and outcome.get("artifact"):
+            from codex_dispatch_terminal import inspect_terminal_attempt
+            from dispatch_contract import attempt_process_quiescence, terminal_conflict_pending
+            exact = [(s, m) for s, m in _lineage_rows(route, jobs).get(node["id"], ())
+                     if m.get("attempt_id") == attempt]
+            if len(exact) != 1 or exact[0][0] != "done" or terminal_conflict_pending(exact[0][1]):
+                return {}
+            if attempt_process_quiescence(exact[0][1], terminal_receipt=True).state != "quiescent":
+                return {}
+            terminal = inspect_terminal_attempt(metadata.get("log_file"), worktree=route.get("cwd"),
+                artifact_root_metadata=route.get("artifact_root"), artifact_binding=metadata)
+            if terminal.get("state") != "valid" or terminal.get("verdict") != "FAIL" or terminal.get("artifact_state") != "readable":
+                return {}
+            producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
+                         and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
+            return {"kind": "review", "attempt": attempt, "artifact": outcome["artifact"],
+                    "source": True, "target": "", "command": route_start_command(route_file, node["id"], jobs=jobs),
+                    "producer_command": route_start_command(route_file, producers[-1]["id"], jobs=jobs) if producers else ""}
+        if (node.get("kind") == "pipeline-stage" and node.get("completion_gate") == "code-execute"
+                and readable_result(metadata) == "BLOCKED" and outcome.get("artifact")
+                and incomplete_handoff_settled(route, node, metadata, jobs, metadata.get("parent_attempt_id"))):
+            return blocked_handoff_followup(route, node, metadata, jobs, route_file)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    return {}
+
+
+def continuation_followup_text(fields):
+    """Render only facts established by the common continuation projection."""
+    def bounded(value, limit=512):
+        value = str(value or "")
+        return value if len(value) <= limit else "[path omitted; inspect the exact result]"
+    def command(value):
+        value = str(value or "")
+        return value if len(value) <= 1200 else "[command omitted; inspect the exact result]"
+    if isinstance(fields, list):
+        if not fields:
+            return ""
+        if len(fields) == 1:
+            return continuation_followup_text(fields[0])
+        if all(item.get("kind") == "review" for item in fields):
+            artifacts = list(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
+            targets = list(dict.fromkeys(bounded(item.get("target")) for item in fields if item.get("target")))
+            producers = list(dict.fromkeys(command(item.get("producer_command")) for item in fields if item.get("producer_command")))
+            commands = list(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
+            target = (", ".join(targets) if targets else "the source through the bounded producing stage"
+                      if any(item.get("source") for item in fields) else "the reviewed inputs")
+            return ("Review FAIL: batch the findings in " + ", ".join(artifacts) + " into one correction of " + target + "."
+                    + (" First use " + "; ".join(producers) + "." if producers else "")
+                    + " Then run the same start for the closure check: " + "; ".join(commands))
+        return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
+    if fields.get("kind") == "review":
+        target = bounded(fields.get("target")) or ("the source through the bounded producing stage" if fields.get("source") else "the reviewed inputs")
+        producer = (" First use " + command(fields["producer_command"]) + ".") if fields.get("producer_command") else ""
+        return (f"Review FAIL {fields['attempt']}: batch the findings in {bounded(fields['artifact'])} into one correction of {target}."
+                f"{producer} Then run the same start for the closure check: {command(fields['command'])}")
+    if fields.get("kind") == "unfinished":
+        return (f"Execute attempt {fields['attempt']} ended BLOCKED with an unfinished handoff. "
+                f"Read the blocker and {bounded(fields['artifact'])}. If it needs the person, raise it to your parent. "
+                f"Otherwise write the remaining items, plus any choice you made within the approved scope, to a file "
+                f"and run: {command(fields['command'])}")
+    return ""
+
+
+def blocked_handoff_followup(route, node, metadata, jobs, route_file):
+    """The next step for a BLOCKED execute handoff: the same start with the owner's remaining-work file."""
+    try:
+        artifact = attempt_outcome(route, metadata).get("artifact") or "its recorded result"
+        return {"kind": "unfinished", "attempt": metadata["attempt_id"], "artifact": artifact,
+                "command": route_start_command(route_file, node["id"], jobs=jobs) + " --prompt-file <file>"}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
+    """Resolve the sealed route of an exact registry row for advisory output."""
+    try:
+        from route_identity import route_hash
+        route_file = Path(metadata["route_file"])
+        route = json.loads(route_file.read_text(encoding="utf-8"))
+        if route_hash(route) != route.get("route_hash"):
+            return ""
+        node = next(n for n in _route_nodes(route) if n.get("id") == metadata.get("route_node"))
+        fields = continuation_followup_fields(route, node, metadata, jobs, route_file)
+        return fields if return_fields else continuation_followup_text(fields)
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return {} if return_fields else ""
 
 
 def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
@@ -1337,6 +1553,7 @@ def prior_round_context(route, node_id, jobs) -> str:
             text += f"; its report: `{outcome['artifact']}`"
         lines.append(text)
         if own_result == "BLOCKED":
+            lines.append("- Continue only the unfinished items in that exact report; preserve existing partial work and commits.")
             try:
                 import route_authority
                 unmet = route_authority._blocked_round_items(route, own)
