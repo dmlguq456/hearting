@@ -109,3 +109,30 @@ def claude_fields(callback):
             "ctx_pct": claude_percentage(callback), "quota_windows": quota_windows(quota),
             "weekly_pct": quota.get("rl_7d"), "model_quotas": quota.get("rl_ms") or []}
 
+
+
+def write_claude_tap(path, raw, environ):
+    """Keep a finite initial refresh from overwriting a newer native callback."""
+    import fcntl,json,os,tempfile
+    from contextlib import ExitStack
+    from pathlib import Path
+    lock=Path(environ['HEARTING_SHELL_SOCKET']).parent/'claude-first-display.json'
+    try:
+        with ExitStack() as stack:
+            try:guard=stack.enter_context(lock.open('r+'))
+            except OSError:guard=None
+            if guard:fcntl.flock(guard,fcntl.LOCK_EX)
+            stamp=float(environ['HEARTING_STATUS_OBSERVED_AT'])
+            previous={}
+            try:
+                if path.stat().st_size<=65536:previous=json.loads(path.read_text())
+            except (OSError,ValueError):pass
+            if previous.get('hearting_display_observed_at',0)>stamp:return
+            value=json.loads(raw);value['hearting_display_observed_at']=stamp
+            payload=json.dumps(value,ensure_ascii=False)
+            if len(payload.encode())>65536:return
+            with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,prefix='.'+path.name,delete=False) as stream:
+                stream.write(payload);temp=stream.name
+            os.replace(temp,path)
+    except (OSError,ValueError,TypeError):return
+

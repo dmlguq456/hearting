@@ -19,7 +19,7 @@ import human_wait_state,session_tidy,questions
 class SessionShellCopyTest(unittest.TestCase):
     NOW=1700000200
 
-    def panel(self,display,language='en',question=False):
+    def panel(self,display,language='en',question=False,**extra):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ,{'FLEET_NOW_LANG':language}))
             stack.enter_context(mock.patch.object(human_wait_state,'cached_statusline',return_value=((0,0),'')))
@@ -31,10 +31,17 @@ class SessionShellCopyTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(session_tidy,'prompt_display',return_value=display))
             stack.enter_context(mock.patch.object(session_tags,'assigned_tag',return_value='52'))
             stack.enter_context(mock.patch('time.time',return_value=self.NOW))
-            return shell.panel_projection('claude','test-native-session',expanded=True)
+            return shell.panel_projection(extra.pop('harness','claude'),'test-native-session',expanded=True,**extra)
 
     def lines(self,result):
         return [''.join(part['text'] for part in line) for line in result['lines']]
+
+    def test_a_known_native_context_is_not_erased_by_a_cold_projection(self):
+        for harness,percent in (('codex',0),('opencode',10)):
+            with self.subTest(harness=harness):
+                result=self.panel({'human_state':'none'},harness=harness,native_context=percent)
+                self.assertEqual(result['context'],percent)
+                self.assertTrue(any(str(percent)+'%' in line for line in self.lines(result)))
 
     def test_the_existing_fleet_formatter_owns_the_panel_input_line(self):
         with mock.patch.object(prompt_line,'last_input',return_value='SHARED_FRONTIER_PRESENTATION') as present:

@@ -65,6 +65,8 @@ let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
 let actionWorker;
+const nativeDisplay=require('./native-display.cjs');
+let nativeContext;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -139,6 +141,10 @@ function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
+    const observed=nativeDisplay.observe(harness,Array.from({length:terminal.rows},(_,i)=>
+      terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||''),sid);
+    if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
+      nativeContext=observed;if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
@@ -147,7 +153,9 @@ function render() {
     }
     if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
-      if(last[row]!==panelRows[y]){text+=`\x1b[${row+1};1H${panelRows[y]}`;last[row]=panelRows[y];}
+      const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
+        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:panelRows[y];
+      if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
     else if(!fleetView&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
@@ -288,7 +296,7 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:cols,rows,state,expanded});
+    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
@@ -409,6 +417,7 @@ async function lifecycle(req) {
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
+    if(nativeContext?.sid!==req.sid)nativeContext=undefined;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;

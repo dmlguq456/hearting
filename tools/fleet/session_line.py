@@ -241,3 +241,104 @@ def claude_native_statusline(callback, environ):
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
     return "\n".join(ansi_segments(clip_segments(line, columns), colors=colors, no_color="NO_COLOR" in environ)
                      for line in status_lines(values, columns))
+
+
+_CLAUDE_DISPLAY_FIELDS=('S_SESSION_DISPLAY','git_repo','git_branch','git_operation','git_merged',
+    'git_branch_done','git_extra_worktrees','git_ahead','git_behind','git_dirty',
+    'git_observation','git_observed_label','git_jobs')
+
+
+def remember_claude_display(callback, environ):
+    """Retain display metadata in the existing exact-session tap, never authority."""
+    import json, os
+    from pathlib import Path
+    sid=callback.get('session_id') or ''
+    if not sid or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._' for c in sid):
+        return
+    home=Path(environ.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude')
+    path=home/'.statusline'/(sid+'.json')
+    from contextlib import ExitStack
+    import fcntl
+    try:
+        with ExitStack() as stack:
+            endpoint=environ.get('HEARTING_SHELL_SOCKET')
+            marker=Path(endpoint).parent/'claude-first-display.json' if endpoint else None
+            if marker and marker.exists():
+                guard=stack.enter_context(marker.open('r+'))
+                fcntl.flock(guard,fcntl.LOCK_EX)
+            if path.stat().st_size>65536:return
+            before=path.stat()
+            value=json.loads(path.read_text())
+            if value.get('session_id')!=sid:return
+            value['hearting_display']={key:environ[key] for key in _CLAUDE_DISPLAY_FIELDS if key in environ}
+            raw=json.dumps(value,ensure_ascii=False)
+            if len(raw.encode())>65536:return
+            temp=path.with_name('.'+path.name+'.display-'+str(os.getpid()))
+            fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(fd,'w') as stream:stream.write(raw)
+            now=path.stat()
+            if (before.st_ino,before.st_mtime_ns)!=(now.st_ino,now.st_mtime_ns):
+                temp.unlink();return
+            os.replace(temp,path)
+    except (OSError,ValueError,TypeError):return
+
+
+def claude_first_statusline(callback, environ, script):
+    """Paint cached metadata/current native telemetry before finite refresh work."""
+    import json,os,stat,subprocess,sys,tempfile
+    from pathlib import Path
+    explicit=environ.get('HEARTING_SHELL_DIRECTORY')
+    if not explicit:
+        try:
+            endpoint=Path(environ.get('HEARTING_SHELL_SOCKET',''))
+            info=endpoint.lstat()
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid():return None
+            explicit=str(endpoint.parent)
+        except OSError:return None
+    directory=Path(explicit)
+    from .native_display import claude_fields
+    known=claude_fields(callback).get('ctx_pct') is not None
+    marker=directory/'claude-first-display.json'
+    try:
+        info=directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077:return None
+        try:
+            fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        except FileExistsError:
+            info=marker.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_size>1024:return None
+            previous=json.loads(marker.read_text())
+            if previous.get('session_id')==callback.get('session_id') and (previous.get('numeric') or not known):return None
+            fd=os.open(marker,os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+    except (OSError,ValueError,TypeError):return None
+    with os.fdopen(fd,'w') as stream:json.dump({'session_id':callback.get('session_id'),'numeric':known},stream)
+    env=dict(environ)
+    sid=callback.get('session_id') or ''
+    home=Path(env.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude')
+    if sid and all(c.isalnum() or c in '-._' for c in sid):
+        path=home/'.statusline'/(sid+'.json')
+        try:
+            if path.stat().st_size<=65536:
+                old=json.loads(path.read_text())
+                if old.get('session_id')==sid and old.get('cwd')==callback.get('cwd'):
+                    for key,value in (old.get('hearting_display') or {}).items():
+                        if isinstance(value,str) and key in _CLAUDE_DISPLAY_FIELDS:env[key]=value
+        except (OSError,ValueError,TypeError):pass
+    # Preserve the same native PID/SID and birth check when the finite refresh
+    # outlives this short native callback shell.
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'utilities'))
+    import claude_process_identity
+    try:
+        current,_tap,_policy=claude_process_identity.statusline_bindings(env.get('HEARTING_STATUS_CALLER_PID',''),sid,str(home))
+        if current:
+            pid=str(current['pid'])
+            from .collectors.procscan import read_proc_start
+            env.update(HEARTING_STATUS_CALLER_PID=pid,HEARTING_STATUS_CALLER_START=read_proc_start(int(pid)),HEARTING_STATUS_DISPLAY_PID=pid)
+    except (OSError,ValueError,TypeError):pass
+    line=claude_native_statusline(callback,env)
+    env['HEARTING_SHELL_INITIAL_REFRESH']='1'
+    with tempfile.TemporaryFile() as source:
+        source.write(json.dumps(callback).encode());source.seek(0)
+        subprocess.Popen(['bash',script],env=env,stdin=source,
+                         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+    return line

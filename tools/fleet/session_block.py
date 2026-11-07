@@ -21,13 +21,14 @@ def block_lines(values, *, columns, rows, questions=(), route="", received=(),
     if questions:
         lines = lines[:max(1, limit - 2 - bool(route))]
     # These labels deliberately follow the status-line idiom, not a Fleet frame.
-    if route:
+    if route and route != values.get("native_route"):
         lines.append([("⏳ ", "g_idle"), (route.removeprefix("⏳ "), "g_idle"),
                       ("  ↵", "dim")])
     if questions:
         total = sum(max(1, len(item.get("questions") or ())) for item in questions)
-        lines.append([("◑ ", "g_blocked"), (ui_text("fleet.session_block.questions") + " ", "dim"),
-                      (str(total), "g_blocked"), ("  Ctrl+]", "dim")])
+        if values.get("native_wait") is None:
+            lines.append([("◑ ", "g_blocked"), (ui_text("fleet.session_block.questions") + " ", "dim"),
+                          (str(total), "g_blocked"), ("  Ctrl+]", "dim")])
         for item in questions:
             for question in item.get("questions") or ({"question": item.get("reason") or "?"},):
                 options = []

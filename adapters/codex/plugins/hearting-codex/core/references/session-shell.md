@@ -89,6 +89,11 @@ The marker did not survive Native Ink, so no native row is removed or inferred
 from geometry. The approved replacement uses that space for the common line.
 Claude's status row follows its native callback cadence; block updates retain
 their event-driven contract. Parity compares Claude's native row and block together.
+First paint reuses the latest display observation before optional collection.
+Native terminal context is presentation evidence only, never input authority.
+OpenCode's visible context percentage owns its common-line percentage too.
+Claude's native status row owns route/wait badges; the block retains question
+contents without repeating those badges.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.

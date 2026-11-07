@@ -53,6 +53,15 @@ class SessionBlockTest(unittest.TestCase):
             self.assertIn('context '+bar+' '+str(percent)+'%',text)
             self.assertIn((str(percent)+'%',key),parts)
 
+    def test_claude_native_badges_are_not_repeated_above_question_contents(self):
+        from tools.fleet.session_block import block_lines
+        board=[{'questions':[{'question':'Keep this question?','choices':['Yes','No']}]}]
+        text='\n'.join(''.join(t for t,_ in row) for row in block_lines(
+            {**self.values(),'native_route':'⏳ route 1 · draft','native_wait':1},
+            columns=180,rows=50,questions=board,route='⏳ route 1 · draft'))
+        self.assertIn('Keep this question?',text)
+        self.assertNotIn('⏳',text);self.assertNotIn('◑',text)
+
 
     def test_all_original_claude_status_items_survive_in_the_expanded_block(self):
         # Compare against the native renderer itself, not a second item inventory.

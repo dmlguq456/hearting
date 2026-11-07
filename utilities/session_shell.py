@@ -326,7 +326,7 @@ def _plain(value, limit=256):
 
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
-                     columns=100, rows=30, state="unknown", expanded=True) -> dict:
+                     columns=100, rows=30, state="unknown", expanded=True, native_context=None, native_badges=None) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -352,6 +352,12 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     tag = assigned_tag(harness, sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
     values, watched = observe(harness, native_pid, native_start, sid) if native_pid else ({}, [])
+    # The native OpenCode sidebar already owns this display value. It does not
+    # establish an effective policy, process liveness or input readiness.
+    if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
+        values["ctx_pct"] = native_context
+    if harness == "claude" and isinstance(native_badges,dict):
+        values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
     values.update(harness=harness, tag=tag, state=state, route_label=_plain(route),
                   answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
     board = []
@@ -520,7 +526,8 @@ def _backend_operation(request: dict) -> dict:
             return {"ok": False, "reason": "invalid-display-size"}
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
-            columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True)}
+            columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
+            native_context=request.get("native_context"),native_badges=request.get("native_badges"))}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":
