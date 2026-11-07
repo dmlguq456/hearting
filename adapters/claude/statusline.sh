@@ -29,8 +29,8 @@ if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; t
   unset _state_root
 fi
 input=$(cat)
-if [ -z "${HEARTING_SHELL_INITIAL_REFRESH:-}" ]; then
-  export HEARTING_STATUS_OBSERVED_AT="$EPOCHREALTIME"
+if [ -n "${HEARTING_SHELL_SOCKET:-}" ] && [ -z "${HEARTING_SHELL_INITIAL_REFRESH:-}" ]; then
+  export HEARTING_STATUS_OBSERVED_AT="${EPOCHREALTIME:-$(date +%s.%N)}"
 fi
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ] && [ -z "${HEARTING_SHELL_INITIAL_REFRESH:-}" ]; then
   first_helper="$AGENT_HOME/tools/fleet/session_line.py"
