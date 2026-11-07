@@ -1571,8 +1571,8 @@
    "ko": "{record} 내리기 실패: {error}"
   },
   "viewer.busy": {
-   "en": "Port 8765 is already in use by another service or root.",
-   "ko": "8765 포트를 다른 서비스나 산출물 루트가 사용 중입니다."
+   "en": "Port {port} is already in use by another service or root. Try hearting view --port 0 for a free port.",
+   "ko": "{port} 포트를 다른 서비스나 산출물 루트가 사용 중입니다. hearting view --port 0으로 빈 포트를 사용하세요."
   },
   "viewer.empty": {
    "en": "No visible files.",
