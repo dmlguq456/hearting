@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A notice about non-attempt work reaches its session through the shared store and renderer."""
 import sys
+import json
+import hashlib
 import tempfile
 import unittest
 from unittest import mock
@@ -124,6 +126,58 @@ class SessionNoticeTest(unittest.TestCase):
         self.assertEqual(len({row["recipient_digest"] for row in records}), 1)
         duties = ObligationStore(self.jobs.parent).list(kinds={"run-notice"})
         self.assertEqual(len(duties), 1)
+
+
+class MessageNoticeBoundaryTests(unittest.TestCase):
+    def test_context_sweep_cannot_claim_or_ack_the_peer_couriers_message_answer(self):
+        from fixtures.message_questions import MessageQuestionFixture
+        with MessageQuestionFixture() as fixture:
+            for harness in ("claude", "codex", "opencode"):
+                signal, envelope = fixture.ask(harness)
+                fixture.submit(envelope)
+                record = fixture.record(signal)
+                claimed, _ = sweep.sweep_deliver(fixture.root, record["recipient_kind"], signal["session_id"])
+                self.assertEqual(claimed, [])
+                self.assertEqual(fixture.record(signal)["state"], "pending")
+
+    def test_receipt_serialization_keeps_the_existing_2048_byte_limit(self):
+        import dispatch_pending_delivery as pending
+        receipt = {"schema_version": 1, "kind": "notice", "subject": "s", "text": "t",
+                   "required_action": "read-notice", "key": "k"}
+        base = len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode())
+        with tempfile.TemporaryDirectory() as directory:
+            for size in (2047, 2048, 2049):
+                candidate = {**receipt, "subject": "s" * (size - base + 1)}
+                raw = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+                self.assertEqual(len(raw), size)
+                if size <= 2048:
+                    self.assertEqual(N.validate(candidate), candidate)
+                    pending.create(Path(directory), recipient_kind="claude-parent-runtime", recipient_key="sid",
+                        delivery_id="delivery-" + hashlib.sha256(str(size).encode()).hexdigest(), session_generation="",
+                        session_generation_supported="0", attempt_ids=[], parent_attempt_id="",
+                        route_id="route-free", route_node="notice", receipt=candidate,
+                        receipt_digest=N.receipt_digest(candidate), row_revisions={})
+                else:
+                    with self.assertRaisesRegex(ValueError, "too-large"):
+                        N.validate(candidate)
+                    with self.assertRaises(pending.PendingDeliveryError):
+                        pending.create(Path(directory), recipient_kind="claude-parent-runtime", recipient_key="sid",
+                            delivery_id="delivery-" + hashlib.sha256(str(size).encode()).hexdigest(), session_generation="",
+                            session_generation_supported="0", attempt_ids=[], parent_attempt_id="",
+                            route_id="route-free", route_node="notice", receipt=candidate,
+                            receipt_digest=N.receipt_digest(candidate), row_revisions={})
+
+    def test_question_key_alone_keeps_ordinary_notice_semantics(self):
+        from fixtures.message_questions import MessageQuestionFixture
+        with MessageQuestionFixture() as fixture:
+            signal, _ = fixture.ask()
+            record = N.notify("claude", signal["session_id"], key="question-answer:pretend",
+                              subject="ordinary", text="  ordinary\n  text  ", jobs=fixture.jobs)
+            self.assertEqual(record["receipt"]["text"], "ordinary text")
+            self.assertNotIn("answer_binding", record["receipt"])
+            self.assertEqual(N.consumer_text(record["receipt"]), N.render_text(record["receipt"]))
+            import human_wait_state
+            self.assertEqual(human_wait_state.read_signals()[0]["id"], signal["id"])
 
 
 if __name__ == "__main__":

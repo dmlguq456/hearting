@@ -6700,6 +6700,18 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
 
 def _resume_session_notice_obligations(duties, store, *, read_context=None,
                                        selection=None, runner_incarnation=None):
+    try:
+        return _resume_session_notice_pass(duties, store, read_context=read_context,
+            selection=selection, runner_incarnation=runner_incarnation)
+    finally:
+        # Source completion may have recovered from an earlier failed write.
+        # Queue its decision after carrier and source/selected locks are gone.
+        import human_wait_state
+        human_wait_state.flush_message_decisions()
+
+
+def _resume_session_notice_pass(duties, store, *, read_context=None,
+                               selection=None, runner_incarnation=None):
     """Deliver notices through the existing herdr census and peer courier."""
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
@@ -6729,6 +6741,12 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                         duty, record, root, storage_sid, delivery_id, source_jobs)):
                     continue
                 if record.get("state") in {"acked", "rejected", "expired"}:
+                    if record.get("state") == "acked" and "answer_binding" in (record.get("receipt") or {}):
+                        ref = (duty.get("observation") or {}).get("transfer_ref")
+                        message = peer_message._read_pending(ref, roots=[root], state_root=root) if ref else None
+                        if message and message.get("state") == "received":
+                            peer_obligations.acknowledge_session_notice_delivery(message, roots=[root])
+                        continue
                     store.update(duty["id"], state="complete", delivery=record["state"], cleanup="complete",
                                  expected_phases={(duty.get("observation") or {}).get("phase", "waiting")})
                     continue
@@ -6761,7 +6779,8 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                             skip_unchanged=True)
                         continue
                 if (intent.get("kind") == "run-notice" and pair == ("opencode", storage_sid)
-                        and not resume_notice):
+                        and not resume_notice
+                        and "answer_binding" not in (record.get("receipt") or {})):
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "native-opencode-carrier-owns-notice"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},

@@ -1,4 +1,4 @@
-"""Private, observational state for explicitly marked final-reply questions."""
+"""Private S4 question sources and the shared exact selected-response boundary."""
 from __future__ import annotations
 
 import hashlib
@@ -46,7 +46,8 @@ _SELECTED_RESPONSE_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
-                                  "response", "result", "updated_at"))
+                                  "response", "result", "updated_at", "message_binding",
+                                  "source_terminal", "transport_settled"))
 # The one age rule for every answer-wait source (S1-S4): a wait this old folds out of
 # the current count. Age never removes a wait; only evidence does (answered, route
 # closed, replaced by a later attempt, native request ended). User decision
@@ -276,11 +277,384 @@ def signal_value(harness: str, session_id: str, seat_key: str, text: str, *,
     return value
 
 
+def _message_ref(signal):
+    return {"transport": "hearting-message-answer", "signal_id": signal["id"],
+            "seat_key": signal["seat_key"], "sequence": signal["sequence"],
+            "incarnation": signal.get("incarnation")}
+
+
+def _message_envelope(signal):
+    return {"harness": signal["harness"], "session_id": signal["session_id"],
+            "request_id": signal["id"], "selected_id": signal["id"],
+            "id": signal["id"], "turn_id": None, "question_id": "message-response",
+            "kind": "question", "source": "S4", "native_ref": _message_ref(signal),
+            "detail": signal["detail"], "since": signal["since"]}
+
+
+def _prune_selected(overlay, needed=1):
+    """Called only under the selected lock; never discard an unresolved draft/claim.
+
+    These flags are written by the source owner, not inferred from cache age.
+    Native/workflow entries without settlement evidence are deliberately kept.
+    """
+    count = max(0, len(overlay) + needed - _SELECTED_RESPONSE_MAX)
+    candidates = sorted((key for key, entry in overlay.items()
+                         if entry.get("source_terminal") is True
+                         and entry.get("transport_settled") is True
+                         and entry.get("state") in {"received", "applied", "cancelled", "expired"}
+                         and not entry.get("draft")),
+                        key=lambda key: (overlay[key]["updated_at"], key))
+    for key in candidates[:count]:
+        del overlay[key]
+    return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
+
+
+def register_message(harness, session_id, seat, text, *, sequence, choices=(),
+                     recommended=None, secret=False, cwd=None, incarnation=None):
+    """Register one explicit question on the caller's current prompt, without waiting."""
+    import session_tidy as tidy
+    if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
+            in {"owner", "worker", "auxiliary", "reviewer"}):
+        raise ValueError("question-caller-is-worker")
+    if (harness not in {"claude", "codex", "opencode"}
+            or _safe_native_ref(session_id) != session_id or not seat.key
+            or type(sequence) is not int or sequence < 0):
+        raise ValueError("question-caller-unknown")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("question-text-empty")
+    if (not isinstance(choices, (list, tuple)) or len(choices) > 8
+            or any(not isinstance(choice, str) or not choice.strip() for choice in choices)
+            or len(set(choices)) != len(choices)):
+        raise ValueError("question-choices-invalid")
+    if recommended is not None and (type(recommended) is not int
+                                    or not 0 <= recommended < len(choices)):
+        raise ValueError("question-recommendation-invalid")
+    question = {"id": "message-response", "question": text, "choices": list(choices),
+                "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
+    detail = {"questions": [question]}
+    if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
+        raise ValueError("question-detail-too-large")
+    if incarnation is not None and (not isinstance(incarnation, dict)
+            or set(incarnation) != {"pid", "proc_start"}
+            or type(incarnation["pid"]) is not int or incarnation["pid"] <= 1
+            or not str(incarnation["proc_start"]).isdigit()):
+        raise ValueError("question-caller-incarnation-invalid")
+    raw = json.dumps([harness, session_id, seat.key, sequence, detail, incarnation],
+                     ensure_ascii=False, separators=(",", ":"))
+    item_id = "S4:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    value = {"schema_version": 1, "mode": "message", "source": "S4", "id": item_id,
+             "harness": harness, "session_id": session_id, "seat_key": seat.key,
+             "sequence": sequence, "question": text, "detail": detail,
+             "since": time.time(), "lifecycle": "open", "cwd": str(cwd or os.getcwd()),
+             "incarnation": incarnation}
+    prior = None
+    with tidy.seat_lock(seat.key):
+        if tidy.read_prompt_seq(seat) != sequence:
+            raise ValueError("question-prompt-changed")
+        prior = _read(_path(seat.key))
+        if prior and prior.get("id") == item_id:
+            value = prior
+        envelope = _message_envelope(value)
+        identity = _selected_identity(envelope)
+        key = _selected_entry_key(identity)
+        with _cache_write_lock():
+            projection = _read_cache_file()
+            if projection is None and _cache_path().exists():
+                raise ValueError("selected-response-storage-unreadable")
+            projection = projection or {"schema_version": 3, "observed_at": 0,
+                                       "items": [], "by_session": {}, "complete": False}
+            overlay = projection.get("selected_responses", {})
+            if not _valid_selected_overlay(overlay):
+                raise ValueError("selected-response-storage-invalid")
+            if key not in overlay and not _prune_selected(overlay):
+                raise ValueError("selected-response-capacity-unresolved")
+            # Persist source before its projection. An interrupted projection write
+            # is repaired by the identical registration, with the original since.
+            _write(_path(seat.key), value)
+            for old_key, entry in overlay.items():
+                binding = entry.get("message_binding") or {}
+                if (old_key != key and binding.get("seat_key") == seat.key
+                        and not entry.get("source_terminal")):
+                    entry.update(source_terminal=True, updated_at=time.time())
+                    if not entry.get("action_id"):
+                        entry.update(state="cancelled", transport_settled=True,
+                                     result={"status": "replaced"})
+            if key not in overlay:
+                overlay[key] = {"identity": identity, "selected_id": item_id, "state": "open",
+                                "draft": "", "updated_at": time.time(),
+                                "message_binding": {"seat_key": seat.key, "sequence": sequence}}
+            projection["selected_responses"] = overlay
+            if not _write_cache_value(projection):
+                raise OSError("question-projection-storage-unavailable")
+    if prior:
+        _queue_message_decision(prior)
+    _request_producer()
+    return value
+
+
+def _message_source(envelope):
+    native = envelope.get("native_ref") or {}
+    if native.get("transport") != "hearting-message-answer" or not native.get("seat_key"):
+        return None
+    signal = _read(_path(native["seat_key"]))
+    if (not signal or signal.get("mode") != "message"
+            or _message_ref(signal) != native
+            or _selected_identity(_message_envelope(signal)) != _selected_identity(envelope)):
+        return None
+    return signal
+
+
+def _message_incarnation_current(signal):
+    from dispatch_seat_handover import resolve_recipient
+    resolved = resolve_recipient("provenance", session=signal["session_id"], harness=signal["harness"])
+    if (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
+            or resolved.harness != signal["harness"]):
+        return False
+    incarnation = signal.get("incarnation")
+    if incarnation is None:
+        return True  # Native exact-SID courier still enforces its own process proof.
+    pid = incarnation.get("pid") if isinstance(incarnation, dict) else None
+    return (type(pid) is int and pid > 1 and _proc_uid(pid) == os.getuid()
+            and _proc_start_ticks(pid) == str(incarnation.get("proc_start")))
+
+
+def _message_answer_error(text):
+    if not isinstance(text, str) or not text.strip():
+        return "message-answer-empty"
+    if len(text) > 600 or len(text.encode("utf-8")) > _SELECTED_DRAFT_MAX:
+        return "message-answer-too-large-use-original-session"
+    return None
+
+
+def _message_body(portable):
+    answers = portable.get("answers") if isinstance(portable, dict) else None
+    values = answers.get("message-response") if isinstance(answers, dict) else None
+    return values[0] if isinstance(values, list) and len(values) == 1 else None
+
+
+def message_binding_valid(binding):
+    keys = {"request_id", "question_id", "action_id", "body_id", "body_sha256", "body_bytes",
+            "harness", "session_id", "seat_key", "sequence"}
+    return (isinstance(binding, dict) and set(binding) == keys
+            and binding["harness"] in {"claude", "codex", "opencode"}
+            and _safe_native_ref(binding["session_id"]) == binding["session_id"]
+            and isinstance(binding["request_id"], str)
+            and re.fullmatch(r"S4:[0-9a-f]{64}", binding["request_id"])
+            and binding["question_id"] == "message-response"
+            and isinstance(binding["seat_key"], str) and bool(binding["seat_key"])
+            and type(binding["sequence"]) is int and binding["sequence"] >= 0
+            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 4096
+            and isinstance(binding["action_id"], str) and bool(_SAFE.fullmatch(binding["action_id"]))
+            and all(isinstance(binding[key], str) and re.fullmatch(r"[0-9a-f]{64}", binding[key])
+                    for key in ("body_id", "body_sha256")))
+
+
+def message_answer_body(binding, *, current=False):
+    """Resolve an action-bound private body; no caller-provided path is ever read."""
+    if not message_binding_valid(binding):
+        raise ValueError("message-answer-binding-invalid")
+    projection = _read_cache_file() or {}
+    overlay = projection.get("selected_responses", {})
+    if not _valid_selected_overlay(overlay):
+        raise ValueError("message-answer-storage-invalid")
+    entry = overlay.get(binding["body_id"]) or {}
+    identity = entry.get("identity") or {}
+    text = _message_body(entry.get("response"))
+    if (entry.get("message_binding") != binding or entry.get("action_id") != binding["action_id"]
+            or any(identity.get(key) != binding[key]
+                   for key in ("harness", "session_id", "request_id", "question_id"))
+            or _message_answer_error(text)
+            or hashlib.sha256(text.encode("utf-8")).hexdigest() != binding["body_sha256"]
+            or len(text.encode("utf-8")) != binding["body_bytes"]):
+        raise ValueError("message-answer-body-missing-or-changed")
+    if current:
+        signal = _read(_path(binding["seat_key"]))
+        if (not signal or signal.get("id") != binding["request_id"]
+                or signal.get("harness") != binding["harness"]
+                or signal.get("session_id") != binding["session_id"]
+                or signal.get("sequence") != binding["sequence"]
+                or signal.get("lifecycle") != "open"
+                or not _message_incarnation_current(signal)):
+            raise ValueError("message-question-no-longer-current")
+    return text
+
+
+def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
+    """Source seat lock held; completion is independent of the transport claim."""
+    if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
+            or sequence < signal["sequence"]
+            or not verified and not _message_incarnation_current(signal)):
+        return False
+    # A physical prompt bumps the sequence; a courier consumes the question's
+    # exact recorded sequence. No late old prompt may complete a newer question.
+    completion = {"actor": actor, "action_id": action_id, "at": time.time(),
+                  "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    if not signal["detail"]["questions"][0].get("is_secret"):
+        completion["answer"] = text
+    signal.update(lifecycle="answered", completion=completion)
+    _write(_path(signal["seat_key"]), signal)
+    envelope = _message_envelope(signal)
+    entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
+    entry["source_terminal"] = True
+    if not entry.get("action_id") or entry.get("action_id") == action_id:
+        entry.update(state="applied", draft="", transport_settled=True,
+                     result={"status": "applied", "completion": actor, "progress": "unknown"})
+    # Source completion is durable even if this projection write fails. The
+    # same exact ACK (or source re-read) repairs the overlay without a resend.
+    _store_selected_entry(envelope, entry)
+    return True
+
+
+def complete_message_answer(receipt, recipient):
+    """Called ONLY after peer_obligations verified exact native consumption.
+
+    The immutable receipt and selected claim agree on every binding field. An
+    ACK for an old action records delivery, but cannot win a second completion.
+    """
+    binding = receipt.get("answer_binding")
+    text = message_answer_body(binding)
+    if any(recipient.get(key) != binding[key] for key in ("harness", "session_id")):
+        raise ValueError("message-answer-recipient-changed")
+    import session_tidy as tidy
+    with tidy.seat_lock(binding["seat_key"]):
+        signal = _read(_path(binding["seat_key"]))
+        exact = (signal and signal.get("id") == binding["request_id"]
+                 and signal.get("harness") == binding["harness"]
+                 and signal.get("session_id") == binding["session_id"]
+                 and signal.get("sequence") == binding["sequence"])
+        identity = {key: binding[key] for key in ("harness", "session_id", "request_id", "question_id")}
+        envelope = {**identity, "turn_id": None}
+        entry = _selected_entry(envelope)
+        if entry is None or entry.get("message_binding") != binding:
+            raise ValueError("message-answer-claim-lost")
+        if exact and signal.get("lifecycle") == "open":
+            import session_notice
+            consumed = session_notice.receipt_digest(receipt)
+            verified = (entry.get("result") or {}).get("question_receipt") == consumed
+            if not verified and _message_incarnation_current(signal):
+                # Persist exact consumption before source application. A later
+                # normal pass can finish this same accepted answer even after
+                # its original process exits; a newly arriving stale answer has
+                # no such proof and still cannot complete the question.
+                entry.update(state="received", result={"transport": "received",
+                             "status": "received", "question_receipt": consumed})
+                if not _store_selected_entry(envelope, entry):
+                    raise OSError("message-answer-receipt-storage-unavailable")
+                verified = True
+            if verified:
+                _complete_message_locked(signal, text, "fleet", sequence=binding["sequence"],
+                                         action_id=binding["action_id"], verified=True)
+                entry = _selected_entry(envelope) or entry
+        won = bool(exact and (signal.get("completion") or {}).get("action_id") == binding["action_id"])
+        status = "applied" if won else (
+            "answered-elsewhere" if not exact or signal.get("lifecycle") != "open" else "received")
+        entry.update(state="applied" if won else "received", draft="", transport_settled=True,
+                     source_terminal=bool(not exact or signal.get("lifecycle") != "open"),
+                     result={"transport": "received", "status": status,
+                             "progress": "unknown"})
+        if not _store_selected_entry(envelope, entry):
+            raise OSError("message-answer-result-storage-unavailable")
+    return won
+
+
+def _queue_message_decision(signal):
+    completion = signal.get("completion") or {}
+    if (signal.get("mode") != "message" or not completion.get("answer")
+            or completion.get("decision_queued")
+            or signal["detail"]["questions"][0].get("is_secret")):
+        return
+    try:
+        import tidy_decisions as decisions
+        question = signal["detail"]["questions"][0]
+        saved = decisions.save_pending(decisions.make_payload(
+            question["question"], [completion["answer"]], options=question["choices"],
+            cwd=signal.get("cwd"), origin={"kind": "message-question", "harness": signal["harness"],
+                                         "session_id": signal["session_id"], "request_id": signal["id"]}))
+        if saved:
+            import session_tidy as tidy
+            with tidy.seat_lock(signal["seat_key"]):
+                current = _read(_path(signal["seat_key"]))
+                if current and current.get("id") == signal["id"] and current.get("completion"):
+                    current["completion"]["decision_queued"] = True
+                    _write(_path(signal["seat_key"]), current)
+    except Exception:
+        pass  # Memory never reverses the accepted answer; normal reads can retry.
+
+
+def flush_message_decisions():
+    """Normal receiver/hook boundary, after their seat and peer locks are released."""
+    try:
+        paths = tuple(state_root().glob("*.json"))
+    except OSError:
+        return
+    for path in paths:
+        if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
+            continue
+        signal = _read(path)
+        if signal and signal.get("completion"):
+            _queue_message_decision(signal)
+
+
+def _submit_message(envelope, portable, action_id):
+    import session_tidy as tidy
+    import session_notice as notice
+    text = _message_body(portable)
+    error = _message_answer_error(text)
+    if error:
+        return _selected_invalid_response(envelope, error)
+    native = envelope["native_ref"]
+    with tidy.seat_lock(native["seat_key"]):
+        signal = _message_source(envelope)
+        if not signal or signal.get("lifecycle") != "open" or not _message_incarnation_current(signal):
+            return _selected_fallback(envelope, "message-question-no-longer-current")
+        claimed, entry = _claim_selected_action(envelope, action_id, portable)
+        if not claimed:
+            return read_selected_request(envelope)
+    # No source/selected locks across carrier/pending writes or native calls.
+    binding = entry["message_binding"]
+    try:
+        record = notice.notify(signal["harness"], signal["session_id"],
+            key="question-answer:" + signal["id"], subject="Question answer", text=text,
+            required_action="read-question-answer", exact_text=True, answer_binding=binding)
+        state = "submitted" if record else "unknown"
+        result = {"status": state, "transport": "queued" if record else "unknown",
+                  "progress": "unknown"}
+    except ValueError as exc:
+        state, result = "unknown", {"reason": "message-answer-delivery-unconfirmed"}
+        if str(exc) == "message-question-no-longer-current":
+            # notify's exact-text check precedes every carrier write. A physical
+            # answer that won here leaves no ambiguous transmission to retain.
+            with tidy.seat_lock(native["seat_key"]):
+                completed = _message_source(envelope)
+                if completed and (completed.get("completion") or {}).get("actor") == "direct":
+                    state = "cancelled"
+                    result = {"status": "answered-elsewhere", "transport": "not-sent", "progress": "unknown"}
+                    entry.update(source_terminal=True, transport_settled=True, draft="")
+    except (OSError, RuntimeError):
+        state, result = "unknown", {"reason": "message-answer-delivery-unconfirmed"}
+    entry.update(state=state, result=result)
+    if not _store_selected_entry(envelope, entry):
+        state, result = "unknown", {"reason": "response-result-storage-unavailable"}
+    # A synchronous receiver may already have settled this claim during notify.
+    latest = _selected_entry(envelope) or entry
+    return {**envelope, "state": latest.get("state", state), "action_id": action_id,
+            "result": latest.get("result", result), "draft": latest.get("draft", ""), "actions": []}
+
+
 def write_signal(value: dict) -> bool:
     """Write a previously validated signal without running notification work."""
     if not isinstance(value, dict) or not value.get("seat_key") or not value.get("id"):
         return False
     try:
+        prior = _read(_path(str(value["seat_key"])))
+        # An explicit question owns this prompt, including after its completion.
+        # A later Stop marker is only an observation, never its replacement.
+        if (prior and prior.get("mode") == "message" and value.get("mode") != "message"
+                and prior.get("harness") == value.get("harness")
+                and prior.get("session_id") == value.get("session_id")
+                and (prior.get("lifecycle") == "open"
+                     or prior.get("sequence", 0) >= value.get("sequence", 0))):
+            return False
         _write(_path(str(value["seat_key"])), value)
         return True
     except (OSError, ValueError, TypeError):
@@ -326,15 +700,26 @@ def open_signal(harness: str, session_id: str, seat_key: str, text: str, *,
     return True
 
 
-def close_signal(seat_key: str, *, sequence: int | None = None) -> bool:
+def close_signal(seat_key: str, *, sequence: int | None = None,
+                 harness: str | None = None, session_id: str | None = None,
+                 answer: str | None = None) -> bool:
     """Close only this exact seat, and never let an older input clear a newer wait."""
     path = _path(seat_key)
     try:
         current = _read(path)
         if current is None:
             return True
+        if ((harness is not None and current.get("harness") != harness)
+                or (session_id is not None and current.get("session_id") != session_id)):
+            return False
         if sequence is not None and int(current.get("sequence", 0)) > int(sequence):
             return False
+        if current.get("mode") == "message":
+            # The prompt hook already owns the source seat lock. Receipt callers
+            # acquire it in complete_message_answer instead.
+            if harness is None or session_id is None or sequence is None:
+                return False
+            return _complete_message_locked(current, answer, "direct", sequence=sequence)
         path.unlink()
         return True
     except (OSError, ValueError, TypeError):
@@ -371,6 +756,8 @@ def read_signals(*, now: float | None = None) -> list[dict]:
             continue
         value = _read(path)
         if value is None or not isinstance(value.get("since"), (int, float)):
+            continue
+        if value.get("mode") == "message" and value.get("lifecycle") != "open":
             continue
         value["stale"] = wait_fold(value["since"], instant) is not None
         out.append(value)
@@ -451,7 +838,7 @@ def publish_cache(result: dict) -> bool:
             elif source == "S3":
                 kind = "blocked owner"
             elif source == "S4":
-                kind = "marker"
+                kind = "message" if kind == "message" else "marker"
             owner = item.get("owner") or {}
             fleet_item = {
                 "id": item.get("id"), "source": source, "kind": kind,
@@ -681,7 +1068,7 @@ def _valid_selected_overlay(value):
         if identity != entry.get("identity") or _selected_entry_key(identity) != key:
             return False
         draft = entry.get("draft", "")
-        if not isinstance(draft, str) or len(draft) > _SELECTED_DRAFT_MAX:
+        if not isinstance(draft, str) or len(draft.encode("utf-8")) > _SELECTED_DRAFT_MAX:
             return False
         if entry.get("action_id") is not None and not _SAFE.fullmatch(str(entry["action_id"])):
             return False
@@ -698,6 +1085,11 @@ def _valid_selected_overlay(value):
             except (TypeError, ValueError):
                 return False
         if entry.get("result") is not None and not isinstance(entry["result"], dict):
+            return False
+        binding = entry.get("message_binding")
+        if binding is not None and not (
+                isinstance(binding, dict) and (set(binding) == {"seat_key", "sequence"}
+                or message_binding_valid(binding) and binding.get("body_id") == key)):
             return False
     return True
 
@@ -741,9 +1133,14 @@ def _store_selected_entry(envelope, entry):
             previous = overlay.get(key)
             if previous and previous.get("identity") != identity:
                 return False
-            if previous is None and len(overlay) >= _SELECTED_RESPONSE_MAX:
+            if previous is None and not _prune_selected(overlay):
                 return False
             if previous:
+                for flag in ("source_terminal", "transport_settled"):
+                    if previous.get(flag):
+                        entry[flag] = True
+                if previous.get("message_binding") is not None:
+                    entry["message_binding"] = previous["message_binding"]
                 previous_action = previous.get("action_id")
                 next_action = entry.get("action_id")
                 if previous_action and next_action != previous_action:
@@ -763,7 +1160,8 @@ def _store_selected_entry(envelope, entry):
                                 and new_state != old_state)):
                         entry["state"] = old_state
                         entry["result"] = previous.get("result")
-                    if entry.get("state") == "applied":
+                    if (entry.get("state") == "applied" or entry.get("source_terminal")
+                            and entry.get("transport_settled")):
                         entry["draft"] = ""
                 elif previous.get("state") in {"received", "applied", "cancelled", "expired"}:
                     old_state = previous["state"]
@@ -803,7 +1201,7 @@ def _claim_selected_action(envelope, action_id, response):
                              or previous.get("state") in {
                                  "submitted", "received", "applied", "cancelled", "expired"}):
                 return False, dict(previous)
-            if previous is None and len(overlay) >= _SELECTED_RESPONSE_MAX:
+            if previous is None and not _prune_selected(overlay):
                 return False, None
             claimed = dict(previous or {})
             claimed.update({"identity": identity, "state": "submitted",
@@ -813,6 +1211,18 @@ def _claim_selected_action(envelope, action_id, response):
             if isinstance(envelope.get("selected_id"), str):
                 claimed["selected_id"] = envelope["selected_id"]
             claimed.setdefault("draft", envelope.get("draft", ""))
+            native = envelope.get("native_ref") or {}
+            if native.get("transport") == "hearting-message-answer":
+                body = _message_body(response)
+                if _message_answer_error(body):
+                    return False, None
+                claimed["message_binding"] = {
+                    "request_id": identity["request_id"], "question_id": identity["question_id"],
+                    "action_id": action_id, "body_id": key,
+                    "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                    "body_bytes": len(body.encode("utf-8")), "harness": identity["harness"],
+                    "session_id": identity["session_id"], "seat_key": native["seat_key"],
+                    "sequence": native["sequence"]}
             if not _valid_selected_overlay({key: claimed}):
                 return False, None
             overlay[key] = claimed
@@ -2343,6 +2753,24 @@ def _selected_base(ref):
     item_id = values.get("id") or values.get("selected_id")
     if not isinstance(item_id, str):
         return None, "selected-wait-reference-invalid"
+    # Message authority is its durable private source, not display-cache TTL.
+    # The producer and collector remain read-only observers of that source.
+    if item_id.startswith("S4:"):
+        for path in state_root().glob("*.json"):
+            if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
+                continue
+            signal = _read(path)
+            if not signal or signal.get("mode") != "message" or signal.get("id") != item_id:
+                continue
+            base = _message_envelope(signal)
+            if any(values.get(key) not in (None, base[key]) for key in ("harness", "session_id")):
+                return None, "selected-item-identity-changed"
+            if not _selected_hints_match(values, base):
+                return None, "selected-message-reference-changed"
+            supplied = values.get("native_ref")
+            if supplied is not None and supplied != base["native_ref"]:
+                return None, "selected-message-binding-changed"
+            return base, None
     if cache is None:
         stored = _stored_workflow_action(ref)
         if stored is not None:
@@ -2601,6 +3029,21 @@ def _selected_transport(base, requested_id=None):
 
 def _workflow_selected_transport(base):
     source = base.get("source")
+    if (base.get("native_ref") or {}).get("transport") == "hearting-message-answer":
+        signal = _message_source(base)
+        if signal is None:
+            return {"state": "unknown", "reason": "message-question-no-longer-current"}
+        current = _message_incarnation_current(signal)
+        state = "open" if signal.get("lifecycle") == "open" else "applied"
+        entry = _selected_entry(base)
+        if signal.get("completion") and entry and entry.get("action_id"):
+            state = entry["state"]
+        return {"state": state if current or signal.get("completion") else "unknown", "kind": "question",
+                "request_id": signal["id"], "turn_id": None, "question_id": "message-response",
+                "detail": signal["detail"], "support": current and signal.get("lifecycle") == "open",
+                "result": entry.get("result") if entry else None,
+                "reason": None if current else "message-session-incarnation-changed",
+                "native_ref": _message_ref(signal)}
     if source == "S4":
         signal = next((value for value in read_signals()
                        if value.get("id") == base.get("id")), None)
@@ -3431,8 +3874,11 @@ def submit_selected_response(ref, response, *, action_id=None):
         and identity.get("route_id") == native_ref.get("route_id"))
     opencode_turnless_form = (identity.get("turn_id") is None
                               and _opencode_turnless_form_binding(current))
+    message_request = (isinstance(native_ref, dict)
+                       and native_ref.get("transport") == "hearting-message-answer"
+                       and current.get("source") == "S4" and _message_source(current) is not None)
     if (identity.get("turn_id") is None and not workflow_owner_request
-            and not workflow_gate_request and not opencode_turnless_form):
+            and not workflow_gate_request and not opencode_turnless_form and not message_request):
         return _selected_fallback(base, "exact-request-turn-binding-required")
     portable, response_error = _portable_response(current, response)
     if portable is None:
@@ -3461,6 +3907,8 @@ def submit_selected_response(ref, response, *, action_id=None):
     response_error = _native_response_error(current, portable)
     if response_error:
         return _selected_invalid_response(current, response_error)
+    if message_request:
+        return _submit_message(current, portable, action_id)
     claimed, entry = _claim_selected_action(current, action_id, portable)
     if not claimed:
         return read_selected_request(current)

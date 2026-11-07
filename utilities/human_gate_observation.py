@@ -643,8 +643,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
     try:
         import human_wait_state
         for record in human_wait_state.read_signals(now=instant):
-            add({"id": record["id"], "source": "S4", "kind": "decision",
-                 "question": record.get("question"), "choices": [], "recommendation": None,
+            message = record.get("mode") == "message"
+            add({"id": record["id"], "source": "S4", "kind": "message" if message else "decision",
+                 "question": None if message else record.get("question"), "choices": [], "recommendation": None,
                  "route_id": None, "route_hash": None, "attempt_id": None, "gate_id": None,
                  "since": record["since"], "owner": {"harness": record.get("harness"),
                  "session_id": record.get("session_id"), "seat_key": record.get("seat_key")},

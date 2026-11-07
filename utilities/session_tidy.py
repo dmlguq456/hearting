@@ -3166,7 +3166,7 @@ def record_prompt_origin(seat: Seat, harness: str, sid: str, sequence: int, orig
     required = {"kind", "harness", "session_id", "request_digest", "transfer_ref",
                 "transfer_body_sha256", "name"}
     if (not isinstance(origin, dict) or not required.issubset(origin)
-            or origin.get("kind") not in {"peer", "runtime-completion"}
+            or origin.get("kind") not in {"peer", "runtime-completion", "human-answer"}
             or origin.get("harness") != harness or origin.get("session_id") != sid
             or not re.fullmatch(r"[0-9a-f]{64}", str(origin.get("request_digest") or ""))
             or not isinstance(origin.get("transfer_ref"), str) or not origin["transfer_ref"]
@@ -3402,6 +3402,9 @@ def run_hook(*args, **kwargs) -> str:
                 session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))
         return result
     finally:
+        with contextlib.suppress(Exception):
+            import human_wait_state
+            human_wait_state.flush_message_decisions()
         if closed:
             with contextlib.suppress(BaseException):
                 import dispatch_seat_handover as handover
@@ -3513,9 +3516,9 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             projected["items"] = [item for item in projected["items"]
                                    if not (item.get("source") == "S4"
                                            and (item.get("owner") or {}).get("seat_key") == seat.key)]
-            if own:
+            if own and (own.get("mode") != "message" or own.get("lifecycle") == "open"):
                 projected["items"].append(
-                    {"id": own["id"], "source": "S4", "question": own.get("question"),
+                    {"id": own["id"], "source": "S4", "question": None if own.get("mode") == "message" else own.get("question"),
                      "since": own.get("since"), "stale": False,
                      "owner": {"harness": harness, "session_id": sid, "seat_key": seat.key}})
             ids = set(projected.get("by_session", {}).get((harness, sid), ()))
@@ -3583,9 +3586,12 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                             and current.get("harness") == harness and current.get("sid") == sid):
                         current["request_excerpt"] = work_intent.prompt_excerpt(prompt_text)
                         atomic_write_json(boundary, current)
-                with contextlib.suppress(BaseException):
-                    import human_wait_state
-                    human_wait_state.close_signal(seat.key, sequence=sequence)
+                if isinstance(prompt_text, str) and prompt_text.strip():
+                    with contextlib.suppress(BaseException):
+                        import human_wait_state
+                        human_wait_state.close_signal(seat.key, sequence=sequence,
+                                                      harness=harness, session_id=sid,
+                                                      answer=prompt_text)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
