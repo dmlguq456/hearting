@@ -94,3 +94,18 @@ def quota_windows(payload):
     return [(label, payload.get("rl_" + label), payload.get("rs_" + label))
             for label in ("5h", "7d")]
 
+
+def claude_fields(callback):
+    """Display values supplied by this native callback, without a collection pass."""
+    model = callback.get("model") or {}
+    model = model if isinstance(model, dict) else {}
+    effort = callback.get("effort") or {}
+    effort = effort if isinstance(effort, dict) else {}
+    workspace = callback.get("workspace") or {}
+    workspace = workspace if isinstance(workspace, dict) else {}
+    quota = claude_quota(callback)
+    return {"harness": "claude", "cwd": callback.get("cwd") or workspace.get("current_dir"),
+            "model": model.get("display_name") or model.get("id"), "effort": effort.get("level"),
+            "ctx_pct": claude_percentage(callback), "quota_windows": quota_windows(quota),
+            "weekly_pct": quota.get("rl_7d"), "model_quotas": quota.get("rl_ms") or []}
+

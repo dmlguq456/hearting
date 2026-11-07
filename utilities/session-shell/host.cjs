@@ -129,7 +129,12 @@ function serialize(line,width) {
   return s+'\x1b[0m';
 }
 function maxHeight(){return Math.min(10,Math.max(4,Math.floor(rows/3)),Math.max(1,rows-4));}
-function height(){return fleetView?0:expanded?Math.min(maxHeight(),Math.max(4,panelLines.length)):1;}
+function height(){
+  if(fleetView)return 0;
+  if(!expanded)return harness==='claude'?0:1;
+  const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
+  return Math.min(maxHeight(),Math.max(4,panelLines.length,detail.length?detail.length+1:0));
+}
 function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
@@ -144,7 +149,7 @@ function render() {
       const row=rows-height()+y;
       if(last[row]!==panelRows[y]){text+=`\x1b[${row+1};1H${panelRows[y]}`;last[row]=panelRows[y];}
     }
-    else if(!fleetView&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
+    else if(!fleetView&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
@@ -181,7 +186,7 @@ function displayLines(lines,height,done) {
 let rebuilding=false,rebuildPending=false,displayQueued=false,layoutQueued=false;
 function queueDisplay(){
   if(displayQueued)return;displayQueued=true;
-  setImmediate(()=>{displayQueued=false;try{rebuildDisplay();}catch{rawRelay();}});
+  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&terminal.rows!==rows-height())applyLayout();else rebuildDisplay();}catch{rawRelay();}});
 }
 function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
@@ -193,6 +198,7 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
+  if(!height()){panelRows=[];displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
@@ -286,7 +292,7 @@ async function projection() {
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([data.footer,data.segments,data.lines,data.questions,data.help,cols,expanded,currentDelivery,heldBytes]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,cols,expanded,currentDelivery,heldBytes]);
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }

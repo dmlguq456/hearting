@@ -354,11 +354,23 @@ fi
 
 dir=$(basename "$S_CWD")
 
-# The shell paints the shared fields; the existing data producers above stay
-# active. The common display reads this exact session's existing tap. Do not
-# leave a native context-only line when the person hides the common block.
+# A wrapped Claude uses its reserved native rows for the same common formatter
+# as the block. Existing producers and unwrapped output remain available.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
-  exit 0
+  line_helper="$AGENT_HOME/tools/fleet/session_line.py"
+  [ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
+  export S_SESSION_DISPLAY git_repo git_branch git_operation git_merged git_branch_done
+  export git_extra_worktrees git_ahead git_behind git_dirty git_observation git_observed_label git_jobs
+  if [ -f "$line_helper" ] && printf '%s' "$input" | HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
+from fleet.session_line import claude_native_statusline
+print(claude_native_statusline(json.load(sys.stdin), os.environ))
+' "$line_helper"; then
+    exit 0
+  fi
+  # A missing/broken optional formatter keeps the existing native rendering.
 fi
 
 # ANSI 색 + 퍼센트 색 헬퍼 (녹 <50 / 황 <80 / 적 ≥80)

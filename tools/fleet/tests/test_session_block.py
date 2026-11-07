@@ -37,6 +37,15 @@ class SessionBlockTest(unittest.TestCase):
         self.assertNotIn('Ctrl+]',plain(block_lines(self.values(),columns=180,rows=50)))
         self.assertIn('Ctrl+]',plain(block_lines(self.values(),columns=180,rows=50,focused=True)))
 
+    def test_claude_block_omits_the_status_area_while_other_harnesses_keep_it(self):
+        from tools.fleet.session_block import block_lines
+        for harness in ('claude','codex','opencode'):
+            text='\n'.join(''.join(t for t,_ in row) for row in block_lines(
+                {**self.values(),'harness':harness},columns=180,rows=50,route='⏳ route 1 · draft',human='› 1m · hello'))
+            self.assertEqual('context ' in text,harness!='claude')
+            self.assertEqual('📁 ' in text,harness!='claude')
+            self.assertIn('route 1',text);self.assertIn('› 1m · hello',text)
+
     def test_context_is_one_ten_cell_colored_group(self):
         for percent,key,bar in ((42,'lvl_g','━━━━──────'),(60,'lvl_y','━━━━━━────'),(80,'lvl_r','━━━━━━━━──')):
             parts=session_line.line_segments({**self.values(),'ctx_pct':percent},300)
@@ -67,7 +76,7 @@ class SessionBlockTest(unittest.TestCase):
                 'git':dict(repo=1,operation='rebase',extra_worktrees=2,observation='fresh',observed_label='12:34:56'),
                 'quota_windows':[('5h',31,time.time()+5401),('7d',60,time.time()+183601)],
                 'model_quotas':[('fable',57)],'answer_wait':0}
-        block='\n'.join(''.join(t for t,_ in row) for row in block_lines(values,columns=180,rows=50))
+        block='\n'.join(''.join(t for t,_ in row) for row in [*session_line.status_lines(values,180),*block_lines(values,columns=180,rows=50)])
         for field in original.replace(' │ ','\n').splitlines():
             with self.subTest(field=field):
                 self.assertIn(re.sub(r"[\s·│]", "", field),re.sub(r"[\s·│]", "", block))

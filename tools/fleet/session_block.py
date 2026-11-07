@@ -2,7 +2,7 @@
 
 Only presentation lives here. Questions and answers retain their existing owners.
 """
-from .session_line import line_segments, status_lines
+from .session_line import line_segments, status_lines, clip_segments as _clip
 from .explorer.grid import clip_cells, cell_width
 from .config import ui_text
 
@@ -11,24 +11,12 @@ def capacity(rows):
     return min(10, max(4, int(rows) // 3), max(1, int(rows) - 4))
 
 
-def _clip(parts, columns):
-    result = []
-    for text, key in parts:
-        clean = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(text))
-        value = clip_cells(clean, max(0, columns))
-        result.append((value, key))
-        columns -= cell_width(value)
-        if columns <= 0:
-            break
-    return result
-
-
 def block_lines(values, *, columns, rows, questions=(), route="", received=(),
                 human="", work="", gpu="", detail=(), focused=False):
     """Question space wins; absent sections never grow an empty labeled row."""
     limit = capacity(rows)
     # Expanded rows already carry the actionable route and question counts.
-    lines = status_lines({**values, "route_label": ""}, columns)
+    lines = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns)
     # Preserve space for an actual question at small terminal heights.
     if questions:
         lines = lines[:max(1, limit - 2 - bool(route))]

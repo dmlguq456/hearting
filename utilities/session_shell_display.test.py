@@ -1,4 +1,4 @@
-"""Wrapped displays yield duplicate decorations and keep native fallback fields."""
+"""Claude native rows and the block share the same status formatter."""
 from pathlib import Path
 import importlib.util
 import json
@@ -24,12 +24,16 @@ class WrappedDisplayTest(unittest.TestCase):
             result=subprocess.run(['bash',str(ROOT/'adapters/claude/statusline.sh')],input=json.dumps(payload),
                                   env=env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
-            return result.stdout if wrapped else re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
+            return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
 
-    def test_wrapped_claude_emits_no_native_fallback_even_for_unknown_context(self):
-        self.assertEqual(self.statusline(True,37),'')
-        self.assertEqual(self.statusline(True,0),'')
-        self.assertEqual(self.statusline(True,None),'')
+    def test_wrapped_claude_paints_the_common_native_row_even_with_unknown_context(self):
+        for percentage,reading in ((37,'37%'),(0,'0%'),(None,'?')):
+            with self.subTest(percentage=percentage):
+                line=self.statusline(True,percentage)
+                self.assertIn('context ',line);self.assertIn(reading,line)
+                self.assertIn('Opus',line);self.assertIn('7d 42%',line)
+                self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
+
 
     def test_unwrapped_claude_keeps_its_existing_model_and_usage_display(self):
         line=self.statusline(False,37)
@@ -46,6 +50,7 @@ class WrappedDisplayTest(unittest.TestCase):
         self.assertEqual(original,['/synthetic/codex','--model','fixture','resume','native-session'])
         for harness in ('claude','opencode'):
             self.assertEqual(transform(harness,original),original)
+
 
 
 if __name__=='__main__':unittest.main()

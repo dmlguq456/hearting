@@ -160,7 +160,9 @@ for new Claude, Codex and OpenCode terminals. It is off by default;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-The block opens with the native status fields, routes, questions, received peer
+Claude draws the shared status fields in its own native statusline rows; its
+block starts with routes and questions. Codex and OpenCode keep the status area
+in the block. The block opens with routes, questions, received peer
 messages, repo work and your last input. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until

@@ -77,16 +77,18 @@ lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.
 A value that cannot meet this is compared with retaining that native field.
-While wrapped, Claude's former Hearting statusline emits no fallback text or
-newline. Its existing exact-session display tap stays active for the common
-line. Collapsing or disabling Hearting's block must not leave a lone native
-`context N%` decoration. Unwrapped Claude keeps its existing native statusline.
+While wrapped, Claude paints the common status area in its own native statusline
+rows, directly from its callback. It calls the same formatter as the block and
+retains every former Hearting field. Claude's lower block omits that status area
+and keeps routes, questions, messages, work and the last human input. Codex and
+OpenCode retain the status area in their block. Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.
-Claude's reserved native row may only be removed if a private marker survives
-Native Ink and identifies exactly one row. An absent or ambiguous marker keeps
-every row; no geometric inference or alternate workaround removes native output.
+The marker did not survive Native Ink, so no native row is removed or inferred
+from geometry. The approved replacement uses that space for the common line.
+Claude's status row follows its native callback cadence; block updates retain
+their event-driven contract. Parity compares Claude's native row and block together.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.

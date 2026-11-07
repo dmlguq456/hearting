@@ -119,7 +119,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/7d [0-9?]/);
+ await waitFor(/› [·?]/);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -167,7 +167,8 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='action-display'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dw').toString('base64')});
    await existing(cfg.actionReady);
-   fs.writeFileSync(cfg.title+'.new',JSON.stringify({title:'DURING_ACTION',ts:Date.now()/1000}));fs.renameSync(cfg.title+'.new',cfg.title);
+   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='⏳ route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/DURING_ACTION/);
    const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);
    await waitFor(/ACTION_DONE/);
@@ -175,10 +176,11 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const displayLag=[];
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/7d [0-9?]/);
+ if(cfg.scenario==='display')await waitFor(/› [·?]/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
-   fs.writeFileSync(cfg.title+'.new',JSON.stringify({title,ts:Date.now()/1000}));fs.renameSync(cfg.title+'.new',cfg.title);
+   const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='⏳ route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
@@ -258,7 +260,7 @@ class SessionShellPTYTest(unittest.TestCase):
                 'launcher':str(self.launcher),'python':sys.executable,'fake':str(self.fake),'sid':sid,
                 'project':str(self.project),'backend':str(backend),'barrier':str(barrier) if barrier else None,
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
-                'exit_fifo':str(exit_fifo)}
+                'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario=='action-display':config.update(actionGate=str(gate),actionReady=str(ready))
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'

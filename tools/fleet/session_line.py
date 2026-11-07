@@ -36,7 +36,7 @@ def _remaining(reset):
     return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
 
 
-def line_segments(values, columns):
+def line_segments(values, columns, *, complete=False):
     """Shorten words before losing a known count; never invent an unknown value.
 
     Input is the same observed Session fields plus the shared question/route
@@ -61,9 +61,9 @@ def line_segments(values, columns):
     def fixed(name, text, key):
         words(name, text, key, cell_width(text), 99, minimum=cell_width(text))
 
-    words("folder", project_of(values.get("cwd")) if values.get("cwd") else None, "loc_repo", 24, 2,
+    words("folder", project_of(values.get("cwd")) if values.get("cwd") else None, "loc_repo", 64 if complete else 24, 2,
           before=[("📁 ", "dim")])
-    words("title", values.get("title"), "hb_" + str(harness), 40, 0, prefix)
+    words("title", values.get("title"), "hb_" + str(harness), 48 if complete else 40, 0, prefix)
     git = values.get("git") or {}
     branch_after = []
     if git and git.get("repo") != 0:
@@ -85,7 +85,7 @@ def line_segments(values, columns):
         branch_after.append((" " + str(git.get("observation") or "unknown"), "dim"))
     if git:
         branch_after.append((SEPARATOR + str(git.get("observed_label") or "?"), "dim"))
-    words("branch", values.get("branch"), "branch_s", 24, 1,
+    words("branch", values.get("branch"), "branch_s", 64 if complete else 24, 1,
           before=[("⎇ ", "dim")], after=branch_after)
     percent = values.get("ctx_pct")
     level = _level(percent)
@@ -95,7 +95,7 @@ def line_segments(values, columns):
         gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
     words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
           cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
-    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 24, 4, after=suffix)
+    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
     for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
         remaining = _remaining(reset)
         words("quota", _percent(used), _level(used) if used is not None else "dim", 8, 99,
@@ -148,7 +148,7 @@ def line_segments(values, columns):
 
 def status_lines(values, columns):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000)
+    parts = line_segments(values, 10000, complete=True)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):
@@ -176,3 +176,68 @@ def status_lines(values, columns):
     if values.get("jobs"):
         result.append([(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")])
     return result
+
+
+def clip_segments(parts, columns):
+    result = []
+    for text, key in parts:
+        clean = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(text))
+        value = clip_cells(clean, max(0, columns))
+        result.append((value, key));columns -= cell_width(value)
+        if columns <= 0:
+            break
+    return result
+
+
+def claude_native_statusline(callback, environ):
+    """Paint the shared status area in Claude's existing native callback row.
+
+    The shell has already resolved the session subject and Git observation. Reuse
+    those facts; only native callback telemetry and cached badges are read here.
+    None of these display fields establish input or process authority.
+    """
+    import sys
+    from pathlib import Path
+    from .native_display import claude_fields
+    from .palette import ansi_segments
+    from .session_tags import assigned_tag
+    from . import session_registry
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+    import human_wait_state
+    values = claude_fields(callback)
+    sid = callback.get("session_id") or ""
+    git = {}
+    for key in ("repo", "operation", "merged", "branch_done", "extra_worktrees", "ahead", "behind",
+                "dirty", "observation", "observed_label"):
+        raw = environ.get("git_" + key)
+        git[key] = None if raw in (None, "unknown") else int(raw) if raw.isdigit() else raw
+    branch = environ.get("git_branch")
+    if branch == "unknown":
+        branch = None
+    if git["repo"] == 0:
+        branch = "no-git"
+    elif branch and git["dirty"] == 1:
+        branch += "*"
+    record = None
+    pid = environ.get("HEARTING_STATUS_DISPLAY_PID", "")
+    if pid.isdigit() and int(pid) > 1:
+        from .collectors.procscan import read_proc_start
+        before = read_proc_start(int(pid))
+        record = session_registry.read("claude", int(pid))
+        if (not record or str(record.get("procStart")) != before or read_proc_start(int(pid)) != before):
+            record = None
+    state = "unknown"
+    if record and record.get("sessionId") == sid:
+        state = {"busy": "working", "idle": "idle"}.get(record.get("status"), "unknown")
+    counts, route = human_wait_state.cached_statusline("claude", sid)
+    waiting = (counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None)
+    values.update(title=environ.get("S_SESSION_DISPLAY"), git=git, branch=branch,
+                  jobs=environ.get("git_jobs"), state=state, tag=assigned_tag("claude", sid),
+                  route_label=route, answer_wait=waiting)
+    try:
+        columns = max(20, min(10000, int(environ.get("COLUMNS", "100"))))
+    except ValueError:
+        columns = 100
+    colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
+    return "\n".join(ansi_segments(clip_segments(line, columns), colors=colors, no_color="NO_COLOR" in environ)
+                     for line in status_lines(values, columns))
