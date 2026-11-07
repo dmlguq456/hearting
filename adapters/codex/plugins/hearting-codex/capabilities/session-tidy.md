@@ -140,6 +140,13 @@ provider-supplied transcript when available. Herdr resume argv is the original
 launcher array from the proven current process; missing fields stay omitted,
 and saved argv is restoration data without execution or owner authority.
 
+Human input displays use the exact-session prompt frontier after its existing
+source classification. `prompt_display(seat, harness, sid, current=...)` is
+the shared reader for Fleet and an optional session-shell panel. Its human row
+means the person's last typed input; peer, runtime and tidy input stay separate.
+Display text grants no input readiness, ownership, lineage or approval, and is
+excluded from public snapshots and exports.
+
 An inherited pane label never grants access to that pane's card or input. A
 runtime that provides an exact, live native session target may instead keep a
 separate seat for that target and clear it through its official attachment

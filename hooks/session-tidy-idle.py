@@ -25,6 +25,9 @@ def main() -> int:
         utilities = str(root / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
+        if isinstance(payload, dict) and not payload.get("agent_id"):
+            from session_shell import lifecycle
+            lifecycle("claude", "stop", payload.get("session_id", ""))
         from session_tidy_idle import launch_observer
         launch_observer("claude", payload)
     except Exception:

@@ -150,6 +150,19 @@ SESSIONS에서 프로젝트를 누르면 캠페인 현황, 백로그·진행, �
 같은 기록을 쓰며, 기억을 저장한 이력을 작업 완료로 표시하지 않습니다.
 세션을 누르면 그 세션 화면을 열고, OVERVIEW의 세션 줄은 그 자리에서 펼칩니다.
 
+### 선택해서 쓰는 세션 패널
+
+`hearting session shell enable`로 새 Claude·Codex·OpenCode 터미널에 공통 상태줄과
+읽기 전용 하단 패널을 켭니다. 기본값은 꺼짐입니다. `hearting session shell status`로
+설정을 확인하고 `hearting session shell disable`로 원래 실행 방식으로 되돌립니다.
+이미 실행 중인 세션은 그대로 동작합니다.
+
+감싼 세션에서 **Ctrl+]**를 누르면 그 세션의 route 단계, 질문, 받은 peer 메시지와
+내 마지막 입력을 펼칩니다. Fleet의 해당 세션 페이지에서도 같은 키로 정확히 그
+세션의 패널을 엽니다. 답하기는 Fleet에서 합니다. Herdr 없이도 peer로 쉬는 세션을
+깨우며, Codex는 기존 native queue를 씁니다. 독립된 기록에서 문맥 값을 확인할 수
+없으면 native 문맥 표시를 함께 남깁니다. Herdr·cmux·tmux는 선택 사항입니다.
+
 ### 핵심 화면
 
 <table>

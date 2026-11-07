@@ -1,0 +1,16 @@
+{
+  "name": "hearting-session-shell",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  },
+  "private": true
+}

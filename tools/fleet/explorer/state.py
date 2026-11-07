@@ -1130,6 +1130,8 @@ def _reduce(state, event, frame=None):
                                             int(sign[0]) if sign else 1)), ()
             return reduce(state, {"type": "click", "action": hit.action}, frame)
         return state, ()
+    if key == "\x1d" and str(state.scope).startswith("session:"):
+        return state, (("shell.panel", str(state.scope).partition(":")[2]),)
     if state.view == "QUESTIONS" and state.scope == "-":
         overlay = _question_overlay(state)
         refs = _question_refs(event)

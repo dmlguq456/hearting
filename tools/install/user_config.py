@@ -61,7 +61,21 @@ def _herdr_history_key():
             "ok": True, "path": str(path), "detail": "optional managed previous-conversation command"}
 
 
+def _session_shell_policy():
+    import session_shell_install
+    client = session_shell_install._client()
+    enabled, reason = client.policy()
+    return {"status": "valid" if reason in ("enabled", "disabled") and client.policy_path().exists()
+            else "absent" if reason == "disabled" else "invalid",
+            "ok": reason in ("enabled", "disabled"), "path": str(client.policy_path()),
+            "detail": "enabled" if enabled else "native CLI (default off)"}
+
+
 SURFACES = (
+    {"id": "session-shell", "title": "Optional native session shell",
+     "seeded_by": "hearting session shell enable (explicit opt-in)",
+     "when_absent": "native CLI and existing per-harness displays remain in use",
+     "validate": _session_shell_policy},
     {
         "id": "herdr-history-key",
         "title": "Herdr previous-conversation command",

@@ -2634,6 +2634,11 @@ Keep work in this session's route by default; start another interactive session
 (`peer-steward start`) only for long work that needs its own human answers or
 recovery, because each one adds a seat, a model context, and supervision.
 
+**Optional session shell.** An opt-in PTY attachment supplies a collapsed status
+line, a read-only panel and guarded idle wake. Its exact-session transport and
+input-preservation contract is in [session-shell](references/session-shell.md).
+The default remains off; Codex keeps native queue delivery.
+
 | Question | Existing identifier |
 |---|---|
 | Who talks with the user? | any dispatch depth 0 session: main, peer or steward (elsewhere also "supervisor"). |

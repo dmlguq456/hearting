@@ -99,7 +99,7 @@ def _explorer_key_name(ch, searching=False):
     named = {curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_LEFT: "left",
              curses.KEY_RIGHT: "right", curses.KEY_PPAGE: "pageup", curses.KEY_NPAGE: "pagedown",
              curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_ENTER: "enter", 10: "enter",
-             13: "enter", 9: "tab", _ESC: "escape",
+             13: "enter", 9: "tab", 29: "\x1d", _ESC: "escape",
              curses.KEY_BACKSPACE: "backspace", 127: "backspace", 8: "backspace"}
     if hasattr(curses, "KEY_BTAB"):
         named[curses.KEY_BTAB] = "btab"

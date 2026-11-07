@@ -153,6 +153,19 @@ open requests and stages, completed results, recent small work records, and sess
 Open work uses the same records as MEMORY; saving a memory does not count as completing
 a task. Select a session to open its page, or expand its row in OVERVIEW.
 
+### Optional session panel
+
+`hearting session shell enable` enables a common status line and a read-only
+bottom panel for new Claude, Codex and OpenCode terminals. It is off by default;
+`hearting session shell status` reports the choice and `hearting session shell
+disable` restores native launch behavior. Existing sessions keep running.
+
+Press **Ctrl+]** inside a wrapped session to expand its route stages, questions,
+received peer messages and your last input. The same key on its session page in
+Fleet opens that exact session's panel. Answers stay in Fleet. Peer wake works
+without Herdr; Codex keeps its native queue. Native context remains as a fallback
+where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
+
 ### Key screens
 
 <table>
