@@ -52,13 +52,27 @@ def _carries(pid: int, needle: bytes) -> bool:
     return False
 
 
+def _callers() -> set[int]:
+    """A cleanup subprocess must preserve the shell/test that invoked it."""
+    callers = {1}
+    pid = os.getpid()
+    while pid > 1 and pid not in callers:
+        callers.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as stream:
+                pid = int(stream.read().rsplit(b")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return callers
+
+
 def marked_processes(marker: str) -> dict[int, str]:
     """``{pid: start_ticks}`` of every live, non-zombie process carrying ``marker``."""
     needle = marker.encode()
-    me = os.getpid()
+    callers = _callers()
     found: dict[int, str] = {}
     for entry in os.listdir("/proc"):
-        if not entry.isdigit() or int(entry) == me:
+        if not entry.isdigit() or int(entry) in callers:
             continue
         pid = int(entry)
         if _state(pid) in (None, "Z") or not _carries(pid, needle):
@@ -82,8 +96,9 @@ def reap(marker: str, *, fifo: str | None = None, timeout: float = 10.0) -> list
     own_group = os.getpgrp()
     killed: dict[int, str] = {}
     deadline = time.monotonic() + timeout
-    # A second pass catches a child spawned between the scan and the kill.
-    for _ in range(2):
+    # Each snapshot can miss a newly detached descendant. Confirm an empty
+    # snapshot after draining every generation, within the same deadline.
+    while True:
         batch = marked_processes(marker)
         for pid, ticks in batch.items():
             if _start_ticks(pid) != ticks:
@@ -109,6 +124,12 @@ def reap(marker: str, *, fifo: str | None = None, timeout: float = 10.0) -> list
             if alive:
                 raise TimeoutError("fixture processes survived SIGKILL: %s" % alive)
         if not batch:
+            break
+        if time.monotonic() >= deadline:
+            alive = sorted(pid for pid, ticks in marked_processes(marker).items()
+                           if not _gone(pid, ticks))
+            if alive:
+                raise TimeoutError("fixture processes survived SIGKILL: %s" % alive)
             break
     if fifo and os.path.exists(fifo):
         # Unblock anything left waiting on the pipe so no reader outlives its path.
