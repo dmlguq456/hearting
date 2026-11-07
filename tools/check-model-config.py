@@ -62,6 +62,7 @@ EXEMPT_SUBSTRINGS = (
     "/tools/fleet/demo.py",             # synthetic fixture rows
     "/tools/fleet/projection.py",       # display projection of collected values
     "/tools/fleet/collectors/claude.py",  # /api/oauth/usage bucket keys + their labels
+    "/tools/fleet/native_display.py",     # native callback usage bucket keys + display labels; no model selection
     "/tools/render-fleet-svg.py",       # static SVG mockup of the dashboard
     # INERT today: `loops` is not in SCAN_DIRS, so this entry waives nothing. Kept as the
     # waiver that would be needed if `loops` is ever scanned — but do not read this list as

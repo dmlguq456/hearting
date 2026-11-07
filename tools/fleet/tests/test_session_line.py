@@ -14,7 +14,7 @@ class CommonSessionLineTest(unittest.TestCase):
 
     def test_wide_line_uses_the_approved_order_and_weekly_quota(self):
         text = "".join(part for part, _key in line_segments(self.sample(), 240))
-        fields = ("hearting", "Synthetic session", "feature", "CTX 37%", "sol", "7d 60%", "⏳ route 2", "◑ 3")
+        fields = ("hearting", "Synthetic session", "feature", "context ━━━━────── 37%", "sol", "7d 60%", "⏳ route 2", "◑ 3")
         positions = [text.index(field) for field in fields]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("› 나", text)
@@ -32,10 +32,10 @@ class CommonSessionLineTest(unittest.TestCase):
     def test_unknown_is_not_zero_and_known_zero_stays_zero(self):
         sample = {**self.sample(), "ctx_pct": None, "weekly_pct": None, "answer_wait": None}
         text = "".join(part for part, _key in line_segments(sample, 240))
-        self.assertIn("CTX ?", text); self.assertIn("7d ?", text); self.assertIn("◑ ?", text)
+        self.assertIn("context ?", text); self.assertIn("7d ?", text); self.assertIn("◑ ?", text)
         known = {**sample, "ctx_pct": 0, "weekly_pct": 0, "answer_wait": 0}
         text = "".join(part for part, _key in line_segments(known, 240))
-        self.assertIn("CTX 0%", text); self.assertIn("7d 0%", text); self.assertNotIn("◑", text)
+        self.assertIn("context ────────── 0%", text); self.assertIn("7d 0%", text); self.assertNotIn("◑", text)
 
     def test_fleet_model_effort_and_state_keys_reach_the_terminal_palette(self):
         segments = line_segments(self.sample(), 240)

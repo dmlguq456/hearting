@@ -11,56 +11,14 @@ import os
 import stat
 from pathlib import Path
 
-from . import gitinfo, titles, session_registry, context_policy
+from . import gitinfo, titles, session_registry, context_policy, session_handle
 from .collectors import claude, codex, opencode, usage_cache
 from .model import Session
 from .token_budget import parse_codex_token_count, telemetry_from_explicit
 
 
-def _claude_callback(path, sid, pid, start):
-    """Read the existing bounded, exact-session display tap, never latest-global."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
-            before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > 65536:
-                return None
-            raw = os.read(fd, 65537)
-            stamp = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-            if len(raw) != before.st_size or stamp(os.fstat(fd)) != stamp(before) or stamp(path.lstat()) != stamp(before):
-                return None
-            value = json.loads(raw)
-        finally:
-            os.close(fd)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("session_id") != sid:
-        return None
-    if ("pid" in value or "proc_start" in value) and (
-            value.get("pid") != pid or str(value.get("proc_start")) != start):
-        return None
-    return value
-
-
-def _percentage(value):
-    return value if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 100 else None
-
-
-def _claude_percentage(value):
-    window = value.get("context_window")
-    if not isinstance(window, dict):
-        return None
-    percentage = _percentage(window.get("used_percentage"))
-    if percentage is not None:
-        return percentage
-    current = window.get("current_usage")
-    capacity = window.get("context_window_size")
-    if not isinstance(current, dict) or type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity <= 0:
-        return None
-    parts = [current.get(key) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
-    if not all(type(n) in (int, float) and math.isfinite(n) and n >= 0 for n in parts):
-        return None
-    return min(100, 100 * sum(parts) / capacity)
+from .native_display import claude_callback as _claude_callback, percentage as _percentage, claude_percentage as _claude_percentage
+from .native_display import claude_quota, quota_windows
 
 
 def weekly_quota(payload):
@@ -89,6 +47,7 @@ def observe(harness, pid, proc_start, sid):
     paths = [titles.sidecar_path(sid, harness), usage_cache._path(harness),
              context_policy.policy_path(harness, pid=pid, proc_start=proc_start)]
     transcript = None
+    callback = None
     if harness == "claude":
         home = claude._home()
         paths.append(Path(home) / "sessions" / f"{pid}.json")
@@ -134,7 +93,7 @@ def observe(harness, pid, proc_start, sid):
     if sess.cwd:
         git_request = gitinfo._display_request(sess.cwd)
         paths.append(gitinfo._display_paths(git_request)[1])
-        observed_git = (gitinfo.cached_display(sess.cwd) or {}).get("git") or {}
+        observed_git = gitinfo.display_fields(gitinfo.cached_display(sess.cwd))
     branch = gitinfo.branch(sess.cwd)
     if branch is None and observed_git.get("repo") == 1:
         branch = observed_git.get("branch")
@@ -143,7 +102,20 @@ def observe(harness, pid, proc_start, sid):
     if read_proc_start(pid) != proc_start:
         return {}, []
     values = {name: getattr(sess, name) for name in ("cwd", "model", "effort", "ctx_pct")}
-    values.update(harness=harness, title=titles.last_title(sid, harness=harness),
-                  branch=branch,
-                  weekly_pct=weekly_quota(usage_cache.read(harness).get("payload")))
+    name_path = session_handle._session_name_registry_path(harness, sid)
+    if name_path:
+        paths.append(name_path)
+    names = session_handle.resolve_display_inputs(harness, sid, pid=pid)
+    title = session_handle.current_session_subject(names.get("runtime_name"), titles.last_title(sid, harness=harness))
+    quota = dict(usage_cache.read(harness).get("payload") or {})
+    if callback:
+        native_quota = claude_quota(callback)
+        if native_quota:
+            # This terminal mirrors its exact native callback; Fleet account
+            # quota admission remains credential-bound and unchanged.
+            quota = native_quota
+    values.update(harness=harness, title=title or None, git=observed_git,
+                  branch=branch + "*" if branch and observed_git.get("dirty") == 1 else branch,
+                  weekly_pct=weekly_quota(quota), quota_windows=quota_windows(quota),
+                  model_quotas=quota.get("rl_ms") or [], jobs=observed_git.get("jobs"))
     return values, sorted({os.fspath(path) for path in paths if path})

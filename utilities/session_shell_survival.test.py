@@ -74,6 +74,11 @@ class SessionShellSurvivalTest(unittest.TestCase):
         directory=self.root/('survival-'+mode);directory.mkdir(mode=0o700)
         native_file=directory/'native.json';exit_fifo=directory/'exit';os.mkfifo(exit_fifo,0o600)
         pause_fifo=directory/'pause';os.mkfifo(pause_fifo,0o600)
+        enter_gate=directory/'enter-gate';enter_ready=directory/'enter-ready'
+        ready_fd=None
+        if inflight:
+            os.mkfifo(enter_gate,0o600);os.mkfifo(enter_ready,0o600)
+            ready_fd=os.open(enter_ready,os.O_RDONLY|os.O_NONBLOCK)
         native=directory/'native.py'
         native.write_text(fixture.FAKE_NATIVE.replace(
             "    with socket.socket(socket.AF_UNIX) as channel:\n        channel.settimeout(5);channel.connect(os.environ['HEARTING_SHELL_SOCKET'])\n        channel.sendall((json.dumps(request)+'\\n').encode());channel.recv(8192)",
@@ -92,8 +97,27 @@ class SessionShellSurvivalTest(unittest.TestCase):
         sid='survival-native-'+mode;key='claude\0'+sid;now=time.time()
         cache.write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],'by_session':{},
             'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}));cache.chmod(0o600)
+        entry_script=ROOT/'utilities/session-shell/entry.py'
+        if inflight:
+            # Keep the test in the pre-Enter phase until shared held bytes exist.
+            # Production's 50ms timer is unchanged. Only this owned synthetic
+            # entry blocks at its Enter boundary; ordinary keyboard I/O is real.
+            bootstrap=directory/'entry-fixture.py'
+            bootstrap.write_text("import os,runpy,sys,time\nfrom pathlib import Path\n"
+                +"sys.path.insert(0,"+repr(str(ROOT/'utilities/session-shell'))+")\nimport input_owner\n"
+                +"advance=input_owner.InputOwner.advance\n"
+                +"def gated(self,now):\n"
+                +" if self.ref is not None and self.deadline is not None and now>=self.deadline:\n"
+                +"  self.send()\n"
+                +"  if self.responses:self.capture();return\n"
+                +"  ready=os.open("+repr(str(enter_ready))+",os.O_WRONLY);os.write(ready,b'1');os.close(ready)\n"
+                +"  gate=os.open("+repr(str(enter_gate))+",os.O_RDWR);os.read(gate,1);os.close(gate)\n"
+                +" return advance(self,time.monotonic())\n"
+                +"input_owner.InputOwner.advance=gated\n"
+                +"sys.argv=["+repr(str(entry_script))+",*sys.argv[1:]]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
+            entry_script=bootstrap
         master,slave=pty.openpty();outer_attrs=termios.tcgetattr(slave);success=False;fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',30,100,0,0))
-        entry=fixture.subprocess.Popen([sys.executable,str(ROOT/'utilities/session-shell/entry.py'),'claude',sys.executable,str(native),sid],
+        entry=fixture.subprocess.Popen([sys.executable,str(entry_script),'claude',sys.executable,str(native),sid],
             env=env,cwd=self.project,stdin=slave,stdout=slave,stderr=slave,start_new_session=True,
             preexec_fn=lambda:fcntl.ioctl(0,termios.TIOCSCTTY,0))
         os.close(slave);raw=bytearray();original=None
@@ -131,8 +155,19 @@ class SessionShellSurvivalTest(unittest.TestCase):
                         {'harness':'claude','session_id':sid},defer=True)
                     accepted=shell.deliver_pending(ref,'claude',sid)
                     self.assertTrue(accepted.get('ok'),accepted)
+                    self.assertTrue(select.select([ready_fd],[],[],5)[0], 'owned Enter boundary not ready')
+                    self.assertEqual(os.read(ready_fd,1),b'1')
                     held=b'HELD_HUMAN_1388'+b'x'*(65536-len(b'HELD_HUMAN_1388'))
-                    os.write(master,held)
+                    # A partial/backpressured fixture write must not hang a CI shard.
+                    os.set_blocking(master,False);position=0;deadline=time.monotonic()+5
+                    try:
+                        while position<len(held):
+                            left=deadline-time.monotonic()
+                            self.assertGreater(left,0,'synthetic keyboard write stalled')
+                            self.assertTrue(select.select([],[master],[],left)[1])
+                            try:position+=os.write(master,held[position:])
+                            except BlockingIOError:pass
+                    finally:os.set_blocking(master,True)
                     deadline=time.monotonic()+5
                     while True:
                         status=shell.control(binding,'status')
@@ -141,6 +176,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
                         select.select([],[],[],.01)
                 Path(env['SURVIVAL_FAULT']).write_text('fail')
                 if mode=='held-host':self.assertTrue(terminate_owned(host))
+                fd=os.open(enter_gate,os.O_RDWR|os.O_NONBLOCK);os.write(fd,b'1');os.close(fd)
                 fd=os.open(pause_fifo,os.O_RDWR|os.O_NONBLOCK);os.write(fd,b'1');os.close(fd)
             elif mode in ('host','backend'):
                 Path(env['SURVIVAL_FAULT']).write_text('fail')
@@ -178,6 +214,9 @@ class SessionShellSurvivalTest(unittest.TestCase):
             print(json.dumps({'boundary':mode,'same_native_pid':original['pid'],'same_birth':original['start'],
                               'after_input_response':True,'operating_signals':0}),flush=True)
         finally:
+            if inflight:
+                fd=os.open(enter_gate,os.O_RDWR|os.O_NONBLOCK);os.write(fd,b'1');os.close(fd)
+                if ready_fd is not None:os.close(ready_fd)
             fd=os.open(pause_fifo,os.O_RDWR|os.O_NONBLOCK);os.write(fd,b'1');os.close(fd)
             fd=os.open(exit_fifo,os.O_RDWR|os.O_NONBLOCK);os.write(fd,b'q');os.close(fd)
             try:entry.wait(timeout=5)

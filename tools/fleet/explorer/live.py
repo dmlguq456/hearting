@@ -342,13 +342,8 @@ def _delivery_panes(snapshot):
 
 def _last_input(display, now):
     """Presentation of a decided frontier, with a fresh age and no text classification."""
-    display = display if isinstance(display, Mapping) else {}
-    human = display.get("human")
-    if not isinstance(human, Mapping):
-        return ui_text("fleet.input.none" if display.get("human_state") == "none"
-                       else "fleet.input.unknown")
-    age = (_ago(human.get("at"), now) or "?").removesuffix(" ago")
-    return ui_text("fleet.input.value", age=age, text=human.get("text") or "·")
+    from ..prompt_line import last_input
+    return last_input(display, now)
 
 
 def _received_inputs(display, tags=None):

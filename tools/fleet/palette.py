@@ -137,3 +137,19 @@ def style_components(key, *, colors=256, no_color=False):
             "bold": bool(attrs & _A_B) and not no_color,
             "dim": bool(attrs & _A_D) and not no_color,
             "reverse": bool(attrs & _A_REVERSE) and not no_color}
+
+
+def ansi_segments(parts, *, colors=256, no_color=False):
+    """Encode the same semantic spans for a native statusline callback."""
+    result = []
+    for text, key in parts:
+        style = style_components(key, colors=colors, no_color=no_color)
+        codes = [0]
+        for attr, code in (("bold", 1), ("dim", 2), ("reverse", 7)):
+            if style[attr]:
+                codes.append(code)
+        foreground = style["foreground"]
+        if foreground is not None and foreground >= 0:
+            codes.extend((38, 5, foreground)) if colors >= 256 else codes.append(30 + foreground)
+        result.append("\x1b[" + ";".join(map(str, codes)) + "m" + text)
+    return "".join(result) + "\x1b[0m"

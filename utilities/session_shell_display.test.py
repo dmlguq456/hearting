@@ -1,4 +1,4 @@
-"""Wrapped displays yield duplicate decorations and keep native fallback fields."""
+"""Claude native rows and the block share the same status formatter."""
 from pathlib import Path
 import importlib.util
 import json
@@ -24,12 +24,50 @@ class WrappedDisplayTest(unittest.TestCase):
             result=subprocess.run(['bash',str(ROOT/'adapters/claude/statusline.sh')],input=json.dumps(payload),
                                   env=env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
-            return result.stdout if wrapped else re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
+            return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
 
-    def test_wrapped_claude_emits_no_native_fallback_even_for_unknown_context(self):
-        self.assertEqual(self.statusline(True,37),'')
-        self.assertEqual(self.statusline(True,0),'')
-        self.assertEqual(self.statusline(True,None),'')
+    def test_wrapped_claude_paints_the_common_native_row_even_with_unknown_context(self):
+        for percentage,reading in ((37,'37%'),(0,'0%'),(None,'?')):
+            with self.subTest(percentage=percentage):
+                line=self.statusline(True,percentage)
+                self.assertIn('context ',line);self.assertIn(reading,line)
+                self.assertIn('Opus',line);self.assertIn('7d 42%',line)
+                self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
+
+
+    def test_first_claude_paint_reuses_metadata_without_waiting_for_refresh(self):
+        import sys
+        from unittest import mock
+        sys.path.insert(0,str(ROOT/'tools'))
+        sys.path.insert(0,str(ROOT/'utilities'))
+        from fleet.session_line import claude_first_statusline
+        import claude_process_identity
+        with tempfile.TemporaryDirectory(prefix='shell-first-cache-') as directory:
+            root=Path(directory);tap=root/'.statusline';tap.mkdir()
+            old={'session_id':'exact','cwd':directory,'hearting_display':{
+                'S_SESSION_DISPLAY':'Last observed title','git_repo':'0','git_observed_label':'12:00'}}
+            (tap/'exact.json').write_text(json.dumps(old))
+            env=dict(os.environ,CLAUDE_CONFIG_DIR=directory,HEARTING_SHELL_DIRECTORY=directory,COLUMNS='180')
+            callback={'session_id':'exact','cwd':directory,'context_window':{'used_percentage':37},'model':{'display_name':'Native'}}
+            with mock.patch.object(claude_process_identity,'statusline_bindings',return_value=(None,None,'unobserved')),mock.patch('subprocess.Popen') as worker:
+                line=claude_first_statusline(callback,env,str(ROOT/'adapters/claude/statusline.sh'))
+                self.assertIn('Last observed title',line);self.assertIn('37%',line)
+                refreshes=lambda:[c for c in worker.call_args_list if c.args[0]==['bash',str(ROOT/'adapters/claude/statusline.sh')]]
+                self.assertEqual(len(refreshes()),1)
+                self.assertEqual(refreshes()[0].kwargs['env']['HEARTING_SHELL_INITIAL_REFRESH'],'1')
+                self.assertIsNone(claude_first_statusline(callback,env,'unused'))
+                self.assertEqual(len(refreshes()),1)
+
+    def test_an_older_initial_refresh_cannot_replace_new_native_telemetry(self):
+        import sys
+        sys.path.insert(0,str(ROOT/'tools'))
+        from fleet.native_display import write_claude_tap
+        with tempfile.TemporaryDirectory(prefix='shell-tap-order-') as directory:
+            root=Path(directory);(root/'claude-first-display.json').write_text('{}')
+            path=root/'exact.json';env={'HEARTING_SHELL_SOCKET':str(root/'control.sock')}
+            write_claude_tap(path,json.dumps({'context':80}),{**env,'HEARTING_STATUS_OBSERVED_AT':'200'})
+            write_claude_tap(path,json.dumps({'context':37}),{**env,'HEARTING_STATUS_OBSERVED_AT':'100'})
+            self.assertEqual(json.loads(path.read_text())['context'],80)
 
     def test_unwrapped_claude_keeps_its_existing_model_and_usage_display(self):
         line=self.statusline(False,37)
@@ -46,6 +84,7 @@ class WrappedDisplayTest(unittest.TestCase):
         self.assertEqual(original,['/synthetic/codex','--model','fixture','resume','native-session'])
         for harness in ('claude','opencode'):
             self.assertEqual(transform(harness,original),original)
+
 
 
 if __name__=='__main__':unittest.main()

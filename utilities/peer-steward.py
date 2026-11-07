@@ -6712,7 +6712,7 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
 
 def _resume_session_notice_pass(duties, store, *, read_context=None,
                                selection=None, runner_incarnation=None):
-    """Deliver notices through the existing herdr census and peer courier."""
+    """Deliver notices through one verified attachment and the existing peer courier."""
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
@@ -6883,37 +6883,54 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     claimed, prepared = [], []
     submitted = False
     try:
-        result = subprocess.run(_herdr_argv("agent", "list"), capture_output=True,
-                                text=True, timeout=5)
-        if result.returncode != 0:
-            raise OSError("notice-census-unavailable")
-        census = json.loads(result.stdout)
-        observed = census.get("result") if isinstance(census, dict) else None
-        agents = observed.get("agents") if isinstance(observed, dict) else None
-        if (not isinstance(agents, list) or any(not isinstance(agent, dict)
-                or (agent.get("agent_session") is not None
-                    and not isinstance(agent["agent_session"], dict)) for agent in agents)):
-            raise ValueError("notice-census-invalid")
-        matches = [agent for agent in agents if agent.get("agent") == harness
-                   and (agent.get("agent_session") or {}).get("value") == recipient_sid]
-        if len(matches) != 1:
-            for item in batch:
-                store.update(item[0]["id"], observer_error="recipient-unavailable",
-                             observation={**(item[0].get("observation") or {}),
-                                          "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
-            return
-        pane = matches[0].get("pane_id")
-        if not isinstance(pane, str) or not pane or pane == "-":
-            for item in batch:
-                store.update(item[0]["id"], observer_error="recipient-unavailable",
-                             observation={**(item[0].get("observation") or {}),
-                                          "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
-            return
-        if _resolve_target(pane)[:2] != (harness, recipient_sid):
-            return
+        import session_shell
+        attachment, _attachment_reason = session_shell.exact_binding(harness, recipient_sid)
+        # Resume keeps its existing stricter native-start policy. Ordinary
+        # notices (including question answers) use the same exact shell path as
+        # peer messages; no fabricated pane, second queue or alternate resend.
+        if resume_only:
+            attachment = None
+        if attachment is not None:
+            target = harness + ":" + recipient_sid
+        else:
+            result = subprocess.run(_herdr_argv("agent", "list"), capture_output=True,
+                                    text=True, timeout=5)
+            if result.returncode != 0:
+                raise OSError("notice-census-unavailable")
+            census = json.loads(result.stdout)
+            observed = census.get("result") if isinstance(census, dict) else None
+            agents = observed.get("agents") if isinstance(observed, dict) else None
+            if (not isinstance(agents, list) or any(not isinstance(agent, dict)
+                    or (agent.get("agent_session") is not None
+                        and not isinstance(agent["agent_session"], dict)) for agent in agents)):
+                raise ValueError("notice-census-invalid")
+            matches = [agent for agent in agents if agent.get("agent") == harness
+                       and (agent.get("agent_session") or {}).get("value") == recipient_sid]
+            if len(matches) != 1:
+                for item in batch:
+                    store.update(item[0]["id"], observer_error="recipient-unavailable",
+                                 observation={**(item[0].get("observation") or {}),
+                                              "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
+                return
+            target = matches[0].get("pane_id")
+            if not isinstance(target, str) or not target or target == "-":
+                for item in batch:
+                    store.update(item[0]["id"], observer_error="recipient-unavailable",
+                                 observation={**(item[0].get("observation") or {}),
+                                              "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
+                return
+            if _resolve_target(target)[:2] != (harness, recipient_sid):
+                return
+
+        def recipient_current():
+            if attachment is not None:
+                current, _reason = session_shell.exact_binding(harness, recipient_sid)
+                return current == attachment
+            return _resolve_target(target)[:2] == (harness, recipient_sid)
+
         import session_resume
         if any(session_resume.is_resume(item[4]) for item in batch):
-            refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+            refusal, _proof = _native_idle_prompt_guard(target, harness, recipient_sid, target)
             if refusal:
                 for item in batch:
                     store.update(item[0]["id"], state="pending", observation={
@@ -6922,7 +6939,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                 return
         if pending_transfers:
             for message in pending_transfers:
-                _schedule_message_obligation(message, pane, pane)
+                _schedule_message_obligation(message, target, None if attachment is not None else target)
             return
         producer_records = []
         refs = []
@@ -6938,7 +6955,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         or record_recipient_binding(fresh, storage_sid, harness=item_harness,
                                                     jobs=source_jobs, read_context=effect_context)
                         != (harness, item_sid)
-                        or _resolve_target(pane)[:2] != (harness, recipient_sid)):
+                        or not recipient_current()):
                     return
                 owner = "retained-rewake:" + item_duty["id"]
                 prior = retargeted.get((storage_sid, fresh["delivery_id"]))
@@ -6973,7 +6990,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                                                     now_ns=time.monotonic_ns())
                         claim = pending.claim(root, storage_sid, fresh["delivery_id"], claim_owner=owner,
                             lease_seconds=30, require_generation_proof=False, jobs=source_jobs,
-                            retry_context=f"{harness}:{recipient_sid}:{pane}:{item_duty['id']}")
+                            retry_context=f"{harness}:{recipient_sid}:{target}:{item_duty['id']}")
                         original_identity = (prior[1][IDENTITY_KEY] if prior else
                             pending.received_ack_identity(original, storage_sid, original["delivery_id"]))
                         if pending.received_ack_identity(claim, storage_sid, fresh["delivery_id"]) != original_identity:
@@ -7030,9 +7047,9 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
             body_file.write(body)
             body_file.flush()
             ref_args = [arg for ref in dict.fromkeys(refs) for arg in ("--ref", ref)]
-            args = build_parser().parse_args(["prompt", pane, "--body-file", body_file.name,
+            args = build_parser().parse_args(["prompt", target, "--body-file", body_file.name,
                                                *ref_args])
-            if any(_resolve_target(pane)[:2] != (harness, recipient_sid) for _entry in claimed):
+            if any(not recipient_current() for _entry in claimed):
                 return
             for _duty, storage_sid, delivery_id, owner, stored, _view in claimed:
                 source_jobs = peer_obligations._notice_duty_source(_duty, root)[3]
@@ -7040,7 +7057,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                                             jobs=source_jobs):
                     return
             if any(session_resume.is_resume(entry[4]) for entry in claimed):
-                refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+                refusal, _proof = _native_idle_prompt_guard(target, harness, recipient_sid, target)
                 if refusal:
                     return
                 # As for idle tidy, re-read input authority after the slow

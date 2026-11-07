@@ -402,8 +402,8 @@ def _apply_statusline(sess, d):
     cw = d.get("context_window") or {}
     cw = cw if isinstance(cw, dict) else {}
     up = cw.get("used_percentage")
-    raw_percentage = (up if isinstance(up, (int, float)) and not isinstance(up, bool)
-                      and math.isfinite(up) and 0 <= up <= 100 else None)
+    from ..native_display import percentage
+    raw_percentage = percentage(up)
     sess.ctx_pct = None
     sess.active_context_tokens = None
     sess.context_window_tokens = None

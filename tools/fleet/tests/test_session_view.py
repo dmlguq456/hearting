@@ -132,6 +132,18 @@ class SessionViewTest(unittest.TestCase):
         self.assertIsNone(view.weekly_quota({"rl_windows": [["24h", 80, 0]], "rl_7d": 30}))
         self.assertEqual(view.weekly_quota({"rl_windows": [["7d", 0, 0]], "rl_7d": 30}), 0)
 
+    def test_exact_native_rate_windows_keep_resets_and_model_buckets(self):
+        path=self.root / "claude/.statusline" / (self.sid + ".json")
+        self.write(path, {"session_id":self.sid,"rate_limits":{
+            "five_hour":{"used_percentage":31,"resets_at":1800000000},
+            "seven_day":{"used_percentage":62,"resets_at":1800200000},
+            "seven_day_opus":{"used_percentage":57},
+            "model_scoped":[{"display_name":"Fable 5","utilization":.42}]}})
+        values,_=view.observe("claude",os.getpid(),self.start,self.sid)
+        self.assertEqual(values["quota_windows"],[("5h",31,1800000000),("7d",62,1800200000)])
+        self.assertEqual(values["model_quotas"],[("opus",57),("fable",42)])
+        self.assertEqual(values["weekly_pct"],62)
+
     def test_changed_process_birth_yields_no_other_session_values(self):
         self.assertEqual(view.observe("claude", os.getpid(), self.start + "0", self.sid), ({}, []))
 

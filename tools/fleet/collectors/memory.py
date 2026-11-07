@@ -235,7 +235,7 @@ def _db_stamp(path):
 
 
 def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
-                         open_limit=OPEN_PER_PROJECT):
+                         open_limit=OPEN_PER_PROJECT, repo=None):
     """Per project, the newest decisions and the possibly-open records, headline only.
 
     One read-only query ranks records within each (origin, kind) so every project keeps its
@@ -245,7 +245,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
     path = _db_path()
     if not path.is_file():
         return {"state": "unavailable", "by_repo": {}, "record_count": None}
-    key = (str(path), _db_stamp(path), today, tuple(journal_ids), decisions, open_limit)
+    key = (str(path), _db_stamp(path), today, tuple(journal_ids), decisions, open_limit, repo)
     cached = _project_cache.get("value")
     if cached is not None and _project_cache.get("key") == key:
         return dict(cached)
@@ -271,6 +271,13 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
             types = ", ".join("?" for _ in _OPEN_TYPES)
             tags = "tags LIKE '%backlog%' OR " if "tags" in columns else ""
             where.append(f"(type='decision' OR type IN ({types}) OR {tags}headline LIKE '[%')")
+            scope_params = ()
+            if repo is not None:
+                # The session block reads one repo through the same row projection.
+                # Do not sort/materialize every project's work on its first frame.
+                con.create_function("hearting_repo", 1, _repo_label, deterministic=True)
+                where.append("hearting_repo(cwd_origin) = ?")
+                scope_params = (repo,)
             rows = con.execute(
                 f"SELECT {', '.join(fields)}, kind, total, today_count FROM ("
                 f" SELECT *, ROW_NUMBER() OVER (PARTITION BY cwd_origin, kind"
@@ -283,7 +290,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 f"  FROM records WHERE {' AND '.join(where)}))"
                 f" WHERE rank <= CASE kind WHEN 'decision' THEN ? ELSE ? END"
                 f" ORDER BY cwd_origin, kind, rank",
-                (today, *_OPEN_TYPES, max(0, int(decisions)), max(1, int(open_limit))),
+                (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions)), max(1, int(open_limit))),
             ).fetchall()
             ids = [str(item) for item in journal_ids if item][:256]
             headlines = dict(con.execute(

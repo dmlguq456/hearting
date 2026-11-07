@@ -326,61 +326,143 @@ def _plain(value, limit=256):
 
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
-                     columns=100, state="unknown", expanded=False) -> dict:
-    """Display only, using the same route/question and human-input sources."""
+                     columns=100, rows=30, state="unknown", expanded=True, native_context=None, native_badges=None) -> dict:
+    """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
     import human_wait_state
     import session_tidy
-    from fleet.config import ui_text
-    from fleet.explorer.live import _last_input
+    import questions
+    from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
     from fleet.session_line import line_segments
+    from fleet.session_block import block_lines
     from fleet.palette import style_components
+    from fleet.config import ui_text
     from fleet.session_view import observe
-    # The producer owns route/question interpretation; no Fleet collection here.
+    from fleet.session_work import observe as observe_work
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
     ids = set(view.get("by_session", {}).get((harness, sid), ()))
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
-    display = getattr(session_tidy, "prompt_display", lambda *a, **k: {"human_state": "unknown"})(seat, harness, sid)
-    human_line = _last_input(display, time.time())
+    display = session_tidy.prompt_display(seat, harness, sid)
     received = display.get("received") or []
-    peers = ["⇄ " + _plain(row.get("sender") or row.get("sender_harness") or "peer") + ": " + _plain(row.get("text"), 160)
-             for row in received[-2:]]
+    peers = ["⇄ " + _plain(row.get("sender") or row.get("sender_harness") or "peer")
+             + " · " + _plain(row.get("text"), 160) for row in received[-2:]]
     tag = assigned_tag(harness, sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
-    count = counts[1] if counts is not None else None
     values, watched = observe(harness, native_pid, native_start, sid) if native_pid else ({}, [])
-    values.update(harness=harness, tag=tag, state=state, route_label=_plain(route), answer_wait=count)
+    # The native OpenCode sidebar already owns this display value. It does not
+    # establish an effective policy, process liveness or input readiness.
+    if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
+        values["ctx_pct"] = native_context
+    if harness == "claude" and isinstance(native_badges,dict):
+        values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
+    values.update(harness=harness, tag=tag, state=state, route_label=_plain(route),
+                  answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
+    board = []
+    for item in view.get("items", ()):
+        if item.get("id") not in ids or item.get("stale"):
+            continue
+        # questions list owns schema, current request support and original binding.
+        board.append(questions.describe(item, now=time.time()))
+        if len(board) >= 8:
+            break
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
-    segments = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
-                for text, key in line_segments(values, columns)]
-    open_fleet = ui_text("fleet.session_panel.open_fleet")
-    title = ui_text("fleet.session_panel.title", tag=tag, harness=harness,
-                    collapse=ui_text("fleet.memory.collapse"))
-    question_lines = []
-    if expanded:
-        import questions
-        import time
-        for item in view.get("items", ()):
-            if item.get("id") not in ids or item.get("stale"):
-                continue
-            description = questions.describe(item, now=time.time())
-            rows = description.get("questions") or []
-            question_lines.extend(_plain(row.get("question")) or ui_text("wait.title") for row in rows)
-            if not rows:
-                question_lines.append(_plain(description.get("kind")) + " · " + open_fleet)
-            if len(question_lines) >= 3:
-                break
+    def styled(parts):
+        return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
+    segments = styled(line_segments(values, columns))
+    work, work_paths = observe_work(values.get("cwd"))
+    watched.extend(work_paths)
+    lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
+                        received=peers, human=last_input(display, time.time()),
+                        work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
-            "watch": watched, "lines": [title,
-            "ROUTES  " + (_plain(route) or "?"),
-            f"QUESTIONS {count if count is not None else '?'} · {open_fleet}",
-            *question_lines[:3], *peers, human_line]}
+            "watch": watched, "lines": [styled(line) for line in lines],
+            "questions": board, "context": values.get("ctx_pct"),
+            "help": ui_text("fleet.session_block.editor_help")}
+
+
+def _block_action(binding, request):
+    """Only existing, read-only person entry points; never model/terminal input."""
+    registry_root()
+    key = request.get("action")
+    if key == "r":
+        from peer_steward_status import _peer_status_rows, _peer_status_line
+        rows, omitted = _peer_status_rows(binding["sid"], binding["harness"])
+        return {"ok": True, "lines": [_peer_status_line(row) for row in rows[:32]] or ["✉ ·"]}
+    if key == "w":
+        from fleet.session_view import observe
+        from fleet.session_work import observe as work
+        value, _ = observe(binding["harness"], binding["native_pid"], binding["native_start"], binding["sid"])
+        rows, _ = work(value.get("cwd"))
+        return {"ok": True, "lines": [_plain(row.get("headline")) for row in rows[:32]] or ["◌ ·"]}
+    if key == "\r":
+        import subprocess
+        from fleet.explorer.focus import session_entries
+        routes = []
+        for _line, _fields, meta in reversed(session_entries(None, binding["sid"])):
+            route = meta.get("owner_route_id") or meta.get("route_id")
+            if route and route not in routes:
+                routes.append(route)
+        lines = []
+        for route in routes[:2]:
+            if not re.fullmatch(r"rt-[0-9a-f]{16}", route):
+                continue
+            run = subprocess.run([sys.executable, str(Path(__file__).with_name("workflow-supervisor.py")),
+                "status", "--route", route, "--json"], capture_output=True, text=True, timeout=10)
+            try:
+                value = json.loads(run.stdout)
+                lines.append("⏳ " + _plain(value.get("capability") or "route") + " · "
+                             + _plain(value.get("derived_workflow_state") or value.get("workflow_state") or "?"))
+                for name, node in (value.get("nodes") or {}).items():
+                    lines.append("  " + _plain(name) + " · " + _plain(node.get("state") or "?"))
+            except ValueError:
+                lines.append("⏳ ?")
+        return {"ok": True, "lines": lines or ["⏳ ·"]}
+    return {"ok": False, "reason": "unknown-action"}
+
+
+def _block_answer(binding, request):
+    """An explicit person action, using questions answer's existing exact request path."""
+    import contextlib
+    import io
+    import questions
+    import human_wait_state
+    from types import SimpleNamespace
+    wanted = request.get("question_id")
+    revision = request.get("revision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
+        return {"ok": False, "reason": "question-changed"}
+    if not isinstance(wanted, str) or len(wanted) > 512:
+        return {"ok": False, "reason": "question-changed"}
+    board = human_wait_state.cached_view(request=False)
+    item, error = questions._find(board or {}, wanted)
+    if error or (item.get("owner") or {}).get("harness") != binding["harness"] or (
+            item.get("owner") or {}).get("session_id") != binding["sid"] or item.get("stale"):
+        return {"ok": False, "reason": "question-changed"}
+    answers = request.get("answers")
+    decision = request.get("decision")
+    # Keep one command implementation for CLI, Fleet and block. No shell text,
+    # second store, alternate send or optimistic receipt.
+    out = io.StringIO()
+    args = SimpleNamespace(id=wanted, choice=[], text=None, text_file=None,
+                           decision=decision, answers_file=None, json=True,
+                           expected_revision=revision,
+                           expected_owner={"harness": binding["harness"], "session_id": binding["sid"]})
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        if answers is not None:
+            # The command accepts a dict through its shared implementation below.
+            args.answers = answers
+        code = questions._answer(args)
+    try:
+        result = json.loads(out.getvalue())
+    except ValueError:
+        return {"ok": False, "reason": _plain(out.getvalue()) or "answer-unavailable"}
+    return {"ok": code == 0, **result}
 
 
 def _input_readiness(binding, request):
@@ -439,9 +521,17 @@ def _backend_operation(request: dict) -> dict:
         columns = request.get("columns", 100)
         if type(columns) is not int or not 20 <= columns <= 10000:
             return {"ok": False, "reason": "invalid-display-size"}
+        rows = request.get("rows", 30)
+        if type(rows) is not int or not 8 <= rows <= 10000:
+            return {"ok": False, "reason": "invalid-display-size"}
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
-            columns=columns, state=request.get("state", "unknown"), expanded=request.get("expanded") is True)}
+            columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
+            native_context=request.get("native_context"),native_badges=request.get("native_badges"))}
+    if op == "answer":
+        return _block_answer(binding, request)
+    if op == "action":
+        return _block_action(binding, request)
     if op == "readiness":
         return _input_readiness(binding, request)
     if op == "payload":

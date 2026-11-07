@@ -29,6 +29,24 @@ if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; t
   unset _state_root
 fi
 input=$(cat)
+if [ -n "${HEARTING_SHELL_SOCKET:-}" ] && [ -z "${HEARTING_SHELL_INITIAL_REFRESH:-}" ]; then
+  export HEARTING_STATUS_OBSERVED_AT="${EPOCHREALTIME:-$(date +%s.%N)}"
+fi
+if [ -n "${HEARTING_SHELL_SOCKET:-}" ] && [ -z "${HEARTING_SHELL_INITIAL_REFRESH:-}" ]; then
+  first_helper="$AGENT_HOME/tools/fleet/session_line.py"
+  [ -f "$first_helper" ] || first_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
+  if [ -f "$first_helper" ] && printf '%s' "$input" | HEARTING_STATUS_CALLER_PID="$PPID" python3 -c '
+import json,os,sys
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1]).resolve().parents[1]))
+from fleet.session_line import claude_first_statusline
+line=claude_first_statusline(json.load(sys.stdin),os.environ,sys.argv[2])
+if line is None:raise SystemExit(75)
+print(line)
+' "$first_helper" "${BASH_SOURCE[0]}"; then
+    exit 0
+  fi
+fi
 printf '%s' "$input" > "$SL_STATE_HOME/.statusline-last.json" 2>/dev/null || true  # 디버그·필드 탐사용 (최신 입력 1건)
 
 eval "$(printf '%s' "$input" | python3 -c '
@@ -136,11 +154,17 @@ if [ ! -f "$identity_helper" ]; then
   identity_helper="$(dirname "$(dirname "$(dirname "$script_path")")")/utilities/claude_process_identity.py"
 fi
 if [ -n "$S_SID" ] && [ -f "$identity_helper" ]; then
-  identity=$(python3 - "$identity_helper" "$PPID" "$S_SID" "$SL_STATE_HOME" <<'PY' 2>/dev/null || true
+  identity=$(python3 - "$identity_helper" "${HEARTING_STATUS_CALLER_PID:-$PPID}" "$S_SID" "$SL_STATE_HOME" <<'PY' 2>/dev/null || true
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("claude_process_identity", sys.argv[1])
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
 current, tap, policy = mod.statusline_bindings(sys.argv[2], sys.argv[3], sys.argv[4])
+import os
+expected=os.environ.get("HEARTING_STATUS_CALLER_START")
+if expected:
+    try:actual=open('/proc/'+sys.argv[2]+'/stat').read().rsplit(') ',1)[1].split()[19]
+    except OSError:actual=None
+    if actual!=expected:current,tap,policy=None,None,'unobserved'
 # A retained tap claim preserves conflict evidence, not current-SID proof.
 print(current["pid"] if current else "-",
       tap["pid"] if tap else "-", tap["proc_start"] if tap else "-", policy)
@@ -268,7 +292,15 @@ sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
   fi
   # atomic write (temp + rename) so a concurrent reader (tools/fleet dashboard) never sees a
   # half-written file → JSON parse fail → telemetry ('$cost' etc.) flickers to '—' for a tick.
-  if [ -n "$tap_json" ] && printf '%s' "$tap_json" > "$sldir/.$S_SID.json.tmp" 2>/dev/null; then
+  if [ -n "$tap_json" ] && [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
+    printf '%s' "$tap_json" | python3 -c '
+import os,sys
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1]).resolve().parents[1]))
+from fleet.native_display import write_claude_tap
+write_claude_tap(Path(sys.argv[2]),sys.stdin.read(),os.environ)
+' "$git_helper" "$sldir/$S_SID.json" 2>/dev/null || true
+  elif [ -n "$tap_json" ] && printf '%s' "$tap_json" > "$sldir/.$S_SID.json.tmp" 2>/dev/null; then
     mv -f "$sldir/.$S_SID.json.tmp" "$sldir/$S_SID.json" 2>/dev/null || true
   fi
   # stale 청소: mtime > 1일 세션 파일 제거(디렉토리 폭증 방지 — 종료된 세션 잔존물). find 없으면 skip.
@@ -354,11 +386,26 @@ fi
 
 dir=$(basename "$S_CWD")
 
-# The shell paints the shared fields; the existing data producers above stay
-# active. The common display reads this exact session's existing tap. Do not
-# leave a native context-only line when the person hides the common block.
+# A wrapped Claude uses its reserved native rows for the same common formatter
+# as the block. Existing producers and unwrapped output remain available.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
-  exit 0
+  line_helper="$AGENT_HOME/tools/fleet/session_line.py"
+  [ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
+  export S_SESSION_DISPLAY git_repo git_branch git_operation git_merged git_branch_done
+  export git_extra_worktrees git_ahead git_behind git_dirty git_observation git_observed_label git_jobs
+  if [ -f "$line_helper" ] && printf '%s' "$input" | HEARTING_STATUS_DISPLAY_PID="$display_pid" python3 -c '
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
+from fleet.session_line import claude_native_statusline
+from fleet.session_line import remember_claude_display
+callback=json.load(sys.stdin)
+remember_claude_display(callback,os.environ)
+print(claude_native_statusline(callback, os.environ))
+' "$line_helper"; then
+    exit 0
+  fi
+  # A missing/broken optional formatter keeps the existing native rendering.
 fi
 
 # ANSI 색 + 퍼센트 색 헬퍼 (녹 <50 / 황 <80 / 적 ≥80)

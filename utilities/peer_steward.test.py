@@ -7880,6 +7880,60 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                 subject="experiment checkpoint", text="run=run-1; ETA total 2h",
                 route_id="route-fixture", jobs=self.jobs_path)
 
+    def _native_address_notice(self, harness, *, changed=False):
+        import session_shell
+        import dispatch_pending_delivery as pending_delivery
+        notice = self._notice(harness)
+        store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+        duty, = store.list(kinds={"run-notice"})
+        attachment = {"harness": harness, "sid": self.sid,
+                      "native_pid": os.getpid(), "native_start": self.ident["pid_start"]}
+        observations = []
+        def attached(*args):
+            observations.append(args)
+            return (None, "attachment-changed") if changed and len(observations) > 1 else (attachment, "")
+        sends = []
+        def receive(args, *, expected_recipient, on_prepared, producer_binding):
+            self.assertEqual(args.target, harness + ":" + self.sid)
+            self.assertEqual(expected_recipient, (harness, self.sid))
+            body = Path(args.body_file).read_text()
+            text, ref = peer_steward.peer_message.prepare_peer_message(body,
+                {"harness": "runtime", "session_id": None, "name": "Hearting runtime"},
+                {"harness": harness, "session_id": self.sid}, defer=True,
+                refs=args.ref, producer_binding=producer_binding)
+            on_prepared(ref)
+            sends.append(ref)
+            self.assertEqual(peer_steward.peer_message.receive_peer_message(
+                text, {"harness": harness, "session_id": self.sid}), 0)
+            return 0
+        with mock.patch.object(session_shell, "exact_binding", side_effect=attached), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=OSError("no terminal multiplexer")) as external, \
+             mock.patch.object(peer_steward, "cmd_prompt", side_effect=receive) as prompt:
+            peer_steward._resume_session_notice_obligations([duty], store)
+            if changed or harness == "opencode":
+                # Ordinary OpenCode run notices retain their native plugin owner;
+                # message-question answers use the answer-binding path (PTY proof).
+                prompt.assert_not_called()
+                self.assertEqual(pending_delivery.read(self.tmp_root, self.sid, notice["delivery_id"])["state"], "pending")
+            else:
+                self.assertEqual(len(sends), 1)
+                peer_steward._resume_session_notice_obligations([store.get(duty["id"])], store)
+                self.assertEqual(len(sends), 1)
+                self.assertEqual(pending_delivery.read(self.tmp_root, self.sid, notice["delivery_id"])["state"], "acked")
+            external.assert_not_called()
+
+    def test_claude_notice_uses_the_exact_native_address_without_herdr(self):
+        self._native_address_notice("claude")
+
+    def test_codex_notice_uses_the_exact_native_address_without_herdr(self):
+        self._native_address_notice("codex")
+
+    def test_opencode_ordinary_notice_keeps_its_native_carrier(self):
+        self._native_address_notice("opencode")
+
+    def test_changed_shell_attachment_cannot_claim_or_prepare_a_notice(self):
+        self._native_address_notice("claude", changed=True)
+
     def _run_notice_duty(self, harness, duty, *, fail_ack=False, forget_binding=False,
                          target_state="idle", target_sid=None,
                          queue_accept_only=False, duties=None, idle_guard=None, input_observer=None,
