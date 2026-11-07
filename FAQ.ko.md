@@ -68,6 +68,7 @@ Code 작업자에만 적용됩니다. Codex 작업자는 Codex의 `workspace-wri
 담습니다. 옛 `.claude_reports/` 폴더는 이전 이름으로 계속 읽힙니다. 작업이 막혀도
 이 폴더를 지우지 마세요. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하면
 최근 결과를 볼 수 있습니다.
+선택 사항: `hearting view`로 로컬 뷰어를 열고 Ctrl-C로 끕니다. 실행 중에는 `hearting open`이 URL도 보여 줍니다.
 
 ## hearting이나 fleet를 찾을 수 없다고 나옵니다
 
