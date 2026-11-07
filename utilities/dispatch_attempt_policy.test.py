@@ -32,6 +32,15 @@ def _deferred_completed_metadata() -> dict[str, str]:
 
 
 class DeferredCompletionStatesTest(unittest.TestCase):
+    def test_finished_verdict_requires_settled_result(self):
+        review = {"worker_type": "review", "note": "completed-review-blocking", "failure_class": "fail"}
+        self.assertTrue(POLICY.finished_verdict("done", review))
+        self.assertFalse(POLICY.finished_verdict("running", review))
+        self.assertFalse(POLICY.finished_verdict("done", {**review, "terminal_conflict": "1"}))
+        self.assertFalse(POLICY.finished_verdict("done", {"note": "dead-capacity"}))
+        self.assertFalse(POLICY.finished_verdict("done", _deferred_pending_metadata()))
+        self.assertTrue(POLICY.finished_verdict("done", {"worker_type": "stage", "note": "dead-worker-blocked", "failure_class": "blocked"}))
+
     def test_non_deferred_row_is_untouched(self):
         ordinary_pass = {"note": "completed-supervisor", "failure_class": "pass"}
         ordinary_fail = {"note": "dead-worker-fail", "failure_class": "runtime"}

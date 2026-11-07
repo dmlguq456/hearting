@@ -175,9 +175,9 @@ class ReplacementBatchTest(unittest.TestCase):
         # The same test checks every other batch invariant. Capture its local
         # fake constructor through the wrapper result, which sees its command.
         real_result = BATCH.wrapper_result
-        def inspect(leg, process, stdout, stderr):
+        def inspect(leg, process, stdout, stderr, **kwargs):
             observed.append(process.command)
-            return real_result(leg, process, stdout, stderr)
+            return real_result(leg, process, stdout, stderr, **kwargs)
         with mock.patch.object(BATCH, 'wrapper_result', side_effect=inspect):
             self.test_batch_launches_only_gap_with_common_claim_identity()
         self.assertEqual(len(observed), 1)

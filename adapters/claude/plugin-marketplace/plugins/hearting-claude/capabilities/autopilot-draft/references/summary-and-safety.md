@@ -8,6 +8,7 @@ Always write `{strategy_folder}/pipeline_summary.md` before reporting completion
 - **Date**: {YYYY-MM-DD} | **Mode**: {mode} | **Format-ref**: {format_ref or "fallback-generic"} ({format_ref_source}) | **Status**: done / reviewed / draft
 - **User-Refine**: {true | false}
 - **Discovered inputs**: {discovered_inputs}
+- **Project document**: {project_document_path} | **Content version**: {content hash or document revision}
 
 ## Process Log
 | Step | Action | Result | Notes |
@@ -22,9 +23,9 @@ Always write `{strategy_folder}/pipeline_summary.md` before reporting completion
 | 5b | draft-refine (draft) | refined / skipped | |
 | 5.5 | finalize polish (`editorial/report` unit, mode B) | polished / skipped (rigor < standard) | |
 
-## Artifacts
+## Project document and process records
 - Strategy: {primary path} | Mirror: {mirror path or "not needed"}
-- Draft: {primary path} | Mirror: {mirror path or "not needed"}
+- Project draft: {project_document_path, content version} | Mirror: {adjacent project path or "not needed"}
 - Analysis: {reviewer_analysis or ref_analysis path}
 - Material Index: {path} | Strategy Review: {path} | Draft Review: {path}
 

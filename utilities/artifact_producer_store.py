@@ -452,6 +452,9 @@ def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
     root = Path(root)
     if record is None:
         record = read_cycle_record(root, cycle_id)
+    if record and record.get("journal_migration"):
+        from artifact_journal_migration import resolve_backup
+        return resolve_backup(root, record)
     if record and (record.get("relocation") or {}).get("artifact_root"):
         raise ProducerError("cycle-relocated", str(record["relocation"]))
     campaign_record = read_campaign(root, campaign_id)
@@ -1202,6 +1205,9 @@ def _valid_cycle_state(value: Any) -> bool:
 def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
     """Resolve this record's manifest without scanning other cycle bindings."""
     root = Path(root).resolve()
+    if record.get("journal_migration"):
+        from artifact_journal_migration import resolve_backup
+        return resolve_backup(root, record) / "manifest.json"
     campaign_id = record.get("campaign_id")
     cycle_id = record.get("cycle_id")
     if not artifact_identity.is_well_formed(campaign_id, "campaign") or not artifact_identity.is_well_formed(cycle_id, "cycle"):

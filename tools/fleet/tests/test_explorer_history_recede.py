@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -138,6 +139,11 @@ class RecedeDeltaTest(unittest.TestCase):
                 with self.subTest(surface=name, cols=cols):
                     grid = draw(self.vm, state, cols, 45, beat=1)
                     spans = _row_regions(grid, name)
+                    if name == "repo-page":
+                        # The repo page now separates open routes from confirmed
+                        # completed results; it has no ended-route table blocks.
+                        self.assertFalse(spans, "an ended route returned to the open-route list")
+                        continue
                     self.assertTrue(spans, f"no finished row found on {name}")
                     for y, x0, x1 in spans:
                         end = len(grid.cells[y]) if x1 is None else x1
@@ -146,6 +152,26 @@ class RecedeDeltaTest(unittest.TestCase):
                             if key is not None:
                                 self.assertEqual(recede_key(key), key,
                                                  f"{name}:{cols} row {y} col {x} key {key}")
+
+    def test_repo_completed_result_stays_dim_without_reintroducing_a_history_table(self):
+        done = next(route for route in self.vm.routes
+                    if route.get("state") == "done" and tables.route_is_history(route))
+        repo = next(repo for repo in self.vm.repos if repo["id"] == done["repo"])
+        vm = replace(self.vm, repos=(dict(repo, done=None),), sessions=(),
+                     routes=(dict(done, outcome="success"),))
+        for cols in (140, 168):
+            with self.subTest(cols=cols), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+                grid = draw(vm, NavState(scope="repo:" + str(repo["id"])), cols, 45, beat=1)
+                lines = _lines(grid)
+                start = next(y for y, text in enumerate(lines) if "── RECENT RESULTS" in text)
+                end = next(y for y, text in enumerate(lines) if y > start and "── RECENT WORK" in text)
+                rows = [y for y in range(start + 1, end) if "✓ " in lines[y][TABLE_X:]]
+                self.assertEqual(len(rows), 1)
+                self.assertIn(str(done["title"]), lines[rows[0]])
+                self.assertFalse(_row_regions(grid, "repo-page"))
+                for cell in grid.cells[rows[0]][TABLE_X:]:
+                    if cell[1] is not None:
+                        self.assertEqual(recede_key(cell[1]), cell[1])
 
     def test_recede_moves_only_keys_on_finished_rows(self):
         """d2: glyphs, tints, and ordered hits are unchanged; keys change only where declared."""

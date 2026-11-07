@@ -802,7 +802,10 @@ class OwnerPinChangeTest(unittest.TestCase):
             seq = session_tidy.read_prompt_seq(seat)
             marker = session_tidy.prompt_state(seat)
             self.assertEqual(marker["request_origin"]["transfer_ref"], ref)
-            self.assertNotIn(body, json.dumps(marker))
+            # Authority metadata stays body-free; bounded UI text belongs only
+            # to the private display projection in the same frontier record.
+            self.assertNotIn(body, json.dumps(marker["request_origin"]))
+            self.assertEqual(marker["received_inputs"][-1]["text"], body)
             expected = "peer:hearting-4d·" + ref
             self.assertEqual(router._turn_peer_source("codex", "codex-sid", "/w"), expected)
             with mock.patch.object(peer.time, "gmtime", return_value=time.gmtime(marker["at"])):
@@ -1143,6 +1146,81 @@ class Case4RetryLinkTest(unittest.TestCase):
 class Case5ReadRootsTest(unittest.TestCase):
     """Case 5: one read-only request is readable and unwritten on every harness (RA-7, stage 3);
     the grant records each runtime's guarantee."""
+
+    def test_non_git_recovery_uses_the_sealed_unversioned_runtime_placement(self):
+        import worker_bootstrap
+        wrapper = _load("recovery_non_git_opencode", "adapters/opencode/bin/dispatch-headless.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home, worktree, artifact, install = root / "home", root / "documents", root / "records", root / "install"
+            for path in (home, worktree, artifact, install / "core", install / "utilities"):
+                path.mkdir(parents=True)
+            values = {"HOME": str(home), "XDG_STATE_HOME": str(home / ".local/state"),
+                      "HARNESS_STATE_ROOT": str(home / ".local/state/hearting"),
+                      "OPENCODE_CONFIG_CONTENT": "{}"}
+            with mock.patch.dict(os.environ, values):
+                runtime = Path(worker_bootstrap.runtime_dir_candidate(
+                    artifact, os.environ, repository_kind="non-git", source_root=worktree))
+                self.assertTrue(runtime.is_relative_to(home))
+                history = {"harness": "claude", "worktree": str(worktree),
+                           "jobs": str(home / ".local/state/hearting/dispatch/custom.log"),
+                           "resolved": {"runtime_dir": str(runtime)}, "applied_permissions": {}}
+                route = {"cwd": str(worktree), "artifact_root": str(artifact),
+                         "source_commit": "unversioned", "work_request": {"text": ""}}
+                for version in ("1.19.0", "2.0.32"):
+                    with self.subTest(version=version), mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": version}):
+                        config = wrapper.scoped_external_directory_config(
+                            str(artifact), agent_home=install, worktree=str(worktree),
+                            execution_access_roots=(runtime,), selected_agent="build")
+                        candidate = {"harness": "opencode", "launch_home": str(install),
+                            "applied_permissions": DR._applied_permissions(SimpleNamespace(
+                                opencode_config_content=config, agent="build"))}
+                        try:
+                            RA.require_recovery_grant_addresses(candidate, history, route=route)
+                        except DC.DispatchContractError as exc:
+                            self.fail(f"ordinary non-Git runtime grant refused: {exc.reason}({exc.detail})")
+            opencode_runtime.runtime_version.cache_clear()
+
+    def test_cross_harness_recovery_keeps_the_ordinary_project_runtime(self):
+        wrapper = _load("recovery_runtime_opencode", "adapters/opencode/bin/dispatch-headless.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            worktree, artifact, install = root / "worktree", root / "project/.agent_reports", root / "install"
+            runtime = artifact.parent / ".agent_runtime"
+            for path in (worktree, artifact, install / "core", install / "utilities", runtime):
+                path.mkdir(parents=True)
+            history = {"harness": "claude", "worktree": str(worktree),
+                       "jobs": str(root / "state/jobs.log"), "argv": [],
+                       "resolved": {"runtime_dir": str(runtime), "worker_type": "owner"},
+                       "applied_permissions": {}}
+            route = {"cwd": str(worktree), "artifact_root": str(artifact), "work_request": {"text": ""},
+                     "route_id": "rt-runtime-fixture", "route_hash": "sha256:runtime-fixture"}
+            for version in ("1.19.0", "2.0.32"):
+                with self.subTest(version=version), mock.patch.dict(os.environ, {
+                        "OPENCODE_RUNTIME_VERSION": version, "OPENCODE_CONFIG_CONTENT": "{}"}):
+                    config = wrapper.scoped_external_directory_config(
+                        str(artifact), agent_home=install, worktree=str(worktree),
+                        execution_access_roots=(runtime,), selected_agent="build")
+                    candidate = {**history, "harness": "opencode", "launch_home": str(install),
+                                 "resolved": dict(history["resolved"]),
+                                 "applied_permissions": DR._applied_permissions(SimpleNamespace(
+                                     opencode_config_content=config, agent="build"))}
+                    try:
+                        RA.require_recovery_grant_addresses(candidate, history, route=route)
+                        RA.require_recovery_work(candidate, history, route=route, worker_type="owner")
+                    except DC.DispatchContractError as exc:
+                        self.fail(f"ordinary runtime grant was refused: {exc.reason}({exc.detail})")
+                    # Runtime metadata cannot authorize an arbitrary sibling.
+                    outside = root / "outside"
+                    unsafe = wrapper.scoped_external_directory_config(
+                        str(artifact), agent_home=install, worktree=str(worktree),
+                        execution_access_roots=(outside,), selected_agent="build")
+                    candidate["resolved"]["runtime_dir"] = str(outside)
+                    candidate["applied_permissions"] = DR._applied_permissions(SimpleNamespace(
+                        opencode_config_content=unsafe, agent="build"))
+                    with self.assertRaises(DC.DispatchContractError):
+                        RA.require_recovery_grant_addresses(candidate, history, route=route)
+            opencode_runtime.runtime_version.cache_clear()
 
     def test_read_roots_are_projected_on_every_runtime(self):
         request = ExecutionAccessRequest(

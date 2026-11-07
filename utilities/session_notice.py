@@ -296,6 +296,9 @@ def notice_is_current(record: dict, *, jobs=None, notice_context=None) -> bool:
         receipt = validate(record.get("receipt"))
     except ValueError:
         return False
+    if receipt["key"].startswith("native-resume-v1:"):
+        import session_resume
+        return session_resume.current(record)
     if receipt["key"].startswith("steward-check:"):
         try:
             import steward_check

@@ -2250,7 +2250,161 @@ class DispatchBatchTest(unittest.TestCase):
         self._same_owner_next_review_round("closure check after fixes", "codex")
 
     def test_same_owner_opens_next_review_round_with_original_prompt(self):
+        # This legacy fixture has no resolvable input binding. The original
+        # prompt is not proof that the reviewed bytes are unchanged.
         self._same_owner_next_review_round(BATCH.DEFAULT_PROMPT, "claude")
+
+    def test_unchanged_bound_parallel_review_refuses_without_reservation_or_spawn(self):
+        import review_input
+        import route_identity
+        import worker_bootstrap as worker
+        self._configure_lab_review()
+        for index, node in enumerate(self.route["nodes"]):
+            node.update(id=("plan-check" if index == 0 else "plan-check-alternative"),
+                        unit="qa/plan-review", parallel_anchor="plan-check")
+        self.route["artifact_root"] = str(self.base)
+        self.route["route_hash"] = route_identity.route_hash(self.route)
+        evidence = self.base / "plan.md"; evidence.write_text("unchanged reviewed plan")
+        candidate = review_input._file(evidence)
+        legs = self.legs()
+        for index, leg in enumerate(legs):
+            self.write_existing(leg, status="done", note="completed-review-blocking", append=index != 0)
+        rows = []
+        for line in self.jobs.read_text().splitlines():
+            cols = line.split("\t"); meta = BATCH.parse_registry_metadata(cols[5])
+            meta["route_hash"] = self.route["route_hash"]
+            meta["worker_type"] = "review"
+            digest = review_input.seal_binding(self.jobs, meta, candidate)
+            cols[5] += f",route_hash={self.route['route_hash']},worker_type=review,review_input_digest={digest}"
+            rows.append("\t".join(cols))
+        self.jobs.write_text("\n".join(rows)+"\n")
+        before = self.jobs.read_bytes(); output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name, value in (("load_route", self.route), ("resolve_agent_home", self.base),
+                                ("resolve_global_registry", SimpleNamespace(path=self.jobs))):
+                stack.enter_context(mock.patch.object(BATCH, name, return_value=value))
+            stack.enter_context(mock.patch.object(BATCH, "resolve_live_parent_attempt"))
+            stack.enter_context(patch_split(BATCH, "completion_marker_gate"))
+            reserve = stack.enter_context(mock.patch.object(BATCH, "reserve_batch", side_effect=AssertionError("reservation spent")))
+            spawn = stack.enter_context(mock.patch.object(BATCH.subprocess, "Popen", side_effect=AssertionError("child spawned")))
+            stack.enter_context(mock.patch.object(worker, "continuation_followup_fields", side_effect=lambda route, node, meta, jobs, route_file:
+                {"kind":"review", "attempt":meta["attempt_id"], "artifact":node["id"]+".md",
+                 "target":str(evidence), "command":"same-start"}))
+            stack.enter_context(mock.patch.dict(os.environ, {"AGENT_DISPATCH_SELF_SLUG":"owner",
+                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture", "AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless", "AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
+            with contextlib.redirect_stdout(output):
+                result = BATCH.main(self.argv() + ["--reviewed-evidence", str(evidence)])
+        self.assertEqual(result, 65, output.getvalue())
+        refusal=json.loads(output.getvalue())
+        self.assertEqual(refusal["reason"], "review-subject-unchanged")
+        self.assertIn("plan-check.md",refusal["recovery_hint"])
+        self.assertIn("plan-check-alternative.md",refusal["recovery_hint"])
+        self.assertEqual(refusal["recovery_hint"].count("same-start"),1)
+        self.assertEqual(self.jobs.read_bytes(), before)
+        reserve.assert_not_called(); spawn.assert_not_called()
+
+    def test_unfinished_bound_group_reuses_blocking_peer_and_starts_only_missing_peer(self):
+        import dispatch_contract as dc
+        import review_input
+        import route_identity
+        import worker_bootstrap as worker
+        self._configure_lab_review()
+        for index, node in enumerate(self.route["nodes"]):
+            node.update(id=("plan-check" if index == 0 else "plan-check-alternative"),
+                        unit="qa/plan-review", parallel_anchor="plan-check")
+        self.route["artifact_root"] = str(self.base)
+        self.route["route_hash"] = route_identity.route_hash(self.route)
+        evidence=self.base/"plan.md"; evidence.write_text("reviewed plan")
+        artifact=self.base/"review.md"; artifact.write_text("blocking findings")
+        legs=self.legs(); self.write_existing(legs[0],status="done",note="completed-review-blocking",append=False)
+        cols=self.jobs.read_text().strip().split("\t"); meta=BATCH.parse_registry_metadata(cols[5])
+        meta.update(route_hash=self.route["route_hash"],worker_type="review")
+        digest=review_input.seal_binding(self.jobs,meta,review_input._file(evidence))
+        cols[5]+=f",route_hash={self.route['route_hash']},worker_type=review,review_input_digest={digest},failure_class=fail"
+        self.jobs.write_text("\t".join(cols)+"\n"); self.seal_original_input()
+        original=self.jobs.read_bytes(); output=io.StringIO(); commands=[]
+        assignments=self.common_patches()[1]
+        def spawn(command,**kwargs):
+            commands.append(command)
+            return SimpleNamespace(pid=12000,returncode=0,communicate=lambda:(success_receipt(command),""),poll=lambda:0)
+        with contextlib.ExitStack() as stack:
+            for name,value in (("load_route",self.route),("resolve_agent_home",self.base),
+                               ("resolve_global_registry",SimpleNamespace(path=self.jobs)),
+                               ("assign_harnesses",(assignments,"cross-harness",{})),
+                               ("reserve_batch",["a"*32])):
+                stack.enter_context(mock.patch.object(BATCH,name,return_value=value))
+            stack.enter_context(mock.patch.object(BATCH,"resolve_live_parent_attempt"))
+            stack.enter_context(patch_split(BATCH,"completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE,"resolve_checked_tuple",side_effect=resolve_side_effect))
+            stack.enter_context(mock.patch.object(BATCH,"cancel_unclaimed"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess,"check_output",return_value=str(self.base)))
+            stack.enter_context(mock.patch.object(BATCH.subprocess,"Popen",side_effect=spawn))
+            stack.enter_context(mock.patch.object(worker,"attempt_outcome",return_value={"artifact":str(artifact)}))
+            stack.enter_context(mock.patch.object(dc,"observe_terminal_review_failure"))
+            stack.enter_context(mock.patch.dict(os.environ,{"AGENT_DISPATCH_SELF_SLUG":"owner",
+                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless","AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
+            with contextlib.redirect_stdout(output):
+                result=BATCH.main(self.argv()+["--reviewed-evidence",str(evidence)])
+        self.assertEqual(result,0,output.getvalue())
+        receipt=json.loads(output.getvalue())
+        self.assertEqual((receipt["existing"],receipt["newly_started"],receipt["review_verdict"]),(1,1,"FAIL"))
+        self.assertEqual(len(commands),1)
+        self.assertEqual(commands[0][commands[0].index("--attempt-id")+1],legs[1]["attempt_id"])
+        self.assertEqual(self.jobs.read_bytes(),original)
+
+    def test_completed_blocking_wrappers_are_review_results_not_launch_failures(self):
+        import dispatch_contract as dc
+        import review_input
+        import route_identity
+        import worker_bootstrap as worker
+        self._configure_lab_review()
+        for index,node in enumerate(self.route["nodes"]):
+            node.update(id=("plan-check" if index==0 else "plan-check-alternative"),
+                        unit="qa/plan-review",parallel_anchor="plan-check")
+        self.route["artifact_root"]=str(self.base)
+        self.route["route_hash"]=route_identity.route_hash(self.route)
+        evidence=self.base/"plan.md"; evidence.write_text("reviewed plan")
+        artifact=self.base/"review.md"; artifact.write_text("blocking findings")
+        assignments=[(self.route["nodes"][0],"opencode","same-harness-headless",1),
+                     (self.route["nodes"][1],"codex","cross-harness-headless",2)]
+        legs=self.legs(assignments); self.jobs.write_text(""); output=io.StringIO(); commands=[]
+        def spawn(command,**kwargs):
+            commands.append(command); aid=command[command.index("--attempt-id")+1]
+            leg=next(item for item in legs if item["attempt_id"]==aid)
+            self.write_existing(leg,status="done",note="completed-review-blocking",all_legs=legs)
+            lines=self.jobs.read_text().splitlines(); cols=lines[-1].split("\t")
+            meta=BATCH.parse_registry_metadata(cols[5]); meta.update(route_hash=self.route["route_hash"],worker_type="review")
+            digest=review_input.seal_binding(self.jobs,meta,review_input._file(evidence))
+            cols[5]+=f",route_hash={self.route['route_hash']},worker_type=review,review_input_digest={digest},failure_class=fail"
+            lines[-1]="\t".join(cols); self.jobs.write_text("\n".join(lines)+"\n")
+            return SimpleNamespace(pid=12000,returncode=0,
+                communicate=lambda:(success_receipt(command)+"worker_failure=completed-review-blocking\n",""),poll=lambda:0)
+        with contextlib.ExitStack() as stack:
+            for name,value in (("load_route",self.route),("resolve_agent_home",self.base),
+                               ("resolve_global_registry",SimpleNamespace(path=self.jobs)),
+                               ("assign_harnesses",(assignments,"cross-harness",{})),
+                               ("reserve_batch",["a"*32,"b"*32])):
+                stack.enter_context(mock.patch.object(BATCH,name,return_value=value))
+            stack.enter_context(mock.patch.object(BATCH,"resolve_live_parent_attempt"))
+            stack.enter_context(patch_split(BATCH,"completion_marker_gate"))
+            stack.enter_context(mock.patch.object(BATCH,"cancel_unclaimed"))
+            stack.enter_context(mock.patch.object(BATCH.subprocess,"check_output",return_value=str(self.base)))
+            stack.enter_context(mock.patch.object(BATCH.subprocess,"Popen",side_effect=spawn))
+            stack.enter_context(mock.patch.object(worker,"attempt_outcome",return_value={"artifact":str(artifact)}))
+            stack.enter_context(mock.patch.object(dc,"observe_terminal_review_failure"))
+            stack.enter_context(mock.patch.dict(os.environ,{"AGENT_DISPATCH_SELF_SLUG":"owner",
+                "AGENT_DISPATCH_ATTEMPT_ID":"att-parent-fixture","AGENT_DISPATCH_CURRENT_HARNESS":"codex",
+                "AGENT_DISPATCH_CURRENT_TRANSPORT":"headless","AGENT_DISPATCH_CURRENT_SANDBOX":"workspace-write"}))
+            with contextlib.redirect_stdout(output):
+                result=BATCH.main(self.argv()+["--reviewed-evidence",str(evidence)])
+        self.assertEqual(result,0,output.getvalue())
+        receipt=json.loads(output.getvalue())
+        self.assertEqual((receipt["state"],receipt["newly_started"],receipt["review_verdict"]),("launched",2,"FAIL"))
+        self.assertEqual({item["adapter"] for item in receipt["legs"]},{"codex","opencode"})
+        self.assertTrue(all(item["review_verdict"]=="FAIL" for item in receipt["legs"]))
+        self.assertEqual(len(commands),2)
 
     def test_same_owner_next_review_round_works_for_opencode_parent(self):
         self._same_owner_next_review_round("closure check after fixes", "opencode")
@@ -3889,6 +4043,64 @@ class DispatchBatchTest(unittest.TestCase):
             "",
         )
         self.assertEqual(result["launch_state"], "existing")
+
+    def test_blocking_review_is_only_a_valid_launch_with_verified_result(self):
+        leg = {"node": "plan-check", "adapter": "codex", "attempt_id": "att-review"}
+        command = ["dispatch-node.py", "--adapter", "codex", "--attempt-id", "att-review"]
+        output = success_receipt(command) + "worker_failure=completed-review-blocking\n"
+        proc = SimpleNamespace(returncode=0)
+        self.assertEqual(BATCH.wrapper_result(leg, proc, output, "")["launch_state"], "failed")
+        verified = {"review_artifact": "/tmp/review.md"}
+        result = BATCH.wrapper_result(leg, proc, output, "", completed_review=verified)
+        self.assertEqual((result["launch_state"], result["review_verdict"]), ("started", "FAIL"))
+        invalid = output.replace("started=1\n", "")
+        self.assertEqual(BATCH.wrapper_result(leg, proc, invalid, "", completed_review=verified)["launch_state"], "failed")
+
+    def test_existing_blocking_result_requires_exact_bound_row_on_each_harness(self):
+        import dispatch_contract as dc
+        import review_source_subject as subject
+        import worker_bootstrap as worker
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                other = "claude" if harness == "codex" else "codex"
+                assignments = [(self.route["nodes"][0], harness, "same-harness-headless", 1),
+                               (self.route["nodes"][1], other, "cross-harness-headless", 2)]
+                legs = self.legs(assignments); leg = legs[0]
+                self.write_existing(leg, status="done", note="completed-review-blocking", all_legs=legs, append=False)
+                line = self.jobs.read_text().strip()
+                self.jobs.write_text(line + f",route_hash={self.route['route_hash']},worker_type=review,failure_class=fail\n")
+                meta = BATCH.parse_registry_metadata(self.jobs.read_text().strip().split("\t", 5)[5])
+                artifact = self.base / "review.md"; artifact.write_text("blocking findings")
+                args = dict(repo=str(self.base), parent="owner", parent_attempt_id="att-parent-fixture",
+                            parallel_group="plan", declared_size=2, manifest_digest=meta["batch_manifest_sha256"],
+                            leg_digest=meta["batch_leg_sha256"], agent_home=self.base)
+                with mock.patch.object(worker, "attempt_outcome", return_value={"artifact": str(artifact)}), \
+                     mock.patch.object(subject, "read_binding", return_value={"subject_digest":"subject"}), \
+                     mock.patch.object(dc, "observe_terminal_review_failure") as observe:
+                    found = BATCH.existing_leg_result(self.jobs, leg, self.route, **args)
+                    self.assertEqual((found["launch_state"], found["review_verdict"]), ("existing", "FAIL"))
+                    observe.assert_called_once()
+                    self.jobs.write_text(self.jobs.read_text().replace("route_hash=sha256:fixture", "route_hash=sha256:other"))
+                    invalid = BATCH.existing_leg_result(self.jobs, leg, self.route, **args)
+                    self.assertEqual(invalid["launch_state"], "failed")
+
+    def test_batch_receipt_keeps_launch_success_separate_from_blocking_verdict(self):
+        legs = [{"attempt_id": "att-a"}, {"attempt_id": "att-b"}]
+        for verdicts in (("FAIL", "FAIL"), ("PASS", "FAIL")):
+            results = [{**leg, "launch_state": "started", "registered": "1", "started": "1",
+                        "child_spawned": "1", "review_verdict": verdict}
+                       for leg, verdict in zip(legs, verdicts)]
+            receipt, success = BATCH.batch_receipt(args=SimpleNamespace(parallel_group="plan"),
+                lifecycle="detached", independence="cross-harness", required_axes=[], realized_axes=[],
+                degradation_reason="", legs=legs, results=results, admitted=2)
+            self.assertTrue(success)
+            self.assertEqual((receipt["state"], receipt["review_verdict"]), ("launched", "FAIL"))
+        results[0]["launch_state"] = "failed"
+        receipt, success = BATCH.batch_receipt(args=SimpleNamespace(parallel_group="plan"),
+            lifecycle="detached", independence="cross-harness", required_axes=[], realized_axes=[],
+            degradation_reason="", legs=legs, results=results, admitted=2)
+        self.assertFalse(success)
+        self.assertEqual(receipt["state"], "partial-failure")
 
     def test_wrapper_receipt_missing_literal_launch_triplet_fails_closed(self):
         leg = {

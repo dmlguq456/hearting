@@ -1946,32 +1946,28 @@ console.log(JSON.stringify({commands: f.commands, logs: f.logs}));
         self.assertNotIn("publisher-spawned", reasons)
 
     def test_opencode_tui_entry_records_selection_and_clears_on_home_and_dispose(self):
-        body = open(ROOT / "adapters/opencode/tui/hearting-tui-identity.ts").read().replace(
-            'import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"', "").replace(
-            'import path from "node:path"', "").replace(
-            "export default", "var __module =")
+        body = (ROOT / "adapters/opencode/tui/hearting-tui-identity.ts").read_text()
         js = r'''
 import path from "node:path";
 import * as realFs from "node:fs";
-import vm from "node:vm";
 const input = JSON.parse(process.env.FIXTURE_TUI);
-const stat = "456 (opencode) S " + "0 ".repeat(18) + "99 0";
-const scope = {path, Date, JSON,
-  mkdirSync: realFs.mkdirSync, renameSync: realFs.renameSync, rmSync: realFs.rmSync,
-  writeFileSync: realFs.writeFileSync,
-  readFileSync: (file, enc) => String(file) === "/proc/self/stat" ? stat : realFs.readFileSync(file, enc),
-  process: {pid: 456, env: {XDG_STATE_HOME: input.state}}};
+process.env.XDG_STATE_HOME = input.state;
+const stat = realFs.readFileSync("/proc/self/stat", "utf8");
+const start = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[19];
+const record = path.join(input.state, "hearting", "tui-identity", `${process.pid}-${start}.json`);
 let current = {name: "home"};
 const subs = [], unsubs = [], disposed = [], slotRegs = [];
 const api = {route: {get current() {return current}},
   event: {on: (type, handler) => {subs.push([type, handler]); return () => unsubs.push(type)}},
   lifecycle: {onDispose: (fn) => disposed.push(fn)},
   slots: {register: (plugin) => {slotRegs.push(plugin); return "mock-slot-id"}}};
-vm.runInNewContext(input.source, scope);
-await scope.__module.tui(api);
+// Load the real ESM entry without rewriting its imports or module metadata.
+// Its process identity belongs to this test's own Node child.
+const {default: entry} = await import("data:text/javascript;base64," + Buffer.from(input.source).toString("base64"));
+await entry.tui(api);
 const read = () => {
   try {
-    return realFs.readFileSync(input.record, "utf8");
+    return realFs.readFileSync(record, "utf8");
   } catch { return null }
 };
 const slots = slotRegs[0].slots;
@@ -1996,19 +1992,19 @@ current = {name: "home"};
 slots.home_prompt_right({}, {});
 const cleared = read();
 for (const fn of disposed) await fn();
-console.log(JSON.stringify({id: scope.__module.id, hasServer: "server" in scope.__module,
+console.log(JSON.stringify({id: entry.id, hasServer: "server" in entry, pid: process.pid,
   slotNames: Object.keys(slots), subscribed: subs.map(([type]) => type),
   unsubscribed: unsubs, home, gap, mounted: mounted && JSON.parse(mounted).sessionID,
   disagree: disagree && JSON.parse(disagree).sessionID, customCleared,
   appWrote: appWrote && JSON.parse(appWrote).sessionID, clearedByDelete, cleared}));
 '''
         env = dict(os.environ, FIXTURE_TUI=json.dumps({
-            "source": body, "state": str(self.state),
-            "record": str(Path(self.state) / "hearting" / "tui-identity" / "456-99.json")}))
+            "source": body, "state": str(self.state)}))
         run = subprocess.run(["node", "--input-type=module", "-e", js], env=env,
                              capture_output=True, text=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stderr)
         result = json.loads(run.stdout)
+        self.assertGreater(result["pid"], 1)
         self.assertEqual(result["id"], "hearting.tui-identity")
         self.assertFalse(result["hasServer"])
         self.assertEqual(sorted(result["slotNames"]), ["app_bottom", "home_prompt_right", "session_prompt_right"])

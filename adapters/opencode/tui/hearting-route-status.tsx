@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import path from "node:path"
 
 export function setupRouteStatus(context) {
+  if (process.env.HEARTING_SHELL_SOCKET) return
   if (!context?.ui?.slot || !context?.ui?.router?.current) return
   const [status, setStatus] = createSignal({ sid: "", label: "" })
   const root = process.env.AGENT_HOME || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")

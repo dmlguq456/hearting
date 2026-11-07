@@ -1,0 +1,1 @@
+../../../../tools/install/session_shell_install.py

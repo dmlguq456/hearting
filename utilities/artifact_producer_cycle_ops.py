@@ -904,7 +904,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
             continue
         for child in children:
             path = entry / child
-            if child.startswith(".") or child == artifact_locator.CAMPAIGN_EVENTS_DIR:
+            if child.startswith(".") or child in {"journals", artifact_locator.CAMPAIGN_EVENTS_DIR}:
                 continue
             try:
                 mode = os.lstat(str(path)).st_mode
@@ -964,7 +964,8 @@ def _hand_changes(root: Path, scan: _LayoutScan, published: Mapping[str, str]) -
                 continue
             if artifact_identity.is_well_formed(identifier, "cycle"):
                 record = read_cycle_record(root, identifier)
-                if record is not None and not record.get("deleted_at") and _closed_record(record):
+                if (record is not None and not record.get("deleted_at") and not record.get("journal_migration")
+                        and _closed_record(record)):
                     changes["cycle_gone"].append(identifier)
             elif artifact_identity.is_well_formed(identifier, "campaign"):
                 if read_campaign_tombstone(root, identifier) is None:
@@ -1209,7 +1210,8 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
         gone_cycles: List[str] = []
         for cycle_id in changes["cycle_gone"]:
             record = read_cycle_record(root, cycle_id)
-            if record is None or record.get("deleted_at") or (record.get("relocation") or {}).get("artifact_root"):
+            if (record is None or record.get("deleted_at") or record.get("journal_migration")
+                    or (record.get("relocation") or {}).get("artifact_root")):
                 continue
             where = _last_known_path(root, record, published.get(cycle_id, ""))
             _tombstone_cycle_locked(root, record, where=where, command="reconcile", stamp=stamp,

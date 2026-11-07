@@ -24,7 +24,7 @@ lower-cost workers carry it out in small checked steps, and Fleet shows every se
 </p>
 
 <p align="center">
-  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and what it is doing now; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
+  <img src="docs/fleet.svg" alt="Fleet's Explorer OVERVIEW: eight sessions in four projects across Claude Code, Codex, and OpenCode, grouped by project, each project's line showing its open routes, waiting answers, and latest result; every session with its model, context gauge, and your last input; one session waiting for an answer, two open routes with their stage lines, and per-host CPU and GPU use at the bottom left." width="100%">
 </p>
 <p align="center"><sub>Fleet's Explorer, OVERVIEW: sessions from all three runtimes grouped by project, each project's status on its own line, one session waiting for your answer, two requests mid-flight, and GPU use per host. Drawn from synthetic demo data (<a href="docs/fleet/overview.png">PNG</a>).</sub></p>
 <p align="center"><a href="https://dmlguq456.github.io/hearting/fleet.html"><strong>Take the Fleet tour →</strong></a> — every screen at full size, and why you can trust it.</p>
@@ -140,11 +140,31 @@ working, idle, or waiting for you. Below it, one screen per question:
 
 | Screen | What it tells you |
 |---|---|
-| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, what it is doing now, and for how long. |
+| **OVERVIEW** | Every session, grouped by project. Each project's line says where it stands: open requests, questions waiting for you, what is left to decide, and when it last changed. Each session shows runtime, model, context left, your last input and its age. Expand a session for what it is doing now and the first lines of received peer/runtime messages, without notification wrappers. |
 | **ROUTES** | Each request's stage line — `plan › execute › test › report` — with the workers running under it. |
 | **QUESTIONS** | Every agent waiting for your answer or approval: which session, what kind, for which request, and since when. Older waits stay listed until you answer or the work ends. Answer from Fleet when the runtime offers a reply path; otherwise Fleet points you to the session. |
 | **RESOURCES** | CPU, memory, and per-GPU use on this machine and any configured hosts, with the session that owns each GPU process. |
 | **Others** | PEERS (which sessions watch or steer which), HISTORY (earlier sessions of each terminal seat), MEMORY (each project's newest decisions and open work), MODELS · SYSTEM (which real model each budget maps to, and the installed release). |
+
+LAST INPUT uses `› 1m · …` for your last confirmed input. `› ?` means the text cannot be confirmed, including older inputs whose first line was not kept or sessions with no readable input record. `› ·` means no human input was recorded. Expand the row for NOW and RECEIVED.
+
+Select a project in SESSIONS for its campaign status, backlog and work in progress,
+open requests and stages, completed results, recent small work records, and sessions.
+Open work uses the same records as MEMORY; saving a memory does not count as completing
+a task. Select a session to open its page, or expand its row in OVERVIEW.
+
+### Optional session panel
+
+`hearting session shell enable` enables a common status line and a read-only
+bottom panel for new Claude, Codex and OpenCode terminals. It is off by default;
+`hearting session shell status` reports the choice and `hearting session shell
+disable` restores native launch behavior. Existing sessions keep running.
+
+Press **Ctrl+]** inside a wrapped session to expand its route stages, questions,
+received peer messages and your last input. The same key on its session page in
+Fleet opens that exact session's panel. Answers stay in Fleet. Peer wake works
+without Herdr; Codex keeps its native queue. Native context remains as a fallback
+where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
 
 ### Key screens
 
@@ -294,7 +314,7 @@ signature.
 
 Work leaves files you can read, not only a chat log. Each project has one
 artifact root, `.agent_reports/`, shared by every runtime and by every git
-worktree of the project. Each request is one work cycle in
+worktree of the project. Planned work uses one work cycle in
 `campaigns/<campaign>/<cycle>/artifacts/`, where a campaign groups related
 requests (a new project starts one named after its folder):
 
@@ -305,9 +325,10 @@ requests (a new project starts one named after its folder):
 | `spec/` | Blueprint components; the current revision is shared under `.agent_reports/shared/spec/`, and a revision keeps the previous one |
 | `documents/`, `experiments/` | Drafted documents; experiment setups and results |
 
-A campaign can keep one status page, `STATUS.md` in a cycle's `artifacts/`;
-Hearting never creates it. Fleet shows its one-line summary on the project's
-line, and each request that closes adds a line under "Recently closed".
+A campaign can keep a status page, `STATUS.md` directly in its folder;
+Hearting never creates it. Fleet prefers campaign status pages and falls back
+to older cycle or research status documents. The project page shows up to three
+campaign summaries; OVERVIEW keeps the project's one-line summary.
 
 The root's `README.md` (open `index.html` in a browser) collects the most recent
 results and campaigns with relative links, and Hearting rewrites it at every
@@ -463,3 +484,12 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 ## License
 
 [MIT](LICENSE)
+
+Small direct changes and automatic turn records use one campaign daily journal
+(`journals/YYYY-MM-DD.md`) instead of creating a cycle folder. Results remain
+at their project locations; journal entries retain versions, checks and evidence.
+A saved record does not mean tests passed. Existing cycle records stay readable.
+`hearting run artifact-journal dry-run --artifact-root <root>` previews eligible
+old small direct cycles. Explicit `apply --cycle <id>` backs them up before
+consolidation; `restore --cycle <id>` resumes interrupted restores and preserves
+later records. Planned, live, ambiguous and unsupported cycles are skipped.

@@ -309,8 +309,6 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
         pass
     tokens, provider, model = _tokens_and_provider(harness, payload, sid, transcript)
     tokens = _safe_tokens(tokens) if tokens is not None else None
-    if tokens is None:
-        return "booking=skipped reason=usage-unknown"
     event_id = _walk(payload, "turn_id", "turnID", "message_id", "messageID", "assistant_id")
     if not event_id:
         event_id = _transcript_identity(transcript, sid)

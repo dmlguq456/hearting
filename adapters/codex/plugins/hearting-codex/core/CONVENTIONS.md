@@ -74,9 +74,13 @@ Rigor budgets assurance inside the selected graph. It creates no stages or dispa
 
 A correction in the retry budget is one **batched** pass that closes every blocking finding of the failing round together; the review that follows is a closure check of that list plus the delta (unit Round Protocol), never a fresh full audit. The round kind follows the node's lineage, not the content subject: a correction changes the reviewed content, and while the lineage's latest substantive verdict is blocking the next admitted review is that closure check on the corrected subject. The budget unit is the **verdict round** — a round that renders an actual judgment (a recognized success note, a blocking review, or an explicit FAIL), not a crashed, capacity-dead, or invalid-envelope attempt that never reached one; the cap counts only verdict rounds, so a verdict-less round neither spends it nor creates findings to close. If the lineage has no substantive verdict yet, or its latest one passed, the next admitted review makes an independent first judgment of the current subject and its changed interactions using applicable existing evidence, even when the node has earlier verdict-less attempts in its lineage. A run of verdict-less rounds that actually crossed the launch fence is bounded on its own axis: after `B=2` consecutive verdict-less rounds on the same node, the node is `verdictless-bound` and routes through the sealed fallback chain's remaining unregistered hop (native subagent, then owner-inline) instead of a third silent registered attempt — a live gap in launched verdicts is a stall, not a budget the node can keep spending against. Terminal rows with the strict no-start proof stay outside this streak; an open registration still reserves its round. Their bound is the sealed fallback chain itself: one start moves past every candidate that does not start, and a group gap is placed again without the harnesses it could not start on until none remain (`parallel-headless-unavailable`). A review round that ends with blocking findings is a completed round, not a failed worker (`completed-review-blocking`); when the verdict-round budget is spent and the last round still reports blocking findings, the owner closes the gate itself with an owner-closure record (`round_{N}.owner-closure.md`) that names every blocking round and its disposition, and `OPERATIONS §5.10` owns the evidence contract that lets that record complete the node.
 
+A settled, still-open blocking review bound to unchanged input is returned on the same start without another round; correct the findings together and rerun that start for the closure check. A changed subject follows the existing revision and budget rules. A settled `BLOCKED` execute handoff is not continued from its wording: the same start launches nothing and prints the next step (raise to the parent if it needs the person; otherwise rerun the same start with `--prompt-file <file>` holding the remaining items) within its existing budget. Preserve the original FAIL and prior partial work.
+
 For implementation reviews, the verdict budget is counted per automatically observed source-content subject. Reposting the same content, changing only reports or marker sequence, or returning to earlier content does not create a new budget; a different source subject gets its own verdict budget, so an earlier subject's count does not cut off a correction. The round kind still follows the lineage (above): after a blocking verdict, the corrected subject gets the closure check of that 🔴 list and the delta, not a fresh audit. A PASS remains bound to the subject recorded at launch and cannot satisfy a changed subject. A legacy PASS without a source binding remains unknown and is not assigned a subject from `launch_head`; if continuation reaches that marker, it resumes at the review for an ordinary independent judgment. The round number and verdict history remain node-lineage history. Owner-closure is available only for an eligible blocking review and cannot convert PASS into a new completion. A review the ship deploy node depends on is counted the same way once a parent deploy request exists: its subject is that request's hashed inputs inside the review's own input scope, so changed deploy inputs get one ordinary independent review and identical inputs stay capped.
 
-The same content-budget meaning applies when the existing resolver can identify a review's artifact or document input. Plan/spec reviews use the exact selected input bytes and additional sealed files the review consumes; producer, path, and marker changes are excluded from the content budget. Design verification and critique share the sealed build payload and resolvable design-contract input, excluding review and handoff outputs. Other capped reviews use only exact files selected by their sealed input paths and producer scopes; unresolved symbols and resource outputs keep their existing identity. These subject families remain separate from source and deploy histories. A return from A through B to A reuses A's spent verdict budget but advances currentness, so an earlier PASS does not become current again.
+The same content-budget meaning applies when the existing resolver can identify a review's artifact or document input. Plan/spec reviews use the exact selected input bytes and additional sealed files the review consumes; producer, path, and marker changes are excluded from the content budget. Design verification and critique share the sealed build payload and resolvable design-contract input, excluding review and handoff outputs. Other capped reviews use only exact files selected by their sealed input paths and producer scopes; unresolved symbols and resource outputs keep their existing identity. These subject families remain separate from source and deploy histories. A return from A through B to A reuses A's spent verdict budget but advances currentness, so an earlier PASS does not become current again. The verdict-less bound follows the node lineage across content changes; only a substantive verdict or the existing strict progress rule resets it.
+
+An unavailable check remains **unverified (reason)**, including when the user accepts that limit. It contributes no test PASS. Required unknowns still produce BLOCKED; an accepted verification limit is carried into the normal completion report rather than redispatched indefinitely. With no substantive verdict to overturn, use the existing unregistered completion hop, not the FAIL-only owner-closure record. The common writer binds that completion to its current review inputs for source, document, design and artifact reviews alike, preserving native-review independence or owner-inline degradation. Live or unsettled work keeps its existing settlement barrier; a real FAIL retains its findings and disposition.
 
 Verification evidence remains usable across stages, people, folders, and interruptions while its source, target and scope, relevant inputs and dependencies, and execution conditions match. Current verdicts assess that evidence, changed behavior, known failures, and required unknowns. New local checks address unresolved defects or missing or invalidated evidence; broad reruns need a concrete uncovered broad impact. Before another check, rerun, or review round, name the open risk or decision its result could change; when there is none, stop checking and advance — a stop rule, not a pass: what the evidence cannot confirm stays unproven (`roles/units/_shared/stance.md`). Reviewer counts and round budgets are ceilings, not work quotas. Once the requested outcome has sufficient evidence and no required blocker remains, advance to the authorized handoff or closure. Cosmetic findings stay advisory.
 
@@ -555,9 +559,14 @@ Skills run from the project root. Resolve the project-wide write surface with
 primary worktree's canonical `.agent_reports/`, not the tracked local
 snapshot; legacy `.claude_reports/` is selected only when it already exists
 at the canonical project root and the new root does not. `analyze-project`
-reads the current source checkout, `autopilot-code` mutates code there, and
-draft/research/refine read and write persistent inputs only below the canonical
-artifact root. Cross-project work changes cwd and uses another session.
+reads the current source checkout and `autopilot-code` mutates code there.
+Code and document deliverables live at their project location. A new document
+is created there from its first draft, at the user's stated path or directly
+under the project cwd when none was stated. Draft/refine/apply keep that same canonical target;
+planning, material analysis, reviews, pre-change copies and history live below
+the canonical artifact root. Each process record identifies its target path and
+version (a source commit or captured content hash). Cross-project work changes
+cwd to the selected project.
 
 Non-Git cwd resolution never inherits a strict ancestor's root by mere
 discovery. The cwd's own root (`.agent_reports/` or legacy `.claude_reports/`)
@@ -613,7 +622,7 @@ classification or copying.
 
 | Tier | Meaning | Location |
 |---|---|---|
-| **T1 primary** | Core index and deliverable that users routinely see | Artifact directory root |
+| **T1 primary** | Core index, artifact outputs and references to project deliverables | Artifact directory root; code/document deliverables stay at their project paths |
 | **T2 secondary** | Chapters, strategy, analysis, logs, and supporting assets read as needed | Named subdirectories |
 | **T3 tertiary** | Reviews, raw metadata, and version snapshots rarely read directly | `_internal/` |
 
@@ -624,7 +633,7 @@ The underscore keeps internal data visible but de-emphasized; a dot directory wo
 ```text
 <artifact-dir>/
 ├── pipeline_summary.md
-├── <T1 deliverables>
+├── <T1 artifact outputs and references to project deliverables>
 ├── <T2 subdirectories>
 └── _internal/
     ├── <capability-specific review directories>
@@ -645,7 +654,16 @@ The standalone default `$AGENT_ARTIFACT_OUTPUT_DIR/research/<topic>/` contains T
 
 #### §5.4.2. Documents
 
-The standalone default `$AGENT_ARTIFACT_OUTPUT_DIR/documents/<date>_<name>/` contains T1 pipeline state and the latest `draft/`; T2 latest `strategy/`, `analysis/`, and `assets/`; and T3 metadata, strategy/draft reviews, audits, discarded variants, and major-refine snapshots under `_internal/versions/v{N}/`. Direct minor edits remain snapshot-free and are recorded in `pipeline_summary.md`. Routed invocations follow their node's declared outputs and preserve the existing target binding.
+The document itself stays at its stated project path, or directly under cwd
+when no location was stated. Its first draft, integration and polish update
+that file in sequence. The standalone record default
+`$AGENT_ARTIFACT_OUTPUT_DIR/documents/<date>_<name>/` contains T1 pipeline state,
+summary and target/version references; T2 `strategy/`, `analysis/` and supporting
+assets; and T3 reviews, audits, discarded variants and major-refine pre-change
+copies under `_internal/versions/v{N}/`. Direct minor edits keep their existing
+snapshot-free policy and record the target/version in `pipeline_summary.md`.
+Routed invocations distinguish target-document writes from cycle record
+outputs. Existing sealed targets retain their binding.
 
 #### §5.4.3. Code Track — Flat `spec/` and Cycle Outputs
 
@@ -689,7 +707,7 @@ For a new or empty directory, create the modern layout. On re-entry, the presenc
 New route-owned output may be created only in the capability buckets listed in
 §6.5. `autopilot-refine`'s `target-artifact` scope resolves to
 `documents/<artifact>/**` or `research/<artifact>/**`, or to an existing document
-in the route's working-tree repository (its snapshot stays in the route's cycle);
+in the route's project, including an unversioned folder (its snapshot stays in the route's cycle);
 an ad-hoc top-level artifact folder such as `rebuttal/` is input or legacy state,
 never a new output target.
 
@@ -841,8 +859,8 @@ When `spec/pipeline_state.yaml` exists, read it and activate every applicable ap
 | spec-owned design | `spec/design/` decision record |
 | code | standalone default: `plans/<date>_<slug>/` |
 | lab | standalone default: `experiments/<date>_<slug>/` plus `_RUNLOG.md` |
-| draft | `documents/<date>_<name>/` |
-| refine | Target artifact plus `_internal/versions/v{N}/` for a major refine; direct minor edits update history only |
+| draft | Project document from the first draft; `documents/<date>_<name>/` holds process records and target path/version references |
+| refine | Project target stays in place; pre-change copies and history stay in cycle records under `_internal/versions/v{N}/`; direct minor edits update history only |
 | note | Run logs in artifact root plus routed cards and digests under the configured notes target |
 | apply | Real source outside artifact root; git branch and commit provide versions, with apply logs under the cheatsheet artifact |
 
@@ -930,3 +948,35 @@ node, exact attempt, execution-surface, and evidence bound, so a stale dispatch
 row or a same-evidence retry with different attempt axes is not completion.
 
 Lab full-run entry requires a current hash-bound smoke attestation. Reports with media use `capabilities/report-manifest.schema.json` as the shared report manifest: each audio sample has 1:1 waveform/spectrogram/playback media, hashes and visual evidence are bound, and the house audio parameters are 48 kHz with the full 0–24 kHz band. Its optional `bundle` block declares representation `format` separately from semantic `roles` (`canonical`/`summary`/`interactive`/`navigation`), one shared `title`, and one `primary_representation_id`: summary statistics bind to the primary plus every canonical/summary representation, media links bind to interactive ones, and equivalence is declared only through `bundle.equivalence_groups` with a shared title and declared ordered section identity — never inferred from filename, extension, or coexistence. A manifest without `bundle` is classified `legacy/unspecified` and keeps the version-1 both-outputs rule unchanged.
+
+### Small-work daily journal
+
+A new direct inline route and automatic turn records use the campaign's
+`journals/YYYY-MM-DD.md`, without a cycle or a finish-evidence directory.
+Existing cycle bindings retain their v1 lifecycle. Planned work, shared-spec
+transactions, parent-cycle/workflow-group handoffs, scoped refine previews and dispatched work retain cycles. Journals can coexist with legacy payloads without activating or migrating their cycle cutover. A journal entry is an artifact
+with opaque artifact/revision IDs; its immutable revision digest, rather than
+the mutable day file, binds completion. Entries retain original session, turn,
+time and offset, observed changes, checks and actual results. Saved does not
+mean tests passed. Long evidence and corrections stay in that same file.
+
+Results stay at their project locations. Plans, reviews, preimages and history
+stay in `.agent_reports`. Each entry records result locations and versions
+(Git commit, verified copy/hash, or explicitly unknown). Common readers expose
+`result_targets` beside `record_target`, with availability and recorded versions.
+A correction records actor, source, time, reason and prior revision; manual file
+drift is not a confirmed user correction. Historical completion remains bound
+to its original revision while readers distinguish current evidence state.
+
+`artifact-journal.py dry-run|apply|restore` consolidates only verified small,
+closed direct/automatic cycles. It backs up the whole original and affected
+metadata before cleanup. Live, ambiguous, unsupported or changed candidates are
+preserved individually. Original session record locks precede producer admission
+and journal locks; state locks are short. Restore resumes its existing operation,
+uses staging identity as well as bytes, and changes only its own entries/keys.
+The same apply or restore resumes a partial consolidation without manual state
+edits. Restore can retain the verified original before retirement. Directory
+publication reuses the common locked NFS fallback; unsupported directory fsync
+uses checked filesystem sync, while data/space/permission errors remain partial.
+Automatic candidates with an unknown saved writer protocol or ambiguous session owner are preserved. Busy record/finish locks skip only that candidate. No user project is migrated automatically. Request-folder sharing, legacy-root
+aliases, shared revision deltas and Cairn integration are separate follow-ups.

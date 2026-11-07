@@ -88,7 +88,11 @@ Skip the pause when no memo exists.
 - `draft-refine` — Step 5 review, optional user memo, and draft refinement.
 - `finalize` — Step 6 summary.
 
-Resolve the artifact directory from an explicit path or with `ls -d <artifact-root>/documents/*$ARG* 2>/dev/null`. Read `pipeline_state.yaml` to restore `mode`, `intensity`, `discovered_inputs`, and `user_refine`. CLI flags override stored values.
+Resolve the record directory from its existing route/cycle, an explicit path,
+or legacy `ls -d <artifact-root>/documents/*$ARG* 2>/dev/null`. Read
+`pipeline_state.yaml` to restore `mode`, `intensity`, `discovered_inputs`,
+`user_refine` and the project document path/version. Resume that target rather
+than creating another draft in the record directory. CLI flags override stored values.
 
 ## Format-spec discovery
 
@@ -145,14 +149,16 @@ format_ref_source: <auto-discovered|user-supplied-at-prompt|fallback-generic>
 clarified_intent: <string or null>
 last_completed_stage: strategy
 paused_at_stage: strategy-refine
-artifact_dir: <abs path>
+artifact_dir: <absolute cycle record directory>
+project_document_path: <user-stated path, otherwise a filename directly under project cwd>
+project_document_version: <source commit or captured content hash>
 ```
 
 On resume, CLI flags override stored values. Clear `paused_at_stage` after the corresponding refinement finishes.
 
 ## Input-source convention
 
-External material must already exist under `<artifact-root>/`; there is no ad hoc `--refs` path.
+Use the already named project materials and existing analysis records. Normalize material inventories and extracted evidence under `<artifact-root>/`; the original documents stay at their stated locations. There is no ad hoc `--refs` flag.
 
 | Input | Preprocessing capability | Location |
 |---|---|---|
@@ -163,12 +169,13 @@ External material must already exist under `<artifact-root>/`; there is no ad ho
 
 ## Artifact structure
 
+The first draft and every revision of the deliverable stay at the project target. This tree holds records; it does not contain a second canonical document.
+
 ```text
 <artifact-root>/documents/{YYYY-MM-DD}_{short-name}/
 ├─ pipeline_summary.md
 ├─ draft/
-│  ├─ draft.md
-│  └─ draft_{language}.md      # conditional mirror
+│  └─ target.json             # project path/version, including any requested mirror
 ├─ strategy/
 │  ├─ strategy.md
 │  └─ strategy_{language}.md   # conditional mirror
@@ -179,5 +186,5 @@ External material must already exist under `<artifact-root>/`; there is no ad ho
 └─ _internal/
    ├─ strategy_reviews/
    ├─ draft_reviews/
-   └─ versions/v{N}/strategy|draft/
+   └─ versions/v{N}/<target-relative-path>
 ```

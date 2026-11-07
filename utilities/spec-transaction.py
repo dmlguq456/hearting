@@ -630,11 +630,26 @@ def main():
     command=args.transaction[1:] if args.transaction[:1]==["--"] else args.transaction
     if not command: parser.error("transaction command required after --")
     artifact=Path(args.artifact_root).resolve(); worktree=Path(args.worktree)
+    promoted_env = {}
+    # Direct has no cycle until it actually authors a shared contract. Keep
+    # this promotion inside the existing spec command, with its normal route
+    # and scope validation; spec_touch alone is only capacity.
+    import artifact_journal
+    try:
+        route_for_spec, node_for_spec, _ = GUARD.validate_route_contract(args.route,args.node,worktree,artifact)
+    except GUARD.WorkerRouteError as exc:
+        emit({"status":"blocked","reason":exc.reason,"detail":str(exc),"route_id":exc.route_id,"route_file":args.route},args.events); return 65
+    if (artifact_journal.target(artifact, route_for_spec["route_id"])
+            and route_for_spec.get("spec_touch")
+            and any(s == "spec" or s.startswith("spec/") for s in node_for_spec["write_scope"])):
+        prepared = PRODUCER.begin(artifact, route_file=Path(args.route), capability=route_for_spec["capability"],
+            intensity=route_for_spec["effective_intensity"], require_cycle=True)
+        promoted_env = prepared.get("env") or {}
     import artifact_context
     context=None
-    if os.environ.get("AGENT_ROUTE_FILE") or os.environ.get("AGENT_ROUTE_ID"):
+    if promoted_env or os.environ.get("AGENT_ROUTE_FILE") or os.environ.get("AGENT_ROUTE_ID"):
         try:
-            context=artifact_context.resolve_context(environ=os.environ,route=args.route,node_id=args.node,
+            context=artifact_context.resolve_context(environ={**os.environ, **promoted_env},route=args.route,node_id=args.node,
                 explicit={"artifact_root":artifact,"source_worktree":worktree})
         except ValueError as exc:
             emit({"status":"blocked","reason":getattr(exc,"code","artifact-context-invalid"),"detail":str(exc),"artifact_root":str(artifact)},args.events); return 65
@@ -742,7 +757,7 @@ def main():
                 lock.seek(0); lock.truncate(); lock.flush(); os.fsync(lock.fileno())
                 return 65
             emit({"status":"snapshot-prepared","snapshot":prepared_status,"route_id":route["route_id"],"version":version,"path":str(prepared_path),"preimage_sha256":hashlib.sha256(preimage).hexdigest()},args.events)
-        env={**os.environ,"AGENT_SPEC_LOCK_HELD":"1","AGENT_SPEC_NEXT_VERSION":str(version),"AGENT_SPEC_ROOT":str(spec_root),"AGENT_ROUTE_FILE":str(Path(args.route).resolve()),"AGENT_ROUTE_ID":route["route_id"],"AGENT_ROUTE_NODE":node["id"]}
+        env={**os.environ,**promoted_env,"AGENT_SPEC_LOCK_HELD":"1","AGENT_SPEC_NEXT_VERSION":str(version),"AGENT_SPEC_ROOT":str(spec_root),"AGENT_ROUTE_FILE":str(Path(args.route).resolve()),"AGENT_ROUTE_ID":route["route_id"],"AGENT_ROUTE_NODE":node["id"]}
         legacy_before=legacy_spec_state(artifact) if spec_layout=="cycle" else {}
         result=subprocess.run(command,cwd=str(worktree),env=env)
         if spec_layout=="cycle":

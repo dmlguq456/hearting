@@ -15,7 +15,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-sys.path[:0] = [str(HERE), str(ROOT / "utilities")]
+sys.path[:0] = [str(HERE), str(ROOT / "utilities"), str(ROOT)]
 from tidy_isolation import isolated_env
 import session_tidy as st
 import session_tidy_clear as clear
@@ -31,6 +31,8 @@ class NativeCase(unittest.TestCase):
     def setUp(self):
         self.iso = isolated_env()
         self.addCleanup(self.iso.cleanup)
+        import session_tidy_runner
+        self.patch(session_tidy_runner, "_start_queued", side_effect=lambda item: item)
         self.env = self.iso.patched_environ()
         self.env.__enter__()
         self.addCleanup(self.env.__exit__, None, None, None)
@@ -234,6 +236,19 @@ class NativeScreenTest(unittest.TestCase):
 
 class NativeCommandTest(NativeCase):
     def prepare_transport(self):
+        from tools.fleet import collectors
+        from tools.fleet.model import Session
+        from tools.fleet.refresh import LiveSnapshot
+        # The Python fixture process represents this observed native session;
+        # it is not itself a Claude process for the real census to discover.
+        def observed_routes(**kwargs):
+            return LiveSnapshot(sessions=[Session(harness="claude", session_id=self.record["sessionId"],
+                pid=self.own[0], liveness=self.record["status"])],
+                observations={"basic": {"state": "ok", "all_new": True,
+                    "generation_identity": "native-fixture"},
+                    "required-details": {"state": "ok", "all_new": True,
+                        "generation_identity": "native-fixture"}})
+        self.patch(collectors, "collect_all", side_effect=observed_routes)
         proc = mock.Mock(); proc.poll.return_value = None
         @contextlib.contextmanager
         def attached(_target):
@@ -445,7 +460,7 @@ class NativeCommandTest(NativeCase):
         self.assertIsNotNone(clear.validate_request(path, req["nonce"])[0])
         self.assertEqual(clear.read_reservation(self.seat.key)["status"], "reserved")
 
-    def test_idle_card_request_uses_the_exact_attachment_and_claims_one_prompt(self):
+    def test_idle_card_request_queues_one_offscreen_card_for_the_exact_attachment(self):
         req, path = self.book()
         now = time.time()
         with st.seat_lock(self.seat.key):
@@ -458,30 +473,28 @@ class NativeCommandTest(NativeCase):
         req = clear.read_reservation(self.seat.key)
         self.prepare_transport()
 
-        def submitted(fd, data):
-            self.assertEqual(fd, 99)
-            self.assertIn("자동 유휴 정리 요청".encode("utf-8"), data)
-            current = clear.read_reservation(self.seat.key)
-            with st.seat_lock(self.seat.key):
-                current["idle_request"] = {**current["idle_request"], "state": "arrived",
-                                           "arrival": {"harness": "claude", "sid": "session-A",
-                                                       "at": time.time(), "prompt_seq": 0}}
-                clear._write_reservation(current)
-            return len(data)
-
-        self.write.side_effect = submitted
         result = native.idle_card_request(req, path, req["nonce"], screen_ready=lambda *_: None)
         self.assertEqual(result["accepted"], "true")
-        self.write.assert_called_once()
+        self.write.assert_not_called()
         held = clear.read_reservation(self.seat.key)
-        self.assertEqual(held["idle_request"]["state"], "sent")
+        self.assertEqual(held["idle_request"]["state"], "preparing")
+        self.assertEqual(held["idle_request"]["source"], "memory-helper")
+        import session_tidy_runner
+        item = session_tidy_runner.read_item(held["queue_id"])
+        self.assertEqual(item["seat"]["native"]["job"], self.target["job"])
+        self.assertNotIn("arrival", held["idle_request"])
+        again = native.idle_card_request(req, path, req["nonce"], screen_ready=lambda *_: None)
+        self.assertEqual(again["accepted"], "skipped")
+        self.assertEqual(clear.read_reservation(self.seat.key)["queue_id"], item["id"])
+        self.write.assert_not_called()
 
     def test_idle_card_request_native_transport_uses_the_bound_job_once(self):
         req, path = self.book()
         now = time.time()
         with st.seat_lock(self.seat.key):
             held = clear.read_reservation(self.seat.key)
-            held.update(origin="idle", followup_kind="status-only", snapshot_state="ready",
+            held.update(origin="compact", compact={"identity": "compact-native",
+                        "card_request_required": True, "turn_end_observed": True}, followup_kind="status-only", snapshot_state="ready",
                         idle={"identity": "idle-native", "due_at": now - 1, "tokens": 200000,
                               "min_tokens": 200000,
                               "compaction": clear.compaction_position(self.seat, "claude", "session-A")})
@@ -491,7 +504,7 @@ class NativeCommandTest(NativeCase):
 
         def submitted(fd, data):
             self.assertEqual(fd, 99)
-            self.assertIn("자동 유휴 정리 요청".encode("utf-8"), data)
+            self.assertIn(st.reply_card_markers(req["nonce"])[0].encode("utf-8"), data)
             current = clear.read_reservation(self.seat.key)
             with st.seat_lock(self.seat.key):
                 current["idle_request"] = {**current["idle_request"], "state": "arrived",

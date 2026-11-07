@@ -7560,7 +7560,7 @@ class ComposeRouteTest(TestRoute):
   diagnosis={"state":"non-git","cwd":cwd,"detail":"fatal: not a git repository"}
   direct=R._decide_non_git_compose(diagnosis,"direct",0,False,None)
   self.assertEqual(direct["kind"],"direct")
-  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None)["kind"],"direct")
+  self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None)["kind"],"worker-candidate")
   self.assertEqual(R._decide_non_git_compose(diagnosis,None,0,False,None,new_repository=True)["kind"],"worker-candidate")
   for request_shape,depth,attempt in (("framed",0,False),("solo",0,False),
                                       (None,1,False),("direct",1,False),("direct",0,True)):
@@ -10273,8 +10273,23 @@ class RouteChainWriterTest(ComposeRouteTest):
     self.assertEqual(route["campaign_key"],"repo")
     self.assertEqual(continued["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"],
                      started["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"])
-    self.assertNotEqual(continued["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"],
-                        started["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"])
+    # Small direct routes share the campaign journal, not a cycle. Distinct
+    # immutable entry identities still separate the two completed results.
+    self.assertEqual(started["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"], "")
+    self.assertEqual(continued["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"], "")
+    self.assertNotEqual(continued["route_id"], started["route_id"])
+    self.assertEqual(Path(continued["artifact_env"]["AGENT_ARTIFACT_JOURNAL"]).parent,
+                     Path(started["artifact_env"]["AGENT_ARTIFACT_JOURNAL"]).parent)
+    second_finished=cli("finish","--route",continued["route_file"],"--evidence",str(evidence),
+                        "--summary-file",str(evidence))
+    self.assertEqual(second_finished.returncode,0,second_finished.stdout+second_finished.stderr)
+    first_entry=json.loads(finished.stdout)["entries"][0]
+    second_entry=json.loads(second_finished.stdout)["entries"][0]
+    self.assertNotEqual(first_entry["path"],second_entry["path"])
+    import artifact_journal
+    self.assertEqual(artifact_journal.read_reference(first_entry["path"])["route_id"],started["route_id"])
+    self.assertEqual(artifact_journal.read_reference(second_entry["path"])["route_id"],continued["route_id"])
+    self.assertEqual(artifact_journal.revision_digest(first_entry["path"]),first_entry["digest"])
     for extra,expected in ((("--campaign-key","other"),"other"),(("--unassigned",),None)):
      explicit=compose("explicit-choice",*extra,"--explain")
      self.assertEqual(explicit.returncode,0,explicit.stdout+explicit.stderr)

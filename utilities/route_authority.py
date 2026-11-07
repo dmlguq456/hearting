@@ -336,6 +336,7 @@ def _attempt_action(status: str, metadata: Mapping[str, str]) -> str:
 def _round_action(state, node_kind):
     review = node_kind == "review-worker"
     return {"admit": "dispatch", "blocked-live": "wait", "blocked-unsettled": "wait",
+            "review-correction-required": "correct-and-restart",
             "exhausted": "owner-report" if review else "report",
             "verdictless-bound": "native-subagent" if review else "owner-inline"}[state]
 
@@ -363,6 +364,14 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     locking and immutable publication stay with the existing consumers.
     """
     route, facts, metadata = route or {}, facts or {}, metadata or {}
+    if action == "producing-continuation":
+        # The caller observes the exact result and process; this pure decision
+        # does not turn a readable worker result into a transport retry.
+        reason = next((name for name in ("identity", "settled", "quiescent", "readable", "unfinished")
+                       if not facts.get(name)), "")
+        return ContinuationDecision(not reason, "continue" if not reason else "inspect",
+                                    "" if not reason else "continuation-" + reason,
+                                    "same-command" if reason else "start")
     if action in {"finish", "finish-registry"}:
         registered_reason = "finish-registered-route-ineligible" if facts.get("registered_route") else ""
         if action == "finish-registry":
@@ -910,8 +919,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             attempt in subject_attempts
             for attempt in (*tuple(revision.get("answers") or ()), *tuple(revision.get("supersedes") or ()))
         )] if source_aware else revisions
-        budget_kinds_for_streak = budget_kinds if source_aware else kinds
-        budget_rows_for_progress = budget_rows if source_aware else rows
+        # Content owns verdict budgets, not the stall bound. An edited brief
+        # cannot turn two launched BLOCKED rounds into a fresh registered try.
+        budget_kinds_for_streak = kinds
+        budget_rows_for_progress = rows
         streak = 0
         import route_parent_close
         for kind, (_status, row_meta) in zip(reversed(budget_kinds_for_streak),
@@ -939,6 +950,16 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             any(last_id in (r.get("supersedes") or ()) for r in budget_revisions)))
         if closure:
             state = "admit"
+        # A known content subject with an undisposed blocking judgment cannot
+        # use another verdict on the same bytes.  In particular, an old
+        # answers revision for A must not turn A -> B -> A into a correction.
+        # Leave legacy unknown bindings, tests, and stronger refusals alone.
+        transport_retry = bool(rows and kinds[-1] == "verdict-less" and
+            retry_predecessor([{**rows[-1][1], "_status": rows[-1][0]}]))
+        if (action == "round" and state == "admit" and source_aware and not transport_retry
+                and node.get("kind") == "review-worker"
+                and _ROUND.open_blocking_verdict(budget_rows, worker_type) is not None):
+            state = "review-correction-required"
         # The verdict budget stays with the content subject, but the round kind
         # follows the node lineage: a correction always changes the reviewed
         # content, so a review whose lineage ends in a blocking verdict checks
@@ -984,7 +1005,8 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     else:
         allowed = state == "admit"
         reason = {"blocked-live": "prior-attempt-still-live", "blocked-unsettled": "round-unsettled",
-                  "exhausted": "review-round-budget-exhausted", "verdictless-bound": "review-verdictless-bound"}.get(state, "")
+                  "exhausted": "review-round-budget-exhausted", "verdictless-bound": "review-verdictless-bound",
+                  "review-correction-required": "review-subject-unchanged"}.get(state, "")
     detail = ""
     if action == "owner-closure" and not allowed:
         if state == "admit":
@@ -2148,6 +2170,20 @@ def require_recovery_grant_addresses(candidate, history, *, route, access=None):
             writes.extend(targets.writable_roots)
         derived = EA.derive_task_access(route, context, writable=tuple(Path(value) for value in writes if value))
         writes.extend(derived.writable_roots); reads.extend(derived.read_roots)
+        # Every ordinary wrapper grants its optional project runtime as well.
+        # Derive it with the same pure resolver, never from candidate metadata.
+        # A previously sealed override still passes the ordinary path fence.
+        from worker_bootstrap import runtime_dir_candidate
+        runtime_values = {key: os.environ[key] for key in ("HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT")
+                          if key in os.environ}
+        historical_runtime = (history.get("resolved") or {}).get("runtime_dir")
+        if historical_runtime:
+            runtime_values["AGENT_RUNTIME_DIR"] = historical_runtime
+        runtime = runtime_dir_candidate(route["artifact_root"], runtime_values,
+            repository_kind="non-git" if route.get("source_commit") == "unversioned" else "git",
+            source_root=history["worktree"])
+        if runtime:
+            writes.append(runtime); reads.append(runtime)
         if access:
             request = EA.load_request(Path(access["request_path"]), context=context)
             if request.request_sha256 != access["request_sha256"]:

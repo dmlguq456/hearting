@@ -898,8 +898,10 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         fields, unknown = REPLACEMENT._rows(self.jobs.read_text().splitlines())[target]
         unknown = {**unknown, 'attempt_id': 'att-fixture-unknown-binding-2',
                    'note': 'dead-missing-result'}
-        # Unknown history stays unknown under a new identity and refuses before
-        # it can be counted against the current source subject.
+        # Unknown history stays unknown under a new identity. Isolate binding
+        # refusal from the node-lineage stall bound by leaving the preceding
+        # row substantive; the separate case below exercises two verdict-less
+        # rounds, including history from another content subject.
         unknown.pop('review_subject_digest', None)
         unknown.pop('review_subject_binding_digest', None)
         unknown.update(launch_claimed='0', launch_started='0', launch_outcome='never-launched')
@@ -908,6 +910,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
         fields[5] = ','.join(k + '=' + v for k, v in unknown.items())
         unknown_row = '\t'.join(fields)
         settled = self.jobs.read_bytes()
+        self.fixture_row(target, note='completed-marker', failure_class='pass')
         with self.jobs.open('a') as handle:
             handle.write(unknown_row + '\n')
         refusal = self.assert_atomic_refusal(reason='batch-prior-binding-drift')
@@ -968,7 +971,16 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
             self.assertFalse(self.admission(sibling['node']).gate_unmet)
         for leg in first['legs']:
             self.assertEqual(self.admission(leg['node']).budget.verdict_rounds, 1)
+        # An owner-recorded revision alone is not a correction: the reviewed
+        # source is byte-identical, so the same start refuses without spending
+        # a round and leaves the original FAIL and its sibling untouched.
         self.prompt.write_text('Closure after an actual mixed PASS/FAIL group.')
+        refused = self.assert_atomic_refusal(reason='review-subject-unchanged')
+        self.assertEqual(refused['next_action'], 'correct-and-restart', refused)
+        self.assertEqual(refused['started'], '0', refused)
+        # The real correction changes the reviewed source; only then does the
+        # same start open the closure round for both the FAIL and its peer.
+        (self.repo / 'x').write_text('source B\n')
         second = self.launch()
         self.assertEqual(second['newly_started'], 2, second)
         self.settle(second)

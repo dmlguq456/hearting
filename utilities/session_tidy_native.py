@@ -328,6 +328,10 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 clear.COMPACT_COMMAND if compacting else "/clear")
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
+            if not continuing:
+                current, why = clear.recheck_idle_input(request_path, current)
+                if current is None:
+                    return result("skipped", why)
             try:
                 written = os.write(fd, data)
             except OSError:
@@ -355,7 +359,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
 
 
 def idle_card_request(req, request_path, nonce, *, screen_ready):
-    """One exact Claude attach send for an accepted idle booking; never uses an inherited pane."""
+    """Use the exact attachment for background idle cards or legacy compact prompts."""
     import session_tidy_clear as clear
 
     def result(outcome, reason=""):
@@ -394,7 +398,15 @@ def idle_card_request(req, request_path, nonce, *, screen_ready):
                 queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown"} \
                     or str(reason or why).startswith("not-idle-")
                 return result("queued" if queued else "skipped", reason or why or "target-changed")
+            if (claim.get("idle_request") or {}).get("source") == "memory-helper":
+                import session_tidy_idle_card
+                accepted, why = session_tidy_idle_card.enqueue(claim)
+                return result("true" if accepted else "skipped", why)
             data = (clear.idle_card_request_text(claim) + "\r").encode("utf-8")
+            current, why = clear.recheck_idle_input(request_path, current)
+            if current is None:
+                clear.release_unsent_idle_request(claim)
+                return result("skipped", why)
             try:
                 written = os.write(fd, data)
             except OSError as exc:

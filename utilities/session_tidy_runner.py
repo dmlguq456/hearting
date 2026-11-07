@@ -505,6 +505,8 @@ class Bundle:
         self.exchange: Optional[Path] = None
         self.related: list = []
         self.unreadable: list = []      # sessions whose record could not be read (never "nothing new")
+        self.idle_card_requested = False
+        self.idle_card_body: Optional[str] = None
 
 
 def _target_sessions(item: dict, seat) -> list:
@@ -597,11 +599,21 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
            "automatic_records": automatic_records,
            "pending_decisions": pending, "existing_records": records, "duplicate_groups": groups,
            "limits": {"max_new_records": 10, "max_duplicate_groups": DUPLICATE_SIGNAL_MAX}}
+    if item.get("idle_card"):
+        import session_tidy_idle_card
+        try:
+            card_context = session_tidy_idle_card.input_context(item, sessions)
+        except (OSError, ValueError, RunnerFailure):
+            # An unavailable card source leaves the ordinary memory batch intact.
+            card_context = None
+        if card_context is not None:
+            doc["idle_card"] = card_context
     path = run_dir / "input_v1.json"
     st.atomic_write_json(path, doc)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    empty = not (sessions or choices or pending)
+    empty = not (sessions or choices or pending or doc.get("idle_card"))
     bundle = Bundle(path, digest, cursors, empty, unread, {r["id"] for r in records})
+    bundle.idle_card_requested = "idle_card" in doc
     bundle.unreadable = [s for s in skipped if str(s.get("reason", "")).startswith("unreadable")]
     return bundle
 
@@ -937,6 +949,9 @@ def validate_actions(run_dir: Path, batch: str, bundle: Bundle) -> None:
         raise RunnerFailure("actions.json must be an object with an actions list")
     if any(not isinstance(a, dict) for a in doc["actions"]):
         raise RunnerFailure("every action must be an object")
+    body = doc.pop("card", None)
+    if getattr(bundle, "idle_card_requested", False) and isinstance(body, str) and body.strip():
+        bundle.idle_card_body = body
     # The runner owns the identity of the batch; the worker's copies are not trusted.
     doc["schema_version"], doc["batch_id"], doc["input_digest"] = 1, batch, bundle.digest
     # Optional: which existing records of this project the conversation relates to (ids only).
@@ -1126,6 +1141,15 @@ def process_item(item: dict) -> None:
         wait_worker(receipt, run_dir, bundle.exchange / "actions.json")
         set_status(item, "validating")
         validate_actions(run_dir, batch, bundle)
+        if item.get("idle_card") and isinstance(getattr(bundle, "idle_card_body", None), str):
+            import session_tidy_idle_card
+            # Card persistence is independent of a later memory-apply failure.
+            # The existing booking helper can now perform native compaction.
+            try:
+                session_tidy_idle_card.publish(item, bundle.idle_card_body)
+            except (OSError, ValueError, RunnerFailure):
+                # Card failure skips automatic compact; valid memory still applies.
+                pass
         set_status(item, "applying")
         line = apply_actions(item, run_dir, bundle)
         result = st.read_json(run_dir / "result.json")

@@ -354,6 +354,18 @@ fi
 
 dir=$(basename "$S_CWD")
 
+# The shell paints the shared fields; the existing data producers above stay
+# active. Retain only the native context fallback without feeding its payload
+# back into the common line.
+if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
+  if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
+    printf 'context %s%%\n' "$S_CTX"
+  else
+    printf 'context ?\n'
+  fi
+  exit 0
+fi
+
 # ANSI 색 + 퍼센트 색 헬퍼 (녹 <50 / 황 <80 / 적 ≥80)
 DIM=$'\033[2m'; CYAN=$'\033[36m'; YEL=$'\033[33m'; GRN=$'\033[32m'; RED=$'\033[31m'; MAG=$'\033[35m'; RST=$'\033[0m'
 pcol(){ if [ "${1:-0}" -ge 80 ] 2>/dev/null; then printf '%s' "$RED"; elif [ "${1:-0}" -ge 50 ] 2>/dev/null; then printf '%s' "$YEL"; else printf '%s' "$GRN"; fi; }

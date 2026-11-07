@@ -17,6 +17,14 @@ This is the portable capability contract for `autopilot-draft`. It defines runti
 
 ## Invocation Semantics
 
+Choose this document goal and its stages independently of Git availability.
+Reuse existing material analysis, audience, deadlines and writer assignments.
+Keep missing external drafts as unfinished handoffs in the existing route plan.
+HWPX and other available format Skills/tools belong to production and format
+checks in this pipeline; their invocation does not complete integration or
+content review. Original documents in a non-Git folder are edited by the current
+session's direct leg; artifact-only staged legs retain their ordinary workers.
+
 Document draft pipeline: analyze → strategy → strategy-refine → draft →
 draft-refine → finalize. In `paper` mode, “draft” means a **paste-ready
 cheatsheet draft**: LaTeX-ready cards describing mutations that the user applies
@@ -83,6 +91,11 @@ notice after; `core/WORKFLOW.md` §0.4 owns the user-facing card.
 ## Artifact Ownership
 
 Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.
+Create the deliverable at the user's stated project path, defaulting to the
+current project folder itself. Write the first draft there and refine it in
+place. Keep pipeline records, analysis, reviews, pre-change copies and history
+in the cycle; each record names the document path and version. Existing sealed
+targets keep their binding without automatic migration.
 
 ## Artifact Producer Lifecycle
 
@@ -99,9 +112,11 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    `<artifact-root>/documents/` layout stays writable; once active it
    issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
    `campaigns/<campaign-locator>/<cycle-locator>/artifacts/` before any artifact exists.
-2. **write only inside the open cycle.** Every durable artifact goes under
-   `<cycle_dir>/artifacts/documents/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
-   `artifact_producer.py` owns cycle output paths and shared revisions.
+2. **separate the document from its records.** Write the document at its project
+   target from the first draft. Process records go under
+   `<cycle_dir>/artifacts/documents/...` (`AGENT_ARTIFACT_OUTPUT_DIR`), or the
+   route node's declared record outputs. They retain the target path and
+   version; `artifact_producer.py` owns those cycle paths and shared revisions.
 3. **stage workers join, never fork.** `standard+` stage workers receive
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
