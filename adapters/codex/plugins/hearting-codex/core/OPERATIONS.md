@@ -1619,18 +1619,17 @@ denial has exited; a still-live denied environment remains unobservable.
 
 Fleet's two-hex session numbers have one shared resolver,
 `tools/fleet/session_handle.py::resolve_tag`, consumed by Fleet, peer trailers
-and Herdr titles. Codex and OpenCode reserve distinct numbers among observed
-live sessions in a small XDG state assignment file; an existing live assignment
-keeps its number and a later session takes a free one. Initial collection orders
-unassigned sessions by their known start time. Claude's runtime-derived numbers
-are fixed reservations, so a conflicting Codex or OpenCode assignment moves.
+and Herdr titles. All three harnesses reserve distinct live numbers in the existing
+XDG state file. Surviving assignments keep their numbers before newcomers take free
+ones; initial collection orders unassigned sessions by known start time. Claude's
+native suffix is a preferred candidate, with the native name unchanged. Legacy
+Claude duplicates keep the earliest assignment and move later colliding rows.
 Normal start, native reports and collection attempt these reservations without
 waiting for a writer lock; allocation failure does not fail the observed work.
-Readers consume only confirmed assignments from the existing snapshot, including
-while a writer holds its lock. Missing, unreadable or corrupt state, an unavailable
-reader or an exhausted namespace leaves the number absent. The session-id hash
-is an internal allocator candidate. Duplicate fixed Claude
-numbers retain their existing reservation policy; no user input or flag is needed.
+Readers use confirmed assignments for every harness, including while a writer
+holds its lock. Missing, unreadable or corrupt state, an unavailable reader or an
+exhausted namespace leaves the number absent. Native suffixes and session-id hashes
+are allocator inputs only. No user input or flag is needed.
 
 Merge with `hearting run merge-line <PR>`. Sessions and worktrees for the same
 GitHub repository share one user-state FIFO `flock`. A lone PR retains the

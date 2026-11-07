@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "utilities"))
 import session_tidy
-from fleet import herdr_projection, render, session_handle, session_registry
+from fleet import herdr_projection, render, session_handle, session_registry, session_tags
 from fleet.collectors import herdr, steward, procscan
 from fleet.model import Session
 
@@ -367,6 +367,9 @@ class PaneContinuityTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w:p", "CLAUDE_CONFIG_DIR": str(home),
                                           "FLEET_TITLE_STATE_DIR": str(self.root / "titles")}), \
              mock.patch.object(session_handle.os, "getcwd", return_value=str(self.repo)):
+            # The proven native producer retains the historical candidate;
+            # display readers themselves do not allocate or inspect seat history.
+            self.assertEqual(session_tags.assign_observed("claude", "current", pane_id="w:p"), "4d")
             self.assertEqual(session_handle.resolve_tag("claude", "current"), "4d")
 
     def test_recipient_tag_uses_recipient_pane_and_cwd_across_resume(self):
@@ -386,9 +389,15 @@ class PaneContinuityTest(unittest.TestCase):
                 "HERDR_PANE_ID": "w:sender", "CLAUDE_CONFIG_DIR": str(home),
                 "FLEET_TITLE_STATE_DIR": str(self.root / "titles")}), \
                 mock.patch.object(session_handle.os, "getcwd", return_value=str(self.repo)):
-            # The compatibility API retains its caller-seat behavior.
-            self.assertEqual(session_handle.resolve_tag("claude", "current"), "4c")
-            # A recipient lookup follows only that recipient's resumed seat.
+            self.assertIsNone(session_handle.resolve_tag("claude", "current"))
+            self.assertIsNone(session_handle.resolve_recipient_tag(
+                "claude", "current", pane="w:recipient", cwd=str(self.repo)))
+            # Only the existing native producer owns allocation. After its
+            # recipient-seat observation, every reader sees that same number,
+            # even a peer sender whose own seat has a different native suffix.
+            with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w:recipient"}):
+                self.assertEqual(session_tags.assign_observed("claude", "current", pane_id="w:recipient"), "3a")
+            self.assertEqual(session_handle.resolve_tag("claude", "current"), "3a")
             self.assertEqual(session_handle.resolve_recipient_tag(
                 "claude", "current", pane="w:recipient", cwd=str(self.repo)), "3a")
 

@@ -1,4 +1,4 @@
-"""Live number allocation, fixed Claude reservations and consumer agreement."""
+"""Live number allocation across harnesses and consumer agreement."""
 import importlib.util
 import fcntl
 import json
@@ -57,6 +57,96 @@ class SessionTagCollisionTest(unittest.TestCase):
         session_tags.refresh(sessions)
         return [resolve_tag(s.harness, s.session_id) for s in sessions]
 
+    def claude_name(self, sid, tag):
+        path = self.root / "claude/sessions" / (sid + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"sessionId": sid, "nameSource": "derived",
+                                    "name": "project-" + tag}))
+
+    def test_colliding_claude_names_keep_the_first_assignment_and_share_consumers(self):
+        candidate = minted_tag(self.a)
+        self.claude_name(self.a, candidate)
+        self.claude_name(self.b, candidate)
+        first, later = self.session(self.a, "claude"), self.session(self.b, "claude", started=20)
+        self.assertEqual(self.tags([first]), [candidate])
+        shown = self.tags([later, first])
+        self.assertEqual(shown[1], candidate)
+        self.assertEqual(shown[0], f"{(int(candidate, 16) + 1) % 256:02x}")
+        self.assertEqual(self.tags([first, later]), [candidate, shown[0]])
+        spec = importlib.util.spec_from_file_location("peer_claude_tags", ROOT / "utilities/peer-message.py")
+        peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peer)
+        from fleet.session_handle import resolve_recipient_tag
+        sys.path.insert(0, str(ROOT / "utilities"))
+        from peer_steward_base import _prompt_fleet_tag
+        for sess in (first, later):
+            tag = session_tags.assigned_tag("claude", sess.session_id)
+            self.assertEqual(resolve_tag("claude", sess.session_id), tag)
+            self.assertEqual(resolve_recipient_tag("claude", sess.session_id, pane="w:private", cwd="/private"), tag)
+            self.assertEqual(_prompt_fleet_tag("claude", sess.session_id, pane="w:private", cwd="/private"),
+                             (tag, None))
+            self.assertEqual(peer.peer_alias("claude", sess.session_id), "[%s]" % tag)
+            self.assertEqual(herdr_projection.compose("claude", sess.session_id, steward=False, title="")[0],
+                             "[%s] claude" % tag)
+
+    def test_new_claude_observation_never_evicts_an_existing_other_harness(self):
+        for harness in ("codex", "opencode"):
+            with self.subTest(harness=harness):
+                session_tags._path().unlink(missing_ok=True)
+                original = session_tags.assign_observed(harness, self.a)
+                self.claude_name(self.b, original)
+                later = session_tags.assign_observed("claude", self.b)
+                self.assertEqual(resolve_tag(harness, self.a), original)
+                self.assertIsNotNone(later)
+                self.assertNotEqual(later, original)
+
+    def test_legacy_claude_duplicates_are_repaired_without_moving_other_numbers(self):
+        self.claude_name(self.a, "31")
+        self.claude_name(self.b, "31")
+        self.tags([self.session(self.a, "claude"), self.session(self.b, "claude", started=20),
+                   self.session("other", "codex", started=30)])
+        path = session_tags._path()
+        data = json.loads(path.read_text())
+        other = next(r["tag"] for r in data["assignments"] if r["session_id"] == "other")
+        for row in data["assignments"]:
+            if row["harness"] == "claude":
+                row["tag"] = "31"
+                row["first_seen"] = 1 if row["session_id"] == self.a else 2
+        path.write_text(json.dumps(data))
+        self.assertEqual(resolve_tag("claude", self.a), "31")
+        self.assertIsNone(resolve_tag("claude", self.b))
+        self.tags([])
+        self.assertEqual(resolve_tag("claude", self.a), "31")
+        self.assertNotEqual(resolve_tag("claude", self.b), "31")
+        self.assertEqual(resolve_tag("codex", "other"), other)
+
+    def test_unassigned_claude_readers_do_not_publish_native_candidates(self):
+        self.claude_name(self.a, "31")
+        self.assertIsNone(resolve_tag("claude", self.a))
+        self.assertFalse(session_tags._path().exists())
+
+    def test_bootstrap_and_existing_first_rules_apply_to_every_harness_pair(self):
+        for first_harness in ("claude", "codex", "opencode"):
+            for next_harness in ("claude", "codex", "opencode"):
+                with self.subTest(first=first_harness, next=next_harness):
+                    session_tags._path().unlink(missing_ok=True)
+                    candidate = minted_tag(self.a)
+                    self.claude_name(self.a, candidate)
+                    self.claude_name(self.b, candidate)
+                    first = self.session(self.a, first_harness, started=10)
+                    later = self.session(self.b, next_harness, started=20)
+                    new_tag, old_tag = self.tags([later, first])
+                    self.assertEqual(old_tag, candidate)
+                    self.assertNotEqual(new_tag, old_tag)
+                    self.assertEqual(self.tags([first, later]), [old_tag, new_tag])
+                    # An established number also wins over a subsequently
+                    # observed session whose native start time is earlier.
+                    session_tags._path().unlink()
+                    old_tag = self.tags([later])[0]
+                    self.tags([first, later])
+                    self.assertEqual(resolve_tag(next_harness, self.b), old_tag)
+                    self.assertNotEqual(resolve_tag(first_harness, self.a), old_tag)
+
     def test_bootstrap_orders_existing_pair_by_start_not_collection_order(self):
         older, newer = self.session(self.a), self.session(self.b, started=20)
         new_tag, old_tag = self.tags([newer, older])
@@ -87,21 +177,22 @@ class SessionTagCollisionTest(unittest.TestCase):
         spec.loader.exec_module(peer)
         self.assertEqual(peer.peer_alias("opencode", self.b), "[%s]" % tags[1])
 
-    def test_claude_number_is_fixed_and_codex_moves_even_if_already_assigned(self):
+    def test_existing_codex_keeps_its_number_when_claude_prefers_it(self):
         cx = self.session(self.a)
         original = self.tags([cx])[0]
         cl = self.session("fixed-claude", "claude", started=30, tag=original)
         self.tags([cx, cl])
-        self.assertNotEqual(resolve_tag("codex", self.a), original)
+        self.assertEqual(resolve_tag("codex", self.a), original)
         rows = session_tags._read(session_tags._path())
-        self.assertEqual(rows[("claude", "fixed-claude")]["tag"], original)
+        self.assertNotEqual(rows[("claude", "fixed-claude")]["tag"], original)
 
     def test_displaced_session_does_not_steal_another_existing_number(self):
         first, second = self.session(self.a), self.session(self.b, started=20)
         a_tag, b_tag = self.tags([first, second])
         self.tags([self.session("cl", "claude", tag=a_tag), first, second])
         self.assertEqual(resolve_tag("codex", self.b), b_tag)
-        self.assertNotIn(resolve_tag("codex", self.a), {a_tag, b_tag})
+        self.assertEqual(resolve_tag("codex", self.a), a_tag)
+        self.assertNotIn(resolve_tag("claude", "cl"), {a_tag, b_tag})
 
     def test_record_loss_and_corruption_leave_number_absent(self):
         self.tags([self.session(self.a), self.session(self.b, started=20)])
@@ -149,10 +240,11 @@ class SessionTagCollisionTest(unittest.TestCase):
             session_tags.refresh([])
         self.assertEqual(session_tags._read(session_tags._path()), {})
 
-    def test_herdr_reserves_fixed_claude_outside_filtered_fleet_collection(self):
+    def test_herdr_reserves_older_claude_outside_filtered_fleet_collection(self):
         (self.root / "claude/sessions").mkdir(parents=True)
         (self.root / "claude/sessions/1.json").write_text(json.dumps({"sessionId": "cl", "nameSource": "derived", "name": "hearting-" + minted_tag(self.a)}))
         self.agents.return_value = [{"agent": "claude", "pane_id": "w:p", "agent_session": {"kind": "id", "value": "cl"}}]
+        session_tags.assign([])
         self.assertNotEqual(self.tags([self.session(self.a)])[0], minted_tag(self.a))
 
     def test_first_consumers_are_read_only_until_observed_producer(self):
@@ -221,6 +313,7 @@ class SessionTagCollisionTest(unittest.TestCase):
         pid = os.getpid()
         (directory / (str(pid) + ".json")).write_text(json.dumps({"sessionId": "outside-cl", "procStart": procscan.read_proc_start(pid),
                                                                "nameSource": "derived", "name": "hearting-" + minted_tag(self.a)}))
+        session_tags.assign([])
         self.assertNotEqual(self.tags([self.session(self.a)])[0], minted_tag(self.a))
 
     def test_codex_registry_without_process_start_does_not_reserve_recycled_sid(self):
