@@ -163,7 +163,13 @@ Existing projects may still use:
 .claude_reports/
 ```
 
-`.claude_reports/` is a legacy alias. Runtime code must recognize both names during migration. New projects and new documentation should prefer `.agent_reports/`.
+New projects and documentation use `.agent_reports/`. An existing
+`.claude_reports/` stays in place: a normal producer activation or begin may
+create `.agent_reports` as a relative alias to that physical root. Read-only
+resolution creates nothing. Existing root IDs, absolute references and open
+route bindings keep their physical root. Existing entries and distinct roots
+stay in place, including broken or cyclic aliases.
+This root alias does not permit symlinks inside artifact payloads.
 
 The artifact root is a **project-wide canonical write surface**, not a
 per-worktree directory. Resolve it with `utilities/artifact-root.sh <cwd>`:

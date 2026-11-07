@@ -310,6 +310,18 @@
    "en": "Hearting rewrites this file. Editing it is overwritten; deleting it comes back at the next publish.",
    "ko": "이 파일은 하팅이 다시 씁니다. 직접 고치면 덮어씁니다. 지우면 다음 발행 때 다시 생깁니다."
   },
+  "entrance.status_ambiguous": {
+   "en": "conflicting status pages",
+   "ko": "현황 문서 상충"
+  },
+  "entrance.status_recorded": {
+   "en": "recorded",
+   "ko": "기록됨"
+  },
+  "entrance.status_unknown": {
+   "en": "unconfirmed",
+   "ko": "미확인"
+  },
   "entrance.title": {
    "en": "Artifacts",
    "ko": "산출물"

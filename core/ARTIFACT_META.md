@@ -153,6 +153,18 @@ shows.
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
   and edits it in place (a finalized cycle still takes writes, D-123). Fleet keeps the
   most recently modified legacy document when no campaign page is available.
+- **One selection rule.** Fleet, the close-time stamp updater and the artifact
+  entrance use the common campaign-document reader. Conflicting campaign-root
+  `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy
+  copy resolves that conflict. Unreadable, oversized or symlinked canonical
+  candidates remain unknown and are not edited. Legacy-only pages retain their
+  read compatibility. Automatic updates change only their existing stamp and
+  runtime closure lines, preserving the person's decisions and prose.
+- **Other campaign documents.** Optional handoffs and topic Markdown documents
+  also live directly under the campaign. The common entrance lists them as
+  campaign documents, with their existing ownership and locator; it creates no
+  cycle or authority ID for them. Missing identity remains unknown. This does
+  not move historical research/cycle documents or require a new page.
 - **Shape.** Markdown in the reader's language. Only the parts below are read; other
   sections are free.
 

@@ -597,8 +597,8 @@ class RowSourceTests(EntranceFixture):
         self.cycle("2026-01-06_two", "2026-01-06_beta",
                    [("artifacts/final_report.md", "# Beta\n\nBody.\n")], sealed_on="2026-01-06T00:00:00Z")
 
-    def test_default_journal_source_is_empty_without_journals_and_changes_no_byte(self):
-        self.assertEqual(E.ROW_SOURCES, (E._daily_journals,))
+    def test_default_sources_are_empty_without_journals_or_campaign_documents_and_change_no_byte(self):
+        self.assertEqual(E.ROW_SOURCES, (E._daily_journals, E._campaign_documents))
         self._two_cycles()
         self.refresh()
         names = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")

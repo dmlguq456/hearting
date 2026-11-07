@@ -2,7 +2,7 @@
 """A route's close refreshes its campaign's status page, when the campaign keeps one (C-W4).
 
 `core/ARTIFACT_META.md` (`현황.md` / `STATUS.md`): one optional page per campaign, directly
-under a cycle's `artifacts/`, that a person reads first. Writing one stays optional and
+under the campaign, with legacy cycle `artifacts/` pages as fallback. Writing one stays optional and
 nothing waits on it. When the closed route's campaign keeps one, the close refreshes two
 parts the runtime can state from what it saw, and nothing else:
 
@@ -22,13 +22,16 @@ from __future__ import annotations
 import fcntl
 import os
 import re
-import tempfile
+import secrets
+import stat
 import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-NAMES = ("현황.md", "status.md")             # NFC-normalized, case-folded; first wins
+from artifact_campaign_documents import READ_LIMIT, campaign_status
+from artifact_nofollow import open_relative, open_root
+
 KEEP = 5
 LOCK_WAIT_SECONDS = 2.0
 _STAMP = re.compile(r"^(?P<word>갱신|Updated)(?P<gap>\s+)\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?",
@@ -55,24 +58,9 @@ def campaign_dir(root: Path, route) -> Path | None:
 
 
 def status_page(campaign: Path) -> Path | None:
-    """The campaign's newest status page directly under one of its cycles' `artifacts/`."""
-    pages = []
-    try:
-        cycles = [entry for entry in os.scandir(campaign) if entry.is_dir(follow_symlinks=False)]
-    except OSError:
-        return None
-    for cycle in cycles:
-        artifacts = Path(cycle.path) / "artifacts"
-        try:
-            names = {_fold(entry.name): entry for entry in os.scandir(artifacts)}
-        except OSError:
-            continue
-        for name in NAMES:
-            entry = names.get(name)
-            if entry is not None and entry.is_file(follow_symlinks=False):
-                pages.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
-                break
-    return max(pages)[1] if pages else None
+    """The same canonical/ambiguous/legacy choice as the common read entrance."""
+    from artifact_campaign_documents import campaign_status
+    return campaign_status(campaign)['path']
 
 
 def closure_line(route, outcome, now: datetime, *, journal_entry=None, page=None, language="en") -> str:
@@ -154,50 +142,100 @@ def note_route_closed(route, outcome, *, now: datetime | None = None, journal_en
     """Refresh the closed route's campaign status page; the page path, or None when untouched."""
     if not isinstance(outcome, dict) or outcome.get("terminal_gate_proven") is not True:
         return None                       # a cancelled or unproven close is not finished work
-    root = Path(str(route.get("artifact_root") or ""))
+    root = Path(str(route.get("artifact_root") or "")).resolve()
     if not root.is_dir():
         return None
     campaign = campaign_dir(root, route)
-    page = status_page(campaign) if campaign is not None else None
-    if page is None:
+    if campaign is None:
         return None
     now = now or datetime.now()
-    lock_path = root / ".runtime" / "status-board.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a") as lock:
-        deadline = time.monotonic() + LOCK_WAIT_SECONDS
-        while True:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    return None           # another close is writing it; this one stays off the page
-                time.sleep(0.05)
+    root_fd = runtime_fd = None
+    try:
+        # Select again under the existing lock. A canonical conflict never
+        # becomes a legacy write, including while this close was waiting.
+        selected = campaign_status(campaign)
+        if selected['path'] is None:
+            return None
+        root_fd = open_root(root)
         try:
-            before = page.stat(follow_symlinks=False)
-            text = page.read_text(encoding="utf-8")
-            after = refreshed(text, closure_line(route, outcome, now, journal_entry=journal_entry,
-                page=page, language="ko" if _HANGUL.search(text) else "en"), now)
-            if after == text:
-                return page
-            fd, temporary = tempfile.mkstemp(prefix=".status-", dir=page.parent)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(after)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.chmod(temporary, before.st_mode & 0o7777)
-                current = page.stat(follow_symlinks=False)
-                if (current.st_mtime_ns, current.st_size) != (before.st_mtime_ns, before.st_size):
-                    return None           # the person saved it meanwhile: their edit stands
-                os.replace(temporary, page)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+            os.mkdir('.runtime', mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        runtime_fd = open_relative(root_fd, ['.runtime'])
+        lock_fd = os.open('status-board.lock', os.O_WRONLY | os.O_APPEND | os.O_CREAT |
+                          os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=runtime_fd)
+        with os.fdopen(lock_fd, 'a') as lock:
+            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+                return None
+            deadline = time.monotonic() + LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() > deadline:
+                        return None
+                    time.sleep(0.05)
+            selected = campaign_status(campaign)
+            page = selected['path']
+            if page is None or (page.parent == campaign and len(selected['candidates']) > 1):
+                # Updating just one identical copy would create a conflict.
+                return None
+            return _refresh_page(root_fd, root, campaign, page, route, outcome, now, journal_entry)
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        return None  # optional status never blocks the already proven close
+    finally:
+        if runtime_fd is not None:
+            os.close(runtime_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _refresh_page(root_fd, root, campaign, page, route, outcome, now, journal_entry):
+    parts = page.relative_to(root).parts
+    parent = open_relative(root_fd, parts[:-1])
+    temporary = None
+    try:
+        fd = open_relative(parent, [parts[-1]])
+        with os.fdopen(fd, 'rb') as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return None
+            raw = handle.read(READ_LIMIT + 1)
+        if len(raw) > READ_LIMIT:
+            return None
+        text = raw.decode('utf-8')
+        after = refreshed(text, closure_line(route, outcome, now, journal_entry=journal_entry,
+            page=page, language='ko' if _HANGUL.search(text) else 'en'), now)
+        if after == text:
             return page
+        temporary = '.status-' + secrets.token_hex(8)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     before.st_mode & 0o7777, dir_fd=parent)
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
+            handle.write(after)
+            handle.flush()
+            os.fchmod(handle.fileno(), before.st_mode & 0o7777)
+            os.fsync(handle.fileno())
+        current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        signature = lambda item: (item.st_dev, item.st_ino, item.st_mtime_ns, item.st_ctime_ns, item.st_size)
+        if signature(current) != signature(before) or status_page(campaign) != page:
+            return None
+        current_parent = open_relative(root_fd, parts[:-1])
+        try:
+            a, b = os.fstat(parent), os.fstat(current_parent)
+            if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                return None
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            os.close(current_parent)
+        os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+        temporary = None
+        os.fsync(parent)
+        return page
+    finally:
+        if temporary is not None:
+            os.unlink(temporary, dir_fd=parent)
+        os.close(parent)
 
 
 def note_journal_entry(root: Path, entry):
