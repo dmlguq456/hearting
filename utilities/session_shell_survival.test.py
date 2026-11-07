@@ -42,7 +42,7 @@ PRELOAD=r"""
 const Module=require('node:module'),fs=require('node:fs'),load=Module._load;
 if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
  let ordinal=0;
- const fail=()=>{fs.writeFileSync(process.env.SURVIVAL_SEEN,'injected');throw Error('owned synthetic display failure');};
+ const fail=()=>{fs.writeFileSync(process.env.SURVIVAL_SEEN,'injected');process.stdout.write('OWNED_DISPLAY_FAILURE\r\n');throw Error('owned synthetic display failure');};
  Module._load=function(name,...args){const value=load.call(this,name,...args);
   if(name==='@xterm/headless')return {...value,Terminal:new Proxy(value.Terminal,{construct(Base,args){
    const terminal=Reflect.construct(Base,args),index=ordinal++,write=terminal.write;
@@ -134,6 +134,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
             self.assertIn(needle,raw,'original CLI I/O lost: '+repr(bytes(raw[-1200:])))
         try:
             until(b'READY');os.write(master,b'WARM\r');until(b'DONE_WARM')
+            if mode=='scratch':until('› ?'.encode())  # Wait for a real scratch view; empty blocks reserve no rows.
             original=process(json.loads(native_file.read_text())['pid']);entry_identity=process(entry.pid)
             children=Path('/proc')/str(entry.pid)/'task'/str(entry.pid)/'children'
             hosts=[int(pid) for pid in children.read_text().split() if b'host.cjs' in (Path('/proc')/pid/'cmdline').read_bytes()]
@@ -190,6 +191,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
                 Path(env['SURVIVAL_FAULT']).write_text('fail')
                 if mode in ('resize','scratch'):fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',32,100,0,0))
                 os.write(master,b'TRIGGER_DISPLAY_FAILURE\r')
+                if mode=='scratch':until(b'OWNED_DISPLAY_FAILURE')
             after=('AFTER_HOST_ERROR' if inflight else 'AFTER_HOST_ERROR 한글🙂').encode()
             os.write(master,after+b'\r')
             try:until(after if inflight else b'DONE_'+after)

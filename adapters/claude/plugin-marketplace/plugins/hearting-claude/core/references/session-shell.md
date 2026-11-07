@@ -33,7 +33,7 @@ The native callback supplies its session ID before a passive registry may exist.
 Its nearest verified native process and birth must still belong to this wrapped
 terminal; a worker or service callback cannot select another terminal's session.
 
-The block opens by default, using four to ten rows according to terminal height.
+The block opens by default, using its actual content height up to ten rows.
 Questions take space first; absent sections disappear. Its light, dim labels
 and short glyphs follow native status lines, with Fleet's semantic value colors.
 The status area retains every former Hearting-native field: folder and explicit
@@ -97,3 +97,9 @@ contents without repeating those badges.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.
+The wrapped Codex viewport reads its native footer unchanged. It conceals only
+the complete, exact two-item UUID/context footer in its confirmed footer area;
+clipped, additional or ambiguous content stays visible. This affects painting,
+not the native VT, its coordinates or its input/identity observations.
+The block reserves only the rows it paints. Hidden guidance and empty sections
+reserve no rows; native-owned spacing remains under the native renderer.
