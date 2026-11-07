@@ -166,7 +166,10 @@ def _base_recovery_fields(node_kind, state="exhausted"):
     review = node_kind == "review-worker"
     fields = {"recovery_owner": "owner",
               "recovery_surface": "owner-report" if review else "capability-route complete --inline"}
-    if state == "verdictless-bound":
+    if state == "review-correction-required":
+        fields.update(next_action=choice.next_action, required_action="resolve-review-findings",
+            recovery_hint="Correct the blocking findings together, then repeat the same start for the closure check.")
+    elif state == "verdictless-bound":
         fields.update(next_action=choice.next_action,
             recovery_hint="Continue the remaining work through the existing unregistered fallback; "
                 "preserve prior FAILs and publish completion only after verification. No new registered round is admitted.")
@@ -178,6 +181,28 @@ def _base_recovery_fields(node_kind, state="exhausted"):
 
 def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):
     fields = _base_recovery_fields(node_kind, state)
+    if state == "review-correction-required" and route and node and jobs and route_file:
+        try:
+            from worker_bootstrap import _lineage_rows, continuation_followup_fields, continuation_followup_text
+            from review_source_subject import observe, annotate_rows
+            from review_input import read_binding, resolve_input
+            history = _lineage_rows(route, jobs).get(node["id"], ())
+            previous = open_blocking_verdict(history, "review")
+            binding = (read_binding(jobs, previous) if previous and previous.get("review_input_digest") else None)
+            reviewed = (resolve_input(route, node, jobs, binding["path"] if binding and not binding.get("producer") else None)
+                        if binding else None)
+            subject = observe(route, node, worktree=route.get("cwd"), jobs=jobs, reviewed_input=reviewed)
+            digest = subject["digest"]
+            history = annotate_rows(jobs, history, route=route, node=node, family=subject.get("family"))
+            matching = [(status, meta) for status, meta in history
+                        if meta.get("_review_subject_digest") == digest]
+            prior = open_blocking_verdict(matching, "review")
+            guidance = continuation_followup_text(continuation_followup_fields(route, node, prior, jobs, route_file)) if prior else ""
+            if guidance:
+                fields.update(recovery_hint=guidance, review_attempt_id=prior["attempt_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return fields
     if state != "exhausted" or node_kind != "review-worker" or not route or not node or jobs is None:
         return fields
     import base64

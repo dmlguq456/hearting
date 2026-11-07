@@ -138,6 +138,15 @@ def readable_result(metadata: Mapping[str, str]) -> str:
     return ""
 
 
+def finished_verdict(status: str, metadata: Mapping[str, str]) -> bool:
+    """Whether a settled row carries an actual result, independent of storage."""
+    if status != "done" or deferred_completion(metadata) == "pending" or terminal_conflict_pending(metadata):
+        return False
+    from review_round_cap import classify_round_row
+    return (classify_round_row(status, metadata, worker_type=metadata.get("worker_type", "")) == "verdict"
+            or bool(readable_result(metadata)))
+
+
 def success_note(metadata: Mapping[str, str]) -> bool:
     """The one place a caller asks "does this row's note read as success"."""
     if reviewed_blocked_completion(metadata):

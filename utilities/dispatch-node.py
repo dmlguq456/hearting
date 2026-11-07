@@ -490,7 +490,8 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
   current_attempt_ids=frozenset(physical_members(rows[-1][1])) if rows else frozenset(),
   # Supersession is selection authority even after its allowance is spent:
   # exhausted fresh work must not be mistaken for a current exact replay.
-  requires_next_round=unmet or superseded or budget.closure_check_used,
+  requires_next_round=(budget.state != "review-correction-required"
+                       and (unmet or superseded or budget.closure_check_used)),
   source_subject_digest=source_subject_digest,
   source_subject_manifest=source_subject_manifest,
  )
@@ -1021,7 +1022,7 @@ def main():
            "route_node":a.node, "effective_intensity":route['effective_intensity'],
            "round":round_budget.next_round, "max_round":round_budget.cap,
            "next_action":choice.next_action, "retry_when":choice.retry_when, "child_spawned":0}
-   if choice.state in {"exhausted", "verdictless-bound"}:
+   if choice.state in {"exhausted", "verdictless-bound", "review-correction-required"}:
     fields.update(review_budget_recovery_fields(node.get("kind"),choice.state,
                   route=route, node=node, jobs=registry.path, route_file=a.route))
    for key,value in fields.items(): print(f"{key}={value}")

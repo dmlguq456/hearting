@@ -2055,7 +2055,8 @@ def collect_wrapper(
 
 
 def wrapper_result(
-    leg: dict[str, object], proc: subprocess.Popen, stdout: str, stderr: str
+    leg: dict[str, object], proc: subprocess.Popen, stdout: str, stderr: str,
+    *, completed_review: dict[str, object] | None = None,
 ) -> dict[str, object]:
     fields = output_fields(stdout + stderr)
     registered = fields.get("registered", "unknown")
@@ -2076,7 +2077,8 @@ def wrapper_result(
             ("1", "1", "1", "0"),
             ("0", "0", "0", "1"),
         }
-        and not runtime_failure
+        and (not runtime_failure or (fields.get("worker_failure") == "completed-review-blocking"
+                                     and completed_review is not None))
         and not early_death
     )
     if receipt_valid:
@@ -2100,6 +2102,10 @@ def wrapper_result(
         "reason": reason,
         **({"detail": fields["detail"]} if fields.get("detail") else {}),
         **({"cleanup_diagnostics": cleanup_diagnostics} if cleanup_diagnostics else {}),
+        **({"worker_failure": fields["worker_failure"]} if runtime_failure else {}),
+        **({"review_verdict": "FAIL", "terminal_note": "completed-review-blocking",
+            "review_artifact": completed_review.get("review_artifact", "")}
+           if receipt_valid and runtime_failure and completed_review else {}),
         **{key: fields[key] for key in
            ("model_profile", "model", "model_source", "model_diversity", "model_diversity_from")
            if fields.get(key)},
@@ -2275,6 +2281,33 @@ def existing_leg_result(
             "launch_state": "existing",
             "reason": "existing-active-attempt",
         }
+    if fields[1] == "done" and claimed == "1" and metadata.get("note") == "completed-review-blocking":
+        # Identity above and the common terminal observer both have to agree;
+        # neither a wrapper token nor a readable-looking path proves a result.
+        from dispatch_attempt_policy import finished_verdict
+        from dispatch_contract import evidence_digest, observe_terminal_review_failure
+        from worker_bootstrap import attempt_outcome
+        from review_source_subject import read_binding
+        node = next((n for n in route.get("nodes", []) if n.get("id") == leg["node"]), None)
+        try:
+            outcome = attempt_outcome(route, metadata)
+            artifact = Path(outcome["artifact"])
+            if (not node or metadata.get("route_hash") != route.get("route_hash")
+                    or not finished_verdict(fields[1], metadata)):
+                raise ValueError("terminal-verdict-unverified")
+            if read_binding(jobs, metadata, required=False) is None:
+                if not metadata.get("review_input_digest"):
+                    raise ValueError("review-subject-binding-missing")
+                from review_input import read_binding as read_review_input
+                read_review_input(jobs, metadata)
+            observe_terminal_review_failure(route, node, str(leg["attempt_id"]), artifact,
+                                            evidence_digest(artifact), lines)
+        except (OSError, ValueError, KeyError, TypeError, DispatchContractError):
+            return {**common, "exit_code": 70, "check": "failed", "launch_state": "failed",
+                    "reason": "existing-terminal-review-unverified"}
+        return {**common, "check": "ok", "launch_state": "existing",
+                "reason": "existing-terminal-review", "review_verdict": "FAIL",
+                "terminal_note": metadata["note"], "review_artifact": str(artifact)}
     if (
         fields[1] == "done"
         and claimed == "1"
@@ -2511,6 +2544,8 @@ def batch_receipt(
             (selection_diagnostics or {}).get("sole_gate") or "not-applicable"
         ),
     }
+    if any(result.get("review_verdict") == "FAIL" for result in results):
+        receipt["review_verdict"] = "FAIL"
     if selection_diagnostics is not None:
         receipt["selection_diagnostics"] = selection_diagnostics
     if interrupted_signal:
@@ -3071,7 +3106,7 @@ def main(argv: list[str] | None = None) -> int:
                 # identity/input/readiness checks below must prove that replay
                 # before any reservation or input publication. Other refusals
                 # (especially live/unsettled) keep their original priority.
-                if (budget.state not in {"exhausted", "blocked-live"}
+                if (budget.state not in {"exhausted", "blocked-live", "review-correction-required"}
                         or (budget.state == "exhausted" and admission.requires_next_round)):
                     raise error
                 round_errors[capped_node_id] = error
@@ -3091,7 +3126,7 @@ def main(argv: list[str] | None = None) -> int:
                 # exhaustion/live admission. Its process/readiness is checked
                 # below; absent members still owe the common budget.
                 if (member["attempt_id"] in admission.current_attempt_ids
-                        and admission.budget.state in {"blocked-live", "exhausted"}
+                        and admission.budget.state in {"blocked-live", "exhausted", "review-correction-required"}
                         and (admission.budget.state == "blocked-live"
                              or not admission.requires_next_round)):
                     continue
@@ -3254,10 +3289,27 @@ def main(argv: list[str] | None = None) -> int:
         # only on the exception object and died here, leaving PRD 13.30.2's "no
         # silent path" with nothing typed anywhere in the cycle.
         extra = {"retry_when": exc.retry_when} if getattr(exc, "retry_when", "") else {}
-        if reason in {"review-round-budget-exhausted", "review-verdictless-bound"}:
+        if reason in {"review-round-budget-exhausted", "review-verdictless-bound", "review-subject-unchanged"}:
             capped = next((n for n in nodes if n["id"] == getattr(exc, "route_node", None)), {})
-            state = "verdictless-bound" if reason == "review-verdictless-bound" else "exhausted"
+            state = ("verdictless-bound" if reason == "review-verdictless-bound" else
+                     "review-correction-required" if reason == "review-subject-unchanged" else "exhausted")
             extra.update(DISPATCH_NODE.review_budget_recovery_fields(capped.get("kind"), state, route=route, node=capped, jobs=jobs, route_file=args.route))
+            if reason == "review-subject-unchanged":
+                from worker_bootstrap import _lineage_rows, continuation_followup_fields, continuation_followup_text
+                import review_round_cap
+                try:
+                    history = _lineage_rows(route, jobs)
+                    facts = []
+                    for candidate in nodes:
+                        prior = review_round_cap.open_blocking_verdict(history.get(candidate["id"], ()), "review")
+                        if prior:
+                            data = continuation_followup_fields(route, candidate, prior, jobs, route_path)
+                            if data:
+                                facts.append(data)
+                    if facts:
+                        extra["recovery_hint"] = continuation_followup_text(facts)
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
         # `ROUTE_STATE_REFUSAL_REASONS` membership, not literal reason
         # strings: the static guardian in `dispatch_completion_marker.test.py`
         # keeps the gate's own missing-dependency reason inside
@@ -3893,7 +3945,17 @@ def main(argv: list[str] | None = None) -> int:
                         leg, _, proc, stdout, stderr = future.result()
                         save_wrapper_evidence(jobs, leg, proc.returncode, stdout, stderr,
                                               log_dir=args.log_dir)
-                        result = wrapper_result(leg, proc, stdout, stderr)
+                        completed_review = None
+                        if output_fields(stdout + stderr).get("worker_failure") == "completed-review-blocking":
+                            checked = existing_leg_result(
+                                jobs, leg, route, repo=repo, parent=args.parent,
+                                parent_attempt_id=parent_attempt, parallel_group=args.parallel_group,
+                                declared_size=len(legs), manifest_digest=manifest_digest,
+                                leg_digest=leg_digests[str(leg["attempt_id"])], agent_home=agent_home,
+                                replaced_attempt_id=str(partial["failed_source_attempt_id"]) if partial else "")
+                            if checked and checked.get("review_verdict") == "FAIL":
+                                completed_review = checked
+                        result = wrapper_result(leg, proc, stdout, stderr, completed_review=completed_review)
                         if result["launch_state"] == "existing":
                             checked = existing_leg_result(
                                 jobs,
@@ -3947,6 +4009,30 @@ def main(argv: list[str] | None = None) -> int:
         interrupted_signal=interrupted_signal,
         selection_diagnostics=diagnostics,
     )
+    # This is an advisory projection outside the sealed delivery receipt.
+    # Read the exact terminal rows, not the wrapper's failure token.
+    if receipt.get("review_verdict") == "FAIL":
+        try:
+            from worker_bootstrap import continuation_followup_fields, continuation_followup_text
+            by_attempt = {}
+            for line in jobs.read_text(encoding="utf-8").splitlines():
+                fields = line.split("\t")
+                if len(fields) == 6:
+                    meta = parse_registry_metadata(fields[5])
+                    if meta.get("attempt_id"):
+                        by_attempt.setdefault(meta["attempt_id"], []).append(meta)
+            guidance = []
+            for result in results:
+                matches = by_attempt.get(str(result.get("attempt_id")), [])
+                candidate = next((n for n in nodes if n.get("id") == result.get("node")), None)
+                if len(matches) == 1 and candidate and result.get("review_verdict") == "FAIL":
+                    facts = continuation_followup_fields(route, candidate, matches[0], jobs, route_path)
+                    if facts and facts not in guidance:
+                        guidance.append(facts)
+            if guidance:
+                receipt["continuation_followup"] = continuation_followup_text(guidance)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     if continuation_record is not None and replacement_seal is not None:
         receipt.update({
             "continuation_id": continuation_record["continuation_id"],
