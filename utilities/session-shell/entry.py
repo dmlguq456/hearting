@@ -48,6 +48,15 @@ def wrapped_command(harness, command):
     return list(command)
 
 
+def herdr_environment(harness, environment):
+    """Herdr's official foreground-wrapper hint, scoped to this eligible exec."""
+    if (environment.get("HERDR_ENV") != "1" or environment.get("HERDR_AGENT")
+            or any(not environment.get(key) for key in
+                   ("HERDR_PANE_ID", "HERDR_BIN_PATH", "HERDR_SOCKET_PATH"))):
+        return None
+    return dict(environment, HERDR_AGENT=harness)
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 2 or args[0] not in session_shell.HARNESSES:
@@ -74,6 +83,12 @@ def main(argv=None):
     size = os.get_terminal_size(1)
     if size.columns < 20 or size.lines < 8:
         original()
+    hinted = herdr_environment(harness, os.environ)
+    if hinted is not None:
+        # Herdr inspects the foreground process's initial environment. Updating
+        # os.environ after startup is insufficient on Linux. Re-exec this same
+        # PID before starting any native child; the explicit hint prevents a loop.
+        os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve()), *args], hinted)
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
         env = dict(os.environ, HEARTING_SHELL_DIRECTORY=directory,
                    HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
