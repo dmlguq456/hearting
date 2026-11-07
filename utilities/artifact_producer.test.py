@@ -3006,6 +3006,68 @@ class SharedAdmissionTest(ProducerTestBase):
 
 
 class CompletedSpecPublicationTest(ProducerTestBase):
+    def _republished_contract(self, *, related=True, same=True):
+        self.activate()
+        _, _, first = self._completed({"c/prd.md": b"# P\n## Contract\nbase\n"})
+        self.assertEqual(self._publish(first)["status"], "admitted")
+        transaction_spec = importlib.util.spec_from_file_location(
+            "spec_transaction_covered_contract", Path(__file__).with_name("spec-transaction.py"))
+        transaction = importlib.util.module_from_spec(transaction_spec)
+        transaction_spec.loader.exec_module(transaction)
+        def author(slug, data, parent=None):
+            self._adoption_sequence = getattr(self, "_adoption_sequence", 0) + 1
+            route, path = self.route("direct", "autopilot-code", "dev", slug=f"{slug}-{self._adoption_sequence}",
+                                     parent_cycle_id=parent)
+            cycle = P.begin(self.root, route_file=path, capability="autopilot-code", intensity="direct")
+            spec_root = Path(cycle["cycle_dir"]) / "artifacts/spec"
+            transaction.seed_cycle_spec(spec_root, self.root, spec_root / "c")
+            (spec_root / "c/prd.md").write_bytes(data)
+            self.close(route, path)
+            P.finalize(self.root, cycle_id=cycle["cycle_id"])
+            return cycle
+        original = author("original-contract", b"# P\n## Contract\nadopted\n")
+        self.assertEqual(self._publish(original, settle=False)["status"], "pending")
+        later = author("republished-contract",
+            b"# P\n## Contract\n" + (b"adopted" if same else b"different") + b"\n## Later\nnew\n",
+            original["cycle_id"] if related else None)
+        admitted = self._publish(later)
+        self.assertEqual(admitted["status"], "admitted", admitted)
+        return original, later, admitted
+
+    def test_admitted_descendant_settles_historical_pending_without_new_admission_or_writes(self):
+        original, later, admitted = self._republished_contract()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        with patch_split(P, "admit_shared", side_effect=AssertionError("covered work must not admit again")):
+            for settle in (False, True):
+                result = self._publish(original, settle=settle)
+                self.assertEqual(result["status"], "admitted", result)
+                self.assertEqual(result["shared_reference_revision_id"], admitted["shared_reference_revision_id"])
+                self.assertEqual(result["coverage"], {"kind": "admitted-descendant",
+                                                     "publishing_cycle_id": later["cycle_id"]})
+                if settle:
+                    self.assertEqual(result["admission"]["status"], "reused")
+                    self.assertFalse(result["admission"]["reference_created"])
+                    self.assertEqual(result["admission"]["revision_dir"], admitted["admission"]["revision_dir"])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        pending = P.status(self.root)["shared_spec_publications"]
+        self.assertFalse(any(row["cycle_id"] == original["cycle_id"] and row["status"] == "pending"
+                             for row in pending))
+
+    def test_partial_publication_does_not_settle_historical_pending(self):
+        original, _later, _admitted = self._republished_contract(same=False)
+        self.assertEqual(self._publish(original, settle=False)["status"], "pending")
+
+    def test_unrelated_publication_does_not_settle_historical_pending(self):
+        original, _later, _admitted = self._republished_contract(related=False)
+        self.assertEqual(self._publish(original, settle=False)["status"], "pending")
+
+    def test_corrupt_admitted_descendant_keeps_historical_pending(self):
+        original, _later, admitted = self._republished_contract()
+        path = Path(admitted["admission"]["revision_dir"]) / "c/prd.md"
+        path.write_bytes(b"tampered\n")
+        result = self._publish(original, settle=False)
+        self.assertEqual((result["status"], result["reason"]), ("pending", "shared-revision-integrity"))
+
     def _completed(self, tree=None, *, capability="autopilot-spec", seal=True):
         self._publication_sequence = getattr(self, "_publication_sequence", 0) + 1
         route, path = self.route("direct", capability,

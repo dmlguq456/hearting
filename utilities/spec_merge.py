@@ -6,6 +6,7 @@ only combines independently changed units; it never manufactures review text.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import date
 from difflib import SequenceMatcher
 import hashlib
 import json
@@ -205,8 +206,108 @@ def _merge_preamble(path, base, ours, latest):
     return _join_units(path, (), (token.encode("utf-8") for token in result)), "merged"
 
 
+_BLUEPRINT = re.compile(r"^## ✦ 청사진 요약 ⟨v(?:0|[1-9][0-9]*), ([0-9]{4}-[0-9]{2}-[0-9]{2})⟩$")
+
+
+def _blueprint_heading(key):
+    match = _BLUEPRINT.fullmatch(key[-1]) if key else None
+    if match is None:
+        return False
+    try:
+        date.fromisoformat(match[1])
+        return True
+    except ValueError:
+        return False
+
+
+def _align_blueprint(path, parsed):
+    """Align one existing PRD summary, keeping its actual header/body bytes.
+
+    Other titles, moves to another parent, new summaries and ambiguous matches
+    retain the original Markdown rules. No numbers or dates are synthesized.
+    """
+    if PurePosixPath(path).name != "prd.md":
+        return parsed, None
+    matches = [[key for key in nodes if _blueprint_heading(key)] for nodes, _ in parsed]
+    if len(matches[0]) != 1 or any(len(keys) > 1 for keys in matches):
+        return parsed, None
+    target = matches[0][0]
+    if (any(keys and keys[0][:-1] != target[:-1] for keys in matches)
+            or not any(keys and keys[0] != target for keys in matches)):
+        return parsed, None
+    aligned = []
+    for (nodes, children), keys in zip(parsed, matches):
+        source = keys[0] if keys else None
+        def key_for(key):
+            return target + key[len(source):] if source and key[:len(source)] == source else key
+        aligned.append(({key_for(key): value for key, value in nodes.items()},
+                        defaultdict(list, {key_for(parent): [key_for(key) for key in order]
+                                           for parent, order in children.items()})))
+    return aligned, target
+
+
+def _merge_blueprint(path, key, base, ours, latest):
+    if any(value is None for value in (base, ours, latest)):
+        return _choose(path, key, base, ours, latest)
+    parts = []
+    for value in (base, ours, latest):
+        heading, separator, body = value.partition(b"\n")
+        parts.append((heading + separator, body))
+    heading, _ = _choose(path, key, *(part[0] for part in parts))
+    body, _ = _choose(path, key, *(part[1] for part in parts))
+    merged = _join_units(path, key, (heading, body))
+    # Keep the ordinary evidence decision whenever the entire unit agrees.
+    if ours == latest or ours == base or latest == base:
+        return _choose(path, key, base, ours, latest)
+    return merged, "merged"
+
+
+def _markdown_changes_covered(path, base, ours, published):
+    parsed = [_markdown(path, data) for data in (base, ours, published)]
+    parsed, blueprint = _align_blueprint(path, parsed)
+    (bn, _), (on, oc), (pn, pc) = parsed
+    def content(key, value):
+        return value.partition(b"\n")[2] if key == blueprint and value is not None else value
+    for key in set(bn) | set(on):
+        before, after = content(key, bn.get(key)), content(key, on.get(key))
+        if before != after and content(key, pn.get(key)) != after:
+            return False
+    # Extra published units may interleave; the adopted units keep their order.
+    for parent, order in oc.items():
+        retained = set(order) & set(pc[parent])
+        if [key for key in order if key in retained] != [key for key in pc[parent] if key in retained]:
+            return False
+    return True
+
+
+def changes_covered(base, ours, published):
+    """Read-only contract coverage, not a merge or authorization to publish.
+
+    A normal descendant transaction owns its pipeline bookkeeping. PRDs remain
+    opaque per heading, and every other changed payload must match exactly.
+    """
+    changed_prd = False
+    for path in set(base) | set(ours):
+        if path == RECEIPT or "/_internal/versions/" in "/" + path:
+            continue
+        name = PurePosixPath(path).name
+        if name in {"pipeline_state.yaml", "pipeline_summary.md"}:
+            continue
+        before, after, actual = base.get(path), ours.get(path), published.get(path)
+        if before == after:
+            continue
+        changed_prd |= name == "prd.md"
+        if name == "prd.md" and all(data is not None for data in (before, after, actual)):
+            if not _markdown_changes_covered(path, before, after, actual):
+                return False
+        elif actual != after:
+            return False
+    return changed_prd
+
+
 def _merge_markdown(path, base, ours, latest):
     parsed = [_markdown(path, version) for version in (base, ours, latest)]
+    parsed, blueprint = _align_blueprint(path, parsed)
     bn, bc = parsed[0]
     on, oc = parsed[1]
     ln, lc = parsed[2]
@@ -225,6 +326,7 @@ def _merge_markdown(path, base, ours, latest):
         b, o, l = bn.get(key), on.get(key), ln.get(key)
         try:
             value, decision = (_merge_preamble(path, b, o, l) if key == () else
+                               _merge_blueprint(path, key, b, o, l) if key == blueprint else
                                _choose(path, key, b, o, l))
         except MergeConflict as exc:
             errors.extend(exc.conflicts)
