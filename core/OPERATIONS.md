@@ -2904,7 +2904,8 @@ from the pane observation Fleet already reads, or tmux
 terminal; other rows keep the `herdr`/`tmux`/`tty` word. A `⚑` pane that is not
 the top-left pane of its tab leads that cell with `↖`; the Herdr tab geometry
 behind it is one `pane layout` read per such tab at most every 30 s, in the
-background. Fleet only reads here: it moves, resizes or focuses no pane.
+background. This periodic observation only reads; an explicit Open pane action
+may focus an exact verified existing target and reports a short result.
 
 Same-seat succession uses `peer-steward.py start <name> --kind <harness>`,
 which with no `--pane` or `--beside` uses the calling pane (`HERDR_PANE_ID`)
@@ -3036,12 +3037,18 @@ a bare registry status word is never evidence alone.
 response back, but never grants the approval itself; the session that received the
 user's response directly owns the release record. `hearting run questions` lists the
 waits Fleet's QUESTIONS view shows, with each question, choices and recommended answer;
-the steward asks its user through its native question surface, then sends the chosen
-answer with `hearting run questions answer <id>`, the same release path Fleet uses.
+the steward obtains the person's decision through the appropriate question surface,
+then sends the chosen answer with `hearting run questions answer <id>`, the same
+release path Fleet uses.
+Ordinary message questions are registered by `hearting run questions ask`; their
+private S4 source and exact consumed receipt are distinct from native gate
+approval. A queued answer or ordinary peer notice closes neither kind of wait.
 
 **S6** ledger — every message sent or received is a typed record in the `peer-messages/`
 ledger under the dispatch state root. The full body is never stored, only a bounded
 summary (first line, ≤200 characters) and a body digest.
+For a verified question-answer binding the summary contains only its safe subject;
+the private answer body is never copied to the shared ledger.
 
 Every record uses `kind ∈ {watch, steer, handoff, gate-relay, notice}`: `watch` marks an
 idle-notify subscription, `steer`/`handoff`/`gate-relay` are inferred from an explicit

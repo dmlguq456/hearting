@@ -150,7 +150,8 @@ Portable behavior contract = `roles/response-policy.md`.
   Before claiming a tool works, run its check; exit 69 means unavailable, so
   use the reported fallback and never borrow a Claude-native tool to claim
   Codex parity.
-- Ask structured questions, including the §0.4 card, with
+- Register ordinary questions with `hearting run questions ask`; use the
+  shared response policy. Ask structured exceptions, including the §0.4 card, with
   `request_user_input`. It submits empty after 120 s; an empty answer is no
   decision, so restate the question at turn end.
 - Completion arrives through Codex's native queue for this thread. Detached

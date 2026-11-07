@@ -154,7 +154,8 @@ Portable behavior contract = `roles/response-policy.md`.
   named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
   Before claiming a tool works, run its check; exit 69 means unavailable, so
   use the reported fallback or keep the adapter row partial.
-- Ask structured questions, including the §0.4 card, with `question`.
+- Register ordinary questions with `hearting run questions ask`; use the
+  shared response policy. Ask structured exceptions, including the §0.4 card, with `question`.
 - If the hearting guard plugin is unavailable or untrusted, run the guards
   explicitly (README Session Command Reference).
 - While this session is idle, the hearting plugin hands it the completion
