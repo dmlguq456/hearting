@@ -355,14 +355,9 @@ fi
 dir=$(basename "$S_CWD")
 
 # The shell paints the shared fields; the existing data producers above stay
-# active. The common display reads this exact session's existing tap. Keep the
-# native context fallback until the separate layout decision changes it.
+# active. The common display reads this exact session's existing tap. Do not
+# leave a native context-only line when the person hides the common block.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
-  if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
-    printf 'context %s%%\n' "$S_CTX"
-  else
-    printf 'context ?\n'
-  fi
   exit 0
 fi
 
