@@ -135,20 +135,23 @@ function height(){
   if(fleetView)return 0;
   if(!expanded)return harness==='claude'?0:1;
   const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
-  return Math.min(maxHeight(),Math.max(4,panelLines.length,detail.length?detail.length+1:0));
+  return nativeDisplay.blockHeight({harness,count:Math.max(panelLines.length,currentDelivery?1:0),
+    detail:detail.length,limit:maxHeight(),loaded:!!projectionKey});
 }
 function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
-    const observed=nativeDisplay.observe(harness,Array.from({length:terminal.rows},(_,i)=>
-      terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||''),sid);
+    const nativeLines=Array.from({length:terminal.rows},(_,i)=>
+      terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
+    const observed=nativeDisplay.observe(harness,nativeLines,sid);
+    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid);
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      const line=serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      const line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++){
@@ -211,10 +214,11 @@ function rebuildDisplay() {
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
   if(expanded){
-    const base=panelLines.length?panelLines:[[{text:`📁 ${path.basename(process.cwd())} · ${harness} · CTX ?`,dim:true}]];
+    const base=panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
+      [[{text:`📁 ${path.basename(process.cwd())} · ${harness} · CTX ?`,dim:true}]]:[]);
     const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
     if(detail.length){
-      const prefix=base.slice(0,Math.max(1,height()-detail.length)),visible=detail.slice(-(height()-1));
+      const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
       const at=visible.findIndex(line=>Array.isArray(line)&&line.some(part=>String(part.text).startsWith('› ')));
       edit=at<0?-1:prefix.length+at;lines=[...prefix,...visible];
     }else lines=base;

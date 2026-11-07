@@ -22,7 +22,7 @@ class SessionBlockTest(unittest.TestCase):
         for rows in (12,24,50):
             lines=block_lines(self.values(),columns=100,rows=rows,questions=board,
                               route='⏳ route 1 · draft',received=['✉ [73] ready'],human='› 2m · hello')
-            self.assertTrue(4<=len(lines)<=10)
+            self.assertTrue(1<=len(lines)<=10)
             text=[''.join(part for part,_ in line) for line in lines]
             self.assertIn('Include 2025?', '\n'.join(text))
             self.assertNotIn('ROUTES','\n'.join(text));self.assertNotIn('hearting ─','\n'.join(text))
@@ -62,6 +62,14 @@ class SessionBlockTest(unittest.TestCase):
         self.assertIn('Keep this question?',text)
         self.assertNotIn('⏳',text);self.assertNotIn('◑',text)
 
+
+    def test_empty_sections_and_hidden_help_reserve_no_rows(self):
+        from tools.fleet.session_block import block_lines
+        self.assertEqual(block_lines(self.values(),columns=100,rows=30),[])
+        plain=block_lines(self.values(),columns=100,rows=30,human='› 1m · hello')
+        self.assertEqual(len(plain),1)
+        focused=block_lines(self.values(),columns=100,rows=30,human='› 1m · hello',focused=True)
+        self.assertEqual(len(focused),2)
 
     def test_all_original_claude_status_items_survive_in_the_expanded_block(self):
         # Compare against the native renderer itself, not a second item inventory.
