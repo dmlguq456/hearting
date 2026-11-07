@@ -641,6 +641,48 @@ def _code_spec_tree_changed(root: Path, record: Mapping[str, Any], source_rel: s
     return authoring(source_tree) != authoring(base_tree)
 
 
+def _covered_spec_publication(root, record, source_rel, source_path, seed, references,
+                              known_publications=None):
+    """A verified later transaction can satisfy its predecessor's contract duty."""
+    if not isinstance(seed, Mapping) or seed.get("seed_complete") is not True:
+        return None
+    reference = next((row for row in references
+                      if row.get("shared_reference_id") == seed.get("reference_id")), None)
+    if reference is None:
+        return None
+    base_id = _spec_admission_base(root, source_path, reference["shared_reference_id"], None)
+    if base_id not in reference.get("revisions", []):
+        return None
+    source = _spec_bytes(source_path)
+    directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+    rows = _sealed_source_files(directory, record, source_rel, source_path)
+    if rows != [(row["path"], row["sha256"], row["byte_size"]) for row in _spec_inventory(source)]:
+        raise ProducerError("source-manifest-mismatch", source_rel)
+    components = _spec_seed_components(source)
+    base, _ = _verified_shared_spec(root, reference["shared_reference_id"], base_id)
+    if components is not None:
+        base = {path: data for path, data in base.items() if path.split("/", 1)[0] in components}
+    later = reference["revisions"][reference["revisions"].index(base_id) + 1:]
+    cached = dict((known_publications or {}).get(reference["shared_reference_id"], []))
+    import spec_merge
+    for revision_id in reversed(later):
+        revision = cached.get(revision_id) or _read_json(
+            root / "shared/spec" / reference["shared_reference_id"] / "revisions" / revision_id
+            / REVISION_RECORD_NAME)
+        provenance = revision.get("source") if isinstance(revision, Mapping) else None
+        publishing_cycle = provenance.get("cycle_id") if isinstance(provenance, Mapping) else None
+        if not publishing_cycle or publishing_cycle == record["cycle_id"]:
+            continue
+        if "spec_merge" in revision:
+            _verify_spec_publication(root, reference, revision, completed=True)
+        else:
+            _verify_exact_spec_publication(root, reference, revision, completed=True)
+        published, _ = _verified_shared_spec(root, reference["shared_reference_id"], revision_id)
+        if spec_merge.changes_covered(base, source, published):
+            return reference, revision_id, revision, publishing_cycle
+    return None
+
+
 def completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = False,
                                references: Optional[Sequence[Mapping[str, Any]]] = None,
                                known_publications: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -776,6 +818,27 @@ def completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = Fals
         if capability == "autopilot-code":
             if seed is None or not _code_spec_tree_changed(root, record, source_rel, source_path, seed):
                 return result
+        covered = _covered_spec_publication(
+            root, record, source_rel, source_path, seed, refs, known_publications)
+        if covered is not None:
+            reference, revision_id, revision, publishing_cycle = covered
+            coverage = {"kind": "admitted-content", "publishing_cycle_id": publishing_cycle}
+            result.update(status="admitted", shared_reference_id=reference["shared_reference_id"],
+                          shared_reference_revision_id=revision_id,
+                          content_digest=revision.get("content_digest"), coverage=coverage)
+            if settle:
+                result["admission"] = {"status": "reused", "kind": SHARED_KINDS["spec"],
+                    "shared_reference_id": reference["shared_reference_id"],
+                    "shared_reference_revision_id": revision_id,
+                    "reference_created": False,
+                    "revision_dir": str(root / "shared/spec" / reference["shared_reference_id"]
+                                        / "revisions" / revision_id),
+                    "content_digest": revision.get("content_digest"),
+                    "file_count": revision.get("file_count"),
+                    "promotion": revision.get("promotion"), "coverage": coverage}
+                if "spec_merge" in revision:
+                    result["admission"]["spec_merge"] = revision["spec_merge"]
+            return result
         result.update(status="pending", reason="shared-publication-required")
         if capability == "autopilot-spec" and not refs:
             # Reuse the sealed manifest's canonical route admission, including

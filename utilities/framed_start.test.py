@@ -1641,8 +1641,15 @@ class FirstLegStateReplayTest(StartBase):
         self.assertEqual((again["route_id"], second["route_plan"]["index"]), (second["route_id"], 1))
         self.assertEqual(again["cwd"], second["cwd"])
         self.assertIn(second["cwd"], again["next_step"])
-        self.assertEqual(P.read_cycle_record(self.root, again["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"])
-                         ["parent_cycle_id"], cycle)
+        # A planned direct leg uses the daily journal, preserving both the
+        # request and exact predecessor without allocating another cycle.
+        import artifact_journal
+        self.assertEqual(again["artifact_env"]["AGENT_ARTIFACT_CYCLE_ID"], "")
+        target = artifact_journal.target(self.root, second["route_id"])
+        self.assertEqual(target["parent_cycle_id"], cycle)
+        self.assertEqual(target["plan_reference"], second["route_plan"])
+        self.assertEqual(target["request"]["cycle_id"], self.record()["decision"]["frame_route"]["cycle_id"])
+        cycle_count = len(P.list_cycle_records(self.root))
         rows = self.cursor()
         self.assertEqual([(row["index"], row["route_id"], row["after_route_id"]) for row in rows],
                          [(1, second["route_id"], route["route_id"])])
@@ -1652,6 +1659,8 @@ class FirstLegStateReplayTest(StartBase):
         replayed = self.replay()
         self.assertEqual((replayed["route_id"], replayed["state"]), (second["route_id"], "inline"), replayed)
         self.assertEqual((len(self.leg_routes()), len(self.cursor())), (before, 1))
+        self.assertEqual(len(P.list_cycle_records(self.root)), cycle_count)
+        self.assertEqual(artifact_journal.target(self.root, second["route_id"]), target)
 
     def test_the_next_legs_own_start_arms_its_resume_and_the_finished_leg_arms_none(self):
         self.set_briefs([DIRECT, self.SECOND], [DIRECT, self.SECOND])

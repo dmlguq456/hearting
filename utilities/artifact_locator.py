@@ -248,6 +248,9 @@ def iter_cycle_dirs(campaign: Path) -> Iterator[Tuple[Path, str]]:
                 rows.append((entry, "legacy-id"))
     for row in sorted(rows, key=lambda item: item[0].as_posix()):
         yield row
+        import artifact_request
+        for member in artifact_request.members(campaign.parent.parent, row[0]):
+            yield member, "request-execution"
 
 
 def _cycle_record_path(root: Path, cycle_id: str) -> Path:
@@ -402,11 +405,12 @@ def _cycle_entry_id(root: Path, campaign: Mapping[str, Any], campaign_id: str,
     the containing folder, including before a hand move is reconciled.
     """
 
-    binding = read_cycle_binding(cycle_path) if layout == "readable" else None
+    binding = read_cycle_binding(cycle_path) if layout in {"readable", "request-execution"} else None
     # An ordinary cross-campaign rename leaves the old campaign in the
     # binding/manifest until the runtime observes it. The containing campaign
     # is the current location; the stable cycle ID still has to agree.
-    campaign_path = cycle_path.parent.parent if cycle_path.parent.name == "cycles" else cycle_path.parent
+    campaign_path = (cycle_path.parents[3] if layout == "request-execution" else
+                     cycle_path.parent.parent if cycle_path.parent.name == "cycles" else cycle_path.parent)
     cycle_id = _manifest_cycle_id(root, campaign_path, cycle_path)
     if binding is not None and binding.get("campaign_id") != campaign_id:
         record = read_cycle_record(root, binding["cycle_id"]) or {}
@@ -1110,6 +1114,14 @@ def _verify_candidate(root: Path, path: Path, identifier: str) -> bool:
         if len(parts) == 2:
             view = _campaign_view(root, path)
             return view is not None and view.get("campaign_id") == identifier
+        if len(parts) == 6 and parts[3:5] == ("_internal", "executions"):
+            import artifact_request
+            record = read_cycle_record(root, identifier)
+            if not record or artifact_request.execution_dir(root, record, anchor=path.parents[2]) != path:
+                return False
+            binding = read_cycle_binding(path)
+            return bool(binding and binding["cycle_id"] == identifier
+                        and binding["campaign_id"] == record["campaign_id"])
         if len(parts) == 3 and parts[2] != "cycles":
             campaign_path = path.parent
             campaign = _campaign_view(root, campaign_path)
@@ -1142,7 +1154,7 @@ def _verify_candidate(root: Path, path: Path, identifier: str) -> bool:
                 and path.name == identifier
             )
         return False
-    except (LocatorError, OSError):
+    except (LocatorError, OSError, ValueError, KeyError):
         return False
 
 
