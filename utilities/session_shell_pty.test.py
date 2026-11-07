@@ -137,6 +137,18 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(cfg.scenario==='missing-callback-enter')await waitFor(/DONE_held human/);
    else await waitFor(/PEER_NO_CALLBACK/);
  }
+ if(cfg.scenario==='block-focus'||cfg.scenario==='block-focus-batch'){
+   const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
+   const pinned=JSON.parse(fs.readFileSync(file,'utf8'));
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
+   if(!(await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('block focus missing');
+   await rpc(cfg.inlet,{batch:Buffer.from('123\t').toString('base64')});
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
+   if((await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('block focus retained');
+   await rpc(cfg.inlet,{batch:Buffer.from('r1w2f3\r').toString('base64')});await waitFor(/DONE_r1w2f3/);
+   if(/DONE_123/.test(raw))throw Error('focused keys leaked into native');
+   if(cfg.scenario==='block-focus-batch'){await rpc(cfg.inlet,{batch:Buffer.from('\x1d123\t\x1dBATCH_PRESERVED\r').toString('base64')});await waitFor(/DONE_BATCH_PRESERVED/);}
+ }
  const displayLag=[];
  // Registry publication precedes the first complete display observation.
  if(cfg.scenario==='display')await waitFor(/7d [0-9?]/);
@@ -239,6 +251,14 @@ class SessionShellPTYTest(unittest.TestCase):
             raise
         self.assertEqual(child.returncode,0,stderr)
         return json.loads(stdout.splitlines()[-1])
+
+    def test_block_focus_keeps_digits_tabs_and_action_keys_out_of_native_only_while_focused(self):
+        result=self.run_loop('block-focus')
+        self.assertFalse(result['status']['focused'])
+
+    def test_focus_changes_in_one_input_packet_preserve_following_native_bytes(self):
+        result=self.run_loop('block-focus-batch')
+        self.assertFalse(result['status']['focused'])
 
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)

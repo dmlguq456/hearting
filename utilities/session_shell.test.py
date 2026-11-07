@@ -211,12 +211,12 @@ class SessionShellTest(unittest.TestCase):
             with mock.patch.object(shell.os, "getppid", return_value=os.getpid()):
                 result = shell._backend_operation({"op": "projection", "binding": row, "columns": 240, "state": "idle"})
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
-        fields = ("hearting", "Common title", "feature", "CTX 37%", "opus", "7d 60%", "⏳ route 2", "◑ 1")
+        fields = ("hearting", "Common title", "feature", "context ━━━━────── 37%", "opus", "7d 60%", "⏳ route 2", "◑ 2")
         for field in fields:
             self.assertIn(field, text)
         self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))
         self.assertNotIn("private draft", text)
-        self.assertTrue(any("private draft" in line for line in result["lines"]))
+        self.assertTrue(any("private draft" in "".join(part["text"] for part in line) for line in result["lines"]))
 
     def test_an_unobserved_question_projection_does_not_become_zero_waits(self):
         import human_wait_state, session_tidy
@@ -226,7 +226,7 @@ class SessionShellTest(unittest.TestCase):
             result = shell.panel_projection("claude", "test-native-session")
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
         self.assertIn("◑ ?", text)
-        self.assertIn("› ·", result["lines"])
+        self.assertNotIn("◑ 0", result["footer"])
 
     def test_readiness_requires_the_exact_native_idle_record_and_known_empty_screen(self):
         from fleet import session_registry

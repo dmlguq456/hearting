@@ -675,6 +675,24 @@ def _owned_display_refresh(request, fd):
                 break
 
 
+def display_fields(value, *, now=None):
+    """One display projection for the shell callback and the session block."""
+    now = time.time() if now is None else now
+    fields = value["git"] if value else dict.fromkeys(_DISPLAY_FIELDS)
+    observed = value.get("observed_at") if value else None
+    known_time = isinstance(observed, (int, float))
+    fields = {**fields, "observed_at": observed,
+              "completed_at": value.get("completed_at") if value else None,
+              "observation": ("fresh" if now - observed <= _TTL else "stale") if known_time else "unknown",
+              "jobs": value.get("jobs", "") if value else "",
+              "project_auto_compact_disabled": int(value["project_auto_compact_disabled"])
+                  if value and value.get("project_auto_compact_disabled") is not None else None,
+              "observed_label": time.strftime("%H:%M:%S", time.localtime(observed)) if known_time else "?"}
+    for key in ("artifact_root", "artifact_root_kind", "artifact_root_exists", "artifact_root_scope"):
+        fields[key] = value.get(key) if value else None
+    return fields
+
+
 def _display_main():
     import argparse
     import shlex
@@ -703,16 +721,7 @@ def _display_main():
     if args.display in {"json", "refresh"}:
         print(json.dumps(value))
         return
-    fields = value["git"] if value else dict.fromkeys(_DISPLAY_FIELDS)
-    fields = {**fields, "observed_at": value["observed_at"] if value else None,
-              "completed_at": value["completed_at"] if value else None,
-              "observation": ("fresh" if time.time() - value["observed_at"] <= _TTL else "stale") if value else "unknown",
-              "jobs": value["jobs"] if value else "",
-              "project_auto_compact_disabled": int(value["project_auto_compact_disabled"])
-                  if value and value.get("project_auto_compact_disabled") is not None else None,
-              "observed_label": time.strftime("%H:%M:%S", time.localtime(value["observed_at"])) if value else "?"}
-    for key in ("artifact_root", "artifact_root_kind", "artifact_root_exists", "artifact_root_scope"):
-        fields[key] = value.get(key) if value else None
+    fields = display_fields(value)
     for key, item in fields.items():
         # Never place native path/control bytes into a terminal or shell source.
         text = "unknown" if item is None else str(item)

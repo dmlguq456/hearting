@@ -325,6 +325,19 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertNotIn("headline", rows["rec-2"])
         self.assertNotIn("headlines", result["database"])
 
+    def test_selected_repo_reuses_the_same_projection_without_materializing_other_repos(self):
+        self._make_db([
+            {"id": "own", "cwd_origin": "git:github.com/team/repo", "type": "task",
+             "headline": "own task", "updated": "2026-11-02"},
+            {"id": "other", "cwd_origin": "git:github.com/team/other", "type": "task",
+             "headline": "other task", "updated": "2026-11-02"},
+        ])
+        full = memcol._read_project_memory("2026-11-02")
+        selected = memcol._read_project_memory("2026-11-02", repo="repo")
+        self.assertEqual(selected["by_repo"], {"repo": full["by_repo"]["repo"]})
+        with mock.patch.object(memcol.sqlite3, "connect", side_effect=AssertionError("unchanged scope must reuse")):
+            self.assertEqual(memcol._read_project_memory("2026-11-02", repo="repo"), selected)
+
     def test_unchanged_database_is_not_queried_again(self):
         self._make_db([{"id": "d", "cwd_origin": "git:github.com/team/repo", "type": "decision",
                         "headline": "kept", "updated": "2026-11-02"}])

@@ -20,6 +20,7 @@ native question, a legacy S4 marker) is reported with its reason and left for th
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -111,6 +112,19 @@ def _reference(item):
             "session_id": owner.get("session_id")}
 
 
+def request_revision(envelope):
+    """Bind a displayed choice to the original request, not a later refreshed form.
+
+    This is a transient UI reference, not another question or answer store.
+    Volatile observation times, drafts and receipt state do not change identity.
+    """
+    keys = ("harness", "session_id", "source", "kind", "request_id", "turn_id", "item_id",
+            "question_id", "route_id", "gate_epoch", "native_ref", "detail", "choices")
+    raw = json.dumps({key: envelope.get(key) for key in keys}, sort_keys=True,
+                     ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def describe(item, *, now, detail=True):
     """One board row for a person-facing relay: identity, timing, owner and question."""
     owner = item.get("owner") or {}
@@ -131,6 +145,7 @@ def describe(item, *, now, detail=True):
         row.update(questions=[], answerable=False, reason="no exact owner session binding")
         return row
     support = envelope.get("support") if isinstance(envelope.get("support"), dict) else {}
+    row["revision"] = request_revision(envelope)
     row["questions"] = questions_of(envelope)
     row["answer_kind"] = "decision" if envelope.get("kind") == "approval" else "answers"
     row["answerable"] = envelope.get("state") == "open" and support.get("supported") is True
@@ -278,10 +293,18 @@ def _answer(args):
     if item is None:
         print("questions: " + error, file=sys.stderr)
         return 2
+    expected = getattr(args, "expected_owner", None)
+    if expected is not None and _reference(item) != {"id": args.id, **expected}:
+        print("questions: question owner changed", file=sys.stderr)
+        return 2
     if not (item.get("owner") or {}).get("harness"):
         print("questions: %s has no exact owner session binding" % item["id"], file=sys.stderr)
         return 2
     envelope = HWS.read_selected_request(_reference(item))
+    expected_revision = getattr(args, "expected_revision", None)
+    if expected_revision is not None and request_revision(envelope) != expected_revision:
+        print("questions: displayed request changed; review its current choices", file=sys.stderr)
+        return 2
     support = envelope.get("support") if isinstance(envelope.get("support"), dict) else {}
     if envelope.get("state") != "open" or support.get("supported") is not True:
         reason = support.get("reason") or envelope.get("reason") or envelope.get("state")
@@ -292,7 +315,7 @@ def _answer(args):
         text = Path(args.text_file).read_text(encoding="utf-8")
         if (envelope.get("native_ref") or {}).get("transport") != "hearting-message-answer":
             text = text.strip()
-    answers = None
+    answers = getattr(args, "answers", None)
     if args.answers_file:
         try:
             answers = json.loads(Path(args.answers_file).read_text(encoding="utf-8"))

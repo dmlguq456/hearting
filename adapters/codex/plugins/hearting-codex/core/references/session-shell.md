@@ -1,7 +1,7 @@
 # Optional session shell
 
 **Optional session shell.** Hearting may wrap an interactive native terminal
-with a collapsed status line and a read-only bottom panel. Installation leaves
+with a shared status line and an expanded session block. Installation leaves
 this feature off; enabling it is a separate user choice. Noninteractive commands
 and an unavailable shell runtime execute the original CLI without starting a
 second native session. Herdr, cmux and tmux remain optional attachments.
@@ -33,11 +33,25 @@ The native callback supplies its session ID before a passive registry may exist.
 Its nearest verified native process and birth must still belong to this wrapped
 terminal; a worker or service callback cannot select another terminal's session.
 
-`Ctrl+]` or Fleet's exact-session display request expands the same session's
-routes, question list, received peer context and last real human input. The
-panel reads common projections, opens questions in Fleet, and edits no answer.
-It neither creates questions nor changes claims, receipts, approvals or route
-authority. Fleet's absence does not prevent an existing peer runner from
+The block opens by default, using four to ten rows according to terminal height.
+Questions take space first; absent sections disappear. Its light, dim labels
+and short glyphs follow native status lines, with Fleet's semantic value colors.
+The status area retains every former Hearting-native field: folder and explicit
+session subject; branch/flags/worktrees and Git observation/time; the contiguous
+ten-cell colored context gauge; model/effort; 5h/7d percentages and reset times,
+model-specific quota buckets, answer waits, routes and any running-jobs line.
+Long status fields wrap in expanded mode; question space wins on small screens.
+The key guidance appears only while the person focuses the block.
+It shows the same session's routes, questions, received peers, repo work and
+last real human input. Only session-owned GPU work warrants a resource row.
+`Ctrl+]` enters block focus; Escape or `Ctrl+]` returns to native input. Ordinary
+typing, including digits, Enter, Tab and action letters, remains native outside
+that focus. The focused question editor uses existing `questions list/answer`
+choice, text and decision operations; original questions, exact binding, claims
+and receipts remain with that common API. Marked Codex questions use the same
+board, never a new question store. Route, peer, repo and tidy actions use their
+existing entry points. A changed selection cannot retarget an in-flight action.
+Fleet's absence does not prevent an existing peer runner from
 waking a shell. Shell display and input transport add no model instructions.
 
 
@@ -53,7 +67,7 @@ They never establish input readiness or add anything to the model's input.
 An observed non-Git directory is `no-git`; unavailable Git evidence stays `?`.
 While wrapped, the former Hearting Claude/OpenCode decorations yield to this
 line. Unwrapped sessions keep their existing displays. Codex keeps native input,
-execution and permission UI; only duplicate configurable footer items yield.
+execution, permission UI, thread ID and context. Its footer is not deduplicated.
 
 Event-driven updates use native lifecycle and the existing record changes,
 without tuning a polling interval. Validation compares native-to-common update
@@ -65,6 +79,12 @@ While wrapped, Claude's former Hearting statusline emits no fallback text or
 newline. Its existing exact-session display tap stays active for the common
 line. Collapsing or disabling Hearting's block must not leave a lone native
 `context N%` decoration. Unwrapped Claude keeps its existing native statusline.
+First display and updates are compared beside native and Fleet. Last-known
+values and event observations belong in their shared source, not a block-only
+store.
+Claude's reserved native row may only be removed if a private marker survives
+Native Ink and identifies exactly one row. An absent or ambiguous marker keeps
+every row; no geometric inference or alternate workaround removes native output.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.
