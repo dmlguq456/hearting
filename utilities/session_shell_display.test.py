@@ -24,12 +24,12 @@ class WrappedDisplayTest(unittest.TestCase):
             result=subprocess.run(['bash',str(ROOT/'adapters/claude/statusline.sh')],input=json.dumps(payload),
                                   env=env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
-            return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
+            return result.stdout if wrapped else re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
 
-    def test_wrapped_claude_retains_only_the_unavailable_independent_native_context(self):
-        self.assertEqual(self.statusline(True,37),'context 37%')
-        self.assertEqual(self.statusline(True,0),'context 0%')
-        self.assertEqual(self.statusline(True,None),'context ?')
+    def test_wrapped_claude_emits_no_native_fallback_even_for_unknown_context(self):
+        self.assertEqual(self.statusline(True,37),'')
+        self.assertEqual(self.statusline(True,0),'')
+        self.assertEqual(self.statusline(True,None),'')
 
     def test_unwrapped_claude_keeps_its_existing_model_and_usage_display(self):
         line=self.statusline(False,37)
