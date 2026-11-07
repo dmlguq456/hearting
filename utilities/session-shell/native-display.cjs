@@ -41,4 +41,8 @@ function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);
   return Math.min(limit,Math.max(summary,detail+(detail&&summary?1:0)));
 }
-module.exports={observe,firstLine,hiddenFooterRows,blockHeight};
+function titleSequence(title) {
+  const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
+  return '\x1b]2;'+text+'\x07';
+}
+module.exports={observe,firstLine,hiddenFooterRows,blockHeight,titleSequence};

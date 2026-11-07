@@ -7760,8 +7760,30 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
 
 
 
+def _pane_shell_binding(pane, harness, sid, *, expected=None):
+    """Join a native attachment to this pane's exact current foreground owner."""
+    import session_shell
+    binding, _reason = session_shell.exact_binding(harness, sid)
+    if binding is None:
+        return None
+    info = _retire_pane_info(pane)
+    owner = "broker" if "broker_pid" in binding else "host"
+    pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
+    if (not info or info.get("foreground_process_group_id") != pid
+            or not any(isinstance(row, dict) and row.get("pid") == pid
+                       for row in info["foreground_processes"])
+            or _proc_start_ticks(pid) != birth):
+        return None
+    identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                "native_pid", "native_start", "broker_pid", "broker_start")
+    if expected is not None and any(binding.get(k) != expected.get(k) for k in identity):
+        return None
+    return binding
+
+
 def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
-                      expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None):
+                      expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
+                      pane=None):
     """Native-session address using the existing sealed message and carrier."""
     import session_shell
     harness, sid = binding["harness"], binding["sid"]
@@ -7783,6 +7805,8 @@ def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
             result = {"ok": True, "state": "received"}
         elif row.get("state") != "pending" or args.no_trailer:
             result = {"ok": False, "reason": "awaiting-native-receiver"}
+        elif pane is not None and _pane_shell_binding(pane, harness, sid, expected=binding) is None:
+            result = {"ok": False, "reason": "target-process-changed"}
         elif harness == "codex":
             # Same exact native queue; shell display grants no start permission.
             result = peer_message.deliver_pending_codex(ref, start_interrupted=False)
@@ -7903,6 +7927,11 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                                from_identity=from_identity, from_name=from_name)
         print("prompted=false reason=target-identity-changed")
         return 5
+    shell_binding = _pane_shell_binding(target_pane, t_harness, t_sid) if t_sid else None
+    if shell_binding is not None:
+        return _cmd_prompt_shell(args, body, shell_binding, from_identity=from_identity,
+            from_name=from_name, expected_recipient=expected_recipient, on_prepared=on_prepared,
+            producer_binding=producer_binding, handoff=handoff, pane=target_pane)
     recipient = {"harness": t_harness, "session_id": peer_message.usable_session_id(t_sid),
                  "name": t_name}
     if target_pane:
