@@ -415,6 +415,13 @@ def read_seat_history(session, harness, sid, *, cards=False, pane=None, read_con
         return None, "", Health("failed", None, ui_text("fleet.seat.missing", error=type(exc).__name__))
     try:
         entries = _seat_entries(module, seat, harness, sid, cards=cards, read_context=read_context)
+        for entry in entries:
+            identity = (entry.get("harness") or harness, entry.get("sid") or sid)
+            records = utility("turn_change_record").supplementary_records(
+                *identity, nav._get(session, "cwd", "project") or "")
+            journals = [row for row in records if row.get("kind") == "journal-entry"]
+            if journals:
+                entry["journal_records"] = journals
     except Exception as exc:
         return None, "", Health("failed", None, type(exc).__name__)
     return entries, (seat.pane if seat.kind == "pane" else ""), Health("success", time.time())

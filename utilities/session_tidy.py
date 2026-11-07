@@ -1242,10 +1242,10 @@ def matching_tidy_claim(seat: Seat, harness: str, sid: str, prompt: str, sequenc
                default=None)
 
 
-def real_prompt_frontier(seat: Seat, harness: str, sid: str) -> Optional[dict]:
+def real_prompt_frontier(seat: Seat, harness: str, sid: str, *, raw: Optional[bytes] = None) -> Optional[dict]:
     """Latest actual user prompt for this exact session, independent of ledger throttling."""
     seat = session_seat(seat, harness, sid)
-    rows = [row for row in _read_ledger_lines(seat)
+    rows = [row for row in _read_ledger_lines(seat, raw=raw)
             if row.get("event") == "real-prompt" and row.get("harness") == harness and row.get("sid") == sid]
     return max(rows, key=lambda row: int(row.get("sequence", 0) or 0), default=None)
 
@@ -1361,7 +1361,7 @@ def _summarize_sessions(rows) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     for item in rows:
         if item.get("event") in {"handover", "succession", "steward-release", "tidy-claim",
-                                  "real-prompt", "native-address"}:
+                                  "real-prompt", "native-address", "resume-notice"}:
             # Relations, revocation and prompt provenance are not session activity.
             continue
         key = (str(item.get("harness") or ""), str(item["sid"]))
@@ -1404,7 +1404,7 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
             outgoing.setdefault((edge_harness, source), set()).add(target)
     for row in rows:
         name, session = str(row.get("harness") or ""), str(row.get("sid") or "")
-        if not name or not session or row.get("event") == "native-address":
+        if not name or not session or row.get("event") in {"native-address", "resume-notice"}:
             continue
         key = (name, session)
         edge = None if graph is not None else tidy_lineage_edge(row)
@@ -2045,7 +2045,7 @@ def session_start_context(harness: str, sid: str, pane: str, *, endpoint=None) -
 def record_event(seat: Seat, harness: str, sid: str, event: str, *, source: str = "",
                  transcript: str = "", cwd: str = "", now: Optional[float] = None,
                  bump_epoch: bool = False, compact_identity: str = "",
-                 resume_argv=None, launch_cwd: str = "",
+                 resume_argv=None, launch_cwd: str = "", launch_process=None,
                  compact_context: Optional[dict] = None,
                  card_generation: Optional[int] = None) -> dict:
     """Append one ledger line (caller holds the seat lock). Returns the session row."""
@@ -2063,6 +2063,10 @@ def record_event(seat: Seat, harness: str, sid: str, event: str, *, source: str 
         entry["source"] = source
     if event == "start" and source in {"startup", "resume", "select", "clear", "compact", "fork"}:
         entry["session_seq"] = max(1, int(now * 1_000_000))
+        entry["prompt_seq"] = read_prompt_seq(seat)
+        if (isinstance(launch_process, dict) and type(launch_process.get("pid")) is int
+                and launch_process["pid"] > 1 and str(launch_process.get("start", "")).isdigit()):
+            entry["launch_process"] = {"pid": launch_process["pid"], "start": str(launch_process["start"])}
     if event == "start" and isinstance(resume_argv, list):
         try:
             tools = str(Path(__file__).resolve().parents[1] / "tools")
@@ -2150,8 +2154,9 @@ def _fold_ledger(seat: Seat) -> None:
     claims: dict[str, dict] = {}
     real_frontiers: dict[tuple[str, str], dict] = {}
     native_addresses: dict[tuple[str, str], dict] = {}
+    resume_notices: dict[tuple[str, str], dict] = {}
     activity = [l for l in lines if l.get("event") not in {
-        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address"}]
+        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address", "resume-notice"}]
     for item in lines:
         if item.get("event") == "tidy-claim" and item.get("claim_id"):
             claims[str(item["claim_id"])] = item
@@ -2162,6 +2167,8 @@ def _fold_ledger(seat: Seat) -> None:
                 real_frontiers[key] = item
         elif item.get("event") == "native-address":
             native_addresses[(str(item.get("harness") or ""), str(item.get("sid") or ""))] = item
+        elif item.get("event") == "resume-notice":
+            resume_notices[(str(item.get("harness") or ""), str(item.get("sid") or ""))] = item
     claim_rows = sorted(claims.values(), key=lambda row: float(row.get("ts", 0) or 0))[-TIDY_CLAIM_KEEP_ROWS:]
     provenance = claim_rows + list(real_frontiers.values())
     recent = activity[-LEDGER_KEEP_RAW:]
@@ -2190,7 +2197,7 @@ def _fold_ledger(seat: Seat) -> None:
                 and latest_at >= float(row.get("latest_start_at", 0) or 0)):
             row.update(latest_start_source=latest_source, latest_start_at=latest_at,
                        start_seq=item.get("session_seq", item.get("start_seq")))
-            for field in ("resume_argv", "launch_cwd"):
+            for field in ("resume_argv", "launch_cwd", "launch_process", "prompt_seq"):
                 row.pop(field, None)
                 if field in item:
                     row[field] = item[field]
@@ -2199,7 +2206,7 @@ def _fold_ledger(seat: Seat) -> None:
                 row[field] = item[field]
     body = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n"
                     for r in list(folded.values()) + relations + provenance
-                    + list(native_addresses.values()) + recent)
+                    + list(native_addresses.values()) + list(resume_notices.values()) + recent)
     # Retained edges are bounded above; a fold that drops one changes reachability.
     dropped_edges = any(index not in keep_relation_indices for index, _row in handovers)
     try:
@@ -2912,7 +2919,10 @@ def bump_prompt_seq(seat: Seat, harness: str, sid: str, now: float) -> int:
     previous = read_json(_prompt_seq_path(seat))
     seq = read_prompt_seq(seat) + 1
     prior_human = last_human_prompt_seq(seat) if isinstance(previous, dict) else 0
-    atomic_write_json(_prompt_seq_path(seat), {"schema": SCHEMA, "seq": seq, "at": now,
+    display = {key: previous[key] for key in ("last_human_prompt", "received_inputs")
+               if isinstance(previous, dict) and previous.get("harness") == harness
+               and previous.get("sid") == sid and key in previous}
+    atomic_write_json(_prompt_seq_path(seat), {**display, "schema": SCHEMA, "seq": seq, "at": now,
                                               "harness": harness, "sid": sid, "source": "pending",
                                               "last_human_seq": seq, "prior_human_seq": prior_human})
     return seq
@@ -2930,8 +2940,16 @@ def last_human_prompt_seq(seat: Seat) -> int:
 # Turns the runtime itself starts: a finished background task (Claude ``<task-notification>``,
 # Codex ``<subagent_notification>``), a message from another session of the same user
 # (Claude ``<agent-message>`` with its fixed framing) and runtime ``<system-reminder>`` text.
+# OpenCode v2 inserts command/description raw, including quotes and angle brackets.
+# Its native opener ends with a quote, greater-than sign and newline.
+# A later opener boundary cannot recover a missing close. Keep the first
+# boundary instead of rescanning the remaining body for every delimiter.
 _RUNTIME_BLOCK = re.compile(
-    r"<(task-notification|subagent_notification|agent-message|system-reminder)\b[^>]*>.*?</\1>", re.S)
+    r'<(task-notification|subagent_notification|agent-message|system-reminder'
+    r'|(?P<opencode>subagent(?= sessionID="[^"\r\n]+" state="(?:completed|error|cancelled)" description=")'
+    r'|shell(?= id="[^"\r\n]+" state="(?:completed|error|cancelled)" command=")))'
+    r'''(?(opencode)(?>\b.*?">\r?\n)|\b(?:[^>"']|"[^"]*"|'[^']*')*>)'''
+    r'(?P<body>.*?)</\1>', re.S)
 _PEER_FRAMING = (
     re.compile(r"^\s*Another Claude session sent a message[^\n:]*:"),
     # The fixed one-line paragraph, up to its fixed last sentence and no further.
@@ -2942,6 +2960,159 @@ _PEER_FRAMING = (
 # ``last_human_seq`` where it was.
 NON_HUMAN_SOURCES = frozenset({"notification", "peer", "runtime", "claim"})
 
+PROMPT_LINE_CHARS = 384
+RECEIVED_INPUTS_LIMIT = 8
+_PROMPT_DISPLAY_UNREAD = object()
+_PROMPT_PASTE_BLOCK = re.compile(
+    r'<pasted_content id="(?P<id>[^"\r\n]+)">\n?(?P<body>.*?)\n?'
+    r'</pasted_content(?: id="(?P=id)")?>', re.DOTALL)
+
+
+def prompt_first_line(text: str) -> str:
+    """Bound display text after source classification; this never decides its source."""
+    import work_intent
+    value = text if isinstance(text, str) else ""
+    # Display uses the whole-paste grammar accepted by peer-message's reader.
+    # Keep runtime_prompt_text (claim/source authority) unchanged.
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+    if wrapped:
+        value = wrapped.group("body")
+    # Use the existing source grammar: human framing or quoted examples stay
+    # intact. This only selects display text, never prompt/claim authority.
+    for _ in range(4):
+        if not runtime_turn_source(value):
+            break
+        bodies = []
+        for block in _RUNTIME_BLOCK.finditer(value):
+            kind = block.group(1)
+            body = block.group("body").strip()
+            if block.group("opencode") and re.search(r'">\r?\n.*?">\r?\n', block.group(0), re.S):
+                # A raw field and output can contain the same delimiter.
+                # Without a unique boundary the displayed first line is unknown.
+                body = "?"
+            if kind == "task-notification":
+                summary = re.search(r"<summary>(.*?)</summary>", body, re.S)
+                if summary:
+                    body = summary.group(1)
+                else:
+                    # A summary-free notification can still contain plain text.
+                    body = re.sub(r"<(task-id|tool-use-id|output-file|status)>.*?</\1>",
+                                  "", body, flags=re.S)
+            elif kind == "subagent_notification":
+                try:
+                    notice = json.loads(body)
+                except (ValueError, RecursionError):
+                    notice = None
+                status = notice.get("status") if isinstance(notice, dict) else None
+                if isinstance(status, dict):
+                    body = next((status[key] for key in ("completed", "errored")
+                                 if isinstance(status.get(key), str)), body)
+            if body.strip():
+                bodies.append(body)
+        value = "\n".join(bodies)
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+    line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
+    return line if len(line) <= PROMPT_LINE_CHARS else line[:PROMPT_LINE_CHARS - 1] + "…"
+
+
+def _received_prompt_line(prompt_text: str, origin: dict) -> str:
+    """Resolve a verified large-message preview once at arrival, never in Fleet."""
+    ref = origin.get("transfer_ref")
+    if isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{32}", ref):
+        try:
+            import importlib.util
+            path = Path(__file__).resolve().with_name("peer-message.py")
+            spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            payload = module.read_peer_payload(ref)
+            if isinstance(payload, dict) and isinstance(payload.get("body"), str):
+                return prompt_first_line(payload["body"])
+        except (OSError, ValueError, TypeError, ImportError, AttributeError):
+            pass
+    return prompt_first_line(prompt_text)
+
+
+def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
+                          prompt_text: str, now: float) -> None:
+    """Retain only the existing classifier's final result in its existing frontier."""
+    seat = session_seat(seat, harness, sid)
+    path = _prompt_seq_path(seat)
+    current = read_json(path)
+    if (not isinstance(current, dict) or current.get("harness") != harness
+            or current.get("sid") != sid or current.get("seq") != sequence):
+        return
+    source = current.get("source")
+    if source != "real" and source not in NON_HUMAN_SOURCES:
+        return
+    row = {"harness": harness, "sid": sid, "sequence": sequence, "at": now,
+           "text": prompt_first_line(prompt_text), "source": source}
+    if source == "real":
+        current["last_human_prompt"] = row
+    else:
+        origin = current.get("request_origin")
+        origin = origin if isinstance(origin, dict) else {}
+        row["text"] = _received_prompt_line(prompt_text, origin)
+        fallback = "하팅" if source == "claim" else "peer" if source == "peer" else "runtime"
+        row["sender"] = prompt_first_line(str(origin.get("name") or fallback))[:96]
+        if (origin.get("sender_harness") in HARNESSES
+                and isinstance(origin.get("sender_session_id"), str)):
+            row["sender_harness"] = origin["sender_harness"]
+            row["sender_session_id"] = origin["sender_session_id"][:160]
+        if origin.get("transfer_ref"):
+            row["ref"] = str(origin["transfer_ref"])[:96]
+        rows = current.get("received_inputs")
+        rows = [item for item in rows if isinstance(item, dict) and item.get("sequence") != sequence] \
+            if isinstance(rows, list) else []
+        current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
+    atomic_write_json(path, current)
+
+
+def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
+    """Read exact-session display facts, never a conversation or a new prompt judgment."""
+    current = prompt_state(session_seat(seat, harness, sid)) if current is _PROMPT_DISPLAY_UNREAD else current
+    empty = {"human": None, "human_state": "unknown", "received": []}
+    if (not isinstance(current, dict) or current.get("schema") != SCHEMA or current.get("harness") != harness
+            or current.get("sid") != sid or type(current.get("seq")) is not int):
+        return empty
+    sequence = current["seq"]
+    def valid(row):
+        return (isinstance(row, dict) and type(row.get("sequence")) is int
+                and row.get("harness") == harness and row.get("sid") == sid
+                and 0 < row["sequence"] <= sequence
+                and isinstance(row.get("at"), (int, float)) and not isinstance(row["at"], bool)
+                and math.isfinite(row["at"]) and row["at"] >= 0
+                and isinstance(row.get("text"), str) and len(row["text"]) <= PROMPT_LINE_CHARS
+                and all(char.isprintable() for char in row["text"]))
+    human = current.get("last_human_prompt")
+    human_seq = current.get("last_human_seq", current.get("seq", 0))
+    if type(human_seq) is not int or human_seq < 0:
+        return empty
+    if not (valid(human) and human.get("source") == "real" and human["sequence"] == human_seq):
+        human = None
+        # Older frontiers can quote their own exact human boundary, but cannot
+        # supply an earlier prompt whose text was not retained.
+        if (current.get("last_human_prompt") is None and current.get("source") == "real" and sequence == human_seq
+                and isinstance(current.get("request_excerpt"), str)):
+            candidate = {"harness": harness, "sid": sid, "sequence": sequence, "at": current.get("at"),
+                         "text": prompt_first_line(current["request_excerpt"]), "source": "real"}
+            human = candidate if valid(candidate) else None
+    received = [dict(item) for item in current.get("received_inputs", [])
+                if valid(item) and item.get("source") in NON_HUMAN_SOURCES] \
+        if isinstance(current.get("received_inputs"), list) else []
+    for item in received:
+        sender = item.get("sender")
+        item["sender"] = sender if (isinstance(sender, str) and len(sender) <= 96
+                                    and all(char.isprintable() for char in sender)) else "runtime"
+        if (item.get("sender_harness") not in HARNESSES
+                or not isinstance(item.get("sender_session_id"), str)):
+            item.pop("sender_harness", None)
+            item.pop("sender_session_id", None)
+    return {"human": dict(human) if human else None,
+            "human_state": "known" if human else "none" if human_seq == 0 else "unknown",
+            "received": received[-RECEIVED_INPUTS_LIMIT:]}
+
 
 def runtime_turn_source(prompt_text: str) -> str:
     """``notification``, ``peer`` or ``runtime`` when the prompt holds nothing but runtime blocks
@@ -2949,6 +3120,11 @@ def runtime_turn_source(prompt_text: str) -> str:
     if not isinstance(prompt_text, str):
         return ""
     prompt_text = runtime_prompt_text(prompt_text)
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(prompt_text.strip())
+    if wrapped:
+        prompt_text = wrapped.group("body")
+    if "</" not in prompt_text:
+        return ""  # No complete block exists; avoid retrying every opener.
     kinds = [match.group(1) for match in _RUNTIME_BLOCK.finditer(prompt_text)]
     if not kinds:
         return ""
@@ -2957,7 +3133,7 @@ def runtime_turn_source(prompt_text: str) -> str:
         rest = framing.sub("", rest)
     if rest.strip():
         return ""
-    if any(kind in ("task-notification", "subagent_notification") for kind in kinds):
+    if any(kind in ("task-notification", "subagent_notification", "subagent", "shell") for kind in kinds):
         return "notification"
     return "peer" if "agent-message" in kinds else "runtime"
 
@@ -3219,7 +3395,12 @@ def run_hook(*args, **kwargs) -> str:
     taking it under the hook's would deadlock."""
     closed: list = []
     try:
-        return _run_hook(*args, _closed=closed, **kwargs)
+        result = _run_hook(*args, _closed=closed, **kwargs)
+        if len(args) >= 3 and args[1] == "start" and kwargs.get("source") == "resume":
+            with contextlib.suppress(Exception):
+                import session_resume
+                session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))
+        return result
     finally:
         if closed:
             with contextlib.suppress(BaseException):
@@ -3249,6 +3430,10 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
     env = os.environ if env is None else env
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
+    if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness in {"claude", "codex"}:
+        with contextlib.suppress(Exception):
+            import session_shell
+            session_shell.lifecycle(harness, event, sid, env=env)
     if event == "runtime-status":
         if harness == "opencode":
             observed = False
@@ -3406,6 +3591,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
                 if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
+            with contextlib.suppress(Exception):
+                record_prompt_display(seat, harness, sid, sequence, prompt_text, now)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same
@@ -3427,7 +3614,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 launch = None
         row = record_event(seat, harness, sid, event, source=source, transcript=transcript,
                            cwd=cwd, now=now, bump_epoch=compacting,
-                           resume_argv=(launch or {}).get("argv"),
+                           resume_argv=(launch or {}).get("argv"), launch_process=launch,
                            launch_cwd=(launch or {}).get("cwd") or "")
         sessions[(harness, sid)] = row
         if event == "compact":

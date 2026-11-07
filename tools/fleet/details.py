@@ -681,6 +681,10 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
                  if getattr(row, "_continuation_validated", False)}
     value = _copy_for_enrichment(snapshot, required_only=required_only)
     sessions, jobs = value.sessions, value.jobs
+    # The live loop keeps basic collection cheap (fast_first) and publishes
+    # display facts from this existing worker, including required-only passes.
+    from .collectors import prompt_inputs
+    prompt_inputs.enrich(sessions)
     detail_sessions = [row for row in sessions if identity(row) not in continued]
     detail_jobs = [row for row in jobs if identity(row) not in continued]
     route_entities = list(value.route_entities or ())
@@ -905,7 +909,8 @@ def merge(basic, detail):
                 continue
             previous = candidates[0]
             current = copy.copy(row)
-            for field in _METADATA + _STEWARD_RELATIONS:
+            # Input text is live display data, outside the persisted continuation schema.
+            for field in _METADATA + _STEWARD_RELATIONS + ("_prompt_display",):
                 observed = getattr(previous, field, None)
                 if observed is not None:
                     setattr(current, field, observed)

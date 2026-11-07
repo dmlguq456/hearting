@@ -606,6 +606,18 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         pass
 
+    # Resume attention is a read-only view of existing notice/ledger facts.
+    try:
+        import session_resume
+        for session in sessions:
+            try:
+                session._resume_attention = session_resume.status_for_session(
+                    session.harness, getattr(session, "session_id", None))
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                pass
+    except ImportError:
+        pass
+
     answer_waits = None
     fleet_answer_waits = None
     try:
@@ -1042,6 +1054,13 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         peer = None
     collect_all.last_peer_messages = peer
+
+    if not fast_first:
+        try:
+            from . import prompt_inputs
+            prompt_inputs.enrich(sessions)
+        except Exception:
+            pass
 
     # F-25: drop cross-tick hysteresis entries for rows that no longer exist. Runs after
     # BOTH sessions and jobs are classified — sweeping earlier would evict live job keys.

@@ -961,6 +961,22 @@ class NodeScopeTest(unittest.TestCase):
         unbound = W.resolve_node_scope(route, "one-shot", {})
         self.assertIn("do not write durable artifacts", W.node_scope_prompt(unbound))
 
+    def test_project_document_target_and_process_records_have_distinct_locations(self):
+        node = {"id": "draft-production", "write_scope": ["target-artifact", "draft/**"],
+                "outputs": ["draft/**"]}
+        route = {"capability": "autopilot-draft", "cwd": "/project", "nodes": [node]}
+        scope = W.resolve_node_scope(route, "draft-production",
+                                     {"AGENT_ARTIFACT_OUTPUT_DIR": "/records/cycle/artifacts"})
+        prompt = W.node_scope_prompt(scope)
+        self.assertIn("project_document_root=/project", prompt)
+        self.assertIn("from the first draft", prompt)
+        self.assertIn("path and content version", prompt)
+        self.assertIn("/records/cycle/artifacts/draft/**", prompt)
+        self.assertNotIn("Source is read-only", prompt)
+        review = W.resolve_node_scope({**route, "nodes": [{"id": "review", "write_scope": ["reviews/**"]}]},
+                                      "review", {"AGENT_ARTIFACT_OUTPUT_DIR": "/records/cycle/artifacts"})
+        self.assertIn("Source is read-only", W.node_scope_prompt(review))
+
     def test_scope_resolves_from_producer_binding_without_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1738,7 +1754,14 @@ class RepeatFailureTest(unittest.TestCase):
 
 
 class HandedOverChecksTest(unittest.TestCase):
-    """execute records what its environment cannot run; the later qa/test stage receives it (D1 seam 5)."""
+    """Checks unavailable upstream remain visible to the later verification stage."""
+
+    def test_accepted_unavailable_check_is_not_an_unconditional_blocked_retry(self):
+        self.write("dev_logs/step_01.md", "handed-over: `make legacy-fixture` (reason: release unavailable)\n")
+        prompt = W.handed_over_prompt(code_leg_route(), "test", str(self.output))
+        self.assertIn("unverified (reason), never PASS", prompt)
+        self.assertIn("user already accepted that limit", prompt)
+        self.assertIn("without repeating the unavailable check", prompt)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1842,9 +1865,9 @@ class HandedOverChecksTest(unittest.TestCase):
         self.write("dev_logs/step_01.md", "handed-over: `pytest -k socket` (reason: loopback bind EPERM)\n")
         test = assign("test")
         self.assertIn("Checks earlier stages handed over (their environment could not run them); "
-                      "run each as part of your verification.", test)
+                      "assess their available evidence and run checks whose result can still change the decision.", test)
         self.assertIn("- `pytest -k socket` (reason: loopback bind EPERM) [dev_logs/step_01.md]", test)
-        self.assertIn("leaves your verdict BLOCKED: repeat its handed-over line", test)
+        self.assertIn("A required unknown leaves the verdict BLOCKED.", test)
         self.assertLess(test.index("Completion precedence:"), test.index("Checks earlier stages handed over"))
         for other in ("execute", "impl-review", "report"):
             with self.subTest(node=other):

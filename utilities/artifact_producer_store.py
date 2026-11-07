@@ -91,6 +91,11 @@ INACTIVE_FALLBACK_ENV = "AGENT_ARTIFACT_INACTIVE_FALLBACK"
 ROOT_CLASSES = ("active", "inactive-with-legacy", "inactive-empty", "malformed")
 ACTIVATION_KINDS = ("approval", "bootstrap-empty-root")
 RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicate
+# CORE §3 derived read entrance (`utilities/artifact_entrance.py`). These are not
+# canonical records: admission, census and residue never take them as input, and
+# a same-named file without the generator's first-line marker is left to its
+# owner (never overwritten or moved).
+ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")
 COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
                           "reason", "issuer", "created_at", "expires_at")
 WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
@@ -447,6 +452,9 @@ def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
     root = Path(root)
     if record is None:
         record = read_cycle_record(root, cycle_id)
+    if record and record.get("journal_migration"):
+        from artifact_journal_migration import resolve_backup
+        return resolve_backup(root, record)
     if record and (record.get("relocation") or {}).get("artifact_root"):
         raise ProducerError("cycle-relocated", str(record["relocation"]))
     campaign_record = read_campaign(root, campaign_id)
@@ -525,7 +533,7 @@ def transition_window_closed(root: Path) -> bool:
 
 
 def _is_runtime_owned_top_level(name: str) -> bool:
-    return name.startswith(".") or name in RUNTIME_OWNED_EXACT
+    return name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
 
 
 def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
@@ -1197,6 +1205,9 @@ def _valid_cycle_state(value: Any) -> bool:
 def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
     """Resolve this record's manifest without scanning other cycle bindings."""
     root = Path(root).resolve()
+    if record.get("journal_migration"):
+        from artifact_journal_migration import resolve_backup
+        return resolve_backup(root, record) / "manifest.json"
     campaign_id = record.get("campaign_id")
     cycle_id = record.get("cycle_id")
     if not artifact_identity.is_well_formed(campaign_id, "campaign") or not artifact_identity.is_well_formed(cycle_id, "cycle"):

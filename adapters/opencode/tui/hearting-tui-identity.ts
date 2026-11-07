@@ -13,6 +13,8 @@
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
 
 const PLUGIN_ID = "hearting.tui-identity"
 const RECORD_SCHEMA = "hearting-tui-selection-v1"
@@ -91,6 +93,37 @@ function recordPath(dir, own) {
   return path.join(dir, own.pid + "-" + own.start + ".json")
 }
 
+function reportResumeOnce(mem, sid, own) {
+  if (mem.resumeReported) return
+  const argv = process.argv || []
+  if (argv.some((arg) => arg === "--fork" || arg === "--fork=true")) return
+  const requested = argv.some((arg, i) =>
+    ((arg === "--session" || arg === "-s") && argv[i + 1] === sid)
+      || arg === `--session=${sid}` || arg === `-s=${sid}`
+      || ["--continue", "--last", "-c"].includes(arg))
+  if (!requested) return
+  mem.resumeReported = true
+  const home = process.env.HOME || ""
+  const config = process.env.XDG_CONFIG_HOME || path.join(home, ".config")
+  const roots = [process.env.AGENT_HOME,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.."),
+    path.join(config, "opencode", "hearting")].filter(Boolean)
+  for (const root of roots) {
+    try {
+      const script = path.join(root, "utilities", "session_resume.py")
+      readFileSync(script, { encoding: "utf8", flag: "r" })
+      // This bounded helper records native lifecycle only. It never emits or
+      // consumes card/context output, and the existing courier owns wake I/O.
+      const child = spawn("python3", [script], { stdio: ["pipe", "ignore", "ignore"] })
+      child.on("error", () => {})
+      child.stdin.on("error", () => {})
+      child.stdin.end(JSON.stringify({ harness: "opencode", sid, pid: own.pid, start: own.start }))
+      child.unref?.()
+      return
+    } catch {}
+  }
+}
+
 function syncRecord(api, mem, sourceHint = null) {
   const env = (typeof process !== "undefined" && process.env) || {}
   const own = ownLifecycle()
@@ -127,6 +160,7 @@ function syncRecord(api, mem, sourceHint = null) {
     const tmp = file + ".tmp-" + own.pid
     writeFileSync(tmp, body, { encoding: "utf8", mode: 0o600 })
     renameSync(tmp, file)
+    reportResumeOnce(mem, sid, own)
     return true
   } catch { return false }
 }

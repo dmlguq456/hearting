@@ -1238,7 +1238,16 @@
         "topology": "one-shot-owner",
         "worker_kind": "capability-owner",
         "write_scope": [
-          "documents/<cycle>/**"
+          "target-artifact",
+          "documents/<cycle>/**",
+          "analysis/**",
+          "strategy/**",
+          "assets/**",
+          "draft/**",
+          "reviews/**",
+          "final/**",
+          "pipeline_summary.md",
+          "pipeline_state.yaml"
         ],
         "owner_dispatch_depth": 1,
         "max_dispatch_depth": 1,
@@ -1393,6 +1402,7 @@
               "draft/**"
             ],
             "write_scope": [
+              "target-artifact",
               "draft/**"
             ],
             "resource_class": "normal",
@@ -1497,6 +1507,7 @@
               "pipeline_summary.md"
             ],
             "write_scope": [
+              "target-artifact",
               "final/**",
               "pipeline_summary.md"
             ],

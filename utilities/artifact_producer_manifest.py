@@ -575,6 +575,10 @@ def resolve_placed_output(path: Path) -> Path:
     path = Path(path)
     if not path.is_absolute() or os.path.lexists(path):
         return path
+    from artifact_journal_migration import resolve_old_path
+    migrated = resolve_old_path(path)
+    if migrated != path:
+        return migrated
     for output in path.parents:
         if output.name != "artifacts":
             continue

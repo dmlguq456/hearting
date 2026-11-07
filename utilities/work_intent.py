@@ -538,6 +538,29 @@ def cost_line(cost, t) -> str:
     return t("completion.cost", elapsed=elapsed, tokens=words)
 
 
+def _entrance_line(route, primary, t):
+    """The one-time "the results list is here" line for the first user-facing cycle.
+
+    Read-only: `artifact_entrance` writes `.runtime/artifact-entrance.json` once
+    when a root first holds a user-facing document.  A missing file, an
+    unreadable one, or a report outside that first cycle's folder adds no line.
+    """
+    try:
+        root = route.get("artifact_root") if isinstance(route, dict) else None
+        if not isinstance(root, str) or not root or not primary:
+            return None
+        record = json.loads((Path(root) / ".runtime" / "artifact-entrance.json")
+                            .read_text(encoding="utf-8"))
+        first_path = record.get("first_cycle_path") if isinstance(record, dict) else None
+        if not isinstance(first_path, str) or not first_path:
+            return None
+        if not Path(primary).resolve().is_relative_to((Path(root) / first_path).resolve()):
+            return None
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return None
+    return t("completion.entrance", path=str(Path(root) / "README.md"))
+
+
 def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
@@ -584,6 +607,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
     prs = list(dict.fromkeys(_PR_URL.findall(text)))[:3]
+    entrance = _entrance_line(route, primary, t)
+    if entrance:
+        lines.append(entrance)
     artifact = t("completion.artifact", path=primary) if primary else t("completion.no_artifact")
     lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
     rendered = "\n".join(line for line in lines if line.strip())

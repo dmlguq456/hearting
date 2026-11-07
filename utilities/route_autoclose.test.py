@@ -24,6 +24,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+import fixture_processes  # noqa: E402
 import artifact_producer  # noqa: E402
 from split_module_fixture import patch_split  # noqa: E402
 
@@ -101,6 +103,9 @@ class RouteAutocloseTest(unittest.TestCase):
     def tearDown(self):
         for proc in self.processes:
             proc.kill(); proc.wait()
+        # CLI completion may leave fixture-owned asynchronous receipt writers.
+        # Reuse the existing lifetime cleanup before deleting their state root.
+        fixture_processes.reap(str(self.base))
         self.temp.cleanup()
 
     # ---- drivers --------------------------------------------------------
@@ -111,7 +116,8 @@ class RouteAutocloseTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(program), *map(str, argv)], cwd=self.repo, env=env,
                               capture_output=True, text=True)
 
-    def compose(self, slug, harness="codex", sid="session-1", *, intensity="direct", campaign="k1", start=True):
+    def compose(self, slug, harness="codex", sid="session-1", *, intensity="direct", campaign="k1", start=True,
+                material_cycle=True):
         shape = "direct" if intensity == "direct" else "solo"
         argv = ["compose", "--slug", slug, "--campaign-key", campaign, "--shape", shape,
                 "--capability", "autopilot-code", "--capability-mode", "dev", "--intensity", intensity,
@@ -128,6 +134,13 @@ class RouteAutocloseTest(unittest.TestCase):
         if start:
             started = self.run_as(harness, sid, "start", "--route", route_file, "--jobs", self.jobs)
             self.assertEqual(started.returncode, 0, started.stderr)
+            if intensity == "direct" and material_cycle:
+                # These cases inspect cycle payload, sealing and abandonment.
+                # A material producer requests its cycle through the existing
+                # API; a bare small-work start now prepares only a journal.
+                with mock.patch.dict(os.environ, {**self.env, SESSION_ENV[harness]: sid}, clear=True):
+                    artifact_producer.begin(self.root, route_file=route_file,
+                        capability="autopilot-code", intensity="direct", require_cycle=True, jobs=self.jobs)
         self.last_stderr = done.stderr
         return route_file, json.loads(route_file.read_text(encoding="utf-8"))
 
@@ -226,6 +239,23 @@ class RouteAutocloseTest(unittest.TestCase):
         self.assertEqual(workflow_state.human_gate_resolution(ledger.journal(), gate)["status"], "blocked")
 
     # ---- closes, claiming no proof -----------------------------------------
+    def test_autoclosed_journal_finish_acknowledges_without_claiming_new_proof(self):
+        route_file, route = self.compose("journal-quiet", "opencode", "journal-session", material_cycle=False)
+        self.assertIsNone(self.cycle(route))
+        self.age(route_file, "opencode", "journal-session")
+        self.sweep()
+        outcome = self.outcome(route_file)
+        self.assertIsNotNone(outcome)
+        self.assertFalse(outcome["terminal_gate_proven"])
+        before = route_file.with_suffix(".outcome.json").read_bytes()
+        finished = self.run_as("opencode", "journal-session", "finish", "--route", route_file,
+                               "--evidence", "/not-needed", "--summary-file", "/not-needed")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(json.loads(finished.stdout)["state"], "already-closed-automatically")
+        self.assertEqual(route_file.with_suffix(".outcome.json").read_bytes(), before)
+        self.assertEqual(list((self.root / "campaigns").glob("*/journals/*.md")), [])
+        self.assertEqual(list((self.root / "campaigns").glob("*/*/.cycle.json")), [])
+
     def test_idle_direct_closes_without_claiming_proof_and_abandons_its_cycle(self):
         route_file, route = self.compose("quiet", "opencode", "ses-oc")
         record = self.write_artifact(route)

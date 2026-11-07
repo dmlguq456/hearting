@@ -25,3 +25,5 @@ The `attempts` record carries the route it belongs to (`route`: f5). The referen
 A route record may carry `detail_title`, `detail_trailer` and `detail_after`: the words on the top band of an opened route and the note beside its stage band, which the reference words apart from the row's own title and age for some routes. A source without them gets the derived words.
 
 parity_matrix.py compares the same view model with the approved reference for every state the reference's own click targets reach, at 80, 100, 140 and 168 columns; where the reference overlaps or overflows itself the rows are excluded and Fleet must draw clean there.
+
+The 2026-11-06 last-human-input change replaces the collapsed OVERVIEW NOW cell with the private real-prompt display and keeps NOW plus received messages under the expanded session. transitions.json appends five frames and the changed rows for 17 OVERVIEW trace steps only. Input chunks, recorded navigation states, and all other frames are unchanged; refreeze_transitions.py replays the actual decoder/reducer/draw path. The projection is excluded from public JSON/export.

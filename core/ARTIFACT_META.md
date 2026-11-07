@@ -132,13 +132,18 @@ strings). Without a project file the default display name is the project folder 
 ### `현황.md` / `STATUS.md` — the project status document
 
 One short page a person reads first to see where a project stands. Fleet puts its one
-line on the project's OVERVIEW rule and its parts at the top of the project page; Cairn
-pins it at the top of the project. Writing one is optional and nothing waits on it:
+line on the project's OVERVIEW rule and its parts at the top of the project page.
+Writing one is optional and nothing waits on it:
 without one, Fleet builds the line from the routes, questions and results it already
 shows.
 
-- **Where.** `campaigns/<campaign-locator>/<cycle-locator>/artifacts/현황.md` (or
-  `STATUS.md`), directly under the cycle's `artifacts/`. When `finalize` picks the
+- **Where.** `campaigns/<campaign-locator>/현황.md` (or `STATUS.md`), directly in
+  the campaign folder. Fleet prefers these campaign pages, reads up to three newest
+  summaries on the repo page, and keeps the newest summary on OVERVIEW. Editing a
+  page in place is observed even when the campaign directory's timestamp is old.
+- **Legacy documents.** With no campaign page, Fleet reads status documents directly
+  in a cycle's `artifacts/` and the legacy flat `research/<folder>/` copies. When
+  `finalize` picks the
   primary itself, this file is the cycle's primary (`현황.md` first, then `STATUS.md`,
   after the official spec PRD; an explicit `--primary` still wins), and its row carries
   `audience: "user"`, so Cairn's status row and Fleet's project line read the same file
@@ -146,9 +151,8 @@ shows.
   file at the cycle root (`campaigns/<campaign>/<cycle>/현황.md`) makes the seal fail
   with `file-outside-artifacts` and is not read; copies under `_internal/` or
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
-  and edits it in place (a finalized cycle still takes writes, D-123). The most recently
-  modified one in the artifact root is the project's current status. Fleet also keeps
-  reading the legacy flat folder, `research/<folder>/현황.md`.
+  and edits it in place (a finalized cycle still takes writes, D-123). Fleet keeps the
+  most recently modified legacy document when no campaign page is available.
 - **Shape.** Markdown in the reader's language. Only the parts below are read; other
   sections are free.
 
@@ -182,6 +186,45 @@ shows.
   failure leaves it as it was. A PR merge has no Hearting event, so nothing refreshes
   on it, and nothing checks freshness. Fleet shows the age in front of a document older
   than three days.
+
+### Root `README.md` / `index.html` — the read entrance
+
+Four files directly under the artifact root, written by `utilities/artifact_entrance.py`:
+`README.md` and `index.html` (the entrance) and `all-campaigns.md` / `all-campaigns.html`
+(every campaign). They are a derived reading surface, not canonical records: admission,
+census and residue never take them as input, and deleting them is safe — the next publish
+recreates them. They are classified `C-RT` in `core/CORE.md` §3.
+
+- **When.** Right after a seal (the first seal and a re-seal refresh alike), and whenever
+  `hearting reports` or `hearting open` runs. No other write path touches them.
+- **Content.** The 20 most recent user-facing documents (date, title, one-line summary,
+  "+N more"), the 10 most recent campaigns with their cycle count, latest date and work
+  record count, a link to the full campaign list, the root totals, and a link to the ID
+  index `campaigns/INDEX.md`. Every link is a relative path; there is no absolute path,
+  host name, user name, script or external resource in either file.
+- **Reading rule.** A document row marked `audience: "user"` is user-facing; a row without
+  that key (an older sealed cycle) follows the same name rule described above. The
+  representative document per cycle is ranked by name only (`현황.md`/`STATUS.md`, then
+  `final_report.*`, `report.*`, `summary.md`, `audit-report.md`, `prd.md`), never by a
+  manifest `primary`. Manifests are read newest first, up to 300 or 16 MiB each; there is
+  no full scan and no cache.
+- **Row sources.** Rows come from sealed cycles today; a source of rows that are not cycle
+  folders plugs in through `artifact_entrance.ROW_SOURCES`, and its rows join the same list.
+- **Commands.** `hearting reports` prints the same numbered list in the terminal and
+  `hearting open <number|words>` opens one result or, with no argument, the browser
+  entrance. Both names are reserved by the one launcher (`tools/install/harness.sh`) in
+  every runtime and are not installer subcommands.
+- **Ownership.** Each file starts with `<!-- hearting:artifact-entrance v1 -->` (an HTML
+  file keeps `<!DOCTYPE html>` above it). A same-named file without that marker, or a
+  symbolic link at that name, is never overwritten, followed, or moved — it stays its
+  owner's. Rewriting is byte-deterministic: identical root content and declared language
+  produce identical bytes.
+- **First record.** When a root first shows a user-facing document, one call with a
+  cycle id writes `.runtime/artifact-entrance.json`
+  (`{"schema": 1, "first_cycle_id", "first_cycle_path"}`) once; it is never rewritten. A
+  completion summary whose primary report lies in that cycle adds one "Artifact list:
+  `<root>/README.md`" line above its artifact line. Only the first user-facing cycle
+  qualifies, so a root whose entrance was made by hand from the CLI stays quiet.
 
 ## Internal files (no reader duty)
 
@@ -383,3 +426,15 @@ and never create a file; they only report `pending_recovery`. Limits: several fi
 replaced as one atomic step, so between the first and last replacement of an interrupted
 write a reader may see the new `meta.json` before the new number state; a disk that keeps
 failing or a foreign writer is reported with a typed code and retried at the next write.
+
+## Journal records
+
+The common journal row has `kind=journal-entry`, opaque `artifact_id` and
+`revision_id`, a root-relative `path`, exact `anchor`, `record_target`,
+`result_targets`, original `session`/`turn`/`at`, `status`, and `coverage`.
+Partial scans and unreadable/corrupt evidence remain partial/unknown; they do
+not disappear into an empty-success result. Result versions are commit/hash or
+unknown, never inferred from a path or mtime. A versioned journal finish binds
+one immutable entry revision digest. Appending another entry cannot change that
+proof. Confirmed corrections append provenance and keep historical revisions;
+hand-edited drift is reported without inventing a correction event.

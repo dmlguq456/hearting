@@ -30,6 +30,8 @@ S = importlib.util.spec_from_file_location("topology", P); T = importlib.util.mo
 # scope and artifact-order-prechecked declaration change its node census.
 # 2026-10-26 audit report authoring: only the audit report node's default unit
 # (`editorial/polish` -> `editorial/report`) re-freezes the audit node census.
+# 2026-11-06 project documents: only draft production/finalize target scopes change;
+# all parallel-group fields and other capability node digests remain pinned.
 PRESERVED_FULL_FIELD_DIGESTS = {
     # Added with the compiler-internal framed recipe (v3.0 part 3): two `top` frame legs and the
     # model-less runtime terminal. No other entry moves.
@@ -62,7 +64,7 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "535ac7afb655d7d8040841733ed2b46bb7cb7d467279b7ed83cf34496659fca5",
     ),
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
-        "dc91956ddb9d5cc79f171fabaa3258d6bb13cb9df07fcdb0f8bf26bafa2429dc",
+        "3e6b5882583b1a42d4608f7373fd051f584944947acbf0d191379e3609c288c6",
         "e51f3d86b5ead6ac1573610fe55fb0994de2b86658fb1ef09a6c227bc487b0cb",
     ),
     ("autopilot-lab", ('setup',)): (

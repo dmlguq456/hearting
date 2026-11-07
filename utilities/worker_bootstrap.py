@@ -558,8 +558,15 @@ def node_scope_prompt(scope: "NodeScope") -> str:
         lines.append("Cycle-wide artifact scope covers only the approved task's deliverables, not other work or cycles.")
     if source_scope:
         lines.append(f"worktree_source_scope={json.dumps(source_scope, ensure_ascii=False)}")
+    if "target-artifact" in scope.write_scope:
+        lines.append(f"project_document_root={scope.worktree_dir or 'unresolved'}. "
+                     "Keep the document at the user's stated project path from the first draft; "
+                     "otherwise place it directly under this project root without another question. "
+                     "Keep plans, reviews and pre-change copies in the cycle records, recording "
+                     "the target path and content version. The target alias does not authorize unrelated source edits.")
     elif artifact_scope and scope.output_dir:
-        lines.append("Source is read-only; declared artifact outputs remain writable. Save them locally before any optional artifact sink.")
+        if not source_scope:
+            lines.append("Source is read-only; declared artifact outputs remain writable. Save them locally before any optional artifact sink.")
     if not scope.output_dir:
         lines.append("Cycle is unbound (no open cycle is bound); do not write durable artifacts under the artifact root.")
     if not scope.worktree_dir and ("source/**" in scope.write_scope or "source-alternative/**" in scope.write_scope
@@ -1356,9 +1363,11 @@ def handed_over_prompt(route, node_id, output_dir) -> str:
     found = handed_over_scan(route, node_id, output_dir)
     if not found.rows:
         return ""
-    return ("Checks earlier stages handed over (their environment could not run them); run each as "
-            "part of your verification. One your environment cannot run either leaves your verdict "
-            "BLOCKED: repeat its handed-over line in your report so the owner runs it.\n"
+    return ("Checks earlier stages handed over (their environment could not run them); assess their "
+            "available evidence and run checks whose result can still change the decision. An unavailable "
+            "check stays unverified (reason), never PASS: repeat its handed-over line and reason. "
+            "A required unknown leaves the verdict BLOCKED. If the user already accepted that limit, "
+            "retain it in the normal completion report without repeating the unavailable check.\n"
             + "\n".join(handed_over_lines(found, "- ")) + "\n")
 
 

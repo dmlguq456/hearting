@@ -96,8 +96,9 @@ For paper mode, run the baseline gate in `convention-paper.md` §3.6 before any 
 
 Resolve:
 
-- `draft_path = {strategy_folder}/draft/draft.md`
-- `draft_mirror_path = {strategy_folder}/draft/draft_{language}.md`, when present.
+- `draft_path = {project_document_path}`, the file created in the project from its first draft.
+- `draft_mirror_path` is the requested adjacent project mirror, when present.
+  Record both paths and their content versions in the review log.
 
 Use the same intensity scaling as Step 3:
 
@@ -116,7 +117,10 @@ Thorough axes:
 - **Cross-reference and coverage** — Verify card links and identify relevant orphan cards absent from the draft.
 - **Fact check** — Compare sourced claims verbatim against cards or PDFs.
 
-Write localized memos in the primary draft, with stable axis prefixes, then merge and deduplicate them.
+Write localized memo proposals with stable axis prefixes in the declared review
+log, referring to the project target and content version. The document-edit leg
+merges and applies them to the same project file; artifact-only reviewers keep
+that file read-only.
 
 #### Draft quality-review prompt
 
@@ -130,8 +134,9 @@ Check strategy coverage, logical flow, completeness, remaining TODOs, reviewer-p
 coverage for rebuttals, Style Guide consistency, card-link targets, and omitted cards.
 Do not independently verify individual venue, year, or metric facts.
 
-Write localized `<!-- memo: [AXIS] ... -->` comments in the primary draft,
-write a structured review log, and return a short summary or "no issues found".
+Write localized `<!-- memo: [AXIS] ... -->` proposals in a structured review log
+with target path/version; leave the project draft unchanged. Return a short
+summary or "no issues found".
 ```
 
 #### Draft fact-check prompt
@@ -151,7 +156,7 @@ external-reverified, conflict, and circular-ref classifications as Step 3.
 Output one table:
 | Slide/Section | Claim | Source | Match (✅/🟡/❌) | Source type | Severity (🔴/🟡/🟢) |
 
-For each 🔴 or 🟡 item, add a localized
+For each 🔴 or 🟡 item, add to the review log a localized
 `<!-- memo: [FACT] location X — claim Y conflicts with source Z -->`.
 Return only the log path and a one-line verdict.
 ```
@@ -160,6 +165,6 @@ If memos exist:
 
 - At `quick`, retain them, skip draft-refine, and continue to Step 6.
 - With `--user-refine`, set `paused_at_stage: draft-refine`, report the resume command, and exit.
-- Otherwise invoke `draft-refine` on the primary draft. Path auto-detection handles the optional mirror.
+- Otherwise the document-edit leg applies the logged memos through `draft-refine` to the primary project draft and its optional mirror.
 
 If no memo exists, continue to Step 5.5. When resuming from `draft-refine`, skip repeat review and refine from the existing memos.

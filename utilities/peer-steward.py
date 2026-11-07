@@ -5470,6 +5470,17 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
             "ref": ref, "reason": "received-binding-unverified"})
         return
     native_recipient = peer_message.pending_delivery_recipient(row)
+    if (native_recipient and row.get("state") == "pending"
+            and native_recipient.get("harness") in {"claude", "opencode"}):
+        import session_shell
+        attachment, _attachment_reason = session_shell.exact_binding(
+            native_recipient["harness"], native_recipient["session_id"])
+        if attachment is not None:
+            result = session_shell.deliver_pending(ref, native_recipient["harness"],
+                                                   native_recipient["session_id"])
+            checkpoint(state="pending", observation={"ref": ref,
+                       "reason": result.get("reason") or "awaiting-exact-receiver-ref"})
+            return
     if (native_recipient and not native_recipient.get("pane_id")
             and not ((duty.get("intent") or {}).get("identity") or {}).get("pane")):
         if row.get("state") == "pending" and native_recipient.get("harness") == "codex":
@@ -6739,7 +6750,18 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                         skip_unchanged=True)
                     continue
                 harness, recipient_sid = pair
-                if intent.get("kind") == "run-notice" and pair == ("opencode", storage_sid):
+                import session_resume
+                resume_notice = session_resume.is_resume(record)
+                if resume_notice:
+                    try:
+                        session_resume.current(record)
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                        store.update(duty["id"], state="pending", observation={
+                            **(duty.get("observation") or {}), "reason": "resume-source-pending"},
+                            skip_unchanged=True)
+                        continue
+                if (intent.get("kind") == "run-notice" and pair == ("opencode", storage_sid)
+                        and not resume_notice):
                     store.update(duty["id"], state="pending", observation={
                         **(duty.get("observation") or {}), "reason": "native-opencode-carrier-owns-notice"},
                         expected_phases={(duty.get("observation") or {}).get("phase", "waiting")},
@@ -6762,8 +6784,9 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
         except (TypeError, ValueError):
             return 1
 
+    import session_resume
     candidates.sort(key=lambda item: (item[1], item[3], _terminal_rank(item),
-                                      item[4]["delivery_id"]))
+                                      session_resume.is_resume(item[4]), item[4]["delivery_id"]))
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
@@ -6795,6 +6818,10 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
         selection["last_group"] = group_key
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
+    # Resume needs idle/empty; ordinary notices keep their existing steering
+    # policy. An obsolete resume must not hold a useful completion behind it.
+    resume_only = session_resume.is_resume(batch[0][4])
+    batch = [item for item in batch if session_resume.is_resume(item[4]) == resume_only]
     pending_transfers = []
     retargeted = {}
     folded = []
@@ -6865,6 +6892,15 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
             return
         if _resolve_target(pane)[:2] != (harness, recipient_sid):
             return
+        import session_resume
+        if any(session_resume.is_resume(item[4]) for item in batch):
+            refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+            if refusal:
+                for item in batch:
+                    store.update(item[0]["id"], state="pending", observation={
+                        **(item[0].get("observation") or {}), "reason": "resume-" + refusal},
+                        skip_unchanged=True)
+                return
         if pending_transfers:
             for message in pending_transfers:
                 _schedule_message_obligation(message, pane, pane)
@@ -6983,6 +7019,19 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                 source_jobs = peer_obligations._notice_duty_source(_duty, root)[3]
                 if not claimed_send_current(root, storage_sid, stored, owner, harness, recipient_sid,
                                             jobs=source_jobs):
+                    return
+            if any(session_resume.is_resume(entry[4]) for entry in claimed):
+                refusal, _proof = _native_idle_prompt_guard(pane, harness, recipient_sid, pane)
+                if refusal:
+                    return
+                # As for idle tidy, re-read input authority after the slow
+                # physical observation, not just before it. The courier also
+                # rechecks this at its existing first-write boundary.
+                try:
+                    if any(not session_resume.current(entry[4], for_submission=True)
+                           for entry in claimed if session_resume.is_resume(entry[4])):
+                        return
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer)
@@ -7674,6 +7723,54 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
     return direct_reason, outcome, verify, reason
 
 
+
+def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
+                      expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None):
+    """Native-session address using the existing sealed message and carrier."""
+    import session_shell
+    harness, sid = binding["harness"], binding["sid"]
+    if expected_recipient is not None and (harness, sid) != expected_recipient:
+        print("prompted=false reason=target-identity-changed")
+        return 5
+    sender_sid, sender_harness, _project = from_identity
+    try:
+        text, ref = peer_message.prepare_peer_message(body,
+            {"harness": sender_harness, "session_id": sender_sid, "name": from_name},
+            {"harness": harness, "session_id": sid, "name": args.target},
+            defer=True, refs=args.ref, receipt="native-pending", with_trailer=not args.no_trailer,
+            producer_binding=producer_binding, handoff=handoff,
+            original_target=args.target, server=_HERDR_SESSION or "default")
+        if on_prepared is not None:
+            on_prepared(ref)
+        row = peer_message._read_pending(ref)
+        if row.get("state") == "received":
+            result = {"ok": True, "state": "received"}
+        elif row.get("state") != "pending" or args.no_trailer:
+            result = {"ok": False, "reason": "awaiting-native-receiver"}
+        elif harness == "codex":
+            # Same exact native queue; shell display grants no start permission.
+            result = peer_message.deliver_pending_codex(ref, start_interrupted=False)
+        else:
+            result = session_shell.deliver_pending(ref, harness, sid)
+        current = peer_message._read_pending(ref) or row
+    except (OSError, ValueError):
+        print("prompted=unverified reason=peer-pending-unavailable")
+        return 5
+    outcome = "true" if current.get("state") == "received" else (
+        "queued" if current.get("state") in {"pending", "queued"} else "unverified")
+    reason = result.get("reason") or "awaiting-exact-receiver-ref"
+    if producer_binding is None and outcome != "true":
+        _schedule_message_obligation(current, f"{harness}:{sid}")
+    _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body),
+            summary_text=text, to_session_id=sid, to_pane=None, ref=args.ref,
+            status=_PROMPT_LEDGER_STATUS[outcome], receipt="session-shell:" + reason,
+            from_identity=from_identity, from_name=from_name, transfer_ref=ref,
+            surface="codex-queue" if harness == "codex" else harness + "-native",
+            producer_binding=producer_binding)
+    print(f"prompted={outcome} target={args.target} to_harness={harness} ref={ref} reason={reason}")
+    _prompt_carrier_note(ref, args.target, outcome)
+    return _PROMPT_EXIT[outcome]
+
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
                handoff=None, resolved_recipient=None, sender=None):
     """Seal a peer message and route it through the recipient's native carrier.
@@ -7721,6 +7818,17 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         from_identity = (from_sid, from_harness, _project_of(os.getcwd()))
         from_name = _from_name(from_harness, from_sid)
     relay_pane = (sender or {}).get("pane") or ""
+    shell_binding = None
+    # Full native addresses are explicit. Existing window/name resolution keeps
+    # precedence otherwise, and an uncertain send never switches transports.
+    if (str(args.target).split(":", 1)[0] in {"claude", "codex", "opencode"}
+            or _surface_missing(args.target) and _tmux_inventory() is None):
+        import session_shell
+        shell_binding, _shell_reason = session_shell.resolve_target(args.target)
+    if shell_binding is not None:
+        return _cmd_prompt_shell(args, body, shell_binding, from_identity=from_identity,
+            from_name=from_name, expected_recipient=expected_recipient, on_prepared=on_prepared,
+            producer_binding=producer_binding, handoff=handoff)
     if _surface_missing(args.target) and _tmux_inventory() is None:
         resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
     elif resolved_recipient is None:
@@ -8448,6 +8556,9 @@ def cmd_clear(args):
     if compacting:
         command = clear.COMPACT_COMMAND     # background agents keep running in the same session
     before = _codex_footer_threads(lines) if harness == "codex" else set()
+    req, why = clear.recheck_idle_input(args.request, req)
+    if req is None:
+        return finish("skipped", why, agent)
     rc, payload = _herdr_prompt(target, command, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc is None:
         return finish("failed", "herdr-invocation-failed", agent)
@@ -8466,7 +8577,7 @@ def cmd_clear(args):
 
 
 def cmd_idle_card_request(args):
-    """Send one claim-bound request to the exact idle main session to author its own card."""
+    """Prepare an idle card off-screen; retain old compact-origin prompt transport."""
     import session_tidy_clear as clear
     path = Path(args.request)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -8478,11 +8589,12 @@ def cmd_idle_card_request(args):
         receipt = (f"action=idle-card-request accepted={outcome} harness={harness} session={sid}"
                    + (f" reason={reason}" if reason else ""))
         try:
-            _record(to_harness=harness, to_name=args.target, kind="notice",
-                    summary_text="[notice] session-tidy idle card request", to_session_id=sid,
-                    to_pane=pane, ref=[], status="sent" if outcome == "true" else "unknown",
-                    receipt=receipt, from_identity=(sid, harness, _project_of((req or {}).get("cwd"))),
-                    from_name=_from_name(harness, sid))
+            if req and req.get("origin") != "idle":
+                _record(to_harness=harness, to_name=args.target, kind="notice",
+                        summary_text="[notice] session-tidy idle card request", to_session_id=sid,
+                        to_pane=pane, ref=[], status="sent" if outcome == "true" else "unknown",
+                        receipt=receipt, from_identity=(sid, harness, _project_of((req or {}).get("cwd"))),
+                        from_name=_from_name(harness, sid))
         except Exception:
             pass
         print(f"accepted={outcome} target={args.target} harness={harness} session={sid}"
@@ -8547,7 +8659,15 @@ def cmd_idle_card_request(args):
     if checked is None:
         clear.release_unsent_idle_request(claim)
         return finish("skipped", why)
+    if (claim.get("idle_request") or {}).get("source") == "memory-helper":
+        import session_tidy_idle_card
+        accepted, why = session_tidy_idle_card.enqueue(claim)
+        return finish("true" if accepted else "skipped", why)
     text = clear.idle_card_request_text(claim)
+    checked, why = clear.recheck_idle_input(path, checked)
+    if checked is None:
+        clear.release_unsent_idle_request(claim)
+        return finish("skipped", why)
     rc, payload = _herdr_prompt(args.target, text, wait=True, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
     if rc != 0:
         reason = "herdr-invocation-failed" if rc is None else _herdr_error_reason(payload, rc)

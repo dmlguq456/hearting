@@ -145,9 +145,8 @@ from artifact_producer_store import (  # noqa: F401
     campaign_runtime_record, CANONICAL_ROOTS, CAPABILITY_BUCKETS, classify_campaign_key,
     classify_root, CLOSED_BINDABLE_STATES, COMPAT_OVERRIDE_FIELDS, COMPAT_OVERRIDE_NAME,
     compat_override_path, CONTRACT, cutover_path, cycle_dir, cycle_disposition,
-    cycle_record_closed, cycle_record_path, default_bucket, ENTRY_CAPABILITIES,
-    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,
-    INTERNAL_CAPABILITIES, is_active, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
+    cycle_record_closed, cycle_record_path, default_bucket, ENTRANCE_NAMES, ENTRY_CAPABILITIES,
+    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
     LEGACY_WRITE_HINT, list_cycle_records, MEDIA_TYPES, OK, PRIMARY_CANDIDATES, producer_dir,
     PRODUCER_REL, ProducerError, PROVISIONAL_SEAL_WARNING, read_campaign,
     read_campaign_tombstone, read_compat_override, read_cutover, read_cycle_record,
@@ -718,9 +717,13 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
             intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs,
-            sibling_looked=sibling_looked, **selection)["env"]
+            sibling_looked=sibling_looked, journal_target=not require_cycle, **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
+        import artifact_journal
+        binding = artifact_journal.target(root, route["route_id"])
+        if binding:
+            return artifact_journal.environment(root, binding)
         return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (
             "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
             "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR")}}
@@ -1130,6 +1133,7 @@ def _begin_cycle_record(
     jobs: Optional[Path] = None,
     owner_attempt_id: Optional[str] = None,
     resume_only: bool = False,
+    journal_target: bool = False,
 ) -> Dict[str, Any]:
     dispatch_terminal_commit.require_current_cleanup("producer-begin", jobs=jobs)
     root = Path(root).resolve()
@@ -1154,6 +1158,11 @@ def _begin_cycle_record(
         raise ProducerError("route-capability-mismatch", f"{route_capability}!={capability}")
     if route["effective_intensity"] != intensity:
         raise ProducerError("route-intensity-mismatch", f"{route['effective_intensity']}!={intensity}")
+    journal_requested = (journal_target and route.get("artifact_storage_contract_version", 1) == 2
+        and intensity == "direct" and not require_cycle and route.get("capability") != "autopilot-spec"
+        and not parent_cycle_id and not workflow_group_id
+        and not (route.get("capability") == "autopilot-refine" and route.get("entry_scope_contract_version"))
+        and node_id is None and not (owner_attempt_id or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")))
     node = _route_node(route, node_id)
     if route_is_closed(root, route):
         raise ProducerError("route-already-closed", route["route_id"])
@@ -1173,22 +1182,24 @@ def _begin_cycle_record(
                  adopt_existing_identity=True,
                  now=now)
     elif klass["state"] == "inactive-with-legacy":
-        fallback = legacy_fallback_state(root, now=now, classification=klass)
-        if _fallback_blocks(fallback):
-            raise ProducerError("cutover-inactive-fallback-denied",
-                                fallback["override"]["reason"] or "override-absent")
-        if require_cycle:
-            raise ProducerError("cutover-inactive", "activation required before cycle issuance")
-        return {
-            "status": "legacy-compat",
-            "layout": "legacy",
-            "route_id": route["route_id"],
-            "reason": "cutover-inactive",
-            "env": {"AGENT_ARTIFACT_ROOT": str(root)},
-            "legacy_fallback": fallback,
-        }
+        if not journal_requested:
+            fallback = legacy_fallback_state(root, now=now, classification=klass)
+            if _fallback_blocks(fallback):
+                raise ProducerError("cutover-inactive-fallback-denied",
+                                    fallback["override"]["reason"] or "override-absent")
+            if require_cycle:
+                raise ProducerError("cutover-inactive", "activation required before cycle issuance")
+            return {
+                "status": "legacy-compat", "layout": "legacy", "route_id": route["route_id"],
+                "reason": "cutover-inactive", "env": {"AGENT_ARTIFACT_ROOT": str(root)},
+                "legacy_fallback": fallback,
+            }
+        # A journal neither writes legacy buckets nor activates their cycle
+        # cutover. The already admitted route owns this new record kind.
     # active, or just bootstrapped: fall through to the existing cycle path.
     identity = artifact_lifecycle.read_root_identity(root)
+    if identity is None and journal_requested:
+        identity = artifact_admission.ensure_root_identity(root, allocator=alloc, now=now)
     if identity is None:
         raise ProducerError("root-identity-missing")
     # SD-120 A1: only registered owner/worker contexts participate.  The
@@ -1438,6 +1449,13 @@ def _begin_cycle_record(
                 changed = True
             if changed:
                 _write_campaign(root, campaign, exclusive=False)
+        if journal_requested:
+            import artifact_journal
+            binding = artifact_journal.prepare_locked(root, route, campaign,
+                campaign_dir(root, campaign["campaign_id"], campaign), at=started_on)
+            artifact_locator.update_indexes(root, [campaign["campaign_id"]])
+            return {"status": "prepared", "layout": "journal", "campaign_id": campaign["campaign_id"],
+                    "env": artifact_journal.environment(root, binding), "journal_target": binding}
         new_cycle_id = alloc.allocate("cycle")
         while ((head.has_prefixed_stable_id(new_cycle_id) if head is not None
                 else new_cycle_id in index.stable_ids)
@@ -1767,6 +1785,8 @@ def require_cycle_output(
             record = candidates[0] if candidates else None
     if record is None:
         return None
+    if record.get("journal_migration"):
+        raise ProducerError("cycle-consolidated-to-journal", record["cycle_id"])
     if route_id and not lineage_checked and record.get("route_id") != route_id:
         raise ProducerError("cycle-route-binding-mismatch", f"cycle={record['cycle_id']} route={route_id}")
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)

@@ -114,9 +114,14 @@ def _session_name(s):
 
 
 def _display_session_subject(s):
-    if getattr(s, "runtime_name", None):
-        return _session_name(s)
-    return _subject_title(s)
+    value = _session_name(s) if getattr(s, "runtime_name", None) else _subject_title(s)
+    interaction = getattr(s, "interaction_state", None)
+    waiting = isinstance(interaction, str) and interaction in _INTERACTION_LABEL
+    if (getattr(s, "_resume_attention", None) == "stopped"
+            and getattr(s, "liveness", None) not in ("working", "dead", "stale") and not waiting):
+        from .config import ui_text
+        return ((value + " · ") if value else "") + ui_text("fleet.resume.stopped")
+    return value
 
 
 def _text_age(timestamp, now=None):

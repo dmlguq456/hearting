@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from .live import current_route_counts
 from .grid import CellGrid
 from .style import recede_key
+from ..config import ui_text
 
 X = 34
 GAP = 3
@@ -106,18 +107,19 @@ def _draw_context_gauge(grid, x, y, pct, window):
     grid.put(x + 9, y, f"{pct:3d}%", key if pct >= 50 else "dim")
 
 
-def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
+def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     use = max(0, grid.cols - x - 2)
     right = x + use + 1
-    grid.fill(0, x - 2, y, " ", tint=236)
+    if not session_table:
+        grid.fill(0, x - 2, y, " ", tint=236)
+        grid.put(x - 2, y, "┃", "line")
+        grid.put(1, y, "OVERVIEW", "head", tint=236)
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
-    grid.put(x - 2, y, "┃", "line")
-    grid.put(1, y, "OVERVIEW", "head", tint=236)
     c = _overview_columns(use, _overview_harness_width(vm.sessions))
     harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()), (c["ctx"], "CTX"),
-                          *(([(c["now"], "NOW")] if c["now"] is not None else [])),
+                          *(([(c["now"], ui_text("fleet.input.label"))] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
         if label == "HARNESS" and harn_end is None:
             continue                      # a table this narrow has no room for the harness cell
@@ -143,7 +145,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
         if not mine:
             continue                      # a rule is drawn only above rows that are drawn under it
         page_scope = getattr(state, "scope", "-") != "-"
-        if name:
+        if name and not session_table:
             if page_scope:
                 grid.add_hit(y, x, right, ("scope", "repo:" + str(repo.get("id", name))))
             grid.put(x + 1, y, "┈ ", "line")
@@ -174,6 +176,10 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             row_y = y
             if state.opened == tag:
                 grid.put(x, y, "▶", "soft")
+            restart_text = ""
+            restart_inline = False
+            if session.get("restart") == "stopped":
+                restart_text = ui_text("fleet.resume.stopped")
             status = session.get("state")
             marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
                                   "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
@@ -243,6 +249,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 # Reserve its cells before a long CJK title or branch is drawn.
                 if route_tail:
                     tail = route_tail
+                if restart_text and _seg_width(" " + restart_text) <= c["title_w"]:
+                    restart_inline = True
+                    tail = " " + restart_text + route_tail
                 room = max(0, c["title_w"] - _seg_width(tail))
                 title_text = _clip(title, room)
                 bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
@@ -253,8 +262,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                     # An open count pulses on the shared working beat between the bright and
                     # dark green of the g_work/g_work_off pair; its text stays, so the title
                     # and columns never move. A finished count stays a steady dim note.
-                    tail_key = "dim"
-                    if route_tail and tag in open_current_routes:
+                    tail_key = "g_idle" if session.get("restart") == "stopped" else "dim"
+                    if route_tail and tag in open_current_routes and session.get("restart") != "stopped":
                         tail_key = "g_work" if getattr(grid, "beat", 1) else "g_work_off"
                     grid.put(title_end, y, tail, tail_key, limit=x + c["title"] + c["title_w"])
             context = session.get("context")
@@ -269,16 +278,24 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             if c["now"] is not None:
                 now_start = x + c["now"]
                 now_end = x + use - AGE_W - GAP
-                ask = str(session.get("ask") or "")
-                if ask:
-                    ask_text = _clip(ask, max(0, now_end - now_start))
-                    grid.put(now_start, y, ask_text, "blocked", limit=now_end)
-                    now_start += len(ask_text) + 2
-                now_text = _clip(str(session.get("now") or ""), max(0, now_end - now_start))
-                now_key = "head" if session.get("state") in ("working", "blocked") else "title_dim"
-                grid.put(now_start, y, now_text, now_key,
+                now_text = _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                                 max(0, now_end - now_start))
+                # Input is muted grey; unfolded NOW keeps its existing white.
+                grid.put(now_start, y, now_text, "dim",
                          limit=now_end)
             y += 1
+            if restart_text and not restart_inline:
+                grid.put(x + IND + 3, y, restart_text, "g_idle", limit=right)
+                y += 1
+            if session_table and c["now"] is None:
+                # The repo page keeps the same table columns; a narrow pane puts
+                # the existing last-input projection directly below its session.
+                grid.put(x + IND + 3, y,
+                         _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                               max(0, right - x - IND - 4)),
+                         "head" if session.get("state") in ("working", "blocked") else "title_dim",
+                         limit=right)
+                y += 1
             gpu_count = sum(1 for host in (vm.compute or ()) for gpu in host[5]
                             if tag in (gpu[7] or ()))
             if gpu_count > 1 and y < grid.rows - 5:
@@ -296,6 +313,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                     return
                 grid.put(right - 18, grid.rows - 5, "↓ more below", "dim", limit=right)
                 return
+    if session_table:
+        return y
     sessions_total = len(sessions)
     working_sessions = sum(1 for item in sessions if item.get("state") == "working")
     waits = (vm.system or {}).get("answer_waits") or {}
@@ -520,6 +539,12 @@ def _session_unfold(grid, vm, x, use, y, session, c):
     now = session.get("now")
     for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
         grid.put(x_val, y, line, "now_sub" if now else "dim")
+        y += 1
+    received_label = ui_text("fleet.input.received")
+    message_x = max(x_val, x_lab + _seg_width(received_label) + 2)
+    grid.put(x_lab, y, received_label, "label", limit=right)
+    for line in session.get("received_inputs") or ("·",):
+        grid.put(message_x, y, _clip(str(line), max(0, right - message_x)), "soft", limit=right)
         y += 1
     system = vm.system if hasattr(vm.system, "get") else {}
     task = system.get("task_summary") if hasattr(system, "get") else None

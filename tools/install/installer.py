@@ -43,7 +43,21 @@ import host_probes
 import node_runtime
 import safe_fs
 import model_settings
+import session_shell_install
 from drivers import get_driver, RUNTIMES
+
+
+def _ui_text(key):
+    """One line from the shared catalog; English fallback when it is unavailable."""
+    try:
+        catalog = Path(__file__).resolve().parents[1] / "i18n"
+        if str(catalog) not in sys.path:
+            sys.path.insert(0, str(catalog))
+        import ui_text
+
+        return ui_text.text(key)
+    except Exception:  # a missing catalog never blocks an install
+        return None
 
 
 def _ensure_herdr_history_key(launcher_results, *, dry_run=False):
@@ -181,6 +195,10 @@ def build_parser():
         "session", help="Set the hearting-owned display name for the current session")
     session_sub = p_session.add_subparsers(
         dest="session_command", required=True, parser_class=_UsageExitParser)
+    p_shell = session_sub.add_parser("shell", help="Manage the optional native session shell (default off)")
+    p_shell.add_argument("action", choices=("enable", "disable", "status"))
+    p_shell.add_argument("--dry-run", action="store_true")
+    p_shell.add_argument("--json", action="store_true")
     p_session_name = session_sub.add_parser(
         "name", help="Register a display name for a session (F-99c)")
     p_session_name.add_argument("name", help="The display name to register")
@@ -520,6 +538,11 @@ def cmd_install(args):
                 lr["status"] == "skipped-collision" for lr in launcher_results
             )
 
+    try:
+        shell_report = session_shell_install.ensure(dry_run=args.dry_run)
+        lines.append("session shell: " + shell_report["status"])
+    except (OSError, ValueError, subprocess.SubprocessError, safe_fs.SafetyError) as exc:
+        lines.append("session shell: native fallback (" + str(exc) + ")")
     environment = [node_runtime.ensure_node(dry_run=args.dry_run)]
     environment.extend(host_probes.run())
     for probe in environment:
@@ -531,6 +554,10 @@ def cmd_install(args):
         lines.extend("  " + line for line in user_config.lines(user_config_rows))
 
     exit_code = EXIT_BLOCKED if any_blocked else EXIT_FAIL if bootstrap_failed else EXIT_OK
+    if exit_code == EXIT_OK:
+        entrance = _ui_text("install.entrance")
+        if entrance:
+            lines.append(entrance)
     return {"runtime": runtimes, "channel": "plugin" if args.plugin else "dev", "checks": checks,
             "drift": [], "exit": exit_code, "lines": lines, "environment": environment,
             "user_config": user_config_rows}
@@ -1777,6 +1804,18 @@ def cmd_session(args):
     hearting-owned `<dispatch state root>/session-names/<harness>/<session_id>.json`;
     never a runtime record (`~/.claude/sessions/*.json` etc. stay untouched)."""
     operation = f"session {args.session_command}"
+    if args.session_command == "shell":
+        try:
+            if args.action == "status":
+                enabled, reason = session_shell_install._client().policy()
+                result = {"status": "enabled" if enabled else reason, "changed": False}
+            else:
+                result = session_shell_install.set_enabled(args.action == "enable", dry_run=args.dry_run)
+            return {"operation": operation, "session_shell": result, "checks": [], "drift": [],
+                    "exit": EXIT_OK, "lines": ["session shell: " + result["status"]]}
+        except (OSError, ValueError, subprocess.SubprocessError, safe_fs.SafetyError) as exc:
+            return {"operation": operation, "checks": [], "drift": [], "exit": EXIT_FAIL,
+                    "lines": ["session shell: " + str(exc)]}
     harness, session_id, err = _resolve_session_identity(args)
     if err:
         return {"operation": operation, "checks": [], "drift": [],

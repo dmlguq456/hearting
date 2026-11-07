@@ -72,6 +72,8 @@ shared-utility-deferred	resource_resume.py
 shared-utility-deferred	review_input.py
 shared-utility-deferred	retained_review_completion.py
 shared-utility-deferred	review_watchdog.py
+shared-utility-deferred	session_resume.py
+shared-utility-deferred	session_shell.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
 shared-utility-deferred	session_card_format.py
@@ -105,6 +107,8 @@ utility-deferred	artifact_admission.py
 utility-deferred	artifact_checkpoint_trigger.py
 utility-deferred	artifact_cutover.py
 utility-deferred	artifact_cross_root_move.py
+utility-deferred	artifact_entrance.py
+utility-deferred	artifact_entrance.test.py
 utility-deferred	artifact_history.py
 utility-deferred	artifact_identity.py
 utility-deferred	artifact_index.py
@@ -317,6 +321,7 @@ utility-deferred	session_notice.py
 utility-deferred	session_supervisor_decisions.py
 utility-deferred	session_tidy.py
 utility-deferred	session_tidy_clear.py
+utility-deferred	session_tidy_idle_card.py
 utility-deferred	session_tidy_native.py
 utility-deferred	session_tidy_runner.py
 utility-deferred	spec-transaction.py
@@ -443,3 +448,7 @@ tool-deferred	web-bundle
 utility-deferred	artifact_directory_bundle.py
 utility-deferred	codex_shared_daemon_live_driver.py
 utility-deferred	retained_review_completion.test.py
+utility-deferred	artifact_journal.py
+utility-deferred	artifact_journal_migration.py
+utility-deferred	artifact-journal.py
+utility-deferred	journal_finish.py

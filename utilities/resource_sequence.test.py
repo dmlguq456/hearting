@@ -2640,6 +2640,192 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         self.assertEqual(len(ledger.claims()), 1)
         self.assertEqual(marker_path.read_bytes(), marker_bytes)
 
+    def _superseded_resource_fixture(self):
+        route, path, jobs, registry, output, ledger = self.fixture()
+        owner, _owner_input = self.live_owner(route, jobs, registry)
+        (output / 'run.json').write_text('{"state":"done"}\n')
+        router = SUP.route_module()
+
+        def publish(node_id, evidence, attempt):
+            node = WS.route_node(route, node_id)
+            return router.write_completion_marker(route, node, node_id, evidence, jobs=jobs,
+                attempt_id=attempt, attempt_metadata={
+                    'attempt_schema_version': 2, 'dispatch_depth': node['dispatch_depth'],
+                    'transport': 'interactive', 'execution_surface': 'inline',
+                    'registered_worker': False, 'fallback_hop': 'inline'})
+
+        review = output / 'reviews' / 'input-review.json'
+        review.parent.mkdir(parents=True, exist_ok=True)
+        review.write_text('{"verdict":"PASS","revision":1}\n')
+        publish('smoke', review, 'att-reviewed-input-1')
+        self.assertTrue(SUP.admit_owner_successor_start(
+            route, 'run-verify', jobs, owner, 'same-native'))
+        marker_path = router.completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+        old_marker = json.loads(marker_path.read_text())
+        old_resource = json.loads(registry.read_text())['runs']['fixture-run']
+        old_claims = {key: ledger.claim_path(key).read_bytes() for key in ledger.claims()}
+        self.assertEqual(DC.gate_currency(route, WS.route_node(route, 'full-run'),
+            marker_path, old_marker, jobs=jobs).state, 'current')
+        old_test = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+        old_identity = DC.process_launch_identity(old_test.pid)
+        self.assertEqual(old_test.wait(timeout=5), 0)
+        old_test_meta = dict(attempt_id='att-old-resource-verification', worker_type='review',
+            route_id=route['route_id'], route_hash=route['route_hash'], route_node='run-verify',
+            parent_attempt_id=owner, note='completed-review-blocking', failure_class='fail',
+            launch_started='1', **old_identity)
+        old_test_row = '\t'.join(['2026-11-06T00:00:00Z', 'done', str(self.base), str(self.base),
+            'old-verification', ','.join(f'{key}={value}' for key, value in old_test_meta.items())]) + '\n'
+        with jobs.open('a') as stream:
+            stream.write(old_test_row)
+        self.assertEqual(DC.attempt_process_quiescence(
+            old_test_meta, terminal_receipt=True).state, 'quiescent')
+
+        # A correction received a fresh review; the old resource is now a
+        # historical result of the previous inputs, not a reusable completion.
+        review.write_text('{"verdict":"PASS","revision":2}\n')
+        publish('smoke', review, 'att-reviewed-input-2')
+        self.assertTrue(DC.completion_superseded(DC.gate_currency(
+            route, WS.route_node(route, 'full-run'), marker_path, old_marker, jobs=jobs)))
+        return SimpleNamespace(context=(route, path, jobs, registry, output, ledger),
+            owner=owner, router=router, old_resource=old_resource, old_marker=old_marker,
+            marker_path=marker_path, old_claims=old_claims, old_test_row=old_test_row,
+            old_test_meta=old_test_meta)
+
+    def test_new_upstream_review_rearms_resource_then_verification_and_report(self):
+        for controller_mode in (False, True):
+            with self.subTest(controller=controller_mode), self.subfixture():
+                self._corrected_resource_continues(controller_mode)
+
+    def _corrected_resource_continues(self, controller_mode):
+        fixture = self._superseded_resource_fixture()
+        route, path, jobs, registry, output, ledger = fixture.context
+        owner, router = fixture.owner, fixture.router
+        old_marker, marker_path = fixture.old_marker, fixture.marker_path
+        old_resource, old_test_row, old_claims = fixture.old_resource, fixture.old_test_row, fixture.old_claims
+
+        def publish(node_id, evidence, attempt):
+            node = WS.route_node(route, node_id)
+            return router.write_completion_marker(route, node, node_id, evidence, jobs=jobs,
+                attempt_id=attempt, attempt_metadata={
+                    'attempt_schema_version': 2, 'dispatch_depth': node['dispatch_depth'],
+                    'transport': 'interactive', 'execution_surface': 'inline',
+                    'registered_worker': False, 'fallback_hop': 'inline'})
+
+        body = self.next_body(registry, 'corrected-resource', output, final=True)
+        controller = None
+        if controller_mode:
+            body['launch_state'] = 'queued'
+            data = json.loads(registry.read_text())
+            data['runs'][body['run_id']] = body
+            registry.write_text(json.dumps(data))
+            controller = SimpleNamespace(expected=copy.deepcopy(body),
+                identity={**SUP.RR.proc_identity(os.getpid()), 'pid_namespace': os.readlink('/proc/self/ns/pid')},
+                command=body['command'], sandbox='fixture', guard=contextlib.nullcontext)
+        try:
+            processes, receipt = self.launch(route, path, jobs, registry, output, body, controller=controller)
+        except ValueError as error:
+            self.fail(f'normal corrected resource start refused: {error}')
+        self.assertEqual(len(processes), 1, receipt)
+        self.assertTrue(receipt['payload_spawned'])
+        self.assertEqual(SUP.read_armed(ledger)['full-run']['predecessor_id'], body['run_id'])
+        self.assertEqual(json.loads(registry.read_text())['runs']['fixture-run'], old_resource)
+        self.assertIn(old_test_row, jobs.read_text())
+        self.assertEqual(ledger.claims(), {})
+        for key, raw in old_claims.items():
+            self.assertEqual(ledger.claim_path(key).read_bytes(), raw)
+        self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+        self.assertTrue(SUP.admit_owner_successor_start(
+            route, 'run-verify', jobs, owner, 'same-native'))
+        fresh = json.loads(marker_path.read_text())
+        self.assertGreater(fresh['sequence'], old_marker['sequence'])
+        self.assertNotEqual(fresh['resource_execution_identity'], old_marker['resource_execution_identity'])
+        self.assertEqual(DC.gate_currency(route, WS.route_node(route, 'full-run'),
+            marker_path, fresh, jobs=jobs).state, 'current')
+        verdict = output / 'reviews' / 'run-verdict.json'
+        verdict.write_text('{"verdict":"PASS","checked":"corrected-resource"}\n')
+        publish('run-verify', verdict, 'att-corrected-verification')
+        report = output / 'setup-handoff.json'
+        report.write_text('{"verdict":"PASS","result":"corrected resource verified"}\n')
+        publish('handoff', report, 'att-corrected-report')
+        gates = router.terminal_gate_observation(route, jobs=jobs)
+        self.assertTrue(gates and all(value['passed'] for value in gates.values()), gates)
+        self.assertIn(old_test_row, jobs.read_text())
+
+    def test_superseded_resource_rearm_keeps_execution_conflict_and_unrelated_failure_guards(self):
+        for mutation in ('live-resource', 'unsettled-successor', 'unknown-successor',
+                         'conflicting-successor', 'corrupt-marker', 'unrelated-failure', 'reused-sentinel'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                fixture = self._superseded_resource_fixture()
+                route, path, jobs, registry, output, ledger = fixture.context
+                body = self.next_body(registry, 'unsafe-correction', output, final=True)
+                if mutation == 'live-resource':
+                    data = json.loads(registry.read_text())
+                    data['runs']['fixture-run'].update(SUP.RR.proc_identity(os.getpid()), status='running')
+                    registry.write_text(json.dumps(data))
+                elif mutation in {'unsettled-successor', 'unknown-successor', 'conflicting-successor'}:
+                    meta = dict(fixture.old_test_meta)
+                    status = 'running' if mutation == 'unsettled-successor' else 'done'
+                    if mutation == 'unknown-successor':
+                        meta['pid_observer_ns'] = 'pidns:unobserved'
+                    if mutation == 'conflicting-successor':
+                        meta['terminal_conflict'] = '1'
+                    changed = '\t'.join(['2026-11-06T00:00:00Z', status, str(self.base), str(self.base),
+                        'old-verification', ','.join(f'{key}={value}' for key, value in meta.items())]) + '\n'
+                    jobs.write_text(jobs.read_text().replace(fixture.old_test_row, changed))
+                elif mutation == 'corrupt-marker':
+                    marker = json.loads(fixture.marker_path.read_text())
+                    marker['route_hash'] = 'sha256:foreign'
+                    fixture.marker_path.write_text(json.dumps(marker))
+                elif mutation == 'unrelated-failure':
+                    ledger.record('scaffold', 'FAILED_TERMINAL', evidence={'reason': 'separate failure'})
+                elif mutation == 'reused-sentinel':
+                    body['sentinel'] = fixture.old_resource['sentinel']
+                before = ledger.journal_path.read_bytes(), SUP.read_armed(ledger), ledger.claims()
+                try:
+                    processes, receipt = self.launch(route, path, jobs, registry, output, body)
+                except ValueError:
+                    processes, receipt = [], {'payload_spawned': False}
+                self.assertEqual(processes, [])
+                self.assertFalse(receipt['payload_spawned'])
+                self.assertEqual((ledger.journal_path.read_bytes(), SUP.read_armed(ledger), ledger.claims()), before)
+
+    def test_superseded_resource_rearm_resumes_after_each_existing_journal_boundary(self):
+        for boundary in ('event', 'stage', 'workflow'):
+            with self.subTest(boundary=boundary), self.subfixture():
+                fixture = self._superseded_resource_fixture()
+                route, path, jobs, registry, output, ledger = fixture.context
+                event, record, workflow = WS.WorkflowLedger.record_event, WS.WorkflowLedger.record, WS.WorkflowLedger.set_workflow_state
+                crashed = []
+
+                def after(instance, fn, which, *args, **kwargs):
+                    result = fn(instance, *args, **kwargs)
+                    state = args[-1] if args else None
+                    if (not crashed and which == boundary
+                            and kwargs.get('actor') == 'resource-input-supersession'
+                            and (which == 'event' or state == 'FAILED_RETRYABLE')):
+                        crashed.append(which)
+                        raise OSError('interrupted supersession journal')
+                    return result
+
+                first = self.next_body(registry, 'interrupted-correction', output, final=True)
+                with mock.patch.object(WS.WorkflowLedger, 'record_event',
+                        lambda instance, *a, **kw: after(instance, event, 'event', *a, **kw)), \
+                     mock.patch.object(WS.WorkflowLedger, 'record',
+                        lambda instance, *a, **kw: after(instance, record, 'stage', *a, **kw)), \
+                     mock.patch.object(WS.WorkflowLedger, 'set_workflow_state',
+                        lambda instance, *a, **kw: after(instance, workflow, 'workflow', *a, **kw)):
+                    processes, failed = self.launch(route, path, jobs, registry, output, first)
+                self.assertTrue(crashed)
+                self.assertEqual(processes, [])
+                self.assertFalse(failed['payload_spawned'])
+                following = self.next_body(registry, 'continued-correction', output, final=True)
+                processes, receipt = self.launch(route, path, jobs, registry, output, following)
+                self.assertEqual(len(processes), 1, receipt)
+                self.assertTrue(receipt['payload_spawned'])
+                replay, _receipt = self.launch(route, path, jobs, registry, output, following)
+                self.assertEqual(replay, [])
+                self.assertEqual(SUP.read_armed(ledger)['full-run']['predecessor_id'], following['run_id'])
+
     def test_old_poll_false_success_and_unstarted_claim_recover_on_same_route(self):
         route, path, jobs, registry, output, ledger = self.fixture()
         producer = output / 'run.json'

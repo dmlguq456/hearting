@@ -295,6 +295,29 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
         self.assertNotIn("\n\n", text)
 
+    def test_the_first_user_cycle_adds_the_artifact_list_line_before_the_artifact_line(self):
+        cycle = self.root / "campaigns/2026-01-02_c/2026-01-02_alpha/artifacts"
+        cycle.mkdir(parents=True)
+        report = cycle / "final_report.md"
+        report.write_text(REPORT, encoding="utf-8")
+        (self.root / ".runtime/artifact-entrance.json").write_text(json.dumps({
+            "schema": 1, "first_cycle_id": "cyc_x",
+            "first_cycle_path": "campaigns/2026-01-02_c/2026-01-02_alpha",
+        }), encoding="utf-8")
+        lines = WI.completion_summary(self.route, report).splitlines()
+        self.assertEqual(lines[-2], f"산출물 목록: {self.root / 'README.md'}")
+        self.assertTrue(lines[-1].startswith("산출물: "))
+
+    def test_a_report_outside_the_first_cycle_or_a_missing_record_adds_no_line(self):
+        record = self.root / ".runtime/artifact-entrance.json"
+        record.write_text(json.dumps({
+            "schema": 1, "first_cycle_id": "cyc_x",
+            "first_cycle_path": "campaigns/2026-01-02_c/2026-01-02_alpha",
+        }), encoding="utf-8")
+        self.assertNotIn("산출물 목록:", WI.completion_summary(self.route, self.report))
+        record.unlink()
+        self.assertNotIn("산출물 목록:", WI.completion_summary(self.route, self.report))
+
     def test_numbered_sections_of_other_documents_are_read_by_their_words_only(self):
         # The D3 design document: its section 4 is a priority table, not verification.
         research = {**self.route, "capability": "autopilot-research"}

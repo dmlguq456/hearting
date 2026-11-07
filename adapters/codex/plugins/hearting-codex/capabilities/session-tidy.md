@@ -41,15 +41,26 @@ Existing manual session-tidy, clear and handoff behavior remains unchanged.
 
 Automatic idle tidy has one shared policy for Claude, Codex and OpenCode.
 The optional `${XDG_CONFIG_HOME:-~/.config}/hearting/session-tidy.json` keeps
-`idle.enabled=true`, `idle.wait_seconds=3240`, `idle.min_tokens=200000` and
+`idle.enabled=true`, `idle.wait_seconds=21600`, `idle.min_tokens=500000` and
 `idle.cache_margin_seconds=60` as its defaults. The existing
 `{"idle":{"enabled":false}}` switch disables it; installation never enables
 an operator-disabled policy. Unknown latest input usage is ineligible. The wait
 is a configured operating default, not a verified provider cache lifetime.
+The six-hour default tidies after the cache has cooled rather than just before
+expiry. `cache_margin_seconds` remains readable for compatibility and is recorded
+in the booking, but has no scheduling effect and does not shorten the wait.
+Idle means no activity for that wait, counted from the end of the latest user,
+peer, notification, completion or runtime-resume turn; Hearting's own tidy-request
+turn is excluded. The default context floor matches the recommendation notice's
+500,000-token value.
 
 Each actual user-work interval permits one automatic request, including failed
 or uncertain requests. Runtime notifications, other sessions' messages, status
-lines and Hearting's own requests never rearm it. Recognize the runtime's
+lines and Hearting's own requests never rearm it. Other completed turns only move
+an unclaimed idle deadline; they do not create another automatic request in the
+same user-work interval. New activity after a request is claimed cancels its
+remaining automatic input without rearming the consumed interval; the saved
+card and memory work remain available. Recognize the runtime's
 transport wrapping of an exact recorded self-request without treating the
 wrapper as user input. Keep this classification after booking expiry. A newer
 compaction boundary cancels an unsent idle booking; pre-compaction usage cannot
@@ -58,13 +69,22 @@ Use the existing session ledger and booking; add no gate or state store.
 Unresolved clear lineage does not block this same-session operation. A source
 with a confirmed successor remains ineligible.
 
-At the due time, the existing helper requests one marked card reply, with no
-Skill or tool call. The common turn-end observer stores that reply as the exact
-native session's external handoff card and queues memory tidying once. The card
-must be saved before requesting native compaction: `/compact` in Claude and
+At the due time, the existing memory helper prepares the external handoff card
+and memory actions in the same private output. It reads the caller's conversation
+and complete previous card, follows the Card Format below, and keeps its existing
+deep editor role. The main conversation receives no card request or card-body
+reply. The runner saves the card for that exact native session before requesting
+native compaction: `/compact` in Claude and
 Codex, the equivalent command in OpenCode. Never use `/clear` or `/new` for idle
-tidy. Preserve scrollback, the native session and its background agents. Running
-background agents neither postpone idle tidy nor select a special adapter path.
+tidy. Preserve scrollback, the native session and its background agents. Native
+background agents alone do not postpone idle tidy or select a special adapter
+path. A session responsible for an open registered route or owner/worker attempt
+is not idle: use the same route projection as its status line and Fleet to
+withhold both booking and input while that work remains open.
+An absent target session or incomplete route observation is unknown, so it
+withholds input too. After observations, recheck the current booking and its
+activity/claim before the existing writer sends; an old copy cannot permit a
+cancelled request.
 A running foreground turn, a nonempty composer or an open question/approval
 prevents either input. Physical binding and input readiness are transport safety
 only; success is established solely by the stored card and a later exact-session
@@ -81,8 +101,9 @@ auto-compaction and restores its prior value on uninstall.
 
 When an exact native identity is available, each session keeps its own card independently of the current project or pane seat; one session never replaces another's card. A different native identity receives a card or result only through the existing confirmed lineage and receipt rules. Calls without an exact identity retain the shared project fallback behavior, with author checks and no inferred recipient.
 
-The main-authored card follows the single Card Format below, using the
-conversation it already holds. The core comes first; an automatically selected
+Every card follows the single Card Format below. Manual cards use the main
+session's conversation; automatic idle cards use the helper's recorded input.
+The core comes first; an automatically selected
 module follows. Dated user wording and PRD locations remain verbatim, including
 in the existing card history when they exceed the bounded display.
 
@@ -92,13 +113,12 @@ tool call (`utilities/session_tidy.py tidy`), followed by the command's short
 keep their existing meaning. Manual memory-tidy results retain their undo and
 partial-coverage details.
 
-An automatic idle request needs no Skill or tool. The main session replies once
-between the request's nonce markers. Its own turn-end evidence (Claude/Codex
-Stop `last_assistant_message`, or OpenCode's latest assistant message finished
-with `stop`) supplies the external card. An exact late response is retained
-without restoring permission to compact; a newer human prompt, another request's
-markers, or an incomplete response never authorizes compaction. Repeat callbacks
-reuse the card and existing memory queue. Idle memory work does not publish its
+Automatic idle work needs no main-session Skill, tool or model turn. Its existing
+booking and memory queue bind the helper output to the unchanged session,
+activity frontier and card generation. A late helper never replaces a newer
+manual card or writes after cancellation or new activity. Repeated callbacks
+reuse that same queue and accepted card. Memory application can finish after
+card persistence and does not hold up compaction when it fails. Idle work does not publish its
 internal operation/coverage/undo text as a second user notification. Only the
 saved-card plus native-compaction result emits the short human notice, through
 the existing adapter output and notice receipt handling, with no model turn.
@@ -119,6 +139,13 @@ selection has moved. Start reports retain the native sequence/source and
 provider-supplied transcript when available. Herdr resume argv is the original
 launcher array from the proven current process; missing fields stay omitted,
 and saved argv is restoration data without execution or owner authority.
+
+Human input displays use the exact-session prompt frontier after its existing
+source classification. `prompt_display(seat, harness, sid, current=...)` is
+the shared reader for Fleet and an optional session-shell panel. Its human row
+means the person's last typed input; peer, runtime and tidy input stay separate.
+Display text grants no input readiness, ownership, lineage or approval, and is
+excluded from public snapshots and exports.
 
 An inherited pane label never grants access to that pane's card or input. A
 runtime that provides an exact, live native session target may instead keep a
@@ -159,6 +186,16 @@ prompt, and runner sweeps discover open records that have no retained duty.
 New notices retain a duty when written so an idle recipient can be woken.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+
+### Read-only prompt display
+
+Fleet reuses the existing prompt-source judgment and exact native-session
+frontier. Keep a bounded first line and timestamp for the last real prompt and
+recent received peer/runtime/Hearting inputs in that same frontier. Generated
+inputs retain the last real prompt; an unknown or different session supplies no
+substitute. This is display data only: it changes no idle rearming, wait,
+claim, delivery or completion decision. Readers reuse file-generation caches
+and never rescan conversations on a rendering tick or create another store.
 
 ## Portable Procedure
 
@@ -362,3 +399,14 @@ confirmed tidy edges advance a holder without another binding. Card delivery,
 explicit acceptance and physical retirement remain separate from this logical
 record. An unreadable graph waits with the existing controller and preserves
 the original storage and receipt identities.
+
+## Interrupted resume
+
+A native resume start is an observation of the same exact session, not a new
+user prompt. Positive unfinished-turn, stopped-background-task or open-work
+evidence may retain one ordinary restart notice in the existing courier.
+Completed sessions and sessions waiting for a person receive no automatic
+continue input. The existing current-session, idle, empty-composer and receipt
+checks own the send; ambiguous submission is not retried through another path.
+Fleet shows a retained interrupted resume when the courier cannot wake it.
+No additional queue, approval, operator input or helper daemon is introduced.
