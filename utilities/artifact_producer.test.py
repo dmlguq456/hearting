@@ -293,6 +293,70 @@ class ProducerTestBase(unittest.TestCase):
 
 
 class ActivateAndBeginTest(ProducerTestBase):
+    def _assert_replaced_legacy_root_is_not_aliased(self, *, copied_identity=False, journal=False, resume=False):
+        self.activate()
+        legacy = self.root.with_name('.claude_reports')
+        self.root.rename(legacy); self.root = legacy
+        identity = L.read_root_identity(legacy)
+        identity_rel = P.artifact_admission._root_identity_path(legacy).relative_to(legacy)
+        identity_bytes = (legacy / identity_rel).read_bytes()
+        route, route_file = self.route()
+        route_bytes, route_rel = route_file.read_bytes(), route_file.relative_to(legacy)
+        alias = legacy.with_name('.agent_reports')
+        if resume:
+            P.begin(legacy, route_file=route_file, capability='autopilot-code', intensity='direct')
+            alias.unlink()
+        retained = legacy.with_name('retained-original')
+        original = P._begin_cycle_record
+        observed = {}
+        def begin_then_replace(*args, **kwargs):
+            result = original(*args, **kwargs)
+            observed.update(status=result['status'], layout=result['layout'])
+            legacy.rename(retained); legacy.mkdir()
+            (legacy / 'sentinel').write_text('keep replacement')
+            if copied_identity:
+                target = legacy / identity_rel
+                target.parent.mkdir(parents=True)
+                target.write_bytes(identity_bytes)
+            return result
+        with mock.patch.object(P, '_begin_cycle_record', side_effect=begin_then_replace):
+            result = P.begin(legacy, _reconcile=False, _deliver_history=False,
+                route_file=route_file, capability='autopilot-code', intensity='direct', journal_target=journal)
+        self.assertFalse(os.path.lexists(alias), 'optional alias must retain the admitted physical root')
+        self.assertEqual(result['root_alias']['status'], 'unknown')
+        self.assertEqual((result['status'], result['layout']), (observed['status'], observed['layout']))
+        if journal:self.assertEqual(result['layout'], 'journal')
+        if resume:self.assertEqual(result['status'], 'resumed')
+        self.assertEqual(L.read_root_identity(retained), identity)
+        self.assertEqual((retained / route_rel).read_bytes(), route_bytes)
+        self.assertEqual((legacy / 'sentinel').read_text(), 'keep replacement')
+
+    def test_begin_rejects_an_alias_after_its_root_is_replaced_by_a_regular_directory(self):
+        self._assert_replaced_legacy_root_is_not_aliased()
+
+    def test_begin_rejects_a_replacement_even_when_it_copies_the_root_identity(self):
+        self._assert_replaced_legacy_root_is_not_aliased(copied_identity=True)
+
+    def test_journal_begin_preserves_its_original_root_binding(self):
+        self._assert_replaced_legacy_root_is_not_aliased(journal=True)
+
+    def test_resumed_begin_preserves_its_original_root_binding(self):
+        self._assert_replaced_legacy_root_is_not_aliased(resume=True)
+
+    def test_inactive_legacy_begin_can_alias_its_existing_identity_without_activation(self):
+        self.seed_legacy()
+        P.artifact_admission.ensure_root_identity(self.root)
+        legacy = self.root.with_name('.claude_reports')
+        self.root.rename(legacy); self.root = legacy
+        identity = L.read_root_identity(legacy)
+        route, route_file = self.route()
+        result = P.begin(legacy, route_file=route_file, capability='autopilot-code', intensity='direct')
+        self.assertEqual((result['status'], result['layout']), ('legacy-compat', 'legacy'))
+        self.assertTrue(legacy.with_name('.agent_reports').is_symlink())
+        self.assertEqual(L.read_root_identity(legacy), identity)
+        self.assertEqual(P.read_cutover(legacy)['state'], 'inactive')
+        self.assertFalse((legacy / 'campaigns').exists())
+
     def test_begin_adds_only_a_legacy_root_alias_and_preserves_the_open_route(self):
         self.activate()
         legacy = self.root.with_name('.claude_reports')

@@ -6,24 +6,27 @@ from pathlib import Path
 from artifact_nofollow import open_relative, open_root
 
 
-def ensure_legacy_alias(root, identity=None):
+def ensure_legacy_alias(root, identity=None, *, expected_inode=None):
     root = Path(root)
     if root.name != '.claude_reports':
         return None
+    if identity is None:
+        return {'status': 'unknown', 'reason': 'root-identity-unavailable'}
     parent = legacy = None
     try:
         parent = open_root(root.parent)
         legacy = open_relative(parent, [root.name])
         observed = os.fstat(legacy)
-        if identity is not None:
-            fd = open_relative(legacy, ['.runtime', 'artifact-admission', 'v1', 'root-identity.json'])
-            try:
-                record = json.loads(os.read(fd, 65536))
-            finally:
-                os.close(fd)
-            if (record.get('artifact_root_id'), record.get('repository_id')) != (
-                    identity.artifact_root_id, identity.repository_id):
-                return {'status': 'unknown', 'reason': 'root-identity-changed'}
+        if expected_inode is not None and (observed.st_dev, observed.st_ino) != expected_inode:
+            return {'status': 'unknown', 'reason': 'root-path-changed'}
+        fd = open_relative(legacy, ['.runtime', 'artifact-admission', 'v1', 'root-identity.json'])
+        try:
+            record = json.loads(os.read(fd, 65536))
+        finally:
+            os.close(fd)
+        if (record.get('artifact_root_id'), record.get('repository_id')) != (
+                identity.artifact_root_id, identity.repository_id):
+            return {'status': 'unknown', 'reason': 'root-identity-changed'}
         current = os.stat(root.name, dir_fd=parent, follow_symlinks=False)
         if (observed.st_dev, observed.st_ino) != (current.st_dev, current.st_ino):
             return {'status': 'unknown', 'reason': 'root-path-changed'}
