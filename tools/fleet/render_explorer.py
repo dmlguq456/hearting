@@ -133,6 +133,17 @@ def _explorer_row_y(frame, entry):
 
 
 def _explorer_question_status(value, fallback):
+    if (isinstance(value, Mapping) and isinstance(value.get("native_ref"), Mapping)
+            and value["native_ref"].get("transport") == "hearting-message-answer"):
+        result = value.get("result") or {}
+        if result.get("status") == "answered-elsewhere":
+            if result.get("transport") == "not-sent":
+                return "Answered in the original session; queued answer not sent."
+            return "Answered in the original session; delivery received."
+        return {"submitted": "Queued; waiting for the original session to receive it.",
+                "received": "Received by the original session.",
+                "applied": "Answer accepted.",
+                "unknown": "Delivery is unconfirmed; your draft is kept."}.get(value.get("state"), fallback)
     reason = value.get("reason") if isinstance(value, Mapping) else None
     if isinstance(reason, str) and reason.strip():
         return " ".join(reason.split())[:220]
@@ -159,6 +170,12 @@ def _explorer_question_has_workflow_binding(ref, envelope):
             or selected != ref.get("id") or envelope.get("request_id") != selected):
         return False
     transport = native.get("transport")
+    if transport == "hearting-message-answer":
+        return (envelope.get("source") == "S4" and selected.startswith("S4:")
+                and native.get("signal_id") == selected
+                and isinstance(native.get("seat_key"), str) and bool(native["seat_key"])
+                and type(native.get("sequence")) is int and native["sequence"] >= 0
+                and envelope.get("question_id") == "message-response")
     if transport == "hearting-answer-marker":
         return (selected.startswith("S4:") and native.get("signal_id") == selected
                 and bool(native.get("seat_key"))

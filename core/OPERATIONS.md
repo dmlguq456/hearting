@@ -3045,10 +3045,10 @@ private S4 source and exact consumed receipt are distinct from native gate
 approval. A queued answer or ordinary peer notice closes neither kind of wait.
 
 **S6** ledger — every message sent or received is a typed record in the `peer-messages/`
-ledger under the dispatch state root. The full body is never stored, only a bounded
-summary (first line, ≤200 characters) and a body digest.
-For a verified question-answer binding the summary contains only its safe subject;
-the private answer body is never copied to the shared ledger.
+ledger under the dispatch state root. Its content is limited to a bounded summary
+(first line, ≤200 characters) and a body digest. For a verified question-answer
+binding the summary contains only its safe subject; the answer body stays in the
+private selected action and native consumer payload.
 
 Every record uses `kind ∈ {watch, steer, handoff, gate-relay, notice}`: `watch` marks an
 idle-notify subscription, `steer`/`handoff`/`gate-relay` are inferred from an explicit

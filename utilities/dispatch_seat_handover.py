@@ -1973,6 +1973,15 @@ def record_recipient_binding(record: dict, storage_key: str, *, harness: str,
             source_harness = next((name for name in HARNESSES
                 if parent_completion(name).get("carrier") == record.get("recipient_kind")), None)
             jobs, lineage = session_notice.pending_lineage(record, source_harness, storage_key, jobs)
+            # A message question is addressed to its original native consumer.
+            # Ordinary notices retain their existing proven successor semantics.
+            if "answer_binding" in receipt:
+                answer = receipt["answer_binding"]
+                if (answer["harness"] != source_harness or answer["session_id"] != storage_key
+                        or lineage != {"kind": "provenance", "harness": source_harness,
+                                       "session_id": storage_key}):
+                    return None
+                return source_harness, storage_key
             return _notice_recipient_binding(lineage, jobs, source_harness, read_context=read_context)
         except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
             return None

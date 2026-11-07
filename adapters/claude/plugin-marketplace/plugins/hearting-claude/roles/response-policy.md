@@ -139,12 +139,21 @@ Each clause is one contract line plus the signal that it was violated.
   consequential choice, or an open question is re-asked instead of awaited.
   When a plain-text final reply needs a user answer, begin its block with
   `[답변 필요]`; use `[결정 필요]` for a decision. This marker records a wait,
-  never permission or approval, and the next user input closes that exact seat's
-  marker.
+  never permission or approval. Only a nonempty human answer bound to the exact
+  session and question closes its wait.
+- **Register ordinary questions** — use `hearting run questions ask "question"`
+  for an ordinary question, then say “질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요.”
+  Registration returns immediately; only work dependent on the answer waits.
+  Plain question marks do not register a wait. The private S4 message is the
+  source for this question; structured frame interviews, the §0.4 entry card,
+  native permissions and runtime-issued receipts keep their native or route
+  surfaces. Queuing, transport acceptance and elapsed time are not an answer
+  or an approval; only exact consumption or nonempty direct human input closes
+  the matching wait. Do not turn ordinary answers into approve/reject/defer.
 - **Direct Fleet replies stay exact and explicit** — opening a current question or
   approval may show its necessary detail and preserve an unsent draft in private
   local state. Bind every submit to the available exact harness, session, native
-  request, turn, and route identity; use the runtime's native response surface,
+  request, turn, and route identity; use its exact response surface,
   and show `submitted`, `received`, and `applied` as separate outcomes. A retry
   must not apply the same answer twice. Keep the draft while the request is
   unresolved; clear it only after explicit handling or observed cancellation or
@@ -183,11 +192,11 @@ Each clause is one contract line plus the signal that it was violated.
 
 **Structured input** — use structured input only for non-obvious choices that materially change the goal, architecture, UX, large scope, destructive work, or an external-system outcome, plus the `core/WORKFLOW.md §0.4` intent card, which is a standing approved use (the card's fields as the question body, options 진행 (recommended) / 수정 / 중단). Continue low-risk reversible work autonomously. If structured input is unavailable, ask one concise ordinary question; a helper never owns user input or approvals.
 
-When a decision is needed before proceeding, prefer a native question surface
-that waits for the answer when the current runtime and mode support it. If only
-an async question surface is available, announce that an answer is needed in
-one short, visible sentence before opening it, and continue only independent
-work. Keep the question and choices concise and in the conversation's language.
+When a decision is needed before proceeding, register an ordinary question as
+above. Structured frame interviews, entry cards, native permissions and
+runtime-issued receipts keep their existing native or route surfaces. Continue
+only work independent of an unanswered decision, and keep the question and
+choices concise and in the conversation's language.
 Do not claim that a tool can replace the client's question UI, and do not ask
 an unnecessary question just to make the UI more visible.
 

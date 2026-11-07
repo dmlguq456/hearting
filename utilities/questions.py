@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Open questions waiting on the person, and their answers sent the existing way.
+"""Register a question, read the shared board, or answer the exact selected request.
+
+``hearting run questions ask TEXT`` registers an explicit private message question
+for this interactive caller and returns immediately. Fleet or a nonempty answer
+in this session completes that question; native approvals keep their own surface.
 
 ``hearting run questions`` lists the same board Fleet's QUESTIONS view shows (one
 shared projection, one count): each wait's question, choices and recommended answer,
@@ -11,7 +15,7 @@ surface; it never answers on the person's behalf.
 same selected-request path Fleet uses (``human_wait_state.submit_selected_response``):
 S2 releases the route gate, S3 continues the blocked owner with a correction, S1 Codex
 and OpenCode questions use their native reply. A wait without a reply surface (a Claude
-native question, an S4 marker) is reported with its reason and left for that session.
+native question, a legacy S4 marker) is reported with its reason and left for that session.
 """
 from __future__ import annotations
 
@@ -111,7 +115,8 @@ def describe(item, *, now, detail=True):
     """One board row for a person-facing relay: identity, timing, owner and question."""
     owner = item.get("owner") or {}
     row = {"id": item.get("id"), "source": item.get("source"),
-           "kind": _KIND_LABEL.get(item.get("source"), str(item.get("kind") or "wait")),
+           "kind": ("message question" if item.get("kind") == "message" else
+                    _KIND_LABEL.get(item.get("source"), str(item.get("kind") or "wait"))),
            "since": item.get("since"), "age": _age(now - float(item.get("since") or now)),
            "state": item.get("fold") or ("older" if item.get("stale") else "current"),
            "owner": {"harness": owner.get("harness"), "session_id": owner.get("session_id")},
@@ -284,7 +289,9 @@ def _answer(args):
         return 2
     text = args.text
     if args.text_file:
-        text = Path(args.text_file).read_text(encoding="utf-8").strip()
+        text = Path(args.text_file).read_text(encoding="utf-8")
+        if (envelope.get("native_ref") or {}).get("transport") != "hearting-message-answer":
+            text = text.strip()
     answers = None
     if args.answers_file:
         try:
@@ -316,8 +323,13 @@ def _answer(args):
         verdict, code = state, 0
     elif result.get("action_id") not in (None, action_id) or (
             state in _DELIVERED and result.get("action_id") != action_id):
-        verdict, code = "answered-elsewhere", 1
-        reason = "already answered by another caller (%s)" % state
+        if ((envelope.get("native_ref") or {}).get("transport") == "hearting-message-answer"
+                and state in {"submitted", "unknown"}):
+            verdict, code = "claimed-elsewhere", 1
+            reason = "an answer is already queued or unconfirmed; waiting for exact receipt"
+        else:
+            verdict, code = "answered-elsewhere", 1
+            reason = "already answered by another caller (%s)" % state
     else:
         verdict, code = state, 1
     if args.json:
@@ -328,11 +340,53 @@ def _answer(args):
     return code
 
 
+def _ask(args):
+    import session_tidy as tidy
+    from dispatch_parent_completion import interactive_parent_identity
+    try:
+        if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
+                in {"owner", "worker", "auxiliary", "reviewer"}):
+            raise ValueError("question-caller-is-worker")
+        harness, sid = interactive_parent_identity()
+        if harness not in {"claude", "codex", "opencode"} or not HWS._safe_native_ref(sid):
+            raise ValueError("question-caller-unknown")
+        if (args.text is None) == (args.text_file is None):
+            raise ValueError("give TEXT or --text-file, exclusively")
+        text = Path(args.text_file).read_text(encoding="utf-8") if args.text_file else args.text
+        seat = tidy.resolve_seat(harness, os.getcwd(), os.environ, sid)
+        if not seat.key:
+            raise ValueError("question-seat-unproven")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        from fleet.process_identity import current_launch_context
+        launch = current_launch_context(harness, sid)
+        incarnation = ({key: launch[key] for key in ("pid", "proc_start")} if launch else None)
+        value = HWS.register_message(harness, sid, seat, text,
+            sequence=tidy.read_prompt_seq(seat), choices=args.choice or (),
+            recommended=args.recommend - 1 if args.recommend is not None else None,
+            secret=args.secret, incarnation=incarnation)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print("questions: " + str(exc), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"id": value["id"], "state": value["lifecycle"]}))
+    else:
+        print(value["id"])
+        print(HWS.ui_translator()("questions.registered"))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="hearting run questions", allow_abbrev=False,
                                      description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", parser_class=argparse.ArgumentParser)
     listing = sub.add_parser("list", allow_abbrev=False, help="list waiting questions (default)")
+    ask = sub.add_parser("ask", allow_abbrev=False, help="register a question in this session")
+    ask.add_argument("text", nargs="?")
+    ask.add_argument("--text-file")
+    ask.add_argument("--choice", action="append")
+    ask.add_argument("--recommend", type=int)
+    ask.add_argument("--secret", action="store_true")
+    ask.add_argument("--json", action="store_true")
     answer = sub.add_parser("answer", allow_abbrev=False,
                             help="send the person's chosen answer the existing way")
     for target, default in ((parser, False), (listing, argparse.SUPPRESS)):
@@ -350,6 +404,8 @@ def main(argv=None):
     picked.add_argument("--answers-file", help="JSON object: question id -> answer(s)")
     answer.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "ask":
+        return _ask(args)
     if args.command == "answer":
         return _answer(args)
     return _list(args)

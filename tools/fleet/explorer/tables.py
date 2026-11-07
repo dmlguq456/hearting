@@ -1160,6 +1160,8 @@ _QUESTION_ABOUT = {"S1-approval": "permission approval", "S1-question": "questio
 def question_about(question):
     """``frame plan review`` / ``blocked work needs direction`` …: a body-free one-line summary of a wait."""
     source, node = question.get("source"), question.get("node")
+    if source == "S4" and question.get("kind") == "message":
+        return "question answer"
     if source == "S2":
         if node == "frame-review":
             return "frame plan review"
@@ -1500,7 +1502,7 @@ def draw_questions(grid, vm, state, x=34, y=3):
                     values = tuple(values) if isinstance(values, (list, tuple)) else ()
                     multi_select = question_multiple_select(envelope, qid)
                     choice_labels = {}
-                    for choice in choices if isinstance(choices, (list, tuple)) else ():
+                    for choice_index, choice in enumerate(choices if isinstance(choices, (list, tuple)) else ()):
                         if isinstance(choice, Mapping):
                             value = choice.get("value")
                             if value is None:
@@ -1515,6 +1517,8 @@ def draw_questions(grid, vm, state, x=34, y=3):
                             break
                         cursor = x + 20
                         selected_choice = value in values
+                        if question_spec.get("recommended") == choice_index:
+                            label = str(label) + " (recommended)"
                         shown = ("[" + ("x" if selected_choice else " ") + "] "
                                  + str(label if isinstance(label, str) else value)
                                  if multi_select else

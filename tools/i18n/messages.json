@@ -638,6 +638,10 @@
    "en": "No artifact matches {query}.",
    "ko": "\"{query}\"에 해당하는 산출물이 없습니다."
   },
+  "questions.registered": {
+   "en": "Waiting for your answer. Reply in Fleet or in this session.",
+   "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요."
+  },
   "reports.empty": {
    "en": "No user-facing document yet.",
    "ko": "아직 사용자용 문서가 없습니다."

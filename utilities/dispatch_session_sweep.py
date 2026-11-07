@@ -824,6 +824,11 @@ def sweep_deliver(
     # that the seat handover bound to it. Those stay stored (and acked) under the registered
     # parent; only the receiving session differs.
     for current in addressed:
+        if "answer_binding" in (current.get("receipt") or {}):
+            # Message answers use the retained peer courier on every harness:
+            # its exact consumed envelope owns completion. A context-only sweep
+            # must not turn an answer into an ordinary runtime prompt or ACK.
+            continue
         if current.get("delivery_id") in visited_batch_ids:
             continue
         if claimed and over_budget():
@@ -1231,6 +1236,9 @@ def _notice_text(root: Path, record: dict, cache: dict | None = None) -> str:
     """The bounded notice line, with the runner's newer public state if any."""
     from session_notice import render_text
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    if "answer_binding" in receipt:
+        from session_notice import consumer_text
+        return consumer_text(receipt)
     original = render_text(receipt)
     refreshed = _refreshed_notice_text(root, record, {} if cache is None else cache)
     if refreshed is None or refreshed == receipt.get("text"):

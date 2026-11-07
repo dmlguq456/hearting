@@ -369,14 +369,15 @@ assigned number; a changed or unconfirmed target receives no old metadata.
 
 Answer waits are one read-only projection of existing sources: exact native
 interaction sidecars (S1), raised human gates (S2), ended owners whose result
-already waits for a person (S3), and explicitly marked final replies (S4).
+already waits for a person (S3), and S4 message questions or legacy marked replies.
 Display surfaces read only the private derived cache; one demand-driven producer
 refreshes it from the existing sources. A missing or expired cache is unknown,
 not a confirmed zero, and S4 on the current seat is read directly so an exact
 prompt close is visible. Each source closes only through its existing answer,
 gate, successor, or exact seat-input rule. S3 includes only route-bound BLOCKED
 owners without a later owner attempt on that same route. Every source is current
-for 72 hours, older through seven days, then omitted; `total` counts current
+for 72 hours and older through seven days; unresolved message questions remain
+available when older. `total` counts current
 items and `older` counts the older window. The private session projection may
 retain question text for its intended session and notification consumers. Fleet
 reads a separate derived projection whose schema contains no question, choices,
@@ -384,16 +385,24 @@ recommendation, seat key, or free-form health reason. Incomplete health remains
 unknown in both projections, never a confirmed zero. Totals, session indexes and
 notifications count current items only. Unknown seat attribution remains in the
 global current total. Reading does not claim, resume, settle, or mutate a job.
-S4 signals and derived caches are observational, private state; folding never
-changes source state and adds no hook, gate, or user setting.
+The private S4 message is the source of a registered ordinary question; legacy
+markers remain observational. Folding never closes a wait or discards unresolved
+body and draft, and adds no hook, gate, or user setting. Public projections carry
+no question, choices, recommendation, draft, or answer body.
 
 For a supported selected question or approval, Fleet sends the person's explicit
-response through the existing native transport to that exact live request once.
+response through the existing transport to that exact live request once.
 Revalidate a changed or already answered request before submission. Submitted,
 received and applied remain distinct; transport acceptance alone proves neither
 native consumption nor resumed work. Current pending questions, answered or
 expired requests, unknown observations and older history remain distinct on
-every display. Unsupported response surfaces retain their native fallback.
+every display. A message question closes on exact consumed answer receipt or
+nonempty direct human input for the same session and sequence, never on queue
+acceptance or elapsed time. Unsupported native surfaces retain their fallback.
+
+HISTORY presents bounded successful NOW changes at their original time, retaining
+the existing generations, cards and conversation access. Explicit Open pane uses
+an exact verified target; periodic pane observation stays read-only.
 
 Fleet's interactive view keeps shared status, usage, compute/GPU observations,
 and its controls outside the scrolling work-list viewport. The list body owns

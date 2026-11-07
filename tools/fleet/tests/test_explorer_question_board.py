@@ -1,5 +1,9 @@
 """The QUESTIONS board as the person reads it: one count, who/what/route/when, no silent hiding."""
 import unittest
+import sys
+import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -186,6 +190,130 @@ class NoResponseRoutes(unittest.TestCase):
         self.assertIn("0 open · no response 1 · 0 stopped legs", table[-1])
         overview = _text(vm, NavState(), 140)
         self.assertIn("0 routes · no response 1", overview[-1])
+
+
+class MessageQuestions(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "utilities"))
+        from fixtures.message_questions import MessageQuestionFixture
+        self.fixture = MessageQuestionFixture()
+        self.f = self.fixture.__enter__()
+        self.addCleanup(self.fixture.__exit__, None, None, None)
+
+    def board(self, signal):
+        import human_wait_state as waits
+        import time
+        self.assertTrue(waits.publish_cache({"observed_at": time.time(), "complete": True, "items": [{
+            "id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+            "owner": {"harness": signal["harness"], "session_id": signal["session_id"]},
+            "attribution": "exact"}]}))
+        vm = build_view_model({"sessions": [], "jobs": [], "resources": [],
+                               "answer_waits": waits.cached_fleet_view(request=False)})
+        return vm, vm.questions[0]
+
+    def effect(self, state, effect, vm):
+        from tools.fleet import render
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+        result = ExplorerRuntime.execute_question_action(effect)
+        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", vm), \
+             patch.object(render, "_EXPLORER_QUESTION_REFRESH_AT", 0), \
+             patch.object(render, "_explorer_queue_question_effect"):
+            render._explorer_accept_question_result({"effect": effect, "result": result})
+            return render._EXPLORER_STATE, result
+
+    def action(self, state, action, vm):
+        state, effects = reduce(state, {"type": "click", "action": action})
+        for effect in effects:
+            state, _ = self.effect(state, effect, vm)
+        return state, effects
+
+    def test_message_inline_editor_reaches_each_original_native_consumer_once(self):
+        import human_wait_state as waits
+        import tidy_decisions
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                signal, _ = self.f.ask(harness, text="PRIVATE QUESTION " + harness,
+                                       choices=["A", "B"], recommended=1)
+                vm, row = self.board(signal)
+                state, _ = self.action(NavState(view="QUESTIONS"),
+                    ("question.select", row["id"], row["ref"]), vm)
+                self.assertEqual(state.question_overlay["state"], "open", state.question_overlay)
+                self.assertIn("recommended", "\n".join(_text(vm, state)))
+                state, effects = self.action(state, ("question.choice", "message-response", "B"), vm)
+                self.assertEqual(effects[0][0], "questions.draft")
+                state, effects = self.action(state, ("question.submit",), vm)
+                self.assertEqual(effects[0][0], "questions.submit")
+                self.assertEqual(state.question_overlay["state"], "submitted", state.question_overlay)
+                self.assertIn("Queued", state.question_overlay["status"])
+                self.assertEqual(waits._read(waits._path(signal["seat_key"]))["lifecycle"], "open")
+                calls, ref, pending = self.f.courier(signal)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(pending["state"], "queued")
+                wire = pending["text"]
+                repeated, same_ref, _ = self.f.courier(signal)
+                self.assertEqual((repeated, same_ref), ([], ref))
+                self.assertTrue(wire.count("Question answer") == 1)
+                self.f.consume(signal, wire, sid="wrong-native-session")
+                self.assertEqual(waits._read(waits._path(signal["seat_key"]))["lifecycle"], "open")
+                self.f.consume(signal, wire)
+                done = waits._read(waits._path(signal["seat_key"]))
+                self.assertEqual((done["lifecycle"], done["completion"]["actor"]), ("answered", "fleet"))
+                completion = done["completion"]
+                self.f.consume(signal, wire)
+                self.assertEqual(waits._read(waits._path(signal["seat_key"]))["completion"], completion)
+                self.assertEqual(self.f.peer._read_pending(ref)["state"], "received")
+                self.assertEqual(self.f.record(signal)["state"], "acked")
+                records = [item for item in self.f.peer._iter_records() if item.get("transfer_ref") == ref
+                           and item.get("delivery", {}).get("status") == "received"]
+                self.assertEqual(len(records), 1)
+                self.assertNotIn("PRIVATE QUESTION", json.dumps(records))
+        self.assertEqual(len(tidy_decisions.list_pending()), 3)
+
+    def test_editor_preserves_raw_free_text_secret_and_changed_request_draft(self):
+        import human_wait_state as waits
+        import tidy_decisions
+        from tools.fleet.explorer.state import serialize
+        signal, _ = self.f.ask("opencode", secret=True)
+        vm, row = self.board(signal)
+        state, _ = self.action(NavState(view="QUESTIONS"), ("question.select", row["id"], row["ref"]), vm)
+        state, _ = self.action(state, ("question.edit", "message-response"), vm)
+        answer = "PRIVATE-SECRET-ANSWER 한국어 🙂"
+        state, effects = reduce(state, {"type": "key", "key": "text:" + answer})
+        for effect in effects:
+            state, _result = self.effect(state, effect, vm)
+        self.assertNotIn(answer, "\n".join(_text(vm, state)))
+        self.assertNotIn(answer, json.dumps(serialize(state)))
+        self.assertNotIn("PRIVATE-SECRET-ANSWER", repr(vm.source_records))
+        state, _ = self.action(state, ("question.submit",), vm)
+        self.assertEqual(state.question_overlay["state"], "submitted")
+        calls, _ref, pending = self.f.courier(signal)
+        self.assertEqual(len(calls), 1)
+        wire, recipient = pending["text"], pending["to"]
+        self.assertIn(answer, wire)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(tidy_decisions.list_pending(), [])
+        self.assertNotIn(answer, json.dumps(list(self.f.peer._iter_records())))
+        self.assertNotIn(answer, waits._fleet_cache_path().read_text())
+
+        old, envelope = self.f.ask("claude", text="old")
+        vm, row = self.board(old)
+        state, _ = self.action(NavState(view="QUESTIONS"), ("question.select", row["id"], row["ref"]), vm)
+        state, _ = self.action(state, ("question.edit", "message-response"), vm)
+        state, effects = reduce(state, {"type": "key", "key": "text:keep this draft"})
+        for effect in effects:
+            state, _ = self.effect(state, effect, vm)
+        newer, _ = self.f.ask("claude", text="replacement")
+        newer_vm, _ = self.board(newer)
+        # The rendered stale row cannot send. Its private draft survives replacement.
+        from tools.fleet import render
+        from tools.fleet.explorer.state import _question_action_ref
+        ref = _question_action_ref(state.question_overlay)
+        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", newer_vm):
+            self.assertFalse(render._explorer_question_ref_current(ref))
+        result = waits.submit_selected_response(ref, {"answers": {"message-response": ["late"]}})
+        self.assertFalse(result["support"]["supported"])
+        self.assertIn("keep this draft", waits._selected_entry(envelope)["draft"])
+        self.assertIsNone(self.f.record(old))
 
 
 if __name__ == "__main__":

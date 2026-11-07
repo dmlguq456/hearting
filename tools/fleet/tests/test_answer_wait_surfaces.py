@@ -2119,9 +2119,13 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
         self.agent_home = self.root / "agent-home"
         (self.agent_home / "core").mkdir(parents=True)
         (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        (self.root / "codex-home" / "sessions").mkdir(parents=True)
         self.env = mock.patch.dict(os.environ, {
             "XDG_STATE_HOME": str(self.root / "xdg"),
             "HOME": str(self.root),
+            "CODEX_HOME": str(self.root / "codex-home"),
+            "CLAUDE_CONFIG_DIR": str(self.root / "claude-home"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.root / "interactions"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "AGENT_HOME": str(self.agent_home),
             "AGENT_WORKFLOW_ROOT": str(self.root / "workflow"),
@@ -2149,6 +2153,13 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.addCleanup(self.tmp.cleanup)
         self.now = time()
+
+        # These S2/S3/legacy S4 fixtures have no native Codex question. Its
+        # cross-home census must not read unrelated live runtime rollouts.
+        rollouts = mock.patch("human_gate_observation._codex_rollout_waits",
+                              return_value={"pending": {}, "complete": True})
+        rollouts.start()
+        self.addCleanup(rollouts.stop)
 
         demand = mock.patch.object(human_wait_state, "_request_producer")
         demand.start()

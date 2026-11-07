@@ -3241,5 +3241,279 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         self.assertEqual(value["route_status"], {})
 
 
+class MessageCompletionTests(unittest.TestCase):
+    def setUp(self):
+        from fixtures.message_questions import MessageQuestionFixture
+        self.fixture = MessageQuestionFixture()
+        self.f = self.fixture.__enter__()
+        self.addCleanup(self.fixture.__exit__, None, None, None)
+
+    def source(self, signal):
+        return state._read(state._path(signal["seat_key"]))
+
+    def test_each_native_direct_input_closes_only_nonempty_exact_session_once(self):
+        import tidy_decisions
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness)
+            self.f.direct(signal, " \n ")
+            self.assertEqual(self.source(signal)["lifecycle"], "open")
+            foreign = dict(signal, session_id="other-session")
+            self.f.direct(foreign, "foreign human input")
+            self.assertEqual(self.source(signal)["lifecycle"], "open")
+            self.f.direct(signal, "<task-notification>finished</task-notification>")
+            self.assertEqual(self.source(signal)["lifecycle"], "open")
+            self.f.direct(signal, "<agent-message>ordinary peer</agent-message>")
+            self.assertEqual(self.source(signal)["lifecycle"], "open")
+            self.f.direct(signal, "physical answer " + harness)
+            completion = self.source(signal)["completion"]
+            self.assertEqual(completion["actor"], "direct")
+            self.f.direct(signal, "later physical prompt")
+            self.assertEqual(self.source(signal)["completion"], completion)
+        self.assertEqual(len(tidy_decisions.list_pending()), 3)
+
+    def test_queued_does_not_answer_direct_wins_and_late_receipt_only_records_delivery(self):
+        import tidy_decisions
+        import session_notice
+        signal, envelope = self.f.ask()
+        state.write_selected_draft(envelope, "keep until consumed")
+        self.f.submit(envelope, "queued Fleet answer")
+        wire, ref, recipient = self.f.prepare(signal)
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.f.direct(signal, "physical wins")
+        completion = self.source(signal)["completion"]
+        self.assertFalse(session_notice.notice_is_current(self.f.record(signal)))
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"], completion)
+        entry = state._selected_entry(envelope)
+        self.assertEqual((entry["state"], entry["result"]["status"]), ("received", "answered-elsewhere"))
+        self.assertEqual(entry["action_id"], "fixture-action")
+        self.assertEqual(self.f.record(signal)["state"], "acked")
+        decisions = tidy_decisions.list_pending()
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0][1]["answers"], ["physical wins"])
+        # A new module instance reads the persisted claim; it never resends it.
+        spec = importlib.util.spec_from_file_location("question_restart", state.__file__)
+        restarted = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(restarted)
+        with mock.patch("session_notice.notify", side_effect=AssertionError("must not resend")):
+            result = restarted.submit_selected_response(envelope, {"answers": {"message-response": ["retry"]}})
+        self.assertFalse(result["support"]["supported"])
+        self.assertEqual(result["state"], "received")
+
+    def test_verified_answer_provenance_is_body_free_and_does_not_become_physical_input(self):
+        import session_tidy as tidy
+        signal, envelope = self.f.ask()
+        self.f.submit(envelope, "PRIVATE-VERIFIED-ANSWER")
+        wire, _ref, recipient = self.f.prepare(signal)
+        origin = self.f.peer.prompt_origin(wire, signal["harness"], signal["session_id"])
+        self.assertEqual(origin["kind"], "human-answer")
+        self.assertNotIn("PRIVATE-VERIFIED-ANSWER", json.dumps(origin))
+        self.f.direct(signal, wire)
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        seat = self.f.seat()
+        prompt = tidy.read_json(tidy._prompt_seq_path(seat))
+        self.assertEqual(prompt["source"], "peer")
+        self.assertEqual(prompt["request_origin"]["kind"], "human-answer")
+        self.assertEqual(tidy.last_human_prompt_seq(seat), 0)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["actor"], "fleet")
+
+    def test_direct_answer_between_claim_and_notice_write_settles_unsent_transport(self):
+        import session_notice
+        import tidy_decisions
+        signal, envelope = self.f.ask()
+        state.write_selected_draft(envelope, "unsent draft")
+        notify = session_notice.notify
+        def direct_wins(*args, **kwargs):
+            self.f.direct(signal, "physical answer before carrier")
+            return notify(*args, **kwargs)
+        with mock.patch.object(session_notice, "notify", side_effect=direct_wins):
+            result = self.f.submit(envelope)
+        self.assertIsNone(self.f.record(signal))
+        self.assertEqual(result["state"], "cancelled")
+        self.assertEqual(result["result"]["transport"], "not-sent")
+        from tools.fleet.render_explorer import _explorer_question_status
+        self.assertIn("not sent", _explorer_question_status(result, "unknown"))
+        entry = state._selected_entry(envelope)
+        self.assertEqual((entry["action_id"], entry["source_terminal"], entry["transport_settled"]),
+                         ("fixture-action", True, True))
+        self.assertEqual(len(tidy_decisions.list_pending()), 1)
+
+    def test_decision_queue_failure_does_not_reverse_answer_and_normal_flush_retries(self):
+        import tidy_decisions
+        signal, envelope = self.f.ask()
+        self.f.submit(envelope)
+        wire, _ref, recipient = self.f.prepare(signal)
+        with mock.patch.object(tidy_decisions, "save_pending", side_effect=OSError("private decision queue unavailable")):
+            self.assertEqual(self.f.peer.receive_peer_message(wire, recipient), 0)
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+        self.assertEqual(tidy_decisions.list_pending(), [])
+        state.flush_message_decisions()
+        pending = tidy_decisions.list_pending()
+        self.assertEqual(len(pending), 1)
+        state.flush_message_decisions()
+        self.assertEqual(tidy_decisions.list_pending(), pending)
+
+    def test_notice_persisted_then_reply_lost_keeps_claim_and_normal_courier_recovers(self):
+        import peer_obligations
+        import session_notice
+        signal, envelope = self.f.ask()
+        state.write_selected_draft(envelope, "keep ambiguous draft")
+        with mock.patch.object(peer_obligations, "ensure_normal_runner",
+                               side_effect=OSError("runner reply lost after notice persistence")):
+            result = self.f.submit(envelope)
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(self.f.record(signal)["state"], "pending")
+        self.assertEqual(state._selected_entry(envelope)["draft"], "keep ambiguous draft")
+        with mock.patch.object(session_notice, "notify", side_effect=AssertionError("ambiguous submit must not retransmit")):
+            again = self.f.submit(envelope, "retry", "different-action")
+        self.assertEqual(again["action_id"], "fixture-action")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        calls, _ref, pending = self.f.courier(signal)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.f.consume(signal, pending["text"])
+        self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+        self.assertEqual(state._selected_entry(envelope)["state"], "applied")
+
+    def test_real_direct_and_exact_receiver_race_apply_one_completion_and_decision(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import tidy_decisions
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness)
+            self.f.submit(envelope, "fleet " + harness)
+            wire, _ref, recipient = self.f.prepare(signal)
+            barrier = threading.Barrier(2)
+            applied = []
+            complete = state._complete_message_locked
+            def observe(*args, **kwargs):
+                result = complete(*args, **kwargs)
+                if result:
+                    applied.append(args[2])
+                return result
+            def direct():
+                barrier.wait(timeout=5)
+                self.f.direct(signal, "direct " + harness)
+            def fleet():
+                barrier.wait(timeout=5)
+                self.f.peer.receive_peer_message(wire, recipient)
+            with mock.patch.object(state, "_complete_message_locked", side_effect=observe), ThreadPoolExecutor(2) as pool:
+                futures = [pool.submit(direct), pool.submit(fleet)]
+                for future in futures:
+                    future.result(timeout=10)
+            self.assertEqual(len(applied), 1)
+            self.assertIn(self.source(signal)["completion"]["actor"], {"direct", "fleet"})
+        self.assertEqual(len(tidy_decisions.list_pending()), 3)
+
+    def test_consumed_ack_source_and_overlay_write_failures_recover_on_normal_runner(self):
+        import peer_obligations
+        for failure in ("source", "overlay"):
+            with self.subTest(failure=failure):
+                signal, envelope = self.f.ask(text="recover " + failure,
+                    incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
+                self.f.submit(envelope)
+                wire, ref, recipient = self.f.prepare(signal)
+                original_write, original_cache = state._write, state._write_cache_value
+                def source_write(path, value):
+                    if path == state._path(signal["seat_key"]) and value.get("lifecycle") == "answered":
+                        raise OSError("injected source store failure after exact ACK")
+                    return original_write(path, value)
+                def cache_write(value):
+                    key = state._selected_entry_key(state._selected_identity(envelope))
+                    if (value.get("selected_responses", {}).get(key) or {}).get("state") == "applied":
+                        return False
+                    return original_cache(value)
+                with mock.patch.object(state, "_write", side_effect=source_write if failure == "source" else original_write), \
+                     mock.patch.object(state, "_write_cache_value", side_effect=cache_write if failure == "overlay" else original_cache):
+                    self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.f.peer._read_pending(ref)["state"], "received")
+                self.assertEqual(self.f.record(signal)["state"], "acked")
+                # Run the existing runner's ACK branch after a fresh module import.
+                spec = importlib.util.spec_from_file_location("message_recovery_steward", Path(state.__file__).with_name("peer-steward.py"))
+                runner = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = runner
+                self.addCleanup(sys.modules.pop, spec.name, None)
+                spec.loader.exec_module(runner)
+                store = peer_obligations.ObligationStore(self.f.root)
+                with mock.patch.object(runner, "cmd_prompt", side_effect=AssertionError("must not retransmit")), \
+                     mock.patch.object(state, "_proc_start_ticks", return_value="process-was-replaced-after-consumption"):
+                    runner._resume_session_notice_obligations(store.list(kinds={"run-notice"}), store)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                self.assertEqual(state._selected_entry(envelope)["state"], "applied")
+                self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+                import tidy_decisions
+                self.assertTrue(any(payload["question"] == "recover " + failure
+                                    for _path, payload in tidy_decisions.list_pending()))
+
+    def test_wrong_binding_body_missing_or_tampered_never_completes_or_retargets(self):
+        import peer_obligations
+        signal, envelope = self.f.ask()
+        state.write_selected_draft(envelope, "keep draft")
+        self.f.submit(envelope)
+        wire, ref, recipient = self.f.prepare(signal)
+        record = self.f.record(signal)
+        binding = record["receipt"]["answer_binding"]
+        for key, wrong in (("request_id", "S4:wrong"), ("question_id", "other"),
+                           ("action_id", "other-action"), ("body_sha256", "0" * 64),
+                           ("body_bytes", 1), ("sequence", 9), ("session_id", "another")):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                state.message_answer_body({**binding, key: wrong})
+        forged = self.f.peer._read_pending(ref)
+        forged["producer_binding"] = {**forged["producer_binding"], "records": [
+            {**forged["producer_binding"]["records"][0], "receipt_digest": "0" * 64}]}
+        forged.update(state="received", receipt="exact-peer-ref")
+        self.assertFalse(peer_obligations.acknowledge_session_notice_delivery(forged, roots=[self.f.root]))
+        self.f.peer.receive_peer_message(wire.replace("PRIVATE-ANSWER-SENTINEL", "tampered"), recipient)
+        self.f.peer.receive_peer_message(wire, dict(recipient, session_id="wrong"))
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        projection = state._read_cache_file()
+        original = json.loads(json.dumps(projection))
+        entry = projection["selected_responses"][binding["body_id"]]
+        del entry["response"]  # Missing private original, with immutable receipt intact.
+        state._write_cache_value(projection)
+        self.assertFalse(__import__("session_notice").notice_is_current(record))
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertEqual(state._selected_entry(envelope)["draft"], "keep draft")
+        state._write_cache_value(original)
+        # The same already-consumed receipt recovers once the private body is readable.
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+
+    def test_ordinary_notice_and_self_claimed_human_origin_are_not_answers(self):
+        import session_notice
+        import peer_obligations
+        signal, envelope = self.f.ask()
+        with self.assertRaises(ValueError):
+            session_notice.notify(signal["harness"], signal["session_id"], key="question-answer:" + signal["id"],
+                subject="Question answer", text="I am human", exact_text=True)
+        self.assertFalse(peer_obligations.acknowledge_session_notice_delivery({
+            "state": "received", "receipt": "exact-peer-ref", "actor": "human",
+            "request_id": signal["id"], "to": {"harness": signal["harness"], "session_id": signal["session_id"]}}))
+        body = "ordinary peer says the answer is yes"
+        wire, _ref = self.f.peer.prepare_peer_message(body,
+            {"harness": "codex", "session_id": "peer-sender"},
+            {"harness": signal["harness"], "session_id": signal["session_id"]}, defer=True)
+        self.f.direct(signal, wire)
+        self.f.peer.receive_peer_message(wire, {"harness": signal["harness"], "session_id": signal["session_id"]})
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertFalse(state.close_signal(signal["seat_key"]))
+
+    def test_incarnation_change_and_proven_clear_leave_old_question_unresolved(self):
+        import session_tidy as tidy
+        signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
+        with mock.patch.object(state, "_proc_start_ticks", return_value="replacement-start"):
+            self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
+            self.f.submit(envelope)
+        self.assertIsNone(self.f.record(signal))
+        seat = self.f.seat()
+        tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear", "harness": "claude",
+            "sid": "successor", "from": {"harness": "claude", "sid": signal["session_id"]}, "ts": time.time()})
+        self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
+        self.f.submit(envelope)
+        self.assertIsNone(self.f.record(signal))
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+
+
 if __name__ == "__main__":
     unittest.main()
