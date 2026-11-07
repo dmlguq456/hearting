@@ -22,7 +22,8 @@ def line_segments(values, columns):
     """Shorten words before losing a known count; never invent an unknown value.
 
     Input is the same observed Session fields plus the shared question/route
-    projection and the account's seven-day window, not harness statusline input.
+    projection and the account's seven-day window. Exact native display telemetry
+    may supply the session values; it never establishes input readiness.
     """
     columns = max(1, int(columns))
     harness = values.get("harness")
