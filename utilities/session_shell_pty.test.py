@@ -67,6 +67,9 @@ if(process.argv.includes(cfg.host)){
   return spawn(file,args,options);
  };
  process.env.HEARTING_SHELL_PYTHON=cfg.backend;
+ if(cfg.fakeFleet){const pty=require('node-pty'),start=pty.spawn;
+  pty.spawn=function(file,args,options){return args?.includes('--explorer')?start(cfg.python,[cfg.fakeFleet],options):start(file,args,options);};
+ }
  fs.writeFileSync(cfg.hostPidFile,String(process.pid));
  const inlet=net.createServer(socket=>{let raw='';socket.on('data',data=>{
   raw+=data;if(!raw.includes('\n'))return;
@@ -151,6 +154,25 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(/DONE_123/.test(raw))throw Error('focused keys leaked into native');
    if(cfg.scenario==='block-focus-batch'){await rpc(cfg.inlet,{batch:Buffer.from('\x1d123\t\x1dBATCH_PRESERVED\r').toString('base64')});await waitFor(/DONE_BATCH_PRESERVED/);}
  }
+ if(cfg.scenario==='fleet-modal'){
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
+   await rpc(cfg.inlet,{batch:Buffer.from('[A\x1b[200~PASTE\x1dTAIL\x1b[201~').toString('base64')});
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_FLEET\r').toString('base64')});
+   await waitFor(/DONE_AFTER_FLEET/);
+   const got=fs.readFileSync(cfg.fleetRead);
+   if(!got.includes(Buffer.from('\x1b[A\x1b[200~PASTE\x1dTAIL\x1b[201~')))throw Error('Fleet CSI/paste leaked or lost');
+   if(got.includes(Buffer.from('AFTER_FLEET')))throw Error('native suffix remained in Fleet');
+ }
+ if(cfg.scenario==='action-display'){
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1dw').toString('base64')});
+   await existing(cfg.actionReady);
+   fs.writeFileSync(cfg.title+'.new',JSON.stringify({title:'DURING_ACTION',ts:Date.now()/1000}));fs.renameSync(cfg.title+'.new',cfg.title);
+   await waitFor(/DURING_ACTION/);
+   const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);
+   await waitFor(/ACTION_DONE/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_ACTION\r').toString('base64')});await waitFor(/DONE_AFTER_ACTION/);
+ }
  const displayLag=[];
  // Registry publication precedes the first complete display observation.
  if(cfg.scenario==='display')await waitFor(/7d [0-9?]/);
@@ -166,6 +188,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
    if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);}
+   if(cfg.actionGate){const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);}
    if(child&&alive){
      const exitFD=fs.openSync(cfg.exit_fifo,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(exitFD,Buffer.from('q'));fs.closeSync(exitFD);
      await new Promise((resolve,reject)=>{
@@ -224,14 +247,23 @@ class SessionShellPTYTest(unittest.TestCase):
             backend=str(directory/'python')
             Path(backend).write_text('#!'+sys.executable+'\nimport os,runpy,sys\nf=os.open('+repr(str(barrier))+',os.O_RDONLY)\nos.read(f,1);os.close(f)\nsys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name="__main__")\n')
             Path(backend).chmod(0o700)
+        if scenario=='action-display':
+            backend=directory/'action-python';gate=directory/'action-gate';ready=directory/'action-ready';os.mkfifo(gate,0o600)
+            backend.write_text('#!'+sys.executable+'\nimport os,sys\nfrom pathlib import Path\nsys.path.insert(0,'+repr(str(ROOT/'utilities'))+')\nimport session_shell as m\ndef blocked(binding,request):\n Path('+repr(str(ready))+').touch()\n fd=os.open('+repr(str(gate))+',os.O_RDWR);os.read(fd,1);os.close(fd)\n return {"ok":True,"lines":["ACTION_DONE"]}\nm._block_action=blocked\nraise SystemExit(m._backend())\n')
+            backend.chmod(0o700)
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
                 'entry':str(ROOT/'utilities/session-shell/entry.py'),'hostPidFile':str(directory/'host-pid'),
                 'diagnostic':str(directory/'display-errors'),
                 'launcher':str(self.launcher),'python':sys.executable,'fake':str(self.fake),'sid':sid,
-                'project':str(self.project),'backend':backend,'barrier':str(barrier) if barrier else None,
+                'project':str(self.project),'backend':str(backend),'barrier':str(barrier) if barrier else None,
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo)}
+        if scenario=='action-display':config.update(actionGate=str(gate),actionReady=str(ready))
+        if scenario=='fleet-modal':
+            fleet=directory/'fleet.py';read=directory/'fleet-read'
+            fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
+            config.update(fakeFleet=str(fleet),fleetRead=str(read))
         from fleet import titles
         with mock.patch.dict(os.environ,self.env,clear=True):
             title=Path(titles.sidecar_path(sid,'claude'))
@@ -260,6 +292,14 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_focus_changes_in_one_input_packet_preserve_following_native_bytes(self):
         result=self.run_loop('block-focus-batch')
+        self.assertFalse(result['status']['focused'])
+
+    def test_fleet_modal_preserves_csi_paste_and_following_native_input(self):
+        result=self.run_loop('fleet-modal')
+        self.assertFalse(result['status']['focused'])
+
+    def test_a_blocked_read_action_does_not_delay_event_driven_values(self):
+        result=self.run_loop('action-display')
         self.assertFalse(result['status']['focused'])
 
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):

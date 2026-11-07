@@ -415,7 +415,7 @@ def _block_action(binding, request):
                 for name, node in (value.get("nodes") or {}).items():
                     lines.append("  " + _plain(name) + " · " + _plain(node.get("state") or "?"))
             except ValueError:
-                lines.append(route + " · ?")
+                lines.append("⏳ ?")
         return {"ok": True, "lines": lines or ["⏳ ·"]}
     return {"ok": False, "reason": "unknown-action"}
 

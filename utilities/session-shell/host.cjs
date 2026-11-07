@@ -64,6 +64,7 @@ let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = 
 let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
+let actionWorker;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -75,6 +76,7 @@ function identity() {
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !fleetView,alive:live(),expanded,focused:block.focused,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
+  if(op==='action')return readAction(extra);
   if (!backend || backend.exitCode !== null || !sid) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
@@ -83,6 +85,29 @@ function source(op, extra={}) {
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
     if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
     backend.stdin.write(frame);
+  });
+}
+function readAction(extra) {
+  // A person-requested ledger/repo read may be slow. It must not queue ahead
+  // of event-driven values or readiness on the ordinary projection worker.
+  if(actionWorker)return Promise.resolve({ok:false,reason:'action-pending'});
+  return new Promise(resolve=>{
+    let raw='',settled=false;
+    const worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,
+      [path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
+    actionWorker=worker;
+    const finish=value=>{if(!settled){settled=true;clearTimeout(timer);resolve(value);}};
+    const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
+    worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
+    worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
+    worker.on('close',()=>{if(actionWorker===worker)actionWorker=undefined;finish({ok:false,reason:'action-unavailable'});});
+    worker.stdout.setEncoding('utf8');
+    worker.stdout.on('data',bytes=>{
+      if(settled)return;
+      raw+=bytes;if(Buffer.byteLength(raw)>65536){finish({ok:false,reason:'action-unavailable'});return;}
+      if(raw.includes('\n'))try{finish(JSON.parse(raw.split('\n')[0]));}catch{finish({ok:false,reason:'action-unavailable'});}
+    });
+    worker.stdin.end(JSON.stringify({op:'action',binding:binding(),...extra})+'\n');
   });
 }
 function emit(value) { process.stdout.write(value); }
@@ -115,7 +140,10 @@ function render() {
       const line=serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
-    if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++)text+=`\x1b[${rows-height()+y+1};1H${panelRows[y]}`;
+    if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++){
+      const row=rows-height()+y;
+      if(last[row]!==panelRows[y]){text+=`\x1b[${row+1};1H${panelRows[y]}`;last[row]=panelRows[y];}
+    }
     else if(!fleetView&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
@@ -187,10 +215,11 @@ function rebuildDisplay() {
 async function blockAction(key) {
   actionLines=[];
   if(key==='f'){openFleet();return;}
+  actionLines=[[{text:'⠏',dim:true}]];queueDisplay();
   const selected=selection;
   const result=await source('action',{action:key});
   if(selected!==selection||!block.focused)return;
-  actionLines=(result.lines||[result.reason||'?']).slice(0,height()-1).map(text=>[{text,dim:true}]);
+  actionLines=(result.lines||['?']).slice(0,height()-1).map(text=>[{text,dim:true}]);
   rebuildDisplay();
 }
 function openFleet() {
@@ -201,7 +230,7 @@ function openFleet() {
     const exe=path.join(__dirname,'..','..','tools','fleet','fleet.py');
     const session=pty.spawn(process.env.HEARTING_SHELL_PYTHON,[exe,'--explorer'],
       {cols,rows,cwd:process.cwd(),env:{...process.env}});
-    const view={terminal:vt,child:session,closing:false};
+    const view={terminal:vt,child:session,closing:false,inputTail:'',paste:false};
     fleetView=view;block.leave();last=[];emit('\x1b[2J');
     vt.onData(data=>session.write(data));vt.onWriteParsed(schedule);
     session.onData(data=>{try{vt.write(data);}catch{session.write('q');rawRelay();}});
@@ -336,7 +365,13 @@ function userInput(data) {
     if(fleetView){
       const view=fleetView;
       if(view.closing){observeInput(data);child.write(data);return;}
-      const exit=data.indexOf(0x1d);
+      let exit=-1;
+      for(let i=0;i<data.length;i++){
+        view.inputTail=(view.inputTail+String.fromCharCode(data[i])).slice(-6);
+        if(view.inputTail.endsWith('\x1b[200~'))view.paste=true;
+        else if(view.inputTail.endsWith('\x1b[201~'))view.paste=false;
+        else if(data[i]===0x1d&&!view.paste){exit=i;break;}
+      }
       if(exit<0){view.child.write(data);epoch+=data.length;return;}
       if(exit)view.child.write(data.subarray(0,exit));epoch+=exit+1;
       view.closing=true;
