@@ -417,7 +417,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         cycles = list(artifact_locator.iter_cycle_dirs(campaign_path))
         dates = []
         for cycle_path, _layout in cycles:
-            cycle_locator = _nfc(cycle_path.name)
+            cycle_locator = _nfc(cycle_path.parents[2].name if _layout == "request-execution" else cycle_path.name)
             key = _date_key(cycle_locator, campaign_locator)
             dates.append(key)
             if not (cycle_path / "manifest.json").is_file():

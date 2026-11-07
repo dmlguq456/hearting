@@ -329,6 +329,21 @@ def prepare_locked(root, route, campaign, campaign_path, *, at=None):
     row = {"schema": "journal-target/v1", "route_id": route["route_id"],
            "route_hash": route["route_hash"], "campaign_id": campaign["campaign_id"],
            "campaign_key": campaign["key"], "path": path.relative_to(root).as_posix(), "at": at}
+    import artifact_request
+    import artifact_locator
+    if route.get("route_plan"):
+        row["plan_reference"] = route["route_plan"]
+    if route.get("parent_cycle_id"):
+        row["parent_cycle_id"] = route["parent_cycle_id"]
+    try:
+        request = artifact_request.binding_for_route(root, route)
+    except (ValueError, OSError, artifact_locator.LocatorError) as exc:
+        request = None
+        row["request_binding_note"] = str(exc)
+    if request:
+        if request["campaign_id"] != campaign["campaign_id"]:
+            raise JournalError("request-campaign-mismatch")
+        row["request"] = request
     atomic(_target_path(root, route["route_id"]), canonical(row) + b"\n")
     return row
 
@@ -377,6 +392,14 @@ def append(root, binding, *, origin, body, summary, session=None, turn=None, at=
                "recorded_at": datetime.now().astimezone().isoformat(), "session": session or {},
                "turn": turn, "previous_revision": prior[-1]["revision_id"] if prior else None,
                "correction": correction if prior else None, **data}
+        if binding.get("request"):
+            row["request"] = binding["request"]
+        if binding.get("plan_reference"):
+            row["plan_reference"] = binding["plan_reference"]
+        if binding.get("request_binding_note"):
+            row["request_binding_note"] = binding["request_binding_note"]
+        if binding.get("parent_cycle_id"):
+            row["parent_cycle_id"] = binding["parent_cycle_id"]
         row["digest"] = digest(row)
         raw = path.read_bytes() if path.exists() else (f"# Work journal {binding['at'][:10]}\n\n").encode()
         new = _render(row)

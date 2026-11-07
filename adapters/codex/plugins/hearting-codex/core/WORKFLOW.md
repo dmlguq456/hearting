@@ -1093,7 +1093,8 @@ Supply a readable, nonempty regular file anywhere, or an http(s) URL, and the
 final summary. A new small direct route records evidence in its campaign daily
 journal (CONVENTIONS “Small-work daily journal”), binding an immutable entry
 revision with a versioned receipt. Existing cycle-bound routes keep their cycle
-proof. Planned/shared-spec work retains cycles. For a cycle-bound route, finish
+proof. Shared-spec authoring and other cycle-requiring contracts retain logical
+cycles; small planned direct work links its journal entry to the request. For a cycle-bound route, finish
 records that evidence inside the route's own cycle (a
 file byte for byte, a URL as a one-line record) under a runtime name, and that
 copy is what the terminal proof, manifest and producer binding name. If the
@@ -1579,6 +1580,17 @@ Code uses sibling `spec/` and `plans/` buckets.
 Numeric prefixes such as `00_`, `01_`, `02_`, and `05_` are retired. Use plain names inside `spec/`, separating user-facing files from machine-oriented `_internal/`. The spec transaction helper snapshots the exact prior `prd.md` automatically whenever an existing PRD changes, regardless of intensity; initial creation and no-op updates do not allocate a version. See `CONVENTIONS §§5 and 6.5`.
 
 **Producer lifecycle (W7C).** Except small-work daily journals, every process folder above is a bucket inside one producer cycle once the write-cutover is active: `begin` issues the campaign/cycle/producer IDs before the first write, artifacts land under `campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/…`, stage workers join the owner's open cycle through the `AGENT_ARTIFACT_*` environment, and `finalize` commits `manifest.json` after route closure. Before that, `artifact_producer.py checkpoint` publishes a live open cycle's interim manifest — the same schema with `cycle.state: open` — at `.runtime/artifact-producer/v1/open-manifests/<cyc>.json`; stage completion, supervisor polls and session turn ends trigger it automatically (at most once per 15 minutes per cycle, weights and oversized trees excluded), and `finalize` keeps its artifact IDs, then removes it. Legacy top-level writes are allowed only in the pre-activation compatibility window. See `core/CORE.md §3`.
+
+**One request folder.** A verified frame decision and the execution routes that
+seal its `route_plan` share the first frame's physical folder. Each execution
+keeps its own logical cycle, input pins, route authority, completion and
+immutable manifest history. Its declared stage outputs live in that folder's
+`_internal/executions/<cycle-id>/artifacts/`; this is a payload scope, not a
+second campaign child or permission to write the frame's evidence. The common
+locator discovers those scopes from the verified decision binding. Compatible route
+continuations still use D-120; a different capability or intensity keeps a
+separate logical cycle. Small planned direct execution uses a journal entry
+linked to the request. Existing separate folders stay where they are.
 
 ## 6.1. Cross-Project Continuity Layer
 

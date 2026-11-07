@@ -708,3 +708,19 @@ intents remain in `.runtime/`; journal receipts contain no fictitious cycle,
 producer or manifest. Existing cycle receipts remain readable. An old cycle
 consolidated by the explicit journal tool resolves through its verified backup;
 its IDs and receipt/manifest bytes remain unchanged.
+
+#### Logical executions in one request folder
+
+A verified frame decision and new routes sealing its `route_plan` share the first
+frame's physical folder in the same root and campaign. Each execution keeps
+its own cycle and declared stage/leg/attempt scope at
+`_internal/executions/<cycle-id>/artifacts/`, with its own manifest and the
+existing immutable manifest history. The root frame manifest is preserved.
+The common locator discovers these logical scopes from their admitted binding. Input pins and
+route/attempt identities stay exact, including across retries and compatible
+D-120 continuations. Existing admitted manifests remain readable after parent
+input changes or a request rename. Unverified legacy/manual associations keep
+ordinary independent storage and their reason, without another execution gate.
+Small planned direct work uses a journal entry linked to the request and predecessor;
+the existing spec transaction can promote material authoring to a logical
+cycle. Existing separate folders stay in place.
