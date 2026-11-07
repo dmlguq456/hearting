@@ -61,8 +61,10 @@ lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.
 A value that cannot meet this is compared with retaining that native field.
-The native context fallback remains during the values-only repair; layout and
-duplicate-display changes follow the user's separate design decision.
+While wrapped, Claude's former Hearting statusline emits no fallback text or
+newline. Its existing exact-session display tap stays active for the common
+line. Collapsing or disabling Hearting's block must not leave a lone native
+`context N%` decoration. Unwrapped Claude keeps its existing native statusline.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.
