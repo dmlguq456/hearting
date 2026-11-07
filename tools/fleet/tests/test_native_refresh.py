@@ -139,6 +139,27 @@ class NativeLayerTests(unittest.TestCase):
         newer=base.with_updates(sessions=[dict(base.sessions[0],context=81)])
         self.assertEqual(layer.apply(newer).sessions[0]['context'],81)
 
+    def test_clock_and_usage_updates_reuse_rows_and_keep_the_new_metadata(self):
+        base=self.model();layer=fast.NativeDisplayLayer()
+        layer.update(((('claude','exact','1234','birth'),{'context':37}),))
+        first=layer.apply(base)
+        current=base.with_updates(clock=2,usage=[{'text':'fresh quota'}],readiness={'ready':False})
+        shown=layer.apply(current)
+        self.assertIs(shown.sessions,first.sessions)
+        self.assertEqual(shown.usage,current.usage)
+        self.assertEqual(shown.readiness,current.readiness)
+        self.assertEqual(shown.clock,2)
+        layer.update(((('claude','exact','1234','birth'),{'context':71}),))
+        self.assertEqual(layer.apply(current).sessions[0]['context'],71)
+
+    def test_cached_rows_cannot_follow_changed_bindings_with_the_same_sessions(self):
+        base=self.model();layer=fast.NativeDisplayLayer()
+        layer.update(((('claude','exact','1234','birth'),{'context':37}),))
+        layer.apply(base)
+        replaced=base.with_updates(source_records=self.model(pid='9999').source_records)
+        self.assertIs(replaced.sessions,base.sessions)
+        self.assertEqual(layer.apply(replaced).sessions[0]['context'],10)
+
 
 class NativePublisherTests(unittest.TestCase):
     def test_latest_observation_wins_and_only_display_fields_are_shared(self):

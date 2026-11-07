@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import copy
+from dataclasses import fields as dataclass_fields
 import json
 import os
 from pathlib import Path
@@ -237,11 +238,13 @@ class NativeDisplayLayer:
     def __init__(self):
         self._values = ()
         self._model = self._shown = None
+        self._session_inputs = None
 
     def update(self, values):
         if values is not self._values:
             self._values = values
             self._model = self._shown = None
+            self._session_inputs = None
             return True
         return False
 
@@ -253,6 +256,17 @@ class NativeDisplayLayer:
         source = model.source_records or {}
         bindings = source.get("_detail_bindings", {})
         tags = source.get("_detail_tags", {})
+        inputs = (model.sessions, bindings, tags)
+        # Clock and account-usage updates share these deeply frozen inputs.
+        # Reuse their display rows without revisiting every session or losing
+        # the incoming model's fresh usage, readiness or action metadata.
+        if self._session_inputs is not None and all(
+                left is right for left, right in zip(inputs, self._session_inputs)):
+            self._model = model
+            self._shown = self._shown.with_updates(**{
+                field.name: getattr(model, field.name)
+                for field in dataclass_fields(model) if field.name != "sessions"})
+            return self._shown
         fields = {}
         for identity, values in self._values:
             ref = identity[0] + ":" + identity[1]
@@ -269,8 +283,10 @@ class NativeDisplayLayer:
             base = values.get("_base")
             # A read started against an older complete base cannot overwrite a
             # cell the new base already changed while that read was in flight.
-            updates = {key: values[key] for key in _CELLS if key in values
-                       and (base is None or freeze(base.get(key)) == row.get(key))}
+            updates = {key: freeze(values[key]) for key in _CELLS if key in values
+                       and (base is None or freeze(base.get(key)) == row.get(key))
+                       and freeze(values[key]) != row.get(key)}
             rows.append(dict(row, **updates) if updates else row)
         self._model, self._shown = model, model.with_updates(sessions=rows)
+        self._session_inputs = inputs
         return self._shown
