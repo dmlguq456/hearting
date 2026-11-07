@@ -509,6 +509,9 @@ server.listen(socketPath,()=>{
   });
   emit('\x1b[?1049h\x1b[2J');
   terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
+  terminal.onTitleChange(title=>{
+    try{if(!ended&&!relay)emit(nativeDisplay.titleSequence(title));}catch{rawRelay();}
+  });
   child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
   process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}});

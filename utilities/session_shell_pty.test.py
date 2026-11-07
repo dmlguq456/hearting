@@ -34,7 +34,7 @@ if '--headless-event' in sys.argv:
 tty.setraw(0)
 exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
 began=time.monotonic();event('start');delay=(time.monotonic()-began)*1000
-print('\x1b[?2004hACK_MS='+str(delay)+'\r\nREADY\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
+print('\x1b]2;OWN_NATIVE_TITLE\x07\x1b[?2004hACK_MS='+str(delay)+'\r\nREADY\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
 pending=''
 while True:
     readable,_,_=select.select([0,exit_fd],[],[])
@@ -108,11 +108,16 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.barrier)barrier=fs.openSync(cfg.barrier,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);
  child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:100,rows:30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
-        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher}});
+        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher,
+        ...(cfg.scenario==='herdr'?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(cfg.directory,'private-herdr.sock')}:{})}});
  child.onData(text=>{raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
  await waitFor(/READY/);
+ if(cfg.scenario==='herdr'){
+   await waitFor(/\x1b\]2;OWN_NATIVE_TITLE\x07/);
+   if(!fs.readFileSync('/proc/'+child.pid+'/environ').includes(Buffer.from('HERDR_AGENT=claude\0')))throw Error('foreground initial exec environment has no native hint');
+ }
  const ack=Number(raw.match(/ACK_MS=([0-9.]+)/)[1]);
  if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);barrier=undefined;}
  await existing(cfg.hostPidFile);const hostPID=Number(fs.readFileSync(cfg.hostPidFile,'utf8'));
@@ -287,6 +292,9 @@ class SessionShellPTYTest(unittest.TestCase):
             raise
         self.assertEqual(child.returncode,0,stderr)
         return json.loads(stdout.splitlines()[-1])
+
+    def test_foreground_exec_hint_and_native_title_survive_the_real_pty_loop(self):
+        self.assertTrue(self.run_loop('herdr')['status']['ok'])
 
     def test_block_focus_keeps_digits_tabs_and_action_keys_out_of_native_only_while_focused(self):
         result=self.run_loop('block-focus')
