@@ -22,27 +22,66 @@ class SessionViewTest(unittest.TestCase):
         self.env.start(); self.addCleanup(self.env.stop)
         self.quota = patch.object(usage_cache, "read", return_value={"payload": {"rl_7d": 60}})
         self.quota.start(); self.addCleanup(self.quota.stop)
+        self.git_patch = patch.object(view.gitinfo, "cached_display", return_value=None)
+        self.git = self.git_patch.start(); self.addCleanup(self.git_patch.stop)
         self.start = procscan.read_proc_start(os.getpid())
 
     def write(self, path, *rows):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    def test_claude_uses_native_transcript_and_keeps_unobserved_context_unknown(self):
+    def test_claude_prefers_the_exact_native_callback_over_transcript_telemetry(self):
         transcript = self.root / "claude/projects/test" / (self.sid + ".jsonl")
         self.write(transcript, {"type": "assistant", "sessionId": self.sid, "effort": "high",
                    "message": {"model": "claude-opus", "usage": {"input_tokens": 123}}})
         self.write(self.root / "claude/.statusline" / (self.sid + ".json"),
-                   {"session_id": self.sid, "model": {"id": "unrelated-statusline-model"}, "context_window": {"used_percentage": 99}})
+                   {"session_id": self.sid, "pid": os.getpid(), "proc_start": self.start,
+                    "model": {"id": "native-current-model"}, "effort": {"level": "xhigh"},
+                    "context_window": {"used_percentage": 37}})
         self.write(Path(titles.sidecar_path(self.sid, "claude")), {"title": "Shared title"})
         values, watched = view.observe("claude", os.getpid(), self.start, self.sid)
-        self.assertEqual(values["model"], "claude-opus")
-        self.assertEqual(values["effort"], "high")
+        self.assertEqual(values["model"], "native-current-model")
+        self.assertEqual(values["effort"], "xhigh")
         self.assertEqual(values["title"], "Shared title")
         self.assertEqual(values["weekly_pct"], 60)
-        self.assertIsNone(values["ctx_pct"])
+        self.assertEqual(values["ctx_pct"], 37)
         self.assertIn(str(transcript), watched)
-        self.assertFalse(any(".statusline" in path for path in watched))
+        self.assertIn(str(self.root / "claude/.statusline" / (self.sid + ".json")), watched)
+
+    def test_native_context_zero_and_exact_callback_window_are_not_unknown(self):
+        path = self.root / "claude/.statusline" / (self.sid + ".json")
+        for window, expected in (({"used_percentage": 0}, 0),
+                ({"context_window_size": 100000, "current_usage": {
+                    "input_tokens": 10000, "cache_creation_input_tokens": 5000,
+                    "cache_read_input_tokens": 2000}}, 17)):
+            with self.subTest(window=window):
+                self.write(path, {"session_id": self.sid, "model": {"id": "native"},
+                                  "context_window": window})
+                values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+                self.assertEqual(values["ctx_pct"], expected)
+
+    def test_another_sid_or_process_birth_cannot_supply_native_display_values(self):
+        path = self.root / "claude/.statusline" / (self.sid + ".json")
+        for extra in ({"session_id": "another-session"},
+                      {"pid": os.getpid(), "proc_start": self.start + "0"}):
+            with self.subTest(extra=extra):
+                self.write(path, {"session_id": self.sid, "model": {"id": "wrong"},
+                                  "context_window": {"used_percentage": 99}, **extra})
+                values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+                self.assertIsNone(values["model"])
+                self.assertIsNone(values["ctx_pct"])
+
+    def test_observed_non_git_is_distinct_from_unavailable_git(self):
+        with patch.object(view.gitinfo, "branch", return_value=None), patch.object(view.gitinfo, "resolve_gitdir", return_value=(None, None)):
+            self.git.return_value = {"git": {"repo": 0}}
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+            self.assertEqual(values["branch"], "no-git")
+            self.git.return_value = {"git": {"repo": 1, "branch": "observed-branch"}}
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+            self.assertEqual(values["branch"], "observed-branch")
+            self.git.return_value = {"git": {"repo": None}}
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+            self.assertIsNone(values["branch"])
 
     def test_codex_selects_only_the_addressed_rollout_in_a_shared_directory(self):
         sessions = self.root / "codex/sessions"
@@ -55,6 +94,27 @@ class SessionViewTest(unittest.TestCase):
         self.assertIn(str(exact), watched)
         self.assertNotIn(str(neighbor), watched)
         self.assertIsNone(values["ctx_pct"])
+
+    def test_codex_native_usage_is_not_hidden_by_an_unknown_compaction_policy(self):
+        exact = self.root / "codex/sessions" / ("rollout-2026-11-07-" + self.sid + ".jsonl")
+        self.write(exact, {"type": "turn_context", "payload": {"model": "fixture-current", "effort": "high"}},
+            {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "last_token_usage": {"total_tokens": 82000}, "model_context_window": 112000}}})
+        values, watched = view.observe("codex", os.getpid(), self.start, self.sid)
+        self.assertEqual(values["ctx_pct"], 70)
+        self.assertIn(str(exact), watched)
+
+    def test_opencode_uses_observed_native_capacity_without_guessing_one(self):
+        def enrich(sess):
+            sess.model = "native-model"
+            sess.active_context_tokens = 20000
+            sess.context_window_tokens = 200000
+        with patch.object(view.opencode, "enrich", side_effect=enrich):
+            values, _ = view.observe("opencode", os.getpid(), self.start, self.sid)
+            self.assertEqual((values["model"], values["ctx_pct"]), ("native-model", 10))
+        with patch.object(view.opencode, "enrich"):
+            values, _ = view.observe("opencode", os.getpid(), self.start, self.sid)
+            self.assertIsNone(values["ctx_pct"])
 
     def test_other_dynamic_quota_windows_never_take_the_seven_day_label(self):
         self.assertIsNone(view.weekly_quota({"rl_windows": [["24h", 80, 0]], "rl_7d": 30}))
