@@ -4,6 +4,14 @@ import contextlib
 import hashlib
 import io
 import itertools
+import contextlib
+import copy
+import io
+import importlib.util
+import shutil
+import statistics
+import time
+from unittest import mock
 import json
 import os
 import re
@@ -22,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import artifact_entrance as E  # noqa: E402
+import artifact_nofollow as nofollow  # noqa: E402
 
 SERIAL = itertools.count(1)
 
@@ -369,12 +378,64 @@ class CyclePathTests(EntranceFixture):
         def swapped(_root):
             document.unlink()
             document.symlink_to(outside)
-            return rows
-        with mock.patch.object(E, "recent_rows", side_effect=swapped), \
+            return {}, {"recent": rows}
+        with mock.patch.object(E, "_refresh_and_snapshot", side_effect=swapped), \
                 mock.patch.object(E, "_open_externally") as opener, \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(E._command_open(self.root, ["1"]), 1)
         opener.assert_not_called()
+
+    def _swap_after_check(self, swap):
+        """Run `swap` once, right after _document_path accepts a document and before it is read."""
+        original = E._document_path
+        done = []
+
+        def checked(*args, **kwargs):
+            found = original(*args, **kwargs)
+            if found is not None and not done:
+                done.append(found)
+                swap(found)
+            return found
+        return mock.patch.object(E, "_document_path", side_effect=checked), done
+
+    def _assert_swap_unread(self, swap):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        patch, done = self._swap_after_check(swap)
+        with patch:
+            self.refresh()
+        self.assertTrue(done)
+        for name in E.ENTRANCE_NAMES:
+            self.assertNotIn("OUTSIDE_SENTINEL", self.entrance(name))
+
+    def test_leaf_swapped_for_a_link_after_the_check_is_never_read(self):
+        outside = self.base / "private.md"
+        outside.write_text("# OUTSIDE_SENTINEL title\n\nOUTSIDE_SENTINEL summary.\n")
+
+        def swap(document):
+            document.unlink()
+            document.symlink_to(outside)
+        self._assert_swap_unread(swap)
+
+    def test_ancestor_swapped_for_a_link_after_the_check_is_never_read(self):
+        outside = self.base / "outside-dir"
+        outside.mkdir()
+        (outside / "final_report.md").write_text("# OUTSIDE_SENTINEL title\n\nOUTSIDE_SENTINEL summary.\n")
+
+        def swap(document):
+            parent = document.parent
+            parent.rename(parent.with_name("artifacts-old"))
+            parent.symlink_to(outside, target_is_directory=True)
+        self._assert_swap_unread(swap)
+
+    def test_head_is_empty_without_the_no_follow_primitives(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha",
+                   [("artifacts/final_report.md", "# Safe\n\nBody.\n")])
+        self.assertEqual(self.rows()[0]["title"], "Safe")
+        with mock.patch.object(nofollow, "check_nofollow_platform", side_effect=RuntimeError("no")):
+            row = self.rows()[0]
+        self.assertEqual(row["summary"], "")
+        self.assertNotEqual(row["title"], "Safe")
 
     def test_cycle_and_source_rows_share_containment_and_keep_normal_rows(self):
         self.cycle("2026-01-02_one", "2026-01-02_alpha",
@@ -824,6 +885,88 @@ class FirstCycleRecordTests(EntranceFixture):
         self.assertEqual(result["status"], "skipped-no-root")
         self.assertFalse(missing.exists())
 
+
+
+class EntranceIntegrationTests(EntranceFixture):
+    def test_one_scan_commands_and_reuse(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        with mock.patch.object(E, 'scan', wraps=E.scan) as scan, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            E._command_reports(self.root)
+            self.assertEqual(scan.call_count, 1)
+            scan.reset_mock(); E._command_open(self.root, [])
+            self.assertEqual(scan.call_count, 1)
+            scan.reset_mock(); E._command_open(self.root, ['not-found'])
+            self.assertEqual(scan.call_count, 1)
+        with mock.patch.object(E, 'render_all_markdown', wraps=E.render_all_markdown) as md, mock.patch.object(E, 'render_all_html', wraps=E.render_all_html) as ht:
+            before = [(self.root/n).read_bytes() for n in ('all-campaigns.md', 'all-campaigns.html')]
+            E.refresh(self.root)
+            self.assertEqual((md.call_count, ht.call_count), (0, 0))
+            self.assertEqual(before, [(self.root/n).read_bytes() for n in ('all-campaigns.md', 'all-campaigns.html')])
+            (self.root/'all-campaigns.md').unlink()  # destructive-ok: own temporary fixture
+            E.refresh(self.root)
+            self.assertEqual((md.call_count, ht.call_count), (1, 1))
+
+    def test_all_page_cache_invalidates_every_row_change(self):
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        snapshot = E.scan(self.root)
+        self.assertTrue(snapshot['all_campaigns'])
+        with mock.patch.object(E, 'scan', return_value=snapshot): E.refresh(self.root)
+        for field, replacement in (('title', 'new title'), ('date', '2026-02-01'), ('cycles', 99), ('path', 'campaigns/other')):
+            changed = copy.deepcopy(snapshot); changed['all_campaigns'][0][field] = replacement
+            with mock.patch.object(E, 'scan', return_value=changed), mock.patch.object(E, 'render_all_html', wraps=E.render_all_html) as render:
+                E.refresh(self.root)
+                self.assertEqual(render.call_count, 1, field)
+            with mock.patch.object(E, 'scan', return_value=snapshot): E.refresh(self.root)
+
+    def test_open_live_missing_and_wrong_root(self):
+        import artifact_viewer as V
+        import threading
+        self.cycle("2026-01-02_one", "2026-01-02_alpha", [("artifacts/report.md", "# Hello\ntext")])
+        server = V.ViewerServer(self.root, 0)
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            real = V.viewer_url
+            with mock.patch.object(V, 'viewer_url', side_effect=lambda root, target: real(root, target, server.server_address[1])):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(E, '_open_externally') as opener:
+                    self.assertEqual(E._command_open(self.root, ['1']), 0)
+                lines = out.getvalue().splitlines()
+                self.assertTrue(lines[0].endswith('report.md'))
+                self.assertIn('http://127.0.0.1:', lines[1])
+                self.assertTrue(opener.call_args.args[0].startswith('http://'))
+                self.assertIsNone(real(self.base, self.root/'index.html', server.server_address[1]))
+            with mock.patch.dict(sys.modules, {'artifact_viewer': None}), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(E._command_open(self.root, []), 0)
+                self.assertEqual(out.getvalue().strip(), str(self.root/'index.html'))
+        finally:
+            server.shutdown(); thread.join(); server.server_close()
+
+
+class EntrancePerformanceTests(EntranceFixture):
+    def test_refresh_command_snapshot_benchmark(self):
+        # A sealed A source baseline, copied only to this test's private scratch.
+        for campaign in range(100):
+            for cycle in range(10):
+                self.cycle(f'2026-01-01_c{campaign:03}', f'2026-01-01_n{cycle:02}',
+                           [('artifacts/report.md', '# Result\nshort report')])
+        baseline_root = self.base/'baseline'; shutil.copytree(self.root, baseline_root)
+        original = subprocess.check_output(['git', 'show', 'a1f81c142:utilities/artifact_entrance.py'], text=True)
+        baseline_path = self.base/'baseline_entrance.py'; baseline_path.write_text(original)
+        spec = importlib.util.spec_from_file_location('baseline_entrance', baseline_path)
+        baseline = importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline)
+        observations = []
+        for name, module, root in [('baseline', baseline, baseline_root), ('current', E, self.root)]:
+            timings = []
+            with mock.patch.object(module, 'scan', wraps=module.scan) as scan, mock.patch.object(module, 'render_all_html', wraps=module.render_all_html) as render:
+                start = time.perf_counter(); module.refresh(root); first = time.perf_counter()-start
+                module.refresh(root)  # warm-up
+                scans_before, renders_before = scan.call_count, render.call_count
+                for _ in range(5):
+                    start = time.perf_counter(); module.refresh(root); timings.append(time.perf_counter()-start)
+                self.assertEqual(scan.call_count-scans_before, 5)
+                if name == 'current': self.assertEqual(render.call_count-renders_before, 0)
+                observations.append(f'{name} first={first:.4f}s warm median={statistics.median(timings):.4f}s min={min(timings):.4f}s max={max(timings):.4f}s scans={scan.call_count-scans_before} renders={render.call_count-renders_before}')
+        print('\n100x10 warm-cache benchmark: ' + '; '.join(observations))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

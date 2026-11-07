@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import fcntl
 import json
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -51,6 +53,7 @@ import artifact_producer_store as store  # noqa: E402
 from artifact_producer_manifest import artifact_audience, resolve_placed_output  # noqa: E402
 from detached_lifetime import bind as end_with_test  # noqa: E402
 from artifact_checkpoint_trigger import in_test_process  # noqa: E402
+from artifact_nofollow import open_relative, open_root  # noqa: E402
 
 try:  # tools/i18n is a sibling of utilities/ in every checkout and release
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "i18n"))
@@ -115,6 +118,7 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.rewrite": ("Hearting rewrites this file. Editing it is overwritten; "
                              "deleting it comes back at the next publish."),
         "entrance.empty": "No user-facing document yet.",
+        "open.viewer": "Viewer: {url}",
         "reports.empty": "No user-facing document yet.",
         "reports.foreign": "Kept an existing {name}: it carries no Hearting entrance marker.",
         "reports.entrance": "Entrance: {path}",
@@ -136,12 +140,31 @@ _fallback_translator.lang = "en"
 # ---------------------------------------------------------------------------
 
 
-def _read_head(path: Path) -> str:
+def _read_head(root: Path, path: Path) -> str:
+    """The first HEAD_BYTES of a regular document, read from a no-follow fd.
+
+    Without the platform primitives, or when the document cannot be opened
+    that way, the head is empty (callers fall back to a generic title).
+    """
     try:
-        with open(str(path), "rb") as handle:
-            raw = handle.read(HEAD_BYTES)
+        parts = list(path.relative_to(root).parts)
+        root_fd = open_root(os.path.realpath(str(root)))
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    try:
+        fd = open_relative(root_fd, parts)
     except OSError:
         return ""
+    finally:
+        os.close(root_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, HEAD_BYTES)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
     return raw.decode("utf-8", "replace")
 
 
@@ -177,8 +200,7 @@ def _unescape(value: str) -> str:
     return html.unescape(value)
 
 
-def _document_title(path: Path, *, fallback: str) -> str:
-    text = _read_head(path)
+def _document_title(path: Path, text: str, *, fallback: str) -> str:
     lowered = path.name.casefold()
     if lowered.endswith((".html", ".htm")):
         found = _html_title(text)
@@ -467,7 +489,8 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
         title_fallback = ""
         if record:
             title_fallback = str(record.get("title") or record.get("slug") or "").strip()
-        title = _document_title(document, fallback=_nfc(title_fallback or cycle_locator))
+        head = _read_head(root, document)
+        title = _document_title(document, head, fallback=_nfc(title_fallback or cycle_locator))
         extras = max(0, sum(1 for row in rows if row.get("audience") == "user") - 1)
         selected_by = "audience" if any(
             row["has_audience"] for row in rows if row.get("audience") == "user") else "name-rule"
@@ -478,7 +501,7 @@ def scan(root: Path, *, recent_limit: int = RECENT_LIMIT,
             "cycle_path": locator,
             "date": date,
             "title": title,
-            "summary": _summarize(_read_head(document),
+            "summary": _summarize(head,
                                   html_document=document.name.casefold().endswith((".html", ".htm"))),
             "doc_path": document_rel,
             "extra": extras,
@@ -950,27 +973,62 @@ def _first_cycle_record(root: Path, snapshot: Dict[str, Any], cycle_id: str) -> 
         pass  # the record is an optional notification, never part of the entrance
 
 
-def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
-    """Rewrite the four entrance files when their bytes differ; never touch anything else."""
+# Process-local hint only. Files are rechecked before reuse; no sidecar or persistent
+# state is created, and process startup always computes the pages normally.
+_ALL_PAGE_CACHE: Dict[str, Any] = {}
+
+
+def _refresh_and_snapshot(root: Path, cycle_id: Optional[str] = None):
+    """Refresh once and return the same snapshot to the calling command."""
     root = Path(root)
     result: Dict[str, Any] = {
         "status": "skipped-no-root", "paths": [], "foreign": [], "created": [],
         "selected_by": {"audience": 0, "name-rule": 0},
     }
     if not root.is_dir():
-        return result
+        return result, None
     snapshot = scan(root)
     t = _translator()
     payloads = {
         "README.md": render_markdown(snapshot, t),
         "index.html": render_html(snapshot, t),
-        "all-campaigns.md": render_all_markdown(snapshot, t),
-        "all-campaigns.html": render_all_html(snapshot, t),
     }
+    # All page inputs, translations and renderer implementation determine reuse.
+    # The cached file bytes are compared as well, so foreign edits and missing
+    # files always go through the regular marker and symlink checks below.
+    cache_key = str(root.absolute())
+    try:
+        renderer_revision = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        renderer_revision = None  # no reliable identity: render normally
+    fingerprint = json.dumps([snapshot["all_campaigns"], getattr(t, "lang", "en"),
+        [t(k, **fields) for k, fields in (
+            ("entrance.all_campaigns", {}), ("entrance.back", {}),
+            ("entrance.cycles", {"count": "123"}),
+            ("entrance.latest", {"date": "sample"}),
+            ("entrance.empty", {}), ("entrance.rewrite", {}))],
+        renderer_revision],
+        ensure_ascii=False, sort_keys=True)
+    cached = _ALL_PAGE_CACHE.get(cache_key)
+    reuse = bool(renderer_revision and cached and cached[0] == fingerprint)
+    if reuse:
+        try:
+            for name, data in cached[1].items():
+                path = root / name
+                if path.is_symlink() or not path.is_file() or path.read_bytes() != data:
+                    reuse = False
+                    break
+        except OSError:
+            reuse = False
+    if not reuse:
+        payloads["all-campaigns.md"] = render_all_markdown(snapshot, t)
+        payloads["all-campaigns.html"] = render_all_html(snapshot, t)
     written: List[str] = []
     foreign: List[str] = []
     created: List[str] = []
     for name in ENTRANCE_NAMES:
+        if name not in payloads:
+            continue
         path = root / name
         data = payloads[name].encode("utf-8")
         if os.path.islink(str(path)):
@@ -996,6 +1054,22 @@ def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
             store._write_atomic(path, data)
             written.append(name)
             created.append(name)
+    if not reuse:
+        cached_pages = {}
+        for name in ("all-campaigns.md", "all-campaigns.html"):
+            path = root / name
+            data = payloads[name].encode("utf-8")
+            try:
+                if not path.is_symlink() and path.is_file() and path.read_bytes() == data and _has_marker(data):
+                    cached_pages[name] = data
+            except OSError:
+                pass
+        if renderer_revision and len(cached_pages) == 2:
+            if len(_ALL_PAGE_CACHE) >= 16 and cache_key not in _ALL_PAGE_CACHE:
+                _ALL_PAGE_CACHE.pop(next(iter(_ALL_PAGE_CACHE)))
+            _ALL_PAGE_CACHE[cache_key] = (fingerprint, cached_pages)
+        else:
+            _ALL_PAGE_CACHE.pop(cache_key, None)
     _first_cycle_record(root, snapshot, cycle_id or "")
     if written:
         status = "written"
@@ -1010,7 +1084,12 @@ def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
         "created": created,
         "selected_by": snapshot["selected_by"],
     })
-    return result
+    return result, snapshot
+
+
+def refresh(root: Path, cycle_id: Optional[str] = None) -> Dict[str, Any]:
+    """Rewrite the entrance files when their bytes differ."""
+    return _refresh_and_snapshot(root, cycle_id)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1124,7 @@ def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
             print(f"   {_translator()('entrance.open_result')}: {item['path']}")
 
 
-def _open_externally(path: Path) -> None:
+def _open_externally(path: Path | str) -> None:
     if not sys.stdout.isatty():
         return
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
@@ -1061,10 +1140,9 @@ def _open_externally(path: Path) -> None:
 
 
 def _command_reports(root: Path) -> int:
-    result = refresh(root)
+    result, snapshot = _refresh_and_snapshot(root)
     t = _translator()
-    snapshot = scan(root)
-    rows = snapshot["recent"]
+    rows = snapshot["recent"] if snapshot else []
     if _partial_sources(snapshot):
         print(t("entrance.partial"))
     if not rows:
@@ -1086,10 +1164,12 @@ def _open_target(root: Path) -> Path:
 
 def _command_open(root: Path, args: Sequence[str]) -> int:
     t = _translator()
-    refresh(root)
-    rows = recent_rows(root)
+    _, snapshot = _refresh_and_snapshot(root)
+    rows = snapshot["recent"] if snapshot else []
     if not args:
-        print(str(_open_target(root)))
+        target = root / "index.html"
+        print(str(target))
+        _show_viewer(root, target, t)
         return 0
     selector = " ".join(args)
     chosen: Optional[Dict[str, Any]] = None
@@ -1114,8 +1194,23 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
         return 1
     anchor = chosen.get("anchor")
     print(str(target) + ("#" + anchor if anchor else ""))
-    _open_externally(target.as_uri() + "#" + anchor if anchor else target)
+    url = _show_viewer(root, target, t)
+    if url:
+        _open_externally(url + ("#" + anchor if anchor else ""))
+    else:
+        _open_externally(target.as_uri() + "#" + anchor if anchor else target)
     return 0
+
+
+def _show_viewer(root: Path, target: Path, t) -> Optional[str]:
+    try:
+        from artifact_viewer import viewer_url
+        url = viewer_url(root, target)
+        if url:
+            print(t("open.viewer", url=url))
+        return url
+    except Exception:
+        return None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
