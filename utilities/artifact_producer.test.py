@@ -3042,7 +3042,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
                 result = self._publish(original, settle=settle)
                 self.assertEqual(result["status"], "admitted", result)
                 self.assertEqual(result["shared_reference_revision_id"], admitted["shared_reference_revision_id"])
-                self.assertEqual(result["coverage"], {"kind": "admitted-descendant",
+                self.assertEqual(result["coverage"], {"kind": "admitted-content",
                                                      "publishing_cycle_id": later["cycle_id"]})
                 if settle:
                     self.assertEqual(result["admission"]["status"], "reused")
@@ -3057,9 +3057,12 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         original, _later, _admitted = self._republished_contract(same=False)
         self.assertEqual(self._publish(original, settle=False)["status"], "pending")
 
-    def test_unrelated_publication_does_not_settle_historical_pending(self):
-        original, _later, _admitted = self._republished_contract(related=False)
-        self.assertEqual(self._publish(original, settle=False)["status"], "pending")
+    def test_independent_transaction_with_same_admitted_content_settles_historical_pending(self):
+        original, later, admitted = self._republished_contract(related=False)
+        result = self._publish(original, settle=False)
+        self.assertEqual(result["status"], "admitted", result)
+        self.assertEqual(result["shared_reference_revision_id"], admitted["shared_reference_revision_id"])
+        self.assertEqual(result["coverage"]["publishing_cycle_id"], later["cycle_id"])
 
     def test_corrupt_admitted_descendant_keeps_historical_pending(self):
         original, _later, admitted = self._republished_contract()

@@ -160,16 +160,30 @@ class SpecMergeTest(unittest.TestCase):
                          {"## Contract": "latest", "## ✦ 청사진 요약 ⟨v10, 2026-11-01⟩": "ours"})
 
     def test_published_descendant_covers_exact_contract_delta_with_newer_bookkeeping(self):
-        base = {"c/prd.md": self.blueprint(), "c/pipeline_state.yaml": b"version: 10\n"}
-        source = base | {"c/prd.md": self.blueprint().replace(b"original", b"adopted")}
+        base = {"c/prd.md": self.blueprint(), "c/policy.yaml": b"policy: old\n"}
+        source = base | {"c/prd.md": self.blueprint().replace(b"original", b"adopted"),
+                         "c/policy.yaml": b"policy: adopted\n",
+                         "c/pipeline_state.yaml": b"version: 10\nchange: {version: 10, status: implementation-in-progress}\n"}
         published = {"c/prd.md": source["c/prd.md"].replace(b"v10, 2026-11-01", b"v12, 2026-11-03")
-                     + b"## Later\nindependent\n", "c/pipeline_state.yaml": b"version: 12\n"}
+                     + b"## Later\nindependent\n", "c/policy.yaml": b"policy: adopted\n",
+                     "c/pipeline_state.yaml": b"version: 12\n"}
         before = copy.deepcopy((base, source, published))
         self.assertTrue(M.changes_covered(base, source, published))
         self.assertEqual(before, (base, source, published))
+        self.assertFalse(M.changes_covered(base, source, published | {
+            "c/policy.yaml": b"policy: old\n"}))
         for actual in (published["c/prd.md"].replace(b"adopted", b"partially adopted"),
                        self.blueprint()):
             self.assertFalse(M.changes_covered(base, source, published | {"c/prd.md": actual}))
+
+    def test_contract_coverage_ignores_only_blank_separators_not_body_or_code(self):
+        base = {"c/prd.md": b"# P\n## Existing\nold\n"}
+        source = {"c/prd.md": base["c/prd.md"] + b"\n\n## Added\ncontract\n"}
+        published = {"c/prd.md": base["c/prd.md"] + b"\n## Added\ncontract\n\n"}
+        self.assertTrue(M.changes_covered(base, source, published))
+        self.assertFalse(M.changes_covered(base, source, {"c/prd.md": published["c/prd.md"].replace(b"contract", b"changed")}))
+        fenced = b"# P\n## Added\n```\ncontract\n\n```\n"
+        self.assertFalse(M.changes_covered(base, {"c/prd.md": fenced}, {"c/prd.md": fenced.replace(b"contract\n\n", b"contract\n")}))
 
     def test_coverage_keeps_order_deletions_and_other_payloads_exact(self):
         base = {"c/prd.md": b"# P\n## A\na\n## B\nb\n", "c/input.json": b"old"}

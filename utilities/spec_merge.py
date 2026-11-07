@@ -267,7 +267,10 @@ def _markdown_changes_covered(path, base, ours, published):
     parsed, blueprint = _align_blueprint(path, parsed)
     (bn, _), (on, oc), (pn, pc) = parsed
     def content(key, value):
-        return value.partition(b"\n")[2] if key == blueprint and value is not None else value
+        if value is None:
+            return None
+        body = value.partition(b"\n")[2] if key == blueprint else value
+        return body.rstrip(b"\r\n")
     for key in set(bn) | set(on):
         before, after = content(key, bn.get(key)), content(key, on.get(key))
         if before != after and content(key, pn.get(key)) != after:
@@ -283,8 +286,9 @@ def _markdown_changes_covered(path, base, ours, published):
 def changes_covered(base, ours, published):
     """Read-only contract coverage, not a merge or authorization to publish.
 
-    A normal descendant transaction owns its pipeline bookkeeping. PRDs remain
-    opaque per heading, and every other changed payload must match exactly.
+    The spec capability defines pipeline state/summary as execution metadata.
+    PRD bodies and other contract payloads must be preserved; only the standard
+    summary label and trailing blank separator lines are disregarded.
     """
     changed_prd = False
     for path in set(base) | set(ours):

@@ -662,17 +662,6 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
     base, _ = _verified_shared_spec(root, reference["shared_reference_id"], base_id)
     if components is not None:
         base = {path: data for path, data in base.items() if path.split("/", 1)[0] in components}
-    def descendant(cycle_id):
-        seen = {record["cycle_id"]}
-        while cycle_id and cycle_id not in seen:
-            seen.add(cycle_id)
-            current = read_cycle_record(root, cycle_id)
-            if current is None:
-                return False
-            cycle_id = current.get("parent_cycle_id")
-            if cycle_id == record["cycle_id"]:
-                return True
-        return False
     later = reference["revisions"][reference["revisions"].index(base_id) + 1:]
     cached = dict((known_publications or {}).get(reference["shared_reference_id"], []))
     import spec_merge
@@ -682,7 +671,7 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
             / REVISION_RECORD_NAME)
         provenance = revision.get("source") if isinstance(revision, Mapping) else None
         publishing_cycle = provenance.get("cycle_id") if isinstance(provenance, Mapping) else None
-        if not publishing_cycle or not descendant(publishing_cycle):
+        if not publishing_cycle or publishing_cycle == record["cycle_id"]:
             continue
         if "spec_merge" in revision:
             _verify_spec_publication(root, reference, revision, completed=True)
@@ -833,7 +822,7 @@ def completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = Fals
             root, record, source_rel, source_path, seed, refs, known_publications)
         if covered is not None:
             reference, revision_id, revision, publishing_cycle = covered
-            coverage = {"kind": "admitted-descendant", "publishing_cycle_id": publishing_cycle}
+            coverage = {"kind": "admitted-content", "publishing_cycle_id": publishing_cycle}
             result.update(status="admitted", shared_reference_id=reference["shared_reference_id"],
                           shared_reference_revision_id=revision_id,
                           content_digest=revision.get("content_digest"), coverage=coverage)
