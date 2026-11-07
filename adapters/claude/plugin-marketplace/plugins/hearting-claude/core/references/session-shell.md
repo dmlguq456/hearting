@@ -47,7 +47,10 @@ shorten words before numeric values, routes and waits. The expanded panel uses
 Fleet's existing LAST INPUT presentation (`› 1m · first line`, `› ·`, `› ?`)
 for the common `prompt_display` result. Its title and guidance use Fleet's
 shared message catalog and language preference. Fleet owns the values, palette, glyph meanings, separators and
-unknown-value rules; a harness-specific statusline input is not their source.
+unknown-value rules. Native display callbacks and exact-session telemetry are
+valid sources for these display values, including Claude's statusline JSON.
+They never establish input readiness or add anything to the model's input.
+An observed non-Git directory is `no-git`; unavailable Git evidence stays `?`.
 While wrapped, the former Hearting Claude/OpenCode decorations yield to this
 line. Unwrapped sessions keep their existing displays. Codex keeps native input,
 execution and permission UI; only duplicate configurable footer items yield.
@@ -58,8 +61,8 @@ lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.
 A value that cannot meet this is compared with retaining that native field.
-The first slice retains Claude's native context field because its independent
-transcript has no proven denominator. Its other Hearting decorations yield.
+The native context fallback remains during the values-only repair; layout and
+duplicate-display changes follow the user's separate design decision.
 Wrapped Codex keeps the official thread ID and native context fields through
 an invocation-only footer preference; stored settings and permission flags stay
 with their existing owner. OpenCode's Hearting route footer yields to the shell.

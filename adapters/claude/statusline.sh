@@ -355,8 +355,8 @@ fi
 dir=$(basename "$S_CWD")
 
 # The shell paints the shared fields; the existing data producers above stay
-# active. Retain only the native context fallback without feeding its payload
-# back into the common line.
+# active. The common display reads this exact session's existing tap. Keep the
+# native context fallback until the separate layout decision changes it.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
   if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
     printf 'context %s%%\n' "$S_CTX"
