@@ -558,7 +558,9 @@ Skills run from the project root. Resolve the project-wide write surface with
 `utilities/artifact-root.sh`. In a linked task worktree this selects the
 primary worktree's canonical `.agent_reports/`, not the tracked local
 snapshot; legacy `.claude_reports/` is selected only when it already exists
-at the canonical project root and the new root does not. `analyze-project`
+at the canonical project root and the new root does not. A normal producer
+writer may add a `.agent_reports` alias to that same physical legacy root
+(`CORE.md` §3); discovery stays read-only. `analyze-project`
 reads the current source checkout and `autopilot-code` mutates code there.
 Code and document deliverables live at their project location. A new document
 is created there from its first draft, at the user's stated path or directly
