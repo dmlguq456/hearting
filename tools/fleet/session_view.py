@@ -130,9 +130,11 @@ def observe(harness, pid, proc_start, sid):
     linked, _main = gitinfo.resolve_gitdir(sess.cwd)
     if linked:
         paths.append(Path(linked) / "HEAD")
-    git_request = gitinfo._display_request(sess.cwd)
-    paths.append(gitinfo._display_paths(git_request)[1])
-    observed_git = (gitinfo.cached_display(sess.cwd) or {}).get("git") or {}
+    observed_git = {}
+    if sess.cwd:
+        git_request = gitinfo._display_request(sess.cwd)
+        paths.append(gitinfo._display_paths(git_request)[1])
+        observed_git = (gitinfo.cached_display(sess.cwd) or {}).get("git") or {}
     branch = gitinfo.branch(sess.cwd)
     if branch is None and observed_git.get("repo") == 1:
         branch = observed_git.get("branch")

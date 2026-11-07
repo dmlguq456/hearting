@@ -83,6 +83,18 @@ class SessionViewTest(unittest.TestCase):
             values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
             self.assertIsNone(values["branch"])
 
+    def test_unavailable_cwd_does_not_borrow_the_backend_git_observation(self):
+        readlink = os.readlink
+        def observed(path, *args, **kwargs):
+            if str(path) == f"/proc/{os.getpid()}/cwd":
+                raise PermissionError("synthetic unavailable cwd")
+            return readlink(path, *args, **kwargs)
+        self.git.return_value = {"git": {"repo": 0}}
+        with patch.object(view.os, "readlink", side_effect=observed):
+            values, _ = view.observe("claude", os.getpid(), self.start, self.sid)
+        self.assertIsNone(values["branch"])
+        self.git.assert_not_called()
+
     def test_codex_selects_only_the_addressed_rollout_in_a_shared_directory(self):
         sessions = self.root / "codex/sessions"
         exact = sessions / ("rollout-2026-11-06-" + self.sid + ".jsonl")
