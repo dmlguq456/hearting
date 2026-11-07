@@ -322,12 +322,20 @@ def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str
     roots = excluded_roots if excluded_roots is not None else []
     excluded_paths = excluded if excluded is not None else []
     skipped = set(skip_directories)
+    # A request's execution scopes own their own manifests. Never include a
+    # later execution's files in the frame's immutable output inventory.
+    import artifact_request
+    request_members = set(artifact_request.members(directory.parents[2], directory, strict=False)) if (
+        directory.parent.parent.name == "campaigns") else set()
     out: List[Path] = []
     for current, dirs, files in os.walk(str(directory), followlinks=False):
         dirs.sort()
         for name in list(dirs):
             path = Path(current) / name
             rel = path.relative_to(directory).as_posix()
+            if path in request_members:
+                dirs.remove(name)
+                continue
             if os.path.islink(path):
                 out.append(path)
                 dirs.remove(name)
@@ -457,6 +465,19 @@ def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
         return resolve_backup(root, record)
     if record and (record.get("relocation") or {}).get("artifact_root"):
         raise ProducerError("cycle-relocated", str(record["relocation"]))
+    if record and record.get("request_binding"):
+        import artifact_request
+        try:
+            # The shared locator follows an explicit move/rename as it does
+            # for ordinary cycles. Scans pass the known anchor to avoid a
+            # recursive lookup while rebuilding a missing index.
+            original = Path(root) / record["request_binding"]["path"] / Path(*artifact_request.EXECUTIONS) / cycle_id
+            found = artifact_locator.locate(root, cycle_id, candidates=lambda: [original], heal=False)
+            if found is not None:
+                return found
+            return artifact_request.execution_dir(root, record)
+        except (ValueError, artifact_locator.LocatorError) as exc:
+            raise ProducerError("request-binding-invalid", str(exc)) from exc
     campaign_record = read_campaign(root, campaign_id)
 
     def owner_campaign_candidates() -> Iterator[Path]:
@@ -1205,6 +1226,8 @@ def _valid_cycle_state(value: Any) -> bool:
 def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
     """Resolve this record's manifest without scanning other cycle bindings."""
     root = Path(root).resolve()
+    if record.get("request_binding"):
+        return cycle_dir(root, record["campaign_id"], record["cycle_id"], record) / "manifest.json"
     if record.get("journal_migration"):
         from artifact_journal_migration import resolve_backup
         return resolve_backup(root, record) / "manifest.json"
