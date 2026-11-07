@@ -27,4 +27,18 @@ function observe(harness, lines, sid) {
   return null;
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-module.exports={observe,firstLine};
+function hiddenFooterRows(harness,lines,sid) {
+  const found=[];
+  if(harness!=='codex')return new Set();
+  const exact=/^ *([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · Context (?:100|[1-9]?[0-9])% used *$/;
+  for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
+    const match=lines[y].match(exact);
+    if(match&&(!sid||match[1]===sid)&&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
+  }
+  return new Set(found.length===1?found:[]);
+}
+function blockHeight({harness,count,detail=0,limit,loaded=true}) {
+  const summary=count||(!loaded&&harness!=='claude'?1:0);
+  return Math.min(limit,Math.max(summary,detail+(detail&&summary?1:0)));
+}
+module.exports={observe,firstLine,hiddenFooterRows,blockHeight};

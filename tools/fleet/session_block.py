@@ -56,6 +56,4 @@ def block_lines(values, *, columns, rows, questions=(), route="", received=(),
     if focused and len(lines) < limit:
         lines.append([("Ctrl+] ", "dim"), (ui_text("fleet.session_block.help"), "dim")])
     lines = lines[:limit]
-    while len(lines) < min(4, limit):
-        lines.append([])
     return [_clip(line, columns) for line in lines]
