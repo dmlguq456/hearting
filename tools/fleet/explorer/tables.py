@@ -107,13 +107,14 @@ def _draw_context_gauge(grid, x, y, pct, window):
     grid.put(x + 9, y, f"{pct:3d}%", key if pct >= 50 else "dim")
 
 
-def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
+def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     use = max(0, grid.cols - x - 2)
     right = x + use + 1
-    grid.fill(0, x - 2, y, " ", tint=236)
+    if not session_table:
+        grid.fill(0, x - 2, y, " ", tint=236)
+        grid.put(x - 2, y, "┃", "line")
+        grid.put(1, y, "OVERVIEW", "head", tint=236)
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
-    grid.put(x - 2, y, "┃", "line")
-    grid.put(1, y, "OVERVIEW", "head", tint=236)
     c = _overview_columns(use, _overview_harness_width(vm.sessions))
     harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
@@ -144,7 +145,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
         if not mine:
             continue                      # a rule is drawn only above rows that are drawn under it
         page_scope = getattr(state, "scope", "-") != "-"
-        if name:
+        if name and not session_table:
             if page_scope:
                 grid.add_hit(y, x, right, ("scope", "repo:" + str(repo.get("id", name))))
             grid.put(x + 1, y, "┈ ", "line")
@@ -286,6 +287,15 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             if restart_text and not restart_inline:
                 grid.put(x + IND + 3, y, restart_text, "g_idle", limit=right)
                 y += 1
+            if session_table and c["now"] is None:
+                # The repo page keeps the same table columns; a narrow pane puts
+                # the existing last-input projection directly below its session.
+                grid.put(x + IND + 3, y,
+                         _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                               max(0, right - x - IND - 4)),
+                         "head" if session.get("state") in ("working", "blocked") else "title_dim",
+                         limit=right)
+                y += 1
             gpu_count = sum(1 for host in (vm.compute or ()) for gpu in host[5]
                             if tag in (gpu[7] or ()))
             if gpu_count > 1 and y < grid.rows - 5:
@@ -303,6 +313,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                     return
                 grid.put(right - 18, grid.rows - 5, "↓ more below", "dim", limit=right)
                 return
+    if session_table:
+        return y
     sessions_total = len(sessions)
     working_sessions = sum(1 for item in sessions if item.get("state") == "working")
     waits = (vm.system or {}).get("answer_waits") or {}

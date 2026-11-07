@@ -1,11 +1,12 @@
 """Bounded repo, session, route, and selected-history detail projections."""
 
 from collections.abc import Mapping
+import math
 from ..config import ui_text
 from .grid import cell_width
 from .grid import clip_cells as clip
 from .tables import repo_rule_label
-from .tables import _clip, _tint_row, draw_overview, draw_routes
+from .tables import _clip, _tint_row, draw_overview, draw_routes, route_is_history
 
 
 def draw_scope(grid, vm, state):
@@ -39,31 +40,118 @@ def _section(grid, x, right, y, title, detail=""):
     return y + 1
 
 
+def _result_time(value):
+    """Unknown completion time follows known times; duration text supplies no timestamp."""
+    return value if type(value) in (int, float) and math.isfinite(value) else -math.inf
+
+
 def _repo_page(grid, vm, ident, x, right, bottom, nav=None):
     repo = next((item for item in vm.repos
                  if str(item.get("id", item.get("name", ""))) == ident), None)
     if repo is None:
         return
     from dataclasses import replace
+    from types import SimpleNamespace
+    from .resources import draw_open_work, memory_projects
     sessions = tuple(item for item in vm.sessions
                      if item.get("repo_id", item.get("repo")) == ident)
     routes = tuple(item for item in vm.routes if str(item.get("repo") or "") == ident)
     questions = tuple(item for item in vm.questions if item.get("project") == ident)
-    scoped_vm = replace(vm, repos=(repo,), sessions=sessions, routes=routes,
-                        questions=questions)
-    folds = dict(getattr(nav, "folds", ()) or ())
+    scoped_vm = replace(vm, repos=(repo,), sessions=sessions, routes=routes, questions=questions)
+    system = vm.system if isinstance(vm.system, Mapping) else {}
+    memory, _order, _journal = memory_projects(vm)
+    projects = memory.get("projects")
+    projects = projects if isinstance(projects, Mapping) else {}
+    project = projects.get(ident)
+    project = project if isinstance(project, Mapping) else {}
+    opened_for = nav.opened_for if nav is not None else lambda _key, default="": default
+
+    y = _section(grid, x, right, 3, ui_text("fleet.repo.status"))
     status = repo.get("status")
-    top = _repo_status_block(grid, x, right, 3, status) + 1 if isinstance(status, Mapping) else 3
-    draw_overview(grid, scoped_vm, state=type("ScopedOverview", (), {
-        "opened": "", "scope": "repo:" + ident,
-        "opened_for": staticmethod(lambda key, default="": folds.get(str(key), default)),
-    })(), x=x, y=top)
-    for column in range(1, 9):
-        glyph, _key, _tint = grid.cells[top][column]
-        grid.cells[top][column] = (glyph, "loc_repo", None)
-    for column in range(0, x - 2):
-        glyph, key, _tint = grid.cells[top][column]
-        grid.cells[top][column] = (glyph, key, None)
+    status = status if isinstance(status, Mapping) else {}
+    campaigns = tuple(status.get("campaigns") or ())
+    if campaigns:
+        for doc in campaigns[:3]:
+            title = str(doc.get("campaign") or doc.get("title") or "·")
+            line = str(doc.get("line") or "?")
+            if doc.get("stale"):
+                line = str(doc.get("doc_age") or "?") + " · " + line
+            grid.put(x + 3, y, clip(title + ": " + line, max(0, right - x - 3)), "soft", limit=right)
+            y += 1
+        if status.get("next"):
+            y = _put_line(grid, x + 3, y, "next:", status["next"], right=right)
+    elif status:
+        y = _repo_status_block(grid, x, right, y, status)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_status"), "dim", limit=right)
+        y += 1
+
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.open_work"))
+    db_state = str(memory.get("state") or "unknown")
+    if db_state != "success":
+        detail = ui_text("fleet.memory.db_last_good" if memory.get("stale") else "fleet.memory.db_unknown")
+        grid.put(x + 3, y, ui_text("fleet.memory.db_state", state=db_state) + detail, "dim", limit=right)
+        y += 1
+    if project.get("open"):
+        y = draw_open_work(grid, x, y, right, project, ident, ui_text("fleet.memory.open_work"),
+                           opened=opened_for("repo:open", ""), fold_key="repo:open", preview_rows=2)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_work") if db_state == "success" or memory.get("stale")
+                 else "?", "dim", limit=right)
+        y += 1
+
+    current = tuple(route for route in routes if not route_is_history(route))
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.routes"), str(len(current)))
+    if current:
+        y = _draw_route_subset(grid, scoped_vm, current, x, y, bottom,
+                              view_key="repo:" + ident, state=nav)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_routes"), "dim", limit=right)
+        y += 1
+
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.recent"))
+    recent = []
+    if repo.get("done") and repo.get("done_result") == "success":
+        recent.append((repo.get("done_at"), repo.get("age"), str(repo["done"])))
+    for route in routes:
+        if route.get("state") == "done" and route.get("outcome") == "success" and route.get("title"):
+            recent.append((route.get("result_at"), route.get("age"), str(route["title"])))
+    recent.sort(key=lambda item: _result_time(item[0]), reverse=True)
+    shown = set()
+    for _at, age, text in recent:
+        if text in shown:
+            continue
+        shown.add(text)
+        grid.put(x + 3, y, clip((str(age) + "  " if age else "") + "✓ " + text,
+                                max(0, right - x - 3)), "now_sub", limit=right)
+        y += 1
+        if len(shown) == 3:
+            break
+    if not recent:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_recent"), "dim", limit=right)
+        y += 1
+
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.journals"))
+    work = [row for row in system.get("journal_records", ()) if row.get("project") == ident]
+    for row in sorted(work, key=lambda item: str(item.get("at") or ""), reverse=True)[:2]:
+        grid.put(x + 3, y, clip(str(row.get("title") or "?"), max(0, right - x - 3)), "soft", limit=right)
+        y += 1
+        record = row.get("reference") or row.get("record_target") or "?"
+        targets = [ui_text("entrance.open_record") + ": " + str(record)]
+        for result in (row.get("result_targets") or ())[:1]:
+            targets.append(ui_text("entrance.open_result") + ": " + str(result.get("path") or "?"))
+        grid.put(x + 3, y, clip(" · ".join(targets), max(0, right - x - 3)), "dim", limit=right)
+        y += 1
+    if not work:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_journals"), "dim", limit=right)
+        y += 1
+
+    y = _section(grid, x, right, y + 1, ui_text("fleet.repo.sessions"), str(len(sessions)))
+    if sessions:
+        draw_overview(grid, scoped_vm, state=SimpleNamespace(opened="", scope="repo:" + ident,
+                      opened_for=opened_for), x=x, y=y, session_table=True)
+    else:
+        grid.put(x + 3, y, ui_text("fleet.repo.no_sessions"), "dim", limit=right)
 
 
 def _repo_status_block(grid, x, right, y, status):

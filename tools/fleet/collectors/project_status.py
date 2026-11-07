@@ -2,16 +2,16 @@
 
 Read-only and best-effort. The location and shape are the convention in
 ``core/ARTIFACT_META.md`` ("The project status document"): ``현황.md`` (else ``STATUS.md``)
-directly in a cycle's ``artifacts/``, which the producer makes that cycle's primary, so
-Cairn's status row reads the same file. Names match NFC-normalized and case-folded, as
-the producer and Cairn match them. The most recently changed one is the project's current
-status. A file at the cycle root is never sealed and is not read; the legacy flat folder
+directly in a campaign folder, with older cycle ``artifacts/`` documents as a
+fallback. Names match NFC-normalized and case-folded, as the common artifact reader
+matches them. Campaign documents take priority; within each group the newest wins.
+A file at the cycle root is never sealed and is not read; the legacy flat folder
 ``research/<dir>/`` is read too.
 
 Cost: the artifact root comes from file reads only (no git process), and one scan per
-root runs at most every ``INTERVAL`` seconds, over campaigns changed in the last
-``RECENT_DAYS`` days, with one stat per cycle and a time budget. Everything else is
-cached. Nothing here writes, gates, or asks anything.
+root runs at most every ``INTERVAL`` seconds within a time budget. Campaign status
+filenames are cached; legacy cycle scans cover campaigns changed in the last
+``RECENT_DAYS`` days. Nothing here writes, gates, or asks anything.
 """
 import os
 import re
@@ -170,9 +170,9 @@ def _status_file(folder):
 def find_documents(root, now=None, budget=SCAN_BUDGET):
     """Status documents under ``root`` the convention names, plus the legacy research copies.
 
-    Campaigns changed in the last ``RECENT_DAYS`` days are read newest first, one stat per
-    cycle's ``artifacts/`` (listed again only when it changed); past ``budget`` seconds the
-    rest waits for the next scan.
+    Campaign pages use cached filenames, including edits in an old campaign folder.
+    Legacy cycles are scanned only in campaigns changed within ``RECENT_DAYS`` days;
+    past ``budget`` seconds the rest waits for the next scan.
     """
     now = time.time() if now is None else now
     since = now - RECENT_DAYS * 86400
@@ -183,9 +183,17 @@ def find_documents(root, now=None, budget=SCAN_BUDGET):
     campaigns = []
     for campaign in _subdirs(os.path.join(root, "campaigns")):
         mtime = _mtime(campaign)
-        if mtime is not None and mtime >= since:
+        if mtime is not None:
             campaigns.append((mtime, campaign))
     for mtime, campaign in sorted(campaigns, reverse=True):
+        if time.monotonic() - started > budget:
+            break
+        primary = _status_file(campaign)
+        if primary:
+            found.append(primary)
+            continue
+        if mtime < since:
+            continue
         cached = _CYCLES.get(campaign)
         if cached is None or cached[0] != mtime:
             cached = (mtime, _subdirs(campaign))
@@ -307,15 +315,22 @@ def read_document(path):
 
 
 def newest(root, now=None, budget=SCAN_BUDGET):
-    """The most recently changed status document under ``root``, parsed; None when there is none."""
-    best = None
+    """Campaign status first, then the legacy latest document; retain up to three campaigns."""
+    records, campaigns = [], []
     for path in find_documents(root, now, budget):
         record = read_document(path)
-        if record is not None and (best is None or record["mtime"] > best["mtime"]):
-            best = record
-    if best is not None:
-        best["relative"] = os.path.relpath(best["path"], root)
-    return best
+        if record is None:
+            continue
+        record["relative"] = os.path.relpath(record["path"], root)
+        records.append(record)
+        parts = record["relative"].split(os.sep)
+        if len(parts) == 3 and parts[0] == "campaigns":
+            record["campaign"] = re.sub(r"^\d{4}-\d{2}-\d{2}_", "", parts[1])
+            campaigns.append(record)
+    ordered = sorted(campaigns or records, key=lambda row: row["mtime"], reverse=True)
+    if not ordered:
+        return None
+    return dict(ordered[0], campaigns=sorted(campaigns, key=lambda row: row["mtime"], reverse=True)[:3])
 
 
 def collect(cwds, now=None, budget=SCAN_BUDGET):
