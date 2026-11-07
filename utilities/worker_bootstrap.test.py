@@ -2147,38 +2147,26 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--max-bytes") + 1], "6144")
 
 
-class BlockerAwaitsPersonTest(unittest.TestCase):
-    """An unfinished handoff continues unless a clause still asks a person for a decision."""
+class BlockedHandoffFollowupTest(unittest.TestCase):
+    """A BLOCKED execute handoff is never continued by its wording; the follow-up names the one next step."""
 
-    def test_implementation_work_and_negated_requests_do_not_wait(self):
-        for blocker in ("remaining implementation unfinished",
-                        "No user decision needed; remaining implementation unfinished",
-                        "remaining implementation: user input validation is unfinished",
-                        "operator precedence parsing is unfinished", "approval is not required, work unfinished",
-                        "사용자 승인 불필요; 구현 미완"):
-            with self.subTest(blocker=blocker):
-                self.assertFalse(W.blocker_awaits_person(blocker))
-
-    def test_real_decision_requests_still_wait(self):
-        for blocker in ("Decision needed: choose the migration behavior", "Choice pending", "approval required",
-                        "awaiting user approval", "waiting for the supervisor's answer", "need user input",
-                        "cannot proceed without user approval", "사용자 승인 필요", "결정 대기",
-                        "No test ran. User decision needed", "unfinished and requires approval"):
-            with self.subTest(blocker=blocker):
-                self.assertTrue(W.blocker_awaits_person(blocker))
-
-    def test_declined_handoff_names_the_runnable_continuation(self):
+    def test_followup_is_the_same_start_with_the_owners_remaining_work_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             artifact = Path(tmp) / "handoff.md"
             artifact.write_text("partial\n", encoding="utf-8")
-            route = {"cwd": tmp}
             meta = {"attempt_id": "att-1", "review_artifact_b64": __import__("base64").b64encode(str(artifact).encode()).decode()}
-            fields = W.blocked_handoff_followup(route, {"id": "execute"}, meta, Path(tmp) / "jobs.log", Path(tmp) / "route.json")
+            fields = W.blocked_handoff_followup({"cwd": tmp}, {"id": "execute"}, meta, Path(tmp) / "jobs.log", Path(tmp) / "route.json")
             text = W.continuation_followup_text(fields)
+        self.assertEqual(fields["kind"], "unfinished")
         self.assertIn("att-1", text)
         self.assertIn(str(artifact), text)
-        self.assertIn("--node execute --start", text)
-        self.assertIn("--prompt-file <task-file>", text)
+        self.assertIn("If it needs the person, raise it to your parent.", text)
+        self.assertIn("write the remaining items, plus any choice you made within the approved scope, to a file", text)
+        self.assertTrue(text.endswith("--node execute --start --jobs " + str(Path(tmp) / "jobs.log") + " --prompt-file <file>"), text)
+
+    def test_the_wording_check_is_gone(self):
+        self.assertFalse(hasattr(W, "blocker_awaits_person"))
+        self.assertFalse(hasattr(W, "incomplete_continuation_eligible"))
 
 
 if __name__ == "__main__":

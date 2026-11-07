@@ -60,7 +60,7 @@ eligibility, reader protection and shared-home exclusions are defined in
 
 ## 2. Adapter Rule
 
-All harnesses use the shared continuation decision and guidance: unchanged blocking review input returns the existing result without a new round; corrected input uses the existing closure check. A settled incomplete producing-stage handoff continues remaining work through the same start within the existing budget. Receipt identity remains unchanged.
+All harnesses use the shared continuation decision and guidance: unchanged blocking review input returns the existing result without a new round; corrected input uses the existing closure check. A settled `BLOCKED` execute handoff is not continued from its wording; the same start prints the shared next step (raise to the parent, or rerun with `--prompt-file <file>`) within the existing budget. Receipt identity remains unchanged.
 
 An adapter must not claim support for a surface unless it provides one of:
 

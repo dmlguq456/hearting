@@ -50,7 +50,7 @@ def dispatch_defaults_config_text(text):
 
 
 class FallbackTest(unittest.TestCase):
- def test_semantic_continuation_uses_exact_quiescent_blocked_handoff(self):
+ def test_blocked_handoff_never_selects_a_semantic_predecessor(self):
   import codex_dispatch_terminal as terminal
   import dispatch_contract as dc
   import worker_bootstrap as worker
@@ -61,25 +61,21 @@ class FallbackTest(unittest.TestCase):
        "route_node":"execute","parent_attempt_id":"att-owner","note":"dead-worker-blocked",
        "failure_class":"blocked","log_file":"/log","worker_type":"stage"}
   valid={"state":"valid","artifact_state":"readable","verdict":"BLOCKED"}
+  # A settled, readable, quiescent BLOCKED handoff is never continued by its blocker wording.
   with mock.patch.object(terminal,"inspect_terminal_attempt",return_value=valid), \
-       mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"remaining implementation unfinished"}), \
        mock.patch.object(worker,"_lineage_rows",return_value={"execute":[("done",row)]}), \
        mock.patch.object(dc,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")):
-   self.assertIs(F.semantic_continuation_predecessor(args,route,node,[row]),row)
-   identity=F.semantic_continuation_identity(route,node,"att-owner","att-old")
-   open_row={"_status":"open","attempt_id":identity,"parent_attempt_id":"att-owner"}
-   self.assertIs(F.semantic_continuation_predecessor(args,route,node,[row,open_row]),row)
-   self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row,{**open_row,"attempt_id":"other"}]))
-   for text in ("need user decision", "waiting for supervisor guidance", "사람의 판단이 필요", "답변 대기",
-                "Decision needed: choose migration behavior", "Choice pending", "approval required",
-                "unresolved clarification", "confirmation outstanding"):
+   for text in ("remaining implementation unfinished","No user decision needed; remaining implementation unfinished",
+                "remaining implementation: user input validation is unfinished","need user input to choose the migration behavior",
+                "Decision needed: choose migration behavior","사람의 판단이 필요"):
     with self.subTest(blocker=text), mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":text}):
      self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
-   with mock.patch.object(dc,"attempt_process_quiescence",return_value=SimpleNamespace(state="unverifiable")):
-    self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
-   with mock.patch.object(terminal,"inspect_terminal_attempt",return_value={**valid,"artifact_state":"missing"}):
-    self.assertIsNone(F.semantic_continuation_predecessor(args,route,node,[row]))
-   self.assertNotEqual(identity,F.semantic_continuation_identity(route,node,"att-owner","att-other"))
+     self.assertTrue(worker.incomplete_handoff_settled(route,node,row,args.jobs,"att-owner"))
+   with mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"x"}), \
+        mock.patch.object(dc,"attempt_process_quiescence",return_value=SimpleNamespace(state="unverifiable")):
+    self.assertFalse(worker.incomplete_handoff_settled(route,node,row,args.jobs,"att-owner"))
+  identity=F.semantic_continuation_identity(route,node,"att-owner","att-old")
+  self.assertNotEqual(identity,F.semantic_continuation_identity(route,node,"att-owner","att-other"))
 
  def test_concurrent_semantic_successor_claims_share_one_registry_row(self):
   import dispatch_contract as dc
@@ -1841,67 +1837,94 @@ class FallbackTest(unittest.TestCase):
    for surface in ("codex","opencode","claude"):
     self.assertIn(guidance,join.completion_followup_text(receipt,jobs=str(self.jobs),surface=surface))
 
- def test_same_execute_start_claims_one_semantic_successor(self):
-  import codex_dispatch_terminal as terminal
-  import dispatch_contract as DC
+ def check_blocked_execute_handoff(self,blocker):
+  import dispatch_contract as dc
   import dispatch_replacement as replacement
+  import worker_bootstrap as worker
   with self.dispatch_env():
    path=self.route(same_status="supported",intensity="standard",tuples=[self.tuple("codex","supported")])
-   route=json.loads(path.read_text()); node=next(n for n in route["nodes"] if n["id"]=="execute")
-   self.seed_parent(); self.seed_predecessor_markers(path,"execute")
+   route=json.loads(path.read_text()); self.seed_parent(); self.seed_predecessor_markers(path,"execute")
    parent=F.parent_attempt_generation(self.jobs,"owner",route)
-   previous={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
-       "execution_surface":"registered-headless","registered_worker":"1",
-       "fallback_hop":"same-harness-headless","worker_type":"stage","harness":"codex",
-       "attempt_id":"att-prior-blocked","route_id":route["route_id"],"route_hash":route["route_hash"],
-       "route_node":"execute","parent_attempt_id":parent,"parent_sid":"fixture-native-parent",
-       "note":"dead-worker-blocked","failure_class":"blocked","log_file":"/fixture-log"}
+   artifact=self.art/"execute-partial.md"; artifact.write_text("Remaining implementation: finish validation.\n")
+   log=self.art/"execute-log.jsonl"
+   log.write_text(json.dumps({"type":"item.completed","item":{"type":"agent_message",
+     "text":f"artifact: {artifact}\nverdict: BLOCKED\nblocker: {blocker}"}})+"\n"+json.dumps({"type":"turn.completed"})+"\n")
+   previous={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless","execution_surface":"registered-headless",
+     "registered_worker":"1","fallback_hop":"same-harness-headless","harness":"codex","route_id":route["route_id"],
+     "route_hash":route["route_hash"],"route_node":"execute","route_file":str(path),"parent_attempt_id":parent,
+     "artifact_root":str(self.art),"launch_outcome":"reaped-before-publish","attempt_id":"att-execute-blocked",
+     "worker_type":"stage","note":"dead-worker-blocked","failure_class":"blocked","log_file":str(log)}
+   old_task="Implement the migration and its validation."
+   previous.update(dc.parse_registry_metadata(replacement.seal_launch_input(
+    SimpleNamespace(attempt_id="att-execute-blocked",jobs_path=self.jobs,worktree=self.repo,
+                    replacement_input_argv=["--slug","fixture"]),"codex",old_task)))
    with self.jobs.open("a") as handle:
-    handle.write(f"now\tdone\t{self.repo}\t{self.repo}\tsemantic-gap\t"+
-                 ",".join(f"{k}={v}" for k,v in previous.items())+"\n")
+    handle.write(f"now\tdone\t{self.repo}\t{self.repo}\tfixture\t"+",".join(f"{k}={v}" for k,v in previous.items())+"\n")
    original=self.jobs.read_bytes(); calls=[]
-   def wrapper(_args,command,**_policy):
-    aid=self.arg(command,"--attempt-id"); calls.append(command)
-    candidate={k:v for k,v in previous.items() if k not in {"note","failure_class","log_file"}}
+   def wrapper(_args,argv,**_policy):
+    aid=self.arg(argv,"--attempt-id"); calls.append(argv)
+    candidate={k:v for k,v in previous.items() if k not in {"note","failure_class","log_file","launch_outcome","automatic_retry_of","replacement_input_digest"}}
     candidate.update(attempt_id=aid,completion_gate="code-execute")
-    retry=self.arg(command,"--automatic-retry-of")
-    if retry: candidate["automatic_retry_of"]=retry
+    candidate.update(dc.parse_registry_metadata(replacement.seal_launch_input(
+     SimpleNamespace(attempt_id=aid,jobs_path=self.jobs,worktree=self.repo,replacement_input_argv=["--slug","fixture"]),
+     "codex",request.read_text() if request.exists() else old_task)))
     replacement.admission(self.jobs,self.jobs.read_text().splitlines(),candidate)
-    row=f"now\topen\t{self.repo}\t{self.repo}\tsemantic-gap\t"+",".join(f"{k}={v}" for k,v in candidate.items())
-    started="--start" in command
-    self.assertTrue(DC.claim_attempt_row(self.jobs,aid,row,launch=started))
-    return SimpleNamespace(returncode=0,stdout=f"check=ok\nregistered_worker=1\nchild_spawned={int(started)}\nattempt_id={aid}\n",stderr="")
+    row=f"now\topen\t{self.repo}\t{self.repo}\tcontinuation\t"+",".join(f"{k}={v}" for k,v in candidate.items())
+    ok=dc.claim_attempt_row(self.jobs,aid,row,launch=True)
+    self.assertTrue(ok,("DEBUG claim false",aid,[(r["attempt_id"],r["_status"],r.get("launch_claimed")) for r in F.registry_rows(self.jobs,route["route_id"],"execute")]))
+    return SimpleNamespace(returncode=0,stdout=f"check=ok\nregistered=1\nstarted=1\nchild_spawned=1\nattempt_id={aid}\n",stderr="")
    hops=[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[self.tuple("codex","supported")]}]
-   common=["stage-dispatch-fallback.py","--route",str(path),"--node","execute","--slug","semantic-gap",
-           "--parent","owner","--capability-mode","dev","--jobs",str(self.jobs)]
-   with self.compiled_order(), mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
-        mock.patch.object(F,"run_wrapper",side_effect=wrapper), \
-        mock.patch.object(F,"watch_launched_attempt",return_value=("observed",{})), \
-        mock.patch.object(terminal,"inspect_terminal_attempt",return_value={"state":"valid","artifact_state":"readable","verdict":"BLOCKED"}), \
-        mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":"remaining implementation unfinished"}), \
-        patch_split(DC,"attempt_process_quiescence",return_value=SimpleNamespace(state="quiescent")):
-    for blocker in ("need user decision", "Decision needed: choose migration behavior", "Choice pending",
-                     "approval required", "awaiting user approval", "waiting for the supervisor's answer", "사용자 승인 필요"):
-     blocked_out=io.StringIO()
-     with mock.patch.object(terminal,"inspect_terminal_log",return_value={"blocker":blocker}), \
-          mock.patch.object(sys,"argv",common+["--start"]), contextlib.redirect_stdout(blocked_out):
-      blocked_code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
-     self.assertEqual(blocked_code,78,blocked_out.getvalue())
-     self.assertIn("reason=prior-result-requires-inspection",blocked_out.getvalue())
-     self.assertIn("--prompt-file <task-file>",blocked_out.getvalue())
-     self.assertEqual(calls,[])
-     self.assertEqual(self.jobs.read_bytes(),original)
-    for action in ("--register","--start"):
-     out=io.StringIO()
-     with mock.patch.object(sys,"argv",common+[action]), contextlib.redirect_stdout(out):
-      code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
-     self.assertEqual(code,0,out.getvalue())
-   self.assertEqual(len(calls),2)
-   ids=[self.arg(command,"--attempt-id") for command in calls]
-   self.assertEqual(ids,[F.semantic_continuation_identity(route,node,parent,"att-prior-blocked")]*2)
-   self.assertTrue(all("--automatic-retry-of" not in command for command in calls))
-   self.assertTrue(self.jobs.read_bytes().startswith(original))
-   self.assertEqual(len([r for r in F.registry_rows(self.jobs,route["route_id"],"execute") if r["attempt_id"]==ids[0]]),1)
+   command=worker.route_start_command(path,"execute",jobs=self.jobs)
+   request=self.art/"remaining.md"
+   def start(extra=()):
+    out=io.StringIO()
+    with self.compiled_order(), mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
+         mock.patch.object(F,"run_wrapper",side_effect=wrapper), \
+         mock.patch.object(F,"watch_launched_attempt",return_value=("observed",{})), \
+         mock.patch.object(sys,"argv",shlex.split(command)[1:]+["--slug","fixture"]+list(extra)), contextlib.redirect_stdout(out):
+     code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+    return code,out.getvalue()
+   # The same start launches nothing and hands the owner one complete next step.
+   code,out=start()
+   self.assertEqual(code,78,out); self.assertIn("reason=prior-result-requires-inspection",out)
+   self.assertEqual(calls,[]); self.assertEqual(self.jobs.read_bytes(),original)
+   guidance=next(line for line in out.splitlines() if line.startswith("continuation_followup="))
+   self.assertIn("If it needs the person, raise it to your parent",guidance)
+   self.assertIn("run: "+command+" --prompt-file <file>",guidance)
+   # The unchanged saved request is no new request either.
+   request.write_text(old_task)
+   code,out=start(["--prompt-file",str(request)])
+   self.assertEqual(code,78,out); self.assertEqual(calls,[])
+   # The owner's remaining-items file is the new request: exactly one continuation.
+   request.write_text("Finish the validation tests. Choice within scope: keep the current migration behavior.\n")
+   code,out=start(["--prompt-file",str(request)])
+   self.assertEqual(code,0,out); self.assertEqual(len(calls),1)
+   self.assertNotIn("--automatic-retry-of",calls[0])
+   # Each further BLOCKED continuation is a new settled result under the unchanged repeat-failure
+   # ladder: it counts the streak and escalates, and never refuses an owner-written request.
+   for n in range(3):
+    cont=self.arg(calls[-1],"--attempt-id")
+    lines=self.jobs.read_text().splitlines()
+    lines=[(line.replace("\topen\t","\tdone\t",1)+f",note=dead-worker-blocked,failure_class=blocked,log_file={log},launch_outcome=reaped-before-publish")
+           if f"attempt_id={cont}" in line and "\topen\t" in line else line for line in lines]
+    self.jobs.write_text("\n".join(lines)+"\n")
+    request.write_text(f"Round {n} remaining items.\n")
+    code,out=start(["--prompt-file",str(request)])
+    self.assertEqual(code,0,out); self.assertEqual(len(calls),n+2)
+    self.assertIn(f"repeat_failure_streak={n+2}",out)
+   self.assertIn("repeat_escalation=",out)
+
+ def test_blocked_handoff_control_wording(self):
+  self.check_blocked_execute_handoff("remaining implementation unfinished")
+
+ def test_blocked_handoff_negated_wording(self):
+  self.check_blocked_execute_handoff("No user decision needed; remaining implementation unfinished")
+
+ def test_blocked_handoff_technical_user_input_wording(self):
+  self.check_blocked_execute_handoff("remaining implementation: user input validation is unfinished")
+
+ def test_blocked_handoff_user_input_request_wording(self):
+  self.check_blocked_execute_handoff("remaining implementation unfinished: need user input to choose the migration behavior")
 
  def test_new_execute_request_can_reuse_its_failed_slug(self):
   self.assert_new_execute_request("gap-two")

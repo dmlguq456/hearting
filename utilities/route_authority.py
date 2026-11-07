@@ -367,7 +367,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     if action == "producing-continuation":
         # The caller observes the exact result and process; this pure decision
         # does not turn a readable worker result into a transport retry.
-        reason = next((name for name in ("identity", "settled", "quiescent", "readable", "unfinished", "no_human_decision")
+        reason = next((name for name in ("identity", "settled", "quiescent", "readable", "unfinished")
                        if not facts.get(name)), "")
         return ContinuationDecision(not reason, "continue" if not reason else "inspect",
                                     "" if not reason else "continuation-" + reason,

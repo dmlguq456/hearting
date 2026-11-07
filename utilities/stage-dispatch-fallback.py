@@ -1460,7 +1460,7 @@ def semantic_continuation_identity(route, node, parent_attempt_id, predecessor_i
 
 
 def semantic_continuation_predecessor(args, route, node, prior_rows):
-    """Find a readable, quiescent incomplete producing attempt owned by this parent."""
+    """Find the passed producer an exact downstream blocking judgment reopens (an unfinished handoff is never continued by its wording)."""
     if (node.get("kind") != "pipeline-stage" or node.get("completion_gate") != "code-execute"
             or not prior_rows):
         return None
@@ -1487,9 +1487,8 @@ def semantic_continuation_predecessor(args, route, node, prior_rows):
                 return None
         except (OSError, ValueError, KeyError, TypeError):
             return None
-    from worker_bootstrap import incomplete_continuation_eligible, correction_continuation_eligible
-    return previous if (incomplete_continuation_eligible(route, node, previous, args.jobs, args.parent_attempt_id)
-                        or correction_continuation_eligible(route, node, previous, args.jobs, args.parent_attempt_id)) else None
+    from worker_bootstrap import correction_continuation_eligible
+    return previous if correction_continuation_eligible(route, node, previous, args.jobs, args.parent_attempt_id) else None
 
 
 def retry_attempt_identity(failed_attempt_id: str) -> str:
