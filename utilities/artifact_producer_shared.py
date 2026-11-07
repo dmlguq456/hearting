@@ -1098,7 +1098,42 @@ def admit_shared(
         _write_exclusive(shared_journal_path(root, revision_id), _json_bytes(journal), 0o600)
         os.makedirs(str(staging))
         try:
-            if merged_tree is None:
+            stored_in = {}
+            physical_count = physical_bytes = 0
+            if kind == 'spec':
+                from artifact_spec_storage import read_files, StorageError
+                logical_tree = merged_tree if merged_tree is not None else source_tree
+                previous_files = {}
+                previous_id = (reference or {}).get('latest_revision_id')
+                if previous_id and not _legacy_adopted_spec_base(root, reference, previous_id):
+                    try:
+                        previous_files, _ = read_files(root, reference_id, previous_id)
+                    except StorageError as error:
+                        raise ProducerError(error.code, str(error)) from error
+                by_content = {}
+                for name, file in previous_files.items():
+                    by_content.setdefault((file.sha256, file.byte_size), file)
+                rows, violations = [], []
+                for name, data in sorted(logical_tree.items()):
+                    digest, size = _digest(data), len(data)
+                    rows.append((name, digest, size))
+                    prior = previous_files.get(name)
+                    if prior is None or (prior.sha256, prior.byte_size) != (digest, size):
+                        preimage = re.search(r'(?:^|/)_internal/versions/v[0-9]+/prd\.md$', name)
+                        prior = by_content.get((digest, size)) if preimage else None
+                    if prior is not None:
+                        # Flatten the source to actual bytes. A preimage slot
+                        # can reuse its former PRD path without a reference chain.
+                        stored_in[name] = {'revision_id': prior.source_revision_id,
+                                           'source_path': prior.source_path}
+                    else:
+                        dst = staging / name
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        _write_exclusive(dst, data)
+                        physical_count += 1; physical_bytes += size
+                for current, _, _ in os.walk(staging):
+                    _fsync_dir(Path(current))
+            elif merged_tree is None:
                 rows, violations = _copy_tree_files(source_path, staging)
             else:
                 rows, violations = [], []
@@ -1138,11 +1173,13 @@ def admit_shared(
                 revision["spec_merge"] = merge_proof
             elif kind == "spec":
                 revision["spec_base_revision_id"] = expected
+            if kind == 'spec':
+                revision.update(physical_file_count=physical_count, physical_byte_size=physical_bytes)
+                if stored_in:
+                    revision.update(schema_version=2, stored_in=stored_in)
             # D-87 (b): an explicit removal is named and reasoned in the record.
-            # The key is omitted entirely when nothing was dropped, so an
-            # ordinary admit's revision record is byte-identical to before
-            # (A17-4). `content_digest` covers `files[]` only, so this key never
-            # moves the digest either way.
+            # Absence of drops does not invent a drop decision. The inventory
+            # digest covers files[] only, independently of storage metadata.
             if dropped:
                 revision["dropped_components"] = drop_decisions
             _write_exclusive(staging / REVISION_RECORD_NAME, _json_bytes(revision))
