@@ -98,7 +98,8 @@ class HarnessViewerTest(HarnessEntranceTest):
             done = launch('view', 'unexpected', env={'AGENT_HOME': str(self.home), 'TEST_RUNTIME': runtime})
             self.assertEqual(done.returncode, 0)
             self.assertEqual(done.stdout.strip(), 'viewer unexpected')
-        viewer.unlink()  # destructive-ok: own fixture in TemporaryDirectory
+        # destructive-ok: reason=remove the fixture viewer module to test the missing-viewer refusal; boundary=one fixture file under self.home in this test TemporaryDirectory
+        viewer.unlink()
         result = launch('view', env={'AGENT_HOME': str(self.home)})
         self.assertEqual(result.returncode, 2)
         self.assertIn('optional artifact viewer is missing', result.stderr)
