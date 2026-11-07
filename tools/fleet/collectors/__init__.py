@@ -664,7 +664,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     try:
         from ..session_handle import resolve_tag
         for s in sessions:
-            if s.harness in {"codex", "opencode"} and s.session_id:
+            if s.harness in {"claude", "codex", "opencode"} and s.session_id:
                 s.session_tag = resolve_tag(s.harness, s.session_id)
     except Exception:
         pass

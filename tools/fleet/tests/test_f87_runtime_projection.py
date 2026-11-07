@@ -384,8 +384,12 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertEqual([row[1] for row in rows], ["report-metadata"])
-            self.assertEqual(rows[0][4:], ["herdr:claude", "--display-agent", "claude",
-                                          "--title", "claude Claude pane title"])
+            from fleet import session_tags
+            with unittest.mock.patch.dict(os.environ, self.env(root)):
+                tag = session_tags.assigned_tag("claude", sid)
+            self.assertIsNotNone(tag)
+            self.assertEqual(rows[0][4:], ["herdr:claude", "--display-agent", f"[{tag}] claude",
+                                          "--title", f"[{tag}] claude Claude pane title"])
 
     def test_claude_hook_skips_a_registered_worker(self):
         with tempfile.TemporaryDirectory() as td:

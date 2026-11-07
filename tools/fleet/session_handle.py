@@ -136,9 +136,9 @@ def derived_tag(name: object) -> Optional[str]:
 def minted_tag(session_id: object) -> Optional[str]:
     """F-100b (user 2026-09-03) — the 2-hex tag for a harness that mints no derived name.
 
-    Claude carries its tag inside the derived session name, so ``derived_tag()`` only has
-    to read it off. Codex and OpenCode expose no such name, so Fleet mints the tag itself
-    from the canonical session id. This pure hash is only an allocator candidate. Display consumers
+    Claude prefers the suffix of its derived name; otherwise Fleet mints a candidate
+    from the canonical session id, as it does for Codex and OpenCode. This pure hash
+    is only an allocator candidate. Display consumers
     use ``resolve_tag`` to honor collision-free live assignments.
 
     NOT the id's own leading hex: a Codex thread id is a UUIDv7 and every one of them
@@ -261,11 +261,10 @@ _UNSET_RECIPIENT_CONTEXT = object()
 
 
 def resolve_tag(harness: object, session_id: object, *, home: object = None) -> Optional[str]:
-    """Resolve the shared display tag using the caller's historical context.
+    """Read the shared assignment for this exact native session.
 
-    Existing callers retain their environment-based Claude seat fallback. A
-    recipient lookup must use :func:`resolve_recipient_tag` so the sender's
-    pane and cwd cannot affect which resumed seat history is read.
+    ``home`` remains accepted for older callers; display lookup no longer uses
+    native names or the caller's seat as a fallback.
     """
     return _resolve_tag(harness, session_id, home=home)
 
@@ -284,26 +283,32 @@ def _resolve_tag(harness: object, session_id: object, *, home: object = None,
 
     Fleet's collectors, `peer-message.py`'s trailer alias, and the Herdr pane title all
     have to answer the same question — "which badge does this session wear?" — and the
-    rule differs per harness (Claude reads its derived name, the other two read their
-    confirmed shared assignment). Keeping copies is how the badge and the
-    trailer drift apart, so this is the single definition; callers add their own
-    brackets. I/O-bearing and fail-soft: any unreadable record yields the next source,
+    rule reads the confirmed shared assignment for every harness. Keeping copies
+    is how the badge and the trailer drift apart; callers add their own
+    brackets. I/O-bearing and fail-soft: any unreadable assignment yields no number,
     and an unresolvable session yields ``None`` rather than a guess.
     """
     harness_key = str(harness or "").lower()
     sid = str(session_id or "").strip()
-    if not harness_key or not sid:
+    if harness_key not in _PREFIXES or not sid:
         return None
-    if harness_key in ("codex", "opencode"):
+    try:
         try:
             from .session_tags import assigned_tag
-            return assigned_tag(harness_key, sid)
-        except ImportError:
-            return None
-    if harness_key != "claude":
+        except ImportError:  # The statusline can load this module by file path.
+            from fleet.session_tags import assigned_tag
+        return assigned_tag(harness_key, sid)
+    except ImportError:
         return None
-    # Claude: the derived `<basename>-<xx>` name is the only carrier, and only while the
-    # record still says `derived` (a user-set `release-1a` has the same shape, F-100a).
+
+
+def _claude_tag_candidate(session_id: str, *, home: object = None) -> Optional[str]:
+    """Read the historical native suffix for allocation only, never for display.
+
+    Keep native names and remembered suffixes intact. The shared allocator may
+    choose a different number when an older live session already owns this one.
+    """
+    sid = session_id
     sessions = _claude_sessions_dir(home)
     records = []
     try:
@@ -337,11 +342,7 @@ def _resolve_tag(harness: object, session_id: object, *, home: object = None,
         # Keep the derived pane badge across a native resume. The alias lookup
         # is the same display-only seat history Fleet uses, never a cwd guess.
         from fleet.collectors.herdr import pane_session_aliases
-        if recipient_pane is _UNSET_RECIPIENT_CONTEXT:
-            alias_pane, alias_cwd = os.environ.get("HERDR_PANE_ID"), os.getcwd()
-        else:
-            alias_pane = recipient_pane
-            alias_cwd = None if recipient_cwd is _UNSET_RECIPIENT_CONTEXT else recipient_cwd
+        alias_pane, alias_cwd = os.environ.get("HERDR_PANE_ID"), os.getcwd()
         aliases = pane_session_aliases("claude", sid, alias_pane, alias_cwd)
         tags = {derived_tag(record.get("name")) for record in records
                 if record.get("sessionId") in aliases and record.get("nameSource") == "derived"}

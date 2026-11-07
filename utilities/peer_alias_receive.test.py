@@ -662,16 +662,20 @@ console.log(JSON.stringify(output));'''
         self.assertIsNone(pm.parse_peer_trailer(text)["session_id"])
 
     def test_claude_derived_then_rename_remembered_tag(self):
-        from fleet import titles
+        from fleet import titles, session_tags
         sessions = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
         sessions.mkdir(parents=True)
         path = sessions / "123.json"
         path.write_text(json.dumps({"sessionId": "claude-id", "name": "project-ab", "nameSource": "derived"}))
+        self.assertEqual(pm.peer_alias("claude", "claude-id"), "[?]")
+        self.assertEqual(session_tags.assign_observed("claude", "claude-id"), "ab")
         with mock.patch.object(titles, "read_tag", return_value="cd"):
             self.assertEqual(pm.peer_alias("claude", "claude-id"), "[ab]")
             path.write_text(json.dumps({"sessionId": "claude-id", "name": "renamed-ef", "nameSource": "user"}))
-            self.assertEqual(pm.peer_alias("claude", "claude-id"), "[cd]")
+            self.assertEqual(pm.peer_alias("claude", "claude-id"), "[ab]")
         with mock.patch.object(titles, "read_tag", return_value=None):
+            self.assertEqual(pm.peer_alias("claude", "claude-id"), "[ab]")
+            session_tags._path().unlink()
             self.assertEqual(pm.peer_alias("claude", "claude-id"), "[?]")
 
     def test_pane_move_and_reuse_do_not_supply_identity(self):

@@ -361,6 +361,9 @@ class PaneMetadata(unittest.TestCase):
             stack.enter_context(mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)))
             stack.enter_context(mock.patch.object(herdr_projection, "session_title", return_value="Existing subject"))
             writer = stack.enter_context(mock.patch.object(herdr_projection, "_send_projection", autospec=True))
+            # Basic/native observation already published the shared assignment;
+            # the detail worker below remains a reader for every harness.
+            self.assertEqual(session_tags.assign_observed("claude", sid, pane_id="idle-pane"), "2e")
             forbidden = [stack.enter_context(patch_split(owner, name, side_effect=AssertionError(name)))
                          for owner, name in ((herdr_projection, "_report"),
                              (herdr_projection, "_session_lifecycle"), (herdr_projection, "_assign_observed_tag"),
@@ -388,6 +391,12 @@ class PaneMetadata(unittest.TestCase):
             writer.reset_mock()
             (home / "sessions/77.json").write_text(json.dumps({
                 "pid": 77, "sessionId": sid, "name": "Automatic subject", "nameSource": "auto"}))
+            self.assertEqual(herdr_projection.resolve_tag("claude", sid), "2e")
+            observed["display_agent"] = "[2e] claude"
+            details._enrich(LiveSnapshot(tag_metadata=[observed]))
+            writer.assert_not_called()
+            session_tags._path().unlink()
+            observed.pop("display_agent")
             self.assertIsNone(herdr_projection.resolve_tag("claude", sid))
             details._enrich(LiveSnapshot(tag_metadata=[observed]))
             writer.assert_not_called()

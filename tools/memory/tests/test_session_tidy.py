@@ -7026,9 +7026,9 @@ class CardExactIdentityTest(TidyCase):
                     directory.mkdir(parents=True, exist_ok=True)
                     (directory / "99999.json").write_text(json.dumps({"sessionId": sid,
                         "nameSource": "derived", "name": "fixture-93"}))
-                    confirmed = "93"
-                else:
-                    confirmed = session_tags.assign_observed(harness, sid)
+                confirmed = session_tags.assign_observed(harness, sid)
+                if harness == "claude":
+                    self.assertEqual(confirmed, "93")
                 card = {"author": {"harness": harness, "sid": sid},
                         "seat": {"pane": "stored:pane"}, "authored_at_epoch": 10,
                         "body": "원래 목표: 보존할 원문\n관련: 작업"}
@@ -7039,17 +7039,16 @@ class CardExactIdentityTest(TidyCase):
                     self.assertIn("[" + confirmed + "]", text)
                     self.assertNotIn("successor:pane", text)
                     self.assertIn(card["body"], text)
-                if harness != "claude":
-                    path = session_tags._path()
-                    for snapshot in (None, "{broken"):
-                        path.unlink(missing_ok=True)
-                        if snapshot:
-                            path.write_text(snapshot)
-                        text = st.render_card_text(card)
-                        self.assertNotIn("[" + confirmed + "]", text)
-                        self.assertIn("sid=" + sid, text)
-                        self.assertIn("pane=stored:pane", text)
-                    path.unlink()
+                path = session_tags._path()
+                for snapshot in (None, "{broken"):
+                    path.unlink(missing_ok=True)
+                    if snapshot:
+                        path.write_text(snapshot)
+                    text = st.render_card_text(card)
+                    self.assertNotIn("[" + confirmed + "]", text)
+                    self.assertIn("sid=" + sid, text)
+                    self.assertIn("pane=stored:pane", text)
+                path.unlink()
 
     def test_sparse_cards_and_tiny_caps_never_claim_a_truncated_sid(self):
         sid = "full-native-session-" + "한" * 100

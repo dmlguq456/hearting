@@ -40,6 +40,8 @@ def _read(path):
     claimed = {}
     for key, row in rows.items():
         prior = claimed.get(row["tag"])
+        # Older versions wrote duplicate Claude suffixes. Read them so the
+        # existing writer can repair them; no new snapshot keeps duplicates.
         if prior and (key[0] != "claude" or prior[0] != "claude"):
             raise ValueError("duplicate mutable tag assignment")
         claimed[row["tag"]] = key
@@ -49,10 +51,20 @@ def _read(path):
 def assigned_tag(harness, sid):
     """Read a confirmed snapshot row without allocation, discovery or locking."""
     try:
-        row = _read(_path()).get((harness, sid))
-        return row["tag"] if row else None
+        rows = _read(_path())
+        row = rows.get((harness, sid))
+        if row is None:
+            return None
+        # Until normal allocation repairs a legacy collision, only its oldest
+        # owner is addressable. A reader never publishes two owners of a tag.
+        owner = min((r for r in rows.values() if r["tag"] == row["tag"]), key=_order)
+        return row["tag"] if owner is row else None
     except (OSError, ValueError, TypeError):
         return None
+
+
+def _order(row):
+    return row["first_seen"], row["started_at"], row["harness"], row["session_id"]
 
 
 def _started(harness, sid, started=None):
@@ -66,7 +78,7 @@ def _started(harness, sid, started=None):
 
 
 def _inventory(sessions):
-    from .session_handle import resolve_tag
+    from .session_handle import _claude_tag_candidate
     from .collectors.herdr import list_agents
     from . import session_registry
     from .collectors.procscan import read_proc_start
@@ -79,7 +91,7 @@ def _inventory(sessions):
                "started_at": _started(harness, sid, getattr(sess, "started_at", None)),
                "pid": getattr(sess, "pid", None), "proc_start": getattr(sess, "proc_start", None)}
         if harness == "claude":
-            row["tag"] = getattr(sess, "session_tag", None) or resolve_tag(harness, sid)
+            row["tag"] = getattr(sess, "session_tag", None) or _claude_tag_candidate(sid)
         live[(harness, sid)] = row
     # Native/managed registry evidence also reserves sessions outside Herdr or
     # a harness-filtered collection. PID/start agreement prevents recycled PIDs.
@@ -104,7 +116,7 @@ def _inventory(sessions):
                                   "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
             row.update(pid=pid, proc_start=start)
             if harness == "claude" and not row.get("tag"):
-                row["tag"] = resolve_tag(harness, sid)
+                row["tag"] = _claude_tag_candidate(sid)
     agents = list_agents()
     for agent in agents or []:
         identity = agent.get("agent_session") or {}
@@ -117,7 +129,7 @@ def _inventory(sessions):
                               "started_at": _started(harness, sid)})
         row["pane_id"] = agent.get("pane_id")
         if harness == "claude" and not row.get("tag"):
-            row["tag"] = resolve_tag(harness, sid)
+            row["tag"] = _claude_tag_candidate(sid)
     return live, agents
 
 
@@ -176,8 +188,8 @@ def assign_observed(harness, sid, *, pane_id=None, pid=None, proc_start=None):
                 (("pane_id", pane_id), ("pid", pid), ("proc_start", proc_start))
                 if value is not None})
     if harness == "claude":
-        from .session_handle import resolve_tag
-        row["tag"] = resolve_tag(harness, sid)
+        from .session_handle import _claude_tag_candidate
+        row["tag"] = _claude_tag_candidate(sid)
     _assign({(harness, sid): row}, None, observed_only=True)
     return assigned_tag(harness, sid)
 
@@ -215,7 +227,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None):
                 previous = old.get(key, {})
                 if previous:
                     # Missing fields in a narrow observation cannot erase prior
-                    # PID/start/pane evidence or a Claude fixed reservation.
+                    # PID/start/pane evidence or a confirmed reservation.
                     if observed_only:
                         row = {**previous, **{k: v for k, v in row.items() if v is not None}}
                         live[key] = row
@@ -225,18 +237,12 @@ def _assign(live, agents, *, observed_only=False, baseline=None):
                     # A real reaffirmation is newer even if pane/PID data match.
                     # Carried or superseded census rows are not new observations.
                     row["observation_revision"] = previous.get("observation_revision", 0) + 1
-                if previous and row["harness"] != "claude":
+                if previous:
                     row["tag"] = previous["tag"]
-                elif row["harness"] != "claude":
+                elif not _HEX.fullmatch(str(row.get("tag") or "")):
                     row["tag"] = minted_tag(row["session_id"])
-            for row in live.values():
-                if row["harness"] == "claude" and not _HEX.fullmatch(str(row.get("tag") or "")):
-                    row.pop("tag", None)
-            fixed = {row["tag"] for row in live.values() if row["harness"] == "claude" and row.get("tag")}
-            taken = set(fixed)
-            movable = [(key, row) for key, row in live.items() if row["harness"] != "claude"]
-            movable.sort(key=lambda item: (0 if item[0] in old else 1,
-                                           item[1]["first_seen"], item[1]["started_at"], item[0]))
+            taken = set()
+            movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
             # Reserve every surviving old number before placing newcomers or a
             # displaced number. A new hash must never evict an existing session.
             displaced = []
@@ -247,7 +253,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None):
                 else:
                     displaced.append(row)
             for row in displaced:
-                base = int(minted_tag(row["session_id"]), 16)
+                base = int(row["tag"], 16)
                 tag = next((f"{(base + step) % 256:02x}" for step in range(256)
                             if f"{(base + step) % 256:02x}" not in taken), None)
                 if tag is None:
