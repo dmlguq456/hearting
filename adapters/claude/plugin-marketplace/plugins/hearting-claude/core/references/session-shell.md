@@ -109,3 +109,16 @@ clipped, additional or ambiguous content stays visible. This affects painting,
 not the native VT, its coordinates or its input/identity observations.
 The block reserves only the rows it paints. Hidden guidance and empty sections
 reserve no rows; native-owned spacing remains under the native renderer.
+Inside a complete Herdr pane context, an eligible wrapped session uses Herdr's
+official `HERDR_AGENT` foreground-wrapper hint. Keep an explicit operator hint,
+leave unwrapped/noninteractive ingress unchanged, and never export it globally.
+The hint must be present in the wrapper's initial exec environment so Herdr can
+use its native manifests and integration authority. Do not imitate `herdr:`
+reports with a Hearting-owned source. Native identity and input guards stay intact.
+Preserve the native terminal-title signal through the VT attachment as well.
+Herdr's native manifests use that signal for activity and its original title.
+Forward normalized, bounded title text only; never forward control characters
+inside a title as another terminal command.
+A pane address may use that same native attachment only when its birth-bound
+owner is the pane's current foreground group. Recheck that join immediately
+before delivery; keep the existing composer/lifecycle and Codex queue guards.

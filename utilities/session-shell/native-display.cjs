@@ -77,4 +77,8 @@ function publisher(directory, identity) {
     pending=raw;if(!writing)draining=flush();return draining;
   };
 }
-module.exports={observe,firstLine,hiddenFooterRows,blockHeight,publisher};
+function titleSequence(title) {
+  const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
+  return '\x1b]2;'+text+'\x07';
+}
+module.exports={observe,firstLine,hiddenFooterRows,blockHeight,titleSequence,publisher};

@@ -84,6 +84,119 @@ class SpecMergeTest(unittest.TestCase):
         self.assertEqual(result["x/prd.md"],b.replace(b"\na\n",b"\nA\n").replace(b"\nb\n",b"\nB\n"))
         self.assertEqual([row["section"] for row in evidence["units"]],[["# Project","## A"],["# Project","## B"]])
 
+    def blueprint(self):
+        return "# Project\n## ✦ 청사진 요약 ⟨v10, 2026-11-01⟩\nsummary\n## Contract\noriginal\n".encode()
+
+    def merge_blueprint(self, base, ours, latest):
+        try:
+            return self.merge(base, ours, latest)
+        except M.MergeConflict as exc:
+            self.fail("independent blueprint label/body changes must merge: " + str(exc))
+
+    def test_blueprint_label_update_on_either_branch_keeps_independent_contract(self):
+        base = self.blueprint()
+        label = base.replace(b"v10, 2026-11-01", b"v11, 2026-11-02")
+        contract = base + b"## Added\nindependent requirement\n"
+        for ours, latest in ((label, contract), (contract, label)):
+            with self.subTest(label_on_ours=ours == label):
+                result, _ = self.merge_blueprint(base, ours, latest)
+                self.assertEqual(result["x/prd.md"], label + b"## Added\nindependent requirement\n")
+
+    def test_blueprint_label_and_other_branch_body_are_separate_units(self):
+        base = self.blueprint()
+        ours = base.replace(b"v10, 2026-11-01", b"v11, 2026-11-02")
+        latest = base.replace(b"\nsummary\n", b"\nreviewed summary\n")
+        result, evidence = self.merge_blueprint(base, ours, latest)
+        self.assertEqual(result["x/prd.md"], ours.replace(b"\nsummary\n", b"\nreviewed summary\n"))
+        self.assertIn("merged", [row["decision"] for row in evidence["units"]])
+
+    def test_blueprint_label_update_keeps_child_identity_and_order(self):
+        base = self.blueprint().replace(b"## Contract", b"### Detail\nchild\n## Contract")
+        ours = base.replace(b"v10, 2026-11-01", b"v11, 2026-11-02")
+        latest = base.replace(b"\nchild\n", b"\nupdated child\n")
+        result, _ = self.merge_blueprint(base, ours, latest)
+        self.assertEqual(result["x/prd.md"], ours.replace(b"\nchild\n", b"\nupdated child\n"))
+
+    def test_blueprint_conflicting_labels_or_bodies_are_not_synthesized(self):
+        base = self.blueprint()
+        ours = base.replace(b"v10, 2026-11-01", b"v11, 2026-11-02")
+        for latest in (base.replace(b"v10, 2026-11-01", b"v12, 2026-11-03"),
+                       base.replace(b"\nsummary\n", b"\nlatest body\n")):
+            candidate = ours if b"v12" in latest else ours.replace(b"\nsummary\n", b"\nours body\n")
+            with self.subTest(latest=latest), self.assertRaises(M.MergeConflict):
+                self.merge(base, candidate, latest)
+
+    def test_blueprint_reorder_and_delete_modify_remain_conflicts(self):
+        base = self.blueprint()
+        prefix, contract = base.split(b"## Contract", 1)
+        updated = prefix.replace(b"v10, 2026-11-01", b"v11, 2026-11-02")
+        latest = base.replace(b"\noriginal\n", b"\nchanged contract\n")
+        with self.assertRaises(M.MergeConflict):
+            self.merge(base, b"# Project\n## Contract" + contract + updated.split(b"\n", 1)[1], latest)
+        self.conflict(base, b"# Project\n## Contract" + contract,
+                      updated + b"## Contract" + contract, "delete-versus-modify")
+
+    def test_blueprint_duplicate_versioned_identity_is_ambiguous(self):
+        base = self.blueprint()
+        heading = "## ✦ 청사진 요약 ⟨v11, 2026-11-02⟩\nother\n".encode()
+        candidate = base.replace(b"v10, 2026-11-01", b"v12, 2026-11-03") + heading
+        self.conflict(base, candidate, base.replace(b"original", b"latest"),
+                      "markdown-heading-rename-ambiguous")
+
+    def test_other_numbered_headings_and_non_prd_files_keep_rename_protection(self):
+        for base, path in ((b"# Project\n## Release v10\nbody\n## Other\nold\n", "x/prd.md"),
+                           (self.blueprint(), "x/notes.md")):
+            with self.subTest(path=path):
+                self.conflict(base, base.replace(b"v10", b"v11"),
+                              base.replace(b"old", b"new") if b"old" in base else base + b"## Added\nnew\n",
+                              "markdown-heading-rename-ambiguous", path)
+
+    def test_unchanged_blueprint_label_keeps_existing_whole_unit_evidence(self):
+        base = self.blueprint()
+        ours = base.replace(b"summary", b"ours summary")
+        latest = base.replace(b"original", b"latest contract")
+        _, evidence = self.merge(base, ours, latest)
+        self.assertEqual({row["section"][-1]: row["decision"] for row in evidence["units"]},
+                         {"## Contract": "latest", "## ✦ 청사진 요약 ⟨v10, 2026-11-01⟩": "ours"})
+
+    def test_published_descendant_covers_exact_contract_delta_with_newer_bookkeeping(self):
+        base = {"c/prd.md": self.blueprint(), "c/policy.yaml": b"policy: old\n"}
+        source = base | {"c/prd.md": self.blueprint().replace(b"original", b"adopted"),
+                         "c/policy.yaml": b"policy: adopted\n",
+                         "c/pipeline_state.yaml": b"version: 10\nchange: {version: 10, status: implementation-in-progress}\n"}
+        published = {"c/prd.md": source["c/prd.md"].replace(b"v10, 2026-11-01", b"v12, 2026-11-03")
+                     + b"## Later\nindependent\n", "c/policy.yaml": b"policy: adopted\n",
+                     "c/pipeline_state.yaml": b"version: 12\n"}
+        before = copy.deepcopy((base, source, published))
+        self.assertTrue(M.changes_covered(base, source, published))
+        self.assertEqual(before, (base, source, published))
+        self.assertFalse(M.changes_covered(base, source, published | {
+            "c/policy.yaml": b"policy: old\n"}))
+        for actual in (published["c/prd.md"].replace(b"adopted", b"partially adopted"),
+                       self.blueprint()):
+            self.assertFalse(M.changes_covered(base, source, published | {"c/prd.md": actual}))
+
+    def test_contract_coverage_ignores_only_blank_separators_not_body_or_code(self):
+        base = {"c/prd.md": b"# P\n## Existing\nold\n"}
+        source = {"c/prd.md": base["c/prd.md"] + b"\n\n## Added\ncontract\n"}
+        published = {"c/prd.md": base["c/prd.md"] + b"\n## Added\ncontract\n\n"}
+        self.assertTrue(M.changes_covered(base, source, published))
+        self.assertFalse(M.changes_covered(base, source, {"c/prd.md": published["c/prd.md"].replace(b"contract", b"changed")}))
+        fenced = b"# P\n## Added\n```\ncontract\n\n```\n"
+        self.assertFalse(M.changes_covered(base, {"c/prd.md": fenced}, {"c/prd.md": fenced.replace(b"contract\n\n", b"contract\n")}))
+
+    def test_coverage_keeps_order_deletions_and_other_payloads_exact(self):
+        base = {"c/prd.md": b"# P\n## A\na\n## B\nb\n", "c/input.json": b"old"}
+        source = {"c/prd.md": b"# P\n## A\nchanged\n## B\nb\n", "c/input.json": b"new"}
+        self.assertTrue(M.changes_covered(base, source, source))
+        self.assertFalse(M.changes_covered(base, source, source | {"c/input.json": b"old"}))
+        self.assertFalse(M.changes_covered(base, source, source | {
+            "c/prd.md": b"# P\n## B\nb\n## A\nchanged\n"}))
+        removed = {"c/prd.md": b"# P\n## B\nb\n", "c/input.json": b"old"}
+        self.assertTrue(M.changes_covered(base, removed, removed))
+        self.assertFalse(M.changes_covered(base, removed, base))
+        self.assertFalse(M.changes_covered(base, base | {"c/pipeline_state.yaml": b"version: 12\n"}, base))
+
     def test_markdown_same_heading_disjoint_lines_still_conflict(self):
         b=b"# A\none\ntwo\n"
         rows=self.conflict(b,b.replace(b"one",b"ONE"),b.replace(b"two",b"TWO"),"same-unit-changed")
