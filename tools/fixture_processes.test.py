@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/fixture_processes.py — a detached writer is dead before its temp dir goes."""
 import os
+import json
 import signal
 import subprocess
 import sys
@@ -115,7 +116,7 @@ class ReapDeadlineTest(unittest.TestCase):
 
     def test_second_scan_live_child_still_raises_after_first_process_exits(self):
         self.marked_processes.side_effect = [{101: "101"}, {102: "102"}]
-        self.clock.side_effect = [0, 1, 10]
+        self.clock.side_effect = [0, 1, 1, 10]
         # Pin the first snapshot before its process disappears.
         starts = iter(["101", None, "102", None, "102"])
         self.start.side_effect = lambda pid: next(starts)
@@ -126,6 +127,100 @@ class ReapDeadlineTest(unittest.TestCase):
 
 
 class ReapTest(unittest.TestCase):
+    def test_cleanup_subprocess_never_selects_its_caller_as_a_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = ("import json,os,sys;sys.path.insert(0,sys.argv[1]);"
+                     "import fixture_processes;print(json.dumps(fixture_processes.marked_processes(sys.argv[2])))")
+            parent = ("import json,os,subprocess,sys;"
+                      "raw=subprocess.check_output([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]]);"
+                      "print(json.dumps({'parent':os.getpid(),'marked':json.loads(raw)}))")
+            result = subprocess.run([sys.executable, "-c", parent, probe,
+                str(Path(__file__).resolve().parent), str(root)],
+                env=dict(os.environ, FIXTURE_DIR=str(root)), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            row = json.loads(result.stdout)
+            self.assertNotIn(str(row["parent"]), row["marked"])
+
+    def test_third_detached_generation_is_gone_before_directory_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "chain.py"
+            script.write_text("import os,subprocess,sys,time\nfrom pathlib import Path\n"
+                "root=Path(os.environ['FIXTURE_DIR']);level=int(sys.argv[1])\n"
+                "(root/('ready-'+str(level))).write_text(str(os.getpid()))\n"
+                "if level<2:\n"
+                " while not (root/('release-'+str(level))).exists():time.sleep(.005)\n"
+                " subprocess.Popen([sys.executable,__file__,str(level+1)],start_new_session=True)\n"
+                "while True:time.sleep(.01)\n")
+            parent = subprocess.Popen([sys.executable, str(script), "0"],
+                env=dict(os.environ, FIXTURE_DIR=str(root)), start_new_session=True)
+            scan = fixture_processes.marked_processes
+            passes = 0
+            def delayed_scan(marker):
+                nonlocal passes
+                batch = scan(marker); passes += 1
+                if passes <= 2:
+                    (root / f"release-{passes-1}").touch()
+                    self.assertTrue(self._wait_for(root / f"ready-{passes}"))
+                return batch
+            try:
+                self.assertTrue(self._wait_for(root / "ready-0"))
+                with mock.patch.object(fixture_processes, "marked_processes", side_effect=delayed_scan):
+                    killed = fixture_processes.reap(str(root))
+                last = int((root / "ready-2").read_text())
+                self.assertIn(last, killed)
+                self.assertEqual(scan(str(root)), {})
+            finally:
+                fixture_processes.reap(str(root))
+                parent.wait(timeout=5)
+
+    def test_install_activation_cleanup_stops_writer_before_removal(self):
+        root_dir = Path(__file__).resolve().parents[1]
+        script = root_dir / "tools/install/runtime-activation.test.sh"
+        prefix = script.read_text().split('\neval "$(python3', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); binary = root / "bin"; binary.mkdir()
+            # This assertion shim sees the removal boundary; it does not fake
+            # an installer outcome or suppress a failed deletion.
+            rm = binary / "rm"
+            rm.write_text("#!" + sys.executable + "\nimport json,os,sys\nfrom pathlib import Path\n"
+                "root=Path(sys.argv[-1]);row=json.loads((root/'writer.json').read_text())\n"
+                "try:\n"
+                " fields=Path('/proc',str(row['pid']),'stat').read_text().rsplit(') ',1)[1].split()\n"
+                " if fields[19]==row['start'] and fields[0] not in ('Z','X'):\n"
+                "  print('fixture writer reached removal while live',file=sys.stderr);raise SystemExit(17)\n"
+                "except FileNotFoundError:pass\n"
+                "os.execv('/bin/rm',['/bin/rm',*sys.argv[1:]])\n")
+            rm.chmod(0o700)
+            body = "\npython3 - \"$TMP\" <<'PY'\n" + (
+                "import json,os,subprocess,sys,time\nfrom pathlib import Path\n"
+                "root=Path(sys.argv[1]);state=root/'home/.local/state/hearting/dispatch';state.mkdir(parents=True)\n"
+                "p=subprocess.Popen([sys.executable,'-c'," + repr(_WRITER) + "],"
+                "env=dict(os.environ,FIXTURE_DIR=str(state)),start_new_session=True,\n"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "deadline=time.monotonic()+5\n"
+                "while not (state/'ready').exists() and time.monotonic()<deadline:time.sleep(.005)\n"
+                "assert (state/'ready').exists()\n"
+                "start=Path('/proc',str(p.pid),'stat').read_text().rsplit(') ',1)[1].split()[19]\n"
+                "(root/'writer.json').write_text(json.dumps({'pid':p.pid,'start':start}))\n"
+                "print('FIXTURE='+str(root),flush=True)\n") + "PY\n"
+            try:
+                result = subprocess.run(["sh", "-c", prefix + body, str(script)],
+                    env=dict(os.environ, TMPDIR=str(root), PATH=str(binary) + os.pathsep + os.environ["PATH"]),
+                    capture_output=True, text=True, timeout=20)
+                fixture = next(Path(line[8:]) for line in result.stdout.splitlines() if line.startswith("FIXTURE="))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(fixture.exists())
+            finally:
+                # All generated temporary directories are inside this test's
+                # private root, including when the subprocess fails early.
+                import shutil
+                for fixture in root.glob("tmp.*"):
+                    fixture_processes.reap(str(fixture))
+                    if fixture.exists():
+                        shutil.rmtree(fixture)
+
     @staticmethod
     def _wait_for(path, timeout=10):
         deadline = time.monotonic() + timeout

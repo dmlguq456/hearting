@@ -5,8 +5,23 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 TMP=$(mktemp -d)
-# destructive-ok: reason=clean one mktemp activation fixture; boundary=TMP returned by the immediately preceding mktemp call
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  python3 - "$ROOT/tools" "$TMP" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from fixture_processes import reap
+reap(sys.argv[2])
+PY
+  # destructive-ok: reason=clean one quiescent mktemp activation fixture; boundary=TMP returned by mktemp above
+  rm -rf "$TMP"
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
 export OPENCODE_RUNTIME_VERSION=2.0.32
