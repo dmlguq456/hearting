@@ -596,6 +596,12 @@ history with no live work transfers no parent or successor execution authority.
 Source routes and outcomes retain their original bytes and remain historical.
 A new current manifest names the target root and campaign while preserving
 origin-qualified route rows and every earlier manifest snapshot.
+An absent same-key target campaign is created from the source key/title through
+normal producer allocation; executing the move needs no extra route or output
+cycle. Dry-run only describes that creation and leaves its ID unknown.
+Whole workflow groups follow the moved members through the existing metadata
+validation. Partial selections, conflicts and unverified declarations are
+reported explicitly, with original declaration bytes retained in the move journal.
 Same-filesystem moves use atomic rename and file-list/size inventories;
 cross-device moves use durable copies and byte digests.
 Directory publication holds the ordered root admission locks. On filesystems

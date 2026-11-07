@@ -99,6 +99,26 @@ independent writers can still alter artifact bytes afterward, so the declaration
 does not claim an atomic snapshot of external artifact writes. Historical stale
 evidence remains readable and does not block an unrelated merge.
 
+## Cross-root cycle relocation
+
+`cycle-move` carries a group when all its members are selected. Its group ID,
+title, stage labels, relations and exact evidence identities/digests remain;
+only root/campaign/cycle locators change. The normal prepare/apply checks own
+membership, evidence, target merges and preimage conflicts. A partial selection
+does not split the group or mint an ID: the receipt names the omitted scope and
+reason. Unreadable declarations, stale evidence and target conflicts remain
+unconfirmed rather than looking like an empty successful transfer.
+
+The existing relocation journal preserves the original declaration and metadata
+intent before effects. Source withdrawal removes departing members from current
+membership, retaining untouched groups and historical bytes. Ordered admission
+locks and the existing locked apply validation protect metadata replacement;
+the same move command resumes interrupted effects without duplicating groups.
+Group outcomes are separate from cycle payload movement. Old committed moves
+without a group observation stay explicitly unobserved and are not backfilled.
+Dry-run writes no campaign/group/operation and allocates no identity. No new
+gate, input, flag, state store or recovery command is introduced.
+
 ## Incremental review of newly sealed cycles
 
 A cycle that no group covers, or that has no metadata yet, is reviewed in the
