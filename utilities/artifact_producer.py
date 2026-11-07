@@ -1606,6 +1606,12 @@ def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True,
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
+    # This optional write uses the originally admitted path. Resolving again
+    # after begin could follow a replacement link into a different root.
+    physical_root = Path(root)
+    if physical_root.name == '.claude_reports':
+        from artifact_root_alias import ensure_legacy_alias
+        result['root_alias'] = ensure_legacy_alias(physical_root)
     source = result.pop(_ENV_SOURCE, None)
     if source is not None:
         # The admission lock only reserves the cycle; what its env names (the source cycle,

@@ -76,7 +76,12 @@ def _daily_journals(root):
     return entrance_snapshot(root)
 
 
-ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals,)
+def _campaign_documents(root):
+    from artifact_campaign_documents import entrance_snapshot
+    return entrance_snapshot(root)
+
+
+ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals, _campaign_documents)
 _DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
@@ -118,6 +123,9 @@ def _fallback_translator(message: str, /, **fields: Any) -> str:
         "entrance.rewrite": ("Hearting rewrites this file. Editing it is overwritten; "
                              "deleting it comes back at the next publish."),
         "entrance.empty": "No user-facing document yet.",
+        "entrance.status_ambiguous": "conflicting status pages",
+        "entrance.status_recorded": "recorded",
+        "entrance.status_unknown": "unconfirmed",
         "open.viewer": "Viewer: {url}",
         "reports.empty": "No user-facing document yet.",
         "reports.foreign": "Kept an existing {name}: it carries no Hearting entrance marker.",
@@ -554,7 +562,10 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
     kind, date, title, doc = (raw.get("kind"), raw.get("date"), raw.get("title"), raw.get("doc_path"))
     if not all(isinstance(value, str) for value in (kind, date, title, doc)):
         return None
-    kind, date, title, doc = _nfc(kind).strip(), _nfc(date), _nfc(title).strip(), _nfc(doc)
+    kind, date, title = _nfc(kind).strip(), _nfc(date), _nfc(title).strip()
+    # Campaign documents already exist at this exact filesystem locator.
+    # Normalizing a decomposed name would point to a different file on Linux.
+    doc = doc if kind == 'campaign-document' else _nfc(doc)
     if not kind or kind == "cycle" or not title or not _DATE_FULL.match(date):
         return None
     if _document_path(root, doc) is None:
@@ -588,6 +599,11 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
             "campaign_id", "route_id", "session", "turn", "at", "status", "coverage", "checks", "digest",
             "results_total", "results_coverage")})
         row["result_targets"] = list(raw.get("result_targets") or [])
+    elif kind == 'campaign-document':
+        row.update({key: raw.get(key) for key in ('campaign_id', 'artifact_root_id', 'repository_id',
+            'artifact_id', 'revision_id', 'status', 'coverage', 'mtime', 'timestamp_source')})
+        row['record_target'] = doc
+        row['result_targets'] = []
     return row
 
 
@@ -664,11 +680,15 @@ def _md_href(path: str) -> str:
 
 
 def _href(path: str) -> str:
-    return quote(_nfc(path), safe="/.")
+    return quote(path, safe="/.")
 
 
 def _record_target(row):
     return row.get("record_target") or row["doc_path"]
+
+
+def _record_md_href(row):
+    return _href(row['doc_path']) if row['kind'] == 'campaign-document' else _md_href(_record_target(row))
 
 
 def _record_href(row):
@@ -688,17 +708,24 @@ def _partial_sources(snapshot):
     return any(row.get("coverage") != "complete" for row in snapshot.get("source_status") or [])
 
 
+def _row_status(row, t):
+    status = row.get('status') or 'unknown'
+    if row['kind'] == 'campaign-document':
+        return t('entrance.status_' + (status if status in ('recorded', 'ambiguous') else 'unknown'))
+    return str(status)
+
+
 def _markdown_recent(snapshot: Dict[str, Any], t) -> List[str]:
     lines: List[str] = []
     for number, row in enumerate(snapshot["recent"], start=1):
         suffix = f"  ({t('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         where = f"  — `{_md_href(row['cycle_path'])}`" if row["cycle_path"] else ""
-        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_md_href(_record_target(row))}>)"
+        lines.append(f"{number}. {row['date']}  [{_md_text(row['title'])}](<{_record_md_href(row)}>)"
                      f"{where}{suffix}")
-        if row["kind"] == "journal-entry":
-            links = [f"[{t('entrance.open_record')}](<{_md_href(_record_target(row))}>)"]
+        if row["kind"] in ("journal-entry", "campaign-document"):
+            links = [f"[{t('entrance.open_record')}](<{_record_md_href(row)}>)"]
             links += [f"[{t('entrance.open_result')}](<{item['href']}>)" for item in _result_links(row)]
-            lines.append("   " + " · ".join(links) + " · " + _md_text(str(row.get("status") or "unknown")))
+            lines.append("   " + " · ".join(links) + " · " + _md_text(_row_status(row, t)))
         if row["summary"]:
             lines.append(f"   {_md_text(row['summary'])}")
     if not lines:
@@ -827,11 +854,11 @@ def render_html(snapshot: Dict[str, Any], t) -> str:
         body.append(f'<li><span class="meta">{_escape(row["date"])}</span> '
                     f'<a href="{_record_href(row)}">{_escape(row["title"])}</a>'
                     f'<span class="meta">{where}{suffix}</span>{summary}')
-        if row["kind"] == "journal-entry":
+        if row["kind"] in ("journal-entry", "campaign-document"):
             links = [f'<a href="{_record_href(row)}">{_escape(t("entrance.open_record"))}</a>']
             # Result hrefs are already encoded file URIs from the common reader.
             links += [f'<a href="{_escape(item["href"])}">{_escape(t("entrance.open_result"))}</a>' for item in _result_links(row)]
-            body.append('<br>' + ' &#183; '.join(links) + ' &#183; ' + _escape(row.get("status") or "unknown"))
+            body.append('<br>' + ' &#183; '.join(links) + ' &#183; ' + _escape(_row_status(row, t)))
         body[-1] += '</li>'
     if not snapshot["recent"]:
         body.append(f"<li>{_escape(t('entrance.empty'))}</li>")
@@ -1119,7 +1146,8 @@ def _print_rows(rows: Sequence[Dict[str, Any]], root: Path) -> None:
     for number, row in enumerate(rows, start=1):
         suffix = f"  ({_translator()('entrance.more', count=_count(row['extra']))})" if row["extra"] else ""
         print(f"{number}. {row['date']}  {row['title']}{suffix}")
-        print(f"   {_record_target(row)}")
+        status = ' · ' + _row_status(row, _translator()) if row['kind'] == 'campaign-document' else ''
+        print(f"   {_record_target(row)}{status}")
         for item in _result_links(row):
             print(f"   {_translator()('entrance.open_result')}: {item['path']}")
 

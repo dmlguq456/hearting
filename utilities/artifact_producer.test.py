@@ -293,6 +293,23 @@ class ProducerTestBase(unittest.TestCase):
 
 
 class ActivateAndBeginTest(ProducerTestBase):
+    def test_begin_adds_only_a_legacy_root_alias_and_preserves_the_open_route(self):
+        self.activate()
+        legacy = self.root.with_name('.claude_reports')
+        self.root.rename(legacy)
+        self.root = legacy
+        identity = L.read_root_identity(self.root)
+        route, route_file = self.route()
+        before = route_file.read_bytes()
+        result = P.begin(self.root, route_file=route_file, capability='autopilot-code', intensity='direct')
+        alias = self.root.with_name('.agent_reports')
+        self.assertEqual(result['root_alias']['status'], 'created')
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(), self.root)
+        self.assertEqual(L.read_root_identity(alias), identity)
+        self.assertEqual(route_file.read_bytes(), before)
+        self.assertEqual(Path(result['env']['AGENT_ARTIFACT_ROOT']), self.root)
+
     def test_begin_before_activation_is_legacy_compat(self):
         self.seed_legacy()
         route, route_file, result = self.begin()
