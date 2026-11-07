@@ -3336,7 +3336,7 @@ class MessageCompletionTests(unittest.TestCase):
         updated = state.signal_value("codex", "legacy-session", "legacy-seat",
                                      "[답변 필요] current question", sequence=2)
         with mock.patch.object(state, "_retire_legacy_signal", side_effect=OSError("interrupted")):
-            self.assertFalse(state.write_signal(updated))
+            self.assertTrue(state.write_signal(updated))
         self.assertTrue(legacy.exists())
         self.assertEqual([row["id"] for row in state.read_signals()], [updated["id"]])
         self.assertTrue(state.close_signal("legacy-seat", harness="codex",

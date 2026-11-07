@@ -178,7 +178,10 @@ def _write_signal_source(value):
     path = _signal_path(value, write=True)
     _write(path, value)
     if path != _path(value["seat_key"]):
-        _retire_legacy_signal(value)
+        try:
+            _retire_legacy_signal(value)
+        except OSError:
+            pass  # The durable new slot already masks this legacy copy.
 
 
 def _remove_signal_source(value, path):
