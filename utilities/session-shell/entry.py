@@ -42,8 +42,8 @@ def asset_root(node):
 
 
 def wrapped_command(harness, command):
-    if harness == "codex":
-        return [command[0], "-c", 'tui.status_line=["thread-id","context-used"]', *command[1:]]
+    # A configuration override selects Codex's embedded backend. Preserve its
+    # native shared-daemon ingress and per-thread queue instead.
     return list(command)
 
 

@@ -64,6 +64,8 @@ def line_segments(values, columns, *, complete=False):
     words("folder", project_of(values.get("cwd")) if values.get("cwd") else None, "loc_repo", 64 if complete else 24, 2,
           before=[("📁 ", "dim")])
     words("title", values.get("title"), "hb_" + str(harness), 48 if complete else 40, 0, prefix)
+    if values.get("native_sid"):
+        words("thread", values["native_sid"], "dim", 256, 0)
     git = values.get("git") or {}
     branch_after = []
     if git and git.get("repo") != 0:

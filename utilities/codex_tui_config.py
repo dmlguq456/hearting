@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import tomllib
 
@@ -249,6 +250,31 @@ def status_line_capability_for_home(home, *, argv=()) -> str:
     except (OSError, UnicodeError):
         return "unknown"
     return status_line_capability(text)
+
+
+def managed_status_line_observation(home, *, argv=()):
+    """One unchanged default-format observation; custom/unknown layers stay visible."""
+    if _status_line_override(argv):
+        return None
+    path = Path(home).expanduser() / "config.toml"
+    def generation(info):
+        return [str(value) for value in (info.st_dev, info.st_ino, info.st_size,
+                                        info.st_mtime_ns, info.st_ctime_ns)]
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_mode & 0o022 or before.st_size > 1024 * 1024):
+            return None
+        parsed = _parse(path.read_text(encoding="utf-8"))
+        if (parsed.get("profile") or (parsed.get("tui") or {}).get("status_line")
+                != list(DEFAULT_STATUS_LINE)):
+            return None
+        if generation(path.lstat()) != generation(before):
+            return None
+        return {"path": str(path), "stamp": generation(before),
+                "items": list(DEFAULT_STATUS_LINE)}
+    except (OSError, UnicodeError, CodexTuiConfigError, TypeError, AttributeError):
+        return None
 
 
 def merge_status_line_from_fragment(text: str, fragment_path) -> str:
