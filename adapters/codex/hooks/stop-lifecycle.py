@@ -49,14 +49,13 @@ def main() -> int:
     except Exception:
         return 0
     try:
+        from session_shell import lifecycle
+        lifecycle("codex", "stop", _sid(payload))
+    except Exception:
+        pass
+    try:
         session_id = "" if _worker() else _sid(payload)
         if session_id:
-            if os.environ.get("HEARTING_SHELL_SOCKET"):
-                try:
-                    from session_shell import lifecycle
-                    lifecycle("codex", "stop", session_id)
-                except Exception:
-                    pass
             try:
                 import session_tidy_idle
                 session_tidy_idle.launch_observer("codex", payload)

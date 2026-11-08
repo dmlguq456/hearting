@@ -32,6 +32,19 @@ state for Claude and Codex alike; they never replace the Codex queue with input.
 The native callback supplies its session ID before a passive registry may exist.
 Its nearest verified native process and birth must still belong to this wrapped
 terminal; a worker or service callback cannot select another terminal's session.
+For a shared Codex daemon callback, reuse the native MCP origin's live TUI
+PID/thread proof and its current unique selection. Read the attachment only
+from that TUI's own initial environment; never inherit the daemon's first
+client socket. Its PID/birth and exact wrapped PTY checks still apply. Unknown,
+ambiguous, worker, remote or changed evidence grants no attachment or input.
+Preserve native shared startup: do not insert a footer configuration override
+that silently selects embedded mode. Existing explicit native modes keep
+their own behavior and the existing pending queue semantics.
+
+Startup uses the running display host's Node ABI to validate the existing
+prepared assets, without an auxiliary Node version probe. Native execution
+retains the existing display-ready boundary, exact binding and same-child
+input/relay ownership.
 
 The block opens by default, using its actual content height up to ten rows.
 Questions take space first; absent sections disappear. Its light, dim labels
@@ -69,7 +82,7 @@ They never establish input readiness or add anything to the model's input.
 An observed non-Git directory is `no-git`; unavailable Git evidence stays `?`.
 While wrapped, the former Hearting Claude/OpenCode decorations yield to this
 line. Unwrapped sessions keep their existing displays. Codex keeps native input,
-execution, permission UI, thread ID and context. Its footer is not deduplicated.
+execution and permission UI; verified common fields may replace duplicate paint.
 
 Event-driven updates use native lifecycle and the existing record changes,
 without tuning a polling interval. Fleet requests its narrow display reader on
@@ -102,13 +115,25 @@ CPU protection keep their existing cadence.
 OpenCode's visible context percentage owns its common-line percentage too.
 Claude's native status row owns route/wait badges; the block retains question
 contents without repeating those badges.
-Wrapped Codex keeps the official thread ID and native context fields through
-an invocation-only footer preference; stored settings and permission flags stay
-with their existing owner. OpenCode's Hearting route footer yields to the shell.
-The wrapped Codex viewport reads its native footer unchanged. It conceals only
-the complete, exact two-item UUID/context footer in its confirmed footer area;
-clipped, additional or ambiguous content stays visible. This affects painting,
-not the native VT, its coordinates or its input/identity observations.
+Wrapped Codex keeps its original native arguments, settings and permission flags.
+OpenCode's Hearting route footer yields to the shell. The wrapped Codex viewport
+reads its native footer unchanged. Concealment requires the unchanged managed
+default preference, exact native SID, and all equivalent common fields actually
+painted, including all seven managed items and the exact thread ID. Custom,
+clipped, stale or ambiguous content stays visible. This affects
+painting, not the native VT, its coordinates or its input/identity observations.
+Person-requested answers use the existing separate action worker so a slow
+submission cannot stall native input, readiness or event-driven display values.
+An answer originating in a wrapped Codex terminal retains that exact attachment
+in its existing private answer claim. Reuse the lifecycle bridge's current-root
+proof before accepting it and at the existing native effect boundary, including
+retained delivery retries. These authority reads refresh MCP origins even for
+already loaded roots; loaded membership alone does not prove current selection.
+An unknown or multiple root withholds the answer;
+an old displayed question, a later question or a waiting worker grants nothing.
+This restriction belongs to the wrapped answer, not ordinary full-session-ID
+queue delivery. Existing queue and consumption receipts remain unchanged, and
+an already consumed answer can still settle after the terminal changes.
 The block reserves only the rows it paints. Hidden guidance and empty sections
 reserve no rows; native-owned spacing remains under the native renderer.
 Inside a complete Herdr pane context, an eligible wrapped session uses Herdr's

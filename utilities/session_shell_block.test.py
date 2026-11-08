@@ -22,6 +22,7 @@ class BlockAnswersTest(unittest.TestCase):
         before=dict(id='exact-question',owner=dict(harness='codex',session_id='original-session'))
         after=dict(id='exact-question',owner=dict(harness='claude',session_id='another-session'))
         with mock.patch.object(hws,'cached_view',return_value={'items':[before]}), \
+             mock.patch.object(shell,'answer_attachment_current',return_value=True), \
              mock.patch.object(questions,'load_board',return_value={'items':[after]}), \
              mock.patch.object(hws,'submit_selected_response') as submit:
             result=shell._block_answer(binding,{'question_id':'exact-question','revision':'0'*64,'answers':{'q':['yes']}})
@@ -36,6 +37,7 @@ class BlockAnswersTest(unittest.TestCase):
             self.assertEqual(response,{'answers':{'q':['typed answer']}})
             return dict(state='submitted',action_id=kwargs['action_id'])
         with mock.patch.object(hws,'cached_view',return_value={'items':[item]}), \
+             mock.patch.object(shell,'answer_attachment_current',return_value=True), \
              mock.patch.object(questions,'load_board',return_value={'items':[item]}), \
              mock.patch.object(hws,'read_selected_request',return_value=envelope), \
              mock.patch.object(hws,'submit_selected_response',side_effect=consume) as submit:

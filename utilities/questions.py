@@ -335,7 +335,9 @@ def _answer(args):
     # This command's own action id: a reply claimed first by Fleet or another
     # caller comes back with that caller's action and state, never as ours.
     action_id = uuid.uuid4().hex
-    result = HWS.submit_selected_response(ref, response, action_id=action_id)
+    attachment = getattr(args, "answer_attachment", None)
+    options = {"answer_attachment": attachment} if attachment is not None else {}
+    result = HWS.submit_selected_response(ref, response, action_id=action_id, **options)
     result = result if isinstance(result, dict) else {}
     state = result.get("state") or "unknown"
     outcome = result.get("result") if isinstance(result.get("result"), dict) else {}

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Opt-in, single-start ingress; the original argv and permission ingress survive."""
 from __future__ import annotations
-import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
-import secrets
-import subprocess
 import sys
 import tempfile
 
@@ -32,6 +29,8 @@ def interactive(harness, args):
 
 
 def asset_key(node):
+    import hashlib
+    import subprocess
     lock = (Path(__file__).parent / "package-lock.json").read_bytes()
     abi = subprocess.check_output([node, "-p", "process.versions.modules"], timeout=5).strip()
     return hashlib.sha256(lock + b"\0" + abi).hexdigest()[:24]
@@ -43,8 +42,8 @@ def asset_root(node):
 
 
 def wrapped_command(harness, command):
-    if harness == "codex":
-        return [command[0], "-c", 'tui.status_line=["thread-id","context-used"]', *command[1:]]
+    # A configuration override selects Codex's embedded backend. Preserve its
+    # native shared-daemon ingress and per-thread queue instead.
     return list(command)
 
 
@@ -71,13 +70,6 @@ def main(argv=None):
     node = shutil.which("node")
     if not node:
         original()
-    try:
-        assets = asset_root(node)
-        ready = json.loads((assets / "ready.json").read_text())
-        if ready != {"key": assets.name} or not (assets / "node_modules/node-pty").is_dir():
-            original()
-    except (OSError, ValueError, subprocess.SubprocessError):
-        original()
     # The launcher owns the PTY. A display worker only borrows its descriptor.
     import pty_owner
     size = os.get_terminal_size(1)
@@ -92,8 +84,8 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
         env = dict(os.environ, HEARTING_SHELL_DIRECTORY=directory,
                    HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
-                   HEARTING_SHELL_TOKEN=secrets.token_hex(32),
-                   HEARTING_SHELL_PYTHON=sys.executable, NODE_PATH=str(assets / "node_modules"))
+                   HEARTING_SHELL_TOKEN=os.urandom(32).hex(),
+                   HEARTING_SHELL_PYTHON=sys.executable)
         try:
             return pty_owner.run(harness, command, wrapped_command(harness, command), node,
                                  Path(__file__).with_name("host.cjs"), env, directory)

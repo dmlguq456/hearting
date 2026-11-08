@@ -47,7 +47,7 @@ _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
                                   "response", "result", "updated_at", "message_binding",
-                                  "source_terminal", "transport_settled"))
+                                  "source_terminal", "transport_settled", "answer_attachment"))
 # The one age rule for every answer-wait source (S1-S4): a wait this old folds out of
 # the current count. Age never removes a wait; only evidence does (answered, route
 # closed, replaced by a later attempt, native request ended). User decision
@@ -549,6 +549,28 @@ def message_answer_body(binding, *, current=False):
     return text
 
 
+def _answer_attachment_current(attachment, envelope):
+    if attachment is None:
+        return True  # Ordinary full-SID questions/queue keep their own contract.
+    if not isinstance(attachment, dict):
+        return False
+    from session_shell import answer_attachment_current
+    return bool(attachment.get("harness") == envelope.get("harness")
+                and attachment.get("sid") == envelope.get("session_id")
+                and answer_attachment_current(attachment))
+
+
+def message_answer_submission_current(binding):
+    """First-write permission only; exact consumption/ACK does not use this."""
+    if not message_binding_valid(binding):
+        return False
+    envelope = {key: binding[key] for key in ("harness", "session_id", "request_id", "question_id")}
+    envelope["turn_id"] = None
+    entry = _selected_entry(envelope)
+    return bool(entry and entry.get("message_binding") == binding
+                and _answer_attachment_current(entry.get("answer_attachment"), envelope))
+
+
 def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
@@ -665,7 +687,7 @@ def flush_message_decisions():
             _queue_message_decision(signal)
 
 
-def _submit_message(envelope, portable, action_id):
+def _submit_message(envelope, portable, action_id, *, answer_attachment=None):
     import session_tidy as tidy
     import session_notice as notice
     text = _message_body(portable)
@@ -677,7 +699,8 @@ def _submit_message(envelope, portable, action_id):
         signal = _message_source(envelope)
         if not signal or signal.get("lifecycle") != "open" or not _message_incarnation_current(signal):
             return _selected_fallback(envelope, "message-question-no-longer-current")
-        claimed, entry = _claim_selected_action(envelope, action_id, portable)
+        options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+        claimed, entry = _claim_selected_action(envelope, action_id, portable, **options)
         if not claimed:
             return read_selected_request(envelope)
     # No source/selected locks across carrier/pending writes or native calls.
@@ -1142,6 +1165,13 @@ def _valid_selected_overlay(value):
         identity = _selected_identity(entry.get("identity"))
         if identity != entry.get("identity") or _selected_entry_key(identity) != key:
             return False
+        attachment = entry.get("answer_attachment")
+        if attachment is not None:
+            from session_shell import answer_attachment_shape
+            if (not answer_attachment_shape(attachment)
+                    or attachment["harness"] != identity["harness"]
+                    or attachment["sid"] != identity["session_id"]):
+                return False
         draft = entry.get("draft", "")
         if not isinstance(draft, str) or len(draft.encode("utf-8")) > _SELECTED_DRAFT_MAX:
             return False
@@ -1211,6 +1241,10 @@ def _store_selected_entry(envelope, entry):
             if previous is None and not _prune_selected(overlay):
                 return False
             if previous:
+                if previous.get("answer_attachment") is not None:
+                    if entry.get("answer_attachment") not in (None, previous["answer_attachment"]):
+                        return False
+                    entry["answer_attachment"] = previous["answer_attachment"]
                 for flag in ("source_terminal", "transport_settled"):
                     if previous.get(flag):
                         entry[flag] = True
@@ -1255,7 +1289,7 @@ def _store_selected_entry(envelope, entry):
         return False
 
 
-def _claim_selected_action(envelope, action_id, response):
+def _claim_selected_action(envelope, action_id, response, *, answer_attachment=None):
     """Atomically persist the one allowed action before its native transport call."""
     identity = _selected_identity(envelope)
     if identity is None:
@@ -1283,6 +1317,8 @@ def _claim_selected_action(envelope, action_id, response):
                             "action_id": action_id, "response": response,
                             "result": {"status": "submitted"},
                             "updated_at": time.time()})
+            if answer_attachment is not None:
+                claimed["answer_attachment"] = dict(answer_attachment)
             if isinstance(envelope.get("selected_id"), str):
                 claimed["selected_id"] = envelope["selected_id"]
             claimed.setdefault("draft", envelope.get("draft", ""))
@@ -1307,6 +1343,26 @@ def _claim_selected_action(envelope, action_id, response):
             return True, dict(claimed)
     except (OSError, ValueError, TypeError):
         return False, None
+
+
+def _release_unsubmitted_selected_action(envelope, action_id, result):
+    """A refused local guard sent nothing; leave that exact question editable."""
+    key = _selected_entry_key(_selected_identity(envelope))
+    with _cache_write_lock():
+        projection = _read_cache_file()
+        overlay = (projection or {}).get("selected_responses", {})
+        if not _valid_selected_overlay(overlay):
+            return False
+        entry = overlay.get(key)
+        if (not entry or entry.get("action_id") != action_id or entry.get("state") != "submitted"
+                or entry.get("source_terminal") or entry.get("transport_settled")):
+            return False
+        entry = dict(entry, state="open", result=result, updated_at=time.time())
+        for name in ("action_id", "answer_attachment"):
+            entry.pop(name, None)
+        overlay[key] = entry
+        projection["selected_responses"] = overlay
+        return _write_cache_value(projection)
 
 
 def _proc_start_ticks(pid):
@@ -3881,7 +3937,7 @@ def _opencode_submit(envelope, portable):
     return "received", {"transport": "received", "http_status": 204}
 
 
-def _codex_submit(envelope, portable, action_id):
+def _codex_submit(envelope, portable, action_id, *, answer_attachment=None):
     base, error = _selected_base(envelope)
     if base is None:
         return "unknown", {"reason": error}
@@ -3901,6 +3957,8 @@ def _codex_submit(envelope, portable, action_id):
             or gateway.get("path") != native_ref.get("control_path")
             or gateway.get("epoch") != native_ref.get("epoch")):
         return "unknown", {"reason": "codex-gateway-incarnation-changed"}
+    if not _answer_attachment_current(answer_attachment, envelope):
+        return "open", {"status": "not-sent", "reason": "current-session-unverified"}
     result = _codex_control_request(gateway["path"], {
         "schema_version": 1, "op": "interaction-reply",
         "ref": native_ref["request"], "response": portable, "action_id": action_id})
@@ -3916,7 +3974,7 @@ def _codex_submit(envelope, portable, action_id):
     return state, response_result
 
 
-def submit_selected_response(ref, response, *, action_id=None):
+def submit_selected_response(ref, response, *, action_id=None, answer_attachment=None):
     """Submit one explicit response to the exact live request; ambiguous delivery never retries."""
     base, reason = _selected_base(ref)
     if base is None:
@@ -3934,6 +3992,8 @@ def submit_selected_response(ref, response, *, action_id=None):
             or current_identity != identity
             or current.get("native_ref") != ref.get("native_ref")):
         return current
+    if not _answer_attachment_current(answer_attachment, current):
+        return _selected_invalid_response(current, "current-session-unverified")
     native_ref = current.get("native_ref")
     workflow_owner_request = (
         isinstance(native_ref, dict)
@@ -3983,8 +4043,10 @@ def submit_selected_response(ref, response, *, action_id=None):
     if response_error:
         return _selected_invalid_response(current, response_error)
     if message_request:
-        return _submit_message(current, portable, action_id)
-    claimed, entry = _claim_selected_action(current, action_id, portable)
+        options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+        return _submit_message(current, portable, action_id, **options)
+    options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+    claimed, entry = _claim_selected_action(current, action_id, portable, **options)
     if not claimed:
         return read_selected_request(current)
     if (isinstance(native_ref, dict)
@@ -3996,9 +4058,13 @@ def submit_selected_response(ref, response, *, action_id=None):
     elif current["harness"] == "opencode":
         state, result = _opencode_submit(current, portable)
     elif current["harness"] == "codex":
-        state, result = _codex_submit(current, portable, action_id)
+        state, result = _codex_submit(current, portable, action_id, **options)
     else:
         state, result = "unknown", {"reason": "claude-native-response-surface-unavailable"}
+    if answer_attachment is not None and state == "open" and result.get("status") == "not-sent":
+        if _release_unsubmitted_selected_action(current, action_id, result):
+            return _selected_invalid_response(current, result["reason"])
+        return _selected_fallback(current, "selected-response-storage-unavailable")
     entry["state"] = state
     entry["result"] = result
     if state == "applied":

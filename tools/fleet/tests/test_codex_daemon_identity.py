@@ -115,6 +115,20 @@ class CodexDaemonIdentityTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def test_answer_root_rechecks_an_already_loaded_threads_changed_origin(self):
+        import session_shell
+        self.threads[ROOT] = (41302, 'user')
+        self.threads[SECOND] = (41301, 'user')
+        empty = (frozenset(), frozenset())
+        with mock.patch.object(codex, '_tcp_listener_snapshot', side_effect=lambda port, *args: self.listener if port == 41301 else empty), \
+             mock.patch.object(session_shell, 'process', return_value={'pid':PID,'start':'778899'}), \
+             mock.patch.object(codex, 'session_id_of_process', side_effect=lambda pid, **kw: codex._daemon_session_for_process(pid, {}, **kw)):
+            self.assertTrue(session_shell._codex_current_root(PID, '778899', SECOND))
+            # /resume reattaches an already loaded root to the same live TUI.
+            # Loaded membership, PID/birth and listening port do not change.
+            self.threads[ROOT] = (41301, 'user')
+            self.assertFalse(session_shell._codex_current_root(PID, '778899', SECOND))
+
     def test_loaded_root_thread_uses_origin_listener_and_excludes_subagents(self):
         self.assertEqual(codex._daemon_session_for_process(PID, {"CODEX_HOME": "/fake"}), ROOT)
         methods = [method for method, _params in self.client.calls]

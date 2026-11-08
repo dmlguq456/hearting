@@ -169,14 +169,14 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!got.includes(Buffer.from('\x1b[A\x1b[200~PASTE\x1dTAIL\x1b[201~')))throw Error('Fleet CSI/paste leaked or lost');
    if(got.includes(Buffer.from('AFTER_FLEET')))throw Error('native suffix remained in Fleet');
  }
- if(cfg.scenario==='action-display'){
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1dw').toString('base64')});
+ if(cfg.scenario==='action-display'||cfg.scenario==='answer-display'){
+   await rpc(cfg.inlet,{batch:Buffer.from(cfg.scenario==='answer-display'?'\x1d1\r':'\x1dw').toString('base64')});
    await existing(cfg.actionReady);
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='⏳ route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/DURING_ACTION/);
    const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);
-   await waitFor(/ACTION_DONE/);
+   await waitFor(cfg.scenario==='answer-display'?/ANSWER_DONE/:/ACTION_DONE/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_ACTION\r').toString('base64')});await waitFor(/DONE_AFTER_ACTION/);
  }
  const displayLag=[];
@@ -254,9 +254,17 @@ class SessionShellPTYTest(unittest.TestCase):
             backend=str(directory/'python')
             Path(backend).write_text('#!'+sys.executable+'\nimport os,runpy,sys\nf=os.open('+repr(str(barrier))+',os.O_RDONLY)\nos.read(f,1);os.close(f)\nsys.argv=sys.argv[1:];runpy.run_path(sys.argv[0],run_name="__main__")\n')
             Path(backend).chmod(0o700)
-        if scenario=='action-display':
+        if scenario in {'action-display','answer-display'}:
             backend=directory/'action-python';gate=directory/'action-gate';ready=directory/'action-ready';os.mkfifo(gate,0o600)
             backend.write_text('#!'+sys.executable+'\nimport os,sys\nfrom pathlib import Path\nsys.path.insert(0,'+repr(str(ROOT/'utilities'))+')\nimport session_shell as m\ndef blocked(binding,request):\n Path('+repr(str(ready))+').touch()\n fd=os.open('+repr(str(gate))+',os.O_RDWR);os.read(fd,1);os.close(fd)\n return {"ok":True,"lines":["ACTION_DONE"]}\nm._block_action=blocked\nraise SystemExit(m._backend())\n')
+            if scenario=='answer-display':
+                setup=('original=m.panel_projection\ndef projection(*args,**kwargs):\n'
+                       ' value=original(*args,**kwargs)\n'
+                       ' value["questions"]=[{"id":"owned-question","revision":"0"*64,"answerable":True,"questions":[{"id":"q","question":"Owned question","choices":["Yes","No"]}]}]\n'
+                       ' return value\nm.panel_projection=projection\nm._block_answer=blocked\n')
+                backend.write_text(backend.read_text().replace('m._block_action=blocked\n',setup)
+                                   .replace('{"ok":True,"lines":["ACTION_DONE"]}',
+                                            '{"ok":False,"reason":"ANSWER_DONE"}'))
             backend.chmod(0o700)
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
@@ -266,7 +274,7 @@ class SessionShellPTYTest(unittest.TestCase):
                 'project':str(self.project),'backend':str(backend),'barrier':str(barrier) if barrier else None,
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
-        if scenario=='action-display':config.update(actionGate=str(gate),actionReady=str(ready))
+        if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
             fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
@@ -311,6 +319,9 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_a_blocked_read_action_does_not_delay_event_driven_values(self):
         result=self.run_loop('action-display')
         self.assertFalse(result['status']['focused'])
+
+    def test_a_blocked_answer_keeps_projection_and_native_keyboard_responsive(self):
+        self.assertFalse(self.run_loop('answer-display')['status']['focused'])
 
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
