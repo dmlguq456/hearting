@@ -560,6 +560,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
         "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+    if columns < 64:
+        for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
+            labels[key] = ui_text("fleet.session_block.compact_" + key)
     if pane_binding:
         try:
             from fleet import herdr_projection
@@ -575,7 +578,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     native_footer = None
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
-                                                       status_lines(values, columns - 4), lines, padding="  ")
+                                                       status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ")
         if config_path:
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),

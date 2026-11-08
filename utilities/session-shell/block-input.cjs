@@ -69,7 +69,7 @@ module.exports=function({changed,answer,action}) {
     if(focused)head=[span('› ','g_blocked'),...head];
     const body=view?.body||[[span(row.question.question||'?','loc_repo')]];
     const options=status!=='open'?(row.item.reason?[[span(row.item.reason)]]:[]):view?.options||(choices(row).length?[[span(choices(row).map((c,i)=>`${i+1} ${typeof c==='object'?c.label||c.value:c}`).join(' · '),'loc_repo')]]:[[span(text('text','type answer'))]]);
-    const content=[...body,...options];
+    const content=[...body,...options,...(view?.source||[])];
     const tail=[];
     const picked=local.answers[id];
     if(focused&&local.typing[id]){
