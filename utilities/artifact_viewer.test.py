@@ -4,6 +4,7 @@ import contextlib
 import io
 import http.client
 import os
+import re
 import socket
 import signal
 import subprocess
@@ -231,8 +232,48 @@ class ViewerTests(unittest.TestCase):
         finally:
             busy.close()
 
+    def test_cli_busy_port_names_the_selected_port_and_a_free_port_option(self):
+        resolved = mock.Mock(returncode=0, stdout=str(self.base), stderr='')
+        error = io.StringIO()
+        with mock.patch.object(V.subprocess, 'run', return_value=resolved), contextlib.redirect_stderr(error):
+            self.assertEqual(V.main(['--port', str(self.port)]), 2)
+        self.assertIn(str(self.port), error.getvalue())
+        self.assertIn('--port 0', error.getvalue())
+        self.assertTrue(V._probe(self.root, self.port))
+
 
 class ProbeTests(unittest.TestCase):
+    def test_default_port_is_preserved_without_opening_a_listener(self):
+        resolved = mock.Mock(returncode=0, stdout='/tmp/private-viewer-root', stderr='')
+        server = mock.Mock(server_address=('127.0.0.1', V.PORT))
+        server.t.side_effect = lambda key, **kw: kw['url']
+        server.serve_forever.side_effect = KeyboardInterrupt
+        selected = []
+        def viewer(root, port=V.PORT):
+            selected.append((root, port))
+            return server
+        output = io.StringIO()
+        with mock.patch.object(V.subprocess, 'run', return_value=resolved), \
+                mock.patch.object(V, 'ViewerServer', side_effect=viewer), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(V.main([]), 0)
+        self.assertEqual(selected, [('/tmp/private-viewer-root', 8765)])
+        self.assertIn('http://127.0.0.1:8765/', output.getvalue())
+        server.server_close.assert_called_once()
+
+    def test_invalid_ports_and_help_do_not_resolve_a_root_or_open_a_listener(self):
+        with mock.patch.object(V.subprocess, 'run') as resolve, mock.patch.object(V, 'ViewerServer') as listen:
+            for args in (['--port', '-1'], ['--port', '65536'], ['--port', 'invalid'],
+                         ['--port', '1.5'], ['--port'], ['--host', '0.0.0.0']):
+                with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(V.main(args), 2)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(V.main(['--help']), 0)
+            self.assertIn('--port', output.getvalue())
+            resolve.assert_not_called()
+            listen.assert_not_called()
+
     def test_root_refusal_and_arguments(self):
         for result, code in ((mock.Mock(returncode=7, stderr='refused', stdout=''), 7),
                              (mock.Mock(returncode=0, stderr='', stdout='  '), 2)):
@@ -259,28 +300,27 @@ class ProbeTests(unittest.TestCase):
 
 class ViewerCLITests(unittest.TestCase):
     def test_foreground_same_root_and_other_root(self):
-        # Port 8765 is the public contract. Do not disturb an existing listener.
-        probe = socket.socket()
-        try:
-            probe.bind(('127.0.0.1', V.PORT))
-        except OSError:
-            self.skipTest('port 8765 already occupied')
-        finally:
-            probe.close()
+        # The CLI chooses a private ephemeral port; never probe the host's 8765.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp); root = base/'root'; root.mkdir(); other = base/'other'; other.mkdir()
             env = dict(os.environ, AGENT_ARTIFACT_ROOT=str(root), HOME=tmp, PYTHONDONTWRITEBYTECODE='1')
             script = str(Path(__file__).resolve().parent/'artifact_viewer.py')
-            process = subprocess.Popen([sys.executable, '-B', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            process = subprocess.Popen([sys.executable, '-B', script, '--port', '0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
             try:
                 ready, _, _ = select.select([process.stdout], [], [], 10)
                 self.assertTrue(ready, 'viewer did not report readiness')
-                self.assertIn('127.0.0.1:8765', process.stdout.readline())
-                duplicate = subprocess.run([sys.executable, '-B', script], capture_output=True, text=True, env=env, timeout=10)
+                match = re.search(r'http://127\.0\.0\.1:(\d+)/', process.stdout.readline())
+                self.assertIsNotNone(match, 'viewer must print its actual loopback URL')
+                port = match.group(1)
+                self.assertGreater(int(port), 0)
+                duplicate = subprocess.run([sys.executable, '-B', script, '--port', port], capture_output=True, text=True, env=env, timeout=10)
                 self.assertEqual(duplicate.returncode, 0, duplicate.stderr)
+                self.assertIn('127.0.0.1:' + port, duplicate.stdout)
                 other_env = dict(env, AGENT_ARTIFACT_ROOT=str(other))
-                collision = subprocess.run([sys.executable, '-B', script], capture_output=True, text=True, env=other_env, timeout=10)
-                self.assertEqual(collision.returncode, 2); self.assertIn('8765', collision.stderr)
+                collision = subprocess.run([sys.executable, '-B', script, '--port', port], capture_output=True, text=True, env=other_env, timeout=10)
+                self.assertEqual(collision.returncode, 2); self.assertIn(port, collision.stderr)
+                self.assertIn('--port 0', collision.stderr)
+                self.assertIsNone(process.poll(), 'a collision must leave the original viewer running')
                 invalid = subprocess.run([sys.executable, '-B', script, '--host'], capture_output=True, text=True, env=env, timeout=10)
                 self.assertEqual(invalid.returncode, 2)
             finally:
