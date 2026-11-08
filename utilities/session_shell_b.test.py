@@ -106,5 +106,21 @@ b.update([{...a,revision:'changed'}]);assert.ok(JSON.stringify(b.detail({budget:
             rows=session_shell.session_questions('codex','exact',view={'items':[]},retained=[{'id':owned['id'],'revision':'r'}])
             self.assertEqual(rows[0]['request_state'],'applied');self.assertFalse(rows[0]['answerable'])
 
+    def test_optional_panel_metadata_reuses_canonical_board_and_restricts_a_busy_slot(self):
+        import session_tidy,human_wait_state
+        from fleet import herdr_projection
+        item={'id':'owned','revision':'r','answerable':True,'questions':[{'id':'q','question':'Owned?'}]}
+        with mock.patch.object(session_shell,'registry_root'),mock.patch.object(session_shell,'session_questions',return_value=[item]), \
+             mock.patch.object(human_wait_state,'cached_statusline',return_value=([0,0],'')),mock.patch.object(human_wait_state,'cached_view',return_value={}), \
+             mock.patch.object(session_tidy,'resolve_seat',return_value='owned-seat'),mock.patch.object(session_tidy,'prompt_display',return_value={}), \
+             mock.patch.object(session_tidy,'session_seat',return_value='owned-seat'),mock.patch.object(session_tidy,'_prompt_seq_path',return_value=Path('/private-fixture/prompt')), \
+             mock.patch('fleet.session_work.observe',return_value=([],[])),mock.patch.object(herdr_projection,'project_panel',create=True) as publish:
+            result=session_shell.panel_projection('claude','exact',pane_binding={'sid':'exact'},answer_busy=True)
+            self.assertTrue(result['questions'][0]['answerable'])
+            self.assertFalse(publish.call_args.args[2][0]['answerable'])
+            self.assertEqual(publish.call_args.args[0],{'sid':'exact'})
+            publish.side_effect=OSError('optional unavailable')
+            self.assertIn('lines',session_shell.panel_projection('claude','exact',pane_binding={'sid':'exact'}))
+
 
 if __name__=='__main__':unittest.main()

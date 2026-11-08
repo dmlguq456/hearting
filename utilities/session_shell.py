@@ -481,7 +481,7 @@ def session_questions(harness, sid, *, view=None, retained=()):
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
-                     native_badges=None, retained_questions=(), pane_binding=None) -> dict:
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -543,7 +543,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             from fleet import herdr_projection
             projector = getattr(herdr_projection, "project_panel", None)
             if projector is not None:
-                projector(pane_binding, values, board)
+                # Mirror the local single action slot for optional metadata;
+                # this restrictive display hint never grants input authority.
+                available = [dict(item, answerable=False, reason="action-pending")
+                             if answer_busy and item.get("answerable") else item for item in board]
+                projector(pane_binding, values, available)
         except Exception:
             pass  # Optional metadata cannot interrupt this terminal's display.
     native_footer = None
@@ -711,7 +715,8 @@ def _backend_operation(request: dict) -> dict:
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
-            retained_questions=request.get("retained_questions", ()), pane_binding=binding)}
+            retained_questions=request.get("retained_questions", ()), pane_binding=binding,
+            answer_busy=request.get("answer_busy") is True)}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":

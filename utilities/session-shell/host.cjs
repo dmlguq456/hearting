@@ -113,12 +113,12 @@ function readAction(extra,operation='action') {
     let raw='',settled=false;
     const worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,
       [path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
-    actionWorker=worker;
+    actionWorker=worker;queueProjection();
     const finish=value=>{if(!settled){settled=true;clearTimeout(timer);resolve(value);}};
     const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
-    worker.on('close',()=>{if(actionWorker===worker)actionWorker=undefined;finish({ok:false,reason:'action-unavailable'});});
+    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();}finish({ok:false,reason:'action-unavailable'});});
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
@@ -332,7 +332,7 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references()});
+    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
@@ -365,7 +365,7 @@ async function releaseHeld(ref,cancel=false) {
   // No new direct writes may overtake keys the owner is still draining.
   process.stdin.pause();
   await inputOwner.release(ref,cancel);
-  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';}
+  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 function screenSnapshot() {
@@ -497,7 +497,7 @@ async function request(req) {
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;
+  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueProjection();
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter
