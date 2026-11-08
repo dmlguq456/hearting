@@ -23,11 +23,11 @@ class SessionShellCopyTest(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ,{'FLEET_NOW_LANG':language}))
             stack.enter_context(mock.patch.object(human_wait_state,'cached_statusline',return_value=((0,0),'')))
-            items=[{'id':'copy-fixture'}] if question else []
+            items=[{'id':'copy-fixture','owner':{'harness':'claude','session_id':'test-native-session'}}] if question else []
             stack.enter_context(mock.patch.object(human_wait_state,'cached_view',return_value={
                 'items':items,'by_session':{('claude','test-native-session'):['copy-fixture']}}))
             stack.enter_context(mock.patch.object(questions,'describe',return_value={
-                'id':'copy-fixture','questions':[{'question':'Choose?','choices':['Yes','No']}]}))
+                'id':'copy-fixture','revision':'0'*64,'answerable':True,'questions':[{'question':'Choose?','choices':['Yes','No']}]}))
             stack.enter_context(mock.patch.object(session_tidy,'prompt_display',return_value=display))
             stack.enter_context(mock.patch.object(session_tags,'assigned_tag',return_value='52'))
             stack.enter_context(mock.patch('time.time',return_value=self.NOW))

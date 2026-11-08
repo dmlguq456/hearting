@@ -102,4 +102,4 @@ def block_lines(values, *, columns, rows, questions=(), route="", received=(),
     if len(lines) > limit:
         omitted = len(lines) - limit + 1
         lines = lines[:limit-1] + [[(f"+{omitted} · " + ui_text("fleet.session_block.more"), "dim")]]
-    return [clip_segments([("  ", "dim"), *line], columns) for line in lines]
+    return [clip_segments(line, columns) for line in lines]

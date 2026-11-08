@@ -398,7 +398,7 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
-def _codex_footer_plan(values, sid, pid, status_rows, painted_rows):
+def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding=""):
     """Conceal only known native fields already represented in the common area."""
     from fleet.collectors import procscan
     from fleet.render_cells import _half_up
@@ -444,7 +444,7 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows):
                                 f"{name} {100-used}% remaining", f"{name} {used}% used"))
         fields[item] = options or None
     return {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
-            "lines": ["".join(text for text, _key in row) for row in status_rows]}, path
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}, path
 
 
 def session_questions(harness, sid, *, view=None, retained=()):
@@ -524,11 +524,12 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     segments = styled(line_segments(values, columns))
     work, work_paths = observe_work(values.get("cwd"))
     watched.extend(work_paths)
+    human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
-                        received=peers, human=last_input(display, time.time()),
+                        received=peers, human=human_line,
                         work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
     prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
-                                 human=last_input(display, time.time()),
+                                 human=human_line,
                                  work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
     question_presentations(board, columns, native_wait=values.get("native_wait"))
     for item in board:
@@ -553,7 +554,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     native_footer = None
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
-                                                       status_lines(values, columns), lines)
+                                                       status_lines(values, columns - 4), lines, padding="  ")
         if config_path:
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
