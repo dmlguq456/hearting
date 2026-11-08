@@ -59,8 +59,12 @@ The default bottom uses the question-first B layout. The current question,
 choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
-Enter submits only explicit, complete answers. Keep a single active action;
-pending transport and proved consumption are distinct, and unavailable, expired
+Enter submits only explicit, complete answers. Keep a single active action.
+Collect every current form draft at that one submit; moving with Tab does not
+require Enter in each field and an edited draft supersedes its earlier value.
+Secret answers remain masked while selected, submitted, unfocused or consumed;
+only the unchanged canonical response carries their actual value.
+Pending transport and proved consumption are distinct, and unavailable, expired
 or cancelled questions offer no active choices. Long questions remain readable
 with focused scrolling and an explicit overflow count. Use at most ten rows,
 preserve at least six native rows where possible, and retain the shared status

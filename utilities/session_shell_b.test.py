@@ -75,6 +75,21 @@ b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.f
 assert.equal(sent.length,0,'cleared latest text must not fall back to an older saved answer');
 })();""")
 
+    def test_secret_answers_stay_masked_after_selection_submission_and_consumption(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const secret='FAKE_SECRET_B52';
+for(const picked of [false,true]){
+ let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
+ const item={id:'secret',revision:'r',answerable:true,questions:[{id:'q',question:'Synthetic secret?',secret:true,...(picked?{choices:[{label:'Stored credential',value:secret}]}:{})}]};
+ b.update([item]);b.enter();b.input(Buffer.from(picked?'1':secret));assert.ok(!JSON.stringify(b.detail()).includes(secret));
+ b.input(Buffer.from('\r'));await new Promise(setImmediate);b.leave();assert.ok(!JSON.stringify(b.detail()).includes(secret));
+ assert.deepEqual(sent[0].answers,{q:[secret]});
+ for(const state of ['received','applied','expired','cancelled']){b.update([{...item,answerable:false,request_state:state}]);assert.ok(!JSON.stringify(b.detail()).includes(secret));}
+}
+})();""")
+
     def test_single_active_action_keeps_another_questions_choice_without_claiming_consumption(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

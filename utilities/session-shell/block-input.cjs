@@ -79,7 +79,7 @@ module.exports=function({changed,answer,action}) {
       for(let i=chars.length-1;i>=0;i--){const w=chars[i].charCodeAt(0)<128?1:2;if(width+w>Math.max(1,columns-9))break;shown=chars[i]+shown;width+=w;}
       tail.push([span('› '+(shown!==safe?'…':'')+shown,'loc_repo')]);
     }else if(picked){
-      const selected=picked.map(v=>{const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
+      const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push([span('› '+selected.join(', '),'loc_repo')]);
     }
     if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
