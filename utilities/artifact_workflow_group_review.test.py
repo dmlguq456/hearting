@@ -1126,6 +1126,7 @@ class ModelCallTest(unittest.TestCase):
                                              "AGENT_ARTIFACT_WORKFLOW_GROUP_ID": "wg-x"}), \
                 mock.patch.object(rt, "selected_providers", return_value=("claude", "opencode")) as select, \
                 mock.patch.object(rt, "provider_settings", return_value={"model": "model-x", "budget": "low"}) as model, \
+                mock.patch.object(rt.opencode_runtime, "is_v2", return_value=False), \
                 mock.patch.object(rt, "_executable_available", return_value=True), \
                 mock.patch.object(rt, "run_provider_cascade", cascade), \
                 mock.patch.object(R, "_load_governor", return_value=governor):
@@ -1151,6 +1152,31 @@ class ModelCallTest(unittest.TestCase):
         governor.acquire.assert_called_once()
         self.assertEqual(governor.acquire.call_args.args[1], "title")
         self.assertEqual(governor.acquire.call_args.kwargs["budget"], 20)
+        governor.release.assert_called_once()
+
+    def test_invoke_model_v2_uses_its_prefixed_agent_and_neutral_workdir(self):
+        rt = R._refresh_title()
+        governor = mock.Mock(); governor.acquire.return_value = 'token'; governor.title_start_budget.return_value = 20
+        cascade = mock.Mock(return_value=('reply', 0)); prompt = 'Synthetic input only'
+        with tempfile.TemporaryDirectory() as state, \
+                mock.patch.dict(os.environ, {'XDG_STATE_HOME': state}), \
+                mock.patch.object(rt, 'selected_providers', return_value=('opencode',)), \
+                mock.patch.object(rt, 'provider_settings', return_value={'model': 'model-x', 'budget': 'low'}), \
+                mock.patch.object(rt.opencode_runtime, 'is_v2', return_value=True), \
+                mock.patch.object(rt.opencode_runtime, 'select_automatic_model', return_value=('model-x', 'low', {'state': 'available'})), \
+                mock.patch.object(rt.opencode_runtime, 'automatic_eligible', return_value=True), \
+                mock.patch.object(rt, '_executable_available', return_value=True), \
+                mock.patch.object(rt, 'run_provider_cascade', cascade), \
+                mock.patch.object(R, '_load_governor', return_value=governor):
+            self.assertEqual(R._invoke_model(prompt), ('reply', 'opencode'))
+            workdir = R.neutral_workdir()
+            self.assertTrue((workdir / '.opencode/agents/hearting-workflow-group-reviewer.md').is_file())
+            config = json.loads((workdir / '.opencode/opencode.json').read_text())
+            self.assertTrue(all(row['effect'] == 'deny' for row in config['permissions']))
+        argv, stdin, _ = cascade.call_args.args[0][0]
+        self.assertEqual(argv[argv.index('--agent') + 1], 'hearting-workflow-group-reviewer')
+        self.assertNotIn(prompt, argv); self.assertEqual(stdin, prompt)
+        self.assertEqual(cascade.call_args.kwargs['cwd'], str(workdir))
         governor.release.assert_called_once()
 
     def test_invoke_model_passes_a_caller_agent_out_tag_and_label(self):

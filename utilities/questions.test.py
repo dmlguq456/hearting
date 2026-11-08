@@ -176,7 +176,7 @@ class MessageQuestionTest(unittest.TestCase):
         question = questions.questions_of(envelope)[0]
         self.assertEqual((question["question"], question["recommended"], question["secret"]), (text, 1, True))
         self.assertNotIn(text, out)
-        self.assertEqual(state._path(seat.key).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
 
     def test_one_line_cli_resolves_each_harness_without_a_supplied_sid_or_tag(self):
@@ -231,7 +231,7 @@ class MessageQuestionTest(unittest.TestCase):
                            ("q", {"choices": ["A"], "recommended": 1})]:
             with self.subTest(opts=opts, size=len(text)), self.assertRaises(ValueError):
                 state.register_message("claude", "native-question-session", seat, text, sequence=0, **opts)
-        self.assertFalse(state._path(seat.key).exists())
+        self.assertIsNone(state._signal_path({"seat_key": seat.key}))
         for env in ({"AGENT_SESSION_ROLE": "owner"}, {"AGENT_SESSION_ROLE": "reviewer"},
                     {"AGENT_DISPATCH_CHILD": "1"}, {"AGENT_DISPATCH_DEPTH": "2"}):
             with mock.patch.dict(os.environ, env):
@@ -295,7 +295,7 @@ class MessageQuestionTest(unittest.TestCase):
         binding = dict(receipt["answer_binding"], body_sha256="0" * 64)
         with self.assertRaises(ValueError):
             state.message_answer_body(binding)
-        self.assertEqual(state._read(state._path(s["seat_key"]))["lifecycle"], "open")
+        self.assertEqual(state._read(state._signal_path(s))["lifecycle"], "open")
 
     def test_draft_utf8_boundaries_and_600_character_answer_boundary(self):
         s, e = self.f.ask()
@@ -351,9 +351,9 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertEqual(self.f.record(first_signal)["state"], "acked")
         # Overlay pruning never removes the carrier's immutable receipt/ACK.
         state.flush_message_decisions()
-        before = state._read(state._path(s["seat_key"]))
+        before = state._read(state._signal_path(s))
         self.f.peer.receive_peer_message(wire, recipient)
-        self.assertEqual(state._read(state._path(s["seat_key"])), before)
+        self.assertEqual(state._read(state._signal_path(s)), before)
 
     def test_full_unresolved_overlay_keeps_source_and_draft(self):
         first = None
@@ -361,10 +361,10 @@ class MessageQuestionTest(unittest.TestCase):
             s, e = self.f.ask(text="unresolved " + str(index))
             state.write_selected_draft(e, "draft " + str(index))
             first = first or e
-        before = state._path(s["seat_key"]).read_bytes()
+        before = state._signal_path(s).read_bytes()
         with self.assertRaisesRegex(ValueError, "capacity-unresolved"):
             self.f.ask(text="257")
-        self.assertEqual(state._path(s["seat_key"]).read_bytes(), before)
+        self.assertEqual(state._signal_path(s).read_bytes(), before)
         self.assertEqual(state._selected_entry(first)["draft"], "draft 0")
 
     def test_mixed_terminal_pruning_preserves_unresolved_draft_and_prune_submit_race(self):
@@ -429,7 +429,7 @@ print(json.dumps({"state":result["state"],"action_id":result.get("action_id"),"d
         with mock.patch.object(state, "_write_cache_value", return_value=False):
             with self.assertRaises(OSError):
                 self.f.ask(text="source written before projection")
-        source = state._read(state._path(signal["seat_key"]))
+        source = state._read(state._signal_path(signal))
         retried, _ = self.f.ask(text="source written before projection")
         self.assertEqual((source["id"], source["since"]), (retried["id"], retried["since"]))
         self.assertEqual(state._selected_entry(envelope)["draft"], "private draft")

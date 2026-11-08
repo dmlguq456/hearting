@@ -310,6 +310,18 @@
    "en": "Hearting rewrites this file. Editing it is overwritten; deleting it comes back at the next publish.",
    "ko": "이 파일은 하팅이 다시 씁니다. 직접 고치면 덮어씁니다. 지우면 다음 발행 때 다시 생깁니다."
   },
+  "entrance.status_ambiguous": {
+   "en": "conflicting status pages",
+   "ko": "현황 문서 상충"
+  },
+  "entrance.status_recorded": {
+   "en": "recorded",
+   "ko": "기록됨"
+  },
+  "entrance.status_unknown": {
+   "en": "unconfirmed",
+   "ko": "미확인"
+  },
   "entrance.title": {
    "en": "Artifacts",
    "ko": "산출물"
@@ -1559,8 +1571,8 @@
    "ko": "{record} 내리기 실패: {error}"
   },
   "viewer.busy": {
-   "en": "Port 8765 is already in use by another service or root.",
-   "ko": "8765 포트를 다른 서비스나 산출물 루트가 사용 중입니다."
+   "en": "Port {port} is already in use by another service or root. Try hearting view --port 0 for a free port.",
+   "ko": "{port} 포트를 다른 서비스나 산출물 루트가 사용 중입니다. hearting view --port 0으로 빈 포트를 사용하세요."
   },
   "viewer.empty": {
    "en": "No visible files.",

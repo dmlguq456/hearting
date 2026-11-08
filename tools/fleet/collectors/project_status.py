@@ -14,11 +14,18 @@ filenames are cached; legacy cycle scans cover campaigns changed in the last
 ``RECENT_DAYS`` days. Nothing here writes, gates, or asks anything.
 """
 import os
+from pathlib import Path
 import re
+import stat
+import sys
 import time
-import unicodedata
 
-STATUS_NAMES = ("현황.md", "status.md")    # preference order, NFC and case-folded
+_UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
+import artifact_campaign_documents as campaign_documents
+
+STATUS_NAMES = campaign_documents.STATUS_NAMES
 RECENT_DAYS = 14
 INTERVAL = 60.0           # seconds between scans of one artifact root
 SCAN_BUDGET = 3.0         # seconds one scan may spend before it stops (the rest waits a pass)
@@ -126,7 +133,7 @@ def artifact_root(cwd):
             folder = parent
     if root and any(part in root + "/" for part in _IMMUTABLE):
         return None
-    return root
+    return os.path.realpath(root) if root else None
 
 
 def _mtime(path):
@@ -145,26 +152,21 @@ def _subdirs(path):
         return []
 
 
-def _status_file(folder):
-    """The status document directly in ``folder``: ``현황.md`` before ``STATUS.md``, any case or
-    Unicode form. One listing per change of the folder (a new or renamed file changes its mtime)."""
+def _status_selection(folder, *, canonical=False):
+    """Cache names, then apply the shared selection to their current bytes."""
     stamp = _mtime(folder)
     if stamp is None:
-        return None
+        return {'status': 'absent', 'path': None}
     known = _LISTED.get(folder)
     if known is None or known[0] != stamp:
-        names = {}
-        try:
-            with os.scandir(folder) as entries:
-                for entry in entries:
-                    key = unicodedata.normalize("NFC", entry.name).casefold()
-                    if key in STATUS_NAMES and entry.is_file():
-                        names.setdefault(key, entry.path)
-        except OSError:
-            names = {}
-        known = (stamp, next((names[key] for key in STATUS_NAMES if key in names), None))
+        known = (stamp, campaign_documents.status_candidates(folder))
         _LISTED[folder] = known
-    return known[1]
+    return campaign_documents.select_status(folder, canonical=canonical, candidates=known[1])
+
+
+def _status_file(folder):
+    path = _status_selection(folder)['path']
+    return str(path) if path is not None else None
 
 
 def find_documents(root, now=None, budget=SCAN_BUDGET):
@@ -188,9 +190,10 @@ def find_documents(root, now=None, budget=SCAN_BUDGET):
     for mtime, campaign in sorted(campaigns, reverse=True):
         if time.monotonic() - started > budget:
             break
-        primary = _status_file(campaign)
-        if primary:
-            found.append(primary)
+        primary = _status_selection(campaign, canonical=True)
+        if primary['status'] != 'absent':
+            if primary['path'] is not None:
+                found.append(str(primary['path']))
             continue
         if mtime < since:
             continue
@@ -297,7 +300,9 @@ def parse(text):
 def read_document(path):
     """The parsed document with its path and mtime; None when it cannot be read."""
     try:
-        info = os.stat(path)
+        info = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            return None
     except OSError:
         return None
     cached = _DOCS.get(path)
@@ -305,9 +310,9 @@ def read_document(path):
         parsed = cached[2]
     else:
         try:
-            with open(path, "rb") as handle:
-                text = handle.read(READ_LIMIT).decode("utf-8", "replace")
-        except OSError:
+            raw, info, _ = campaign_documents.read_document(Path(path).parent, Path(path).name)
+            text = raw.decode('utf-8', 'replace')
+        except (OSError, RuntimeError, ValueError):
             return None
         parsed = parse(text)
         _DOCS[path] = (info.st_mtime, info.st_size, parsed)

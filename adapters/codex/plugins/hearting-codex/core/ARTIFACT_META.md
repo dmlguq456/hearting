@@ -153,6 +153,18 @@ shows.
   `versions/`, or deeper inside `artifacts/`, are not read either. A campaign keeps one
   and edits it in place (a finalized cycle still takes writes, D-123). Fleet keeps the
   most recently modified legacy document when no campaign page is available.
+- **One selection rule.** Fleet, the close-time stamp updater and the artifact
+  entrance use the common campaign-document reader. Conflicting campaign-root
+  `STATUS.md` / `현황.md` candidates remain ambiguous; neither mtime nor a legacy
+  copy resolves that conflict. Unreadable, oversized or symlinked canonical
+  candidates remain unknown and are not edited. Legacy-only pages retain their
+  read compatibility. Automatic updates change only their existing stamp and
+  runtime closure lines, preserving the person's decisions and prose.
+- **Other campaign documents.** Optional handoffs and topic Markdown documents
+  also live directly under the campaign. The common entrance lists them as
+  campaign documents, with their existing ownership and locator; it creates no
+  cycle or authority ID for them. Missing identity remains unknown. This does
+  not move historical research/cycle documents or require a new page.
 - **Shape.** Markdown in the reader's language. Only the parts below are read; other
   sections are free.
 
@@ -229,7 +241,10 @@ recreates them. They are classified `C-RT` in `core/CORE.md` §3.
 ### Optional local artifact viewer
 
 `hearting view` serves the existing entrance and artifact files read-only on
-`127.0.0.1:8765` in the foreground; Ctrl-C stops it. It uses only the Python
+`127.0.0.1:8765` by default in the foreground; Ctrl-C stops it. If that port
+is occupied, `hearting view --port 8766` selects another port, or `--port 0`
+asks the OS for a free one. Use the URL printed by the viewer; custom ports
+are not discovered by `hearting open`. It uses only the Python
 standard library and never generates or updates the entrance. Directory browsing
 is available when the entrance is absent. HTTP access excludes `_internal`,
 `.runtime` and `_scratch` at every depth and rejects symbolic links and special

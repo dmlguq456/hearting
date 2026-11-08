@@ -142,6 +142,7 @@ class InstallFollowTest(unittest.TestCase):
             execute.assert_called_once()
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    @mock.patch.object(install_follow.time, "monotonic", new=lambda: 1000.0)
     def test_waiting_note_names_the_release_and_the_last_reason(self):
         self.assertIsNone(self.follower.waiting_note())
         self.activate(self.new)
@@ -166,6 +167,7 @@ class InstallFollowTest(unittest.TestCase):
         self.assertIsNone(self.follower.waiting_note(now=later + 60))
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"})
+    @mock.patch.object(install_follow.time, "monotonic", new=lambda: 1000.0)
     def test_waiting_note_reads_in_english_without_a_korean_declaration(self):
         self.activate(self.new)
         seen = (self.follower.target(), self.follower._pending[1])[1]

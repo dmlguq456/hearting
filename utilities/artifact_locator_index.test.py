@@ -966,6 +966,7 @@ def _writer_census():
 _EXPECTED_WRITER_CENSUS = {
     ("artifact_cross_root_move.py", "move"): "incremental",
     ("artifact_producer.py", "_begin_cycle_record"): "incremental",
+    ("artifact_producer.py", "_create_campaign_locked"): "incremental",  # begin and cross-root _ensure_campaign update the indexes
     ("artifact_producer_interim.py", "_remove_empty_cycle"): "incremental",
     ("artifact_producer_refresh.py", "_commit_sealed"): "incremental",
     ("artifact_producer_cycle_ops.py", "mark_cycle_superseded"): "incremental",

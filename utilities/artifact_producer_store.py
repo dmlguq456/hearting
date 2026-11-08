@@ -1180,7 +1180,12 @@ def activate(
         if current.get("state") == "active":
             if current.get("identity", {}).get("artifact_root_id") != artifact_root_id:
                 raise ProducerError("cutover-identity-conflict")
-            return {"status": "already-active", "cutover": current, "identity": identity_state}
+            result = {"status": "already-active", "cutover": current, "identity": identity_state}
+            from artifact_root_alias import ensure_legacy_alias
+            alias = ensure_legacy_alias(root, identity)
+            if alias is not None:
+                result['root_alias'] = alias
+            return result
         body = {
             "schema_version": 1,
             "contract": CONTRACT,
@@ -1193,7 +1198,12 @@ def activate(
         }
         _ensure_dir(producer_dir(root))
         _write_exclusive(cutover_path(root), _json_bytes(body), 0o600)
-        return {"status": "activated", "cutover": body, "identity": identity_state}
+        result = {"status": "activated", "cutover": body, "identity": identity_state}
+        from artifact_root_alias import ensure_legacy_alias
+        alias = ensure_legacy_alias(root, identity)
+        if alias is not None:
+            result['root_alias'] = alias
+        return result
     finally:
         artifact_admission._release_lock(root, lock_fd)
 

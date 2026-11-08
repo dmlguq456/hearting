@@ -784,6 +784,41 @@ def _campaign_naming(campaign_key: Optional[str]) -> Tuple[str, str, str, bool]:
     return slug, campaign_key, "campaign-key", truncated
 
 
+def _campaign_metadata(root: Path, campaign_key, *, started_on, goal, title=None, completion_criterion=None):
+    """Normal campaign fields, also usable for a read-only creation preview."""
+    slug, default_title, naming, truncated = _campaign_naming(campaign_key)
+    locator, suffix = artifact_locator.allocate_locator(root / 'campaigns', started_on, slug)
+    return {
+        'schema_version': 1, 'contract': CONTRACT,
+        'key': campaign_key or UNASSIGNED_KEY,
+        **({'degraded': True, 'degraded_reason': 'campaign-unassigned'} if campaign_key is None else {}),
+        'slug': slug, 'title': default_title if title is None else title,
+        'slug_source': naming, 'slug_truncated': truncated,
+        'locator': locator, 'locator_suffix': suffix, 'goal': goal,
+        'completion_criterion': (dict(completion_criterion) if completion_criterion is not None else
+                                 {'statement': artifact_campaign.DEFAULT_COMPLETION_CRITERION}),
+        'state': 'active', 'created_on': started_on, 'cycles': [],
+    }
+
+
+def _create_campaign_locked(root: Path, campaign_key, *, started_on, goal, title=None,
+                            completion_criterion=None, alloc=None, head=None, index=None):
+    """Create a campaign without creating a producer/cycle or a runnable route."""
+    if not artifact_admission.holds_lock(root):
+        raise ProducerError('producer-lock-required', str(root))
+    if alloc is None: alloc = artifact_identity.IdAllocator()
+    if head is None and index is None:
+        head = artifact_admission.load_index_head(root)
+        index = artifact_admission.load_index(root) if head is None else None
+    identifier = alloc.allocate('campaign')
+    while (head.has_prefixed_stable_id(identifier) if head is not None else identifier in index.stable_ids):
+        identifier = alloc.allocate('campaign')
+    record = dict(_campaign_metadata(root, campaign_key, started_on=started_on, goal=goal, title=title,
+                                     completion_criterion=completion_criterion), campaign_id=identifier)
+    _write_campaign(root, record, exclusive=True)
+    return record
+
+
 RECOVERED_SOURCE = "retirement-backup-mtime"
 
 
@@ -1115,6 +1150,28 @@ def _campaign_degradation(campaign: Mapping[str, Any]) -> Dict[str, Any]:
 # Key under which `_begin_cycle_record` hands `begin` what the env is read from: the env reads
 # the root's other records, so it is resolved after the admission lock is released.
 _ENV_SOURCE = "_env_source"
+_ROOT_ALIAS_BINDING = "_root_alias_binding"
+
+
+def _root_identity_for_begin(root):
+    """The existing identity read, with optional physical context for an alias."""
+    inode = None
+    if root.name == '.claude_reports':
+        try:
+            before = root.stat(follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                inode = before.st_dev, before.st_ino
+        except OSError:
+            pass  # an alias observation cannot add a begin failure
+    identity = artifact_lifecycle.read_root_identity(root)
+    if inode is not None:
+        try:
+            after = root.stat(follow_symlinks=False)
+            if (after.st_dev, after.st_ino) != inode:
+                inode = None
+        except OSError:
+            inode = None
+    return identity, inode
 
 
 def _begin_cycle_record(
@@ -1194,19 +1251,28 @@ def _begin_cycle_record(
                                     fallback["override"]["reason"] or "override-absent")
             if require_cycle:
                 raise ProducerError("cutover-inactive", "activation required before cycle issuance")
+            alias_binding = None
+            if root.name == '.claude_reports':
+                try:
+                    existing, inode = _root_identity_for_begin(root)
+                    if existing is not None and inode is not None:
+                        alias_binding = existing, inode
+                except (OSError, artifact_lifecycle.LifecycleError):
+                    pass  # legacy work keeps its existing compatibility path
             return {
                 "status": "legacy-compat", "layout": "legacy", "route_id": route["route_id"],
                 "reason": "cutover-inactive", "env": {"AGENT_ARTIFACT_ROOT": str(root)},
-                "legacy_fallback": fallback,
+                "legacy_fallback": fallback, _ROOT_ALIAS_BINDING: alias_binding,
             }
         # A journal neither writes legacy buckets nor activates their cycle
         # cutover. The already admitted route owns this new record kind.
     # active, or just bootstrapped: fall through to the existing cycle path.
-    identity = artifact_lifecycle.read_root_identity(root)
+    identity, alias_inode = _root_identity_for_begin(root)
     if identity is None and journal_requested:
         identity = artifact_admission.ensure_root_identity(root, allocator=alloc, now=now)
     if identity is None:
         raise ProducerError("root-identity-missing")
+    alias_binding = (identity, alias_inode) if alias_inode is not None else None
     # SD-120 A1: only registered owner/worker contexts participate.  The
     # canonical jobs path and attempt identity come from the runtime; callers
     # do not get a route/owner override surface.
@@ -1414,7 +1480,7 @@ def _begin_cycle_record(
                 "status": "resumed", "layout": "cycle", "campaign_id": record["campaign_id"],
                 "cycle_id": record["cycle_id"], "producer_id": record["producer_id"],
                 "cycle_dir": str(cycle_dir(root, record["campaign_id"], record["cycle_id"], record)),
-                _ENV_SOURCE: (root, record, route),
+                _ENV_SOURCE: (root, record, route), _ROOT_ALIAS_BINDING: alias_binding,
                 **({"rebound": True} if rebound else {}),
                 **({"title_updated": True} if title_updated else {}),
                 **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
@@ -1432,37 +1498,10 @@ def _begin_cycle_record(
             route, campaign, title=title, goal=goal, root=root)
         started_on = _rfc3339(now)
         if campaign is None:
-            new_campaign_id = alloc.allocate("campaign")
-            while (head.has_prefixed_stable_id(new_campaign_id) if head is not None
-                   else new_campaign_id in index.stable_ids):
-                new_campaign_id = alloc.allocate("campaign")
-            # The campaign is named from the proposed stream key; the route
-            # slug names only this cycle (CONVENTIONS "Campaign or cycle").
-            campaign_slug, campaign_title, campaign_slug_source, campaign_slug_truncated = (
-                _campaign_naming(campaign_key))
-            locator, locator_suffix = artifact_locator.allocate_locator(
-                root / "campaigns", started_on, campaign_slug)
-            campaign = {
-                "schema_version": 1,
-                "contract": CONTRACT,
-                "campaign_id": new_campaign_id,
-                "key": campaign_key or UNASSIGNED_KEY,
-                **({"degraded": True, "degraded_reason": "campaign-unassigned"} if campaign_key is None else {}),
-                "slug": campaign_slug,
-                "title": campaign_title,
-                "slug_source": campaign_slug_source,
-                "slug_truncated": campaign_slug_truncated,
-                "locator": locator,
-                "locator_suffix": locator_suffix,
-                "goal": (goal or f"{route_capability} cycle output") if campaign_key else "Work stream not proposed",
-                "completion_criterion": {"statement": artifact_campaign.DEFAULT_COMPLETION_CRITERION},
-                "state": "active",
-                "created_on": started_on,
-                "cycles": [],
-            }
+            campaign = _create_campaign_locked(root, campaign_key, started_on=started_on,
+                goal=(goal or f"{route_capability} cycle output") if campaign_key else "Work stream not proposed",
+                alloc=alloc, head=head, index=index)
             campaign_created = True
-            # The readable locator is persisted before children are created.
-            _write_campaign(root, campaign, exclusive=True)
         else:
             # Existing W7 records keep their physical path until Cycle B, but
             # missing display fields are filled from this route for hybrid joins.
@@ -1493,7 +1532,8 @@ def _begin_cycle_record(
                 campaign_dir(root, campaign["campaign_id"], campaign), at=started_on)
             artifact_locator.update_indexes(root, [campaign["campaign_id"]])
             return {"status": "prepared", "layout": "journal", "campaign_id": campaign["campaign_id"],
-                    "env": artifact_journal.environment(root, binding), "journal_target": binding}
+                    "env": artifact_journal.environment(root, binding), "journal_target": binding,
+                    _ROOT_ALIAS_BINDING: alias_binding}
         new_cycle_id = alloc.allocate("cycle")
         while ((head.has_prefixed_stable_id(new_cycle_id) if head is not None
                 else new_cycle_id in index.stable_ids)
@@ -1572,6 +1612,7 @@ def _begin_cycle_record(
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
             "campaign_created": campaign_created, _ENV_SOURCE: (root, record, route),
+            _ROOT_ALIAS_BINDING: alias_binding,
             **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
                if campaign_reopen_event_id else {}),
             **_campaign_degradation(campaign),
@@ -1606,6 +1647,15 @@ def begin(root: Path, *, _reconcile: bool = True, _deliver_history: bool = True,
     if _reconcile and kwargs.get("node_id") is None:
         reconcile_root(root)  # §45 D-126: what was moved or removed by hand is found before a cycle is begun
     result = _begin_cycle_record(root, **kwargs)
+    alias_binding = result.pop(_ROOT_ALIAS_BINDING, None)
+    # This optional write uses the originally admitted path. Resolving again
+    # after begin could follow a replacement link into a different root.
+    physical_root = Path(root)
+    if physical_root.name == '.claude_reports':
+        from artifact_root_alias import ensure_legacy_alias
+        result['root_alias'] = (ensure_legacy_alias(physical_root, alias_binding[0],
+            expected_inode=alias_binding[1]) if alias_binding is not None else
+            {'status': 'unknown', 'reason': 'root-identity-unavailable'})
     source = result.pop(_ENV_SOURCE, None)
     if source is not None:
         # The admission lock only reserves the cycle; what its env names (the source cycle,

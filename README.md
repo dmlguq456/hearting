@@ -338,7 +338,7 @@ The root's `README.md` (open `index.html` in a browser) collects the most recent
 results and campaigns with relative links, and Hearting rewrites it at every
 publish. `hearting reports` prints the same list, and `hearting open <number or
 words>` opens one result.
-Optional: run `hearting view` for a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs.
+Optional: run `hearting view` for a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs on the default port 8765. If that port is occupied, use `hearting view --port 0` for a free port or `--port 8766` to choose one, then open the printed URL.
 
 To follow a request while it runs:
 

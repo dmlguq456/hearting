@@ -163,7 +163,13 @@ Existing projects may still use:
 .claude_reports/
 ```
 
-`.claude_reports/` is a legacy alias. Runtime code must recognize both names during migration. New projects and new documentation should prefer `.agent_reports/`.
+New projects and documentation use `.agent_reports/`. An existing
+`.claude_reports/` stays in place: a normal producer activation or begin may
+create `.agent_reports` as a relative alias to that physical root. Read-only
+resolution creates nothing. Existing root IDs, absolute references and open
+route bindings keep their physical root. Existing entries and distinct roots
+stay in place, including broken or cyclic aliases.
+This root alias does not permit symlinks inside artifact payloads.
 
 The artifact root is a **project-wide canonical write surface**, not a
 per-worktree directory. Resolve it with `utilities/artifact-root.sh <cwd>`:
@@ -590,6 +596,12 @@ history with no live work transfers no parent or successor execution authority.
 Source routes and outcomes retain their original bytes and remain historical.
 A new current manifest names the target root and campaign while preserving
 origin-qualified route rows and every earlier manifest snapshot.
+An absent same-key target campaign is created from the source key/title through
+normal producer allocation; executing the move needs no extra route or output
+cycle. Dry-run only describes that creation and leaves its ID unknown.
+Whole workflow groups follow the moved members through the existing metadata
+validation. Partial selections, conflicts and unverified declarations are
+reported explicitly, with original declaration bytes retained in the move journal.
 Same-filesystem moves use atomic rename and file-list/size inventories;
 cross-device moves use durable copies and byte digests.
 Directory publication holds the ordered root admission locks. On filesystems
