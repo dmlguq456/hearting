@@ -3416,6 +3416,8 @@ attachment, joined to the selected endpoint's current foreground owner. Resolve
 this before treating an absent native process in the outer pane as SID-less;
 the native process may run on the wrapper's inner PTY. Reuse the same attachment
 join at delivery, without inferring identity from titles or screen content.
+An unavailable optional attachment reader leaves the existing native process
+identity checks in charge.
 Retained SID-less messages still need their original process proof; discovery
 does not grant retroactive authority to a message that lacks it.
 A name or tag is a search key, including when it comes from a historical seat or

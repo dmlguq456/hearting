@@ -178,6 +178,20 @@ class WrappedPaneResolutionTest(unittest.TestCase):
             self.assertIsNone(peer._pane_shell_binding(self.pane, "codex", self.sid))
         observe.assert_not_called()
 
+    def test_optional_attachment_reader_absence_preserves_independent_native_proof(self):
+        for native_sid in (self.sid, ""):
+            with self.subTest(native_sid=native_sid), self.observed("codex"), \
+                 mock.patch.object(session_shell, "bindings", side_effect=ImportError("optional reader")), \
+                 mock.patch("pane_ownership.current_codex_thread", return_value=native_sid):
+                candidate, error = peer._prompt_current_candidate(self.pane,
+                    expected_sid=self.sid, require_process_session=True)
+            if native_sid:
+                self.assertIsNone(error)
+                self.assertEqual(candidate["session_id"], self.sid)
+            else:
+                self.assertIsNone(candidate)
+                self.assertEqual(error, "target-identity-unverified")
+
     def retained(self, recipient):
         _text, ref = peer.peer_message.prepare_peer_message("retained synthetic report",
             {"harness": "codex", "session_id": "sender"}, recipient, defer=True,

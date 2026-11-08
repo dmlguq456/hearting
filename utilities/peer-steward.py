@@ -301,7 +301,12 @@ def _prompt_process_session(pane, harness, info):
         return None, "target-observation-unavailable"
     claims = set()
     try:
-        attachment = _pane_shell_binding(pane, harness, info=info)
+        try:
+            attachment = _pane_shell_binding(pane, harness, info=info)
+        except ImportError:
+            # The optional attachment/Fleet reader is absent in partial
+            # runtimes. Keep independent native process proof available.
+            attachment = None
         if attachment is not None:
             claims.add(attachment["sid"])
         if harness == "codex":
