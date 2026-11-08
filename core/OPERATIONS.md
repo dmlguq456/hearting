@@ -3041,8 +3041,12 @@ the steward obtains the person's decision through the appropriate question surfa
 then sends the chosen answer with `hearting run questions answer <id>`, the same
 release path Fleet uses.
 Ordinary message questions are registered by `hearting run questions ask`; their
-private S4 source and exact consumed receipt are distinct from native gate
-approval. A queued answer or ordinary peer notice closes neither kind of wait.
+private S4 source belongs to the exact harness and session, even when several
+sessions share one project or pane seat. Replacing a question affects only that
+session. Existing question IDs, seat addresses and answer bindings remain valid;
+legacy seat-only sources are read only for their matching session. The exact
+consumed receipt remains distinct from native gate approval. A queued answer or
+ordinary peer notice closes neither kind of wait.
 
 **S6** ledger — every message sent or received is a typed record in the `peer-messages/`
 ledger under the dispatch state root. Its content is limited to a bounded summary

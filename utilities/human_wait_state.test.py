@@ -3248,8 +3248,104 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_shared_project_questions_remain_open_for_each_exact_session(self):
+        import session_tidy as tidy
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                def ask(sid, text):
+                    seat = tidy.session_seat(tidy.seat_for_project(harness,
+                        tidy.project_key_for(str(self.f.root))), harness, sid)
+                    return state.register_message(harness, sid, seat, text,
+                        sequence=tidy.read_prompt_seq(seat))
+                a = ask("session-a", "question A")
+                b = ask("session-b", "question B")
+                self.assertEqual(a["seat_key"], b["seat_key"])
+                for signal in (a, b):
+                    selected = state.read_selected_request({"id": signal["id"],
+                        "harness": harness, "session_id": signal["session_id"]})
+                    self.assertEqual(selected["state"], "open", selected)
+                ask("session-a", "replacement A")
+                selected = state.read_selected_request({"id": b["id"],
+                    "harness": harness, "session_id": b["session_id"]})
+                self.assertEqual(selected["state"], "open", selected)
+
+    def test_legacy_question_keeps_its_address_when_another_session_registers(self):
+        import session_tidy as tidy
+        a, envelope = self.f.ask("codex", "session-a", "legacy question")
+        legacy = state._path(a["seat_key"])
+        # Recreate the pre-upgrade source layout, keeping its exact public ID.
+        for path in state.state_root().glob("*.json"):
+            row = state._read(path)
+            if row and row.get("id") == a["id"]:
+                path.unlink()
+        state._write(legacy, a)
+        b, _ = self.f.ask("codex", "session-b", "new question")
+        selected = state.read_selected_request(envelope)
+        self.assertEqual(selected["state"], "open", selected)
+        self.assertEqual(selected["request_id"], a["id"])
+        self.f.direct(a, "answer A")
+        self.assertEqual(state.read_selected_request(envelope)["state"], "applied")
+        selected_b = state.read_selected_request({"id": b["id"], "harness": "codex",
+                                                "session_id": b["session_id"]})
+        self.assertEqual(selected_b["state"], "open", selected_b)
+        self.assertEqual(len(state.read_signals()), 1)
+
+    def test_shared_seat_answers_still_require_each_original_consumed_receipt(self):
+        a, ea = self.f.ask("codex", "session-a", "question A")
+        b, eb = self.f.ask("codex", "session-b", "question B")
+        self.assertEqual(state.read_selected_request(ea)["state"], "open")
+        self.f.submit(ea, "answer A")
+        wire, _, _ = self.f.prepare(a)
+        self.f.direct(b, "answer B")
+        self.assertEqual(self.source(a)["lifecycle"], "open")
+        self.f.consume(a, wire, sid=b["session_id"])
+        self.assertEqual(self.source(a)["lifecycle"], "open")
+        self.f.consume(a, wire)
+        self.assertEqual(self.source(a)["completion"]["actor"], "fleet")
+        self.assertEqual(self.source(b)["completion"]["actor"], "direct")
+
+    def test_same_sid_shared_seat_is_still_separate_between_harnesses(self):
+        import session_tidy as tidy
+        seat = tidy.Seat("project", "shared-project")
+        a = state.register_message("claude", "same-session", seat, "question A", sequence=0)
+        b = state.register_message("codex", "same-session", seat, "question B", sequence=0)
+        for signal in (a, b):
+            view = state.read_selected_request({"id": signal["id"],
+                "harness": signal["harness"], "session_id": signal["session_id"]})
+            self.assertEqual(view["state"], "open", view)
+        self.assertEqual(len(state.read_signals()), 2)
+
+    def test_unreadable_new_slot_never_resurrects_the_legacy_question(self):
+        signal, envelope = self.f.ask()
+        legacy = state._path(signal["seat_key"])
+        state._write(legacy, signal)
+        scoped = state._signal_path(signal)
+        self.assertNotEqual(scoped, legacy)
+        scoped.unlink()
+        scoped.symlink_to(scoped.with_suffix(".missing"))
+        self.assertIsNone(state._message_source(envelope))
+        self.assertEqual(state.read_signals(), [])
+        self.assertTrue(legacy.exists())
+
+    def test_interrupted_legacy_retirement_cannot_resurrect_a_cleared_source(self):
+        import session_tidy as tidy
+        signal = state.signal_value("codex", "legacy-session", "legacy-seat",
+                                    "[답변 필요] legacy question", sequence=1)
+        legacy = state._path(signal["seat_key"])
+        state._write(legacy, signal)
+        updated = state.signal_value("codex", "legacy-session", "legacy-seat",
+                                     "[답변 필요] current question", sequence=2)
+        with mock.patch.object(state, "_retire_legacy_signal", side_effect=OSError("interrupted")):
+            self.assertTrue(state.write_signal(updated))
+        self.assertTrue(legacy.exists())
+        self.assertEqual([row["id"] for row in state.read_signals()], [updated["id"]])
+        self.assertTrue(state.close_signal("legacy-seat", harness="codex",
+                                          session_id="legacy-session", sequence=3))
+        self.assertFalse(legacy.exists())
+        self.assertEqual(state.read_signals(), [])
+
     def source(self, signal):
-        return state._read(state._path(signal["seat_key"]))
+        return state._read(state._signal_path(signal))
 
     def test_each_native_direct_input_closes_only_nonempty_exact_session_once(self):
         import tidy_decisions
@@ -3415,7 +3511,7 @@ class MessageCompletionTests(unittest.TestCase):
                 wire, ref, recipient = self.f.prepare(signal)
                 original_write, original_cache = state._write, state._write_cache_value
                 def source_write(path, value):
-                    if path == state._path(signal["seat_key"]) and value.get("lifecycle") == "answered":
+                    if path == state._signal_path(signal) and value.get("lifecycle") == "answered":
                         raise OSError("injected source store failure after exact ACK")
                     return original_write(path, value)
                 def cache_write(value):
