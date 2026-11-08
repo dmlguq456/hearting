@@ -301,6 +301,9 @@ def _prompt_process_session(pane, harness, info):
         return None, "target-observation-unavailable"
     claims = set()
     try:
+        attachment = _pane_shell_binding(pane, harness, info=info)
+        if attachment is not None:
+            claims.add(attachment["sid"])
         if harness == "codex":
             from pane_ownership import current_codex_thread
             executable = shutil.which("herdr")
@@ -7776,22 +7779,42 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
 
 
 
-def _pane_shell_binding(pane, harness, sid, *, expected=None):
+def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
     """Join a native attachment to this pane's exact current foreground owner."""
     import session_shell
-    binding, _reason = session_shell.exact_binding(harness, sid)
-    if binding is None:
+    if sid is None:
+        # The outer foreground is the retained PTY owner, not the native TUI
+        # on its inner PTY. Discover only attachments joined to this endpoint's
+        # observed foreground; a title, pane hint or registry age proves nothing.
+        rows = session_shell.bindings(harness=harness)
+    else:
+        binding, _reason = session_shell.exact_binding(harness, sid)
+        rows = [binding] if binding is not None else []
+    if not rows:
         return None
-    info = _retire_pane_info(pane)
-    owner = "broker" if "broker_pid" in binding else "host"
-    pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
-    if (not info or info.get("foreground_process_group_id") != pid
-            or not any(isinstance(row, dict) and row.get("pid") == pid
-                       for row in info["foreground_processes"])
-            or _proc_start_ticks(pid) != birth):
+    if info is None:
+        info = _retire_pane_info(pane)
+    if not info:
         return None
+    joined = []
+    for binding in rows:
+        owner = "broker" if "broker_pid" in binding else "host"
+        pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
+        if (info.get("foreground_process_group_id") == pid
+                and any(isinstance(row, dict) and row.get("pid") == pid
+                        for row in info.get("foreground_processes", []))
+                and _proc_start_ticks(pid) == birth):
+            joined.append(binding)
+    if len(joined) != 1:
+        return None
+    binding = joined[0]
     identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
+    if sid is None:
+        current, _reason = session_shell.exact_binding(harness, binding["sid"])
+        if current is None or any(current.get(k) != binding.get(k) for k in identity):
+            return None
+        binding = current
     if expected is not None and any(binding.get(k) != expected.get(k) for k in identity):
         return None
     return binding
