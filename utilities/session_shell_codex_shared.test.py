@@ -87,6 +87,8 @@ class SharedCodexTest(unittest.TestCase):
      plain='\n'.join(plan['lines'])
      for value in (self.sid,'Fixture title','fixture*','42%','fixture high','5h 23%','7d 60%'):
       self.assertIn(value,plain)
+     padded,_=shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows,padding='  ')
+     self.assertEqual(padded['lines'],['  '+line for line in plan['lines']])
      self.assertEqual(plan['config']['items'],list(codex_tui_config.DEFAULT_STATUS_LINE))
      self.assertEqual(len(plan['fields']),7)
      for index,value in enumerate((self.sid,'Fixture title','fixture','Context 42% used','fixture high','5h 77% left','Weekly 40% left')):

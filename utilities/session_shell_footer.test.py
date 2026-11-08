@@ -33,6 +33,8 @@ for(const width of [410,274,220,410]) {
  a.equal(JSON.stringify(rows),original);
  a.deepEqual([...d.hiddenFooterRows('claude',rows,sid,plan,[status])],[]);
 }
+a.deepEqual(hidden(make(410,footer),{...plan,lines:['  '+status]},['  '+status]),[1]);
+a.deepEqual(hidden(make(410,footer),{...plan,lines:['  '+status]},[status]),[]);
 a.deepEqual(hidden(make(100,footer)),[]);
 for(const value of [footer+' · extra',footer.replace('Title','different title'),footer.replace('10%','101%'),footer.replace('fixture high','fixture low'),footer.replace('Context','context')])
  a.deepEqual(hidden(make(410,value)),[]);

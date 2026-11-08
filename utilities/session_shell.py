@@ -398,7 +398,7 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
-def _codex_footer_plan(values, sid, pid, status_rows, painted_rows):
+def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding=""):
     """Conceal only known native fields already represented in the common area."""
     from fleet.collectors import procscan
     from fleet.render_cells import _half_up
@@ -444,11 +444,44 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows):
                                 f"{name} {100-used}% remaining", f"{name} {used}% used"))
         fields[item] = options or None
     return {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
-            "lines": ["".join(text for text, _key in row) for row in status_rows]}, path
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}, path
+
+
+def session_questions(harness, sid, *, view=None, retained=()):
+    """The exact session's canonical board; retained IDs read receipts only."""
+    import time
+    import human_wait_state
+    import questions
+    view = view if isinstance(view, dict) else human_wait_state.cached_view(request=False) or {}
+    ids = set(view.get("by_session", {}).get((harness, sid), ()))
+    result = []
+    for item in view.get("items", ()):
+        owner = item.get("owner") or {}
+        if (item.get("id") in ids and not item.get("stale")
+                and owner.get("harness") == harness and owner.get("session_id") == sid):
+            result.append(questions.describe(item, now=time.time()))
+        if len(result) >= 8:
+            break
+    known = {item["id"] for item in result}
+    for old in list(retained or ())[:8]:
+        if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
+            continue
+        if not isinstance(old.get("id"), str) or not re.fullmatch(r"S[1-4]:[A-Za-z0-9:_-]{1,256}", old["id"]):
+            continue
+        item = {"id": old["id"], "source": old["id"][:2],
+                "owner": {"harness": harness, "session_id": sid}}
+        described = questions.describe(item, now=time.time())
+        if described.get("revision") == old.get("revision"):
+            # No active input comes from a retained display reference.
+            described["answerable"] = False
+            result.append(described)
+            known.add(described["id"])
+    return result
 
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
-                     columns=100, rows=30, state="unknown", expanded=True, native_context=None, native_badges=None) -> dict:
+                     columns=100, rows=30, state="unknown", expanded=True, native_context=None,
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -459,14 +492,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.session_tags import assigned_tag
     from fleet.session_line import line_segments
     from fleet.session_line import status_lines
-    from fleet.session_block import block_lines
+    from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
-    ids = set(view.get("by_session", {}).get((harness, sid), ()))
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = session_tidy.prompt_display(seat, harness, sid)
     received = display.get("received") or []
@@ -484,14 +516,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
                   state=state, route_label=_plain(route),
                   answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
-    board = []
-    for item in view.get("items", ()):
-        if item.get("id") not in ids or item.get("stale"):
-            continue
-        # questions list owns schema, current request support and original binding.
-        board.append(questions.describe(item, now=time.time()))
-        if len(board) >= 8:
-            break
+    board = session_questions(harness, sid, view=view, retained=retained_questions)
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     def styled(parts):
@@ -499,13 +524,37 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     segments = styled(line_segments(values, columns))
     work, work_paths = observe_work(values.get("cwd"))
     watched.extend(work_paths)
+    human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
-                        received=peers, human=last_input(display, time.time()),
+                        received=peers, human=human_line,
                         work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+    prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
+                                 human=human_line,
+                                 work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+    question_presentations(board, columns, native_wait=values.get("native_wait"))
+    for item in board:
+        for question in item.get("questions") or ():
+            question["display"] = {key: ([styled(line) for line in value] if key != "head" else styled(value))
+                                   for key, value in question["display"].items()}
+    labels = {key: ui_text("fleet.session_block." + key) for key in (
+        "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
+        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+    if pane_binding:
+        try:
+            from fleet import herdr_projection
+            projector = getattr(herdr_projection, "project_panel", None)
+            if projector is not None:
+                # Mirror the local single action slot for optional metadata;
+                # this restrictive display hint never grants input authority.
+                available = [dict(item, answerable=False, reason="action-pending")
+                             if answer_busy and item.get("answerable") else item for item in board]
+                projector(pane_binding, values, available)
+        except Exception:
+            pass  # Optional metadata cannot interrupt this terminal's display.
     native_footer = None
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
-                                                       status_lines(values, columns), lines)
+                                                       status_lines(values, columns - 4), lines, padding="  ")
         if config_path:
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
@@ -513,6 +562,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
+            "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
+                      "labels": labels, "styles": {key: style_components(key, colors=colors, no_color=no_color)
+                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
             "help": ui_text("fleet.session_block.editor_help")}
@@ -663,7 +715,9 @@ def _backend_operation(request: dict) -> dict:
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
-            native_context=request.get("native_context"),native_badges=request.get("native_badges"))}
+            native_context=request.get("native_context"),native_badges=request.get("native_badges"),
+            retained_questions=request.get("retained_questions", ()), pane_binding=binding,
+            answer_busy=request.get("answer_busy") is True)}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":
