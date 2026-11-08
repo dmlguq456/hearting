@@ -3295,6 +3295,20 @@ directory metadata before deciding its repository; targets retain their own
 repository evidence. A current snapshot row takes precedence over history.
 Unknown or foreign repository targets grant no role, connector or pink tag;
 cross-repository messages remain communication (`✉`).
+Wrapped sessions also mirror their existing shell projection through Herdr's
+`hearting:pane` display metadata, guarded by the current native agent label.
+The Agent sidebar keeps the session identity prefix and adds `Q<count>/A<count>`
+(current questions / answerable questions), observed work state, model, context
+and account limits. The counts precede optional telemetry in narrow sidebars.
+State labels and namespaced tokens carry the same summary; tokens need an
+existing token row to be drawn. This display path does not set a pane title,
+change native `herdr:<harness>` lifecycle/session reports, or create input
+authority. Question counts come from that exact shell board, with current
+requests and answerable requests counted separately.
+Existing projection events refresh the bounded metadata lifetime. No new
+collector, question store, timer or user configuration is needed. The existing
+birth-bound native attachment and pane-owner check runs immediately before each
+report; a missing or changed binding leaves the previous display to expire.
 No new role probe or execution authority follows from this projection. Fleet
 reads one steward per target: the newest same-repository start/watch/explicit
 evidence wins, with a stable identity tie-break. A session's watch of the
