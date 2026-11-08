@@ -383,6 +383,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"),
+            "native_display": {"model": values.get("model"), "effort": values.get("effort"),
+                               "context_percent": values.get("ctx_pct")},
             "help": ui_text("fleet.session_block.editor_help")}
 
 
