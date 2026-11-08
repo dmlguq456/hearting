@@ -266,6 +266,43 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     return result
 
 
+def _codex_current_root(pid, birth, sid):
+    """One current native root, never a displayed SID or a formerly loaded root."""
+    from fleet.collectors import codex
+    before = process(pid)
+    if before is None or before["start"] != str(birth):
+        return False
+    current = codex.session_id_of_process(pid, fresh=True)
+    after = process(pid)
+    return bool(current == sid and after and after["start"] == before["start"])
+
+
+def answer_attachment_shape(value):
+    """Static private-claim validation; historical receipts need no live process."""
+    keys = {"schema", "harness", "sid", "incarnation", "host_pid", "host_start",
+            "native_pid", "native_start", "socket"}
+    if not isinstance(value, dict) or set(value) not in (keys, keys | {"broker_pid", "broker_start"}):
+        return False
+    return bool(value.get("schema") == SCHEMA and value.get("harness") == "codex"
+        and isinstance(value.get("sid"), str) and _SID.fullmatch(value["sid"])
+        and isinstance(value.get("incarnation"), str) and re.fullmatch(r"[0-9a-f]{32,64}", value["incarnation"])
+        and isinstance(value.get("socket"), str) and os.path.isabs(value["socket"])
+        and "\0" not in value["socket"] and len(os.fsencode(value["socket"])) < 104
+        and all(type(value.get(key + "_pid")) is int and value[key + "_pid"] > 1
+                and isinstance(value.get(key + "_start"), str) and value[key + "_start"].isdigit()
+                for key in (("host", "native", "broker") if "broker_pid" in value else ("host", "native"))))
+
+
+def answer_attachment_current(value):
+    """The same attachment and current root immediately before an answer effect."""
+    try:
+        return bool(answer_attachment_shape(value) and valid_binding(value)
+            and read_binding(binding_path("codex", value["host_pid"])) == value
+            and _codex_current_root(value["native_pid"], value["native_start"], value["sid"]))
+    except Exception:
+        return False
+
+
 def _lifecycle_owner(harness: str, sid: str, env: dict):
     """The actual native TUI, including a callback run by its shared daemon."""
     import session_tidy
@@ -288,7 +325,7 @@ def _lifecycle_owner(harness: str, sid: str, env: dict):
         # The daemon retains its first client's environment. Only this proved
         # TUI's initial environment can name its own private PTY attachment.
         env = procscan.read_environ(pid)
-        if session_tidy.is_worker(env) or codex.session_id_of_process(pid) != sid:
+        if session_tidy.is_worker(env) or not _codex_current_root(pid, birth, sid):
             return None
     else:
         if session_tidy.is_worker(env):
@@ -528,6 +565,8 @@ def _block_answer(binding, request):
     import questions
     import human_wait_state
     from types import SimpleNamespace
+    if binding.get("harness") == "codex" and not answer_attachment_current(binding):
+        return {"ok": False, "reason": "current-session-unverified"}
     wanted = request.get("question_id")
     revision = request.get("revision")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -548,6 +587,8 @@ def _block_answer(binding, request):
                            decision=decision, answers_file=None, json=True,
                            expected_revision=revision,
                            expected_owner={"harness": binding["harness"], "session_id": binding["sid"]})
+    if binding["harness"] == "codex":
+        args.answer_attachment = dict(binding)
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         if answers is not None:
             # The command accepts a dict through its shared implementation below.

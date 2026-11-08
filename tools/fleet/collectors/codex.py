@@ -1393,7 +1393,7 @@ def _daemon_client_matches_service(client, expected_service):
         return False
 
 
-def _daemon_thread_origins(environ, *, expected_service=None):
+def _daemon_thread_origins(environ, *, expected_service=None, fresh=False):
     """Read a complete loaded/source/status snapshot, caching only loaded threads.
 
     The only daemon calls are initialize, thread/loaded/list,
@@ -1417,7 +1417,7 @@ def _daemon_thread_origins(environ, *, expected_service=None):
             if (isinstance(old_key, tuple) and old_key and old_key[0] == endpoint_path
                     and old_key != cache_key):
                 _DAEMON_ORIGINS.pop(old_key, None)
-        cache = _DAEMON_ORIGINS.get(cache_key)
+        cache = None if fresh else _DAEMON_ORIGINS.get(cache_key)
         if cache is None:
             cache = {}
         utilities = os.path.abspath(os.path.join(
@@ -1652,19 +1652,19 @@ def _live_tui_start(pid):
     return start if procscan.read_proc_start(pid) == start else None
 
 
-def _daemon_session_for_process(pid, environ=None, observation=None):
+def _daemon_session_for_process(pid, environ=None, observation=None, *, fresh=False):
     """The sole root thread whose codex_tui listener belongs to this live TUI PID."""
     from . import procscan
     start = _live_tui_start(pid)
     if not start:
         return None
     env = environ if isinstance(environ, dict) else procscan.read_environ(pid)
-    origins = _daemon_thread_origins(env)
+    origins = _daemon_thread_origins(env, fresh=True) if fresh else _daemon_thread_origins(env)
     if origins is None:
         return None
     listeners = {}
     candidates = set()
-    scan = observation.initial_scan if isinstance(observation, DaemonIdentityObservation) else {}
+    scan = observation.initial_scan if not fresh and isinstance(observation, DaemonIdentityObservation) else {}
     for thread_id, (port, source) in origins.items():
         if not port or not source or source == "subagent":
             continue
@@ -1682,7 +1682,7 @@ def _daemon_session_for_process(pid, environ=None, observation=None):
             candidates.add(thread_id)
     if len(candidates) != 1:
         return None
-    recheck = observation.recheck_scan if isinstance(observation, DaemonIdentityObservation) else {}
+    recheck = observation.recheck_scan if not fresh and isinstance(observation, DaemonIdentityObservation) else {}
     if (not _daemon_endpoint_current(origins)
             or any(not _listener_unchanged(port, observed, recheck)
                    for port, observed in listeners.items())
@@ -1727,12 +1727,14 @@ def process_for_thread(thread_id, environ=None, *, expected_service=None):
     return pid, start
 
 
-def session_id_of_process(pid, live_codex=None, *, observation=None):
+def session_id_of_process(pid, live_codex=None, *, observation=None, fresh=False):
     """Return an fd-proven thread or the daemon's unique TUI-loader thread.
 
     A Codex TUI without its own rollout fd is identified only by its
     ``codex_tui`` MCP origin and the PID holding that origin's LISTEN socket.
     Time, cwd, and launcher records never attach a TUI thread.
+    Permission checks refresh MCP origins: /resume may reattach a loaded root
+    without changing loaded membership, the TUI PID or its listening port.
     """
     try:
         pid = int(pid)
@@ -1756,6 +1758,8 @@ def session_id_of_process(pid, live_codex=None, *, observation=None):
         return None                     # procscan lists only `codex` itself as a runtime
     if procscan.invocation_mode("codex", procscan._read_argv(pid)) != "session":
         return None
+    if fresh:
+        return _daemon_session_for_process(pid, initial_env, fresh=True)
     if observation is None:
         observation = _DAEMON_IDENTITY_SCOPE.get()
     return _daemon_session_for_process(pid, initial_env, observation=observation)

@@ -119,6 +119,16 @@ clipped, stale or ambiguous content stays visible. This affects
 painting, not the native VT, its coordinates or its input/identity observations.
 Person-requested answers use the existing separate action worker so a slow
 submission cannot stall native input, readiness or event-driven display values.
+An answer originating in a wrapped Codex terminal retains that exact attachment
+in its existing private answer claim. Reuse the lifecycle bridge's current-root
+proof before accepting it and at the existing native effect boundary, including
+retained delivery retries. These authority reads refresh MCP origins even for
+already loaded roots; loaded membership alone does not prove current selection.
+An unknown or multiple root withholds the answer;
+an old displayed question, a later question or a waiting worker grants nothing.
+This restriction belongs to the wrapped answer, not ordinary full-session-ID
+queue delivery. Existing queue and consumption receipts remain unchanged, and
+an already consumed answer can still settle after the terminal changes.
 The block reserves only the rows it paints. Hidden guidance and empty sections
 reserve no rows; native-owned spacing remains under the native renderer.
 Inside a complete Herdr pane context, an eligible wrapped session uses Herdr's

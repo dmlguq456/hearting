@@ -2741,6 +2741,9 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
             steer_turn = None
 
     def before_add():
+        from peer_obligations import message_answer_submission_current
+        if not message_answer_submission_current(row):
+            raise QueueDeliveryError("question-current-session-unverified")
         with pending_lock(ref):
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
@@ -2751,6 +2754,9 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
             _save_pending(dict(current, state="unverified", receipt="native-queue-inflight"))
 
     def before_steer(turn_id):
+        from peer_obligations import message_answer_submission_current
+        if not message_answer_submission_current(row):
+            raise QueueDeliveryError("question-current-session-unverified")
         with pending_lock(ref):
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
