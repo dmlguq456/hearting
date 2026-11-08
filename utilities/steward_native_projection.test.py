@@ -76,6 +76,14 @@ class NativeStewardProjectionTest(unittest.TestCase):
         self.rows.append(SimpleNamespace(harness='codex',session_id='actor',cwd=self.repos[1]))
         self.assertEqual(self.targets(),['foreign'])
 
+    def test_current_actor_row_wins_over_historical_alias_metadata(self):
+        self.rows.append(SimpleNamespace(harness='codex',session_id='actor',cwd=self.repos[0]))
+        self.markers[('codex','old-actor')]={'harness':'codex','session_id':'old-actor','targets':{}}
+        with sqlite3.connect(self.db) as con:
+            con.execute('INSERT INTO threads VALUES(?,?)',('old-actor',self.repos[1]))
+        targets=steward.role_targets('codex','actor',aliases=('old-actor',))
+        self.assertEqual([t['session_id'] for t in targets],['target'])
+
     def test_latest_same_repository_winner_stays_unique(self):
         self.relations.append(self.relation('newer','2026-01-02T00:00:00Z'))
         self.assertEqual(self.targets(),[])

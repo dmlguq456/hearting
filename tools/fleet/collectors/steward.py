@@ -488,9 +488,12 @@ def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, ses
     if _winners is not None:
         return _owner_targets(_winners, harness, session_id)
     rows = _projection_sessions() if sessions is None else list(sessions)
-    if sessions is None or include_native:
-        rows += _native_role_sessions(markers, rows, relations)
     own_keys = {(harness, sid) for sid in [session_id, *aliases] if sid}
+    read_native = sessions is None or include_native
+    native_loaded = (read_native and cwd is None
+                     and not any(own_keys.intersection(_session_keys(row)) for row in rows))
+    if native_loaded:
+        rows += _native_role_sessions(markers, rows, relations)
     if cwd is None:
         own_cwds = {row.cwd for row in rows if own_keys.intersection(_session_keys(row))}
         cwd = own_cwds.pop() if len(own_cwds) == 1 else None
@@ -505,6 +508,8 @@ def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, ses
                           _herdr_name=next(iter(own_names)) if len(own_names) == 1 else None,
                           runtime_name=next(iter(runtime_names)) if len(runtime_names) == 1 else None)
     rows = [own] + [row for row in rows if not own_keys.intersection(_session_keys(row))]
+    if read_native and not native_loaded:
+        rows += _native_role_sessions(markers, rows, relations)
     winners = _role_winners(markers, rows, evidence, relations)
     return _owner_targets(winners, harness, session_id)
 
