@@ -3411,7 +3411,20 @@ For `peer-steward.py prompt`, an exact Fleet display name, its `[xx]` Fleet tag,
 and an explicit pane address may resolve to the same recipient only when each
 identifies one current pane on the selected herdr endpoint and the existing
 native identity readers prove that pane's current harness and session ID. A
-name or tag is a search key, including when it comes from a historical seat or
+wrapped terminal may supply that proof through its existing birth-bound native
+attachment, joined to the selected endpoint's current foreground owner. Resolve
+this before treating an absent native process in the outer pane as SID-less;
+the native process may run on the wrapper's inner PTY. Reuse the same attachment
+join at delivery, without inferring identity from titles or screen content.
+The attachment's inner native PID also participates in the existing native
+identity check at both joins: a different independently PROVEN SID is a conflict.
+Unknown native evidence retains the existing policy, without requiring a new
+proof for every attachment.
+An unavailable optional attachment reader leaves the existing native process
+identity checks in charge.
+Retained SID-less messages still need their original process proof; discovery
+does not grant retroactive authority to a message that lacks it.
+A name or tag is a search key, including when it comes from a historical seat or
 registry alias; it does not prove current identity. Resolution keeps the
 selected endpoint, canonical pane, harness, and current session ID together
 through readiness, identity rechecks, native delivery, deferred resume, and the
