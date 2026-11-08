@@ -79,8 +79,10 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
  assert.ok(JSON.stringify(block.detail()).includes('draft'));
  block.input(Buffer.from('\r'));await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(sent[0],{question_id:'a',revision:'one',answers:{q:['draft']}});
+ // A new open request, rather than the submitted request, owns this draft.
+ const fresh={...a,id:'fresh'};block.update([fresh]);
  block.input(Buffer.from('tpreserved'));
- block.update([{...a,revision:'two'}]);block.input(Buffer.from('\r'));
+ block.update([{...fresh,revision:'two'}]);block.input(Buffer.from('\r'));
  await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1);
  assert.ok(JSON.stringify(block.detail()).includes('preserved'));
  left=block.input(Buffer.from('\x1dnative\r'));assert.deepEqual(left,Buffer.from('native\r'));

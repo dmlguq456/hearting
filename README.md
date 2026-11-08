@@ -166,7 +166,14 @@ in the block. The block opens with routes, questions, received peer
 messages, repo work and your last input. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
-you focus the block. Fleet can open that exact session's panel too. Peer wake works
+you focus the block. The question-first bottom shows the current question and
+choices before focus. Use **Tab** to move between questions, **1–9** to choose,
+**t** for text (including pasted text), and **Enter** after every form field is
+answered. Choices and drafts survive question navigation. A transport receipt
+is shown separately from proved consumption; expired or cancelled questions
+cannot be submitted. Focused **↑/↓** scrolls long question content, and an explicit
+count marks hidden lines. Empty question sections disappear.
+Fleet can open that exact session's panel too. Peer wake works
 without Herdr; Codex keeps its native queue. Native context remains as a fallback
 where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
 
