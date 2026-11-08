@@ -3272,7 +3272,13 @@ role decision below. The pane pid probe
 steward marker under `<dispatch-state-root>/peer-steward/` is a **role** flag, not a
 side effect of talking: it is raised only by `peer-steward.py
 steward on` (`source=explicit`), by `peer-steward.py wait`/`watch` once herdr answered
-about a real target (`source=watch`; a mistyped target leaves no flag), or by a
+about a real target (`source=watch`; a mistyped target leaves no flag), including a
+birth-bound native attachment observed in that same pane when its optional
+transport omits the identity. That is identity evidence only: missing native
+activity remains `unknown`, never an inferred idle or completion. Input and
+terminal gates keep their existing guards. The same observation reader is used
+at wait/watch admission, revalidation and native wait-result decoding.
+It can also be raised by a
 `peer-steward.py start` that launched a session (`source=start`). No `record` path and
 no send raises it — not a steer/handoff/gate-relay and not a `SendMessage` with `notify_when_idle`, which the
 Claude hook records as `kind=watch`. The explicit `steward on` entry
@@ -3283,8 +3289,12 @@ workflow-health or execution-authority evidence. Fleet and herdr share
 requires targets confirmed in the same repository. The shared
 `steward.role_targets` lookup compares
 Git common directories (so linked worktrees count as the same repository) from
-existing session metadata. Unknown or foreign repository targets grant no role,
-connector or pink tag; cross-repository messages remain communication (`✉`).
+existing session metadata.
+When an evidenced holder is absent from the snapshot, read its exact native
+directory metadata before deciding its repository; targets retain their own
+repository evidence. A current snapshot row takes precedence over history.
+Unknown or foreign repository targets grant no role, connector or pink tag;
+cross-repository messages remain communication (`✉`).
 No new role probe or execution authority follows from this projection. Fleet
 reads one steward per target: the newest same-repository start/watch/explicit
 evidence wins, with a stable identity tie-break. A session's watch of the
