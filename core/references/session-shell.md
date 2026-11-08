@@ -72,7 +72,9 @@ line. Unwrapped sessions keep their existing displays. Codex keeps native input,
 execution, permission UI, thread ID and context. Its footer is not deduplicated.
 
 Event-driven updates use native lifecycle and the existing record changes,
-without tuning a polling interval. Validation compares native-to-common update
+without tuning a polling interval. Fleet requests its narrow display reader on
+file/lifecycle notifications or an adopted snapshot, never on an independent
+periodic source probe. Validation compares native-to-common update
 lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.

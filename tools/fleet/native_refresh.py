@@ -113,6 +113,15 @@ class NativeDisplayReader:
         self._attachments = {}
         self._entries = {}
         self._latest = ()
+        self._event_sources = (), (), ()
+
+    def invalidate(self):
+        # An exact selection/attachment change may arrive before the next
+        # complete census. Re-read that binding; never infer a new roster.
+        self._snapshot = None
+
+    def event_sources(self):
+        return self._event_sources
 
     def read(self, snapshot):
         if snapshot is not self._snapshot:
@@ -122,6 +131,7 @@ class NativeDisplayReader:
             except (OSError, ValueError, TypeError):
                 self._attachments = {}
         entries, result = {}, []
+        event_paths, event_patterns, event_processes = set(), set(), set()
         for session in tuple(_get(snapshot, "sessions", ()) or ())[:_LIMIT]:
             identity = _identity(session)
             harness, sid, pid, start = identity
@@ -139,9 +149,18 @@ class NativeDisplayReader:
                 registry = session_registry.registry_path(harness, int(pid))
             except (TypeError, ValueError):
                 continue
+            event_paths.update(str(path) for path in (native_path, tap, db,
+                str(db) + '-wal' if db else None, feed_path, registry) if path)
+            event_patterns.add((str(Path(session_registry.state_root()) / harness), 'session-shell-'))
+            event_processes.add((int(pid), start))
+            if binding:
+                event_processes.add((binding['host_pid'], binding['host_start']))
             host_live = not binding or read_proc_start(binding["host_pid"]) == binding["host_start"]
             signature = tuple(_signature(path) for path in
-                              (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)) + (native_live, host_live)
+                              (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)) + (
+                                  native_live, host_live,
+                                  tuple(binding.get(key) for key in ('host_pid', 'host_start', 'incarnation', 'socket'))
+                                  if binding else None)
             # Policy/value changes in the complete base invalidate a conversion,
             # without making that complete base a new display authority.
             base = repr(tuple(_get(session, key) for key in
@@ -161,6 +180,8 @@ class NativeDisplayReader:
             if entry[2] is not None:
                 result.append((identity, entry[2]))
         self._entries = entries
+        self._event_sources = (tuple(sorted(event_paths)), tuple(sorted(event_patterns)),
+                               tuple(sorted(event_processes)))
         value = tuple(result)
         if value != self._latest:
             self._latest = value

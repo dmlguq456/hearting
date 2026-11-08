@@ -6814,14 +6814,21 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         compute_host_pump = RefreshPump(
             compute_host_refresh, compute_host_interval, name="fleet-gpu-refresh")
     latest_view = [snapshot]
-    display_pump, display_generation = None, 0
+    display_pump, display_generation, display_events = None, 0, None
     if _EXPLORER_ENABLED:
         from .native_refresh import NativeDisplayReader, NativeDisplayLayer
+        from .native_events import NativeDisplayEvents
         display_reader = NativeDisplayReader()
+        display_events = NativeDisplayEvents()
         _EXPLORER_NATIVE_DISPLAY = NativeDisplayLayer()
-        # Read only changed narrow native inputs. Do not accelerate the basic
-        # or detail collectors, nor admit a new complete generation from these.
-        display_pump = RefreshPump(lambda: display_reader.read(latest_view[0]), 0.1,
+        def collect_native_display():
+            display_reader.invalidate()
+            value = display_reader.read(latest_view[0])
+            display_events.configure(*display_reader.event_sources())
+            return value
+        # No periodic request_due: kernel notifications and adopted snapshots
+        # alone request this bounded reader. Normal census cadence stays intact.
+        display_pump = RefreshPump(collect_native_display, interval,
                                    name="fleet-native-display", adaptive_cadence=True)
     else:
         _EXPLORER_NATIVE_DISPLAY = None
@@ -6914,8 +6921,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             now_mono = time.monotonic()
             if background_started:
                 pump.request_due(now=now_mono)
-                if display_pump is not None and generation > 0:
-                    display_pump.request_due(now=now_mono)
+                if (display_pump is not None and generation > 0
+                        and display_events.take_changed()):
+                    display_pump.request(force=True)
             if install_pump is not None and background_started:
                 install_pump.request_due(now=now_mono)
                 install_update = install_pump.poll(install_generation)
@@ -6949,6 +6957,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             if update is not None or detail_update is not None:
                 snapshot = details.merge(basic_snapshot, latest_detail)
                 latest_view[0] = snapshot
+                if display_pump is not None and generation > 0:
+                    display_pump.request(force=True)
                 _HIT_VALID = False
                 sessions, jobs = snapshot.sessions, snapshot.jobs
                 resources = snapshot.resources
@@ -7114,6 +7124,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         _explorer_stop_question_pump()
         if display_pump is not None:
             display_pump.stop(join_timeout=1.0)
+        if display_events is not None:
+            display_events.stop(join_timeout=1.0)
         _EXPLORER_NATIVE_DISPLAY = None
         pump.stop(join_timeout=1.0)
         detail_pump.stop(join_timeout=1.0)

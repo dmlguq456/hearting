@@ -81,6 +81,13 @@ class NativeDisplayTests(unittest.TestCase):
         self.registry.write_text(json.dumps({'procStart':'native-birth','sessionId':'replacement'}))
         self.assertIsNone(self.reader.read(self.snapshot)[0][1]['context'])
 
+    def test_attachment_change_cannot_reuse_values_from_its_previous_incarnation(self):
+        self.write(); self.reader.read(self.snapshot)
+        changed = dict(self.binding, incarnation='b'*48)
+        with mock.patch.object(fast, '_attachment_index', return_value={self.identity:changed}):
+            self.reader.invalidate()
+            self.assertEqual(self.reader.read(self.snapshot), ())
+
     def test_symlink_or_malformed_feed_drops_only_the_fast_value(self):
         self.write();self.reader.read(self.snapshot)
         path=self.root/'native-display.json';path.unlink()
