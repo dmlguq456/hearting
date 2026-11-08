@@ -982,7 +982,13 @@ def project_panel(binding, values, questions, *, pane_id=None):
         # Reuse its successful publication, refreshing only on another event;
         # no timer or helper is started to keep metadata alive.
         seq = command.index("--seq")
-        key = (os.environ.get("HERDR_SOCKET_PATH"), pane,
+        endpoint = os.environ.get("HERDR_SOCKET_PATH")
+        try:
+            info = os.stat(endpoint) if endpoint else None
+            endpoint_birth = (info.st_dev, info.st_ino, info.st_ctime_ns) if info else None
+        except OSError:
+            endpoint_birth = None
+        key = (endpoint, endpoint_birth, pane,
                tuple(sorted(binding.items())), tuple(command[:seq] + command[seq+2:]))
         now = time.monotonic()
         if _PANEL_LAST and _PANEL_LAST[0] == key and now - _PANEL_LAST[1] < 240:

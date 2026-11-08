@@ -3,6 +3,8 @@ import copy
 import os
 from pathlib import Path
 import sys
+import socket
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -131,6 +133,30 @@ class HerdrPanelProjectionTest(unittest.TestCase):
                 report(self.binding, self.values, self.board, pane_id="private:p1")
             self.assertEqual(send.call_count, 2)
             self.assertEqual(peer._pane_shell_binding_result.call_count, 2)
+
+    def test_restarted_endpoint_at_the_same_path_gets_a_fresh_publication(self):
+        report = getattr(projection, "project_panel", None)
+        self.assertTrue(callable(report))
+        peer = SimpleNamespace(_pane_shell_binding_result=mock.Mock(return_value=(self.binding, None)))
+        def sent(command, observed):
+            observed["metadata_report"] = "exit0"
+        with tempfile.TemporaryDirectory(prefix="herdr-panel-") as directory, \
+                mock.patch.dict(sys.modules, {"_hearting_panel_peer_steward":peer}), \
+                mock.patch.object(projection, "is_worker", return_value=False), \
+                mock.patch.object(projection.shutil, "which", return_value="herdr"), \
+                mock.patch.object(projection, "compose", return_value=("[ab] codex", "")), \
+                mock.patch.object(projection, "_send_projection", side_effect=sent) as send:
+            endpoint = Path(directory)/"herdr.sock"
+            with mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH":str(endpoint)}):
+                with socket.socket(socket.AF_UNIX) as first:
+                    first.bind(str(endpoint))
+                    report(self.binding, self.values, self.board, pane_id="private:p1")
+                    report(self.binding, self.values, self.board, pane_id="private:p1")
+                endpoint.unlink()
+                with socket.socket(socket.AF_UNIX) as replacement:
+                    replacement.bind(str(endpoint))
+                    report(self.binding, self.values, self.board, pane_id="private:p1")
+            self.assertEqual(send.call_count, 2)
 
 
 if __name__ == "__main__":
