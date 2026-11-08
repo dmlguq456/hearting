@@ -2787,6 +2787,7 @@ _EXPLORER_COMPOSE_MODEL = None
 _EXPLORER_COMPOSE_SNAPSHOT = None
 _EXPLORER_COMPOSE_DETAIL = None
 _EXPLORER_COMPOSE_GENERATION = None
+_EXPLORER_NATIVE_DISPLAY = None
 _EXPLORER_ORDER = []         # main-session ids in first-seen order, so the navigation does not reshuffle
 _EXPLORER_SIZE = None
 _EXPLORER_EARLIER = False    # the output pane was scrolled past its first row: read further back once
@@ -3067,6 +3068,10 @@ def explorer_read_detail(snapshot, state):
     return ExplorerDetail(focus=results.get("session"), seats=records("seats", "seats", {}),
                           config=records("models", "models", None), panes=records("panes", "panes", {}),
                           results=results)
+
+
+def _explorer_native_display(model):
+    return _EXPLORER_NATIVE_DISPLAY.apply(model) if _EXPLORER_NATIVE_DISPLAY is not None else model
 
 
 def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_good=None, now=None,
@@ -6193,7 +6198,8 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
         # their readiness evidence is current before a publication decision.
         if loading and _EXPLORER_PUBLISHED_MODEL is not None:
             from .explorer.live import current_claude_usage
-            _EXPLORER_MODEL = current_claude_usage(_EXPLORER_PUBLISHED_MODEL, current, time.time())
+            _EXPLORER_MODEL = _explorer_native_display(
+                current_claude_usage(_EXPLORER_PUBLISHED_MODEL, current, time.time()))
             frame = _explorer_frame_from_model(_EXPLORER_MODEL, state, w, h, beat=1)
             _EXPLORER_SHOWN = True
         elif loading:
@@ -6207,10 +6213,10 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
             if complete:
                 _EXPLORER_REPLAY_ACTIVE = False
                 _EXPLORER_PUBLISHED_MODEL = candidate_model
-                _EXPLORER_MODEL = candidate_model
+                _EXPLORER_MODEL = _explorer_native_display(candidate_model)
                 _EXPLORER_SHOWN = True
                 runtime.mark_published(readiness)
-                frame = runtime.draw_frame(candidate_model, state, w, h, beat=int(_BLINK_ON))
+                frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
                 if runtime.all_new(readiness):
                     runtime.persist_complete_async(candidate_model, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
@@ -6219,7 +6225,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                 base = _EXPLORER_PUBLISHED_MODEL
                 # Replay lacks exact live bindings; it remains responsive without guessing them.
                 shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
-                shown = current_claude_usage(shown, current, time.time())
+                shown = _explorer_native_display(current_claude_usage(shown, current, time.time()))
                 _EXPLORER_MODEL = shown
                 from .explorer.chrome import _clock_freshness
                 clock = time.time()
@@ -6640,6 +6646,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     global _EXPLORER_REPLAY_ACTIVE, _EXPLORER_SHOWN, _EXPLORER_DETAIL_CONTINUATION
     global _EXPLORER_READINESS, _EXPLORER_REMOTE_OBSERVATION
     global _EXPLORER_QUESTION_QUEUE, _EXPLORER_QUESTION_PUMP, _EXPLORER_QUESTION_GENERATION
+    global _EXPLORER_NATIVE_DISPLAY
     curses.curs_set(0)
     _init_colors()
     if _EXPLORER_ENABLED:
@@ -6807,6 +6814,24 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         compute_host_pump = RefreshPump(
             compute_host_refresh, compute_host_interval, name="fleet-gpu-refresh")
     latest_view = [snapshot]
+    display_pump, display_generation, display_events = None, 0, None
+    if _EXPLORER_ENABLED:
+        from .native_refresh import NativeDisplayReader, NativeDisplayLayer
+        from .native_events import NativeDisplayEvents
+        display_reader = NativeDisplayReader()
+        display_events = NativeDisplayEvents()
+        _EXPLORER_NATIVE_DISPLAY = NativeDisplayLayer()
+        def collect_native_display():
+            display_reader.invalidate()
+            value = display_reader.read(latest_view[0])
+            display_events.configure(*display_reader.event_sources())
+            return value
+        # No periodic request_due: kernel notifications and adopted snapshots
+        # alone request this bounded reader. Normal census cadence stays intact.
+        display_pump = RefreshPump(collect_native_display, interval,
+                                   name="fleet-native-display", adaptive_cadence=True)
+    else:
+        _EXPLORER_NATIVE_DISPLAY = None
     selection_feed = None
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
@@ -6896,6 +6921,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             now_mono = time.monotonic()
             if background_started:
                 pump.request_due(now=now_mono)
+                if (display_pump is not None and generation > 0
+                        and display_events.take_changed()):
+                    display_pump.request(force=True)
             if install_pump is not None and background_started:
                 install_pump.request_due(now=now_mono)
                 install_update = install_pump.poll(install_generation)
@@ -6929,6 +6957,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             if update is not None or detail_update is not None:
                 snapshot = details.merge(basic_snapshot, latest_detail)
                 latest_view[0] = snapshot
+                if display_pump is not None and generation > 0:
+                    display_pump.request(force=True)
                 _HIT_VALID = False
                 sessions, jobs = snapshot.sessions, snapshot.jobs
                 resources = snapshot.resources
@@ -6938,6 +6968,12 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 governor_snapshot = snapshot.governor
                 if snapshot.hearting is not None:
                     set_hearting(snapshot.hearting)
+            if display_pump is not None:
+                display_update = display_pump.poll(display_generation)
+                if display_update is not None:
+                    display_generation, display_values = display_update
+                    if _EXPLORER_NATIVE_DISPLAY.update(display_values):
+                        _HIT_VALID = False
             if compute_host_pump is not None:
                 compute_host_update = compute_host_pump.poll(compute_host_generation)
                 if compute_host_update is not None:
@@ -7086,6 +7122,11 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         if selection_feed is not None:
             selection_feed.stop()
         _explorer_stop_question_pump()
+        if display_pump is not None:
+            display_pump.stop(join_timeout=1.0)
+        if display_events is not None:
+            display_events.stop(join_timeout=1.0)
+        _EXPLORER_NATIVE_DISPLAY = None
         pump.stop(join_timeout=1.0)
         detail_pump.stop(join_timeout=1.0)
         if compute_host_pump is not None:

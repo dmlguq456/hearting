@@ -140,11 +140,14 @@ jobs:
           work="$(mktemp -d "${RUNNER_TEMP}/hearting-codex-cli.XXXXXX")"
           mkdir -m 700 "$work/bin" "$work/unpacked"
           archive="$work/codex-x86_64-unknown-linux-musl.tar.gz"
+          # The same rust-v0.163.0 release asset, through GitHub's binary API.
+          # The browser download endpoint can return 504 before its CDN redirect.
           curl --fail --location --silent --show-error \
+            --header 'Accept: application/octet-stream' \
             --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 300 \
             --connect-timeout 20 --max-time 240 \
             --output "$archive" \
-            https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-x86_64-unknown-linux-musl.tar.gz
+            https://api.github.com/repos/openai/codex/releases/assets/645227929
           printf '%s  %s\n' \
             beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4 \
             "$archive" | sha256sum --check --strict

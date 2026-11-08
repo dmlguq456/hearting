@@ -76,6 +76,7 @@ let callID = 0, projecting = false, projectionPending = false;
 let actionWorker;
 const nativeDisplay=require('./native-display.cjs');
 let nativeContext;
+let displayValues={};
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -83,6 +84,11 @@ function binding() {
 }
 function identity() {
   const b = binding(); delete b.schema; delete b.socket; return b;
+}
+const publishDisplay=nativeDisplay.publisher(dir,identity);
+function publishNativeDisplay() {
+  publishDisplay({...displayValues,...(typeof nativeContext?.percent==='number'
+    ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !fleetView,alive:live(),expanded,focused:block.focused,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
@@ -156,7 +162,7 @@ function render() {
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid);
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
-      nativeContext=observed;if(harness!=='codex')queueProjection();}
+      nativeContext=observed;publishNativeDisplay();if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
@@ -314,6 +320,7 @@ async function projection() {
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,cols,expanded,currentDelivery,heldBytes]);
+    displayValues=data.native_display||{};publishNativeDisplay();
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
@@ -431,7 +438,9 @@ async function lifecycle(req) {
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
+    displayValues={};
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
+    publishNativeDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
     // Display collection must never delay the native start hook or input.
