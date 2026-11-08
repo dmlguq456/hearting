@@ -47,6 +47,18 @@ module.exports=function({changed,answer,action}) {
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
   function active(row){return !stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
+  function formValues(row){
+    const local=state(row.item),result={};
+    for(const question of row.item.questions||[]){
+      const id=question.id;
+      if(local.typing[id]){
+        const draft=local.drafts[id]||'';
+        if(draft.trim())result[id]=[draft];
+      }else if(local.answers[id]?.length)result[id]=[...local.answers[id]];
+    }
+    return result;
+  }
+  function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
   function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
   function preview({budget=10,columns=100}={}) {
     const row=current();if(!row)return focused?[[span(help||text('navigate','Tab next · Esc/Ctrl+] back'))]]:[];
@@ -72,8 +84,8 @@ module.exports=function({changed,answer,action}) {
     }
     if(local.notice)tail.push([span(local.notice,stale?'lvl_r':'dim')]);
     if(focused){
-      const complete=row.item.answer_kind==='decision'?!!picked:(row.item.questions||[]).every(q=>local.answers[q.id]||(q.id===id&&local.typing[id]&&(local.drafts[id]||'').trim()));
-      const instruction=active(row)?(complete?text('send','Enter send'):local.typing[id]||!choices(row).length?text('text','type answer'):text('choose','1–9 choose · t text')):text(status,status);
+      const ready=complete(row,formValues(row));
+      const instruction=active(row)?(ready?text('send','Enter send'):local.typing[id]||!choices(row).length?text('text','type answer'):text('choose','1–9 choose · t text')):text(status,status);
       tail.push([span((active(row)?instruction+' · ':'')+text('navigate','Tab next · Esc/Ctrl+] back'))]);
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
@@ -92,13 +104,13 @@ module.exports=function({changed,answer,action}) {
     if(local.typing[id]){
       const draft=local.drafts[id]||'';
       if(!draft.trim()){local.notice=text('empty','empty answer');changed();return;}
-      local.answers[id]=[draft];local.typing[id]=false;
+      local.typing[id]=false;local.answers[id]=[draft];
     }
-    const complete=row.item.answer_kind==='decision'?!!local.answers[id]:(row.item.questions||[]).every(q=>local.answers[q.id]);
-    if(!complete){local.notice=text('complete','answer every field · Tab next');changed();return;}
+    const values=formValues(row);local.answers=values;
+    if(!complete(row,values)){local.notice=text('complete','answer every field · Tab next');changed();return;}
     busy=true;local.state='submitted';local.notice='';changed();
     try{
-      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:local.answers[id][0]}:{answers:{...local.answers}})});
+      const result=await answer({question_id:row.item.id,revision:row.item.revision,...(row.item.answer_kind==='decision'?{decision:values[id][0]}:{answers:values})});
       if(['submitted','received','applied'].includes(result.state))local.state=result.state;
       else{local.state=null;local.notice=result.reason||text('unknown','unknown · check receipt');}
     }catch{local.state='unknown';local.notice=text('unknown','unknown · check receipt');}

@@ -56,6 +56,25 @@ b.update([{...item,request_state:'applied',answerable:false}]);assert.ok(JSON.st
 const rest=b.input(Buffer.from('\x1dnative\r'));assert.equal(rest.toString(),'native\r');
 })();''')
 
+    def test_whole_form_collects_all_latest_text_drafts_after_tab_or_reediting(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+for(const edited of [false,true]){
+ const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
+ b.update([{id:'exact',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
+ if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t-EDIT'));}
+ else b.input(Buffer.from('first'));
+ b.input(Buffer.from('\tsecond\r'));await new Promise(setImmediate);
+ assert.deepEqual(sent,[{question_id:'exact',revision:'r',answers:{first:[edited?'first-EDIT':'first'],second:['second']}}]);
+ b.input(Buffer.from('\x1b[Z'));assert.ok(JSON.stringify(b.detail()).includes(edited?'first-EDIT':'first'));
+}
+const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
+b.update([{id:'cleared',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
+b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t\x7f\x7f\x7f\x7f\x7f\tsecond\r'));await new Promise(setImmediate);
+assert.equal(sent.length,0,'cleared latest text must not fall back to an older saved answer');
+})();""")
+
     def test_single_active_action_keeps_another_questions_choice_without_claiming_consumption(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
