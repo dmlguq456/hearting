@@ -36,7 +36,11 @@ try {
 const socketPath = path.join(dir, 'control.sock');
 let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
-const terminal = new Terminal({cols, rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
+const nativeDisplay=require('./native-display.cjs');
+let displayConfiguration={layout:'bottom'},nativeSidebar=false;
+try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
+const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration});
+const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
 const incarnation = crypto.randomBytes(24).toString('hex'), token = process.env.HEARTING_SHELL_TOKEN;
 function processRow(pid) {
@@ -74,7 +78,6 @@ let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
 let actionWorker;
-const nativeDisplay=require('./native-display.cjs');
 let nativeContext;
 let displayValues={};
 let nativeFooter=null,paintedCommon=[],panelSections;
@@ -146,11 +149,16 @@ function serialize(line,width) {
   }
   return s+'\x1b[0m';
 }
-function maxHeight(){return Math.min(10,Math.max(1,rows-6));}
+function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,nativeSidebar});}
+function panelColumns(){return geometry().panelCols;}
+function nativeColumns(){return geometry().nativeCols;}
+function nativeRows(){return geometry().side?rows:rows-height();}
+function panelRow(){return geometry().side?2:rows-height();}
+function maxHeight(){return geometry().side?Math.max(1,rows-2):Math.min(10,Math.max(1,rows-6));}
 function panelContent(){
   if(!panelSections)return panelLines;
   const prefix=panelSections.prefix||[],tail=panelSections.tail||[];
-  const question=actionLines.length&&block.focused?actionLines:block.detail({budget:Math.max(2,maxHeight()-prefix.length-(tail.length?1:0)),columns:cols});
+  const question=actionLines.length&&block.focused?actionLines:block.detail({budget:Math.max(2,maxHeight()-prefix.length-(tail.length?1:0)),columns:panelColumns()});
   const room=Math.max(0,maxHeight()-prefix.length-question.length);
   const ancillary=tail.length>room&&room>0?[...tail.slice(0,room-1),[{text:`+${tail.length-room+1} · ${panelSections.labels?.more||'more'}`,dim:true}]]:tail.slice(0,room);
   let lines=[...prefix,...question,...ancillary];
@@ -176,22 +184,28 @@ function render() {
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
+    if(harness==='opencode'&&observed&&!nativeSidebar){
+      // A confirmed native sidebar keeps this attachment at bottom. Do not
+      // oscillate geometry across partial native redraws or compete with it.
+      const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
+    }
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon);
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;publishNativeDisplay();if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      const line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      if(!fleetView&&geometry().side){const panel=y-2;line+='\x1b[0m  '+(panel>=0&&panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
-    if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++){
+    if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
       const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
         '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:panelRows[y];
       if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
-    else if(!fleetView&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
+    else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
@@ -204,12 +218,13 @@ function render() {
 }
 function lineLength(line){
   if(!line)return 0;
-  for(let x=cols-1;x>=0;x--){const cell=line.getCell(x);if(cell?.getChars())return x+cell.getWidth();}
+  for(let x=panelColumns()-1;x>=0;x--){const cell=line.getCell(x);if(cell?.getChars())return x+cell.getWidth();}
   return 0;
 }
 function displayLines(lines,height,done) {
   if(displayVTs.size>=4){rawRelay();return;}
-  const vt=new Terminal({cols,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});displayVTs.add(vt);
+  const width=panelColumns();
+  const vt=new Terminal({cols:width,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});displayVTs.add(vt);
   vt.loadAddon(new Unicode11Addon());vt.unicode.activeVersion='11';
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
   const paint=line=>Array.isArray(line)?line.map(part=>{
@@ -219,7 +234,7 @@ function displayLines(lines,height,done) {
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
   try{vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
-    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0),Array.from({length:height},(_,y)=>vt.buffer.active.getLine(y)?.translateToString(true)||''));}
+    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),width)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0),Array.from({length:height},(_,y)=>vt.buffer.active.getLine(y)?.translateToString(true)||''));}
     catch{rawRelay();}
     finally{displayVTs.delete(vt);vt.dispose();}
     schedule();
@@ -228,7 +243,7 @@ function displayLines(lines,height,done) {
 let rebuilding=false,rebuildPending=false,displayQueued=false,layoutQueued=false;
 function queueDisplay(){
   if(displayQueued)return;displayQueued=true;
-  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&terminal.rows!==rows-height())applyLayout();else rebuildDisplay();}catch{rawRelay();}});
+  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&(terminal.rows!==nativeRows()||terminal.cols!==nativeColumns()))applyLayout();else rebuildDisplay();}catch{rawRelay();}});
 }
 function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
@@ -257,7 +272,7 @@ function rebuildDisplay() {
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
-    blockCursor=edit>=0?{row:rows-height()+edit+1,col:Math.min(cols,lengths[edit]+1)}:null;
+    blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns(),lengths[edit]+1)}:null;
     panelRows=painted;paintedCommon=plain;displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
   });
@@ -296,7 +311,7 @@ let displayFooter='';
 function applyLayout() {
   if(relay)return;
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
-  child.resize(cols,rows-height());terminal.resize(cols,rows-height());last=[];footerLast='\0';
+  child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 function queueProjection() {
@@ -332,7 +347,7 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
@@ -471,7 +486,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;block.update([]);
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;nativeSidebar=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }

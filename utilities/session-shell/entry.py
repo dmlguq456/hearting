@@ -85,7 +85,8 @@ def main(argv=None):
         env = dict(os.environ, HEARTING_SHELL_DIRECTORY=directory,
                    HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
                    HEARTING_SHELL_TOKEN=os.urandom(32).hex(),
-                   HEARTING_SHELL_PYTHON=sys.executable)
+                   HEARTING_SHELL_PYTHON=sys.executable,
+                   HEARTING_SHELL_LAYOUT=json.dumps(session_shell.display_policy(), separators=(",", ":")))
         try:
             return pty_owner.run(harness, command, wrapped_command(harness, command), node,
                                  Path(__file__).with_name("host.cjs"), env, directory)

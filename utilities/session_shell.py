@@ -41,17 +41,38 @@ def _private_json(path: Path, limit: int):
     return json.loads(raw)
 
 
+def _configuration(environ=None):
+    value = _private_json(policy_path(environ), MAX_RECORD_BYTES)
+    keys = {"enabled", "layout", "side_width", "side_min_columns"}
+    if not isinstance(value, dict) or not set(value) <= keys or type(value.get("enabled")) is not bool:
+        raise ValueError("invalid shell configuration")
+    if value.get("layout", "bottom") not in {"bottom", "side"}:
+        raise ValueError("invalid shell layout")
+    for key, default, lower, upper in (("side_width", 40, 32, 80), ("side_min_columns", 132, 80, 1000)):
+        number = value.get(key, default)
+        if type(number) is not int or not lower <= number <= upper:
+            raise ValueError("invalid shell geometry")
+    return value
+
+
 def policy(environ: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Absence and invalid configuration both preserve the original CLI."""
     try:
-        value = _private_json(policy_path(environ), MAX_RECORD_BYTES)
+        value = _configuration(environ)
     except FileNotFoundError:
         return False, "disabled"
     except (OSError, ValueError, TypeError):
         return False, "config-unavailable"
-    if not isinstance(value, dict) or set(value) != {"enabled"} or type(value["enabled"]) is not bool:
-        return False, "config-invalid"
     return value["enabled"], "enabled" if value["enabled"] else "disabled"
+
+
+def display_policy(environ=None):
+    try:
+        value = _configuration(environ)
+    except (OSError, ValueError, TypeError):
+        value = {}
+    return {key: value.get(key, default) for key, default in
+            (("layout", "bottom"), ("side_width", 40), ("side_min_columns", 132))}
 
 
 def process(pid: int) -> dict | None:

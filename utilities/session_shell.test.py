@@ -88,6 +88,16 @@ class SessionShellTest(unittest.TestCase):
         target.write_text('{"enabled":true}'); path.symlink_to(target)
         self.assertFalse(shell.policy()[0])
 
+    def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
+        path=shell.policy_path();path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
+        self.assertEqual(shell.display_policy(),{'layout':'bottom','side_width':40,'side_min_columns':132})
+        path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
+        self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
+        for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
+            path.write_text(json.dumps({'enabled':True,field:value}))
+            self.assertFalse(shell.policy()[0]);self.assertEqual(shell.display_policy()['layout'],'bottom')
+
     def test_exact_live_birth_bound_native_attachment_is_found(self):
         row = self.binding(); path = self.save(row)
         self.assertEqual(shell.read_binding(path), row)
