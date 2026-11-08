@@ -3416,6 +3416,10 @@ attachment, joined to the selected endpoint's current foreground owner. Resolve
 this before treating an absent native process in the outer pane as SID-less;
 the native process may run on the wrapper's inner PTY. Reuse the same attachment
 join at delivery, without inferring identity from titles or screen content.
+The attachment's inner native PID also participates in the existing native
+identity check at both joins: a different independently PROVEN SID is a conflict.
+Unknown native evidence retains the existing policy, without requiring a new
+proof for every attachment.
 An unavailable optional attachment reader leaves the existing native process
 identity checks in charge.
 Retained SID-less messages still need their original process proof; discovery

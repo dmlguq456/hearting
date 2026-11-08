@@ -302,7 +302,9 @@ def _prompt_process_session(pane, harness, info):
     claims = set()
     try:
         try:
-            attachment = _pane_shell_binding(pane, harness, info=info)
+            attachment, attachment_error = _pane_shell_binding_result(pane, harness, info=info)
+            if attachment_error:
+                return None, attachment_error
         except ImportError:
             # The optional attachment/Fleet reader is absent in partial
             # runtimes. Keep independent native process proof available.
@@ -7785,6 +7787,12 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
 
 
 def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
+    binding, _reason = _pane_shell_binding_result(
+        pane, harness, sid, expected=expected, info=info)
+    return binding
+
+
+def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=None):
     """Join a native attachment to this pane's exact current foreground owner."""
     import session_shell
     if sid is None:
@@ -7796,11 +7804,11 @@ def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
         binding, _reason = session_shell.exact_binding(harness, sid)
         rows = [binding] if binding is not None else []
     if not rows:
-        return None
+        return None, None
     if info is None:
         info = _retire_pane_info(pane)
     if not info:
-        return None
+        return None, None
     joined = []
     for binding in rows:
         owner = "broker" if "broker_pid" in binding else "host"
@@ -7811,18 +7819,27 @@ def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
                 and _proc_start_ticks(pid) == birth):
             joined.append(binding)
     if len(joined) != 1:
-        return None
+        return None, None
     binding = joined[0]
     identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
     if sid is None:
         current, _reason = session_shell.exact_binding(harness, binding["sid"])
         if current is None or any(current.get(k) != binding.get(k) for k in identity):
-            return None
+            return None, None
         binding = current
     if expected is not None and any(binding.get(k) != expected.get(k) for k in identity):
-        return None
-    return binding
+        return None, None
+    try:
+        from fleet.process_identity import PROVEN, process_identity
+    except ImportError:
+        pass  # Optional reader absence preserves independent native fallback.
+    else:
+        native = process_identity(binding["native_pid"], binding["harness"])
+        if (native.confidence == PROVEN and native.session_id
+                and native.session_id != binding["sid"]):
+            return None, "target-identity-changed"
+    return binding, None
 
 
 def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
