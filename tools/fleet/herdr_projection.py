@@ -917,7 +917,7 @@ def _panel_counts(harness, sid, values, questions):
 def panel_metadata_command(herdr, pane, harness, sid, values, questions):
     """Render already observed shell values; no collection, question text or input."""
     from fleet.session_line import _percent, _remaining
-    from fleet.render_cells import _clean_model, _effort_text
+    from fleet.render_cells import _clean_model, _effort_text, _LIVE_GLYPH
     count, answerable = _panel_counts(harness, sid, values, questions)
     count = "?" if count is None else str(count)
     answerable = "?" if answerable is None else str(answerable)
@@ -935,7 +935,7 @@ def panel_metadata_command(herdr, pane, harness, sid, values, questions):
     for label, used in values.get("model_quotas") or ():
         limits.append(sanitize_title(label) + " " + _percent(used))
     limits = " · ".join(limits)
-    summary = " · ".join(("Q" + count + "/A" + answerable, state,
+    summary = " · ".join(("Q" + count + "/" + _LIVE_GLYPH["blocked"] + "A" + answerable, state,
                           model, "context " + context, limits))
     tag = sanitize_title(values.get("tag")).strip("[]") or "?"
     agent, _ = compose(harness, sid, tag=tag, title="", display_relations=True)

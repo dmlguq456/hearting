@@ -3297,7 +3297,7 @@ Unknown or foreign repository targets grant no role, connector or pink tag;
 cross-repository messages remain communication (`✉`).
 Wrapped sessions also mirror their existing shell projection through Herdr's
 `hearting:pane` display metadata, guarded by the current native agent label.
-The Agent sidebar keeps the session identity prefix and adds `Q<count>/A<count>`
+The Agent sidebar keeps the session identity prefix and adds `Q<count>/◑A<count>`
 (current questions / answerable questions), observed work state, model, context
 and account limits. The counts precede optional telemetry in narrow sidebars.
 State labels and namespaced tokens carry the same summary; tokens need an
