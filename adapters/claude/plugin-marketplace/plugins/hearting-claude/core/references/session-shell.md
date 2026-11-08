@@ -33,6 +33,11 @@ The native callback supplies its session ID before a passive registry may exist.
 Its nearest verified native process and birth must still belong to this wrapped
 terminal; a worker or service callback cannot select another terminal's session.
 
+Startup uses the running display host's Node ABI to validate the existing
+prepared assets, without an auxiliary Node version probe. Native execution
+retains the existing display-ready boundary, exact binding and same-child
+input/relay ownership.
+
 The block opens by default, using its actual content height up to ten rows.
 Questions take space first; absent sections disappear. Its light, dim labels
 and short glyphs follow native status lines, with Fleet's semantic value colors.
