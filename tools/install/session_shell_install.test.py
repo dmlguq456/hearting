@@ -1,6 +1,7 @@
 """Opt-in installation only touches a private prefix and its exact profile block."""
 from pathlib import Path
 import importlib.util
+import json
 import os
 import sys
 import subprocess
@@ -51,6 +52,14 @@ class SessionShellInstallTest(unittest.TestCase):
         self.assertFalse(install._client().policy()[0])
         self.assertEqual(self.profile.read_bytes(), before)
         self.assertEqual({p: p.read_bytes() for p in self.native.iterdir()}, natives)
+
+    def test_enable_disable_preserves_optional_layout_preferences(self):
+        policy=install._client().policy_path();policy.parent.mkdir(parents=True,exist_ok=True)
+        policy.write_text(json.dumps({'enabled':False,'layout':'side','side_width':48,'side_min_columns':150}));policy.chmod(0o600)
+        install.set_enabled(True)
+        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150})
+        install.set_enabled(False)
+        self.assertEqual(json.loads(policy.read_text())['side_width'],48)
 
     def test_enable_and_disable_restore_a_profile_without_its_own_final_lf(self):
         before = b"alias keep='printf keep'"

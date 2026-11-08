@@ -50,6 +50,16 @@ function hiddenFooterRows(harness,lines,sid,plan,painted=[]) {
   }
   return new Set(found.length===1?found:[]);
 }
+function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) {
+  configuration=configuration&&typeof configuration==='object'?configuration:{};
+  const width=configuration.side_width,minimum=configuration.side_min_columns;
+  const side=expanded&&!nativeSidebar&&configuration.layout==='side'
+    &&Number.isInteger(width)&&width>=32&&width<=80
+    &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
+    &&cols>=minimum&&cols-width-2>=60&&rows>=8;
+  return {side,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+    panelColumn:side?cols-width:0,panelRow:side?2:null};
+}
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);
   return Math.min(limit,Math.max(summary,detail+(detail&&summary?1:0)));
@@ -94,4 +104,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={observe,firstLine,hiddenFooterRows,blockHeight,titleSequence,publisher};
+module.exports={layout,observe,firstLine,hiddenFooterRows,blockHeight,titleSequence,publisher};

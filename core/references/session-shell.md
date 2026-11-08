@@ -55,6 +55,13 @@ ten-cell colored context gauge; model/effort; 5h/7d percentages and reset times,
 model-specific quota buckets, answer waits, routes and any running-jobs line.
 Long status fields wrap in expanded mode; question space wins on small screens.
 The key guidance appears only while the person focuses the block.
+The existing optional session-shell configuration selects `layout: bottom`
+(default) or `side`, with `side_width: 40` and `side_min_columns: 132` defaults.
+Side changes geometry only: the same status, question editor and receipt source
+remain in use. Narrow windows fall back to bottom and return when widened.
+An observed OpenCode native sidebar keeps that attachment at bottom, avoiding
+competing rails. Preserve the same native process and input/relay boundaries
+through layout changes; the full-window Fleet modal remains full-window.
 The default bottom uses the question-first B layout. The current question,
 choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts

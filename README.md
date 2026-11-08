@@ -182,6 +182,14 @@ footer can yield duplicate paint to the common area, including the exact thread 
 Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
+The optional side placement uses the same block and editor. In the existing
+`~/.config/hearting/session-shell.json`, keep `"enabled": true` and add
+`"layout": "side"` (default `"bottom"`), optionally `"side_width": 40` and
+`"side_min_columns": 132`. This applies to new wrapped terminals. A narrower
+window uses bottom and returns to side when widened. Once OpenCode's own sidebar
+is observed, that attachment keeps bottom to avoid competing panels. Enabling or
+disabling the shell preserves these placement preferences.
+
 ### Key screens
 
 <table>

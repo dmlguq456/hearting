@@ -1,32 +1,11 @@
 """Question-first session block; values and authority keep their existing owners."""
-from .session_line import status_lines, clip_segments
+from .session_line import status_lines, clip_segments, wrap_segments as wrap_parts
 from .explorer.grid import cell_width
 from .config import ui_text
 
 
 def capacity(rows):
     return min(10, max(1, int(rows) - 6))
-
-
-def wrap_parts(parts, columns):
-    """Wrap semantic spans at cell boundaries, retaining their Fleet colors."""
-    columns = max(1, columns)
-    result, row, width = [], [], 0
-    for text, key in parts:
-        for char in str(text):
-            if ord(char) < 32 or ord(char) == 127:
-                char = " "
-            size = cell_width(char)
-            if width + size > columns and row:
-                result.append(row); row=[]; width=0
-            if row and row[-1][1] == key:
-                row[-1] = (row[-1][0] + char, key)
-            else:
-                row.append((char, key))
-            width += size
-    if row:
-        result.append(row)
-    return result
 
 
 def question_state(item):
@@ -46,8 +25,11 @@ def question_presentations(items, columns, *, native_wait=None):
         heading = [("" if native_wait is not None else "◑ ", key),
                    (ui_text("fleet.session_block.questions") + " " + str(len(listed)), "dim"),
                    (f" · {index+1}/{len(listed)} · ", "dim"),
-                   (ui_text("fleet.session_block." + state), key),
+                   (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key),
                    (" · " + ui_text("fleet.session_block.this_session") + " · " + str(item.get("age") or "?"), "dim")]
+        source = []
+        if columns < 64:
+            source = wrap_parts([heading.pop()], width)
         choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"
                    else question.get("choices") or [])
         options = []
@@ -59,7 +41,7 @@ def question_presentations(items, columns, *, native_wait=None):
             if question.get("recommended") == number - 1:
                 options.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
         question["display"] = {
-            "head": heading,
+            "head": heading, "source": source,
             "body": wrap_parts([(question.get("question") or "?", "loc_repo")], width),
             "options": wrap_parts(options or [(ui_text("fleet.session_block.text_hint"), "dim")], width)
                        if state == "open" else [[(str(item.get("reason") or ui_text("fleet.session_block." + state)), "dim")]],
@@ -68,7 +50,7 @@ def question_presentations(items, columns, *, native_wait=None):
 
 
 def block_sections(values, *, columns, route="", received=(), human="", work="", gpu=""):
-    prefix = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns - 4)
+    prefix = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns - 4, wrap_long=columns < 64)
     if route and route != values.get("native_route"):
         prefix += wrap_parts([("⏳ ", "g_idle"), (route.removeprefix("⏳ "), "g_idle")], columns - 4)
     tail = []
@@ -93,7 +75,7 @@ def block_lines(values, *, columns, rows, questions=(), route="", received=(),
     for item in questions:
         if item.get("questions"):
             view = item["questions"][0]["display"]
-            board = [view["head"], *view["body"], *view["options"]]
+            board = [view["head"], *view["body"], *view["options"], *view["source"]]
             break
     lines = prefix + (list(detail) if detail else board) + tail
     if focused:

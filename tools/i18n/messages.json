@@ -622,6 +622,38 @@
    "en": "1–9 choose · t text",
    "ko": "1–9 선택 · t 직접 입력"
   },
+  "fleet.session_block.compact_applied": {
+   "en": "✓ consumed",
+   "ko": "✓ 소비 확인"
+  },
+  "fleet.session_block.compact_cancelled": {
+   "en": "cancelled",
+   "ko": "취소"
+  },
+  "fleet.session_block.compact_expired": {
+   "en": "expired",
+   "ko": "만료"
+  },
+  "fleet.session_block.compact_open": {
+   "en": "reply needed",
+   "ko": "답 필요"
+  },
+  "fleet.session_block.compact_received": {
+   "en": "sent",
+   "ko": "전송됨"
+  },
+  "fleet.session_block.compact_submitted": {
+   "en": "sending",
+   "ko": "전송 중"
+  },
+  "fleet.session_block.compact_unavailable": {
+   "en": "unavailable",
+   "ko": "답변 불가"
+  },
+  "fleet.session_block.compact_unknown": {
+   "en": "unknown",
+   "ko": "미확인"
+  },
   "fleet.session_block.complete": {
    "en": "answer every field · Tab next",
    "ko": "모든 문항에 답하기 · Tab 다음"

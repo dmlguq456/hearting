@@ -48,6 +48,19 @@ def _write(path, payload, mode=0o600, *, expected=None):
     return safe_fs.atomic_write_bytes(auth, payload, mode, create_parents=True)
 
 
+def _enabled_policy(enabled):
+    client = _client()
+    before = safe_fs.capture_state(client.policy_path(), include_payload=True)
+    try:
+        value = client._private_json(client.policy_path(), client.MAX_RECORD_BYTES)
+        if not isinstance(value, dict):
+            value = {}
+    except (OSError, ValueError, TypeError):
+        value = {}
+    value["enabled"] = enabled
+    _write(client.policy_path(), (json.dumps(value, separators=(",", ":")) + "\n").encode(), expected=before)
+
+
 def _wrapper(harness, native):
     metadata = json.dumps({"harness": harness, "native": native}, separators=(",", ":"))
     entry = paths.runtime_home(harness) / "hearting/utilities/session-shell/entry.py"
@@ -174,11 +187,11 @@ def set_enabled(enabled, *, dry_run=False):
     if enabled:
         result = ensure(dry_run=dry_run, enabled=True)
         if not dry_run:
-            _write(client.policy_path(), b'{"enabled":true}\n')
+            _enabled_policy(True)
         return result
     # Disabling the policy first makes every retained wrapper transparent even
     # if a user-edited profile prevents removal of its former PATH block.
     if not dry_run:
-        _write(client.policy_path(), b'{"enabled":false}\n')
+        _enabled_policy(False)
     profile = _profile(False, dry_run=dry_run)
     return {"status": "disabled", "changed": profile["changed"], "profile": profile}

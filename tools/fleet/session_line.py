@@ -148,7 +148,29 @@ def line_segments(values, columns, *, complete=False):
     return output
 
 
-def status_lines(values, columns):
+def wrap_segments(parts, columns):
+    """Wrap semantic spans at cell boundaries, retaining their Fleet colors."""
+    columns = max(1, columns)
+    result, row, width = [], [], 0
+    for text, key in parts:
+        for char in str(text):
+            if ord(char) < 32 or ord(char) == 127:
+                char = " "
+            size = cell_width(char)
+            if width + size > columns and row:
+                result.append(row); row=[]; width=0
+            if row and row[-1][1] == key:
+                row[-1] = (row[-1][0] + char, key)
+            else:
+                row.append((char, key))
+            width += size
+    if row:
+        result.append(row)
+    return result
+
+
+
+def status_lines(values, columns, *, wrap_long=False):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
     parts = line_segments(values, 10000, complete=True)
     groups = [[]]
@@ -164,6 +186,9 @@ def status_lines(values, columns):
             result.append(line);line=[];width=0
         if line:
             line.append((SEPARATOR, "dim"));width+=cell_width(SEPARATOR)
+        if size > columns and wrap_long:
+            result.extend(wrap_segments(group, columns))
+            continue
         if size > columns:
             # A single long name cannot consume rows intended for questions.
             clipped, left = [], columns
@@ -176,7 +201,8 @@ def status_lines(values, columns):
     if line:
         result.append(line)
     if values.get("jobs"):
-        result.append([(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")])
+        job = [(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")]
+        result.extend(wrap_segments(job, columns) if wrap_long else [job])
     return result
 
 

@@ -117,6 +117,21 @@ b.update([a,{id:'late',revision:'r',answerable:true,questions:[{id:'q',question:
 b.update([{...a,revision:'changed'}]);assert.ok(JSON.stringify(b.detail({budget:5})).includes('changed'));
 ''')
 
+    def test_narrow_focused_guidance_keeps_the_full_return_key_visible(self):
+        self.node(r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+b.update([{id:'exact',revision:'r',answerable:true,questions:[{id:'q',question:'Choose?',choices:['one','two']}]}]);b.enter();
+for(const selected of [false,true]){
+ if(selected)b.input(Buffer.from('1'));
+ const rows=b.detail({budget:20,columns:40}).map(row=>row.map(part=>part.text).join(''));
+ const hints=rows.filter(row=>row.includes('Esc/')||row.includes('choose')||row.includes('Enter send'));
+ assert.ok(hints.every(row=>[...row].reduce((n,c)=>n+(c.charCodeAt(0)<128?1:2),0)<=36),'focus guidance must fit the panel');
+ assert.ok(hints.join(' ').includes('Esc/Ctrl+] back'));
+ assert.ok(hints.join(' ').includes(selected?'Enter send':'1–9 choose'));
+}
+""")
+
     def test_display_prepares_readable_choices_without_a_checkmark_for_recommendation(self):
         item={'answerable':True,'age':'2m','questions':[{'id':'q','question':'한글 질문 '*25,'choices':['one','two'],'recommended':1}]}
         question_presentations([item],80)
