@@ -46,6 +46,9 @@ class WrappedPaneResolutionTest(unittest.TestCase):
                                               {"pid": self.host["pid"]}]}
         # Only attachment/transport observations are synthetic. Record validation
         # checks real live children, their ancestry, process births and file modes.
+        mock.patch.object(peer, "_surface_missing", return_value=False).start()
+        mock.patch.object(peer, "_tmux_inventory", return_value=None).start()
+        mock.patch.object(peer, "_tmux_target_address", side_effect=lambda target: target).start()
         mock.patch.object(peer, "_retire_pane_info", side_effect=lambda pane: self.info
                           if pane == self.pane else None).start()
         mock.patch("pane_ownership.current_codex_thread", return_value="").start()
