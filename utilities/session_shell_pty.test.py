@@ -53,6 +53,7 @@ while True:
         if not callback_missing:event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line.startswith('geometry'):print('GEOMETRY_'+line+'_'+str(os.get_terminal_size(0).columns)+'x'+str(os.get_terminal_size(0).lines)+'\r\n',end='',flush=True)
+        if line=='side-unicode':print('\x1b[3;1H🙂',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
 """
 
@@ -85,6 +86,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
+const sideTerm=cfg.scenario==='side-columns'?new (require('@xterm/headless').Terminal)({cols:180,rows:40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -111,7 +113,7 @@ function existing(file){return new Promise((resolve,reject)=>{
     {cols:cfg.columns||100,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
         HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher,
         ...(cfg.scenario==='herdr'?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(cfg.directory,'private-herdr.sock')}:{})}});
- child.onData(text=>{raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
+ child.onData(text=>{if(sideTerm)sideTerm.write(text);raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
  await waitFor(/READY/);
@@ -167,6 +169,12 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
    if(!(await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('native Escape blocked the following block focus');
    await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
+ }
+ if(cfg.scenario==='side-columns'){
+   await rpc(cfg.inlet,{batch:Buffer.from('side-unicode\r').toString('base64')});await waitFor(/🙂/);
+   await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
+   const line=sideTerm.buffer.active.getLine(2);
+   if(line.getCell(142).getChars()!=='›'||[140,141].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
@@ -291,7 +299,7 @@ class SessionShellPTYTest(unittest.TestCase):
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
-        if scenario=='side-layout':
+        if scenario in {'side-layout','side-columns'}:
             config.update(columns=180,rows=40)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
@@ -305,7 +313,7 @@ class SessionShellPTYTest(unittest.TestCase):
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
-        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132}) if scenario=='side-layout' else '{"enabled":true}')
+        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132}) if scenario in {'side-layout','side-columns'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -325,6 +333,9 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_native_escape_closes_a_modal_without_disabling_the_next_block_focus(self):
         self.assertFalse(self.run_loop('native-escape-focus')['status']['focused'])
+
+    def test_side_column_is_fixed_when_native_and_outer_terminal_disagree_about_emoji_width(self):
+        self.run_loop('side-columns')
 
     def test_side_layout_resizes_the_same_native_pty_and_falls_back_when_narrow(self):
         self.run_loop('side-layout')

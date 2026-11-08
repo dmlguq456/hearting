@@ -196,7 +196,7 @@ function render() {
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
       let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
-      if(!fleetView&&geometry().side){const panel=y-2;line+='\x1b[0m  '+(panel>=0&&panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
+      if(!fleetView&&geometry().side){const panel=y-2;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel>=0&&panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
