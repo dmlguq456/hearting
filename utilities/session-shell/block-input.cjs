@@ -86,7 +86,9 @@ module.exports=function({changed,answer,action}) {
     if(focused){
       const ready=complete(row,formValues(row));
       const instruction=active(row)?(ready?text('send','Enter send'):local.typing[id]||!choices(row).length?text('text','type answer'):text('choose','1–9 choose · t text')):text(status,status);
-      tail.push([span((active(row)?instruction+' · ':'')+text('navigate','Tab next · Esc/Ctrl+] back'))]);
+      const navigate=text('navigate','Tab next · Esc/Ctrl+] back');
+      if(columns<64){if(active(row))tail.push([span(instruction)]);tail.push([span(navigate)]);}
+      else tail.push([span((active(row)?instruction+' · ':'')+navigate)]);
     }else if(status==='open')tail.push([span('Ctrl+] · '+text('open','answer needed'))]);
     const limit=Math.max(2,budget),tailLimit=Math.min(tail.length,Math.max(1,limit-2));
     const footer=tail.slice(-tailLimit),space=Math.max(0,limit-1-footer.length);
