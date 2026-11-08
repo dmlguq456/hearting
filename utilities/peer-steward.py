@@ -794,7 +794,7 @@ _LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the la
 def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pane=None,
                    target_cwd=None):
     """F-100c-2 — the ONE place `source=watch` steward evidence is written: after
-    herdr answered about a real target (`wait` returned a typed state other than
+    the shared observer answered about a real target (`wait` returned a typed state other than
     agent-not-found, or `watch` armed its watcher). The `kind=watch` ledger row itself
     is only the message; `record` never marks (review round 1, #1/#2)."""
     if from_identity is not None:
@@ -812,6 +812,39 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
     return result
 
 
+def _observe_target(payload, target, *, server=None):
+    """Normalize observation identity without granting native input or activity."""
+    observed = _interpret_payload(payload, target)
+    state, ident, code, reason = observed
+    if reason or state in {"timeout", "herdr-unavailable"}:
+        return observed
+    harness = ident.get("harness")
+    sid = peer_message.usable_session_id(ident.get("session_id"))
+    pane = ident.get("pane")
+    if pane in {None, "", "-"}:
+        if (not isinstance(target, str) or any(c.isspace() for c in target)
+                or not (":" in target or terminal_surface.is_tmux_pane(target))):
+            return observed
+        pane = target
+    try:
+        binding, conflict = _pane_shell_binding_result(
+            pane, harness if harness in _PROMPT_HARNESSES else None, server=server)
+    except ImportError:
+        return observed
+    if conflict:
+        return "unknown", ident, 4, conflict
+    if binding is None:
+        return observed
+    if sid and sid != binding["sid"]:
+        return "unknown", ident, 4, "target-identity-changed"
+    current = dict(ident, harness=binding["harness"], session_id=binding["sid"], pane=pane)
+    # The attachment proves the conversation, not its activity. An absent
+    # transport agent has no idle/done evidence; retain a typed unknown.
+    native_state = (state if harness in _PROMPT_HARNESSES and sid == binding["sid"]
+                    and state != "agent-not-found" else "unknown")
+    return native_state, current, 0, None
+
+
 def cmd_wait(args):
     target = args.target = _tmux_target_address(args.target)
     # S6: one record at wait start, append-only, never updated on return. F-100c: the
@@ -826,7 +859,7 @@ def cmd_wait(args):
                             else "herdr-not-found")
 
     payload = _run_herdr_wait(target, args.until, args.timeout)
-    state, agent, code, reason = _interpret_payload(payload, target)
+    state, agent, code, reason = _observe_target(payload, target)
     if reason is not None:
         return _unavailable(reason)
     # Role evidence only now: herdr answered about a real target. A mistyped target
@@ -3150,7 +3183,7 @@ def cmd_watch(args):
     if _herdr_missing():
         return _unavailable("herdr-not-found")
     watch_payload = _run_herdr_get(target)
-    state, agent, _code, reason = _interpret_payload(watch_payload, target)
+    state, agent, _code, reason = _observe_target(watch_payload, target, server=server)
     if state == "agent-not-found":
         print(_typed_line("agent-not-found", "-", "-", target, "-"))
         return 2
@@ -3197,7 +3230,7 @@ def cmd_watch(args):
         if seat_fd is not None:
             os.close(seat_fd)
         return _unavailable("watch-endpoint-changed")
-    state, current_agent, _code, reason = _interpret_payload(_run_herdr_get(target), target)
+    state, current_agent, _code, reason = _observe_target(_run_herdr_get(target), target, server=server)
     if state == "agent-not-found":
         os.close(alias_fd)
         if seat_fd is not None:
@@ -3803,7 +3836,8 @@ def cmd_watch_run(args):
                 pass
             if not isinstance(payload, dict):
                 return None
-            result_state, result_agent, _code, result_reason = _interpret_payload(payload, args.target)
+            result_state, result_agent, _code, result_reason = _observe_target(
+                payload, args.target, server=server)
             if result_state not in {"timeout", "agent-not-found", "herdr-unavailable"}:
                 result = {"agent_state": result_state, "agent": result_agent,
                           "reason": result_reason}
@@ -7792,7 +7826,7 @@ def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
     return binding
 
 
-def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=None):
+def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=None, server=None):
     """Join a native attachment to this pane's exact current foreground owner."""
     import session_shell
     if sid is None:
@@ -7806,7 +7840,8 @@ def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=N
     if not rows:
         return None, None
     if info is None:
-        info = _retire_pane_info(pane)
+        info = (_retire_pane_info(pane) if server is None
+                else _retire_pane_info(pane, server=server))
     if not info:
         return None, None
     joined = []
@@ -7824,7 +7859,7 @@ def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=N
     identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
     if sid is None:
-        current, _reason = session_shell.exact_binding(harness, binding["sid"])
+        current, _reason = session_shell.exact_binding(binding["harness"], binding["sid"])
         if current is None or any(current.get(k) != binding.get(k) for k in identity):
             return None, None
         binding = current
