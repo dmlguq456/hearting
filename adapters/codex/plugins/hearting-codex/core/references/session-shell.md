@@ -41,6 +41,11 @@ Preserve native shared startup: do not insert a footer configuration override
 that silently selects embedded mode. Existing explicit native modes keep
 their own behavior and the existing pending queue semantics.
 
+Startup uses the running display host's Node ABI to validate the existing
+prepared assets, without an auxiliary Node version probe. Native execution
+retains the existing display-ready boundary, exact binding and same-child
+input/relay ownership.
+
 The block opens by default, using its actual content height up to ten rows.
 Questions take space first; absent sections disappear. Its light, dim labels
 and short glyphs follow native status lines, with Fleet's semantic value colors.

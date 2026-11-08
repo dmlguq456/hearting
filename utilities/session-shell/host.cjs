@@ -16,8 +16,17 @@ function bypass() { startupResult('BYPASS'); process.exit(0); }
 let pty, Terminal, Unicode11Addon;
 try {
   if (!['claude','codex','opencode'].includes(harness) || !command.length || !process.stdin.isTTY || !process.stdout.isTTY) throw Error();
-  pty = require('node-pty'); ({Terminal} = require('@xterm/headless'));
-  ({Unicode11Addon} = require('@xterm/addon-unicode11'));
+  // The running host already knows its ABI; no auxiliary Node probe is needed.
+  const key=crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname,'package-lock.json')))
+    .update('\0').update(process.versions.modules).digest('hex').slice(0,24);
+  const cache=process.env.XDG_CACHE_HOME||path.join(require('node:os').homedir(),'.cache');
+  const assets=path.resolve(cache,'hearting','session-shell',key);
+  const ready=JSON.parse(fs.readFileSync(path.join(assets,'ready.json'),'utf8'));
+  if(!ready||ready.key!==key||Object.keys(ready).length!==1||
+     !fs.statSync(path.join(assets,'node_modules','node-pty')).isDirectory())throw Error('assets unavailable');
+  const assetRequire=require('node:module').createRequire(path.join(assets,'package.json'));
+  pty=assetRequire('node-pty');({Terminal}=assetRequire('@xterm/headless'));
+  ({Unicode11Addon}=assetRequire('@xterm/addon-unicode11'));
 } catch { bypass(); }
 const dir = process.env.HEARTING_SHELL_DIRECTORY;
 try {
