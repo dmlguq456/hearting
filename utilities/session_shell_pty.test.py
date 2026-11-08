@@ -159,6 +159,14 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(/DONE_123/.test(raw))throw Error('focused keys leaked into native');
    if(cfg.scenario==='block-focus-batch'){await rpc(cfg.inlet,{batch:Buffer.from('\x1d123\t\x1dBATCH_PRESERVED\r').toString('base64')});await waitFor(/DONE_BATCH_PRESERVED/);}
  }
+ if(cfg.scenario==='native-escape-focus'){
+   const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
+   const pinned=JSON.parse(fs.readFileSync(file,'utf8'));
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
+   if(!(await rpc(pinned.socket,{...pinned,op:'status'})).focused)throw Error('native Escape blocked the following block focus');
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1d').toString('base64')});
+ }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
@@ -300,6 +308,9 @@ class SessionShellPTYTest(unittest.TestCase):
             raise
         self.assertEqual(child.returncode,0,stderr)
         return json.loads(stdout.splitlines()[-1])
+
+    def test_native_escape_closes_a_modal_without_disabling_the_next_block_focus(self):
+        self.assertFalse(self.run_loop('native-escape-focus')['status']['focused'])
 
     def test_foreground_exec_hint_and_native_title_survive_the_real_pty_loop(self):
         self.assertTrue(self.run_loop('herdr')['status']['ok'])

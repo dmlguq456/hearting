@@ -1605,6 +1605,86 @@
   "wait.title": {
    "en": "◑ answer needed",
    "ko": "◑답변 필요"
+  },
+  "fleet.session_block.open": {
+   "en": "answer needed",
+   "ko": "답변 필요"
+  },
+  "fleet.session_block.submitted": {
+   "en": "sending · not consumed",
+   "ko": "전송 중 · 소비 전"
+  },
+  "fleet.session_block.received": {
+   "en": "sent · not consumed",
+   "ko": "전송됨 · 소비 전"
+  },
+  "fleet.session_block.applied": {
+   "en": "✓ consumed",
+   "ko": "✓ 소비 확인"
+  },
+  "fleet.session_block.expired": {
+   "en": "expired",
+   "ko": "만료"
+  },
+  "fleet.session_block.cancelled": {
+   "en": "cancelled",
+   "ko": "취소"
+  },
+  "fleet.session_block.unknown": {
+   "en": "unknown · check receipt",
+   "ko": "미확인 · 영수증 확인"
+  },
+  "fleet.session_block.unavailable": {
+   "en": "answer unavailable",
+   "ko": "답변 불가"
+  },
+  "fleet.session_block.this_session": {
+   "en": "this session",
+   "ko": "이 세션"
+  },
+  "fleet.session_block.recommended": {
+   "en": "recommended",
+   "ko": "추천"
+  },
+  "fleet.session_block.text_hint": {
+   "en": "Text answer · Ctrl+] to reply",
+   "ko": "자유입력 · Ctrl+]로 답하기"
+  },
+  "fleet.session_block.more": {
+   "en": "more · focus and ↑↓ to read",
+   "ko": "더 있음 · 포커스 후 ↑↓ 읽기"
+  },
+  "fleet.session_block.choose": {
+   "en": "1–9 choose · t text",
+   "ko": "1–9 선택 · t 직접 입력"
+  },
+  "fleet.session_block.send": {
+   "en": "Enter send",
+   "ko": "Enter 제출"
+  },
+  "fleet.session_block.navigate": {
+   "en": "Tab next · Esc/Ctrl+] back",
+   "ko": "Tab 다음 · Esc/Ctrl+] 복귀"
+  },
+  "fleet.session_block.text": {
+   "en": "type answer",
+   "ko": "답 입력"
+  },
+  "fleet.session_block.changed": {
+   "en": "question changed · Tab next",
+   "ko": "질문 변경됨 · Tab 다음"
+  },
+  "fleet.session_block.complete": {
+   "en": "answer every field · Tab next",
+   "ko": "모든 문항에 답하기 · Tab 다음"
+  },
+  "fleet.session_block.busy": {
+   "en": "action pending · wait for receipt",
+   "ko": "앞선 전송 대기 · 영수증 확인"
+  },
+  "fleet.session_block.empty": {
+   "en": "empty answer",
+   "ko": "답이 비어 있음"
   }
  }
 }

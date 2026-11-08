@@ -55,6 +55,17 @@ ten-cell colored context gauge; model/effort; 5h/7d percentages and reset times,
 model-specific quota buckets, answer waits, routes and any running-jobs line.
 Long status fields wrap in expanded mode; question space wins on small screens.
 The key guidance appears only while the person focuses the block.
+The default bottom uses the question-first B layout. The current question,
+choices or free-text affordance and exact request state are readable before
+focus; an empty question section reserves no space. Retain choices and drafts
+by request ID, revision and question ID when moving with Tab or leaving focus.
+Enter submits only explicit, complete answers. Keep a single active action;
+pending transport and proved consumption are distinct, and unavailable, expired
+or cancelled questions offer no active choices. Long questions remain readable
+with focused scrolling and an explicit overflow count. Use at most ten rows,
+preserve at least six native rows where possible, and retain the shared status
+fields and Claude's native-owned status area. The former rows/3 estimate does
+not hide a question or require another user decision at 80 columns.
 It shows the same session's routes, questions, received peers, repo work and
 last real human input. Only session-owned GPU work warrants a resource row.
 `Ctrl+]` enters block focus; Escape or `Ctrl+]` returns to native input. Ordinary

@@ -77,7 +77,7 @@ let actionWorker;
 const nativeDisplay=require('./native-display.cjs');
 let nativeContext;
 let displayValues={};
-let nativeFooter=null,paintedCommon=[];
+let nativeFooter=null,paintedCommon=[],panelSections;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -146,10 +146,25 @@ function serialize(line,width) {
   }
   return s+'\x1b[0m';
 }
-function maxHeight(){return Math.min(10,Math.max(4,Math.floor(rows/3)),Math.max(1,rows-4));}
+function maxHeight(){return Math.min(10,Math.max(1,rows-6));}
+function panelContent(){
+  if(!panelSections)return panelLines;
+  const prefix=panelSections.prefix||[],tail=panelSections.tail||[];
+  const question=actionLines.length&&block.focused?actionLines:block.detail({budget:Math.max(2,maxHeight()-prefix.length-(tail.length?1:0)),columns:cols});
+  const room=Math.max(0,maxHeight()-prefix.length-question.length);
+  const ancillary=tail.length>room&&room>0?[...tail.slice(0,room-1),[{text:`+${tail.length-room+1} · ${panelSections.labels?.more||'more'}`,dim:true}]]:tail.slice(0,room);
+  let lines=[...prefix,...question,...ancillary];
+  if(lines.length>maxHeight()){
+    const omitted=lines.length-maxHeight()+1;
+    lines=[...lines.slice(0,maxHeight()-1),[{text:`+${omitted} · ${panelSections.labels?.more||'more'}`,dim:true}]];
+  }
+  return lines.map(line=>[{text:'  '},...line]);
+}
 function height(){
   if(fleetView)return 0;
   if(!expanded)return harness==='claude'?0:1;
+  const content=panelContent();
+  if(panelSections)return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
   const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
   return nativeDisplay.blockHeight({harness,count:Math.max(panelLines.length,currentDelivery?1:0),
     detail:detail.length,limit:maxHeight(),loaded:!!projectionKey});
@@ -230,14 +245,15 @@ function rebuildDisplay() {
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
   if(expanded){
-    const base=panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
+    const base=panelSections?panelContent():panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
       [[{text:`📁 ${path.basename(process.cwd())} · ${harness} · CTX ?`,dim:true}]]:[]);
-    const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
+    const detail=!panelSections&&block.focused?(actionLines.length?actionLines:block.detail()):[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
       const at=visible.findIndex(line=>Array.isArray(line)&&line.some(part=>String(part.text).startsWith('› ')));
       edit=at<0?-1:prefix.length+at;lines=[...prefix,...visible];
     }else lines=base;
+    if(panelSections&&block.focused)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
@@ -316,13 +332,13 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext});
+    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references()});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,data.native_footer,cols,expanded,currentDelivery,heldBytes]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,cols,expanded,currentDelivery,heldBytes]);
     displayValues=data.native_display||{};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
@@ -424,6 +440,9 @@ function userInput(data) {
     if(offset<0){observeInput(data);child.write(data);return;}
     const prefix=data.subarray(0,offset);
     if(prefix.length){observeInput(prefix);child.write(prefix);}
+    // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
+    // prefix; keeping that lone byte pending would disable focus after a modal.
+    if(keyTail==='\x1b'&&!paste)keyTail='';
     if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];block.enter();queueLayout();}
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
@@ -452,7 +471,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
