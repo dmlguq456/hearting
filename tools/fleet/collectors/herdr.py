@@ -447,8 +447,11 @@ def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_cu
     }
     if not targets:
         return {}
-    key = tuple(sorted((pid, str(s.proc_start), os.path.realpath(s.cwd or ""))
-                       for pid, s in targets.items()))
+    scope = (getattr(observation, "endpoint", None), getattr(observation, "socket_path", None),
+             os.environ.get("AGENT_HERDR_SESSION"), os.environ.get("HERDR_SESSION"),
+             os.environ.get("HERDR_SOCKET_PATH"))
+    key = (scope, tuple(sorted((pid, str(s.proc_start), os.path.realpath(s.cwd or ""))
+                              for pid, s in targets.items())))
     now = time.monotonic()
     if not force_current and panes is None and runner is subprocess.run \
             and key == _CODEX_PANE_CACHE["key"] \

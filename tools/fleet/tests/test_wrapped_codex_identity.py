@@ -105,6 +105,19 @@ class WrappedFleetIdentityTest(unittest.TestCase):
             self.assertEqual(self.collect(), {})
         reader.assert_not_called()
 
+    def test_warm_identity_cannot_be_borrowed_by_a_different_observation_endpoint(self):
+        original = herdr.pane_evidence
+        def evidence(panes, **kwargs):
+            return original(panes, runner=self.runner, bindings=kwargs.get('bindings'),
+                            observation=kwargs.get('observation'))
+        foreign = SimpleNamespace(endpoint='other', socket_path=self.socket + '.other',
+                                  panes=tuple(self.panes))
+        with mock.patch.object(herdr, 'list_panes', return_value=(self.panes, self.observation)), \
+             mock.patch.object(herdr, 'pane_evidence', side_effect=evidence):
+            self.assertEqual(herdr.codex_pane_sessions([self.row], force_current=True),
+                             {self.row.pid: self.sid})
+            self.assertEqual(herdr.codex_pane_sessions([self.row], observation=foreign), {})
+
     def test_cli_default_reuses_the_existing_server_reported_endpoint(self):
         original = herdr.pane_evidence
         def evidence(panes, **kwargs):
