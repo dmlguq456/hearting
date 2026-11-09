@@ -363,7 +363,7 @@ def _adopt_child_titles(sessions, jobs):
                 and (exact_process or exact_session) and not conflicts):
             for field_name in (
                     'ctx_pct', 'active_context_tokens', 'context_window_tokens',
-                    'context_display_window_tokens', 'context_policy',
+                    'context_display_window_tokens', 'context_policy', 'compaction_pressure',
                     'session_input_tokens', 'session_cached_input_tokens',
                     'session_output_tokens', 'session_reasoning_output_tokens',
                     'session_total_tokens', 'exec_tool'):

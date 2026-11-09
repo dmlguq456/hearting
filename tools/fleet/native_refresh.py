@@ -22,7 +22,7 @@ from .collectors.procscan import read_proc_start
 
 
 _LIMIT = 512
-_CELLS = ("model", "effort", "context", "window")
+_CELLS = ("model", "effort", "context", "window", "context_detail")
 
 
 def _get(value, name, default=None):
@@ -165,7 +165,7 @@ class NativeDisplayReader:
             # without making that complete base a new display authority.
             base = repr(tuple(_get(session, key) for key in
                              ("model", "effort", "effort_default", "ctx_pct", "active_context_tokens",
-                              "context_window_tokens", "context_display_window_tokens", "context_policy", "liveness")))
+                              "context_window_tokens", "context_display_window_tokens", "context_policy", "compaction_pressure", "liveness")))
             previous = self._entries.get(identity)
             if previous is not None and previous[:2] == (signature, base):
                 entry = previous
@@ -201,7 +201,9 @@ class NativeDisplayReader:
         row = SimpleNamespace(**session) if isinstance(session, Mapping) else copy.copy(session)
         base_model, base_effort = _session_model_effort(row, _get(row, "liveness"))
         base_context, base_window = _context_gauge(row)
-        base_cells = dict(model=base_model, effort=base_effort, context=base_context, window=base_window)
+        from .token_budget import context_display_detail
+        base_cells = dict(model=base_model, effort=base_effort, context=base_context, window=base_window,
+                          context_detail=context_display_detail(row))
         feed = _feed(binding, identity)
         if harness == "claude":
             callback = native_display.claude_callback(tap, sid, int(pid), start)
@@ -250,7 +252,8 @@ class NativeDisplayReader:
         state = _get(row, "liveness")
         model, effort = _session_model_effort(row, state)
         context, window = _context_gauge(row)
-        return dict(model=model, effort=effort, context=context, window=window, _base=base_cells)
+        return dict(model=model, effort=effort, context=context, window=window,
+                    context_detail=context_display_detail(row), _base=base_cells)
 
 
 class NativeDisplayLayer:

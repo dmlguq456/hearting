@@ -330,6 +330,26 @@
    "en": "Campaigns: {campaigns} · cycles: {cycles} · running: {open}",
    "ko": "캠페인 {campaigns}개 · 사이클 {cycles}개 · 진행 중 {open}개"
   },
+  "fleet.context.compaction_imminent": {
+   "en": "compaction imminent",
+   "ko": "압축 임박"
+  },
+  "fleet.context.limit": {
+   "en": "limit",
+   "ko": "압축 기준"
+  },
+  "fleet.context.native_estimate": {
+   "en": "native estimate",
+   "ko": "native 추정"
+  },
+  "fleet.context.observed": {
+   "en": "observed",
+   "ko": "관측"
+  },
+  "fleet.context.server": {
+   "en": "server",
+   "ko": "서버"
+  },
   "fleet.delivery.no_recipient": {
    "en": " · {count} with no session to receive",
    "ko": " · 받을 세션 없음 {count}"

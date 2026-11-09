@@ -2163,6 +2163,10 @@ def _context_detail_row(entity, depth=0, term_width=None, dim=False,
     else:
         value_text = "%d%%" % shown_pct
     segs.append((value_text.rjust(_CONTEXT_VALUE_W), "dim"))
+    from .token_budget import compaction_imminent
+    if compaction_imminent(getattr(entity, "compaction_pressure", None)):
+        from .config import ui_text
+        segs.append((" · " + ui_text("fleet.context.compaction_imminent"), "lvl_r"))
     exec_segs = [] if resource_now is not None else _exec_detail_segs(entity)
     if now_text or exec_segs:
         prefix_width = sum(_dw(text) for text, _key in segs)

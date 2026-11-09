@@ -507,6 +507,7 @@ class Session:
     context_window_tokens: Optional[int] = None
     context_display_window_tokens: Optional[int] = None
     context_policy: Optional[dict] = None
+    compaction_pressure: Optional[dict] = None
     session_input_tokens: Optional[int] = None
     session_cached_input_tokens: Optional[int] = None
     session_output_tokens: Optional[int] = None
@@ -811,6 +812,7 @@ class DispatchJob:
     context_window_tokens: Optional[int] = None
     context_display_window_tokens: Optional[int] = None
     context_policy: Optional[dict] = None
+    compaction_pressure: Optional[dict] = None
     session_input_tokens: Optional[int] = None
     session_cached_input_tokens: Optional[int] = None
     session_output_tokens: Optional[int] = None
