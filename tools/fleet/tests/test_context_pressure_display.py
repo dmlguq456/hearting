@@ -44,6 +44,10 @@ class PressureDisplayTest(unittest.TestCase):
             detail=context_detail_lines(context_display_detail(values()))
             self.assertEqual(detail[1][1],'?');self.assertIn('539,613',str(detail))
 
+    def test_ended_rows_do_not_retain_an_active_compaction_warning(self):
+        for state in ('dead','stale'):
+            self.assertIsNone(context_display_detail(dict(values(),liveness=state)))
+
     def mapping(self):
         m=load_fixture(Path(__file__).parent/'fixtures/explorer/view_model.json').to_mapping()
         session=dict(m['sessions'][0],tag='52',harness='codex',context=65,window=.8284,

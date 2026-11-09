@@ -383,6 +383,8 @@ def context_display_detail(entity):
     """One numeric display record; never a policy or input authorization."""
     get = entity.get if isinstance(entity, Mapping) else lambda key: getattr(entity, key, None)
     pressure = get("compaction_pressure")
+    if get("liveness") in {"dead", "stale"}:
+        return None
     if not isinstance(pressure, Mapping):
         return None
     return {"server_total_tokens": get("active_context_tokens"),
