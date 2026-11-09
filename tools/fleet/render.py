@@ -6225,10 +6225,11 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                     runtime.persist_complete_async(candidate_model, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
             elif _EXPLORER_PUBLISHED_MODEL is not None:
-                from .explorer.live import selected_detail, current_claude_usage
+                from .explorer.live import selected_detail, current_claude_usage, current_session_activity
                 base = _EXPLORER_PUBLISHED_MODEL
                 # Replay lacks exact live bindings; it remains responsive without guessing them.
                 shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
+                shown = current_session_activity(shown, candidate_model, current)
                 shown = _explorer_native_display(current_claude_usage(shown, current, time.time()))
                 _EXPLORER_MODEL = shown
                 from .explorer.chrome import _clock_freshness
