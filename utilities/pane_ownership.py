@@ -530,8 +530,8 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
         if not isinstance(info, dict) or info.get("pane_id") != pane:
             return ""
         join = sys.modules[name]._pane_shell_binding_result
-        binding, reason = join(pane, "codex", session_id, info=info)
-        if binding is None or reason:
+        binding, reason = join(pane, "codex", info=info)
+        if binding is None or reason or session_id is not None and binding["sid"] != session_id:
             return ""
         inner = binding["native_pid"]
         owner = binding.get("broker_pid", binding["host_pid"])
@@ -555,7 +555,7 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
                                     socket_path=socket_path, tmux=tmux)
         if not latest or latest.get("pane_id") != pane:
             return ""
-        current, reason = join(pane, "codex", binding["sid"], expected=binding, info=latest)
+        current, reason = join(pane, "codex", expected=binding, info=latest)
         if current is None or reason:
             return ""
         # Attachment identity alone does not authorize input into a loaded-but-

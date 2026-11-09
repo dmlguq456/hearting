@@ -120,10 +120,24 @@ class WrappedTidyTest(unittest.TestCase):
         self.assertEqual(self.loader(), self.pane)
         with mock.patch('fleet.collectors.codex.session_id_of_process', return_value=''):
             self.assertEqual(self.current(self.broker['pid']), '')
-        self.publish('codex', host_pid=self.native['pid'], host_start=self.native['start'],
-                     native_pid=self.host['pid'], native_start=self.host['start'])
-        self.assertEqual(self.loader(), '')
-        self.assertEqual(self.current(self.broker['pid']), '')
+        for sid in (self.sid, '01000000-0000-7000-8000-000000000002'):
+            with self.subTest(second_attachment=sid):
+                self.publish('codex', sid=sid, host_pid=self.native['pid'], host_start=self.native['start'],
+                             native_pid=self.host['pid'], native_start=self.host['start'])
+                self.assertEqual(self.loader(), '')
+                self.assertEqual(self.current(self.broker['pid']), '')
+
+    def test_another_sid_attachment_appearing_at_the_final_look_is_ambiguous(self):
+        seen = []
+        def observation(*args, **kwargs):
+            seen.append(True)
+            if len(seen) == 2:
+                self.publish('codex', sid='01000000-0000-7000-8000-000000000002',
+                             host_pid=self.native['pid'], host_start=self.native['start'],
+                             native_pid=self.host['pid'], native_start=self.host['start'])
+            return self.info
+        with mock.patch.object(po, '_pane_process_info', side_effect=observation):
+            self.assertEqual(self.loader(), '')
 
     def test_tidy_effect_rechecks_native_root_even_when_metadata_keeps_the_old_sid(self):
         agent = {"pane": self.pane, "harness": "codex", "session_id": self.sid}
