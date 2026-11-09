@@ -509,6 +509,65 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
                            and not _registered_worker(pid)) else ""
 
 
+def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
+                          server=None, socket_path=None, info=None, tmux=None):
+    """Reuse the attachment join, then require the inner TUI's current root."""
+    try:
+        import importlib.util
+        import session_shell
+        from fleet.collectors import procscan
+        from terminal_surface import caller_tmux_pane, same_tmux_pane
+
+        # Shared with the Herdr projection; identity policy stays in the existing
+        # peer join, including its independently PROVEN inner-SID conflict check.
+        name = "_hearting_panel_peer_steward"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(
+                name, Path(__file__).with_name("peer-steward.py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        if not isinstance(info, dict) or info.get("pane_id") != pane:
+            return ""
+        join = sys.modules[name]._pane_shell_binding_result
+        binding, reason = join(pane, "codex", session_id, info=info)
+        if binding is None or reason:
+            return ""
+        inner = binding["native_pid"]
+        owner = binding.get("broker_pid", binding["host_pid"])
+        if pid is not None and pid not in {inner, owner}:
+            return ""
+        record = _process(inner)
+        kind, service = _runtime(inner)
+        if (not record or str(record[5]) != binding["native_start"]
+                or not record[3] or record[2] != record[4]
+                or kind != "codex" or service or _registered_worker(inner)):
+            return ""
+        env = procscan.read_environ(inner)
+        if tmux:
+            native_pane, native_tmux = caller_tmux_pane(env)
+            if not native_tmux or native_tmux != tmux or not same_tmux_pane(native_pane, pane):
+                return ""
+        elif (env.get("HERDR_PANE_ID") != pane
+                or not _same_socket_endpoint(env.get("HERDR_SOCKET_PATH", ""), socket_path, server)):
+            return ""
+        latest = _pane_process_info(pane, executable=executable, server=server,
+                                    socket_path=socket_path, tmux=tmux)
+        if not latest or latest.get("pane_id") != pane:
+            return ""
+        current, reason = join(pane, "codex", binding["sid"], expected=binding, info=latest)
+        if current is None or reason:
+            return ""
+        # Attachment identity alone does not authorize input into a loaded-but-
+        # unselected root. This is the same fresh check used by shell answers.
+        if not session_shell._codex_current_root(inner, binding["native_start"], binding["sid"]):
+            return ""
+        return binding["sid"] if _process(inner) == record else ""
+    except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError,
+            AttributeError, KeyError):
+        return ""
+
+
 def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket_path=None,
                          process_info=None, codex_observation=None, tmux=None):
     """Return the native thread proved current in this pane's foreground Codex TUI."""
@@ -531,6 +590,7 @@ def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket
         return ""
     candidates = sorted(foreground_pids if pid is None else foreground_pids & {int(pid)})
     current_ids = set()
+    direct_tui = False
     from fleet.collectors import codex as codex_collector
     codex_observation = _codex_identity_observation(codex_collector, codex_observation)
     for candidate in candidates:
@@ -539,6 +599,7 @@ def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket
         if (kind != "codex" or service or not record or not record[3]
                 or record[2] != group or record[4] != group or _registered_worker(candidate)):
             continue
+        direct_tui = True
         native_sid = _native_session(candidate, "codex", codex_observation=codex_observation)
         selected = _resolve_codex_pane_selection(
             pane, candidate, record, group, native_sid, executable=executable,
@@ -546,7 +607,10 @@ def current_codex_thread(pane, pid=None, *, executable=None, server=None, socket
             tmux=tmux)
         if selected:
             current_ids.add(selected)
-    return next(iter(current_ids)) if len(current_ids) == 1 else ""
+    if direct_tui:
+        return next(iter(current_ids)) if len(current_ids) == 1 else ""
+    return _wrapped_codex_thread(pane, pid, executable=executable, server=server,
+                                 socket_path=socket_path, info=info, tmux=tmux)
 
 
 def current_codex_thread_for_caller(pane, *, executable=None, server=None, socket_path=None):
@@ -585,8 +649,13 @@ def _loader_verified_pane(pane, session_id, owner_pid, owner_start, *,
                            if isinstance(item, dict) and str(item.get("pid", "")).isdigit()}
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
         return ""
-    if not info or owner_pid not in foreground_pids or record[2] != group or record[4] != group:
+    if not info or info.get("pane_id") != pane:
         return ""
+    if owner_pid not in foreground_pids or record[2] != group or record[4] != group:
+        selected = _wrapped_codex_thread(
+            pane, owner_pid, session_id, executable=executable, server=server,
+            socket_path=socket_path, info=info, tmux=tmux)
+        return pane if selected == session_id else ""
     process_sid = _native_session(owner_pid, "codex", codex_observation=codex_observation)
     selected = _resolve_codex_pane_selection(
         pane, owner_pid, record, group, process_sid, executable=executable,

@@ -8475,10 +8475,10 @@ def _clear_look(target, req):
         return "target-changed", agent, None
     if agent.get("harness") != req.get("harness"):
         return "target-changed", agent, None
-    if req.get("harness") == "opencode":
-        # Herdr may retain an old pane session after the TUI selects another one.
-        # The PID/birth-bound TUI record is the only authority for this seat.
-        current = _process_session(agent.get("pane") or target, "opencode")
+    if req.get("harness") in ("codex", "opencode"):
+        # Metadata can retain an old selection. Reuse the exact current native
+        # reader at both looks, including a wrapper's inner PTY and current root.
+        current = _process_session(agent.get("pane") or target, req.get("harness"))
         if current != req.get("sid"):
             return "target-changed" if current else "session-identity-unknown", agent, None
     if req.get("harness") in ("claude", "codex") and agent.get("session_id") != req.get("sid"):

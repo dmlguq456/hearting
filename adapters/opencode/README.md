@@ -517,8 +517,9 @@ records as live. See [V2 Shell](https://opencode.ai/v2/docs/tools/#shell) and
 
 ## Runtime compaction tidy
 
-`experimental.session.compacting` appends shared six-field instructions to `output.context`; `session.compacted` fetches the matching completed assistant summary and its parent compaction part through the v1 client. Only a verified `auto=true` part with a nonempty summary successfully saved to the main session's own verified herdr pane can book the existing snapshot/clear/`이어서해` flow. The helper requires the latest ordinary assistant to finish after the matching user and a native idle observation after compaction, then refreshes the card with bounded recent conversation and the transcript path. It waits up to three hours. Manual/unknown parts, missing/empty summaries, failed card writes, project seats (no Herdr or tmux pane), and workers/sub-sessions remain queue-only; unknown session identity stays ledger-only.
+Hearting records the exact native session's compaction boundary only. Native compact hooks add no card instructions, card or memory request, clear, or automatic continuation. Registered workers retain their separate stage-ledger flush and re-anchor behavior.
 
+Manual `정리만` / `--no-clear` saves the card and queues memory work while retaining the conversation. It does not shrink context or prevent native automatic compaction.
 
 ### Session route waiting
 

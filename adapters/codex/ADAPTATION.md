@@ -765,14 +765,14 @@ Session and prompt bridges retain `hookSpecificOutput.additionalContext` for opt
 
 ## Runtime compaction tidy
 
-- **Runtime support:** PreCompact/PostCompact run, but OpenAI remote V2 exposes no plaintext summary or compact-prompt override through them.
-- **Adapter realization:** explicitly automatic Codex remote-V2 PostCompact may join the shared tidy booking after transcript-confirmed turn completion. Since remote-V2 has no usable summary, the bounded helper requests a real card from the same verified main pane and waits for matching card/enqueue evidence. Manual/unknown events, workers, changed input/target, and uncertain sends stay queue-only; compact-origin continuation remains unchanged.
-- **Fallback:** six-field automatic summaries and automatic summary-card saving are unavailable. No provider switch, local compaction, user setting, or manual approval is introduced.
+- **Runtime surface:** the existing PreCompact/PostCompact hooks observe native compaction.
+- **Adapter realization:** the shared hook records the exact native session's compaction boundary only; it adds no card instructions, card or memory request, clear, or automatic continuation. Registered worker stage-ledger handling remains separate.
+- **Fallback:** missing native identity leaves observation unverified without blocking native compaction. Manual `정리만` / `--no-clear` saves the card and queues memory work while retaining the conversation. It does not shrink context or prevent native automatic compaction.
 
 ## Idle tidy
 
 - **Runtime support:** the existing Stop hook receives the exact thread id and reads only the latest `last_token_usage.input_tokens` from that thread's rollout. If the Stop payload omits a transcript path, the bounded rollout finder must resolve the exact thread.
-- **Adapter realization:** the shared idle observer records a durable due time and requests a card from the same verified main pane once. It does not fabricate a remote-V2 compact summary. The card/enqueue receipt is required before clear, and the successor receives status-only guidance.
+- **Adapter realization:** the shared observer uses the configured last-activity wait and token threshold. The existing memory helper writes an external card from the original transcript and prior card, then the guarded exact-session writer sends `/compact` once when the pane is idle, its input is empty and no question or confirmation is open. The session and readable conversation remain; the main session receives no card-writing request, clear or continuation prompt.
 
 - **Cache evidence:** the local config names the configured deep model (`CFG_TIER_DEEP_MODEL`) but leaves `model_provider` unset and provides no request-level cache settings. The provider/cache lifetime is therefore unknown; no OpenAI API retention claim is applied to the Codex account path.
 
