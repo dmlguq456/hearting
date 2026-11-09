@@ -108,7 +108,8 @@ class CompactionPressureTest(unittest.TestCase):
         self.assertEqual(self.read()['state'], 'unknown')
 
     def test_malformed_latest_boundary_never_reuses_an_older_judgment(self):
-        for fragment in ('{"type":"compacted",', '{"payload":{"type":"token_count",'):
+        for fragment in ('{"type":"compacted",', '{"payload":{"type":"token_count",',
+                         '["token_count"]', '["compacted"]'):
             original=self.path.read_text()
             self.path.write_text(original+fragment+'\n')
             self.assertEqual(self.read()['state'],'unknown')
@@ -119,6 +120,19 @@ class CompactionPressureTest(unittest.TestCase):
             self.path.write_text(json.dumps({'type':'session_meta','payload':{
                 'id':'exact-session-id','cli_version':version}})+'\n'+self.line+'\n')
             self.assertEqual(self.read()['reason'],'unsupported-log-version')
+
+    def test_nonobject_metadata_and_truncated_log_bodies_stay_unknown(self):
+        original=self.path.read_text()
+        for row in (['session_meta'], 'session_meta', {'type':'session_meta','payload':[]}):
+            self.path.write_text(json.dumps(row)+'\n'+self.line+'\n')
+            self.assertEqual(self.read()['state'],'unknown')
+        self.path.write_text(original)
+        prefix='auto_compact_scope_tokens=799116 auto_compact_scope_limit=Some(784800) auto_compact_limit_scope=Total token_limit_reached=true '
+        for padding in ('x'*8200, '한'*3000):
+            self.clear();self.add(body=prefix+padding+' auto_compact_scope_tokens=1')
+            self.assertEqual(self.read()['reason'],'partial-log-body')
+        self.clear();self.add(body=prefix+' auto_compact_scope_tokens=1')
+        self.assertEqual(self.read()['state'],'unknown')
 
     def test_old_or_untimed_usage_and_unseen_tail_remain_unknown(self):
         p = codex_compaction_pressure('exact-session-id', self.path, self.line,

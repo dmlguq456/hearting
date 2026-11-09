@@ -436,8 +436,16 @@ def codex_compaction_pressure(session_id, rollout, token_line, *, home=None,
             tail = handle.read(262_144).splitlines()
         if signature(initial) != signature(path.stat()):
             return unknown("rollout-changed")
-        meta = next((json.loads(row).get("payload") for row in head
-                     if b'"session_meta"' in row and json.loads(row).get("type") == "session_meta"), None)
+        meta = None
+        for raw in head:
+            if b'"session_meta"' not in raw:
+                continue
+            event = json.loads(raw)
+            if not isinstance(event, dict):
+                return unknown("malformed-session-meta")
+            if event.get("type") == "session_meta":
+                meta = event.get("payload")
+                break
         if not isinstance(meta, dict) or meta.get("id") != session_id:
             return unknown("session-mismatch")
         # Internal log semantics are verified for this release, not a public API.
@@ -452,6 +460,8 @@ def codex_compaction_pressure(session_id, rollout, token_line, *, home=None,
                     return unknown("malformed-usage-boundary")
                 continue
             if not isinstance(event, dict):
+                if b'"token_count"' in raw or b'"compacted"' in raw:
+                    return unknown("malformed-usage-boundary")
                 continue
             if event.get("type") == "compacted":
                 compact_at = codex_event_epoch(raw)
@@ -491,16 +501,27 @@ def codex_compaction_pressure(session_id, rollout, token_line, *, home=None,
         # The existing thread/time index bounds work. Limit rows and each body;
         # only this request's post-sampling judgment may match, never an older one.
         rows = connection.execute(
-            "SELECT ts, ts_nanos, substr(feedback_log_body,1,8192) FROM logs "
+            "SELECT ts, ts_nanos, length(CAST(feedback_log_body AS BLOB)), "
+            "substr(CAST(feedback_log_body AS BLOB),1,8193) FROM logs "
             "WHERE thread_id=? AND ts>=? AND ts<=? AND target=? "
             "AND feedback_log_body LIKE '%auto_compact_scope_tokens=%' "
             "ORDER BY ts DESC,ts_nanos DESC LIMIT 8",
             (session_id, int(usage_at), int(usage_at + 2), "codex_core::session::turn")).fetchall()
         if signature(initial) != signature(path.stat()):
             return unknown("rollout-changed")
-        candidates = [(ts + ns / 1_000_000_000, body) for ts, ns, body in rows
-                      if type(ts) is int and type(ns) is int and 0 <= ns < 1_000_000_000
-                      and usage_at <= ts + ns / 1_000_000_000 <= min(now + 2, usage_at + 2)]
+        candidates = []
+        for ts, ns, body_size, body in rows:
+            if type(ts) is not int or type(ns) is not int or not 0 <= ns < 1_000_000_000:
+                return unknown("unsupported-log-format")
+            point = ts + ns / 1_000_000_000
+            if not usage_at <= point <= min(now + 2, usage_at + 2):
+                continue
+            # A readable prefix is not a complete diagnostic. The extra byte and
+            # original byte length detect truncation, including multibyte text.
+            if (type(body_size) is not int or body_size > 8192
+                    or not isinstance(body, bytes) or len(body) != body_size):
+                return unknown("partial-log-body")
+            candidates.append((point, body.decode("utf-8")))
         if len(candidates) != 1:
             return unknown("missing-or-ambiguous-judgment")
         observed_at, body = candidates[0]
