@@ -411,6 +411,10 @@ def _session_records(snapshot, now, resolver):
         if (_get(session, "_resume_attention") == "stopped"
                 and state not in ("working", "dead", "stale") and not record["ask"]):
             record["restart"] = "stopped"
+        from ..token_budget import context_display_detail
+        detail = context_display_detail(session)
+        if detail is not None:
+            record["context_detail"] = detail
         rows.append(record)
         sid = _text(_get(session, "session_id", "sid", "id"))
         chain = _get(session, "route_chain")

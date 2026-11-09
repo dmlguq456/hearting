@@ -945,7 +945,7 @@ def merge(basic, detail):
                         context is None or getattr(context, "used_pct", None) is None):
                     current._dispatch_context_owned = True
                     for field in ("context", "_context_evidence", "ctx_pct", "active_context_tokens",
-                                  "context_window_tokens", "session_input_tokens", "session_cached_input_tokens",
+                                  "context_window_tokens", "compaction_pressure", "session_input_tokens", "session_cached_input_tokens",
                                   "session_output_tokens", "session_reasoning_output_tokens", "session_total_tokens"):
                         if hasattr(previous, field) and (getattr(current, field, None) is None
                                 or field in ("context", "_context_evidence")):

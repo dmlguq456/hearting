@@ -97,6 +97,12 @@ def line_segments(values, columns, *, complete=False):
         gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
     words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
           cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
+    from .token_budget import compaction_imminent
+    if compaction_imminent(values.get("compaction_pressure")):
+        from .config import ui_text
+        warning = ui_text("fleet.context.compaction_imminent")
+        words("compaction", warning, "lvl_r", cell_width(warning), 99,
+              minimum=cell_width(warning))
     words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
     for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
         remaining = _remaining(reset)
@@ -370,3 +376,21 @@ def claude_first_statusline(callback, environ, script):
         subprocess.Popen(['bash',script],env=env,stdin=source,
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
     return line
+
+
+def context_detail_lines(detail):
+    """Common detail labels retain server usage beside a separate native estimate."""
+    from .token_budget import current_compaction_pressure
+    from .config import ui_text
+    if not isinstance(detail, dict) and not hasattr(detail, "get"):
+        return []
+    def number(value):
+        return f"{value:,}" if type(value) is int and value >= 0 else "?"
+    pressure = detail.get("pressure")
+    observed = current_compaction_pressure(pressure)
+    return [
+        (ui_text("fleet.context.server"), number(detail.get("server_total_tokens")) + " / " + number(detail.get("server_window_tokens"))),
+        (ui_text("fleet.context.native_estimate"), number(pressure.get("scope_tokens")) if observed else "?"),
+        (ui_text("fleet.context.limit"), (number(pressure.get("limit_tokens")) + " · " + str(pressure.get("scope"))) if observed else "?"),
+        (ui_text("fleet.context.observed"), time.strftime("%H:%M:%S", time.localtime(pressure["observed_at"])) if observed else "?"),
+    ]

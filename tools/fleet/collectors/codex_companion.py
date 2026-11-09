@@ -186,7 +186,7 @@ def _telemetry(record, home=None):
     if tel.context_window_tokens is None and tel.active_context_tokens is None:
         return None, None                    # parsed but empty → still an honest gap
     from ..context_policy import codex_applied_policy
-    from ..token_budget import context_policy_used_pct
+    from ..token_budget import context_policy_used_pct, codex_compaction_pressure
     policy = codex_applied_policy(
         runtime_version=codex._rollout_cli_version(path),
         model=codex._rollout_model_effort(path)[0],
@@ -199,6 +199,8 @@ def _telemetry(record, home=None):
         "rollout": path,
         "context_used_pct": used,
         "context_policy": policy,
+        "compaction_pressure": codex_compaction_pressure(
+            record.get("threadId"), path, line, home=home or codex._rollout_home(path)),
         "active_context_tokens": tel.active_context_tokens,
         "context_window_tokens": tel.context_window_tokens,
         "context_display_window_tokens": (
@@ -301,6 +303,7 @@ def _row(record, state_dir, now, codex_home=None):
         job.context_window_tokens = telemetry.get("context_window_tokens")
         job.context_display_window_tokens = telemetry.get("context_display_window_tokens")
         job.context_policy = telemetry.get("context_policy")
+        job.compaction_pressure = telemetry.get("compaction_pressure")
         job.ctx_pct = telemetry.get("context_used_pct")
     return job
 
