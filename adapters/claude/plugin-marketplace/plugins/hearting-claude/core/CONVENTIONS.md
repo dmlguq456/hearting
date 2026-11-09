@@ -120,6 +120,16 @@ separate. Display may use that session's native measurements when its applied
 policy is unknown; missing measurements remain unknown, including a missing
 owner when only workers were observed.
 
+The display's latest server-reported usage and percentage remain distinct from
+native compaction pressure: an exact-session, compaction-interval and usage-time
+observation of the native estimate, applied limit, scope and timestamp. Supported
+native telemetry takes precedence over bounded reads of existing internal logs.
+Unavailable, changed, mismatched or stale diagnostic evidence means unknown,
+including any remaining headroom. This display observation uses existing refresh
+paths and grants no input authority or additional model instructions. The fixed
+500K/700K work-preservation notices describe saving work, not guaranteed time
+before native compaction, and reuse the same pressure without changing idle policy.
+
 Pressure cannot reduce validation, tests, error and data-loss handling, security, auth, permissions, accessibility, spec and plan gates, sandbox and approval, git/write/hook/liveness guards, required tools, or input context. Automatic pruning stays off. An adapter may inject a compact output directive only on a verified pressure-band transition; normal, unknown, unsupported, native-owned, and repeated bands inject zero bytes. Runtime-owned budget config is read-only unless the user explicitly chooses a separately verified native opt-in.
 
 ## §2. Portable Model Roles
