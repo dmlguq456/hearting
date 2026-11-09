@@ -10874,7 +10874,10 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
             with self.subTest(screen=screen[:40]):
                 self.book(harness="codex", sid="thr-A")
                 world = _ClearWorld(harness="codex", sid="thr-A", screens=[screen], new_sid="thr-B")
-                rc, line = self.clear_cmd(world)
+                # This screen fixture has an explicit current native selection.
+                with mock.patch.object(peer_steward, "_process_session", side_effect=
+                                       lambda *_: None if world.sent else world.sid):
+                    rc, line = self.clear_cmd(world)
                 self.assertIn(expect, line)
                 self.assertEqual(len(world.typed()), 1 if expect == "cleared=true" else 0)
 
@@ -11009,32 +11012,65 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                         rc, line = self.clear_cmd(world)
                     self.assertEqual(len(world.typed()), expect_typed, line)
                     if not expect_typed:
-                        self.assertEqual((rc, "reason=target-changed" in line), (3, True), line)
+                        reason = "session-identity-unknown" if harness == "codex" and proof is None else "target-changed"
+                        self.assertEqual((rc, f"reason={reason}" in line), (3, True), line)
 
-    def test_a_codex_pane_record_that_trails_the_seat_ledger_is_not_a_changed_target(self):
-        # Shared app-server daemon: no rollout for the process check, herdr keeps the session
-        # before the last clear.  The seat ledger (both sessions' hooks at this pane) orders them.
+    def test_a_codex_seat_ledger_cannot_replace_the_current_native_selection(self):
         st = self.st
         seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "codex", "")
         with st.seat_lock(seat.key):
             st.record_event(seat, "codex", "sid-A", "prompt", cwd="/w", now=time.time() - 100)
             st.record_event(seat, "codex", "sid-B", "prompt", cwd="/w", now=time.time() - 50)
-        for herdr_says, typed in (("sid-A", 1), ("sid-never-seen", 0), ("sid-B", 1)):
-            with self.subTest(herdr_says=herdr_says):
+        for metadata, native in (("sid-A", "sid-B"), ("sid-B", "sid-A"), ("sid-B", None)):
+            with self.subTest(metadata=metadata, native=native):
                 self.book(harness="codex", sid="sid-B")
-                world = _ClearWorld(harness="codex", sid=herdr_says, new_sid=None, screens=[CODEX_EMPTY])
-                # the process check may name the older session too (same-cwd fallback of the board)
-                with mock.patch("fleet.collectors.codex.session_id_of_process",
-                                return_value="sid-A" if herdr_says == "sid-A" else None), \
-                        mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                world = _ClearWorld(harness="codex", sid=metadata, new_sid=None, screens=[CODEX_EMPTY])
+                with mock.patch.object(peer_steward, "_process_session", return_value=native), \
+                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
                     rc, line = self.clear_cmd(world)
-                self.assertEqual(len(world.typed()), typed, line)
-                if typed:
-                    # the lagging value is never taken for the new session
+                self.assertEqual(len(world.typed()), int(native == "sid-B"), line)
+                if native == "sid-B":
                     self.assertIn("cleared=unverified", line)
-                    self.assertNotIn("new_session=sid-A", line)
                 else:
-                    self.assertIn("reason=target-changed", line)
+                    reason = "target-changed" if native else "session-identity-unknown"
+                    self.assertIn("reason=" + reason, line)
+
+
+    def test_codex_native_judgment_is_taken_once_per_look_with_lagging_metadata(self):
+        for final in ("sid-B", None, "sid-C"):
+            with self.subTest(final_native=final):
+                st = self.st
+                seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "codex", "")
+                with st.seat_lock(seat.key):
+                    st.record_event(seat, "codex", "sid-A", "prompt", cwd="/w", now=time.time() - 100)
+                    st.record_event(seat, "codex", "sid-B", "prompt", cwd="/w", now=time.time() - 50)
+                self.book(harness="codex", sid="sid-B")
+                world = _ClearWorld(harness="codex", sid="sid-A", new_sid=None, screens=[CODEX_EMPTY])
+                original_look = peer_steward._clear_look
+                look_number, reads = 0, []
+
+                def look(*args):
+                    nonlocal look_number
+                    look_number += 1
+                    return original_look(*args)
+
+                def native(*args):
+                    value = "sid-B" if look_number == 1 else final
+                    if not world.sent:
+                        reads.append((look_number, value))
+                    return value
+
+                with mock.patch.object(peer_steward, "_clear_look", side_effect=look), \
+                     mock.patch.object(peer_steward, "_process_session", side_effect=native), \
+                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                    rc, line = self.clear_cmd(world)
+                self.assertEqual(len(world.typed()), int(final == "sid-B"), line)
+                if final != "sid-B":
+                    reason = "session-identity-unknown" if final is None else "target-changed"
+                    self.assertIn("reason=" + reason, line)
+                # Bind the change to the final input look, not to a fourth
+                # reader call that disappears when redundant reads are removed.
+                self.assertEqual(reads, [(1, "sid-B"), (2, final)])
 
     # -- after the send: never a second one -------------------------------------------------
 
@@ -11079,7 +11115,10 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                             home_after=codex_screen(f"proj · main · Context 0% used · {NEW_T}"))
         with mock.patch("fleet.collectors.codex.session_id_of_process", return_value=None), \
                 mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-            rc, line = self.clear_cmd(world)
+            # This screen fixture has an explicit current native selection.
+            with mock.patch.object(peer_steward, "_process_session", side_effect=
+                                   lambda *_: None if world.sent else world.sid):
+                rc, line = self.clear_cmd(world)
         self.assertEqual((rc, f"new_session={NEW_T}" in line), (0, True), line)
         self.assertEqual(len(world.typed()), 1)
 
@@ -11104,7 +11143,10 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                                     home_after=codex_screen(after))
                 with mock.patch("fleet.collectors.codex.session_id_of_process", return_value=None), \
                         mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-                    rc, line = self.clear_cmd(world)
+                    # This screen fixture has an explicit current native selection.
+                    with mock.patch.object(peer_steward, "_process_session", side_effect=
+                                           lambda *_: None if world.sent else world.sid):
+                        rc, line = self.clear_cmd(world)
                 self.assertEqual("cleared=true" in line, changed, line)
                 self.assertEqual(rc, 0 if changed else 5, line)
 
@@ -11115,7 +11157,10 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                 "Keep using the current working directory\n"
                 "Create new Git worktree\n")
         world = _ClearWorld(harness="codex", sid=OLD_T, screens=[menu])
-        rc, line = self.clear_cmd(world)
+        # This screen fixture has an explicit current native selection.
+        with mock.patch.object(peer_steward, "_process_session", side_effect=
+                               lambda *_: None if world.sent else world.sid):
+            rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 3, line)
         self.assertIn("cleared=skipped", line)
         self.assertIn("reason=form-open", line)
@@ -11130,7 +11175,10 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         world = _ClearWorld(harness="codex", sid=OLD_T, new_sid=NEW_T,
                             screens=[CODEX_EMPTY], home_after=menu)
         with mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-            rc, line = self.clear_cmd(world)
+            # This screen fixture has an explicit current native selection.
+            with mock.patch.object(peer_steward, "_process_session", side_effect=
+                                   lambda *_: None if world.sent else world.sid):
+                rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 5, line)
         self.assertIn("cleared=unverified", line)
         self.assertEqual(len(world.typed()), 1)  # the authorized /clear only

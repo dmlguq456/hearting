@@ -525,14 +525,14 @@ unimplemented follow-up work.
 
 ## Runtime compaction tidy
 
-- **Runtime support:** PreCompact accepts successful stdout as summary instructions; PostCompact provides `compact_summary` and `trigger` for auto/idle and manual compaction.
-- **Adapter realization:** the shared compact hook requests six fields, records the epoch, saves the complete nonempty summary at the session's own verified pane/native seat, and queues memory tidying. Only `trigger=auto` with successful JSON and text card persistence can use the existing snapshot/clear/continue booking. The helper waits up to three hours for transcript evidence of actual turn completion, then stores bounded recent conversation and the transcript path before the clear.
-- **Fallback:** manual/unknown trigger, missing or empty summaries, card-write failure, project seats (no Herdr or tmux pane), and workers/sub-sessions never auto-clear. Hook failures leave compaction running; summary admission is bounded at 256 KiB without truncation.
+- **Runtime surface:** the existing PreCompact/PostCompact hooks observe native compaction.
+- **Adapter realization:** the shared hook records the exact native session's compaction boundary only; it adds no card instructions, card or memory request, clear, or automatic continuation. Registered worker stage-ledger handling remains separate.
+- **Fallback:** missing native identity leaves observation unverified without blocking native compaction. Manual `정리만` / `--no-clear` saves the card and queues memory work while retaining the conversation. It does not shrink context or prevent native automatic compaction.
 
 ## Idle tidy
 
 - **Runtime support:** the Stop payload carries the main session id and transcript path; the existing latest-request reader returns input plus cache creation/read tokens for that exact session.
-- **Adapter realization:** the shared idle observer uses the configured token threshold and fixed due time. The helper sends one claim-bound card request through `peer-steward` on the verified pane or the native Claude attachment; clear waits for the matching card and durable queue receipt. The status-only successor prompt does not restart work.
+- **Adapter realization:** the shared observer uses the configured last-activity wait and token threshold. The existing memory helper writes an external card from the original transcript and prior card, then the guarded exact-session writer sends `/compact` once when the pane is idle, its input is empty and no question or confirmation is open. The session and readable conversation remain; the main session receives no card-writing request, clear or continuation prompt.
 - **Cache evidence:** the installed `opus[1m]` model name does not expose the actual request cache policy. No cache expiry is inferred from it; current Stop payloads do not carry a verified expiry, so the configured idle wait is used.
 
 ## Parent authority and peer transport

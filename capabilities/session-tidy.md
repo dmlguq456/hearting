@@ -31,7 +31,13 @@ existing confirmed task or handover lineage. Missing or ambiguous identity
 does not borrow a project-latest card; an absent or changed pane limits only
 operations that require its exact physical binding.
 
-Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These notices do not change the runtime's compaction policy.
+Wrapped Codex panes reuse the existing birth-bound attachment to the inner native
+session at discovery and immediately before an input effect. The outer
+foreground process is transport, not a replacement session identity. Existing
+endpoint, current-root, ambiguity and input-readiness checks apply unchanged;
+native card storage remains available without a physical pane.
+
+Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
 
 Native runtime compaction is not a session-tidy invocation. PreCompact adds no
 card instructions; PostCompact records the exact native session's compaction
@@ -206,6 +212,10 @@ Modes are `정리` (default), `정리만` (keep this window), and `인계 <받�
 `--handoff <받을 세션>` for a peer handoff. Card writing, queueing and optional
 handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
+
+`정리만` / `--no-clear` saves the card and queues the existing memory work while
+keeping the conversation. Saving does not shrink its context, disable native
+automatic compaction or establish that compaction was avoided.
 
 A supervisor or user may run the same transfer for a session it names:
 `python3 $AGENT_HOME/utilities/session_tidy.py handoff --from <세션> --kind <하네스>`.
