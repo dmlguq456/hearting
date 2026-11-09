@@ -434,10 +434,10 @@ def pane_pids(panes, runner=subprocess.run, bindings=None, observation=None):
 
 def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_current=False,
                         wait_timeout=0.0, observation=None):
-    """Process identities for Codex TUIs currently foreground in herdr panes.
+    """Current native identities for bare or wrapped Codex TUIs in Herdr panes.
 
-    Pane metadata is not thread proof. The live foreground PID's
-    ``process_identity`` is authoritative; pane process info confirms ownership.
+    Pane metadata and native environment are candidate hints. The shared pane
+    reader proves the native PID/current root, including a wrapper's inner PTY.
     """
     from . import procscan
 
@@ -470,28 +470,59 @@ def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_cu
             else:
                 panes = list_panes(runner=runner, wait_timeout=wait_timeout)
         cwds = {os.path.realpath(s.cwd or "") for s in targets.values()}
+        # Native environment names a candidate only. The shared current-thread
+        # reader proves its inner PID through the wrapper's birth-bound join.
+        pane_hints = {pid: str(procscan.read_environ(pid).get("HERDR_PANE_ID") or "").strip()
+                      for pid in targets}
+        hinted_panes = set(pane_hints.values()) - {""}
         selected = [p for p in panes or []
                     if p.get("agent") == "codex"
-                    and os.path.realpath(p.get("cwd") or "") in cwds]
+                    and (os.path.realpath(p.get("cwd") or "") in cwds
+                         or p.get("pane_id") in hinted_panes)]
         pane_bindings = {}
         evidence = pane_evidence(selected, runner=runner, bindings=pane_bindings,
                                  observation=observation)
-        _shells, foreground, _metadata = evidence
+        _shells, _foreground, _metadata = evidence
         utilities = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "utilities"))
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         try:
             from pane_ownership import current_codex_thread
             found = {}
+            pane_infos = getattr(evidence, "pane_infos", {})
             for pid, session in targets.items():
-                if pid not in foreground or procscan.read_proc_start(pid) != session.proc_start:
+                if procscan.read_proc_start(pid) != session.proc_start:
                     continue
                 bound_panes = pane_bindings.get(pid, set())
+                hinted = not bound_panes
+                if hinted:
+                    hint = pane_hints.get(pid)
+                    # An inner native PID is not an outer foreground PID. Keep
+                    # the observed pane candidate, then reuse the same proof;
+                    # never synthesize foreground membership or a native SID.
+                    if hint and hint in pane_infos:
+                        bound_panes = {hint}
                 if len(bound_panes) != 1:
                     continue
                 pane_id = next(iter(bound_panes))
-                pane_info = getattr(evidence, "pane_infos", {}).get(str(pane_id))
-                sid = current_codex_thread(str(pane_id), pid, process_info=pane_info)
+                pane_info = pane_infos.get(str(pane_id))
+                options = {"process_info": pane_info}
+                endpoint = getattr(observation, "endpoint", None)
+                socket_path = getattr(observation, "socket_path", None)
+                if not socket_path and hinted and runner is subprocess.run:
+                    # A CLI default census has no inherited socket. Reuse the
+                    # existing server-reported endpoint resolver, not a guessed
+                    # path or the native process's unverified environment.
+                    from session_tidy import _herdr_endpoint_socket
+                    endpoint = endpoint or _observation_module().endpoint_name()
+                    socket_path = _herdr_endpoint_socket("" if endpoint == "default" else endpoint)
+                    if not socket_path:
+                        continue
+                if socket_path:
+                    options["socket_path"] = socket_path
+                    if endpoint and endpoint != "default":
+                        options["server"] = endpoint
+                sid = current_codex_thread(str(pane_id), pid, **options)
                 if sid:
                     found[pid] = sid
         except Exception:

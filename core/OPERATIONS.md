@@ -883,9 +883,13 @@ cycle environment can be recovered from the route's producer record. Refusals
 name the correct output directory, and node scopes are relative to that directory.
 Another open cycle or a matching filename suffix does not grant write authority.
 
-Cards, peer callbacks and pane reports use `utilities/pane_ownership.py` across
-Claude, Codex and OpenCode. It connects the caller's runtime to the live pane's
-foreground PID, controlling terminal and process-start identity. Environment,
+Cards, peer callbacks, Fleet identity enrichment and pane reports use
+`utilities/pane_ownership.py` across Claude, Codex and OpenCode. It connects the
+caller's runtime to the live pane's foreground PID, controlling terminal and
+process-start identity. For wrapped Codex, the outer foreground is transport;
+the existing birth-bound attachment joins the exact inner native PID and current
+root. Fleet uses that same verified selection before exact-rollout enrichment,
+including when the inner PID is absent from the outer foreground list. Environment,
 cwd, title, history and shared-daemon ancestry are lookup hints. Shared services
 and background attachments need exact native evidence of the current session;
 a parked job or shared socket is insufficient. Missing or ambiguous proof keeps
