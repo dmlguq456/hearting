@@ -8481,7 +8481,8 @@ def _clear_look(target, req):
         current = _process_session(agent.get("pane") or target, req.get("harness"))
         if current != req.get("sid"):
             return "target-changed" if current else "session-identity-unknown", agent, None
-    if req.get("harness") in ("claude", "codex") and agent.get("session_id") != req.get("sid"):
+    elif req.get("harness") == "claude" and agent.get("session_id") != req.get("sid"):
+        # Codex/OpenCode already used this look's authoritative native judgment.
         # herdr's pane record can lag a /clear; the process itself is the proof, never a guess.
         # An unnamed session (`-`, empty) is not a confirmed match: only the process can vouch for it.
         if _process_session(agent.get("pane") or target, req.get("harness")) != req.get("sid") \

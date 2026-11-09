@@ -11036,6 +11036,42 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                     self.assertIn("reason=" + reason, line)
 
 
+    def test_codex_native_judgment_is_taken_once_per_look_with_lagging_metadata(self):
+        for final in ("sid-B", None, "sid-C"):
+            with self.subTest(final_native=final):
+                st = self.st
+                seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "codex", "")
+                with st.seat_lock(seat.key):
+                    st.record_event(seat, "codex", "sid-A", "prompt", cwd="/w", now=time.time() - 100)
+                    st.record_event(seat, "codex", "sid-B", "prompt", cwd="/w", now=time.time() - 50)
+                self.book(harness="codex", sid="sid-B")
+                world = _ClearWorld(harness="codex", sid="sid-A", new_sid=None, screens=[CODEX_EMPTY])
+                original_look = peer_steward._clear_look
+                look_number, reads = 0, []
+
+                def look(*args):
+                    nonlocal look_number
+                    look_number += 1
+                    return original_look(*args)
+
+                def native(*args):
+                    value = "sid-B" if look_number == 1 else final
+                    if not world.sent:
+                        reads.append((look_number, value))
+                    return value
+
+                with mock.patch.object(peer_steward, "_clear_look", side_effect=look), \
+                     mock.patch.object(peer_steward, "_process_session", side_effect=native), \
+                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                    rc, line = self.clear_cmd(world)
+                self.assertEqual(len(world.typed()), int(final == "sid-B"), line)
+                if final != "sid-B":
+                    reason = "session-identity-unknown" if final is None else "target-changed"
+                    self.assertIn("reason=" + reason, line)
+                # Bind the change to the final input look, not to a fourth
+                # reader call that disappears when redundant reads are removed.
+                self.assertEqual(reads, [(1, "sid-B"), (2, final)])
+
     # -- after the send: never a second one -------------------------------------------------
 
     def test_a_send_that_cannot_be_confirmed_is_unverified_and_nothing_else_is_typed(self):
