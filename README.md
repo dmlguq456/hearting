@@ -190,6 +190,12 @@ window uses bottom and returns to side when widened. Once OpenCode's own sidebar
 is observed, that attachment keeps bottom to avoid competing panels. Enabling or
 disabling the shell preserves these placement preferences.
 
+Codex context keeps the latest server-reported usage. A separate `compaction
+imminent` label appears only when the exact session's current native diagnostic
+supports it; detail separates server usage, native estimate, limit and time.
+Unavailable or stale diagnostic data stays unknown. The 500K/700K preservation
+notices do not guarantee remaining time before native compaction.
+
 ### Key screens
 
 <table>

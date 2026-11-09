@@ -13,6 +13,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -123,6 +124,7 @@ class TokenTelemetry:
     signal_source: Optional[str] = None
     signal_age_seconds: Optional[int] = None
     active_context_tokens: Optional[int] = None
+    compaction_pressure: Optional[dict] = None
     context_window_tokens: Optional[int] = None
     context_used_pct: Optional[int] = None
     session_input_tokens: Optional[int] = None
@@ -342,5 +344,210 @@ def telemetry_from_codex_session(session_id: str, *, codex_home=None,
         return TokenTelemetry(adapter="codex", session_id=session_id,
                               signal_source="codex-rollout", signal_age_seconds=age,
                               reason="stale-signal")
-    return parse_codex_token_count(line, session_id=session_id,
-                                   signal_age_seconds=age)
+    telemetry = parse_codex_token_count(line, session_id=session_id,
+                                       signal_age_seconds=age)
+    telemetry.compaction_pressure = codex_compaction_pressure(
+        session_id, path, line, home=home, now=now)
+    return telemetry
+
+def _unknown_compaction_pressure(session_id, reason):
+    return {"state": "unknown", "source": "codex-internal-log-v2",
+            "session_id": session_id, "reason": reason,
+            "scope_tokens": None, "limit_tokens": None, "scope": None,
+            "observed_at": None, "usage_at": None, "compact_at": None,
+            "token_limit_reached": None, "fresh_until": None}
+
+
+def current_compaction_pressure(pressure, *, now=None):
+    """A display clock can expire a sample without collecting or changing policy."""
+    now = time.time() if now is None else now
+    if not isinstance(pressure, Mapping) or pressure.get("state") != "observed":
+        return False
+    if any(type(pressure.get(key)) not in (int, float) or not math.isfinite(pressure[key])
+           for key in ("usage_at", "observed_at", "fresh_until")):
+        return False
+    return (type(pressure.get("scope_tokens")) is int and pressure["scope_tokens"] >= 0
+            and type(pressure.get("limit_tokens")) is int and pressure["limit_tokens"] > 0
+            and pressure.get("scope") in {"Total", "BodyAfterPrefix"}
+            and type(pressure.get("token_limit_reached")) is bool
+            and pressure["usage_at"] <= pressure["observed_at"] <= pressure["usage_at"] + 2
+            and pressure["usage_at"] <= now + 2 < pressure["fresh_until"])
+
+
+def compaction_imminent(pressure, *, now=None):
+    """Only a complete current native judgment warrants the short warning."""
+    return current_compaction_pressure(pressure, now=now) and pressure.get("token_limit_reached") is True
+
+
+def context_display_detail(entity):
+    """One numeric display record; never a policy or input authorization."""
+    get = entity.get if isinstance(entity, Mapping) else lambda key: getattr(entity, key, None)
+    pressure = get("compaction_pressure")
+    if get("liveness") in {"dead", "stale"}:
+        return None
+    if not isinstance(pressure, Mapping):
+        return None
+    return {"server_total_tokens": get("active_context_tokens"),
+            "server_window_tokens": get("context_window_tokens"),
+            "pressure": dict(pressure)}
+
+
+def codex_pressure_paths(home):
+    """Existing event sources only; no new collector or persistent record."""
+    database = Path(home) / "logs_2.sqlite"
+    return database, Path(str(database) + "-wal")
+
+
+def codex_compaction_pressure(session_id, rollout, token_line, *, home=None,
+                             now=None, max_age_seconds=900):
+    """Bound an internal diagnostic to this SID, usage point and compact interval.
+
+    Codex 0.163's public ThreadTokenUsage reports last/total/window, not the
+    auto-compaction estimate. This private fallback never changes that usage,
+    infers missing values, or supplies any identity/readiness authority.
+    """
+    import sqlite3
+    import stat
+
+    unknown = lambda reason: _unknown_compaction_pressure(session_id, reason)
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return unknown("invalid-session-id")
+    usage_at = codex_event_epoch(token_line)
+    if usage_at is None or not math.isfinite(usage_at):
+        return unknown("missing-usage-time")
+    now = time.time() if now is None else now
+    if not math.isfinite(now) or usage_at > now + 2 or now - usage_at > max_age_seconds:
+        return unknown("stale-usage-time")
+    if not isinstance(rollout, (str, os.PathLike)):
+        return unknown("rollout-unavailable")
+    path = Path(rollout)
+    home = Path(home) if home else next((p.parent for p in path.parents if p.name == "sessions"), None)
+    if home is None:
+        return unknown("runtime-home-unavailable")
+    signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    try:
+        initial = path.stat()
+        with path.open("rb") as handle:
+            head = handle.read(64 * 1024).splitlines()
+            start = max(0, initial.st_size - 262_144)
+            handle.seek(start)
+            if start:
+                handle.readline()
+            tail = handle.read(262_144).splitlines()
+        if signature(initial) != signature(path.stat()):
+            return unknown("rollout-changed")
+        meta = None
+        for raw in head:
+            if b'"session_meta"' not in raw:
+                continue
+            event = json.loads(raw)
+            if not isinstance(event, dict):
+                return unknown("malformed-session-meta")
+            if event.get("type") == "session_meta":
+                meta = event.get("payload")
+                break
+        if not isinstance(meta, dict) or meta.get("id") != session_id:
+            return unknown("session-mismatch")
+        # Internal log semantics are verified for this release, not a public API.
+        if meta.get("cli_version") != "0.163.0":
+            return unknown("unsupported-log-version")
+        latest, compact_at = None, None
+        for raw in reversed(tail):
+            try:
+                event = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                if b'"token_count"' in raw or b'"compacted"' in raw:
+                    return unknown("malformed-usage-boundary")
+                continue
+            if not isinstance(event, dict):
+                if b'"token_count"' in raw or b'"compacted"' in raw:
+                    return unknown("malformed-usage-boundary")
+                continue
+            if event.get("type") == "compacted":
+                compact_at = codex_event_epoch(raw)
+                # A boundary without a time cannot certify its side of usage.
+                if compact_at is None or not math.isfinite(compact_at):
+                    return unknown("unknown-compact-time")
+                break
+            payload = event.get("payload")
+            if latest is None and isinstance(payload, dict) and payload.get("type") == "token_count":
+                latest = event
+        supplied = json.loads(token_line)
+        if latest != supplied:
+            return unknown("usage-not-current")
+        info = (latest.get("payload") or {}).get("info")
+        usage = info.get("last_token_usage") if isinstance(info, dict) else None
+        if not isinstance(usage, dict) or _policy_tokens(usage.get("total_tokens")) is None:
+            return unknown("missing-server-usage")
+        if compact_at is not None and compact_at >= usage_at:
+            return unknown("usage-before-compact")
+    except (OSError, ValueError, TypeError, StopIteration):
+        return unknown("rollout-unavailable")
+    database, _wal = codex_pressure_paths(home)
+    connection = None
+    try:
+        info = database.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return unknown("logs-unavailable")
+        connection = sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True, timeout=.03)
+        connection.execute("PRAGMA query_only=ON")
+        deadline = time.monotonic() + .03
+        steps = 0
+        def stop():
+            nonlocal steps
+            steps += 1
+            return int(steps >= 100 or time.monotonic() >= deadline)
+        connection.set_progress_handler(stop, 1000)
+        # The existing thread/time index bounds work. Limit rows and each body;
+        # only this request's post-sampling judgment may match, never an older one.
+        rows = connection.execute(
+            "SELECT ts, ts_nanos, length(CAST(feedback_log_body AS BLOB)), "
+            "substr(CAST(feedback_log_body AS BLOB),1,8193) FROM logs "
+            "WHERE thread_id=? AND ts>=? AND ts<=? AND target=? "
+            "AND feedback_log_body LIKE '%auto_compact_scope_tokens=%' "
+            "ORDER BY ts DESC,ts_nanos DESC LIMIT 8",
+            (session_id, int(usage_at), int(usage_at + 2), "codex_core::session::turn")).fetchall()
+        if signature(initial) != signature(path.stat()):
+            return unknown("rollout-changed")
+        candidates = []
+        for ts, ns, body_size, body in rows:
+            if type(ts) is not int or type(ns) is not int or not 0 <= ns < 1_000_000_000:
+                return unknown("unsupported-log-format")
+            point = ts + ns / 1_000_000_000
+            if not usage_at <= point <= min(now + 2, usage_at + 2):
+                continue
+            # A readable prefix is not a complete diagnostic. The extra byte and
+            # original byte length detect truncation, including multibyte text.
+            if (type(body_size) is not int or body_size > 8192
+                    or not isinstance(body, bytes) or len(body) != body_size):
+                return unknown("partial-log-body")
+            candidates.append((point, body.decode("utf-8")))
+        if len(candidates) != 1:
+            return unknown("missing-or-ambiguous-judgment")
+        observed_at, body = candidates[0]
+        fields = {}
+        for key in ("auto_compact_scope_tokens", "auto_compact_scope_limit",
+                    "auto_compact_limit_scope", "token_limit_reached"):
+            matches = re.findall(r"\b" + key + r"=([^\s]+)", body or "")
+            if len(matches) != 1:
+                return unknown("unsupported-log-format")
+            fields[key] = matches[0]
+        tokens = fields["auto_compact_scope_tokens"]
+        limit = re.fullmatch(r"Some\(([0-9]+)\)", fields["auto_compact_scope_limit"])
+        scope = fields["auto_compact_limit_scope"]
+        reached = fields["token_limit_reached"]
+        if (not tokens.isascii() or not tokens.isdigit() or len(tokens) > 18
+                or not limit or len(limit[1]) > 18 or int(limit[1]) <= 0
+                or scope not in {"Total", "BodyAfterPrefix"} or reached not in {"true", "false"}
+                or reached == "false" and int(tokens) >= int(limit[1])):
+            return unknown("unsupported-log-format")
+        return {"state": "observed", "source": "codex-internal-log-v2", "session_id": session_id,
+                "reason": None, "scope_tokens": int(tokens), "limit_tokens": int(limit[1]),
+                "scope": scope, "observed_at": observed_at, "usage_at": usage_at,
+                "compact_at": compact_at, "token_limit_reached": reached == "true",
+                "fresh_until": usage_at + max_age_seconds}
+    except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        return unknown("logs-unavailable")
+    finally:
+        if connection is not None:
+            connection.close()

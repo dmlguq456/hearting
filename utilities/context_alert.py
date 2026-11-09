@@ -3,6 +3,7 @@
 500K/700K are absolute token thresholds, not historical usage or window ratios.
 A session jumping across both gets the urgent line; both thresholds are consumed.
 Only a new native session ID resets them. Adapters own user/model presentation.
+These work-preservation notices do not promise headroom before native compaction.
 """
 from __future__ import annotations
 
@@ -143,7 +144,18 @@ def codex_notice(payload: dict) -> str:
         except Exception:
             return ""
     tokens = codex_usage(transcript, sid)
-    return notice("codex", sid, tokens)
+    text = notice("codex", sid, tokens)
+    if not text:
+        return ""
+    try:
+        from fleet.token_budget import tail_codex_token_count, codex_compaction_pressure, compaction_imminent
+        line = tail_codex_token_count(Path(transcript))
+        pressure = codex_compaction_pressure(sid, transcript, line)
+        if compaction_imminent(pressure):
+            text += " · 자동 압축 임박(native 추정)"
+    except Exception:
+        pass  # Missing diagnostic evidence never changes prompt admission.
+    return text
 
 
 def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None, env=None) -> str:
@@ -177,8 +189,8 @@ def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None,
             os.replace(temporary, target)
             temporary = None
         suffix = ("지금 /session-tidy로 정리하세요" if max(fresh) == THRESHOLDS[1]
-                  else "700K 전에 /session-tidy로 정리 권장")
-        return f"컨텍스트 약 {tokens / 1000:.0f}K — {suffix}"
+                  else "/session-tidy로 작업 상태 저장 권장")
+        return f"입력 문맥 약 {tokens / 1000:.0f}K — {suffix} · 자동 압축 여유 보장 아님"
     except (OSError, ValueError, TypeError):
         return ""
     finally:

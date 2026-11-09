@@ -278,6 +278,11 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
             if c["now"] is not None:
                 now_start = x + c["now"]
                 now_end = x + use - AGE_W - GAP
+                from ..token_budget import compaction_imminent
+                pressure = (session.get("context_detail") or {}).get("pressure")
+                if compaction_imminent(pressure):
+                    now_start = grid.put(now_start, y, ui_text("fleet.context.compaction_imminent") + " · ",
+                                         "lvl_r", limit=now_end)
                 now_text = _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
                                  max(0, now_end - now_start))
                 # Input is muted grey; unfolded NOW keeps its existing white.
@@ -555,6 +560,13 @@ def _session_unfold(grid, vm, x, use, y, session, c):
             grid.put(x_lab, y, name, key)
             grid.put(x_val, y, ", ".join(values[:3]) or "·", "soft" if values else "dim",
                      limit=right)
+            y += 1
+    detail = session.get("context_detail")
+    if detail is not None:
+        from ..session_line import context_detail_lines
+        for label, value in context_detail_lines(detail):
+            grid.put(x_lab, y, label, "label", limit=right)
+            grid.put(max(x_val, x_lab + _seg_width(label) + 2), y, value, "soft", limit=right)
             y += 1
     grid.put(x_lab, y, "ROUTE", "label")
     rows = [route for route in vm.routes

@@ -2244,6 +2244,9 @@ def _cmdline_overrides_compaction(pid):
 def _apply_token_count(sess, line, path=None):
     # Shared parser keeps active context separate from cumulative session counters.
     telemetry = parse_codex_token_count(line, session_id=sess.session_id)
+    from ..token_budget import codex_compaction_pressure
+    sess.compaction_pressure = codex_compaction_pressure(
+        sess.session_id, path, line, home=_rollout_home(path) if path else None)
     sess.active_context_tokens = telemetry.active_context_tokens
     sess.context_window_tokens = telemetry.context_window_tokens
     sess.session_input_tokens = telemetry.session_input_tokens

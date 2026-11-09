@@ -38,7 +38,7 @@ class ContextAlertTest(unittest.TestCase):
     def test_strict_boundaries_and_once_even_after_same_session_compaction(self):
         for count in (499999, 500000):
             self.assertEqual(self.notice(count), "")
-        self.assertIn("700K 전에", self.notice(500001))
+        self.assertIn("작업 상태 저장 권장", self.notice(500001))
         self.assertEqual(self.notice(600000), "")
         self.assertEqual(self.notice(699999), "")
         self.assertEqual(self.notice(700000), "")
@@ -47,10 +47,10 @@ class ContextAlertTest(unittest.TestCase):
             self.assertEqual(self.notice(count), "")
 
     def test_jump_emits_only_urgent_line_and_native_new_session_resets(self):
-        self.assertEqual(self.notice(703000), "컨텍스트 약 703K — 지금 /session-tidy로 정리하세요")
+        self.assertEqual(self.notice(703000), "입력 문맥 약 703K — 지금 /session-tidy로 정리하세요 · 자동 압축 여유 보장 아님")
         self.assertEqual(self.notice(512000), "")
         self.assertEqual(self.notice(512000, sid="after-clear"),
-                         "컨텍스트 약 512K — 700K 전에 /session-tidy로 정리 권장")
+                         "입력 문맥 약 512K — /session-tidy로 작업 상태 저장 권장 · 자동 압축 여유 보장 아님")
         self.assertTrue(self.notice(512000, harness="opencode"))
 
     def test_workers_owners_and_auxiliary_calls_do_not_consume_state(self):
@@ -116,6 +116,26 @@ class ContextAlertTest(unittest.TestCase):
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         return path
 
+    def test_codex_notice_reuses_pressure_only_for_a_fresh_preservation_notice(self):
+        sys.path.insert(0, str(ROOT / 'tools'))
+        import fleet.token_budget as budget
+        path=self.codex_rollout(sid='codex-session-id',count=539596)
+        pressure={'state':'observed','token_limit_reached':True,'usage_at':1000.5,
+                  'observed_at':1000.501,'fresh_until':1900.5,'scope_tokens':799116,
+                  'limit_tokens':784800,'scope':'Total'}
+        with patch.dict(os.environ,self.env,clear=True), \
+             patch.object(budget,'codex_compaction_pressure',return_value=pressure) as read, \
+             patch.object(budget.time,'time',return_value=1001):
+            payload={'hook_event_name':'UserPromptSubmit','session_id':'codex-session-id',
+                     'transcript_path':str(path)}
+            line=alert.codex_notice(payload)
+            self.assertIn('자동 압축 여유 보장 아님',line)
+            self.assertIn('자동 압축 임박(native 추정)',line)
+            self.assertNotIn('700K 전에',line)
+            self.assertEqual(alert.codex_notice(payload),'')
+            self.assertEqual(read.call_count,1)
+            self.assertEqual(read.call_args.args[:2],('codex-session-id',str(path)))
+
     def test_codex_latest_input_usage_bounded_head_tail_and_identity(self):
         path = self.codex_rollout(count=703000)
         data = path.read_bytes()
@@ -167,7 +187,7 @@ class ContextAlertTest(unittest.TestCase):
             payload["session_id"] = "new-codex-session"
             self.assertEqual(alert.codex_notice(payload), "")
             payload["transcript_path"] = str(self.codex_rollout("new-codex-session", 500001))
-            self.assertIn("700K 전에", alert.codex_notice(payload))
+            self.assertIn("작업 상태 저장 권장", alert.codex_notice(payload))
             self.assertEqual(alert.codex_notice({**payload, "hook_event_name": "SessionStart"}), "")
             self.assertEqual(alert.codex_notice({**payload, "session_id": ""}), "")
         with patch.dict(os.environ, {**self.env, "HOME": str(self.temp),
@@ -306,12 +326,12 @@ async function prompt(sid="ses_main") {
     {message: {sessionID:sid, agent: "build"}, parts:[{type:"text", text:"ok", synthetic}]})
   const output = {system:[]}
   await plugin["experimental.chat.system.transform"]({sessionID:sid, model:{}}, output)
-  return output.system.filter(text => text.startsWith("컨텍스트 약"))
+  return output.system.filter(text => text.startsWith("입력 문맥 약"))
 }
 for (count of [499999,500000]) assert.deepEqual(await prompt(), [])
 count=512000
 let lines=await prompt()
-assert.deepEqual(lines, ["컨텍스트 약 512K — 700K 전에 /session-tidy로 정리 권장"])
+assert.deepEqual(lines, ["입력 문맥 약 512K — /session-tidy로 작업 상태 저장 권장 · 자동 압축 여유 보장 아님"])
 assert.equal(toasts.length, 1); assert.equal(toasts[0].message, lines[0]); assert.equal(toasts[0].variant,"warning")
 let continued={system:[]}
 await plugin["experimental.chat.system.transform"]({sessionID:"ses_main",model:{}},continued)
