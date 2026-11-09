@@ -2063,6 +2063,44 @@ def _usage_records(snapshot, session_rows, now):
     return usage
 
 
+def current_session_activity(model, candidate, snapshot):
+    """Paint fresh basic activity over retained details for the same process only.
+
+    Complete publication, roster/order, detail and action provenance remain the
+    admitted model's. A persisted replay has no process bindings to transfer.
+    """
+    from ..refresh import _BASIC_COMPLETE_STATES
+    if model is None or candidate is None:
+        return model
+    observations = _get(snapshot, "observations", default={}) or {}
+    basic = _get(observations, "basic", default={}) or {}
+    if str(_get(basic, "state", default="")).lower() not in _BASIC_COMPLETE_STATES:
+        return model
+    previous = model.source_records or {}
+    current = candidate.source_records or {}
+    old_bindings, new_bindings = previous.get("_detail_bindings", {}), current.get("_detail_bindings", {})
+    old_tags, new_tags = previous.get("_detail_tags", {}), current.get("_detail_tags", {})
+    candidates = {row["tag"]: row for row in candidate.sessions}
+    updates = {}
+    for ref, binding in old_bindings.items():
+        new = new_bindings.get(ref)
+        row = candidates.get(new_tags.get(ref))
+        if (isinstance(binding, (list, tuple)) and isinstance(new, (list, tuple))
+                and len(binding) >= 4 and tuple(binding[:4]) == tuple(new[:4])
+                and ref in old_tags and row is not None):
+            updates[old_tags[ref]] = row
+    rows = []
+    changed = False
+    for row in model.sessions:
+        current = updates.get(row.get("tag"))
+        values = ({key: current.get(key) for key in ("state", "ask", "restart", "running")}
+                  if current is not None else {})
+        values = {key: value for key, value in values.items() if row.get(key) != value}
+        rows.append(dict(row, **values) if values else row)
+        changed = changed or bool(values)
+    return model.with_updates(sessions=rows) if changed else model
+
+
 def current_claude_usage(model, snapshot, now):
     """Rebind only Claude usage at precomputed/replay and pending-draw boundaries."""
 

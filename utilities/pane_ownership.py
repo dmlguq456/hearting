@@ -157,8 +157,8 @@ def _pane_reader(pane, executable):
     return executable or shutil.which("herdr")
 
 
-def _read_codex_footer_threads(pane, *, executable=None, socket_path=None, tmux=None):
-    """Read one pane's visible screen and parse only its native Codex footer."""
+def _read_pane_visible_lines(pane, *, executable=None, socket_path=None, tmux=None):
+    """One bounded read of the selected terminal surface, without input."""
     surface = _tmux_surface(pane, tmux)
     executable = "tmux" if surface else executable or shutil.which("herdr")
     if not executable:
@@ -177,10 +177,19 @@ def _read_codex_footer_threads(pane, *, executable=None, socket_path=None, tmux=
         if stdout is None or len(stdout.encode("utf-8")) > 131072:
             return None
         visible = _ANSI_ESCAPE_RE.sub("", stdout).replace("\r", "")
-        state, session_id = _codex_current_footer(visible.splitlines())
-        return _CodexFooterThreads({session_id} if state == "current" else set(), state=state)
+        return visible.splitlines()
     except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
+
+
+def _read_codex_footer_threads(pane, *, executable=None, socket_path=None, tmux=None):
+    """Read one pane's visible screen and parse only its native Codex footer."""
+    lines = _read_pane_visible_lines(pane, executable=executable,
+                                     socket_path=socket_path, tmux=tmux)
+    if lines is None:
+        return None
+    state, session_id = _codex_current_footer(lines)
+    return _CodexFooterThreads({session_id} if state == "current" else set(), state=state)
 
 
 def _registered_worker(pid):

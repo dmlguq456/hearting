@@ -20,6 +20,7 @@ Misattribution is worse than absence (PRD F-26): every failure path yields None.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -432,6 +433,70 @@ def pane_pids(panes, runner=subprocess.run, bindings=None, observation=None):
                         pane_infos=getattr(evidence, "pane_infos", None))
 
 
+def _codex_display_footer(lines):
+    """Normalize known display chrome; the input-ownership parser stays strict."""
+    from pane_ownership import _ANSI_ESCAPE_RE, _codex_current_footer
+    if not isinstance(lines, (list, tuple)) or not all(isinstance(line, str) for line in lines):
+        return ""
+    rows = [_ANSI_ESCAPE_RE.sub("", line).replace("\r", "") for line in lines]
+    while rows and not rows[-1].strip():
+        rows.pop()
+    # The unbound shell's existing fallback line follows the native viewport.
+    if rows and re.fullmatch(r"📁 .+ · codex · CTX \?", rows[-1].strip()):
+        rows.pop()
+    if rows and re.fullmatch(r"(?:\^c|ctrl\+c) copy · enter copy & follow · esc clear",
+                             rows[-1].strip().lower()):
+        rows[-1] = "? for shortcuts"
+    state, sid = _codex_current_footer(rows)
+    return sid if state == "current" else ""
+
+
+def _codex_display_thread(pane, pid, birth, info, *, socket_path, server=None):
+    """Select display identity from the native footer and its existing root owner.
+
+    This read-only projection never changes the native/peer input join. A loaded
+    root's LISTEN owner and the observed foreground ancestry bind the visible
+    choice even when an older wrapper has no attachment record.
+    """
+    try:
+        import pane_ownership as ownership
+        from . import codex, procscan
+        executable = ownership._pane_reader(pane, None)
+        record = ownership._process(pid)
+        if (not executable or not socket_path or not record or str(record[5]) != str(birth)
+                or not record[3] or record[2] != record[4]
+                or ownership._runtime(pid) != ("codex", False)
+                or ownership._registered_worker(pid)):
+            return ""
+        env = procscan.read_environ(pid)
+        if (env.get("HERDR_PANE_ID") != pane or
+                not ownership._same_socket_endpoint(env.get("HERDR_SOCKET_PATH", ""), socket_path, server)):
+            return ""
+        owner_pid = int((info or {}).get("foreground_process_group_id") or 0)
+        owner = ownership._process(owner_pid)
+
+        def connected(value):
+            return bool(owner and value and value.get("pane_id") == pane
+                        and value.get("foreground_process_group_id") == owner_pid
+                        and any(row.get("pid") == owner_pid
+                                for row in value.get("foreground_processes", ()) if isinstance(row, dict))
+                        and ownership._process(owner_pid) == owner
+                        and pid_in_panes(pid, set(), {owner_pid}))
+
+        if not connected(info):
+            return ""
+        options = {"executable": executable, "socket_path": socket_path}
+        sid = _codex_display_footer(ownership._read_pane_visible_lines(pane, **options))
+        if not sid or codex.process_for_thread(sid, env) != (pid, str(birth)):
+            return ""
+        if _codex_display_footer(ownership._read_pane_visible_lines(pane, **options)) != sid:
+            return ""
+        latest = ownership._pane_process_info(pane, server=server, **options)
+        return sid if connected(latest) and ownership._process(pid) == record else ""
+    except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+        return ""
+
+
 def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_current=False,
                         wait_timeout=0.0, observation=None):
     """Current native identities for bare or wrapped Codex TUIs in Herdr panes.
@@ -526,6 +591,10 @@ def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_cu
                     if endpoint and endpoint != "default":
                         options["server"] = endpoint
                 sid = current_codex_thread(str(pane_id), pid, **options)
+                if not sid:
+                    sid = _codex_display_thread(str(pane_id), pid, session.proc_start, pane_info,
+                                                socket_path=socket_path,
+                                                server=options.get("server"))
                 if sid:
                     found[pid] = sid
         except Exception:
