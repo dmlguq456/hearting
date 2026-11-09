@@ -1973,9 +1973,9 @@ def share_managed_registry_state(sessions):
 def prepare_tick(sessions, *, wait_timeout=0.0):
     """Reserve only process-owned rollouts before enriching Codex rows.
 
-    A TUI without a rollout fd gets a session id only from the pane's
-    process_identity check, which uses the daemon loader origin. Rollout timing
-    and same-cwd proximity do not assign a thread.
+    Without a rollout fd, use the pane's current selection or the existing
+    independent process-native reader. Optional wrapper attachment absence does
+    not erase a unique current native root. Rollout timing and cwd never assign it.
     """
     home = os.path.abspath(_home())
     eligible = any(
@@ -2000,8 +2000,31 @@ def prepare_tick(sessions, *, wait_timeout=0.0):
         from . import herdr, procscan
         pane_ids = herdr.codex_pane_sessions(
             direct_tuis, force_current=True, wait_timeout=wait_timeout)
+        current_ids = dict(pane_ids)
+        unresolved = [s for s in direct_tuis if s.pid not in current_ids and s.pid not in paths]
+        if unresolved:
+            # A failed join of an existing attachment can mean a conflicting
+            # current claim; do not bypass it. Older wrappers may have no
+            # attachment at all, while their native PID still proves its root.
+            try:
+                import session_shell
+                attached = {row["native_pid"] for row in session_shell.bindings(harness="codex")}
+            except ImportError:
+                attached = set()  # Independent native proof also works in partial installs.
+            except (OSError, ValueError, TypeError, KeyError):
+                attached = {s.pid for s in unresolved}
+            with daemon_identity_read_scope():
+                for sess in unresolved:
+                    if sess.pid in attached or procscan.read_proc_start(sess.pid) != sess.proc_start:
+                        continue
+                    try:
+                        sid = session_id_of_process(sess.pid)
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if sid and procscan.read_proc_start(sess.pid) == sess.proc_start:
+                        current_ids[sess.pid] = sid
         for sess in direct_tuis:
-            sid = pane_ids.get(sess.pid)
+            sid = current_ids.get(sess.pid)
             if not sid or _sid("rollout-x-%s.jsonl" % sid) != sid:
                 continue
             runtime_home = procscan.read_environ(sess.pid).get("CODEX_HOME")
@@ -2021,7 +2044,10 @@ def prepare_tick(sessions, *, wait_timeout=0.0):
                 # A different live row already owns this thread. Drop the old
                 # path and leave this PID unresolved instead of showing either.
                 continue
-            sess._herdr_session_id = sid
+            if sess.pid in pane_ids:
+                sess._herdr_session_id = sid
+            else:
+                sess.session_id = sid
             claimed.add(sid)
             if path:
                 paths[sess.pid] = path
