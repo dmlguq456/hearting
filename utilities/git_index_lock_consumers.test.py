@@ -446,7 +446,8 @@ console.log(JSON.stringify({{ output: output.output, metadata: output.metadata }
                         for hook in group.get("hooks", []))
                 for group in claude["hooks"][event_name]))
 
-    def invoke_opencode_callback(self, *, instance_directory, workdir, metadata, combined_output):
+    def invoke_opencode_callback(self, *, instance_directory, workdir, metadata, combined_output,
+                                 tool="bash"):
         context = {"client": {}}
         if instance_directory is not None:
             context["directory"] = str(instance_directory)
@@ -456,7 +457,7 @@ console.log(JSON.stringify({{ output: output.output, metadata: output.metadata }
             args["workdir"] = workdir
         script = f'''import {{ AgentHarnessGuards }} from {json.dumps((ROOT / "adapters/opencode/plugins/hearting-guards.js").as_uri())};
 const hooks = await AgentHarnessGuards({json.dumps(context)});
-const input = {{ tool: "bash", args: {json.dumps(args)} }};
+const input = {{ tool: {json.dumps(tool)}, args: {json.dumps(args)} }};
 const output = {{ args: input.args, output: {json.dumps(combined_output)},
   metadata: {json.dumps(metadata)} }};
 const originalMetadata = structuredClone(output.metadata);
@@ -488,15 +489,17 @@ console.log(JSON.stringify({{ output: output.output, metadata: output.metadata,
             "truncated": False,
         }
         scenarios = (
-            ("omitted", self.repo, None),
-            ("relative", self.root, str(self.repo.relative_to(self.root))),
-            ("explicit", self.root, str(self.repo)),
+            ("omitted", self.repo, None, "bash"),
+            ("relative", self.root, str(self.repo.relative_to(self.root)), "bash"),
+            ("explicit", self.root, str(self.repo), "bash"),
+            # OpenCode 2 names its shell tool `shell` (PG-37).
+            ("explicit-v2-shell", self.root, str(self.repo), "shell"),
         )
-        for label, instance_directory, workdir in scenarios:
+        for label, instance_directory, workdir, tool in scenarios:
             with self.subTest(workdir=label):
                 run = self.invoke_opencode_callback(
                     instance_directory=instance_directory, workdir=workdir,
-                    metadata=native_metadata, combined_output=combined,
+                    metadata=native_metadata, combined_output=combined, tool=tool,
                 )
                 self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
                 result = json.loads(run.stdout.strip().splitlines()[-1])

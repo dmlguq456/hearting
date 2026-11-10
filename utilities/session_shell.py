@@ -420,17 +420,26 @@ def _codex_selected_root(binding):
     if native_sid and native_sid != selected:
         return {"selected_sid": None}
     # Membership corroborates the native viewport; alone it never selects one
-    # of several roots retained by a shared daemon after /resume.
+    # of several roots retained by a shared daemon after /resume. A TUI with no
+    # daemon (--no-daemon) has no membership; there the exact process-native
+    # proof of the same thread corroborates it instead.
     member = codex.process_for_thread(selected, environ=procscan.read_environ(pid), fresh=True)
-    if member != (pid, birth):
+    if member != (pid, birth) and not (member is None and native_sid == selected):
         return {"selected_sid": None}
     latest_native = codex.session_id_of_process(pid, fresh=True)
     if latest_native and latest_native != selected:
         return {"selected_sid": None}
     second = control(binding, "native-selection")
-    if (not second.get("ok") or second.get("native_frame") != frame
-            or _process(pid) != record or not same_owner()):
+    later = second.get("native_frame") if second.get("ok") else None
+    if not isinstance(later, dict) or _process(pid) != record or not same_owner():
         return {"selected_sid": None}
+    if later != frame:
+        # Only a repaint (a working turn's spinner) between the reads: the same
+        # selection and no input. That is no stable observation, so the
+        # independent native proof decides, as when no frame is available.
+        repaint = (type(later.get("revision")) is int and later["revision"] > frame["revision"]
+                   and {**later, "revision": frame["revision"]} == frame)
+        return None if repaint else {"selected_sid": None}
     return {"selected_sid": selected, "native_revision": frame["revision"], "native_epoch": frame["epoch"]}
 
 

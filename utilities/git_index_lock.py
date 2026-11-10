@@ -730,7 +730,8 @@ def diagnose_hook_payload(payload: dict, harness: str) -> dict | None:
         inputs = payload.get("tool_input")
         response = payload.get("tool_response")
         cwd = payload.get("cwd")
-        if (not isinstance(name, str) or name.lower() != "bash"
+        # OpenCode 1 names its shell tool `bash`, OpenCode 2 `shell`.
+        if (not isinstance(name, str) or name.lower() not in {"bash", "shell"}
                 or not isinstance(inputs, dict) or not isinstance(response, dict)):
             return None
         return diagnose_opencode_command(
