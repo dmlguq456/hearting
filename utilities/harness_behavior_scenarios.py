@@ -703,6 +703,19 @@ class InstalledHome:
         # bind or reach the operator's shared service port.
         (config_dir / "service.json").write_text(
             json.dumps({"port": _free_port()}) + "\n", encoding="utf-8")
+        # Release activation (tools/install/runtime_activation.py, opencode branch)
+        # places the OpenCode 2 terminal plugins under plugins/<name>/: the session
+        # shell's selected-session report and the TUI identity record. A source-tree
+        # fixture install skips that step; the identity entry's relative import
+        # resolves to the fixture's own tui/ copy.
+        for source, name in (("adapters/opencode/tui/hearting-session-shell.js",
+                              "hearting-session-shell/tui.js"),
+                             ("adapters/opencode/plugins/hearting-tui-identity/tui.ts",
+                              "hearting-tui-identity/tui.ts")):
+            target = config_dir / "plugins" / name
+            if (SOURCE / source).is_file() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(SOURCE / source, target)
         self.env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         self.env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
         self.env["OPENCODE_DISABLE_LSP_DOWNLOAD"] = "1"

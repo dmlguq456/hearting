@@ -335,6 +335,22 @@ def read_flow(requests, booking=None) -> dict:
 
 
 LATE_WINDOW_SEC = 240
+# OpenCode 2.x rejects a summary that does not follow its own compaction template
+# ("Compaction summary did not match the required template").
+TEMPLATE_HEADINGS = ("## Objective", "## Requirements", "## Decisions", "## Work State",
+                     "### Completed", "### Active", "### Blocked", "## Next Move",
+                     "## Relevant Files", "## Important Context")
+
+
+def summary_reply(record, label) -> Reply:
+    """The compaction summary a model would give: the harness's template when it asks for one."""
+    if "<template>" in record["text"] and "## Objective" in record["text"]:
+        body = {"## Objective": f"- TIDYK-SUMMARY {label}: 같은 세션 압축 뒤 이어가기 검증",
+                "## Next Move": "1. 같은 세션에서 이어가기"}
+        return Reply("\n\n".join(f"{h}\n{body.get(h, '- (none)')}" for h in TEMPLATE_HEADINGS
+                                  if h != "## Work State") .replace(
+            "### Completed", "## Work State\n### Completed", 1))
+    return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY {label}</summary>")
 
 
 def _tags(run) -> dict:
@@ -394,8 +410,7 @@ class TidyCompact(Scenario):
             if tidied and not fresh and _is_compaction(record) \
                     and not _is_memory_worker(record):
                 # The harness's own compaction request: answer it the way a model would.
-                return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY "
-                             f"{record['main_index']}</summary>")
+                return summary_reply(record, record["main_index"])
             if kind == "tool":
                 return Reply("Next action finished." if NEXT in last else "정리 요청 완료")
             if self.attempt in record["text"] and tidied and not done_next and not fresh:
@@ -414,7 +429,7 @@ class TidyCompact(Scenario):
         def side(record):
             # Codex sends its own /compact summary request without tools.
             if _is_compaction(record) and not _is_memory_worker(record):
-                return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY side</summary>")
+                return summary_reply(record, "side")
             return None
         return side
 
@@ -631,7 +646,7 @@ class TidyCompactGuard(TidyCompactHerdr):
                                     'python3 "$AGENT_HOME/utilities/session_tidy.py" tidy --text '
                                     + shlex.quote(CARD_BODY) + " 2>&1; echo FX-TIDY-RC=$?" + sleep))
             if _is_compaction(record):
-                return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY guard</summary>")
+                return summary_reply(record, "guard")
             return Reply(f"guard reply {record['main_index']}")
         return answer
 
