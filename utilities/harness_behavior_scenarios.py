@@ -1242,12 +1242,19 @@ class Scenario:
 
     def make_tui(self, run: Run, root: Path, argv: list[str]):
         """The terminal the TUI runs in: the selected ``--surface`` (a private
-        tmux server, or a private Herdr server for ``--surface herdr``)."""
-        if SURFACE == "herdr":
-            tui = PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
+        tmux server, or a private Herdr server for ``--surface herdr``).
+
+        Read from the module whose ``Run`` executes (``__main__`` when run as a
+        script): that is where ``--surface`` is set and where a companion module
+        replaces ``PrivateTui`` for its own terminal (a host shell, Herdr)."""
+        module = sys.modules.get(type(run).__module__)
+        if not hasattr(module, "PrivateTui"):
+            module = sys.modules[__name__]
+        if module.SURFACE == "herdr":
+            tui = module.PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
             run.surface = tui
             return tui
-        return PrivateTui(root, run.home.env, argv, run.home.workspace)
+        return module.PrivateTui(root, run.home.env, argv, run.home.workspace)
 
     def cleanup(self, run: Run):
         """Stop scenario-owned servers before the fixture processes are retired."""

@@ -134,6 +134,25 @@ class TidyContinueCaseTest(unittest.TestCase):
         compile(tidy.DRAFT_DIAG, "draft-diag", "exec")
 
 
+class MakeTuiTest(unittest.TestCase):
+    def test_the_running_modules_terminal_and_surface_are_used(self):
+        """A companion module patches ``PrivateTui`` on the module whose Run executes
+        (``__main__`` as a script); the base ``make_tui`` must build that one."""
+        import types
+        fake = types.ModuleType("hb_running_fixture")
+        fake.SURFACE = "tmux"
+        fake.PrivateTui = lambda *args: ("patched", args)
+        fake.PrivateHerdrTui = lambda *args: ("herdr", args)
+        run_cls = type("Run", (), {"__module__": fake.__name__})
+        run = run_cls()
+        run.home = types.SimpleNamespace(env={}, workspace=Path("/w"))
+        run.harness = "codex"
+        with unittest.mock.patch.dict(sys.modules, {fake.__name__: fake}):
+            self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "patched")
+            fake.SURFACE = "herdr"
+            self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "herdr")
+
+
 class TidyCompactFlowTest(unittest.TestCase):
     """The tidy-compact oracle reads every input that reached the model, and the
     harness's own tool-less compaction request is a summary request, not a title."""
