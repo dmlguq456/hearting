@@ -178,19 +178,20 @@ def _owner(route, path, jobs, rows):
             if fields[1] in OPEN and aid == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
                 continue  # the owner closing its own route finishes it; nothing to stop
             # Launch keys never move after an attachment/advance, so the current binding
-            # decides first; they stand for the owner only once no binding is confirmed.
-            # A known other route, a conflict, or an unreadable state stops nothing.
+            # decides first. Only two readings stop this owner: a clean current binding that
+            # is exactly this route, or no binding record at all for it. Every other reading
+            # (another route, a read error, any non-current status, known or future) stops nothing.
             try:
                 binding, reason = OWNER.resolve_owner_route_lifecycle(jobs, owner_attempt_id=aid)
             except OWNER.OwnerRouteBindingError:
                 continue
-            if binding is None and reason == "owner-route-binding-absent":
-                if fields[1] in OPEN and not AUTH.require_known(owned, meta, jobs):
-                    raise ValueError("parent-close-owner-not-owned")
-                candidates.append((aid, fields, meta))
-            elif (binding is not None and "unresolvable" not in reason and "conflict" not in reason
-                  and (binding.route_id, binding.route_hash, binding.route_file) == (
-                      route["route_id"], route["route_hash"], str(path.resolve()))):
+            if binding is None:
+                stops = reason == "owner-route-binding-absent"
+            else:
+                stops = reason in OWNER.CURRENT_ROUTE_STATUSES and (
+                    binding.route_id, binding.route_hash, binding.route_file) == (
+                    route["route_id"], route["route_hash"], str(path.resolve()))
+            if stops:
                 if fields[1] in OPEN and not AUTH.require_known(owned, meta, jobs):
                     raise ValueError("parent-close-owner-not-owned")
                 candidates.append((aid, fields, meta))

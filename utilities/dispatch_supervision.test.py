@@ -1444,21 +1444,35 @@ class StallNoticeRunningToolTest(unittest.TestCase):
                 self.assertNotIn("ITER", text)
 
     def test_only_the_program_name_reaches_the_parent_never_arguments(self):
+        # The name is the kernel's for the shell's live child; the command text is never read.
         secret = "RV1492_FAKE_API_TOKEN_7b"
-        for script, program in (("sleep 60; : --api-key " + secret, "sleep"),
-                                ("API_TOKEN=" + secret + " sleep 60", "sleep"),
-                                ("sleep 60 && : " + secret + "; : " + secret, "sleep")):
+        for script in ("sleep 60; : --api-key " + secret,
+                       "API_TOKEN=" + secret + " sleep 60; :",
+                       "sleep 60 && : " + secret + "; : " + secret,
+                       "sleep 60; : ' eval " + secret + " '",  # PR #1492 R2: eval inside a quoted argument
+                       "cd / && sleep 60; : " + secret):
             with self.subTest(script=script):
                 metadata = self.runtime("codex", script)
                 for text in (self.notice(metadata), self.notice(metadata, wire=True)):
                     self.assertNotIn(secret, text)
-                    self.assertRegex(text, r"is still running: " + program + r"\.")
-        for script, program in (("python3 script --token " + secret, "python3"),
-                                ("TOKEN=" + secret + " /usr/bin/python3 s.py", "python3"),
-                                ("pytest -q && echo " + secret + "; ls", "pytest")):
-            self.assertEqual(supervision._program_name(script), program)
-        for unsafe in ("(sleep 60)", "'unterminated", "a" * 41 + " x", "$(cat) " + secret):
-            self.assertIsNone(supervision._program_name(unsafe))
+                    self.assertRegex(text, r"is still running: sleep\.")
+        # A single command the shell execs leaves no shell to read: the existing text, no value.
+        metadata = self.runtime("codex", "API_TOKEN=" + secret + " sleep 60")
+        for text in (self.notice(metadata), self.notice(metadata, wire=True)):
+            self.assertNotIn(secret, text)
+        self.assertFalse(hasattr(supervision, "_program_name"))
+        self.assertFalse(hasattr(supervision, "_shell_command_text"))
+
+    def test_a_shell_running_only_builtins_keeps_the_existing_text(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fifo = Path(tmp.name) / "wait"
+        os.mkfifo(fifo)
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                text = self.notice(self.runtime(harness, f"read -t 60 x <> {fifo}; :"))
+                self.assertIn("watchdog windows; last comparable progress", text)
+                self.assertNotIn("tool command", text)
 
     def test_no_running_tool_or_no_runtime_keeps_the_existing_text(self):
         text = self.notice(self.runtime("claude", None))

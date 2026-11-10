@@ -2134,6 +2134,66 @@ class ParentCloseTest(unittest.TestCase):
                 finally:
                     child.doCleanups()
 
+    def test_an_unreadable_binding_record_is_not_absence_and_stops_nothing(self):
+        # PR #1492 R2: a record entry that is there but unreadable is a read error, not absence.
+        import owner_route_binding as OWNER
+        for state in ("dangling-link", "unreadable-directory", "dangling-advance"):
+            with self.subTest(state=state):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, (old, old_path), (advanced, _next) = child.advanced_route_bound_owner(False)
+                    aid = child.aid("att-owner")
+                    record = OWNER._attachment_root(child.jobs) / OWNER._attachment_key(aid)
+                    if state == "dangling-link":
+                        record.unlink()
+                        record.symlink_to(record.with_name("missing-record.json"))
+                        self.assertTrue(os.path.lexists(record) and not record.exists())
+                    elif state == "unreadable-directory":
+                        record.parent.chmod(0)
+                    else:
+                        predecessor = OWNER._advance_root(child.jobs) / OWNER._advance_key(
+                            aid, old["route_id"], old["route_hash"])
+                        moved = predecessor.with_name(predecessor.name + ".moved")
+                        predecessor.rename(moved)
+                        predecessor.symlink_to(predecessor.with_name("missing-predecessor"))
+                    with self.assertRaises(OWNER.OwnerRouteBindingError):
+                        OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                    self.assertIn(CLOSE._rows(child.jobs)[aid][0][1], CLOSE.OPEN)
+                finally:
+                    if state == "unreadable-directory":
+                        record.parent.chmod(0o700)
+                    child.doCleanups()
+
+    def test_a_route_only_owner_stops_only_on_a_clean_match_or_no_record(self):
+        # Every status the binding module can name is read from its source, so a status added
+        # later is required to stop nothing unless it joins CURRENT_ROUTE_STATUSES.
+        import re
+        import owner_route_binding as OWNER
+        statuses = set(re.findall(r'"(owner-route-[a-z0-9-]+)"',
+                                  (HERE / "owner_route_binding.py").read_text(encoding="utf-8")))
+        self.assertIn("owner-route-advance-loop", statuses)
+        self.assertLessEqual(OWNER.CURRENT_ROUTE_STATUSES | {"owner-route-binding-absent"}, statuses)
+        owner = self.process("att-owner")
+        self.route_bound_owner("att-owner", owner, "claude")
+        aid = self.aid("att-owner")
+        here = OWNER.OwnerRouteBinding(str(self.path.resolve()), self.route["route_id"], self.route["route_hash"])
+        other = OWNER.OwnerRouteBinding(str(self.path.with_name("other.json")), "rt-other", "other-hash")
+        stopped = set()
+        for status in sorted(statuses):
+            for binding in (here, other, None):
+                with mock.patch.object(OWNER, "resolve_owner_route_lifecycle",
+                                       return_value=(binding, status)):
+                    selected, _ = CLOSE._owner(self.route, self.path, self.jobs, CLOSE._rows(self.jobs))
+                if selected == aid:
+                    stopped.add((binding and binding.route_id, status))
+        self.assertEqual(stopped, {(self.route["route_id"], status) for status in OWNER.CURRENT_ROUTE_STATUSES}
+                         | {(None, "owner-route-binding-absent")})
+        self.assertIsNone(owner.poll())
+
     def test_never_started_chain_and_post_nodes_fold_no_start_advice(self):
         owner = self.process("att-owner")
         self.row("att-owner", process=owner)

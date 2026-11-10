@@ -461,33 +461,24 @@ def _route_needs_attention(metadata, jobs, now):
 
 
 _TOOL_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,40}")
 
 
-def _shell_command_text(argv):
-    """The command a tool shell runs: the `-c` script, or the `eval` inside Claude's wrapper."""
-    if not argv or Path(argv[0]).name not in _TOOL_SHELLS:
-        return None
-    flag = next((i for i, arg in enumerate(argv[1:], 1)
-                 if arg.startswith("-") and not arg.startswith("--") and "c" in arg), None)
-    script = next((arg for arg in argv[flag + 1:] if not arg.startswith("-")), None) if flag else None
-    if not script:
-        return None
-    marker = script.find(" eval ")
-    if marker >= 0:
-        try:
-            lexer = shlex.shlex(script[marker + 6:], posix=True)
-            lexer.whitespace_split = True
-            script = lexer.get_token() or script
-        except ValueError:
-            pass
-    return " ".join(script.split())
+def _comm(pid):
+    """The kernel's executable name for pid; never its arguments or environment."""
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
 
 
 def _running_tool_command(metadata):
-    """(start epoch, command) of the oldest tool command the attempt's live runtime still runs.
+    """(start epoch, program) of what the attempt's oldest live tool shell is running now.
 
-    Read only from the attempt's existing process census at the moment of the notice;
-    None whenever the runtime is not observed live or nothing can be read.
+    Read only from the attempt's existing process census at the moment of the notice: the
+    tool shell is the topmost shell below the runtime, and the program is the kernel name of
+    that shell's oldest live child. The shell's command text is never read. None whenever
+    the runtime is not observed live, the shell has no child, or nothing can be read.
     """
     try:
         from dispatch_contract import attempt_execution_observation, attempt_tagged_descendants
@@ -496,74 +487,56 @@ def _running_tool_command(metadata):
             return None
         runtimes = {int(identity[0]) for identity in execution.identities}
         members = {int(pid): start for pid, start, _state in attempt_tagged_descendants(metadata).members}
-        stats = {}
-        for pid in members:
+
+        def stat(pid):
             raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
             tail = raw[raw.rfind(")") + 2:].split()
-            if tail[19] == members[pid]:
-                stats[pid] = (int(tail[1]), int(tail[19]))
+            return (int(tail[1]), int(tail[19])) if tail[19] == members[pid] else None
+
+        stats = {}
+        for pid in members:
+            try:
+                observed = stat(pid)
+            except OSError:
+                continue  # exited since the census
+            if observed:
+                stats[pid] = observed
         with open("/proc/stat", encoding="utf-8") as handle:
             boot = next(float(line.split()[1]) for line in handle if line.startswith("btime "))
         ticks = os.sysconf("SC_CLK_TCK")
+        shells = {pid for pid in stats if pid not in runtimes and _comm(pid) in _TOOL_SHELLS}
         found = []
-        for pid, (parent, start) in stats.items():
-            if pid in runtimes:
-                continue
-            command = _shell_command_text(_cmdline(pid))
-            if not command:
-                continue
+        for shell in shells:
             # The tool shell the runtime started: its nearest observed ancestor is the runtime.
-            seen, current = set(), parent
+            seen, current = set(), stats[shell][0]
             while current in stats and current not in runtimes and current not in seen:
                 seen.add(current)
                 current = stats[current][0]
-            if current in runtimes and not any(
-                    _shell_command_text(_cmdline(ancestor)) for ancestor in seen):
-                found.append((boot + start / ticks, command))
+            if current not in runtimes or seen & shells:
+                continue
+            children = sorted((start, pid) for pid, (parent, start) in stats.items() if parent == shell)
+            if not children:
+                continue
+            start, child = children[0]
+            name = _comm(child)
+            try:
+                alive = stat(child) == (shell, start)
+            except OSError:
+                alive = False
+            if alive and _PROGRAM_NAME.fullmatch(name):
+                found.append((boot + start / ticks, name))
         return min(found) if found else None
     except (ImportError, OSError, ValueError, TypeError, IndexError, StopIteration, AttributeError):
         return None
-
-
-def _cmdline(pid):
-    try:
-        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()[:8192]
-    except OSError:
-        return []
-    return [os.fsdecode(part) for part in raw.rstrip(b"\0").split(b"\0") if part]
 
 
 def _running_tool_text(metadata):
     running = _running_tool_command(metadata)
     if not running:
         return ""
-    started, command = running
-    program = _program_name(command)
-    if not program:
-        return ""
+    started, program = running
     return (f"; a tool command started {time.strftime('%H:%M', time.localtime(started))} "
             f"is still running: {program}")
-
-
-_PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,40}")
-
-
-def _program_name(command):
-    """Only the first command's program name: never its arguments, environment, or path.
-
-    The notice reaches the parent model, so it names what runs and nothing it was given.
-    """
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        for token in lexer:
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token, re.S):
-                continue  # a leading NAME=value assignment
-            name = Path(token).name
-            return name if _PROGRAM_NAME.fullmatch(name) else None
-    except ValueError:
-        return None
-    return None
 
 
 def _runtime_tool_active(event):

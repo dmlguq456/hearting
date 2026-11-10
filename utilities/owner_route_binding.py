@@ -104,6 +104,29 @@ class OwnerRouteAdvance:
     path: str
 
 
+# The statuses under which resolve_owner_route_lifecycle names a clean current route.
+# Every other status (known today or added later) is not a confirmed current route.
+CURRENT_ROUTE_STATUSES = frozenset({
+    "owner-route-launch-binding", "owner-route-post-launch-attachment",
+    "owner-route-advance-current",
+})
+
+
+def _record_entry_present(path: Path, reason: str) -> bool:
+    """True when a record entry exists, False only when nothing is there at all.
+
+    A dangling link, an unreadable directory, or any other lookup error is a read
+    error, never absence.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise OwnerRouteBindingError(reason) from exc
+    return True
+
+
 def _attachment_root(jobs: str | Path) -> Path:
     path = Path(jobs).expanduser()
     if not path.is_absolute():
@@ -561,7 +584,7 @@ def _resolve_attachment_locked(jobs: Path, owner_attempt_id: str,
     path = _attachment_root(jobs) / _attachment_key(owner_attempt_id)
     if observer is not None:
         observer("file", path)
-    if not path.exists():
+    if not _record_entry_present(path, "owner-route-attachment-record-invalid"):
         return None
     try:
         attachment = _attachment_from_payload(
@@ -650,7 +673,7 @@ def resolve_owner_route_lifecycle(jobs: str | Path, *, owner_attempt_id: str,
     if observer is not None:
         observer("file", attachment_path)
     if row_binding is not None:
-        if attachment_path.exists():
+        if _record_entry_present(attachment_path, "owner-route-attachment-record-invalid"):
             raise OwnerRouteBindingError("owner-route-attachment-conflicts-sealed-binding")
         anchor = row_binding
         anchor_status = "owner-route-launch-binding"
@@ -686,8 +709,7 @@ def default_owner_route_file(jobs: str | Path | None = None, environ=None) -> st
     if not owner_attempt_id or not registry:
         raise OwnerRouteBindingError("owner-route-default-outside-owner")
     current, status = resolve_owner_route_lifecycle(registry, owner_attempt_id=owner_attempt_id)
-    if current is None or status not in {"owner-route-launch-binding", "owner-route-post-launch-attachment",
-                                         "owner-route-advance-current"}:
+    if current is None or status not in CURRENT_ROUTE_STATUSES:
         raise OwnerRouteBindingError(f"owner-route-default-unresolved:{status}")
     return current.route_file
 
@@ -752,6 +774,17 @@ def _candidate_started_by_owner(
     return any(continuation_attempt_state(meta) == "started" for _fields, meta in relevant)
 
 
+def _advance_candidates(predecessor: Path) -> list[Path]:
+    """Candidate records under one predecessor; an entry that is there but unreadable is an error."""
+    if not _record_entry_present(predecessor, "owner-route-advance-record-invalid"):
+        return []
+    try:
+        names = os.listdir(predecessor)
+    except OSError as exc:
+        raise OwnerRouteBindingError("owner-route-advance-record-invalid") from exc
+    return [predecessor / name for name in names if name.endswith(".json") and not name.startswith(".")]
+
+
 def resolve_owner_route_advance(
     jobs: str | Path, *, owner_attempt_id: str, anchor: OwnerRouteBinding,
     anchor_generation: int | None = None,
@@ -777,7 +810,7 @@ def resolve_owner_route_advance(
         registry_rows = registry_view(jobs_path) if jobs_path.is_file() else []
     if observer is not None:
         observer("members", first_path)
-    first_candidates = list(first_path.glob("*.json")) if first_path.is_dir() else []
+    first_candidates = _advance_candidates(first_path)
     try:
         _current_raw, current_route = _verified_binding(anchor, observer=observer)
         route_generation = int(current_route.get("advance_generation") or 0)
@@ -800,7 +833,7 @@ def resolve_owner_route_advance(
         )
         if observer is not None:
             observer("members", predecessor)
-        paths = sorted(predecessor.glob("*.json")) if predecessor.is_dir() else []
+        paths = sorted(_advance_candidates(predecessor))
         if not paths:
             return current, (
                 "owner-route-advance-absent"
