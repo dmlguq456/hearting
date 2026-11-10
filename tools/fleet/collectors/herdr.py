@@ -841,6 +841,26 @@ def join_deferred_pane_aliases(sessions):
         s._herdr_alias_pane = None
 
 
+def _inner_process_panes(session, pids):
+    """Display placement from this endpoint's existing foreground observation.
+
+    This does not add a native session claim to ``pane_process_claims``. A
+    wrapper's inner PTY can be placed before its optional SID metadata exists.
+    """
+    from . import procscan
+    birth = getattr(session, "proc_start", None)
+    if (not birth or not getattr(pids, "complete", False)
+            or procscan.read_proc_start(session.pid) != birth):
+        return set()
+    matches = set()
+    for pane, info in getattr(pids, "pane_infos", {}).items():
+        foreground = {row["pid"] for row in info.get("foreground_processes") or ()
+                      if isinstance(row, dict) and type(row.get("pid")) is int}
+        if pid_in_panes(session.pid, set(), foreground):
+            matches.add(pane)
+    return matches if procscan.read_proc_start(session.pid) == birth else set()
+
+
 def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bindings=None,
            wait_timeout=0.0):
     """Set ``herdr_attached`` on every eligible depth-0 session. ``agents`` = a
@@ -962,6 +982,8 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         # Herdr can lag a native resume/clear. Its exact foreground PID (or an
         # existing session match) identifies the pane; seat history joins its IDs.
         matching_panes = bindings.get(s.pid, set())
+        if not matching_panes:
+            matching_panes = _inner_process_panes(s, pids)
         if not matching_panes and sid and (harness, sid) in index:
             pane = index[(harness, sid)].get("pane_id")
             matching_panes = {pane} if pane else set()
