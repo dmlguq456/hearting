@@ -544,15 +544,17 @@ mouseInput=require('./panel-mouse.cjs')({
 function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
-  if(currentDelivery){
-    inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
-    if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
-  }
   while(data.length){
+    // Mouse-opened shell editors own their visible keys even while a peer's
+    // paste is admitted. Only native-directed bytes enter the retained queue.
+    if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
+    if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
+    if(!relay&&(routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
+    if(currentDelivery&&(!block.focused||relay)){
+      inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
+      if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
+    }
     if(relay){child.write(data);return;}
-    if(settings){settingsInput(data);epoch+=data.length;return;}
-    if(routeDetail&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
-    if((routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
     if(fleetView){
       const view=fleetView;
       if(view.closing){observeInput(data);child.write(data);return;}

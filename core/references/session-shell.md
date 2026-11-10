@@ -79,6 +79,9 @@ side/bottom layout, side width, narrow-window behavior and auxiliary detail.
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.
+During an admitted peer paste, keys for a visible shell editor remain with that
+editor. Only native-directed human bytes join the retained delivery queue;
+leaving shell focus preserves their order behind the paste's delayed Enter.
 Respect a minimum native area; use configurable bounded bottom height at 80
 columns and preserve the same child through resize. No new global hotkey.
 OpenCode uses only an additive HEARTING section inside its existing sidebar;

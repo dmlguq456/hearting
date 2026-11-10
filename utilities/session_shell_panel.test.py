@@ -13,6 +13,11 @@ import session_shell as shell
 
 
 class PanelTest(unittest.TestCase):
+    def test_mouse_opened_editor_owns_keys_during_peer_delivery(self):
+        result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-delivery-focus.cjs"), str(ROOT)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_all_route_evidence_pages_remain_readable_without_question_effects(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

@@ -746,13 +746,181 @@
    "en": "unknown · check receipt",
    "ko": "미확인 · 영수증 확인"
   },
+  "fleet.session_panel.answer": {
+   "en": "Your answer needed",
+   "ko": "내 답 필요"
+  },
+  "fleet.session_panel.apply": {
+   "en": "Apply",
+   "ko": "적용"
+  },
+  "fleet.session_panel.auxiliary": {
+   "en": "Session information",
+   "ko": "보조 정보"
+  },
+  "fleet.session_panel.back": {
+   "en": "Back",
+   "ko": "돌아가기"
+  },
+  "fleet.session_panel.bottom": {
+   "en": "Bottom",
+   "ko": "하단"
+  },
+  "fleet.session_panel.cancel": {
+   "en": "Cancel",
+   "ko": "취소"
+  },
+  "fleet.session_panel.checking": {
+   "en": "Checking",
+   "ko": "확인 중"
+  },
+  "fleet.session_panel.compact": {
+   "en": "Compact bottom",
+   "ko": "간단 하단"
+  },
+  "fleet.session_panel.defaults": {
+   "en": "Defaults",
+   "ko": "기본값"
+  },
+  "fleet.session_panel.detail": {
+   "en": "Detail",
+   "ko": "상세"
+  },
+  "fleet.session_panel.details": {
+   "en": "Session details",
+   "ko": "세션 상세"
+  },
+  "fleet.session_panel.evidence_brief": {
+   "en": "Report",
+   "ko": "보고"
+  },
+  "fleet.session_panel.evidence_ci": {
+   "en": "CI",
+   "ko": "CI"
+  },
+  "fleet.session_panel.evidence_gate": {
+   "en": "Completion",
+   "ko": "마감"
+  },
+  "fleet.session_panel.evidence_next": {
+   "en": "Next",
+   "ko": "다음"
+  },
+  "fleet.session_panel.evidence_owner": {
+   "en": "Owner",
+   "ko": "담당"
+  },
+  "fleet.session_panel.evidence_result": {
+   "en": "Result",
+   "ko": "결과"
+  },
+  "fleet.session_panel.evidence_review": {
+   "en": "Review",
+   "ko": "검토"
+  },
+  "fleet.session_panel.evidence_route": {
+   "en": "Route",
+   "ko": "형태"
+  },
+  "fleet.session_panel.evidence_stages": {
+   "en": "Stages",
+   "ko": "단계"
+  },
+  "fleet.session_panel.evidence_test": {
+   "en": "Tests",
+   "ko": "시험"
+  },
+  "fleet.session_panel.evidence_why": {
+   "en": "Basis",
+   "ko": "선택 근거"
+  },
+  "fleet.session_panel.fixed_width": {
+   "en": "OpenCode sidebar: fixed 42 columns",
+   "ko": "OpenCode sidebar: 42열 고정"
+  },
+  "fleet.session_panel.height": {
+   "en": "Bottom rows",
+   "ko": "하단 행"
+  },
+  "fleet.session_panel.layout": {
+   "en": "Layout",
+   "ko": "배치"
+  },
+  "fleet.session_panel.narrow": {
+   "en": "Narrow window",
+   "ko": "좁은 창"
+  },
+  "fleet.session_panel.no_routes": {
+   "en": "No current route",
+   "ko": "아직 라우트 없음"
+  },
+  "fleet.session_panel.no_work": {
+   "en": "No confirmed work yet",
+   "ko": "아직 확인된 작업 없음"
+  },
   "fleet.session_panel.open_fleet": {
    "en": "open in Fleet",
    "ko": "Fleet에서 열기"
   },
+  "fleet.session_panel.ready": {
+   "en": "Result ready",
+   "ko": "결과 준비"
+  },
+  "fleet.session_panel.results": {
+   "en": "Results & connected work",
+   "ko": "결과 · 연결된 일"
+  },
+  "fleet.session_panel.routes": {
+   "en": "Route",
+   "ko": "라우트"
+  },
+  "fleet.session_panel.save_failed": {
+   "en": "Could not save · changes not applied",
+   "ko": "저장할 수 없음 · 적용하지 않음"
+  },
+  "fleet.session_panel.saved": {
+   "en": "Saved",
+   "ko": "저장됨"
+  },
+  "fleet.session_panel.settings": {
+   "en": "Settings",
+   "ko": "설정"
+  },
+  "fleet.session_panel.settings_title": {
+   "en": "Hearting shell settings",
+   "ko": "하팅 셸 설정"
+  },
+  "fleet.session_panel.side": {
+   "en": "Side",
+   "ko": "옆"
+  },
+  "fleet.session_panel.summary": {
+   "en": "Summary",
+   "ko": "기본"
+  },
+  "fleet.session_panel.threshold": {
+   "en": "Side minimum columns",
+   "ko": "옆 배치 최소 폭"
+  },
   "fleet.session_panel.title": {
    "en": "SESSION {tag} · {harness} · Ctrl+] {collapse}",
    "ko": "세션 {tag} · {harness} · Ctrl+] {collapse}"
+  },
+  "fleet.session_panel.unknown": {
+   "en": "Checking state",
+   "ko": "상태 확인 중"
+  },
+  "fleet.session_panel.width": {
+   "en": "Panel width",
+   "ko": "패널 폭"
+  },
+  "fleet.session_panel.work": {
+   "en": "Current work",
+   "ko": "지금 맡긴 일"
+  },
+  "fleet.session_panel.working": {
+   "en": "Working",
+   "ko": "진행 중"
   },
   "fleet.span.hour": {
    "en": "{count} hour",
@@ -1737,174 +1905,6 @@
   "wait.title": {
    "en": "◑ answer needed",
    "ko": "◑답변 필요"
-  },
-  "fleet.session_panel.settings": {
-   "en": "Settings",
-   "ko": "설정"
-  },
-  "fleet.session_panel.settings_title": {
-   "en": "Hearting shell settings",
-   "ko": "하팅 셸 설정"
-  },
-  "fleet.session_panel.checking": {
-   "en": "Checking",
-   "ko": "확인 중"
-  },
-  "fleet.session_panel.work": {
-   "en": "Current work",
-   "ko": "지금 맡긴 일"
-  },
-  "fleet.session_panel.no_work": {
-   "en": "No confirmed work yet",
-   "ko": "아직 확인된 작업 없음"
-  },
-  "fleet.session_panel.routes": {
-   "en": "Route",
-   "ko": "라우트"
-  },
-  "fleet.session_panel.no_routes": {
-   "en": "No current route",
-   "ko": "아직 라우트 없음"
-  },
-  "fleet.session_panel.results": {
-   "en": "Results & connected work",
-   "ko": "결과 · 연결된 일"
-  },
-  "fleet.session_panel.details": {
-   "en": "Session details",
-   "ko": "세션 상세"
-  },
-  "fleet.session_panel.back": {
-   "en": "Back",
-   "ko": "돌아가기"
-  },
-  "fleet.session_panel.apply": {
-   "en": "Apply",
-   "ko": "적용"
-  },
-  "fleet.session_panel.cancel": {
-   "en": "Cancel",
-   "ko": "취소"
-  },
-  "fleet.session_panel.defaults": {
-   "en": "Defaults",
-   "ko": "기본값"
-  },
-  "fleet.session_panel.layout": {
-   "en": "Layout",
-   "ko": "배치"
-  },
-  "fleet.session_panel.width": {
-   "en": "Panel width",
-   "ko": "패널 폭"
-  },
-  "fleet.session_panel.narrow": {
-   "en": "Narrow window",
-   "ko": "좁은 창"
-  },
-  "fleet.session_panel.auxiliary": {
-   "en": "Session information",
-   "ko": "보조 정보"
-  },
-  "fleet.session_panel.height": {
-   "en": "Bottom rows",
-   "ko": "하단 행"
-  },
-  "fleet.session_panel.threshold": {
-   "en": "Side minimum columns",
-   "ko": "옆 배치 최소 폭"
-  },
-  "fleet.session_panel.side": {
-   "en": "Side",
-   "ko": "옆"
-  },
-  "fleet.session_panel.bottom": {
-   "en": "Bottom",
-   "ko": "하단"
-  },
-  "fleet.session_panel.compact": {
-   "en": "Compact bottom",
-   "ko": "간단 하단"
-  },
-  "fleet.session_panel.summary": {
-   "en": "Summary",
-   "ko": "기본"
-  },
-  "fleet.session_panel.detail": {
-   "en": "Detail",
-   "ko": "상세"
-  },
-  "fleet.session_panel.working": {
-   "en": "Working",
-   "ko": "진행 중"
-  },
-  "fleet.session_panel.answer": {
-   "en": "Your answer needed",
-   "ko": "내 답 필요"
-  },
-  "fleet.session_panel.ready": {
-   "en": "Result ready",
-   "ko": "결과 준비"
-  },
-  "fleet.session_panel.unknown": {
-   "en": "Checking state",
-   "ko": "상태 확인 중"
-  },
-  "fleet.session_panel.fixed_width": {
-   "en": "OpenCode sidebar: fixed 42 columns",
-   "ko": "OpenCode sidebar: 42열 고정"
-  },
-  "fleet.session_panel.saved": {
-   "en": "Saved",
-   "ko": "저장됨"
-  },
-  "fleet.session_panel.save_failed": {
-   "en": "Could not save · changes not applied",
-   "ko": "저장할 수 없음 · 적용하지 않음"
-  },
-  "fleet.session_panel.evidence_route": {
-   "en": "Route",
-   "ko": "형태"
-  },
-  "fleet.session_panel.evidence_why": {
-   "en": "Basis",
-   "ko": "선택 근거"
-  },
-  "fleet.session_panel.evidence_owner": {
-   "en": "Owner",
-   "ko": "담당"
-  },
-  "fleet.session_panel.evidence_stages": {
-   "en": "Stages",
-   "ko": "단계"
-  },
-  "fleet.session_panel.evidence_test": {
-   "en": "Tests",
-   "ko": "시험"
-  },
-  "fleet.session_panel.evidence_review": {
-   "en": "Review",
-   "ko": "검토"
-  },
-  "fleet.session_panel.evidence_ci": {
-   "en": "CI",
-   "ko": "CI"
-  },
-  "fleet.session_panel.evidence_gate": {
-   "en": "Completion",
-   "ko": "마감"
-  },
-  "fleet.session_panel.evidence_result": {
-   "en": "Result",
-   "ko": "결과"
-  },
-  "fleet.session_panel.evidence_next": {
-   "en": "Next",
-   "ko": "다음"
-  },
-  "fleet.session_panel.evidence_brief": {
-   "en": "Report",
-   "ko": "보고"
   }
  }
 }
