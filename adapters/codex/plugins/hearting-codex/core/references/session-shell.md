@@ -174,20 +174,24 @@ A value that cannot meet this is compared with retaining that native field.
 While wrapped, Claude's panel shows the common status area in the same place
 and with the same formatter as Codex and OpenCode. Claude keeps its reserved
 statusline row and keeps running its callback, which stays the value source and
-paints every former Hearting field with that formatter. Only while the panel
-actually paints its model and compact status for the callback's exact session
-does the shell blank the rows whose text equals the callback's latest recorded
-output, and the callback then prints one compact line. Claude has no supported
-way to remove that row, so one row remains; it is a notice row, empty unless the
-person must know something now. One function picks a single item by priority
-from existing values: an answer this session owes, then an already computed
-warning (compaction imminent, a context or usage reading at Fleet's red level,
-a failed or attention-needing route), then news that arrived since the last
-human input within ten minutes (a received peer report or a completed route
-result). It reuses Fleet's glyphs and colors and adds no collection, setting
-or judgment. A hidden, collapsed, focused
-or not-yet-bound panel, a lost display host and unwrapped sessions show the
-native row unchanged. Unwrapped displays remain intact.
+paints every former Hearting field with that formatter on every callback; the
+panel never shortens it. Only while the panel actually paints its model and
+compact status for the callback's exact session does the shell blank Claude's
+statusline area, the rows directly under the input box, when their text equals
+the callback's latest recorded output. A screen without that input box, such
+as the Ctrl+O transcript, keeps every row. Claude has no supported way to
+remove those rows, so one or two rows remain (two when the complete status
+wraps or lists jobs); keeping every value visible comes first. The first of
+them is a notice row, empty unless the person must know something now, and any
+other stays blank. One function picks a single item by priority from existing
+values: an answer this session owes, then an already computed warning
+(compaction imminent, a context or usage reading at Fleet's red level, a
+failed, blocked or attention-needing route), then news that arrived since the
+last human input within ten minutes (a received peer report or a completed
+route result). It reuses Fleet's glyphs and colors and adds no collection,
+setting or judgment. A hidden, collapsed, focused or not-yet-bound panel, a
+lost display host and unwrapped sessions show the complete native rows
+unchanged. Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.

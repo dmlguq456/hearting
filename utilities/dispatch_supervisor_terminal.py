@@ -280,6 +280,36 @@ def classify_codex_result(final_text: object, process_exit: int = 0) -> Supervis
     )
 
 
+def completed_owner_assessment(terminal, text, *, jobs=None, attempt_id=None):
+    """Keep an exact audit's negative judgment without declaring its work dead."""
+    if (terminal.note != "dead-worker-fail" or terminal.process_exit != "0"
+            or not jobs or not attempt_id):
+        return terminal
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        from codex_dispatch_terminal import inspect_terminal_value, inspect_terminal_attempt
+        row = exact_attempt_row(Path(jobs), attempt_id)
+        if row.status not in {"open", "running"}:
+            return terminal
+        meta = row.metadata
+        context = dict(worktree=row.raw.split("\t")[3], artifact_root_metadata=meta.get("artifact_root"),
+                       worker_type=meta.get("worker_type"), artifact_binding=meta)
+        if text is None:
+            parsed = inspect_terminal_attempt(meta.get("log_file"), **context)
+        else:
+            match = HANDOFF_RE.search(text.strip()) if isinstance(text, str) else None
+            if not match or match["verdict"] != "FAIL":
+                return terminal
+            parsed = inspect_terminal_value({"state": "valid", "verdict": "FAIL", "blocker": match["blocker"],
+                "artifact": match["artifact"], "artifact_state": "unchecked", "source": "exact-owner-handoff"}, **context)
+        if "completed-audit-with-findings" not in str(parsed.get("envelope_normalized") or "").split(","):
+            return terminal
+        return replace(terminal, note="completed-supervisor", failure_class="pass",
+                       reconcile_reason="completed-audit-with-findings")
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return terminal
+
+
 def codex_turn_failure_terminal(payload: dict[str, Any]) -> SupervisorTerminal:
     """Classify a `dispatch.supervisor.turn.failed` payload.
 
@@ -499,6 +529,9 @@ def reconcile_supervisor_terminal(
     *,
     emit: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
+    # A post-exit watcher can reach the same final handoff before the live
+    # supervisor wrote its normalized event. Use the same exact open owner.
+    terminal = completed_owner_assessment(terminal, None, jobs=jobs, attempt_id=attempt_id)
     # SD-111 P2 trigger 1: this module cannot import
     # dispatch_completion_join.materialize_after_terminal_close (circular --
     # dispatch_completion_join -> codex_dispatch_terminal ->

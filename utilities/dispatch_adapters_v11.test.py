@@ -357,7 +357,9 @@ class AdapterV11Test(unittest.TestCase):
     with self.subTest(harness=harness,error=type(error).__name__), owned_watcher_fixture() as (td,launched):
      base=Path(td);jobs=base/"jobs.log";attempt="att-foreground-watcher-failure"
      wrapper=self.load_wrapper(harness)
-     path=ROOT/f"adapters/{harness}/bin/dispatch-headless.py"
+     # The foreground branch is the launch every wrapper shares; it reads the
+     # wrapper's names through `h`, so each wrapper's own helpers are exercised.
+     path=ROOT/"utilities/dispatch_headless_main.py"
      cell=next(node for node in ast.walk(ast.parse(path.read_text()))
                if isinstance(node,ast.If) and "foreground_review_handoff" in ast.unparse(node.test))
      function=ast.FunctionDef(name="exercise",args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),
@@ -386,10 +388,11 @@ class AdapterV11Test(unittest.TestCase):
        args=SimpleNamespace(launch_lifecycle=wrapper.FOREGROUND_SCOPED,parent_binding=None,
                             foreground_timeout=2,watchdog_budget=wrapper.begin_finite_watchdog(2),
                             attempt_id=attempt,worker_type="review")
-       namespace={**vars(wrapper),"args":args,"proc":proc,"jobs":jobs,"start_ticks":identity["pid_start"],
-                  "launch_metadata":identity,"activity_context":None,"foreground_review_handoff":True,
-                  "seal_foreground_result":seal,"launch_reap_watch":refuse,
-                  "materialize_after_terminal_close":mock.Mock()}
+       adapter={**vars(wrapper),"seal_foreground_result":seal,"launch_reap_watch":refuse,
+                "materialize_after_terminal_close":mock.Mock()}
+       namespace={"h":wrapper.DISPATCH_MAIN.AdapterNamespace(adapter),"args":args,"proc":proc,"jobs":jobs,
+                  "start_ticks":identity["pid_start"],"launch_metadata":identity,"activity_context":None,
+                  "foreground_review_handoff":True}
        exec(compiled,namespace)
        stream=io.StringIO()
        with redirect_stdout(stream):code=namespace["exercise"]()
@@ -398,7 +401,7 @@ class AdapterV11Test(unittest.TestCase):
        self.assertIn("child_spawned=1",stream.getvalue())
        self.assertIn("launch_started=1",stream.getvalue())
        self.assertEqual(dict(seals[0].values)["foreground_process_exit"],"0")
-       namespace["materialize_after_terminal_close"].assert_not_called()
+       adapter["materialize_after_terminal_close"].assert_not_called()
       finally:
        proc.wait(timeout=5)
  def test_watcher_fixture_finalizes_children_before_retiring_scratch_on_failures(self):
@@ -1036,30 +1039,30 @@ class AdapterV11Test(unittest.TestCase):
     self.assertEqual(wrapper.effective_runtime_sandbox(args),"danger-full-access")
    self.assertIn("--sandbox danger-full-access",command)
  def test_background_governor_does_not_hold_orchestrator_capture_pipes(self):
+  # The three wrappers spawn through the shared launch.
   for harness in ADAPTERS:
    with self.subTest(harness=harness):
-    source=(ROOT/f"adapters/{harness}/bin/dispatch-headless.py").read_text(encoding="utf-8")
-    marker=("return subprocess.Popen" if "return subprocess.Popen" in source
-            else "proc = subprocess.Popen")
-    start=source.index(marker)
-    end=source.index("except OSError",start)
-    launch=source[start:end]
-    self.assertIn("stdin=subprocess.DEVNULL",launch)
-    self.assertIn("stdout=subprocess.DEVNULL",launch)
-    self.assertIn("stderr=subprocess.DEVNULL",launch)
-    if harness in ("codex","claude"):
-     self.assertIn('"pid_scope"] = "namespace-local"',source)
-    else:
-     self.assertIn('launch_metadata["pid_scope"] = "namespace-local"',source)
-    self.assertIn('os.environ.get("AGENT_DISPATCH_CHILD") == "1"',source)
+    wrapper=(ROOT/f"adapters/{harness}/bin/dispatch-headless.py").read_text(encoding="utf-8")
+    self.assertEqual(wrapper.count("DISPATCH_MAIN.launch_claimed_attempt("),1)
+  source=(ROOT/"utilities/dispatch_headless_main.py").read_text(encoding="utf-8")
+  start=source.index("return subprocess.Popen")
+  end=source.index("except OSError",start)
+  launch=source[start:end]
+  self.assertIn("stdin=subprocess.DEVNULL",launch)
+  self.assertIn("stdout=subprocess.DEVNULL",launch)
+  self.assertIn("stderr=subprocess.DEVNULL",launch)
+  self.assertIn('launch_metadata["pid_scope"] = "namespace-local"',source)
+  self.assertIn('os.environ.get("AGENT_DISPATCH_CHILD") == "1"',source)
  def test_all_three_wrappers_install_the_same_detached_reap_observer(self):
   for harness in ADAPTERS:
    with self.subTest(harness=harness):
     source=(ROOT/f"adapters/{harness}/bin/dispatch-headless.py").read_text(
      encoding="utf-8")
     self.assertIn("launch_reap_watch",source)
-    self.assertIn("if args.launch_lifecycle == DETACHED:",source)
-    self.assertIn('{"reap_watch": "post-exit", "reap_watch_pid":',source)
+    self.assertIn("DISPATCH_MAIN.launch_claimed_attempt(",source)
+  shared=(ROOT/"utilities/dispatch_headless_main.py").read_text(encoding="utf-8")
+  self.assertIn("if args.launch_lifecycle == h.DETACHED:",shared)
+  self.assertIn('{"reap_watch": "post-exit", "reap_watch_pid":',shared)
  def test_parallel_batch_contract_projects_to_all_three_wrappers(self):
   for harness in ADAPTERS:
    with self.subTest(harness=harness):
@@ -1067,7 +1070,9 @@ class AdapterV11Test(unittest.TestCase):
      encoding="utf-8")
     self.assertIn("REPLICA_RESERVATION_ROW_KEYS",source)
     self.assertIn("replica_batch_expectation",source)
-    self.assertIn("expected_reservation=args.replica_batch_expectation",source)
+    self.assertIn("DISPATCH_MAIN.claim_registered_attempt(",source)
+  shared=(ROOT/"utilities/dispatch_headless_main.py").read_text(encoding="utf-8")
+  self.assertEqual(shared.count("expected_reservation=args.replica_batch_expectation"),2)
  def test_nested_codex_home_links_auth_but_keeps_mutable_state_external(self):
   # `prepare_nested_codex_home` runs the *installed* runtime's projection
   # installer on purpose: the nested home's identity must follow the canonical

@@ -118,6 +118,11 @@ def notice_line(values, routes, questions, display, now):
         if route.get("state") in {"dead", "failed", "attention", "degraded"}:
             return [(_LIVE_GLYPH["dead"] + " ", "g_dead"), (route.get("state_label") or "", "g_dead"),
                     (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
+        if route.get("state") == "blocked":
+            # The common reader's blocked route waits on a person: Fleet's ◑ and
+            # its "answer needed" wording, not a failure.
+            return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"), (ui_text("fleet.session_block.open"), "lvl_y"),
+                    (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
     human = (display or {}).get("human") or {}
     since = human.get("at") if type(human.get("at")) in (int, float) else 0
     news = []

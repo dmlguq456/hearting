@@ -291,6 +291,7 @@ const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'read
    const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
    let paneOwningContext = ctx;
    const pendingPeerStatus = new Map();
+   const sessionInfoById = new Map(), v2SessionInfo = new Map();
    ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
    ${extract('function sdkResponseData(result)', 'function runCompactHook')}
    ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
@@ -335,7 +336,14 @@ try {
             final = [pending.read(root, storage, row["delivery_id"]) for row in notices]
             self.assertEqual([pending.received_ack_identity(row, storage, row["delivery_id"])
                               for row in final], identities)
-            self.assertTrue(all(row["state"] == case.get("state", "pending") for row in final), final)
+            # A prompt the native API accepted without an observed receipt stays
+            # claimed (sent, not unsent): the next idle pass settles it from history
+            # and only the expired claim lease makes it deliverable again.
+            held = case.get("writes", 0) >= 1 and case.get("acceptance") != "ambiguous"
+            expected_state = case.get("state", "claimed" if held else "pending")
+            self.assertTrue(all(row["state"] == expected_state for row in final), final)
+            if held and expected_state == "claimed":
+                self.assertNotIn("release", observed["actions"])
             self.assertTrue(all(pending.read(root, "B" if storage == "A" else "A", row["delivery_id"])
                                 is None for row in notices))
             return observed, final

@@ -273,13 +273,10 @@ def claude_native_statusline(callback, environ):
     except ValueError:
         columns = 100
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
-    # Every field stays in this row whenever the panel is not painting it. While
-    # the shell blanks this row behind a visible panel, one compact line keeps
-    # that blank to a single row and is still complete enough if it reappears
-    # before Claude's next callback.
-    rows = ([clip_segments(line_segments(values, columns - 2), columns)]
-            if claude_panel_painted(environ, sid) else
-            [clip_segments(line, columns) for line in status_lines(values, columns)])
+    # Every field stays in this row on every callback. While the visible panel
+    # paints these values, the shell blanks exactly this recorded output; if the
+    # panel goes away, the native row is already complete.
+    rows = [clip_segments(line, columns) for line in status_lines(values, columns)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
     return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
 
@@ -299,22 +296,6 @@ def _shell_directory(environ):
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         return None
     return directory
-
-
-def claude_panel_painted(environ, sid):
-    """The host's own report that its visible panel paints this session's status."""
-    import json
-    directory = _shell_directory(environ)
-    if not directory or not sid:
-        return False
-    try:
-        path = directory / "claude-panel.json"
-        if path.lstat().st_size > 1024:
-            return False
-        value = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return False
-    return isinstance(value, dict) and value.get("painted") is True and value.get("session_id") == sid
 
 
 def _record_claude_rows(environ, sid, rows):

@@ -863,7 +863,14 @@ def inspect_terminal_attempt(
     type keep the compatibility note.
     """
 
-    parsed = _read_terminal(path)
+    return inspect_terminal_value(_read_terminal(path), worktree=worktree,
+        artifact_root_metadata=artifact_root_metadata, include_failure_detail=include_failure_detail,
+        worker_type=worker_type, artifact_binding=artifact_binding)
+
+
+def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
+                           include_failure_detail=False, worker_type=None, artifact_binding=None):
+    """The same root/placement checks for a live final result and its later log."""
     if parsed["state"] != "valid":
         return parsed
 
@@ -881,6 +888,7 @@ def inspect_terminal_attempt(
         )
 
     artifact = str(parsed["artifact"])
+    artifact_path = None
     if artifact == "-":
         parsed["artifact_state"] = "none"
     else:
@@ -1012,6 +1020,11 @@ def inspect_terminal_attempt(
     if review_blocking_handoff(parsed, worker_type):
         parsed["failure_note"] = REVIEW_BLOCKING_NOTE
 
+    if completed_audit_assessment(parsed, worker_type, artifact_binding, artifact_path):
+        parsed.update(verdict="PASS", assessment_verdict="FAIL", assessment_blocker=parsed.get("blocker"),
+                      blocker="none", blocker_reason="none", failure_class="pass", failure_note="",
+                      envelope_normalized=",".join(filter(None, (parsed.get("envelope_normalized"), "completed-audit-with-findings"))))
+
     if (
         worker_type == REVIEW_WORKER_TYPE
         and parsed.get("artifact_state") == "readable"
@@ -1034,11 +1047,99 @@ def inspect_terminal_attempt(
             excerpt, truncated = _escape_and_bound(diagnostic)
             parsed["failure_diagnostic_excerpt"] = excerpt
             parsed["failure_diagnostic_truncated"] = truncated
+    if include_failure_detail and parsed.get("assessment_blocker") not in {None, "none"}:
+        excerpt, truncated = _escape_and_bound(str(parsed["assessment_blocker"]))
+        parsed["assessment_detail_excerpt"] = excerpt
+        parsed["assessment_detail_truncated"] = truncated
 
     # Raw values stay internal and are removed from the normalized public view.
-    for key in ("artifact", "blocker", "diagnostic"):
+    for key in ("artifact", "blocker", "diagnostic", "assessment_blocker"):
         parsed.pop(key, None)
     return parsed
+
+
+def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None):
+    """A negative subject judgment is not a failed audit execution.
+
+    Only an exact registered audit owner with a completed negative review report
+    qualifies. Native success or a readable file alone cannot prove that review
+    work happened. Stage reviews and ordinary code work do not qualify.
+    """
+    if (worker_type != "owner" or not isinstance(binding, Mapping)
+            or binding.get("worker_type") != "owner" or binding.get("dispatch_depth") != "1"
+            or binding.get("workflow_completion") != "runtime-v1"
+            or str(binding.get("note", "")).startswith("dead-")
+            or parsed.get("state") != "valid" or parsed.get("verdict") != "FAIL"
+            or parsed.get("artifact_state") != "readable"
+            or parsed.get("artifact_shape") != "file"):
+        return False
+    try:
+        import route_identity
+        path = binding.get("owner_route_file") or binding.get("route_file")
+        route = json.loads(Path(path).read_text())
+        digest = binding.get("owner_route_hash") or binding.get("route_hash")
+        rid = binding.get("owner_route_id") or binding.get("route_id")
+        return (route.get("capability") == "audit" and route.get("route_id") == rid
+                and bool(digest) and route.get("route_hash") == digest
+                and route_identity.route_hash(route) == digest
+                and _completed_negative_audit_report(artifact_path))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+# Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
+# negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+_AUDIT_OPENING_BYTES = 64 * 1024
+_AUDIT_VERDICT_FORMS = (
+    ("merge", "최종 판정: 병합 가능"),
+    ("merge", "Final verdict: mergeable"),
+    ("fix", "최종 판정: 수정 후 병합"),
+    ("fix", "Final verdict: changes requested"),
+)
+
+
+def _audit_form_pattern(label):
+    words = [re.escape(word) for word in label.replace(":", " : ").split()]
+    return r"\s*".join(words).replace(r"\s*:\s*", r"\s*[:：]\s*")
+
+
+_AUDIT_CLOSED = re.compile(
+    r"^(?P<label>" + "|".join(f"(?:{_audit_form_pattern(label)})" for _, label in _AUDIT_VERDICT_FORMS)
+    + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.I)
+_AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
+                for kind, label in _AUDIT_VERDICT_FORMS}
+
+
+def _completed_negative_audit_report(path):
+    """Read only the first nonblank, non-heading line, like pr-chain.py.
+
+    The body is not an authority source: no prose, fence, history or conflicting
+    later verdict interpretation. A missing/unreadable opening retains FAIL.
+    """
+    if path is None:
+        return False
+    try:
+        with Path(path).open("rb") as handle:
+            remaining = _AUDIT_OPENING_BYTES
+            while remaining > 0:
+                raw = handle.readline(remaining + 1)
+                if not raw or len(raw) > remaining:
+                    return False
+                remaining -= len(raw)
+                for line in raw.decode("utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    line = line.replace("**", "").replace("__", "").strip()
+                    line = line[:-1].rstrip() if line.endswith(".") else line
+                    match = _AUDIT_CLOSED.fullmatch(line)
+                    if not match:
+                        return False
+                    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
+                    return _AUDIT_KINDS[label] == "fix"
+    except (OSError, UnicodeError):
+        pass
+    return False
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
@@ -1140,6 +1241,14 @@ def carrier_terminal_note(
     if not compat:
         return None, {}
     extra: dict[str, str] = {}
+    if compat.get("failure_note") == "dead-worker-fail" and worker_type == "owner":
+        view = inspect_terminal_attempt(path, worktree=worktree,
+            artifact_root_metadata=artifact_root_metadata, worker_type=worker_type,
+            artifact_binding=artifact_binding)
+        if view.get("assessment_verdict") == "FAIL" and view.get("verdict") == "PASS":
+            compat = {**compat, "verdict": "PASS", "blocker": "none", "failure_note": "",
+                      "failure_class": "pass"}
+            extra["reconcile_reason"] = "completed-audit-with-findings"
     if compat.get("failure_note") == "dead-worker-fail" and worker_type == REVIEW_WORKER_TYPE:
         view = inspect_terminal_attempt(
             path,
