@@ -681,7 +681,8 @@ def _design_review_subject(route: dict, node: dict) -> dict:
                 "cycle_id": cycle.get("cycle_id"), "route_id": cycle.get("route_id")}}
 
 
-def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
+def _generic_artifact_review_subject(route: dict, node: dict, *,
+                                     resolve_logical_directories: bool = True) -> dict | None:
     """Observe only concrete, sealed artifact inputs a capped review consumes."""
     if node.get("kind") != "review-worker":
         return None
@@ -709,6 +710,23 @@ def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
         (scope[len("artifacts/"):] if scope.startswith("artifacts/") else scope)[:-3]
         for scope in producer_scopes if scope.endswith("/**")} - {
         "logs", "checkpoints", "raw-results", "models", "experiment-artifact"}
+    if not resolve_logical_directories:
+        logical_directories = set()
+    # Newly resolved directory inputs must cover the whole logical payload.
+    # A partial subject (apply-log without applied-artifact, for example)
+    # would bypass upstream completion currency and preserve an unverified PASS.
+    if any(isinstance(value, str) and value in logical_directories
+           for value in node.get("inputs") or ()):
+        ignored = {"logs", "checkpoints", "raw-results", "models", "experiment-artifact"}
+        for value in node.get("inputs") or ():
+            if (not isinstance(value, str) or not value or "<" in value or ">" in value
+                    or "/" in value or PurePosixPath(value).suffix or value in ignored):
+                continue
+            source = sources.get(value)
+            if (value not in logical_directories
+                    and not (isinstance(source, dict) and isinstance(source.get("path"), str)
+                             and source["path"])):
+                return None
 
     def concrete_selector(value: str) -> bool:
         return ("/" in value or bool(PurePosixPath(value).suffix)
@@ -1542,7 +1560,11 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
             and not artifact_review and not (implementation_review or source_test
                                              or is_deploy_review(route, node))):
         try:
-            artifact_review = _generic_artifact_review_subject(route, node) is not None
+            # Newly resolvable logical directories change admission identity,
+            # not the validity of already-issued legacy evidence. Preserve its
+            # upstream-completion currency; never bind old PASS to today's bytes.
+            artifact_review = _generic_artifact_review_subject(
+                route, node, resolve_logical_directories=False) is not None
         except SourceSubjectError as exc:
             return "completion-evidence-unreadable", exc.reason
     if (not isinstance(subject, dict) and node.get("kind") == "review-worker"

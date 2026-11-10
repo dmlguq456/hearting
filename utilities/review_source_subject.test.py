@@ -481,6 +481,19 @@ class SourceSubjectTest(unittest.TestCase):
             again = admission()
             self.assertEqual((again.allowed, again.budget.verdict_rounds), (True, 0))
 
+            # A -> B -> A keeps A's spent budget and cannot advertise an old
+            # PASS as current. The return-to-A advisory now has explicit coverage.
+            record("att-smoke-B", bound=True)
+            config.write_text("threshold: 0.96\n", encoding="utf-8")
+            returned = admission()
+            self.assertEqual((returned.allowed, returned.budget.state), (False, "exhausted"))
+            fields = CAP.recovery_fields("review-worker", returned.state, route=route, node=smoke,
+                                         jobs=jobs, route_file=root / "route.json")
+            self.assertEqual(fields["required_action"], "report-unresolved-verification")
+            self.assertNotEqual(fields.get("next_action"), "successor-start")
+            self.assertIn("without claiming a current PASS", fields["recovery_hint"])
+            self.assertIn("att-smoke-new-2", fields["subject_pass_attempt_ids"])
+
     def test_missing_optional_artifact_bytes_do_not_create_a_new_input_gate(self):
         import artifact_producer
         producer = {"id": "report", "kind": "pipeline-stage", "depends_on": [],
@@ -503,6 +516,79 @@ class SourceSubjectTest(unittest.TestCase):
                 route, verify, {"attempt_id": "att-legacy"},
                 Path(self.temp.name) / "state" / "completion" / route["route_id"],
                 jobs=Path(self.temp.name) / "state" / "jobs.log"))
+
+    def test_probe2_partial_logical_inputs_keep_the_whole_review_legacy(self):
+        """Reviewer's probe2: unchanged logs/strategy cannot hide target edits."""
+        import artifact_producer
+        output = Path(self.temp.name) / "probe2-cycle/artifacts"
+        for name, text in (("apply-log/log.md", "applied 3 edits"),
+                           ("target-artifact", "v1"), ("strategy/s.md", "s"),
+                           ("evidence-map.md", "e")):
+            path = output / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        for name, inputs, scopes, target in (
+                ("verify", ["applied-artifact", "apply-log"],
+                 ["target-artifact", "apply-log/**"], "target-artifact"),
+                ("strategy-review", ["evidence-map", "strategy"],
+                 ["analysis/**", "strategy/**"], "evidence-map.md")):
+            with self.subTest(node=name):
+                producer = {"id": "producer", "kind": "pipeline-stage",
+                            "depends_on": [], "write_scope": scopes}
+                node = {"id": name, "kind": "review-worker", "unit": "qa/reviewer",
+                        "inputs": inputs, "depends_on": ["producer"]}
+                route = {"route_id": "rt-probe2", "artifact_root": str(output.parent),
+                         "nodes": [producer, node]}
+                cycle = {"campaign_id": "camp-probe2", "cycle_id": "cyc-probe2"}
+                with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+                     patch_split(artifact_producer, "cycle_dir", return_value=output.parent):
+                    for content in ("v1", "v2 changed"):
+                        (output / target).write_text(content, encoding="utf-8")
+                        self.assertFalse(SUBJECT.has_review_subject(route, node))
+                        self.assertIsNone(SUBJECT.marker_currency(
+                            route, node, {"attempt_id": "att-legacy-pass"},
+                            output.parent / "completion"))
+
+    def test_probe4_legacy_smoke_preserves_upstream_currency_and_full_run_reuse(self):
+        """Probe4/5: acquiring admission subjects must not invalidate old GPU work."""
+        import artifact_producer
+        from dispatch_contract_gates import _older_than_upstream
+        output = Path(self.temp.name) / "probe4-cycle/artifacts"
+        for name in ("experiment-scaffold/model.py", "config/run.yaml"):
+            path = output / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("A", encoding="utf-8")
+        producer = {"id": "scaffold", "kind": "pipeline-stage", "depends_on": [],
+                    "write_scope": ["experiment-scaffold/**", "config/**"]}
+        smoke = {"id": "smoke", "kind": "review-worker", "unit": "qa/ml-debug",
+                 "inputs": ["experiment-scaffold", "config"], "depends_on": ["scaffold"]}
+        route = {"route_id": "rt-probe4", "artifact_root": str(output.parent),
+                 "nodes": [producer, smoke]}
+        cycle = {"campaign_id": "camp-probe4", "cycle_id": "cyc-probe4"}
+        completion = output.parent / "completion"
+        completion.mkdir()
+        legacy = {"attempt_id": "att-smoke-pass", "completed_at": "2026-10-30T12:00:00Z"}
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=output.parent):
+            self.assertTrue(SUBJECT.has_review_subject(route, smoke))
+            self.assertIsNone(SUBJECT.marker_currency(route, smoke, legacy, completion))
+            self.assertIsNone(_older_than_upstream(route, smoke, legacy, completion / "smoke.json"))
+            # rt-3ec5 remains superseded for its real upstream re-completion.
+            (completion / "scaffold.json").write_text(json.dumps({
+                "node_id": "scaffold", "sequence": 2,
+                "completed_at": "2026-10-31T12:00:00Z"}), encoding="utf-8")
+            older = _older_than_upstream(route, smoke, legacy, completion / "smoke.json")
+            self.assertEqual((older.state, older.reason),
+                             ("superseded", "completion-evidence-superseded"))
+            self.assertIn("rerun dependency node smoke", older.next_action)
+            self.assertIn("scaffold@2", older.next_action)
+
+    def test_subject_unknown_review_currency_names_the_existing_start_action(self):
+        from dispatch_contract import route_state_next_action
+        action = route_state_next_action("completion-review-subject-unknown", "smoke", None,
+                                         {"id": "smoke"})
+        self.assertIn("rerun review node smoke", action)
+        self.assertIn("start", action)
 
     def test_capped_selector_table_keeps_unresolved_symbols_on_the_legacy_budget(self):
         import artifact_producer
