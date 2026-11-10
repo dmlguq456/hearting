@@ -547,9 +547,16 @@ def _seal_completion_summary(request, route, primary, slot) -> None:
         if (slot / work_intent.SUMMARY_NAME).exists():
             return
         from dispatch_owner_input import completion_corrections
+        assessment = None
+        if route.get("capability") == "audit":
+            from dispatch_completion_join import exact_attempt_row
+            row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id)
+            if row.metadata.get("reconcile_reason") == "completed-audit-with-findings":
+                assessment = "FAIL"
         text = work_intent.completion_summary(route, primary, route_file=request.route_file,
                                               cost=_completion_cost(request, route),
-                                              corrections=completion_corrections(request.jobs, request.owner_attempt_id))
+                                              corrections=completion_corrections(request.jobs, request.owner_attempt_id),
+                                              assessment=assessment)
         _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return

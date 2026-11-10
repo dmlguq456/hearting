@@ -998,7 +998,10 @@ item; the retry recomputes that gate, otherwise the receipt is
 The guarded PTY input (Claude, and OpenCode with the exact session ID) requires
 the exact native SID, pane, foreground PID birth and namespace, native `idle`
 state, ready registered-work state, no open form or question, and an empty
-visible composer. A dim prompt suggestion is empty. Busy, blocked, unknown,
+visible composer. A dim prompt suggestion is empty. Terminal focus reports
+invalidate an in-flight observation but do not leave an unsubmitted draft;
+the following observation still checks the native composer and identity.
+Focus-looking bytes inside a paste remain input. Busy, blocked, unknown,
 form-open, nonempty-draft, or unreadable targets remain `pending` under the one
 `message-<ref>` carrier and receive no PTY input; a write that provably never
 started returns to `pending`, while an ambiguous write is never retyped. Prompt
