@@ -35,6 +35,8 @@ for(const width of [410,274,220,410]) {
 }
 a.deepEqual(hidden(make(410,footer),{...plan,lines:['  '+status]},['  '+status]),[1]);
 a.deepEqual(hidden(make(410,footer),{...plan,lines:['  '+status]},[status]),[]);
+a.deepEqual(hidden(make(410,footer),plan,['HEARTING','Current work',status,'Session details']),[1]);
+a.deepEqual(hidden(make(410,footer),{...plan,lines:[status,'more status']},[status,'a question','more status']),[]);
 a.deepEqual(hidden(make(100,footer)),[]);
 for(const value of [footer+' · extra',footer.replace('Title','different title'),footer.replace('10%','101%'),footer.replace('fixture high','fixture low'),footer.replace('Context','context')])
  a.deepEqual(hidden(make(410,value)),[]);
@@ -44,6 +46,17 @@ a.deepEqual(hidden(make(410,footer),{...plan,sid:'old-selection'}),[]);
 a.deepEqual(hidden(make(410,footer),plan,[]),[]);
 a.deepEqual(hidden(make(410,footer),{...plan,lines:[status,'more status']},[status]),[]);
 a.deepEqual(hidden(make(410,footer),null),[]);
+// The approved work panel keeps the full ID in same-session details rather
+// than exposing it merely to prove duplicate paint. Native binding is intact.
+const compact=['fixture · high','context 10% · 5h 23% · 7d 60%'];
+const panel={...plan,presentation:'session-panel',lines:compact,detail_lines:[status]};
+const inPanel=(painted=compact,details=[status],selected=sid)=>[...d.hiddenFooterRows('codex',make(410,footer),selected,panel,painted,details)];
+a.deepEqual(inPanel(),[1]);
+a.deepEqual(inPanel([compact[0],'Current task',compact[1]]),[1]);
+a.deepEqual(inPanel(compact,[]),[]);
+a.deepEqual(inPanel(compact,[status.replace(sid,'other-session')]),[]);
+a.deepEqual(inPanel([compact[0]]),[]);
+a.deepEqual(inPanel(compact,[status],'other-session'),[]);
 // A user's two-item layout is preserved after the automatic CLI override is gone.
 a.deepEqual(hidden(make(100,'  '+sid+' · Context 10% used'),null),[]);
 // The native title's SID fallback carries no additional title information.
