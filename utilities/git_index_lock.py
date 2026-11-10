@@ -550,16 +550,18 @@ def _fallback_worktree_context(cwd: str, env: dict[str, str] | None = None):
 
 
 def _shell_failure_candidate(command: str, cwd: str, exit_code: int | None,
-                             output: str, parse_command, env: dict[str, str] | None = None):
+                             output: str, parse_command, env: dict[str, str] | None = None,
+                             *, status_unreported: bool = False):
     """Cheaply recognize a structured, supported index-lock failure candidate.
 
-    ``exit_code=None`` is a harness that reports no exit status (Codex's
-    PostToolUse ``tool_response`` is the command output alone); Git's own
-    lock error text is then the only failure evidence, and the diagnosis says so.
+    ``status_unreported`` is a harness that reports no exit status at all (Codex's
+    PostToolUse ``tool_response`` is the command output alone); Git's own lock
+    error text is then the only failure evidence, and the diagnosis says so.
+    Every other caller still needs a real non-zero exit code.
     """
     if (not isinstance(command, str) or len(command) > 64 * 1024
             or not isinstance(cwd, str) or len(cwd) > 16 * 1024 or not os.path.isabs(cwd)
-            or (exit_code is not None
+            or (not (status_unreported and exit_code is None)
                 and (not isinstance(exit_code, int) or isinstance(exit_code, bool)
                      or exit_code <= 0 or exit_code > 128))
             or not isinstance(output, str) or len(output) > 1_000_000):
@@ -585,8 +587,9 @@ def codex_command_candidate(command: str, cwd: str, exit_code: int,
 
 def _diagnose_shell_failure(command: str, cwd: str, exit_code: int | None, output: str,
                             *, output_source: str, parse_command,
-                            env: dict[str, str] | None = None):
-    candidate = _shell_failure_candidate(command, cwd, exit_code, output, parse_command, env)
+                            env: dict[str, str] | None = None, status_unreported: bool = False):
+    candidate = _shell_failure_candidate(command, cwd, exit_code, output, parse_command, env,
+                                         status_unreported=status_unreported)
     if candidate is None:
         return None
     (argv, effective_cwd, command_env), reported_path = candidate
@@ -712,7 +715,7 @@ def diagnose_hook_payload(payload: dict, harness: str) -> dict | None:
             inputs.get("command") if isinstance(inputs, dict) else None,
             payload.get("cwd"), None, payload["tool_response"],
             output_source="Codex PostToolUse output (no exit status reported)",
-            parse_command=_codex_command_argv,
+            parse_command=_codex_command_argv, status_unreported=True,
         )
     if harness == "opencode":
         name = payload.get("tool_name")
