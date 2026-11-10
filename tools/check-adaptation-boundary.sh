@@ -52,6 +52,14 @@ fail_msg() {
   fail=1
 }
 
+# A wrapper's worker environment is built by the launch phases the three
+# dispatch wrappers share; a literal there counts for the wrapper that calls it.
+wrapper_worker_env_has() {
+  grep -Fq -- "$1" "$2" \
+    || { grep -Fq 'DISPATCH_MAIN.worker_environment(' "$2" \
+      && grep -Fq -- "$1" utilities/dispatch_headless_main.py; }
+}
+
 TAB=$(printf '\t')
 NL='
 '
@@ -952,7 +960,7 @@ check_codex_bin_wrappers() {
     fi
   done
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
-    if ! grep -Fq 'AGENT_DISPATCH_JOBS' "adapters/codex/bin/$p"; then
+    if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' "adapters/codex/bin/$p"; then
       fail_msg "adapters/codex/bin/$p must honor the shared dispatch registry override"
     fi
   done
@@ -2228,7 +2236,7 @@ check_claude_bin_wrappers() {
     fail_msg "claude_setting/bin points to $target; expected ../adapters/claude/bin"
   fi
 
-  if ! grep -Fq 'AGENT_DISPATCH_JOBS' adapters/claude/bin/dispatch-headless.py; then
+  if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' adapters/claude/bin/dispatch-headless.py; then
     fail_msg "adapters/claude/bin/dispatch-headless.py must honor the shared dispatch registry override"
   fi
 }
@@ -2259,7 +2267,7 @@ check_opencode_bin_wrappers() {
     fi
   done
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
-    if ! grep -Fq 'AGENT_DISPATCH_JOBS' "adapters/opencode/bin/$p"; then
+    if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' "adapters/opencode/bin/$p"; then
       fail_msg "adapters/opencode/bin/$p must honor the shared dispatch registry override"
     fi
   done
@@ -3902,7 +3910,7 @@ check_worker_bootstrap_contract() {
     if ! grep -Fq 'render_worker_bootstrap' "$dispatcher" \
       || ! grep -Fq 'resolve_worker_type' "$dispatcher" \
       || ! grep -Fq -- '--worker-type' "$dispatcher" \
-      || ! grep -Fq 'AGENT_DISPATCH_WORKER_TYPE' "$dispatcher"; then
+      || ! wrapper_worker_env_has 'AGENT_DISPATCH_WORKER_TYPE' "$dispatcher"; then
       fail_msg "$dispatcher must render and register one portable worker type"
     fi
     if grep -Fq 'Return a concise report with changed files' "$dispatcher"; then
