@@ -5,7 +5,8 @@
 # Not a CI wall-time claim; runner speed alone varies by about 1.5x.
 # execution_access_owner_start.test.py was split in two after the first three runs;
 # there both halves carry its duration apportioned by a local per-half timing
-# (216 s : 223 s). Unknown suites use the runner's median of known weights.
+# (216 s : 223 s); peer_steward.test.py, split in three after all four runs, likewise
+# (218 s : 140 s : 134 s). Unknown suites use the runner's median of known weights.
 # Refresh this table from recent shard reports when shard times drift apart.
 suite_path	duration_s
 adapters/claude/bin/dispatch-headless.already-claimed.test.py	4.31
@@ -665,11 +666,13 @@ utilities/peer_runner_lifecycle.test.py	30.24
 utilities/peer_runner_release.test.py	39.95
 utilities/peer_shell_identity.test.py	0.72
 utilities/peer_shell_resolution.test.py	1.48
-utilities/peer_steward.test.py	222.06
+utilities/peer_steward.test.py	98.22
 utilities/peer_steward_cap.test.py	8.78
 utilities/peer_steward_herdr_session.test.py	1.51
+utilities/peer_steward_prompt.test.py	63.33
 utilities/peer_steward_reconcile.test.py	3.67
 utilities/peer_steward_resume.test.py	3.19
+utilities/peer_steward_retire.test.py	60.51
 utilities/peer_steward_tmux.test.py	19.44
 utilities/peer_wrapped_foreground.test.py	1.86
 utilities/pr_chain.test.py	1.83
