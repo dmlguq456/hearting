@@ -121,7 +121,16 @@ class SharedRendererTest(unittest.TestCase):
                  ({"review.config.toml": 'model_provider = "local_fixture"\n'}, "rendered"),
                  ({"review.config.toml": 'model_provider = "openai"\n'}, "shipped"),
                  ({"config.toml": 'model_provider = "openai"\n',
-                   "review.config.toml": 'model = "fixture-model"\n'}, "shipped"))
+                   "review.config.toml": 'model = "fixture-model"\n'}, "shipped"),
+                 # A provider defined but never selected does not count.
+                 ('model_providers.local_fixture.name = "local"\n', "shipped"),
+                 # Codex refuses `--profile archive.backup` (exit 2, plain names only),
+                 # so that file is never a session's profile (RV-PR1474-R2 P2).
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "archive.backup.config.toml": 'model_provider = "local_fixture"\n'}, "shipped"),
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "archive.backup.config.toml": 'model_provider = "local_fixture"\n',
+                   "review.config.toml": 'model_provider = "local_fixture"\n'}, "rendered"))
         for config, status in cases:
             with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
                 files = config if isinstance(config, dict) else (

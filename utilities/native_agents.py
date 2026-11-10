@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,6 +154,22 @@ def _file_sha(path: Path) -> Optional[str]:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+# `codex --profile <name>` takes only a plain name and then reads
+# `$CODEX_HOME/<name>.config.toml` (codex-rs `ProfileV2Name`: non-empty ASCII
+# letters, digits, `_`, `-`). Codex 0.163.0 rejects any other name, such as
+# `archive.backup`, with exit 2, so such a file is never a selectable profile.
+_CODEX_PROFILE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_CODEX_PROFILE_SUFFIX = ".config.toml"
+
+
+def codex_profile_configs(home: Path) -> list[Path]:
+    """The `<name>.config.toml` files of `home` that `codex --profile <name>` selects, sorted."""
+    return [
+        path for path in sorted(Path(home).glob("*" + _CODEX_PROFILE_SUFFIX))
+        if _CODEX_PROFILE_NAME.fullmatch(path.name[: -len(_CODEX_PROFILE_SUFFIX)])
+    ]
 
 
 def runtime_plan(fmt: Format, runtime_home: Path) -> dict:

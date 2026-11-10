@@ -125,15 +125,16 @@ def selectable_providers(runtime_home: Path) -> frozenset[str]:
 
     One set of agent files serves every session of the home, so the providers of
     all its configurations count: the top-level `config.toml`, each profile file
-    `<name>.config.toml` that `codex --profile <name>` selects (Codex 0.134+), and
-    the older `[profiles.*]` tables. An unset or unreadable provider is "openai".
+    `<name>.config.toml` that `codex --profile <name>` selects (Codex 0.134+;
+    a file whose name Codex refuses as a profile is never selected), and the
+    older `[profiles.*]` tables. An unset or unreadable provider is "openai".
     A provider given only on the command line (`-c model_provider=...`) is not
     in these files and is not seen.
     """
     import tomllib
     home = Path(runtime_home)
     providers = set()
-    for path in (home / "config.toml", *sorted(home.glob("*.config.toml"))):
+    for path in (home / "config.toml", *native_agents.codex_profile_configs(home)):
         try:
             config = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError):
