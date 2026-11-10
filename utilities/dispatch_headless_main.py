@@ -38,6 +38,99 @@ class AdapterNamespace:
             raise AttributeError(name) from None
 
 
+def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path,
+                       reservation_token: str, permission_env: Mapping[str, str],
+                       current_sandbox: str, supervised: bool,
+                       extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The child environment every wrapper gives its claimed worker.
+
+    The inherited environment minus broker variables, then the dispatch identity,
+    route, artifact, governor and registry values. `permission_env` is the
+    harness's runtime permission context, `extra` its own additional variables.
+    """
+    review = args.review_output_binding
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")}
+    env.update({
+        "AGENT_SESSION_ROLE": "worker",
+        "AGENT_DISPATCH_CHILD": "1",
+        "AGENT_DISPATCH_DEPTH": str(args.dispatch_depth),
+        "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION": "2",
+        "AGENT_DISPATCH_TRANSPORT": "headless",
+        "AGENT_DISPATCH_EXECUTION_SURFACE": args.execution_surface,
+        "AGENT_DISPATCH_REGISTERED_WORKER": str(int(bool(args.registered_worker))),
+        "AGENT_DISPATCH_FALLBACK_HOP": args.fallback_hop,
+        "AGENT_DISPATCH_PARENT_CWD": (
+            h._effective_parent_cwd(args) if (args.parent_slug or args.parent_session_id) else ""
+        ),
+        "AGENT_DISPATCH_INTENSITY": args.intensity,
+        "AGENT_DISPATCH_CAPABILITY_MODE": args.capability_mode,
+        # This session's own slug — the conductor Stop gate / dispatch-wait
+        # identify "open child rows whose parent= equals MY slug" and cannot
+        # do so from AGENT_DISPATCH_PARENT_SLUG (which points at the parent).
+        "AGENT_DISPATCH_SELF_SLUG": args.slug,
+        "AGENT_DISPATCH_PARENT_SLUG": args.parent_slug or "",
+        "AGENT_DISPATCH_ATTEMPT_ID": args.attempt_id,
+        "AGENT_DISPATCH_PARENT_ATTEMPT_ID": args.parent_attempt_id or "",
+        "AGENT_DISPATCH_PARENT_SESSION_ID": args.parent_session_id or "",
+        "AGENT_DISPATCH_WORKER_TYPE": args.worker_type,
+        **permission_env,
+        "AGENT_DISPATCH_ASSIGNED_CONTRACT": args.assigned_contract,
+        "AGENT_DISPATCH_OWNER": args.capability_owner or "",
+        "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
+        "AGENT_ARTIFACT_ROOT": args.artifact_root,
+        "AGENT_DISPATCH_WORKTREE": review["worktree"] if review else args.worktree,
+        "AGENT_REVIEW_OUTPUT": review["output_path"] if review else "",
+        "AGENT_REVIEW_CYCLE_ID": review["cycle_id"] if review else "",
+        "AGENT_REVIEW_PRODUCER_ID": review["producer_id"] if review else "",
+        # W7C producer lifecycle: the owner's open cycle (issued by
+        # `artifact_producer.py begin` before the first write) is passed
+        # through unchanged so stage workers write into the same
+        # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
+        # second lineage.
+        **h.artifact_cycle_environment(os.environ),
+        "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
+        "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
+        "AGENT_ROUTE_FILE": (
+            args.route_file
+            or (args.owner_route_binding.route_file if args.owner_route_binding else "")
+        ),
+        "AGENT_ROUTE_ID": (
+            args.route_id
+            or (args.owner_route_binding.route_id if args.owner_route_binding else "")
+        ),
+        "AGENT_ROUTE_NODE": args.route_node or "",
+        "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
+        h.GOVERNOR_RESERVATION_ENV: reservation_token,
+        "AGENT_HOME": str(args.agent_home),
+        "AGENT_DISPATCH_JOBS": str(jobs),
+        # A worker inherits AGENT_HOME at the managed release; keep its
+        # bytecode out of that immutable tree (defect Q pairing).
+        **h.bytecode_cache_env(),
+        **h.parent_completion.worker_runtime_identity(harness),
+        "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+        "AGENT_DISPATCH_CURRENT_SANDBOX": current_sandbox,
+        **h.stage_session_environment(args),
+        "AGENT_DISPATCH_COMPLETION_MODE": "supervised" if supervised else "poll",
+        **(extra or {}),
+    })
+    return env
+
+
+def apply_worker_fields(env: dict, args, *, worker_mode: bool = True) -> None:
+    """Publish the grant file and the optional role, mode and unit; clear the absent ones."""
+    if args.execution_access_grant is not None:
+        env["AGENT_DISPATCH_EXECUTION_ACCESS_FILE"] = str(args.execution_access_grant.source_path)
+    fields = [("AGENT_DISPATCH_WORKER_ROLE", args.worker_role)]
+    if worker_mode:
+        fields.append(("AGENT_DISPATCH_WORKER_MODE", args.worker_mode))
+    fields.append(("AGENT_DISPATCH_UNIT", args.unit))
+    for key, value in fields:
+        if value:
+            env[key] = value
+        else:
+            env.pop(key, None)
+
+
 @dataclass
 class GovernorClaim:
     """The model governor claim of one registered attempt.

@@ -1732,85 +1732,23 @@ def main(argv: list[str]) -> int:
         return claim.rc
     governor, governor_root, reservation_token = claim.governor, claim.governor_root, claim.reservation_token
     if action == "start" and args.attempt_claimed:
-        dispatch_env = {
-            **{key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")},
-            "AGENT_SESSION_ROLE": "worker",
-            "AGENT_DISPATCH_CHILD": "1",
-            "AGENT_DISPATCH_DEPTH": str(args.dispatch_depth),
-            "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION": "2",
-            "AGENT_DISPATCH_TRANSPORT": "headless",
-            "AGENT_DISPATCH_EXECUTION_SURFACE": args.execution_surface,
-            "AGENT_DISPATCH_REGISTERED_WORKER": str(int(bool(args.registered_worker))),
-            "AGENT_DISPATCH_FALLBACK_HOP": args.fallback_hop,
-            "AGENT_DISPATCH_INTENSITY": args.intensity,
-            "AGENT_DISPATCH_CAPABILITY_MODE": args.capability_mode,
-            "AGENT_DISPATCH_WORKER_MODE": args.worker_mode or "",
-            "AGENT_DISPATCH_SELF_SLUG": args.slug,
-            "AGENT_DISPATCH_PARENT_SLUG": args.parent_slug or "",
-            "AGENT_DISPATCH_ATTEMPT_ID": args.attempt_id,
-            "AGENT_DISPATCH_PARENT_ATTEMPT_ID": args.parent_attempt_id or "",
-            "AGENT_DISPATCH_PARENT_SESSION_ID": args.parent_session_id or "",
-            "AGENT_DISPATCH_PARENT_CWD": (_effective_parent_cwd(args) if (args.parent_slug or args.parent_session_id) else ""),
-            "AGENT_DISPATCH_WORKER_TYPE": args.worker_type,
-            "AGENT_DISPATCH_ASSIGNED_CONTRACT": args.assigned_contract,
-            "AGENT_DISPATCH_OWNER": args.capability_owner or "",
-            "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
-            "AGENT_ARTIFACT_ROOT": args.artifact_root,
-            "AGENT_DISPATCH_WORKTREE": (
-                args.review_output_binding["worktree"]
-                if args.review_output_binding else args.worktree
-            ),
-            "AGENT_REVIEW_OUTPUT": (
-                args.review_output_binding["output_path"]
-                if args.review_output_binding else ""
-            ),
-            "AGENT_REVIEW_CYCLE_ID": (
-                args.review_output_binding["cycle_id"]
-                if args.review_output_binding else ""
-            ),
-            "AGENT_REVIEW_PRODUCER_ID": (
-                args.review_output_binding["producer_id"]
-                if args.review_output_binding else ""
-            ),
-            # W7C producer lifecycle: the owner's open cycle (issued by
-            # `artifact_producer.py begin` before the first write) is passed
-            # through unchanged so stage workers write into the same
-            # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
-            # second lineage.
-            **artifact_cycle_environment(os.environ),
-            "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
-            "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
-            "AGENT_ROUTE_FILE": (
-                args.route_file
-                or (args.owner_route_binding.route_file if args.owner_route_binding else "")
-            ),
-            "AGENT_ROUTE_ID": (
-                args.route_id
-                or (args.owner_route_binding.route_id if args.owner_route_binding else "")
-            ),
-            "AGENT_ROUTE_NODE": args.route_node or "",
-            "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
-            GOVERNOR_RESERVATION_ENV: reservation_token,
-            "AGENT_HOME": str(args.agent_home),
-            "AGENT_DISPATCH_JOBS": str(jobs),
-            # Same rule as the other two adapters: a worker inherits AGENT_HOME
-            # at the managed release; keep its bytecode out of that tree.
-            **bytecode_cache_env(),
-            **parent_completion.worker_runtime_identity("opencode"),
-            "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
-            "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
-            **stage_session_environment(args),
-            "AGENT_DISPATCH_COMPLETION_MODE": (
-                "supervised" if _supervised_owner(args) else "poll"
-            ),
-            "OPENCODE_CONFIG_CONTENT": args.opencode_config_content,
-            # Headless liveness contract: the OpenCode runtime child exposes
-            # the dispatch slug to the plugin, which records a plugin-load
-            # marker at init and touches <log_dir>/<slug>.heartbeat on every
-            # session.idle event. dispatch-liveness.py inspects both as a
-            # secondary alive signal independent of the OpenCode SQLite mtime.
-            "OPENCODE_DISPATCH_SLUG": args.slug,
-        }
+        dispatch_env = DISPATCH_MAIN.worker_environment(
+            _ADAPTER, args, harness="opencode", jobs=jobs, governor_root=governor_root,
+            reservation_token=reservation_token,
+            permission_env={},
+            current_sandbox="adapter-default",
+            supervised=_supervised_owner(args),
+            extra={
+                "AGENT_DISPATCH_WORKER_MODE": args.worker_mode or "",
+                "OPENCODE_CONFIG_CONTENT": args.opencode_config_content,
+                # Headless liveness contract: the OpenCode runtime child exposes
+                # the dispatch slug to the plugin, which records a plugin-load
+                # marker at init and touches <log_dir>/<slug>.heartbeat on every
+                # session.idle event. dispatch-liveness.py inspects both as a
+                # secondary alive signal independent of the OpenCode SQLite mtime.
+                "OPENCODE_DISPATCH_SLUG": args.slug,
+            },
+        )
         args.worker_runtime_env = prepare_worker_home(args.agent_home, 'opencode',
                                                      args.worker_type, args.attempt_id,
                                                      env=dispatch_env)
@@ -1949,16 +1887,7 @@ def main(argv: list[str]) -> int:
         else:
             dispatch_env.pop("AGENT_DISPATCH_COMPLETION_STATE_FILE", None)
             dispatch_env.pop("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE", None)
-        if args.worker_role:
-            dispatch_env["AGENT_DISPATCH_WORKER_ROLE"] = args.worker_role
-        else:
-            dispatch_env.pop("AGENT_DISPATCH_WORKER_ROLE", None)
-        if args.execution_access_grant is not None:
-            dispatch_env["AGENT_DISPATCH_EXECUTION_ACCESS_FILE"] = str(args.execution_access_grant.source_path)
-        if args.unit:
-            dispatch_env["AGENT_DISPATCH_UNIT"] = args.unit
-        else:
-            dispatch_env.pop("AGENT_DISPATCH_UNIT", None)
+        DISPATCH_MAIN.apply_worker_fields(dispatch_env, args, worker_mode=False)
         def context_metadata(launch_metadata, env):
             launch_metadata["opencode_context_window_request"] = str(
                 args.resolved_model_settings.get("context_window", ""))
@@ -2008,54 +1937,23 @@ def main(argv: list[str]) -> int:
     print("check=ok")
     print("adapter=opencode")
     print("runtime_surface=opencode-run-headless")
-    print(f"status={action}")
-    print(f"worktree={args.worktree}")
-    print(f"artifact_root={args.artifact_root}")
-    print("artifact_write_scope=canonical-only")
-    print("external_directory_permission=scoped-allow")
-    print(f"slug={args.slug}")
-    print(f"capability={args.capability}")
-    print(f"capability_mode={args.capability_mode}")
-    print(f"worker_mode={args.worker_mode or '-'}")
-    print(f"qa={args.qa}")
-    print(f"intensity={args.intensity}")
-    print(f"dispatch_depth={args.dispatch_depth}")
-    print(f"eligibility_probe={getattr(args, 'eligibility_probe', None) or '-'}")
-    print(f"parent={args.parent_slug or '-'}")
+    for line in launch_receipt.identity_lines(args, action, after_scope=("external_directory_permission=scoped-allow",)):
+        print(line)
     print(f"parent_session_id={args.parent_session_id or '-'}")
     print(f"parent_attempt_id={args.parent_binding.attempt_id if getattr(args, 'parent_binding', None) else '-'}")
     args.resolved_completion_delivery = "session-resume-supervised" if _supervised_owner(args) else "one-shot"
     for line in launch_receipt.completion_lines(args):
         print(line)
-    print(f"worker_role={args.worker_role or '-'}")
-    print(f"worker_type={args.worker_type}")
-    print(f"assigned_contract={args.assigned_contract}")
-    print(f"unit={args.unit or '-'}")
-    print(f"owner={args.capability_owner or '-'}")
-    print(f"owner_harness={args.owner_harness or '-'}")
-    print(f"route_file={args.route_file or '-'}")
-    print(f"route_validation={getattr(args, 'route_validation', None) or '-'}")
+    for line in launch_receipt.worker_lines(args):
+        print(line)
     print(f"agent={args.agent}")
     settings = args.resolved_model_settings
-    print(f"model_source={settings['source']}")
-    for key, value in {**provider_fallback_fields(settings), **catalog_fit_fields(settings)}.items():
-        print(f"{key}={value}")
-    print(f"model_pin_status={settings.get('pin_status', 'none')}")
-    if getattr(args, 'explicit_adapter', None):
-        print(f"explicit_adapter={args.explicit_adapter}")
-    if settings.get("pin_model"):
-        print(f"model_pin={settings['pin_model']}")
-    print(f"model_role={settings['role']}")
-    print(f"model_profile={settings['profile']}")
-    print(f"model_tier={settings['tier']}")
-    _config_source, _config_reason = _model_config_state()
-    print(f"model_config_source={_config_source}")
-    print(f"model_config_reason={_config_reason}")
-    print(f"profile_granularity={settings['granularity']}")
-    print(f"main_session_only_policy={_main_session_only_policy_state()}")
-    for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
-        print(f"{key}={value}")
-    print(f"model={settings['model']}")
+    for line in launch_receipt.model_lines(
+            args, settings, config_state=_model_config_state,
+            main_session_only_policy=_main_session_only_policy_state,
+            after_source=lambda: (f"{key}={value}" for key, value in {
+                **provider_fallback_fields(settings), **catalog_fit_fields(settings)}.items())):
+        print(line)
     print(f"variant={settings['variant']}")
     print(f"context_window_requested={settings['context_window']}")
     print(f"context_window_source={settings['context_window_source']}")
@@ -2073,18 +1971,14 @@ def main(argv: list[str]) -> int:
                 "context_window_final_limit_context", "context_window_final_limit_input",
                 "context_window_final_limit_output"):
         print(f"{key}={settings.get(key, 'not-launched')}")
-    leg_class, auxiliary_check = _route_node_leg_fields(args)
-    print(f"leg_class={leg_class}")
-    print(f"auxiliary_check={auxiliary_check}")
-    print(f"parent_cross={os.environ.get('AGENT_DISPATCH_PARENT_CROSS', '-')}")
-    print(f"sole_gate={os.environ.get('AGENT_DISPATCH_SOLE_GATE', '-')}")
+    for line in launch_receipt.leg_lines(args, leg_fields=_route_node_leg_fields):
+        print(line)
     for line in launch_receipt.attempt_lines(
             args, jobs=jobs, registry_source=registry.source, action=action,
             launch_state=attempt_launch_state(jobs, args.attempt_id, claimed=args.attempt_claimed, action=action)):
         print(line)
-    print(f"prompt_source={prompt_source}")
-    print(f"prompt_file={prompt_path}")
-    print(f"log_file={log_path}")
+    for line in launch_receipt.prompt_lines(prompt_source, prompt_path, log_path):
+        print(line)
     print(f"command={command}")
     return 0
 
