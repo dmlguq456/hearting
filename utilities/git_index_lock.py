@@ -32,6 +32,11 @@ _LOCK_ERROR_TEXT = re.compile(
     r"unable to create ['\"](?P<path>[^\r\n]*?index\.lock)['\"]:\s*file exists\b",
     re.IGNORECASE,
 )
+# With no exit status, accept only Git's own error line, not the text quoted anywhere.
+_GIT_LOCK_ERROR_LINE = re.compile(
+    r"^(?:fatal|error): unable to create ['\"](?P<path>[^\r\n]*?index\.lock)['\"]:\s*file exists\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _SHELL_META = set(";&|<>$()\n\r") | {chr(96)}
 _GIT_ENV_PATHS = {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -566,11 +571,14 @@ def _shell_failure_candidate(command: str, cwd: str, exit_code: int | None,
                      or exit_code <= 0 or exit_code > 128))
             or not isinstance(output, str) or len(output) > 1_000_000):
         return None
-    match = _LOCK_ERROR_TEXT.search(output)
+    no_status = status_unreported and exit_code is None
+    # Without an exit status, ordinary output (`cat build.log`, `git log`) can quote the
+    # lock text, so only a real Git command's own error line counts as a failure.
+    match = (_GIT_LOCK_ERROR_LINE if no_status else _LOCK_ERROR_TEXT).search(output)
     parsed = parse_command(command, cwd)
     if not match:
         return None
-    if parsed is None:
+    if parsed is None and not no_status:
         parsed = _fallback_worktree_context(cwd, env)
     if parsed is None:
         return None

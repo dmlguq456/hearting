@@ -122,6 +122,37 @@ class GitIndexLockConsumerTest(unittest.TestCase):
         payload["tool_response"] = "fatal: Unable to create '/tmp/unrelated/index.lock': File exists.\n"
         self.assertEqual(self.run_bridge("codex", payload).stdout, "")
 
+    def test_codex_native_text_response_ignores_lock_text_in_successful_output(self):
+        # With no exit status, a normal command's output that quotes this worktree's
+        # lock (the lock is held here, like another Git process holding it) is not a
+        # failure: a non-Git command, an indented commit message, a `file:` prefix.
+        failure = self.response_text(self.result.stderr)
+        self.assertRegex(failure, r"(?m)^fatal: Unable to create '.*index\.lock': File exists")
+        (self.repo / "build.log").write_text(failure, encoding="utf-8")
+        tree = self.git("rev-parse", "HEAD^{tree}").stdout.decode().strip()
+        quoted = self.git("commit-tree", tree, "-p", "HEAD", "-m", "fix: " + failure).stdout.decode().strip()
+        logged = self.response_text(self.git("log", "-1", quoted).stdout)
+        self.assertIn(str(self.lock), logged)
+        cases = [
+            ("cat " + shlex.quote(str(self.repo / "build.log")), failure),
+            ("cd " + shlex.quote(str(self.repo)) + " && cat build.log", failure),
+            ("git -C " + shlex.quote(str(self.repo)) + " log -1 " + quoted, logged),
+            ("git -C " + shlex.quote(str(self.repo)) + " grep Unable", "build.log:" + failure),
+        ]
+        for command, response in cases:
+            with self.subTest(command=command):
+                payload = self.codex_payload()
+                payload["tool_input"] = {"command": command}
+                payload["tool_response"] = response
+                output = self.run_bridge("codex", payload)
+                self.assertEqual(output.returncode, 0, output.stderr)
+                self.assertEqual(output.stdout, "")
+        # The real failure in the same state is still diagnosed.
+        payload = self.codex_payload()
+        payload["tool_response"] = failure
+        context = json.loads(self.run_bridge("codex", payload).stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(str(self.lock), context)
+
     def test_python_wrapped_git_add_uses_only_the_selected_worktree_default_index(self):
         code = "import subprocess; subprocess.run(['git', 'add', 'tracked.txt'], check=True)"
         wrapped = "python3 -c " + shlex.quote(code) + "\n"
