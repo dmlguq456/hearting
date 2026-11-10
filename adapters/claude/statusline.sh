@@ -386,8 +386,8 @@ fi
 
 dir=$(basename "$S_CWD")
 
-# A wrapped Claude uses its reserved native rows for the same common formatter
-# as the block. Existing producers and unwrapped output remain available.
+# A wrapped Claude paints every field with the same common formatter as the panel.
+# The shell blanks this exact output only while its visible panel paints them.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
   line_helper="$AGENT_HOME/tools/fleet/session_line.py"
   [ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"

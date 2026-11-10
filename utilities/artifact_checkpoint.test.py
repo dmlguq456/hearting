@@ -1133,6 +1133,34 @@ class TriggerTest(unittest.TestCase):
                                     "--artifact-root", self.r, "--route", "rt-abc"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
+    def test_checkpoint_child_is_not_the_workers_tagged_descendant(self):
+        # A finished worker's turn-end checkpoint is Hearting's settlement, not work it
+        # left running: the child must not inherit the attempt tag the supervisor counts.
+        import dispatch_terminal_commit as TC
+        cycle = "cyc_" + "c" * 32
+        env = {**self.env, "AGENT_ARTIFACT_ROOT": self.r, "AGENT_ARTIFACT_CYCLE_ID": cycle,
+               "AGENT_DISPATCH_ATTEMPT_ID": "att-" + "d" * 32, "AGENT_ROUTE_ID": "rt-x"}
+        with mock.patch.object(T, "in_test_process", return_value=False), \
+                mock.patch.object(T.subprocess, "Popen") as popen, \
+                mock.patch.object(TC, "load_active_cleanup_scope", return_value=None) as scope:
+            self.assertTrue(T.launch_for_session("claude", "sid-1", env=env))
+        child = popen.call_args.kwargs["env"]
+        self.assertNotIn("AGENT_DISPATCH_ATTEMPT_ID", child)
+        self.assertEqual(child[T.CLEANUP_OWNER_ENV], "att-" + "d" * 32)
+        self.assertEqual(child["AGENT_ARTIFACT_CYCLE_ID"], cycle)
+        self.assertEqual(scope.call_args.args[1], "att-" + "d" * 32)
+
+    def test_checkpoint_keeps_the_cleanup_scope_refusal_its_child_applied(self):
+        import dispatch_terminal_commit as TC
+        env = {**self.env, "AGENT_DISPATCH_ATTEMPT_ID": "att-" + "e" * 32}
+        refused = TC.TerminalCommitError("recovery-unavailable", "cleanup-scope-denied")
+        with mock.patch.object(T, "in_test_process", return_value=False), \
+                mock.patch.object(T.subprocess, "Popen") as popen, \
+                mock.patch.object(TC, "require_current_cleanup", side_effect=refused):
+            self.assertFalse(T.launch(trigger="turn-end", key="k-refused", artifact_root=self.r,
+                                      cycle_id="cyc_" + "e" * 32, env=env))
+        popen.assert_not_called()
+
     def test_turn_end_prefers_the_worker_cycle_then_the_route_chain(self):
         cycle = "cyc_" + "b" * 32
         with mock.patch.object(T, "in_test_process", return_value=False), \
@@ -1175,6 +1203,53 @@ class TriggerTest(unittest.TestCase):
     def test_route_trigger_ignores_malformed_routes(self):
         self.assertFalse(T.launch_for_route(None, trigger="stage-complete"))
         self.assertFalse(T.launch_for_route({"route_id": "rt-1"}, trigger="stage-complete"))
+
+
+class CheckpointCleanupScopeRaceTest(CheckpointTestBase):
+    """A cleanup scope published after the launcher's check still binds the child."""
+
+    def test_scope_published_before_child_entry_refuses_the_untagged_child(self):
+        import contextlib
+        import subprocess
+        from types import SimpleNamespace
+        import dispatch_budget_record as BR
+        owner = "att-" + "e" * 32
+        env = {**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": owner,
+               "AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_ROUTE_ID": self.route_obj["route_id"],
+               "AGENT_ARTIFACT_ROOT": str(self.root), "AGENT_ARTIFACT_CYCLE_ID": self.cycle_id,
+               T.INTERVAL_ENV: "900"}
+        self.write_output(self.result, "plans/race/report.md", b"race source\n")
+        state = self.jobs.parent
+        entry = {}
+
+        def publish_scope_then_enter(argv, **kwargs):
+            # The owner's cleanup handoff lands after the launcher's check, before main.
+            claim = BR.claim_terminal_handoff(
+                state, owner_attempt_id=owner, route_hash=self.route_obj["route_hash"],
+                child_attempt_ids=[], continuation_ordinal=10)
+            BR.convert_claim_to_prompt_intent(state, claim, prompt="race-cleanup", cleanup_scope={
+                "artifact_root": str(self.root), "route_id": self.route_obj["route_id"],
+                "route_hash": self.route_obj["route_hash"], "cycle_id": self.cycle_id,
+                "owner_attempt_id": owner,
+                "allowed_operations": ["partial-report", "read", "verify"],
+                "allowed_write_roots": [str(self.root / "partial-report.md")],
+                "allowed_read_roots": [str(state)],
+                "allowed_recovery_targets": [str(self.route_file), str(self.root)], "one_use": True})
+            entry["tagged"] = T.ATTEMPT_TAG_ENV in kwargs["env"]
+            with mock.patch.dict(os.environ, kwargs["env"], clear=True), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                entry["exit"] = P.main(argv[2:])
+            return SimpleNamespace(pid=-1)
+
+        with mock.patch.object(T, "in_test_process", return_value=False), \
+                mock.patch.object(T, "subprocess",
+                                  SimpleNamespace(Popen=publish_scope_then_enter, DEVNULL=subprocess.DEVNULL)), \
+                mock.patch.object(T, "end_with_test", side_effect=lambda child: child):
+            self.assertTrue(T.launch(trigger="turn-end", key="race", artifact_root=str(self.root),
+                                     cycle_id=self.cycle_id, env=env))
+        self.assertFalse(entry["tagged"])
+        self.assertEqual(entry["exit"], 65)
+        self.assertFalse(P.open_manifest_path(self.root, self.cycle_id).exists())
 
 
 if __name__ == "__main__":
