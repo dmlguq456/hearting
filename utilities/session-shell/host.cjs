@@ -87,7 +87,7 @@ let displayValues={};
 let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
-let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,sessionDetails=false,dragging=false;
+let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
 let panelSubscribers=new Set(),sidebarMounted=false,nativeLayoutPending=false,displaySequence=0;
 let sidebarViews=[],sidebarMouseHeld=false;
 function binding() {
@@ -215,7 +215,7 @@ function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max
 function panelContent(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,details:sessionDetails,focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   panelHits=view.hits;routePageCount=view.routePages;return view.rows;
@@ -446,10 +446,12 @@ async function projection() {
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
-// the same session's model and compact status. Any other state shows it.
+// the same session's model, compact status and session rows (folder, title,
+// branch, Git, jobs). Any other state, including a panel too short for all of
+// them, shows it.
 function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
-  const rows=(panelModel.summary||[]).map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
+  const rows=[...(panelModel.summary||[]),...(panelModel.session||[])].map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
   return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
 }
 // The blanked Claude row carries the panel's one-line notice (empty by default),
@@ -568,10 +570,9 @@ function panelAction(action){
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
-  if(action==='route'){routeDetail=!routeDetail;routePage=0;sessionDetails=false;block.leave();}
+  if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
-  if(action==='details'){sessionDetails=!sessionDetails;routeDetail=false;block.leave();}
-  if(action==='question'){routeDetail=false;sessionDetails=false;block.enter();}
+  if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){
     const [,field,operation]=action.split(':'),index=Number(field);if(index<0||index>=panelView.fields.length)return;
     if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[index]))return;
@@ -637,7 +638,7 @@ function publishPanel(){
   if(!panelSubscribers.size)return;
   const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
     native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
-    routeDetail,routePage,details:sessionDetails,focused:block.focused,harness,cellWidth,
+    routeDetail,routePage,focused:block.focused,harness,cellWidth,
     questions:options=>block.detail(options)});
   if(JSON.stringify(sidebarViews[0]?.rows)!==JSON.stringify(view.rows))sidebarViews=[view,...sidebarViews].slice(0,4);
   routePageCount=view.routePages;
@@ -672,7 +673,7 @@ function inputBytes(data) {
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
     if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
-    if(!relay&&(routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
+    if(!relay&&routeDetail&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
@@ -732,7 +733,7 @@ async function lifecycle(req) {
     }
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;sessionDetails=false;
+    projectionKey='';footer='';footerSegments=[];routeDetail=false;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
@@ -744,7 +745,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;sessionDetails=false;block.update([]);
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
@@ -774,7 +775,7 @@ async function request(req) {
   }
   if(req.op==='display-action'){
     if(!displayReporter(req)||req.sid!==sid)return {ok:false};
-    if(['settings','route','route-prev','route-next','details','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
+    if(['settings','route','route-prev','route-next','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
     return {ok:true};
   }
   if(req.op==='event')return lifecycle(req);

@@ -36,8 +36,12 @@ def _remaining(reset):
     return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False):
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
     """Shorten words before losing a known count; never invent an unknown value.
+
+    ``fields`` keeps only the named groups that carry a value, for a surface
+    which already paints the others (the shell panel's model row and status
+    summary); an absent value is left out rather than painted as ``?``.
 
     ``reported_only`` leaves out the context and quota readings the native
     callback has not reported yet (Claude sends them only after its first
@@ -57,6 +61,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False):
     groups = []
 
     def words(name, text, key, maximum, priority, before=(), after=(), minimum=1):
+        if fields is not None and (name not in fields or text is None or text == ""):
+            return
         text = _text(text)
         groups.append({"name": name, "text": text, "key": key, "budget": min(maximum, cell_width(text)),
                        "minimum": min(minimum, cell_width(text)), "priority": priority,
@@ -119,7 +125,7 @@ def line_segments(values, columns, *, complete=False, reported_only=False):
               before=[(_text(label) + " ", "dim")],
               after=[("(↻ " + remaining + ")", "dim")] if remaining else [], minimum=8)
     for label, used in values.get("model_quotas") or ():
-        words("quota", _percent(used), _level(used), 8, 99,
+        words("model_quota", _percent(used), _level(used), 8, 99,
               before=[(_text(label) + " ", _model_key(label))], minimum=8)
     route = _text(values.get("route_label"), "")
     if route:
@@ -185,9 +191,9 @@ def wrap_segments(parts, columns):
 
 
 
-def status_lines(values, columns, *, wrap_long=False, reported_only=False):
+def status_lines(values, columns, *, wrap_long=False, reported_only=False, fields=None):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000, complete=True, reported_only=reported_only)
+    parts = line_segments(values, 10000, complete=True, reported_only=reported_only, fields=fields)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):

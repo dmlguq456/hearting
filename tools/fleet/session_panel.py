@@ -88,6 +88,31 @@ def compact_status(values, columns, native_owned=()):
     return [parts] if parts else []
 
 
+SESSION_FIELDS = frozenset({"folder", "title", "thread", "branch", "model_quota"})
+
+
+def session_status(values, columns):
+    """The statusline items the panel paints besides its model row and summary.
+
+    Folder, title, thread, branch with its Git state and observation, per-model
+    quotas, quota resets and running jobs, in the native statusline's order and
+    glyphs. Context, 5h/7d, model, route and answer counts are already painted
+    elsewhere in the panel; an item without a value is left out.
+    """
+    from .session_line import _remaining
+    known = {**values, "model_quotas": [(label, used) for label, used in values.get("model_quotas") or ()
+                                        if _percent(used) != "?"]}
+    rows = status_lines(known, columns, wrap_long=True, fields=SESSION_FIELDS)
+    resets = [(str(label), _remaining(reset)) for label, _used, reset in values.get("quota_windows") or ()]
+    resets = [(label, left) for label, left in resets if left]
+    if resets:
+        parts = [("↻ ", "dim")]
+        for index, (label, left) in enumerate(resets):
+            parts += [(" · " if index else "", "dim"), (label + " ", "dim"), (left, "dim")]
+        rows.append([part for part in parts if part[0]])
+    return rows
+
+
 NOTICE_NEWS_SECONDS = 600
 
 
@@ -178,4 +203,5 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "route_label": values.get("route_label") or "",
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
+            "session": session_status(values, max(20, columns - 4)),
             "status": status_lines(values, max(20, columns - 4), wrap_long=True)}

@@ -66,6 +66,59 @@ assert.equal(unknown.color,'dim'); // Native permission state is not route failu
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_session_rows_are_always_painted_after_the_question_with_no_details_view(self):
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const session=[[{text:'📁 project · [23] ● Title'}],[{text:'⎇ topic ↑2 ↓1 🚧 3 dirty · 21:52'}],[{text:'>_ running: pytest'}]];
+const model={model:[{text:'fixture · high'}],summary:[[{text:'context 42% · 5h 23% · 7d 60%'}]],session,
+ routes:[{title:'Route',state:'working',stages:[{name:'one'}]}]};
+const tail=[[{text:'✉ peer news'}],[{text:'› last input'}]];
+const paint=(width,height,side,q)=>view.render({width,height,side,model,sid:'exact',configuration:{},sections:{tail},
+ questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
+const question=[[{text:'Q head'}],[{text:'1 · yes'}],[{text:'2 · no'}],[{text:'Ctrl+] answer'}]];
+for(const [width,height,side] of [[40,30,true],[80,14,false]]){
+ const idle=paint(width,height,side,[]);
+ for(const want of ['📁 project','⎇ topic','running: pytest','context 42%','peer news','last input'])
+  assert(idle.some(s=>s.includes(want)),width+' missing '+want);
+ assert(!idle.join('\n').includes('Session details'));assert(/^└─+┘$/.test(idle.at(-1)));
+ // The summary stays at the bottom; session rows sit directly above it.
+ assert(idle.at(-2).includes('context 42%'));assert(idle.at(-3).includes('running'));
+ const asked=paint(width,height,side,question);
+ for(const row of question)assert(asked.some(s=>s.includes(row[0].text)),'question row lost at '+width);
+ assert(asked.some(s=>s.includes('context 42%')));
+}
+// A short bottom panel gives the question exactly the rows it had without
+// session rows; those take only what is left.
+for(const height of [8,10,12,14]){
+ const short=paint(80,height,false,question);
+ const bare=view.render({width:80,height,side:false,model:{...model,session:[]},sid:'exact',configuration:{},
+  questions:o=>question.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
+ const asked=rows=>rows.filter(s=>question.some(q=>s.includes(q[0].text)));
+ assert.deepEqual(asked(short),asked(bare));
+ assert(short.length<=height);
+}
+const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
+assert(!r.hits.some(h=>h.action==='details'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_session_status_leaves_out_absent_values_and_painted_fields(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.session_panel import session_status
+        text = lambda rows: "\n".join("".join(t for t, _k in row) for row in rows)
+        values = {"harness": "claude", "tag": "[23]", "state": "idle", "title": "Title", "branch": "topic",
+                  "git": {"repo": 1, "operation": "none", "ahead": 2, "behind": 0, "extra_worktrees": 0,
+                          "observation": "fresh", "observed_label": "21:52"},
+                  "model": "fixture", "effort": "high", "ctx_pct": 42, "quota_windows": [("5h", 23, None)],
+                  "route_label": "⏳ 1 route", "answer_wait": 1, "jobs": "pytest"}
+        painted = text(session_status(values, 36))
+        for want in ("Title", "⎇ topic", "↑2", "fresh", "21:52", "running: pytest"):
+            self.assertIn(want, painted)
+        for already in ("fixture", "context", "5h", "route", "◑"):
+            self.assertNotIn(already, painted)
+        self.assertNotIn("?", text(session_status({"harness": "claude", "state": "idle"}, 36)))
+        self.assertEqual(session_status({"harness": "claude", "state": "idle"}, 36), [])
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);

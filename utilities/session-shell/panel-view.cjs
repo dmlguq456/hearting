@@ -31,7 +31,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,details=false,focused=false,cwd='',harness='',cellWidth}){
+function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,focused=false,cwd='',harness='',cellWidth}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -41,17 +41,19 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
   const inner=width-4,content=[],hits=[];
   function add(parts,action){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);}
-  function wrap(parts,maximum=3,action){
+  function wrap(parts,maximum=3,action,into){
+    // `into` collects the rows for a caller that places them after measuring.
+    const put=into?row=>into.push(row):row=>add(row,action);
     let current=[],used=0,count=0,space=false;
     for(const part of parts)for(const token of clean(part.text).match(/\s+|\S+/gu)||[]){
       if(/^\s+$/.test(token)){space=used>0;continue;}
       const size=measure(token),gap=space&&used?1:0;
-      if(used&&used+gap+size>inner){add(current,action);current=[];used=0;space=false;if(++count>=maximum)return;}
+      if(used&&used+gap+size>inner){put(current);current=[];used=0;space=false;if(++count>=maximum)return;}
       if(space&&used){current.push({...part,text:' '});used++;}space=false;
       if(size>inner){const fit=clip([{...part,text:token}],inner-1);current.push(...fit.parts,{...part,text:'…'});used=inner;}
       else{current.push({...part,text:token});used+=size;}
     }
-    if(current.length)add(current,action);
+    if(current.length)put(current);
   }
   const routes=model.routes||[],first=routes[0];
   const asking=!!model.answerable;
@@ -90,12 +92,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     add(m);
     if(model.warning)add(line(model.warning,'lvl_r'));
     if(status&&side)add(line(status,color));
-    if(details){
-      add(line(t('details','Session details'),'loc_repo'),'details');
-      for(const row of model.status||[])wrap(row,4);
-      for(const row of sections?.tail||[])wrap(row,3);
-      add(line('Esc · '+t('back','Back')),'details');
-    }else if(routeDetail){
+    if(routeDetail){
       add(line(t('routes','Route')+' · '+t('back','Back'),'loc_repo'),'route');
       const start=content.length;
       for(const route of routes){
@@ -136,7 +133,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       // Bound optional material first. Question editor gets the remaining rows,
       // and keeps its own overflow/Tab/form/draft/revision handling unchanged.
       // At a short bottom editor the answer owns the scarce rows, identically
-      // for every harness. Telemetry remains in details/native-owned fields.
+      // for every harness. Session telemetry takes only the rows left after it.
       const summary=focused&&!side?[]:(model.summary||[]).slice(0,2);
       const remaining=Math.max(2,height-2-content.length-summary.length);
       const q=questions({budget:Math.max(2,remaining-2),columns:inner-4});
@@ -150,14 +147,22 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       }
       const result=routes.find(r=>r.outcome);
       if(side&&result&&content.length<height-4){
-        add([]);add(line(t('results','Results & connected work')),'details');
-        add(line(result.outcome,'lvl_g'),'details');
+        add([]);add(line(t('results','Results & connected work')));
+        add(line(result.outcome,'lvl_g'));
       }
-      // Every harness uses this bottom summary; verbose native fields and IDs
-      // remain in explicit details. Ownership is supplied as observed facts.
-      const room=Math.max(0,height-2-content.length),kept=summary.slice(0,room);
-      if(fill&&kept.length)while(content.length<height-2-kept.length)add([]);
-      for(const row of kept)add(row,'details');
+      // Every harness paints the whole statusline here, with no separate view:
+      // the summary row first, then folder/title/branch/Git/jobs, then peer
+      // news and the last input, each only while rows remain. Absent values
+      // are already left out. Ownership is supplied as observed facts.
+      let room=Math.max(0,height-2-content.length);
+      const kept=summary.slice(0,room);room-=kept.length;
+      const session=[],quiet=focused&&!side;
+      if(!quiet)for(const row of model.session||[]){const rows=[];wrap(row,4,undefined,rows);if(rows.length>room)break;session.push(...rows);room-=rows.length;}
+      const tail=[];
+      if(!quiet)for(const row of sections?.tail||[]){const rows=[];wrap(row,2,undefined,rows);if(rows.length>room)break;tail.push(...rows);room-=rows.length;}
+      const bottom=[...tail,...session,...kept];
+      if(fill&&bottom.length)while(content.length<height-2-bottom.length)add([]);
+      for(const row of bottom)add(row);
     }
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
@@ -168,9 +173,8 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const fitted=clip(content[i]||[],inner);
     rows.push([text('│',color),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),text('│',color)]);
   }
-  const foot=clip(line(' '+(settings?'Esc · '+t('cancel','Cancel'):t('details','Session details')+' ›')+' '),width-4);
+  const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
-  if(!settings)hits.push({row:count-1,left:1,right:width-2,action:'details'});
   return {rows,hits:hits.filter(h=>h.row<count),color,routePages};
 }
 module.exports={render,defaults,fields,change,nativeSidebarColumns,nativePanelHit};
