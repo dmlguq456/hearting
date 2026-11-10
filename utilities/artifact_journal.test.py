@@ -234,7 +234,8 @@ class EntryTest(unittest.TestCase):
             with J.scan_scope():
                 actual = [J.rows(self.root, limit=limit, session=session)
                           for limit in (1, 200) for session in (None, {"harness": "codex", "sid": "x"})]
-            self.assertEqual(reads.call_count, 1)
+            # One scan per scope; an unchanged day file is not even re-read.
+            self.assertLessEqual(reads.call_count, 1)
         self.assertEqual(actual, expected)
         self.add("c")  # outside the scope every read is fresh again
         self.assertEqual(len(J.rows(self.root)["rows"]), 3)

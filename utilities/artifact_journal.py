@@ -456,10 +456,38 @@ def _scan_events(root):
                 return
             try:
                 safe_path(root, path, missing=False)
-                day = read_day(path, limit=READ_ROWS, newest=True)
+                day = _read_day_generation(path)
             except (OSError, ValueError) as exc:
                 day = {"rows": [], "coverage": "unknown", "errors": [type(exc).__name__]}
             yield ("day", path, day)
+
+
+_DAY_GENERATIONS = {}
+_DAY_GENERATION_LIMIT = 512
+
+
+def _day_generation(path):
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _read_day_generation(path):
+    """A day file unchanged since its last read (same full generation) is not re-read."""
+    key = str(path)
+    before = _day_generation(path)
+    cached = _DAY_GENERATIONS.get(key)
+    if before is not None and cached is not None and cached[0] == before:
+        return cached[1]
+    day = read_day(path, limit=READ_ROWS, newest=True)
+    if before is not None and day.get("coverage") != "unknown" and _day_generation(path) == before:
+        if len(_DAY_GENERATIONS) >= _DAY_GENERATION_LIMIT and key not in _DAY_GENERATIONS:
+            _DAY_GENERATIONS.pop(next(iter(_DAY_GENERATIONS)))
+        _DAY_GENERATIONS[key] = (before, day)
+    else:
+        _DAY_GENERATIONS.pop(key, None)
+    return day
 
 
 def _journal_events(root):
