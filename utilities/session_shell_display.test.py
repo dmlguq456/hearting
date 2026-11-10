@@ -16,8 +16,11 @@ class WrappedDisplayTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='shell-native-line-') as directory:
             root=Path(directory);home=root/'claude';home.mkdir()
             if panel is not None:(root/'claude-panel.json').write_text(json.dumps(panel))
+            # Each call gets its own state root: a shared one lets the answer-wait
+            # producer started by an earlier call fill the cache for a later one,
+            # turning its unknown `◑ ?` into a known zero between the two paints.
             env=dict(os.environ,HOME=str(root),CLAUDE_CONFIG_DIR=str(home),AGENT_HOME=str(root/'no-code'),
-                     FLEET_TITLE_DISABLE='1',HARNESS_CAPACITY_REFRESH_DISABLE='1')
+                     XDG_STATE_HOME=str(root/'state'),FLEET_TITLE_DISABLE='1',HARNESS_CAPACITY_REFRESH_DISABLE='1')
             env.pop('HEARTING_SHELL_SOCKET',None)
             if wrapped:env['HEARTING_SHELL_SOCKET']=str(root/'private.sock')
             payload={'session_id':'synthetic-native-session','cwd':str(root),'model':{'id':'claude-opus','display_name':'Opus'},
