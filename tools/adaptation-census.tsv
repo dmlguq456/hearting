@@ -420,7 +420,6 @@ tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv
-tool-deferred	integrations
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py

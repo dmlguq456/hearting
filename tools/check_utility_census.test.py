@@ -16,6 +16,9 @@ _spec.loader.exec_module(census_check)
 
 HEADER = "# census\nlist\tname\n"
 BASE = HEADER + "utility-deferred\tbase.py\nshared-utility-deferred\tshared.py\n"
+# Merge fixtures also carry one source tool row and the run-time __pycache__ row,
+# whose directory is never created here.
+TOOL_ROWS = "tool-deferred\tobsolete_tool.py\ntool-deferred\t__pycache__\n"
 
 
 def git(repo: Path, *args: str) -> None:
@@ -38,7 +41,9 @@ class UnionMergeTest(unittest.TestCase):
             (repo / "utilities").mkdir()
             for name in ("base.py", "shared.py"):
                 (repo / "utilities" / name).write_text("")
-            (repo / "census.tsv").write_text(BASE)
+            (repo / "tools").mkdir()
+            (repo / "tools" / "obsolete_tool.py").write_text("")
+            (repo / "census.tsv").write_text(BASE + TOOL_ROWS)
             git(repo, "add", "-A")
             git(repo, "commit", "-qm", "base")
             git(repo, "branch", "theirs")
@@ -86,6 +91,22 @@ class UnionMergeTest(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("utilities/base.py does not exist", problems[0])
 
+    def test_removed_tool_against_crlf_row_fails(self):
+        row = "tool-deferred\tobsolete_tool.py\n"
+
+        def remove(repo: Path) -> None:
+            (repo / "tools" / "obsolete_tool.py").unlink()
+            text = (repo / "census.tsv").read_text()
+            (repo / "census.tsv").write_text(text.replace(row, ""))
+
+        def crlf(repo: Path) -> None:
+            data = (repo / "census.tsv").read_bytes()
+            (repo / "census.tsv").write_bytes(data.replace(row.encode(), row.replace("\n", "\r\n").encode()))
+
+        problems = self.merged(remove, crlf)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("tools/obsolete_tool.py does not exist", problems[0])
+
 
 class RowRuleTest(unittest.TestCase):
     def test_repeated_identical_rows_and_comments_stay_harmless(self):
@@ -95,6 +116,10 @@ class RowRuleTest(unittest.TestCase):
             (utilities / "shared.py").write_text("")
             census = "# a\n# a\n" + BASE + "utility-deferred\tbase.py\n"
             self.assertEqual(census_check.census_conflicts(census, utilities), [])
+
+    def test_absent_runtime_tool_entry_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(census_check.census_conflicts("tool-deferred\t__pycache__\n", Path(tmp) / "utilities"), [])
 
     def test_repository_census_has_no_contradicting_rows(self):
         census = (ROOT / "tools" / "adaptation-census.tsv").read_text(encoding="utf-8")
