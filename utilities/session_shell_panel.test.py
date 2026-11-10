@@ -84,7 +84,9 @@ assert.equal(unknown.color,'dim'); // Native permission state is not route failu
             if harness == "claude":
                 self.assertTrue(any("NATIVE ROW" in part["text"] for part in states["both"]["notice"]),
                                 "Claude's native status row keeps its own segments")
-            st.run_hook(harness, "prompt", sid, cwd=str(ROOT), prompt_text="next input")
+            # This is the main-session hook for the seat above, not the runner's
+            # inherited worker or pane environment.
+            st.run_hook(harness, "prompt", sid, cwd=str(ROOT), prompt_text="next input", env={})
             states["resolved"] = project()
             models[harness] = states
         script = r"""
@@ -100,8 +102,9 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   assert(!text.includes('[object Object]')&&!text.includes('NATIVE ROW'),id+' '+s);
   // An open question comes first: its rows stay and the line waits.
   if(asking){assert.equal(text,none,id+' '+s);continue;}
-  const first=rows.findIndex(l=>l.includes('⚠ [정리]')),lines=rows.slice(first,rows.findIndex(l=>l.includes('Current work')));
-  assert(first>=0&&text.includes('이어서해'),id+' '+s);
+  const first=rows.findIndex(l=>l.includes('⚠ [정리]')),end=rows.findIndex(l=>l.includes(states[s].labels.work));
+  assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s);
+  const lines=rows.slice(first,end);
   // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
   assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length);
   assert.equal(rows.length,width===80?none.split('\n').length+1:rows.length,id);
