@@ -264,7 +264,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
     try:
         with attachment(target) as (fd, proc):
             view = View(fd)
-            # A new native conversation can publish its idle state/card shortly
+            # A new native conversation can publish its idle state shortly
             # after /clear. These bounded looks never send or reclaim a prompt.
             deadline = time.monotonic() + 10
             while True:
@@ -274,12 +274,13 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                     return result("queued", "snapshot-pending")
                 why = idle_reason(target, sid)
                 if not why and continuing:
+                    # The prompt hook hands the card over with this continue; only a
+                    # card another prompt already took stops it.
                     seat = st.seat_from_dict(req["seat"])
                     consumed = st.read_json(st._consumed_path(seat)) or {}
-                    if (consumed.get("generation") != req.get("card_generation")
-                            or not any(str(r).startswith(f"claude:{sid}:") for r in consumed.get("receipts") or [])):
-                        why = "card-not-delivered"
-                if not continuing or why not in ("not-idle-native", "card-not-delivered") or time.monotonic() >= deadline:
+                    if consumed.get("generation") == req.get("card_generation") and consumed.get("receipts"):
+                        why = "card-taken"
+                if not continuing or why != "not-idle-native" or time.monotonic() >= deadline:
                     break
                 time.sleep(0.1)
             if why: return result("skipped", why)
