@@ -166,20 +166,44 @@ def _snapshot_signature():
     return tuple(observed)
 
 
+# Readable ledger bytes per lineage directory, keyed by each file's full stat
+# generation (inode, ctime, mtime, size, mode). Ledgers are append-only or
+# replaced whole, so an unchanged generation means unchanged bytes.
+_READABLE_LEDGERS: dict[str, dict[str, tuple]] = {}
+_READABLE_LEDGERS_LOCK = threading.Lock()
+
+
 def _readable_lineage_signature(directory: Path):
     """Observe current readable bytes once and retain them for the parser.
 
-    Stat alone cannot expose transient read failures. Use the normal no-follow
-    reader even on cache hits, binding its bytes to the observed generation.
+    A ledger is read with the normal no-follow reader whenever its stat
+    generation differs from the bytes last read; an unchanged generation reuses
+    those bytes, bound to the same observed generation.
     """
     location, files, generation = _lineage_signature(directory)
     observed, contents = [], {}
+    with _READABLE_LEDGERS_LOCK:
+        held = dict(_READABLE_LEDGERS.get(location, {}))
+    current = {}
     for filename, *file_generation in files:
-        raw = _observed_ledger_bytes(directory / filename, file_generation)
-        observed.append((filename, *file_generation, hashlib.sha256(raw).hexdigest()))
+        file_generation = tuple(file_generation)
+        prior = held.get(filename)
+        if prior is not None and prior[0] == file_generation:
+            # The same inode, size, mtime and ctime as the bytes read before:
+            # an unchanged ledger is not read and hashed again on every pass.
+            raw, digest = prior[1], prior[2]
+        else:
+            raw = _observed_ledger_bytes(directory / filename, file_generation)
+            digest = hashlib.sha256(raw).hexdigest()
+        current[filename] = (file_generation, raw, digest)
+        observed.append((filename, *file_generation, digest))
         contents[filename] = raw
     if generation is not None and _lineage_generation(directory.stat()) != generation:
         raise OSError("lineage-directory-changed")
+    with _READABLE_LEDGERS_LOCK:
+        _READABLE_LEDGERS[location] = current
+        while len(_READABLE_LEDGERS) > 4:
+            _READABLE_LEDGERS.pop(next(iter(_READABLE_LEDGERS)))
     return (location, tuple(observed), generation), contents
 
 

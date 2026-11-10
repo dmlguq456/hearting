@@ -1580,7 +1580,11 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
     # One read-only classification section observes the generation that
     # selected its candidates; settlement writes run after this returns.
     with registry_read_scope(pinned=view):
-        pending = _classify_owner_candidates(jobs, view, candidates, context)
+        # Classification only observes history: one /proc walk serves every
+        # candidate of this pass instead of one walk per owner proof.
+        from dispatch_contract import process_table_scan_scope
+        with process_table_scan_scope():
+            pending = _classify_owner_candidates(jobs, view, candidates, context)
     if context is not None:
         context.remember_owner_cursor(jobs, view)
     return pending
