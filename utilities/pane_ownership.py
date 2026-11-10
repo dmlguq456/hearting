@@ -520,7 +520,13 @@ def _resolve_codex_pane_selection(pane, pid, process_record, group, process_sid,
 
 def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
                           server=None, socket_path=None, info=None, tmux=None):
-    """Reuse the attachment join, then require the inner TUI's current root."""
+    return _wrapped_native_session(pane, "codex", pid, session_id, executable=executable,
+        server=server, socket_path=socket_path, info=info, tmux=tmux)
+
+
+def _wrapped_native_session(pane, harness, pid=None, session_id=None, *, executable,
+                            server=None, socket_path=None, info=None, tmux=None):
+    """Reuse the common attachment join and the inner runtime's native identity."""
     try:
         import importlib.util
         import session_shell
@@ -539,7 +545,7 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
         if not isinstance(info, dict) or info.get("pane_id") != pane:
             return ""
         join = sys.modules[name]._pane_shell_binding_result
-        binding, reason = join(pane, "codex", info=info)
+        binding, reason = join(pane, harness, info=info)
         if binding is None or reason or session_id is not None and binding["sid"] != session_id:
             return ""
         inner = binding["native_pid"]
@@ -550,7 +556,9 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
         kind, service = _runtime(inner)
         if (not record or str(record[5]) != binding["native_start"]
                 or not record[3] or record[2] != record[4]
-                or kind != "codex" or service or _registered_worker(inner)):
+                or kind != harness or service or _registered_worker(inner)):
+            return ""
+        if harness == "claude" and _native_session(inner, harness) != binding["sid"]:
             return ""
         env = procscan.read_environ(inner)
         if tmux:
@@ -564,12 +572,14 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
                                     socket_path=socket_path, tmux=tmux)
         if not latest or latest.get("pane_id") != pane:
             return ""
-        current, reason = join(pane, "codex", expected=binding, info=latest)
+        current, reason = join(pane, harness, expected=binding, info=latest)
         if current is None or reason:
             return ""
         # Attachment identity alone does not authorize input into a loaded-but-
         # unselected root. This is the same fresh check used by shell answers.
-        if not session_shell._codex_current_root(inner, binding["native_start"], binding["sid"]):
+        selected = (session_shell._codex_current_root(inner, binding["native_start"], binding["sid"])
+                    if harness == "codex" else _native_session(inner, harness) == binding["sid"])
+        if not selected:
             return ""
         return binding["sid"] if _process(inner) == record else ""
     except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError,
@@ -833,6 +843,13 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
         own, service = _caller_runtime(os.getpid() if pid is None else pid, harness)
         if not own:
             return ""
+        if (harness == "claude" and sid and not service
+                and not _registered_worker(os.getpid() if pid is None else pid)):
+            selected = _wrapped_native_session(pane, harness, own[0], sid,
+                executable=executable, server=server, socket_path=socket_path,
+                info=info, tmux=tmux)
+            if selected == sid and _process(own[0]) == own:
+                return str(pane)
         for item in info.get("foreground_processes") or []:
             foreground = _process(item.get("pid")) if isinstance(item, dict) else None
             if not foreground or not foreground[3] or foreground[2] != group or foreground[4] != group:
