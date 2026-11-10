@@ -142,6 +142,14 @@ def policy_warnings() -> list[str]:
 
 # ---------------------------------------------------------------- observation seams
 
+def _relations_changed() -> None:
+    try:
+        import dispatch_seat_handover
+        dispatch_seat_handover.invalidate_steward_relations_pass()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _relations() -> list[dict]:
     import dispatch_seat_handover
     return dispatch_seat_handover.resolved_steward_relations(include_released=False)
@@ -404,7 +412,10 @@ def _release_if_window_closed(duty, store, harness: str, session_id: str, now: f
         peer_message = module() if module else None
         if peer_message is None:
             return False
-        summary = peer_message.release_closed_session(harness, session_id, reason=reason)
+        try:
+            summary = peer_message.release_closed_session(harness, session_id, reason=reason)
+        finally:
+            _relations_changed()
         if isinstance(summary, dict) and summary.get("roles") == "unresolved":
             return False
         latest = store.get(duty["id"])

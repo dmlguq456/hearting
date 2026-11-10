@@ -758,6 +758,9 @@ def _directory_stamp(path: Path):
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 
 
+_PASS_CLOCK = time.perf_counter  # bound at import: fixtures replace ``time`` itself
+
+
 class OwnerSettlementReadContext:
     """Reuse exact settled-owner observations while rechecking their dependencies."""
 
@@ -787,6 +790,11 @@ class OwnerSettlementReadContext:
         self._unsettled_noted = {}
         self._deferred = set()
         self._clock = time.monotonic
+        # Optional wall budget for one classification walk (the long-lived
+        # runner sets it). Candidates left when it runs out are carried to the
+        # next pass in order, so every owner is still classified, only later.
+        self.classify_budget_seconds = None
+        self._carry_over = {}
         self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
                          "dependency_checks": 0, "dependency_invalidations": 0,
                          "deferred_owner_checks": 0, "unsettled_retries": 0}
@@ -1298,6 +1306,17 @@ class OwnerSettlementReadContext:
                 affected.add(attempt)
         return tuple(affected)
 
+    def carry_over_owner_ids(self, jobs: Path, attempt_ids):
+        root = str(jobs.resolve(strict=False))
+        if attempt_ids:
+            self._carry_over.setdefault(root, []).extend(attempt_ids)
+
+    def take_carry_over_owner_ids(self, jobs: Path):
+        return tuple(self._carry_over.pop(str(jobs.resolve(strict=False)), ()))
+
+    def has_carry_over(self, jobs: Path) -> bool:
+        return bool(self._carry_over.get(str(jobs.resolve(strict=False))))
+
     def take_invalidated_owner_ids(self, jobs: Path):
         root = str(jobs.resolve(strict=False))
         affected = tuple(attempt for item_root, attempt in self._invalidated_owners
@@ -1395,7 +1414,7 @@ class OwnerSettlementReadContext:
                               for (root, _attempt), entry in self._unsettled.items())
         if not unsettled_owner:
             unsettled_owner = bool(self.due_unsettled_owner_ids(jobs))
-        if active_owner or unsettled_owner:
+        if active_owner or unsettled_owner or self.has_carry_over(jobs):
             scan = True
         # A full candidate scan below rechecks each candidate's lease itself;
         # only the unchanged fast path needs this cached lease probe.
@@ -1558,7 +1577,9 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
                 if attempt_id:
                     selected[attempt_id] = record
             changed_rows = view.records_since(floor) if floor >= 0 else ()
+            carried = context.take_carry_over_owner_ids(jobs)
             impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
+            impacted.update(carried)
             impacted.update(context.take_invalidated_owner_ids(jobs))
             impacted.update(context.active_owner_ids(jobs))
             impacted.update(context.due_unsettled_owner_ids(jobs))
@@ -1572,7 +1593,10 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
                     previous = selected.get(attempt_id)
                     if previous is None or current.order > previous.order:
                         selected[attempt_id] = current
-            candidates = tuple(selected.values())
+            # Owners carried from a budget-bounded walk go first, in their order.
+            carried_first = [selected.pop(attempt_id) for attempt_id in dict.fromkeys(carried)
+                             if attempt_id in selected]
+            candidates = tuple(carried_first) + tuple(selected.values())
     except FileNotFoundError:
         return ()
     if context is not None:
@@ -1599,7 +1623,16 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
     import peer_obligations
 
     pending = []
-    for candidate in candidates:
+    budget = getattr(context, "classify_budget_seconds", None)
+    deadline = _PASS_CLOCK() + budget if budget else None
+    for index, candidate in enumerate(candidates):
+        if deadline is not None and index and _PASS_CLOCK() >= deadline:
+            # Bound one pass: the rest are classified next pass, first.
+            context.carry_over_owner_ids(jobs, [
+                item.completion_metadata().get("attempt_id")
+                for item in candidates[index:]
+                if item.completion_metadata().get("attempt_id")])
+            break
         # Each historical proof reads and drops large inputs; return the freed
         # heap while the long candidate walk continues (rate limited).
         peer_obligations.release_freed_memory()
@@ -1726,8 +1759,29 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
     live_leases = []
     retry_required = False
     signatures = []
-    for order, status, raw, meta, lease_held in pending:
+    budget = getattr(context, "classify_budget_seconds", None)
+    deadline = _PASS_CLOCK() + budget if budget else None
+    for index, (order, status, raw, meta, lease_held) in enumerate(pending):
         attempt_id = meta.get("attempt_id", "")
+        if (deadline is not None and index and not lease_held
+                and _PASS_CLOCK() >= deadline):
+            # Bound one pass: owners not settled yet are classified and
+            # settled first on the next pass; they stay visible meanwhile.
+            remaining = [item for item in pending[index:] if not item[4]]
+            context.carry_over_owner_ids(
+                jobs, [item[3].get("attempt_id") for item in remaining
+                       if item[3].get("attempt_id")])
+            for item in pending[index:]:
+                if item[4]:
+                    live_leases.append(item[3])
+                    if item[1] != "done":
+                        continue
+                signatures.append((str(jobs), "owner-settlement",
+                                   item[3].get("attempt_id", ""), item[1],
+                                   item[3].get("workflow_completion", ""),
+                                   item[3].get("note", "")))
+            retry_required = True
+            break
         deferred = context is not None and context.is_deferred(jobs, attempt_id)
         if lease_held:
             live_leases.append(meta)
