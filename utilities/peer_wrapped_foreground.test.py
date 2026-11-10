@@ -152,6 +152,19 @@ class WrappedForegroundTest(unittest.TestCase):
                 self.assertEqual(self.actions, [])
                 self.assertIn("foreground-unverified", output)
 
+    def test_prompt_effect_keeps_the_same_attachment_when_native_pid_and_sid_stay_equal(self):
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                self.select(harness)
+                proof = peer._prompt_foreground_proof(self.pane, harness, self.sid)
+                self.assertIsNotNone(proof)
+                self.publish(harness, incarnation="b" * 32)
+                with mock.patch.object(peer, "_agent_state", return_value=("idle", self.pane)):
+                    reason, _proof = peer._native_idle_prompt_guard(
+                        self.pane, harness, self.sid, self.pane, expected_foreground=proof)
+                self.assertEqual(reason, "target-process-changed")
+                self.assertEqual(self.actions, [])
+
     def test_known_metadata_conflict_is_not_booked_as_the_current_native(self):
         self.select("claude")
         self.ident["session_id"] = "another-native-session"

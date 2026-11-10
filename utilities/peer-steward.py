@@ -4766,7 +4766,13 @@ def _prompt_foreground(pane, harness, *, info=None):
 def _prompt_foreground_proof(pane, harness, expected_sid):
     info = _retire_pane_info(pane)
     foreground = _prompt_foreground(pane, harness, info=info)
-    if not foreground or _prompt_process_session(pane, harness, info) != (expected_sid, None):
+    if not foreground:
+        return None
+    attachment = foreground.get("attachment")
+    # The shared wrapped foreground already checked native selection and the
+    # final attachment. Keep that one result through the existing effect guard.
+    if (foreground.get("session_id") != expected_sid if attachment else
+            _prompt_process_session(pane, harness, info) != (expected_sid, None)):
         return None
     pid, start = foreground["pid"], foreground["start"]
     if _proc_start_ticks(pid) != start:
@@ -4775,11 +4781,14 @@ def _prompt_foreground_proof(pane, harness, expected_sid):
         namespace = os.readlink(f"/proc/{pid}/ns/pid")
         if (namespace != os.readlink("/proc/self/ns/pid")
                 or _proc_start_ticks(pid) != start
-                or _prompt_process_session(pane, harness, info) != (expected_sid, None)):
+                or not attachment and _prompt_process_session(pane, harness, info) != (expected_sid, None)):
             return None
     except OSError:
         return None
-    return {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
+    proof = {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
+    if attachment:
+        proof["attachment"] = dict(attachment)
+    return proof
 
 
 def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
@@ -4974,6 +4983,7 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
             and isinstance(pane, str) and pane and pane != "-"
             and bool(birth)
             and (native_session_id is None or foreground is not None)
+            and (not foreground or foreground.get("session_id", sid) == sid)
             and (expected_harness is None or harness == expected_harness)
             and (expected_sid is None or sid == expected_sid)
             and (expected_pane is None or pane == expected_pane)
