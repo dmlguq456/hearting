@@ -162,6 +162,11 @@ class InterruptChangeRecord(Scenario):
         time.sleep(2)
         interrupted_at = time.time()
         run.tui.key("Escape")
+        if run.harness == "opencode":
+            # The OpenCode 2 TUI answers the first Escape with "esc again to interrupt" and
+            # interrupts only on a second one shortly after; the person presses it twice.
+            time.sleep(0.4)
+            run.tui.key("Escape")
         time.sleep(1.5)
         if run.harness == "codex" and "esc to interrupt" in run.tui.screen().lower():
             run.tui.key("Escape")

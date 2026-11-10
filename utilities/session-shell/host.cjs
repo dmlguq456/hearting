@@ -136,16 +136,34 @@ function nativeSelectionFrame() {
   const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
     'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
   if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  // Codex 0.163 draws a configured status line with no help row under an idle
+  // composer. Accept exactly the row pane_ownership._codex_status_only accepts
+  // (whole thread-id first, then Context or the repeated unnamed-thread title;
+  // a warning or key hint may follow).
+  const uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const statusOnly=row=>{
+    const fields=row.split('·').map(value=>value.trim());
+    if(fields.length<2||!new RegExp('^'+uuid+'$').test(fields[0]))return false;
+    if(new RegExp('^'+uuid+' · (?:[^·]* · )*Context \\p{Nd}{1,3}% used(?: ·|$)','u').test(row))return true;
+    const repeated=fields[1].split(/\s+/).filter(Boolean)[0]||'';
+    return repeated===fields[0]||repeated.endsWith('…')&&repeated.length>8
+      &&fields[0].startsWith(repeated.slice(0,-1));
+  };
+  // Pass on the accepted row's layout with every identity-shaped word (whole or
+  // clipped thread-id) in place and nothing dropped; any other word becomes "?".
+  // Whether ids repeat or conflict is decided once, by the Python reader.
+  const evidence=row=>row.replace(/(Context[ \u00a0]\p{Nd}{1,3}%[ \u00a0]used)|[^\s·]+/gu,(word,context)=>
+    context||/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f][0-9a-f-]{0,35}…)$/.test(word)?word:'?')
+    .replace(/\?(?:[^\S·]+\?)+/g,'?');
+  if(tail.length===1&&statusOnly(tail[0]))return {...frame,lines:['›',evidence(tail[0])]};
   const hint=tail[tail.length-1]||'';
   const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
   const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
   if(!help)return frame;
   if(tail.length!==2)return {...frame,invalid:true};
-  // Only identity-shaped tokens leave the native viewport. Titles, telemetry
+  // Only identity-shaped words leave the native viewport. Titles, telemetry
   // and even footer-shaped draft text never travel in this read-only response.
-  const fields=tail[0].split('·'),safe=value=>/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f-]{0,27}…)$/.test(value.trim())?value.trim():'?';
-  const status=fields.length===1?safe(fields[0]):safe(fields[0])+' · '+safe(fields[fields.length-1]);
-  return {...frame,lines:['›',status,help]};
+  return {...frame,lines:['›',evidence(tail[0]),help]};
 }
 let checkingNativeSelection=false,nativeSelectionRevision=-1;
 function observeNativeSelection() {
@@ -164,7 +182,11 @@ function observeNativeSelection() {
        ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
     return lifecycle({token,harness,pid:native.pid,start:native.start,
       sid:data.selected_sid,seq:sequence+1,event:'select'});
-  }).finally(()=>{checkingNativeSelection=false;});
+  }).finally(()=>{
+    checkingNativeSelection=false;
+    // A screen painted while this check ran was skipped; look at it once now.
+    if(nativeSelectionRevision!==screenRevision)observeNativeSelection();
+  });
 }
 function readAction(extra,operation='action') {
   // A person-requested read or answer may be slow. It must not queue ahead
