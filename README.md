@@ -161,8 +161,9 @@ for new Claude, Codex and OpenCode terminals. It is off by default;
 disable` restores native launch behavior. Existing sessions keep running.
 
 Claude shows the same status area inside the panel as Codex and OpenCode; while
-the panel shows it, Claude's own statusline row below stays blank, and it
-returns whenever the panel is hidden.
+the panel shows it, Claude's own statusline row below becomes a notice row that
+stays empty unless you owe an answer, a warning applies or news just arrived.
+The full statusline returns whenever the panel is hidden.
 The panel's four colored edges separate Hearting's current work, actual route
 flow and questions from the native conversation. Its background stays neutral.
 Click a route for its stages and result; the bottom edge opens session details,
