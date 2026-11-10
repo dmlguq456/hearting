@@ -7,6 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConsistencyTest(unittest.TestCase):
+    def test_unknown_native_telemetry_is_owned_without_claiming_zero(self):
+        script = r'''const assert=require('node:assert/strict'),d=require(process.argv[1]);
+const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 7d ?'],'exact');
+assert.deepEqual(seen.owned,['context','quota']);assert.equal(seen.percent,undefined);assert.equal(seen.model,undefined);
+'''
+        result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_reserved_claude_and_panel_together_keep_fields_once(self):
         import sys
         sys.path.insert(0, str(ROOT))
@@ -54,6 +62,8 @@ rows[5][96]='X';assert.equal(v.nativePanelHit(term,view,123,3),null,'changed fra
         base['verification']['ci'] = 'same-head'
         self.assertNotIn('CI ?', route_evidence(record)['summary'])
         self.assertNotIn('CI 통과', route_evidence(record)['summary'])
+        from tools.fleet.explorer.grid import cell_width
+        self.assertLessEqual(cell_width(route_evidence(record)['summary']), 31)
         self.assertNotIn('running', str(route_evidence({'summary': 'running'})))
 
     def test_native_model_read_is_loaded_same_thread_display_only(self):

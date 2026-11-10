@@ -68,7 +68,7 @@ def route_evidence(visibility):
     kind = kind if kind in {"closed", "attention", "no-response", "wait", "resume", "person", "start", "close"} else "unknown"
     following = evidence_text(" · ".join(filter(None, [text("next_" + kind), nxt.get("node"), nxt.get("harness")])))
     lines.append([text("evidence_next"), following, "info"])
-    return {"summary": " · ".join(summary), "next": following, "lines": lines}
+    return {"summary": summary[0] + " · " + " ".join(summary[1:]), "next": following, "lines": lines}
 
 
 def compact_status(values, columns, native_owned=()):

@@ -12,8 +12,8 @@ function observe(harness, lines, sid) {
       const selected=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%\s*·\s*([^·]+?)\s*·\s*(?:5h|7d)\b/);
       const context=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%/);
       const choice=selected?.[2].trim().match(/^(.+?)(?:\s+(low|medium|high|xhigh|max|ultra))?$/);
-      const owned=[...(context?['context']:[]),...(/(?:5h|7d)\s+(?:[\d.]+%|\?)/.test(status)?['quota']:[])];
-      if(route||wait||context)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
+      const owned=[...(/context\s+(?:[━─█░]+\s+\d+(?:\.\d+)?%|\?)/.test(status)?['context']:[]),...(/(?:5h|7d)\s+(?:[\d.]+%|\?)/.test(status)?['quota']:[])];
+      if(route||wait||context||owned.length)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
         owned,
         ...(context&&valid(+context[1])?{percent:+context[1]}:{}),
         ...(selected&&!/…|\.\.\./.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})};
