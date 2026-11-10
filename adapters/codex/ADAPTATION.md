@@ -272,8 +272,10 @@ Activation renders these agents with the shared `utilities/native_agents.py` fro
 `models.conf` the Codex home selects: a render equal to the shipped TOML stays a
 symlink, a differing one is written as an activation-owned regular file, and an
 agent whose model is main-session-only in that config gets no file. A home whose
-`config.toml` selects a `model_provider` other than Codex's own `openai` (top level
-or the selected profile) gets every agent without its `model` line: the pinned
+`config.toml`, a profile file `<name>.config.toml` that `codex --profile <name>` reads,
+or a `[profiles.*]` table selects a `model_provider` other than Codex's own `openai`
+gets every agent without its `model` line (one set of agent files serves every
+profile of the home; a provider given only by `-c` on the command line is not seen): the pinned
 models are account models that provider does not serve, and Codex refuses such a
 spawn as `agent type is currently not available`. The agent keeps its reasoning
 effort and sandbox and follows the session model (PG-45). Keep your own
@@ -645,8 +647,10 @@ before payload exec. A duplicate or already-started claim starts zero children,
 and a dead unstarted fence is retryable only after exact group quiescence.
 Dispatch-depth-1 Codex owners run with
 `sandbox_workspace_write.network_access=true` and
-`AGENT_NESTED_HEADLESS_NETWORK=1` at every intensity and entry scope, the
-posture a Claude or OpenCode owner process has; a `report` scope is kept by the
+`AGENT_NESTED_HEADLESS_NETWORK=1` whatever their capability (audit included),
+intensity or entry scope, the posture a Claude or OpenCode owner process has; a
+depth-2 worker, a `read-only` sandbox and the mid-merge observation fence get no
+network, and nothing else widens it (`codex_owner_network_posture`); a `report` scope is kept by the
 owner instruction on all three, and a report or quick owner can read what it
 reviews (`gh pr view`) (PG-44). Their writable `CODEX_HOME` lives at
 `homes/codex/<worktree-key>.<release-key>` beneath the canonical dispatch state root,

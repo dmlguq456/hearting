@@ -115,11 +115,19 @@ class SharedRendererTest(unittest.TestCase):
         cases = (("", "shipped"), ('model_provider = "openai"\n', "shipped"),
                  ('model_provider = "local_fixture"\n', "rendered"),
                  ('profile = "lab"\n[profiles.lab]\nmodel_provider = "local_fixture"\n', "rendered"),
-                 ("not = [valid toml", "shipped"))
+                 ("not = [valid toml", "shipped"),
+                 # `codex --profile review` reads `review.config.toml` (Codex 0.134+):
+                 # the home's agents serve that session as well (RV-PR1474 P2-2).
+                 ({"review.config.toml": 'model_provider = "local_fixture"\n'}, "rendered"),
+                 ({"review.config.toml": 'model_provider = "openai"\n'}, "shipped"),
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "review.config.toml": 'model = "fixture-model"\n'}, "shipped"))
         for config, status in cases:
             with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
-                if config:
-                    (Path(tmp) / "config.toml").write_text(config, encoding="utf-8")
+                files = config if isinstance(config, dict) else (
+                    {"config.toml": config} if config else {})
+                for name, text in files.items():
+                    (Path(tmp) / name).write_text(text, encoding="utf-8")
                 plan = run_plan("codex", Path(tmp))
                 self.assertEqual({row["status"] for row in plan["agents"]}, {status})
                 for row in plan["agents"]:

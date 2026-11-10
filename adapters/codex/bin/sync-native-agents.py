@@ -120,23 +120,36 @@ UNPINNED_KEY = "_CODEX_AGENT_MODEL_UNPINNED"
 ACCOUNT_PROVIDERS = frozenset({"openai"})
 
 
-def selected_provider(runtime_home: Path) -> str:
-    """The `model_provider` the home's `config.toml` selects ("openai" when unset)."""
+def selectable_providers(runtime_home: Path) -> frozenset[str]:
+    """Every `model_provider` a session of this home can select.
+
+    One set of agent files serves every session of the home, so the providers of
+    all its configurations count: the top-level `config.toml`, each profile file
+    `<name>.config.toml` that `codex --profile <name>` selects (Codex 0.134+), and
+    the older `[profiles.*]` tables. An unset or unreadable provider is "openai".
+    A provider given only on the command line (`-c model_provider=...`) is not
+    in these files and is not seen.
+    """
     import tomllib
-    try:
-        config = tomllib.loads((Path(runtime_home) / "config.toml").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return "openai"
-    provider = config.get("model_provider")
-    profile = config.get("profile")
-    profiles = config.get("profiles")
-    if isinstance(profile, str) and isinstance(profiles, dict) and isinstance(profiles.get(profile), dict):
-        provider = profiles[profile].get("model_provider", provider)
-    return provider if isinstance(provider, str) and provider else "openai"
+    home = Path(runtime_home)
+    providers = set()
+    for path in (home / "config.toml", *sorted(home.glob("*.config.toml"))):
+        try:
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            config = {}
+        tables = [config]
+        profiles = config.get("profiles")
+        if isinstance(profiles, dict):
+            tables += [table for table in profiles.values() if isinstance(table, dict)]
+        for table in tables:
+            provider = table.get("model_provider")
+            providers.add(provider if isinstance(provider, str) and provider else "openai")
+    return frozenset(providers or {"openai"})
 
 
 def runtime_config(cfg: Mapping[str, str], runtime_home: Path) -> Mapping[str, str]:
-    if selected_provider(runtime_home) in ACCOUNT_PROVIDERS:
+    if selectable_providers(runtime_home) <= ACCOUNT_PROVIDERS:
         return cfg
     return {**cfg, UNPINNED_KEY: "1"}
 

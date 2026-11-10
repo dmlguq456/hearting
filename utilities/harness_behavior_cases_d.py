@@ -1087,10 +1087,10 @@ try:
     out["network"] = bool(wrapper.nested_headless_network_enabled(ns))
     out["network_source"] = "codex dispatch-headless nested_headless_network_enabled"
 except Exception as exc:
-    from dispatch_contract_base import codex_standard_owner_network_enabled
-    out["network"] = bool(codex_standard_owner_network_enabled(
-        dispatch_depth=1, worker_type="owner", intensity=args["intensity"],
-        sandbox="workspace-write") or projection["task_publish_scope"])
+    from dispatch_contract_base import codex_owner_network_posture
+    out["network"] = bool(codex_owner_network_posture(
+        dispatch_depth=1, worker_type="owner", sandbox="workspace-write",
+        observation_only=bool(projection["observation_only"])))
     out["network_source"] = "fallback %s" % type(exc).__name__
 git_dir, common = commit_policy.worktree_git_dirs(args["worktree"])
 roots = [str(p) for p in (git_dir, common / "objects", common / "refs", common / "logs")]

@@ -101,7 +101,7 @@ from dispatch_contract_base import (  # noqa: F401
     AUTOMATIC_RECEIPTLESS_CLASSIFIER, bounded_candidate_outcomes,
     CANCELLATION_QUIESCENCE_MAX_WAIT_SECONDS, CANCELLATION_QUIESCENCE_POLL_SECONDS,
     candidate_count, candidate_detail, CANDIDATE_PAYLOAD_BYTES, CANONICAL_PARENT_TRANSPORTS,
-    canonical_repository_identity, codex_standard_owner_network_enabled,
+    canonical_repository_identity, codex_owner_network_posture, codex_standard_owner_network_enabled,
     diagnose_repository_start, diagnostic_line, diagnostic_token, diff_attribution_lines,
     DispatchContractError, ELIGIBILITY, end_with_test, EXECUTION_SURFACES, FALLBACK_HOPS,
     FOREGROUND_FAILURES, FOREGROUND_OUTCOME_KEYS, FOREGROUND_OUTCOME_SOURCE,
