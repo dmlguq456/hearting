@@ -102,20 +102,6 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         self.assertEqual(notice_line(calm, done, [], later, now), [], 'the next input retires news')
         self.assertEqual(notice_line(calm, done, [], display, now + 3600), [], 'and so does time')
 
-    def test_additive_click_matches_cells_before_consuming_native_mouse(self):
-        script = r'''const assert=require('node:assert/strict'),v=require(process.argv[1]);
-assert.equal(typeof v.nativePanelHit,'function');
-const view=v.render({width:35,height:12,side:true,fill:false,model:{model_value:'native'},questions:()=>[]});
-const rows=Array.from({length:30},()=>Array(133).fill(' '));
-view.rows.forEach((row,i)=>[...row.map(p=>p.text).join('')].forEach((c,j)=>rows[i+3][j+94]=c));
-const term={cols:133,rows:30,buffer:{active:{viewportY:0,getLine:y=>({getCell:x=>({getChars:()=>rows[y][x]}),translateToString:(_trim,start,end)=>rows[y].slice(start,end).join('').trimEnd()})}}};
-assert.equal(v.nativePanelHit(term,view,123,3).action,'settings');
-assert.equal(v.nativePanelHit(term,view,5,3),null,'native conversation');
-rows[5][96]='X';assert.equal(v.nativePanelHit(term,view,123,3),null,'changed frame must stay native');
-'''
-        result = subprocess.run(['node', '-e', script, str(ROOT/'utilities/session-shell/panel-view.cjs')], capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_structured_route_codes_never_promote_report_prose_or_no_response(self):
         import sys
         sys.path.insert(0, str(ROOT))
@@ -236,17 +222,18 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_opencode_fixed_width_notice_is_one_physical_exception(self):
-        script = r'''
+    def test_opencode_settings_offer_the_same_width_and_threshold_as_the_others(self):
+        script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
-const r=v.render({width:37,height:21,side:true,harness:'opencode',model:{labels:{layout:'Layout'}},settings:{value:{...v.defaults},index:0},questions:()=>[]});
-const s=r.rows.flat().map(p=>p.text).join('');
-assert.equal((s.match(/fixed 42/g)||[]).length,1);assert(s.includes('› Layout'));
-'''
+assert.equal(v.nativePanelHit,undefined);assert.equal(v.nativeSidebarColumns,undefined);
+const text=harness=>v.render({width:40,height:21,side:true,harness,model:{labels:{layout:'Layout',width:'Width',threshold:'Threshold'}},
+  settings:{value:{...v.defaults},index:0},questions:()=>[]}).rows.flat().map(p=>p.text).join('');
+const opencode=text('opencode');assert(opencode.includes('Width')&&opencode.includes('Threshold'));
+assert(!/fixed 42/.test(opencode));assert.equal(opencode,text('claude'));assert.equal(opencode,text('codex'));
+"""
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-
 
 if __name__ == '__main__':
     unittest.main()
