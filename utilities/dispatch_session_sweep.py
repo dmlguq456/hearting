@@ -703,6 +703,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
+    select=None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -716,6 +717,9 @@ def sweep_deliver(
     session's own turn -- an injection into ``additionalContext`` is
     synchronous with the recipient's next inference, unlike the async rewake
     carrier, so acking there is the recipient consuming the token.
+
+    ``select``, when given, is a predicate on an addressed record: a record it
+    rejects is not claimed here and stays with its existing carriers.
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -830,6 +834,8 @@ def sweep_deliver(
             # must not turn an answer into an ordinary runtime prompt or ACK.
             continue
         if current.get("delivery_id") in visited_batch_ids:
+            continue
+        if select is not None and not select(current):
             continue
         if claimed and over_budget():
             break

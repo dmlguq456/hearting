@@ -1848,6 +1848,10 @@ def _load_maps(root: Path) -> List[Tuple[str, Dict[str, str]]]:
 def resolve_legacy(root: Path, rel: str) -> Dict[str, Any]:
     root = Path(root).resolve()
     rel = rel.strip("/")
+    from artifact_spec_storage import resolve_path as resolve_spec
+    logical = resolve_spec(root, rel)
+    if logical is not None:
+        return logical
     direct = root / rel
     # Cleanup may retain a directory solely to hold nested relocation pointers.
     # A real successor payload still wins over a stale sibling pointer.
@@ -1861,11 +1865,21 @@ def resolve_legacy(root: Path, rel: str) -> Dict[str, Any]:
     if direct.exists() and not os.path.islink(str(direct)) and not pointer_wrapper:
         return {"path": rel, "resolution": "present", "target": rel, "absolute": str(direct)}
     maps = _load_maps(root)
+    def mapped(target, resolution, name):
+        logical = resolve_spec(root, target)
+        if logical is not None:
+            return {**logical, 'path': rel, 'map': name, 'logical_target': target,
+                'storage_resolution': logical['resolution'],
+                'resolution': resolution if logical.get('absolute') else 'unknown'}
+        if (root / target).exists():
+            return {'path': rel, 'resolution': resolution, 'target': target,
+                'absolute': str(root / target), 'map': name}
+        return None
     missed: List[str] = [os.path.normpath(str(direct))]
     for name, table in reversed(maps):  # latest map wins
-        if rel in table and (root / table[rel]).exists():
-            return {"path": rel, "resolution": "mapped", "target": table[rel], "absolute": str(root / table[rel]), "map": name}
         if rel in table:
+            result = mapped(table[rel], 'mapped', name)
+            if result is not None: return result
             missed.append(os.path.normpath(str(root / table[rel])))
     # longest mapped ancestor directory
     parts = rel.split("/")
@@ -1873,10 +1887,9 @@ def resolve_legacy(root: Path, rel: str) -> Dict[str, Any]:
         ancestor = "/".join(parts[:depth])
         tail = "/".join(parts[depth:])
         for name, table in reversed(maps):
-            if ancestor in table and (root / table[ancestor] / tail).exists():
-                return {"path": rel, "resolution": "mapped-ancestor", "target": table[ancestor] + "/" + tail,
-                        "absolute": str(root / table[ancestor] / tail), "map": name}
             if ancestor in table:
+                result = mapped(table[ancestor] + '/' + tail, 'mapped-ancestor', name)
+                if result is not None: return result
                 missed.append(os.path.normpath(str(root / table[ancestor] / tail)))
     for candidate in dict.fromkeys(missed):
         target, evidence = _follow_relocated(Path(candidate), require_exists=True)
@@ -2042,6 +2055,13 @@ def prd_candidates(root: Path) -> List[str]:
     root = Path(root).resolve()
     revision = latest_shared_revision(root, "spec")
     if revision is not None:
+        from artifact_spec_storage import revision_address, read_files
+        address = revision_address(root, revision)
+        if address is not None:
+            files, _ = read_files(root, address[0], address[1])
+            return [str(files[name].path) for name in sorted(files, key=lambda name: (name.count('/'), name))
+                    if name == 'prd.md' or (name.count('/') == 1 and name.endswith('/prd.md')
+                                            and not name.startswith('_internal/'))]
         shared = _prd_candidates_in(revision)
         if shared:
             return shared

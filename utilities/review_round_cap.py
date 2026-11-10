@@ -179,7 +179,71 @@ def _base_recovery_fields(node_kind, state="exhausted"):
     return fields
 
 
+# A gate whose verdict is a deterministic, re-runnable check rather than a
+# model reviewer's judgment. The round cap limits reviewer re-invocations; it
+# never removes the way to run the check itself.
+DETERMINISTIC_CHECK_GATES = frozenset({"hash-bound-smoke"})
+
+
+def is_deterministic_check(node):
+    return isinstance(node, Mapping) and node.get("completion_gate") in DETERMINISTIC_CHECK_GATES
+
+
 def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):
+    fields = _review_recovery_fields(node_kind, state, route=route, node=node, jobs=jobs,
+                                     route_file=route_file)
+    if (state in {"exhausted", "verdictless-bound"} and is_deterministic_check(node)
+            and fields.get("required_action", "report-unresolved-verification")
+            == "report-unresolved-verification" and "recovery_complete_command" not in fields):
+        return _deterministic_check_fields(fields, route=route, node=node, route_file=route_file)
+    return fields
+
+
+def _deterministic_check_fields(fields, *, route, node, route_file):
+    """Owner-run path for a deterministic gate whose reviewer rounds are spent.
+
+    The check runs again through the existing verification runner and closes
+    through the existing inline completion, whose marker already records
+    `reviewer_kind=owner-inline` with degraded independence. No registered
+    round, approval, or registry edit is added; without a fresh passing
+    attestation the result stays unverified.
+    """
+    from pathlib import Path
+    import shlex
+    utilities = Path(__file__).resolve().parent
+    tools = utilities.parent / "tools"
+    route_path = route_file
+    if not route_path and isinstance(route, Mapping) and route.get("artifact_root") and route.get("route_id"):
+        try:
+            from route_lineage import canonical_route_path
+            route_path = canonical_route_path(route["artifact_root"], route["route_id"])
+        except (ImportError, OSError, ValueError, KeyError, TypeError):
+            route_path = None
+    attestation = "<current-cycle reviews/smoke-attestation.json>"
+    return {**fields,
+        "recovery_surface": "capability-route complete --inline",
+        "next_action": "owner-inline",
+        "required_action": "run-deterministic-check",
+        "review_independence_when_owner_run": "degraded",
+        "recovery_hint": ("The gate is a deterministic check; the spent budget limits model-reviewer "
+            "re-invocations, not the check. Run it on the current inputs under the verification runner, "
+            "verify the fresh attestation, then complete inline: the marker records owner-inline "
+            "(degraded) independence. A check that cannot run or does not pass stays unverified."),
+        "recovery_run_command": shlex.join([
+            "python3", str(utilities / "verification-background-lease.py"), "--timeout", "<seconds>", "--",
+            "python3", str(tools / "smoke-attestation.py"), "attest", "--input", "<each sealed input>",
+            "--config-manifest", "<sealed config manifest>", "--cwd", "<experiment cwd>",
+            "--output", attestation, "--", "<one-batch smoke command>"]),
+        "recovery_check_command": shlex.join([
+            "python3", str(tools / "smoke-attestation.py"), "verify", "--attestation", attestation]),
+        "recovery_complete_command": shlex.join([
+            "python3", str(utilities / "capability-route.py"), "complete", "--inline",
+            "--route", str(route_path or "<route-file>"), "--node", str(node.get("id")),
+            "--evidence", attestation]),
+    }
+
+
+def _review_recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):
     fields = _base_recovery_fields(node_kind, state)
     if state == "review-correction-required" and route and node and jobs and route_file:
         try:
@@ -238,6 +302,8 @@ def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs
         verdicts = [(status, meta) for status, meta in rows
                     if source_digest is None or meta.get("_review_subject_digest") == source_digest
                     if classify_round_row(status, meta, worker_type="review") == "verdict"]
+        if source_digest is not None and verdicts and verdicts[-1][1].get("note") in SUCCESS_NOTES:
+            return _repeated_pass_fields(fields, rows, verdicts)
         if not verdicts or verdicts[-1][1].get("note") != REVIEW_BLOCKING_NOTE:
             return fields
         latest = verdicts[-1][1]
@@ -310,6 +376,33 @@ def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs
     except (OSError, ValueError, KeyError, TypeError):
         # Recovery hints carry no authority and cannot weaken the original refusal.
         return fields
+    return fields
+
+
+def _repeated_pass_fields(fields, rows, subject_verdicts):
+    """Next step when the unchanged content already holds its PASS verdicts.
+
+    Only repeating the same content with the same result is refused; the
+    refusal names what to do instead of an unresolved-verification dead end.
+    Changed content is a new subject with its own budget and is admitted.
+    """
+    latest = subject_verdicts[-1][1]
+    passes = [meta.get("attempt_id") for _status, meta in subject_verdicts
+              if meta.get("note") in SUCCESS_NOTES and meta.get("attempt_id")]
+    lineage = [meta for status, meta in rows
+               if classify_round_row(status, meta, worker_type="review") == "verdict"]
+    current = bool(lineage) and lineage[-1].get("attempt_id") == latest.get("attempt_id")
+    fields = {**fields, "subject_pass_attempt_ids": "|".join(passes)}
+    if current:
+        fields.update(next_action="successor-start", required_action="use-current-pass",
+            recovery_hint="This exact content already passed (" + (latest.get("attempt_id") or "-")
+                + "); continue with the next node's printed start. Changing the reviewed content "
+                "admits a fresh verification automatically.")
+    else:
+        fields.update(required_action="report-unresolved-verification",
+            recovery_hint="This content returned to an earlier revision that already passed ("
+                + "|".join(passes) + "); change the content to verify it again, or report those "
+                "PASS attempts as evidence without claiming a current PASS.")
     return fields
 
 

@@ -407,13 +407,18 @@ try {
         baseline = json.loads(subprocess.run(["git", "show", f"{BASELINE}:adapters/codex/hooks/hooks.json"],
                                              cwd=ROOT, check=True, text=True, capture_output=True).stdout)
         current = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text(encoding="utf-8"))
-        self.assertEqual(current["hooks"]["PostToolUse"][:-1], baseline["hooks"]["PostToolUse"])
-        self.assertEqual(len(current["hooks"]["PostToolUse"]), len(baseline["hooks"]["PostToolUse"]) + 1)
-        self.assertEqual(current["hooks"]["PostToolUse"][-1]["matcher"],
-                         r"Edit|Write|MultiEdit|apply_patch|functions\.apply_patch")
-        self.assertIn("posttooluse-spec-sync.py", current["hooks"]["PostToolUse"][-1]["hooks"][0]["command"])
+        original = baseline["hooks"]["PostToolUse"]
+        post = current["hooks"]["PostToolUse"]
+        # The original entries keep their positions (Codex keys hook trust by
+        # position), and the spec-sync entry directly follows them. Later
+        # bridges may be appended after it without moving either.
+        self.assertEqual(post[:len(original)], original)
+        spec_sync = post[len(original)]
+        self.assertEqual(spec_sync["matcher"], r"Edit|Write|MultiEdit|apply_patch|functions\.apply_patch")
+        self.assertIn("posttooluse-spec-sync.py", spec_sync["hooks"][0]["command"])
         for event in set(baseline["hooks"]) - {"PostToolUse"}:
-            self.assertEqual(current["hooks"][event], baseline["hooks"][event], event)
+            self.assertEqual(current["hooks"][event][:len(baseline["hooks"][event])],
+                             baseline["hooks"][event], event)
 
 
 if __name__ == "__main__":
