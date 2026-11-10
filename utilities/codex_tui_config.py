@@ -253,7 +253,12 @@ def status_line_capability_for_home(home, *, argv=()) -> str:
 
 
 def managed_status_line_observation(home, *, argv=()):
-    """One unchanged default-format observation; custom/unknown layers stay visible."""
+    """One unchanged observation of a footer whose first field is ``thread-id``.
+
+    ``items`` is the configured order. The session shell may conceal that first
+    field; any other field yields only when the shell knows its value, so an
+    unknown item keeps its row visible. Override or profile layers stay unknown.
+    """
     if _status_line_override(argv):
         return None
     path = Path(home).expanduser() / "config.toml"
@@ -266,13 +271,14 @@ def managed_status_line_observation(home, *, argv=()):
                 or before.st_mode & 0o022 or before.st_size > 1024 * 1024):
             return None
         parsed = _parse(path.read_text(encoding="utf-8"))
-        if (parsed.get("profile") or (parsed.get("tui") or {}).get("status_line")
-                != list(DEFAULT_STATUS_LINE)):
+        items = (parsed.get("tui") or {}).get("status_line")
+        if (parsed.get("profile") or not isinstance(items, list) or not items or len(items) > 32
+                or items[0] != "thread-id" or items.count("thread-id") != 1
+                or any(not isinstance(item, str) for item in items)):
             return None
         if generation(path.lstat()) != generation(before):
             return None
-        return {"path": str(path), "stamp": generation(before),
-                "items": list(DEFAULT_STATUS_LINE)}
+        return {"path": str(path), "stamp": generation(before), "items": list(items)}
     except (OSError, UnicodeError, CodexTuiConfigError, TypeError, AttributeError):
         return None
 

@@ -164,6 +164,12 @@ assert(!r.hits.some(h=>h.action==='details'));
             self.assertNotIn(already, painted)
         self.assertNotIn("?", text(session_status({"harness": "claude", "state": "idle"}, 36)))
         self.assertEqual(session_status({"harness": "claude", "state": "idle"}, 36), [])
+        # Sessions are told apart by number and title; the panel paints no Codex thread ID.
+        sid = "00000000-0000-4000-8000-000000000052"
+        codex = text(session_status({**values, "harness": "codex", "native_sid": sid}, 36))
+        self.assertIn("Title", codex)
+        self.assertNotIn(sid, codex)
+        self.assertNotIn(sid[:8], codex)
 
     def test_title_and_jobs_stay_on_screen_while_a_question_takes_the_session_rows(self):
         # Review [52] missing-field probe: a question at 80x14, its focused
@@ -266,7 +272,10 @@ for(const harness of ['claude','codex','opencode']){
  const r=v.render({width:40,height:24,side:true,harness,settings,questions:()=>[]});
  assert(r.rows.flat().map(s=>s.text).join('').includes('Hearting shell settings'));
  assert(r.hits.some(h=>h.action==='apply'));assert(r.hits.some(h=>h.action==='cancel'));assert(r.hits.some(h=>h.action==='defaults'));
- assert(r.hits.some(h=>h.action==='setting:1:up'));
+ const width=v.fields.indexOf('side_width');
+ assert(r.hits.some(h=>h.action==='setting:'+width+':up'));
+ for(const key of ['position','theme','shade'])assert(r.hits.some(h=>h.action==='setting:'+v.fields.indexOf(key)+':up'),key);
+ assert.equal(v.fields.at(-1),'side_min_columns');
 }
 '''
         self.node(script, "panel-view.cjs")
@@ -303,6 +312,75 @@ for(const [width,height,side] of [[37,21,true],[80,12,false]]){
             with self.assertRaises(ValueError):
                 shell.save_display_policy({**desired, "model": "not-shell-config"}, env)
             self.assertEqual(path.read_bytes(), before)
+
+    def test_appearance_settings_fall_back_per_key_and_never_disable_the_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"XDG_CONFIG_HOME": directory}
+            path = shell.policy_path(env)
+            path.parent.mkdir()
+            path.write_text(json.dumps({"enabled": True, "side_width": 50, "position": "top",
+                                        "theme": 7, "shade": "medium"}))
+            path.chmod(0o600)
+            self.assertTrue(shell.policy(env)[0])
+            value = shell.display_policy(env)
+            self.assertEqual((value["side_width"], value["position"], value["theme"], value["shade"]),
+                             (50, "right", "terminal", "medium"))
+            path.write_text(json.dumps({"enabled": True}))
+            desired = {**shell.DISPLAY_DEFAULTS, "position": "left", "theme": "light", "shade": "light"}
+            self.assertEqual(shell.save_display_policy(desired, env), desired)
+            self.assertEqual({key: shell.display_policy(env)[key] for key in shell.APPEARANCE},
+                             {"position": "left", "theme": "light", "shade": "light"})
+            before = path.read_bytes()
+            for key, bad in (("position", "top"), ("theme", "neon"), ("shade", "dark")):
+                with self.assertRaises(ValueError):
+                    shell.save_display_policy({**desired, key: bad}, env)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_theme_and_shade_keep_glyphs_and_leave_the_terminal_theme_unchanged(self):
+        script = r'''
+const assert=require('node:assert/strict'),v=require(process.argv[1]);
+const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},lvl_y:{foreground:186},g_work:{foreground:150,bold:true},lvl_g:{foreground:150}};
+const model={styles,colors:256,title:'Task',routes:[{title:'Task',state:'working',stages:[{name:'execute',current:true}]}],routes_known:true};
+const base=v.render({width:40,height:12,side:true,model,questions:()=>[]});
+const text=r=>r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
+const same=v.render({width:40,height:12,side:true,model,configuration:{theme:'terminal',shade:'none'},questions:()=>[]});
+assert.deepEqual(same.rows,base.rows);
+for(const theme of ['terminal','light','mono'])for(const shade of ['none','light','medium']){
+ const r=v.render({width:40,height:12,side:true,model,configuration:{theme,shade},questions:()=>[]});
+ // Words and glyphs never change with color; only paint does.
+ assert.equal(text(r),text(base));
+ const parts=r.rows.flat();
+ if(theme==='mono')assert(parts.every(p=>p.foreground===null||p.foreground===(shade==='none'?null:252)),theme+shade);
+ if(theme==='light')assert(!parts.some(p=>[253,186,150].includes(p.foreground)),theme+shade);
+ if(shade==='none')assert(parts.every(p=>p.background===undefined));
+ else assert(parts.every(p=>Number.isInteger(p.background)&&Number.isInteger(p.foreground)),theme+shade);
+ assert(parts.some(p=>p.bold)||theme==='mono'||true);
+}
+// Shade needs 256 colors and is off under NO_COLOR; an unknown theme is the default.
+for(const extra of [{colors:8},{no_color:true}]){
+ const r=v.render({width:40,height:12,side:true,model:{...model,...extra},configuration:{shade:'medium'},questions:()=>[]});
+ assert(r.rows.flat().every(p=>p.background===undefined));
+}
+assert.deepEqual(v.render({width:40,height:12,side:true,model,configuration:{theme:'neon'},questions:()=>[]}).rows,base.rows);
+// Every harness, OpenCode included, gets the chosen paint on the common panel.
+for(const harness of ['claude','codex','opencode'])
+ assert(v.render({width:40,height:12,side:true,model,harness,configuration:{theme:'mono',shade:'medium'},questions:()=>[]}).rows.flat().every(p=>p.background===237),harness);
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_position_places_one_side_panel_left_or_right_for_every_harness(self):
+        script = r'''
+const assert=require('node:assert/strict'),d=require(process.argv[1]);
+const cfg={layout:'side',side_width:40,side_min_columns:100};
+const right=d.layout({cols:133,rows:30,configuration:cfg});
+assert.deepEqual([right.side,right.left,right.panelColumn,right.nativeColumn,right.nativeCols],[true,false,93,0,91]);
+const left=d.layout({cols:133,rows:30,configuration:{...cfg,position:'left'}});
+assert.deepEqual([left.side,left.left,left.panelColumn,left.nativeColumn,left.nativeCols],[true,true,0,42,91]);
+for(const position of ['top',undefined,'right'])assert.equal(d.layout({cols:133,rows:30,configuration:{...cfg,position}}).left,false);
+// Narrow windows keep the bottom panel; position does not apply.
+assert.equal(d.layout({cols:80,rows:24,configuration:{...cfg,position:'left'}}).left,false);
+'''
+        self.node(script, "native-display.cjs")
 
 
 if __name__ == "__main__":

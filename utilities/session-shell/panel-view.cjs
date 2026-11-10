@@ -1,10 +1,38 @@
 'use strict';
 // Geometry and paint only. The existing question controller owns drafts/effects.
-const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14};
-const fields=['layout','side_width','narrow','auxiliary','bottom_rows','side_min_columns'];
-const names=['layout','width','narrow','auxiliary','height','threshold'];
+const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
+  position:'right',theme:'terminal',shade:'none'};
+// Panel color schemes. `terminal` is the original look: the terminal's own
+// background with the shared palette. `light` swaps that palette's pale hues
+// for darker ones that read on a light terminal; `mono` drops hue entirely and
+// keeps weight, glyphs and words. Text and glyphs always carry the state, so
+// no scheme makes color the only signal.
+const LIGHT_256={253:236,252:238,150:28,186:130,217:124,116:30,176:91,147:25,230:94,219:162,137:130};
+// A shade is the panel's own background. It is drawn with an explicit text
+// color, so it reads on either terminal background, and only in 256 colors.
+const SHADES={dark:{light:235,medium:237,text:252},light:{light:255,medium:253,text:235}};
+function appearance(rows,configuration={},{colors=256,noColor=false}={}){
+  const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
+  const shade=['light','medium'].includes(cfg.shade)&&!noColor&&colors>=256?cfg.shade:'';
+  if(theme==='terminal'&&!shade)return rows;
+  const base=SHADES[theme==='light'?'light':'dark'];
+  return rows.map(row=>row.map(part=>{
+    let foreground=Number.isInteger(part.foreground)&&part.foreground>=0?part.foreground:null;
+    if(theme==='mono')foreground=null;
+    else if(theme==='light'&&foreground!==null)foreground=colors>=256?(LIGHT_256[foreground]??foreground):(foreground===7?null:foreground);
+    if(shade&&foreground===null)foreground=base.text;
+    const next={...part,foreground};
+    if(shade)next.background=base[shade];
+    return next;
+  }));
+}
+const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','side_min_columns'];
+const names=['layout','position','width','narrow','auxiliary','height','theme','shade','threshold'];
+const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
+  theme:['terminal','light','mono'],shade:['none','light','medium']};
+const APPEARANCE_KEYS=['position','theme','shade'];
 function change(value,key,step){
-  const options={layout:['side','bottom'],narrow:['bottom','compact'],auxiliary:['summary','detail']};
+  const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
@@ -46,7 +74,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     add(line(t('settings_title','Hearting shell settings'),'loc_repo'));
     const start=Math.max(0,settings.index-Math.max(0,height-7));
     for(let i=start;i<fields.length&&content.length<height-4;i++){
-      const key=fields[i],value=settings.value[key],v=typeof value==='string'?t(value,value):value;
+      const key=fields[i],value=settings.value[key],v=typeof value==='string'?t((APPEARANCE_KEYS.includes(key)?key+'_':'')+value,value):value;
       const prefix=`${i===settings.index?'›':' '} ${t(names[i],names[i])}  `,left=2+measure(prefix);
       hits.push({row:content.length+1,left,right:left+1,action:'setting:'+i+':down'});
       hits.push({row:content.length+1,left:left+measure('‹ '+v+' '),right:left+measure('‹ '+v+' ›'),action:'setting:'+i+':up'});
@@ -200,6 +228,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   }
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
-  return {rows,hits:hits.filter(h=>h.row<count),color,routePages};
+  const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages};
 }
-module.exports={render,defaults,fields,change};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS};
