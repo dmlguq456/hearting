@@ -69,21 +69,27 @@ class DecideTest(unittest.TestCase):
                 row = C.decide(snap(), line + "\n")
                 self.assertEqual((row["state"], row["role"]), ("review-stale", "reviewer"))
 
-    def test_current_closed_verdict_beats_history_on_other_heads(self):
-        text = (f"최종 판정: 병합 가능 — head {HEAD[:7]}\n\n## 이력\n\n"
-                f"최종 판정: 수정 후 병합 — head {OLD[:7]}\n")
-        self.assertEqual(self.state(snap(), text), "ready-to-publish")
+    def test_only_the_first_line_is_read(self):
+        current, other = f"최종 판정: 병합 가능 — head {HEAD[:7]}", f"최종 판정: 수정 후 병합 — head {OLD[:7]}"
+        fix_now = f"Final verdict: changes requested — head {HEAD}"
+        for text, expected in ((f"{current}\n\n## 이력\n\n{other}\n", "ready-to-publish"),
+                               (f"{other}\n\n## 재검토\n\n{current}\n", "review-stale"),
+                               (f"{current}\n\n## 이력\n\n{fix_now}\n", "ready-to-publish"),
+                               (f"# 검토\n\n## PR #1425\n\n**{fix_now}**\n\n{current}\n", "fix-requested")):
+            with self.subTest(text=text):
+                self.assertEqual(self.state(snap(), text), expected)
 
-    def test_different_closed_verdicts_on_the_current_head_go_to_a_person(self):
-        text = (f"최종 판정: 병합 가능 — head {HEAD[:7]}\n\n## 이력\n\n"
-                f"Final verdict: changes requested — head {HEAD}\n")
-        row = C.decide(snap(), text)
-        self.assertEqual((row["state"], row["review"]), ("awaiting-review", "none"))
-        self.assertIn("person", row["next"])
-
-    def test_closed_form_inside_a_code_fence_is_an_example(self):
-        text = f"검토 중.\n\n```text\n최종 판정: 병합 가능 — head {HEAD[:7]}\n```\n"
-        self.assertEqual(self.state(snap(), text), "awaiting-review")
+    def test_closed_lines_after_the_first_line_are_never_read(self):
+        merge, fix = f"Final verdict: mergeable — head {HEAD[:7]}", f"최종 판정: 수정 후 병합 — head {HEAD[:7]}"
+        for line in (merge, fix):
+            # RV-PR1430-R4-1110 boundary: longer and mixed fences hold the example inside.
+            for text in (f"검토 중.\n\n{line}\n", f"```text\n{line}\n```\n", f"~~~text\n{line}\n~~~\n",
+                         f"````markdown\n```\n{line}\n```\n````\n", f"~~~markdown\n```\n{line}\n```\n~~~\n",
+                         f"> {line}\n", f"- {line}\n", f"    {line}x\n\n{line}\n"):
+                for checks in (OK, RUNNING):
+                    with self.subTest(text=text, checks=checks):
+                        row = C.decide(snap(checks), text)
+                        self.assertEqual((row["state"], row["review"]), ("awaiting-review", "none"))
 
 
 class FinishLineTest(unittest.TestCase):
@@ -275,7 +281,7 @@ class ProbeTest(unittest.TestCase):
             with self.subTest(name=name):
                 state = C.decide(snap(headRefOid=head), text)["state"]
                 self.assertEqual(state, expected)
-                closed = any(C.closed_verdict(line) for line in text.splitlines())
+                closed = bool(C.closed_verdict(C.first_line(text)))
                 self.assertEqual(state in AUTO or state == "review-stale", closed)
 
     def test_real_reports_are_never_misread(self):
@@ -288,10 +294,13 @@ class ProbeTest(unittest.TestCase):
                                       "fix": ("fix-requested", "awaiting-review")}[meaning])
 
     def test_public_cli_sends_unclosed_lines_to_a_person(self):
-        for name in ("r3-ko-premature-conclusion", "r3-ko-current-negation-bold", "r3-en-current-negation-bold",
-                     "r3-en-contingent-review"):
-            text = next(text for case, _, text, _ in PROBES if case == name)
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+        texts = [next(text for case, _, text, _ in PROBES if case == name)
+                 for name in ("r3-ko-premature-conclusion", "r3-ko-current-negation-bold",
+                              "r3-en-current-negation-bold", "r3-en-contingent-review")]
+        texts += [f"````markdown\n```\nFinal verdict: mergeable — head {H3}\n```\n````\n",
+                  f"~~~markdown\n```\n최종 판정: 수정 후 병합 — head {H3}\n```\n~~~\n"]
+        for text in texts:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "review.md"
                 path.write_text(text, encoding="utf-8")
                 out = io.StringIO()
@@ -325,6 +334,7 @@ REAL_FILES = {
     "RV-PR1430-1110.md": (R2_OLD, "fix"),
     "RV-PR1430-R2-1110.md": (R2_HEAD, "fix"),
     "RV-PR1430-R3-1110.md": (R3_HEAD, "fix"),
+    "RV-PR1430-R4-1110.md": ("748e5ebc3392960c4d5700f506192d824ccd7a2a", "fix"),
     "RV-PR1431-1110.md": ("e3da694", "merge"),
     "RV-PR1434-1110.md": ("c0b45c1fc252735fa32047183a1d5aae1be7626f", "fix"),
     "RV-PR1434-R2-1110.md": ("fdbabf63525ae1ce10d40d406ae62c6bc9250ae4", "merge"),
@@ -334,6 +344,7 @@ REAL_FILES = {
     "RV-PR1437-1110.md": ("f502625", "fix"),
     "RV-PR1438-1110.md": ("3b86ac1d17d3ca7f55e2587373fa98362f7f6d1b", "merge"),
     "RV-PR1439-1110.md": ("2f1f366", "merge"),
+    "RV-PR1441-1110.md": ("2a445ccb1b091fcb0c236f705570957a178182c0", "fix"),
 }
 
 

@@ -1667,16 +1667,17 @@ already named in the assignment, not by a supervisor relay.
 chain's current step again from the PR's GitHub state (head, draft,
 mergeability, and the head's checks read the same way as `merge-line`) and the
 reviewer's report, and prints one line `pr_chain=<state> … role=<role>
-next=<action>`; it stores, sends, merges and comments nothing. A verdict is read only from a closed list of whole lines: with `**`/`__` emphasis, surrounding
-spaces and a trailing period removed, the line is exactly `최종 판정: 병합 가능 — head <hex>`
-or `Final verdict: mergeable — head <hex>` (merge), or `최종 판정: 수정 후 병합 — head <hex>`
-or `Final verdict: changes requested — head <hex>` (fix), with 7–40 hex digits; lines in
-fenced code are examples. Any other word on the line, and every paragraph after it, is
-not interpreted. A closed line whose hex is a prefix of the current head is the current
-verdict; differing current verdicts are a conflict. With no current closed line the step
-is `review-stale` when closed lines name only other heads, otherwise `awaiting-review`:
-a person reads the report and takes the next step, its `next=` quoting the line it could
-not read. Reviewers are not required to use the form; it only lets the chain continue
+next=<action>`; it stores, sends, merges and comments nothing. A verdict is read only
+from the report's first line: the first line that is neither blank nor a heading (`#`).
+With `**`/`__` emphasis, surrounding spaces and a trailing period removed, that line is
+exactly `최종 판정: 병합 가능 — head <hex>` or `Final verdict: mergeable — head <hex>`
+(merge), or `최종 판정: 수정 후 병합 — head <hex>` or `Final verdict: changes requested — head <hex>`
+(fix), with 7–40 hex digits. Any other word on that line is not interpreted, and the rest
+of the document (code examples, quotes, history, later re-reviews) is not read. A first
+line whose hex is a prefix of the current head is the current verdict; one naming another
+head is `review-stale`; otherwise the step is `awaiting-review`: a person reads the report
+and takes the next step, its `next=` quoting the first line. Reviewers are not required to
+use the form; it only lets the chain continue
 without a person. A finished `autopilot-code` route (`capability-route finish`)
 prints the same line as `next:` on stderr when its branch has an open PR. The author sends the review request (PR, exact head,
 author report) directly to the reviewer named in its assignment and copies the

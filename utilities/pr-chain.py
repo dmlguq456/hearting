@@ -9,8 +9,8 @@ merged or commented; the printed `next=` names the one action and its role.
 States, in the order they are decided:
   merged, closed, draft, ci-failed, conflict  - the PR itself settles the step
   needs-review       no review report given: the author sends the review request
-  awaiting-review    no closed-form verdict line for this head: a person reads the report
-  review-stale       closed-form verdicts name only another head
+  awaiting-review    the report's first line is not a closed verdict: a person reads the report
+  review-stale       the first-line closed verdict names another head
   fix-requested      closed-form fix verdict on this head
   awaiting-ci        final merge verdict on this head, head CI still running
   ready-to-publish   final merge verdict on this head and head CI succeeded
@@ -27,15 +27,14 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 
-# A verdict is read only from a closed list of whole-line forms; nothing else is
-# interpreted. The line, with its `**`/`__` emphasis, surrounding spaces and one
-# trailing period removed, must be exactly one of these and nothing more:
+# A verdict is read only from the report's first line: the first line that is not
+# blank and not a heading (`#...`). That line, with its `**`/`__` emphasis, surrounding
+# spaces and one trailing period removed, must be exactly one of these closed forms:
 #   최종 판정: 병합 가능 — head <7-40 hex>        Final verdict: mergeable — head <hex>
 #   최종 판정: 수정 후 병합 — head <hex>          Final verdict: changes requested — head <hex>
-# Any other wording on the line (a condition, a note, a second sentence) makes it not a
-# verdict, and the commentary after it is never read, so a person reads the report.
-# Lines inside fenced code blocks are examples, not verdicts. core/OPERATIONS.md §5.11
-# names the same four forms; keep the two in step.
+# Any other wording on that line makes it not a verdict, and the rest of the document
+# (code examples, quotes, history) is never read, so a person reads the report.
+# core/OPERATIONS.md §5.11 names the same rule; keep the two in step.
 VERDICT_FORMS = (
     ("merge", "최종 판정: 병합 가능"),
     ("merge", "Final verdict: mergeable"),
@@ -53,11 +52,6 @@ _CLOSED = re.compile(
     r"^(?P<label>" + "|".join(f"(?:{_form_pattern(label)})" for _, label in VERDICT_FORMS)
     + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.IGNORECASE)
 _KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind for kind, label in VERDICT_FORMS}
-# Only used to quote the line a person should read when no closed form is present.
-_LABELED = re.compile(r"^[\s>*#_\-]*(?:최종\s*판정|판정|final\s+verdict|verdict)\s*(?:\([^)\n]*\))?\s*[:：]",
-                      re.IGNORECASE)
-_HEADING = re.compile(r"^\s*#{1,6}\s")
-_FENCE = re.compile(r"^\s*(?:```|~~~)")
 
 
 def _normalize(line):
@@ -74,46 +68,27 @@ def closed_verdict(line):
     return _KINDS[label], match.group("head").lower()
 
 
-def _lines(text):
-    """Document lines outside fenced code blocks."""
-    fenced = False
+def first_line(text):
+    """The report's first line that is neither blank nor a heading, or ""."""
     for line in (text or "").splitlines():
-        if _FENCE.match(line):
-            fenced = not fenced
-            continue
-        if not fenced:
-            yield line
-
-
-def _unread_line(lines):
-    """The line a person is pointed at: a labelled verdict line, else the first text line."""
-    labelled = next((line for line in lines if _LABELED.match(line)), None)
-    first = next((line for line in lines if line.strip() and not _HEADING.match(line)), "")
-    return (labelled or first).strip()
+        if line.strip() and not line.lstrip().startswith("#"):
+            return line
+    return ""
 
 
 def review_reading(text, head):
-    """{verdict, names_head, line}: verdict merge | fix | none; line is the verdict line.
+    """{verdict, names_head, line}: verdict merge | fix | none, read from the first line only.
 
-    Only closed-form lines count. A closed form whose head is a prefix of the current
-    head is a current verdict; different current verdicts are left unread (conflict).
-    Closed forms on other heads only give names_head False (review-stale).
+    A closed form whose head is a prefix of the current head is the current verdict; a
+    closed form on another head gives names_head False (review-stale).
     """
     head = (head or "").lower()
-    lines = list(_lines(text))
-    found = [(line, closed_verdict(line)) for line in lines]
-    found = [(line.strip(), verdict) for line, verdict in found if verdict]
-    current = [(line, kind) for line, (kind, hexa) in found if len(head) >= 7 and head.startswith(hexa)]
-    if current:
-        if len({kind for _, kind in current}) > 1:
-            return {"verdict": "none", "names_head": True, "line": "conflicting verdicts for this head",
-                    "conflict": True}
-        line, kind = current[0]
-        return {"verdict": kind, "names_head": True, "line": line}
-    if found:
-        line, (kind, _) = found[0]
-        return {"verdict": kind, "names_head": False, "line": line}
-    return {"verdict": "none", "names_head": False, "line": _unread_line(lines)}
+    line = first_line(text)
+    verdict = closed_verdict(line)
+    if not verdict:
+        return {"verdict": "none", "names_head": False, "line": line.strip()}
+    kind, hexa = verdict
+    return {"verdict": kind, "names_head": len(head) >= 7 and head.startswith(hexa), "line": line.strip()}
 
 
 def review_verdict(text, head):
@@ -165,19 +140,15 @@ def decide(snapshot, review_text=None, merge_line=None):
     reading = review_reading(review_text, head)
     verdict, names_head = reading["verdict"], reading["names_head"]
     row["review"] = verdict if verdict == "none" or names_head else f"{verdict}-other-head"
-    if verdict == "none" and reading.get("conflict"):
-        row.update(state="awaiting-review", role="reviewer",
-                   next=(f"the report gives both a merge and a fix verdict for head {head[:12]}; a person "
-                         "reads it, and the reviewer keeps one current verdict for that head"))
-    elif verdict == "none" and reading["line"]:
+    if verdict == "none" and reading["line"]:
         quoted = " ".join(reading["line"].split())[:80]
         row.update(state="awaiting-review", role="reviewer",
                    next=(f"`{quoted}` is not a closed verdict line for head {head[:7]}; a person reads the "
-                         "report and takes the next step (a line exactly "
+                         "report and takes the next step (a first line exactly "
                          f"`최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}` continues automatically)"))
     elif verdict == "none":
         row.update(state="awaiting-review", role="reviewer",
-                   next=(f"no closed verdict line for head {head[:7]}; a person reads the report (a line exactly "
+                   next=(f"no closed verdict line for head {head[:7]}; a person reads the report (a first line exactly "
                          f"`최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}` continues automatically)"))
     elif not names_head:
         row.update(state="review-stale", role="reviewer",
