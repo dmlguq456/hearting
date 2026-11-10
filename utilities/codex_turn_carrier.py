@@ -387,9 +387,13 @@ def _is_completion(record: dict) -> bool:
 
 
 def fit(batches, render, max_chars: int):
-    """The shared leading-units fit (``dispatch_session_sweep.fit``), by characters."""
-    from dispatch_session_sweep import fit as shared_fit
-    return shared_fit(batches, render, max_chars)
+    """The shared leading-units fit for a hard limit (``dispatch_session_sweep.fit_inline``).
+
+    By characters. One record over ``max_chars`` alone is shown as the head
+    plus the path of its whole copy, or, without that copy, stays pending.
+    """
+    from dispatch_session_sweep import fit_inline
+    return fit_inline(batches, max_chars, render=render)
 
 
 def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = frozenset(),

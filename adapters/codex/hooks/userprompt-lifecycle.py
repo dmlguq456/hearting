@@ -426,10 +426,16 @@ def fit_prompt_receipts(sid: str, batches, other_parts: list[str], *, rendered=(
         from dispatch_session_sweep import (CODEX_CONTEXT_BYTES, fit_inline, release_claims,
                                             utf8_len)
         others = "\n".join(part.strip() for part in other_parts if part.strip())
-        budget = max(1_000, CODEX_CONTEXT_BYTES - utf8_len(others) - 1)
+        # Only what the other parts leave; no floor, so a full context holds
+        # every receipt back pending rather than push the whole past the limit.
+        budget = CODEX_CONTEXT_BYTES - utf8_len(others) - 1
         whole = "\n".join(part.strip() for part in rendered if part.strip())
         if whole and utf8_len(whole) <= budget:
             return whole, batches
+        if budget <= 0:
+            release_claims(sid, batches, "codex-native-queue",
+                           reason="codex-prompt-context-over-limit")
+            return "", []
         text, kept, rest = fit_inline(batches, budget, measure=utf8_len)
         if rest:
             release_claims(sid, rest, "codex-native-queue", reason="codex-prompt-context-over-limit")

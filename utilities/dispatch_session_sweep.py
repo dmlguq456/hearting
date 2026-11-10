@@ -1384,11 +1384,50 @@ def utf8_len(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+def _render_keys(batches) -> dict[int, tuple]:
+    """Each record's place in the text :func:`delivery_context` renders for ``batches``.
+
+    The same order the renderer uses: gates by delivery id, then notices (by
+    receipt text and delivery id; three or more successful compute runs of one
+    key as one summary after them), then completions by delivery id. Keyed by
+    ``id(record)``.
+    """
+    groups: dict[tuple, list[tuple[dict, dict]]] = {}
+    keys: dict[int, tuple] = {}
+    for _root, records in batches:
+        for record in records:
+            delivery_id = str(record.get("delivery_id", ""))
+            receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+            if is_human_gate_record(record):
+                keys[id(record)] = (0, delivery_id)
+            elif receipt.get("kind") == "notice":
+                run = _compute_run_notice(record)
+                if run and run["exit"] == 0:
+                    key = tuple(str(part) for part in (
+                        receipt.get("subject"), run["host"], run["label"],
+                        receipt.get("required_action")))
+                    groups.setdefault(key, []).append((run, record))
+                keys[id(record)] = (1, 0, str(receipt.get("text", "")), delivery_id)
+            else:
+                keys[id(record)] = (2, delivery_id)
+    for key, members in groups.items():
+        if len(members) < 3:
+            continue
+        members.sort(key=lambda item: (str(item[0]["stamp"]), str(item[0]["run_id"]),
+                                       str(item[1].get("delivery_id", ""))))
+        latest = str(members[-1][0]["run_id"])
+        for position, (_run, record) in enumerate(members):
+            keys[id(record)] = (1, 1, key, latest, position)
+    return keys
+
+
 def _units(batches) -> list[tuple[Path, list[dict]]]:
     """Split claimed batches into the units that are rendered and ACKed together.
 
     Members of one sealed batch share their group claim owner, so a unit never
-    splits a batch; every other record is its own unit.
+    splits a batch; every other record is its own unit. Units come in the order
+    the whole text renders them (:func:`_render_keys`, a unit at its first
+    member), so a split delivers the same sequence as one whole rendering.
     """
     units: list[tuple[Path, list[dict]]] = []
     index: dict[tuple, int] = {}
@@ -1402,6 +1441,11 @@ def _units(batches) -> list[tuple[Path, list[dict]]]:
             else:
                 index[key] = len(units)
                 units.append((root, [record]))
+    try:
+        keys = _render_keys(batches)
+        units.sort(key=lambda unit: min(keys[id(record)] for record in unit[1]))
+    except (KeyError, TypeError, ValueError):  # an unorderable record keeps arrival order
+        pass
     return units
 
 
@@ -1477,13 +1521,25 @@ def fit_inline(batches, max_size: int, *, measure=len, render=None):
     """``fit`` for a native hook context with a hard inline limit.
 
     Same choice as :func:`fit`; a first unit that alone is over the limit is
-    shown as :func:`overflow_pointer` so nothing is ACKed while cut.
+    shown as :func:`overflow_pointer` so nothing is ACKed while cut. When that
+    whole copy cannot be saved, or the pointer text is still over the limit,
+    the unit is not returned for ACK: it goes to ``rest`` (pending) and the
+    units after it are fitted in its place.
     """
     render = render or delivery_context
     text, chosen, rest = fit(batches, render, max_size, measure=measure)
-    if text and measure(text) > max_size and chosen:
-        text = overflow_pointer(text, chosen[0][0], max_size, measure=measure)
-    return text, chosen, rest
+    if not text or measure(text) <= max_size or not chosen:
+        return text, chosen, rest
+    root = chosen[0][0]
+    pointer = overflow_pointer(text, root, max_size, measure=measure)
+    if pointer != text and measure(pointer) <= max_size:
+        return pointer, chosen, rest
+    units = _units(chosen + rest)
+    if len(units) < 2:
+        return "", [], _batches(units)
+    text, chosen, rest = fit_inline(_batches(units[1:]), max_size, measure=measure,
+                                    render=render)
+    return text, chosen, _batches(units[:1]) + rest
 
 
 def release_claims(session_id: str, batches, recipient_kind: str, *, reason: str) -> None:

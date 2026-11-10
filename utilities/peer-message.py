@@ -4124,7 +4124,9 @@ def _fit_claude_context(claims, context):
     would land past the limit is released back to pending for the next
     boundary instead of being recorded received unseen. A single body over
     the limit by itself is shown as its head plus the path of a whole copy,
-    keeping its trailer inline. ``claims`` and ``context`` change in place.
+    keeping its trailer inline; when that copy cannot be saved or the context
+    is still over the limit, the body is released pending as well.
+    ``claims`` and ``context`` change in place.
     """
     if len("\n\n".join(context)) <= 9_000:  # below every limit: no import on the hot path
         return
@@ -4145,6 +4147,12 @@ def _fit_claude_context(claims, context):
         others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
         shown = overflow_pointer(row["text"], _pending_dir().parent,
                                  max(1_000, CLAUDE_CONTEXT_CHARS - others), keep_last_lines=1)
+        if shown == row["text"] or others + len(shown) > CLAUDE_CONTEXT_CHARS:
+            # No whole copy, or no room for the pointer: nothing is received cut.
+            claims.pop()
+            release_pending_herdr_claim(row)
+            del context[index]
+            return
         context[index] = shown
         row["shown_text"] = shown
 

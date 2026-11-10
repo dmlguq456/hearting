@@ -10,6 +10,13 @@ Two subcommands, dispatched by argv[1]:
                 prompt carrier, as Codex's in-turn carrier does at the same
                 boundary. A record the asyncRewake hook already claimed or
                 ACKed stays with it; whichever carrier claims first shows it.
+  stop       -- Stop hook. Records still owed to this session when the turn
+                would end (the rest a prompt boundary could not show whole)
+                continue the same turn through Claude's documented
+                ``{"decision": "block", "reason": ...}``, as Codex's in-turn
+                carrier does at its Stop. Only what the reason shows whole is
+                ACKed, so each continuation removes what it showed and the
+                turn ends once nothing more is owed.
   prompt     -- UserPromptSubmit hook. Records one `notice` peer_message_v1
                 when the injected prompt carries a cross-session message, and
                 sweeps up to five un-acked detached-watch receipts into
@@ -225,12 +232,15 @@ _CROSS_SESSION_RE = re.compile(r"<cross-session-message\s+from=\"([^\"]*)\"")
 _CROSS_SESSION_NAME_RE = re.compile(r"<cross-session-message\s[^>]*?from-name=\"([^\"]*)\"")
 
 
-def tool_boundary_records(session_id, deadline):
+def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
     """Claim this session's owed records for the running turn: ``(text, batches)``.
 
     The same records and claim as the prompt sweep (``dispatch-session-sweep.py``):
     a completion that closed during the tool call reaches this turn instead of
-    waiting for the next prompt. ``deadline`` is ``time.monotonic()``.
+    waiting for the next prompt. ``deadline`` is ``time.monotonic()``. Only
+    records whose text fits ``max_chars`` whole are returned for ACK (one over
+    it alone as its head plus a whole copy's path, or, without that copy,
+    left pending); the rest are handed back pending.
     """
     if not session_id or time.monotonic() >= deadline:
         return "", []
@@ -238,7 +248,7 @@ def tool_boundary_records(session_id, deadline):
         sys.path.insert(0, str(_UTILITIES_DIR))
     from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_notice_state import NoticeReadContext
-    from dispatch_session_sweep import delivery_context, fit, release_claims, sweep_deliver
+    from dispatch_session_sweep import fit_inline, release_claims, sweep_deliver
     deadline_ns = time.monotonic_ns() + int(max(0.0, deadline - time.monotonic()) * 1e9)
     context = NoticeReadContext()
     batches = []
@@ -257,10 +267,37 @@ def tool_boundary_records(session_id, deadline):
             batches.append((root, records))
     if not batches:
         return "", []
-    text, chosen, over = fit(batches, delivery_context, _RECORD_MAX_CHARS)
+    text, chosen, over = fit_inline(batches, max_chars)
     release_claims(session_id, over, _CLAUDE_RECIPIENT_KIND,
                    reason="claude-tool-boundary-unshown")
     return text, chosen
+
+
+_STOP_HEADER = "[hearting] Arrived before this turn ended:"
+
+
+def handle_stop(payload, out):
+    """Continue the turn once more with the records owed to this session, if any.
+
+    Same claim, fit and settlement as a tool boundary; nothing is owed, nothing
+    is printed and the turn ends. A record not shown whole stays pending.
+    """
+    session_id = payload.get("session_id")
+    if not session_id or str(payload.get("agent_id") or "").strip():
+        return
+    if str(_UTILITIES_DIR) not in sys.path:
+        sys.path.insert(0, str(_UTILITIES_DIR))
+    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS
+    text, batches = tool_boundary_records(
+        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2)
+    try:
+        if text:
+            out.write(json.dumps({"decision": "block", "reason": _STOP_HEADER + "\n\n" + text},
+                                 ensure_ascii=False) + "\n")
+            out.flush()
+    finally:
+        if batches:
+            settle_tool_boundary_records(session_id, batches, out.flushed)
 
 
 def settle_tool_boundary_records(session_id, batches, shown):
@@ -530,6 +567,8 @@ def main(exit_guard=False):
                 finally:
                     if owed:
                         settle_tool_boundary_records(session_id, owed, out.flushed)
+    elif mode == "stop":
+        handle_stop(payload, out)
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:
         # the sweep must never be able to swallow it.

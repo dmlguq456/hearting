@@ -1274,7 +1274,7 @@ class WorkerHomes(unittest.TestCase):
                       for match in re.findall(
                           re.escape(hook_root) + r'/hooks/[^\s"\']+', command
                       )]
-        self.assertEqual(len(hook_paths), 40)
+        self.assertEqual(len(hook_paths), 41)
         for token in hook_paths:
             path = Path(token.replace(hook_root, str(home), 1))
             self.assertTrue(path.is_file(), path)

@@ -973,6 +973,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__peer-message-record.py__Stop",
+      "name": "peer-message-record.py stop",
+      "mono": "peer-message-record.py",
+      "event": "Stop",
+      "hard_block": false
+    },
+    {
       "slug": "hook__session-tidy-idle.py__Stop",
       "name": "session-tidy-idle.py",
       "mono": "session-tidy-idle.py",

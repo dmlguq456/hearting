@@ -171,7 +171,8 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         # one observation covers the delivery text and every followup.
         # Claude Code shows at most CLAUDE_CONTEXT_CHARS of one hook context
         # inline (PG-47): only the leading records whose text fits whole are
-        # shown and ACKed; the rest are handed back pending for the next prompt.
+        # shown and ACKed; the rest are handed back pending for this turn's Stop
+        # (peer-message-record.py stop) or the next prompt.
         context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
     prompt = _event_name(payload) == "UserPromptSubmit"
     if rest and prompt:
