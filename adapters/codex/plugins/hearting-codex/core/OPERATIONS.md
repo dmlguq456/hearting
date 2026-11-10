@@ -1670,14 +1670,16 @@ reviewer's report, and prints one line `pr_chain=<state> … role=<role>
 next=<action>`; it stores, sends, merges and comments nothing. A verdict is a
 `최종 판정:`/`판정:`/`Final verdict:`/`Verdict:` line, a first line that starts
 with the verdict (`병합 가능 — head <7hex>`, `수정 후 병합 …`), or, when neither
-exists, a title ending `— 최종 <verdict>`. It names a head only in its own
-block (the line and the lines under it up to a blank line, plus a heading
-directly above). The current verdict is the first that names the current head,
-otherwise the first (later lines are history); a merge verdict without the
-current head is `review-stale`. Negated or conditional wording
-(`not mergeable`, `병합 불가`, `approve with changes`) reads as a fix, not a
-merge; an unreadable or conflicting verdict stays `awaiting-review` with a next step
-for a person. A finished `autopilot-code` route (`capability-route finish`)
+exists, a title ending `— 최종 <verdict>`. The head it reviewed is the one its
+own line names; only a line naming none takes it from its block (the lines
+under it up to a blank line, plus a heading directly above), and another SHA in
+the block does not replace it. The current verdict is the first that reviewed the
+current head, otherwise the first (later lines are history); a merge verdict on
+another head is `review-stale`. A merge is read only when certain: any
+condition, hold or negation in the verdict, or a forward condition or
+unreviewed-head note after it, makes it a fix when it names a correction and
+otherwise leaves it unread; an unreadable or conflicting verdict stays
+`awaiting-review` with a next step for a person. A finished `autopilot-code` route (`capability-route finish`)
 prints the same line as `next:` on stderr when its branch has an open PR. The author sends the review request (PR, exact head,
 author report) directly to the reviewer named in its assignment and copies the
 requester; the reviewer sends its final verdict directly to the named publisher
