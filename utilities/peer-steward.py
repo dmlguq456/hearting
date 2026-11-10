@@ -9035,11 +9035,8 @@ def _continue_card_reason(req):
     hook hands it over with the first message after the compaction, which is normally this
     continue; when another automatic turn (a completion or result notice) took it first, the
     session already resumed with it (`card-taken`, final and quiet)."""
-    st, seat = _booked_seat(req)
-    card = st.read_latest_card(seat)
-    consumed = st.read_json(st._consumed_path(seat))
-    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
-    return "card-taken" if held and consumed.get("receipts") else None
+    import session_tidy_clear as clear
+    return clear.continue_card_reason(req)
 
 
 def _continue_look(target, req):
@@ -9053,11 +9050,12 @@ def _continue_look(target, req):
         return "target-changed"
     if not new or new == "-":
         return "new-session-unknown"
-    if state not in ("idle", "done"):
-        return f"not-idle-{state}"
+    # A card another turn already received is final, working or not: nothing is held for later.
     card = _continue_card_reason(req)
     if card:
         return card
+    if state not in ("idle", "done"):
+        return f"not-idle-{state}"
     info = _retire_pane_info(pane)
     if not isinstance(info, dict):
         return "target-identity-unknown"

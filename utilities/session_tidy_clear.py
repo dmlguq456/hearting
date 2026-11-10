@@ -1886,6 +1886,54 @@ def observe_continue_receipt(harness: str, sid: str, transfer_ref: str = "") -> 
     return True
 
 
+def continue_card_reason(req: dict) -> Optional[str]:
+    """``card-taken`` when another automatic turn of the booked session already received the
+    booked card (its consumption receipt is the card's own generation), else None."""
+    seat = st.seat_from_dict(req.get("seat") or {})
+    card = st.read_latest_card(seat)
+    consumed = st.read_json(st._consumed_path(seat))
+    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
+    return "card-taken" if held and consumed.get("receipts") else None
+
+
+def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
+    """Close a queued continue that will never be sent, with its real reason.
+
+    A continue held back while the session worked (``not-idle-*``) has no transfer ref and
+    no later sender on every harness; once the card reached another turn (``card-taken``) or
+    the continue window ended (``expired``) it is skipped, not left ``pending``. Called from
+    the session's own turn-end observation; nothing is typed and nothing is retried here."""
+    if harness not in ("claude", "codex", "opencode") or not sid:
+        return 0
+    now = st.now_epoch() if now is None else now
+    try:
+        paths = sorted(clear_dir().glob("*.json"))
+    except OSError:
+        return 0
+    settled = 0
+    for path in paths:
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+        except OSError:
+            continue
+        req = read_reservation(path.stem)
+        held = (req or {}).get("continued") if isinstance((req or {}).get("continued"), dict) else {}
+        if (not req or req.get("status") != "cleared" or req.get("harness") != harness
+                or req.get("new_session") != sid or held.get("state") != "pending"
+                or held.get("transfer_ref")):
+            continue
+        try:
+            reason = continue_card_reason(req)
+        except (OSError, ValueError, st.StateError):
+            continue
+        if not reason and now > float(held.get("deadline", 0) or 0):
+            reason = "expired"
+        if reason and _finish_continue(path.stem, str(req.get("nonce") or ""), "skipped", reason):
+            settled += 1
+    return settled
+
+
 def release_unsent_continue(claim):
     """Return only this unsent claim to the same booking's pending state."""
     key = claim["seat"]["key"]

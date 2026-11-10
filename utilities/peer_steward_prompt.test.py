@@ -7116,6 +7116,41 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                     self.cleared(harness=harness, receipt=receipt)
                     self.assertEqual(peer_steward._continue_card_reason(self.booking()), expected)
 
+    def test_a_taken_card_ends_the_continue_even_while_the_session_works(self):
+        # RV-PR1487-R2: the look answered not-idle-working first, and the booking stayed pending.
+        self.cleared(harness="codex", receipt=True)
+        ident = {"harness": "codex", "session_id": "sid-B", "pane": self.seat_obj.pane, "name": "child"}
+        with mock.patch.object(peer_steward, "_retire_target", return_value=("working", ident, 0, None)):
+            self.assertEqual(peer_steward._continue_look(self.seat_obj.pane, self.booking()), "card-taken")
+        self.cleared(harness="codex")
+        with mock.patch.object(peer_steward, "_retire_target", return_value=("working", ident, 0, None)):
+            self.assertEqual(peer_steward._continue_look(self.seat_obj.pane, self.booking()),
+                             "not-idle-working")
+
+    def test_turn_end_settles_a_continue_that_will_never_be_sent(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness, case="card-taken"):
+                self.cleared(harness=harness, receipt=True)
+                self.assertEqual(self.clear.settle_unsent_continue(harness, "sid-B"), 1)
+                held = self.booking()["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "card-taken"))
+            with self.subTest(harness=harness, case="still-due"):
+                self.cleared(harness=harness)
+                self.assertEqual(self.clear.settle_unsent_continue(harness, "sid-B"), 0)
+                self.assertEqual(self.booking()["continued"]["state"], "pending")
+            with self.subTest(harness=harness, case="expired"):
+                self.cleared(harness=harness, window=-1)
+                self.assertEqual(self.clear.settle_unsent_continue(harness, "sid-B"), 1)
+                held = self.booking()["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+        self.cleared(harness="codex", receipt=True)
+        self.assertEqual(self.clear.settle_unsent_continue("codex", "other-sid"), 0)
+        req = self.booking()
+        req["continued"]["transfer_ref"] = "a" * 32       # a queued native ref settles by its receipt
+        self.clear._write_reservation(req)
+        self.assertEqual(self.clear.settle_unsent_continue("codex", "sid-B"), 0)
+        self.assertEqual(self.booking()["continued"]["state"], "pending")
+
     def test_continue_requires_exact_new_sid_and_idle_without_screen_reads(self):
         self.cleared()
         req = self.booking()
