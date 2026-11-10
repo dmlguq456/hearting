@@ -534,8 +534,12 @@ def _is_frame_leg(node):
             or _text(_get(anchor, "route_node")) in FRAME_NODES)
 
 
-def _worker_segments(node, resources, state_text=None):
-    """``[label, harness segments, state segments]`` of the route's worker, or None."""
+def _worker_segments(node, resources, state_text=None, owner=None):
+    """``[label, harness segments, state segments]`` of the route's worker, or None.
+
+    ``owner`` is the route's depth-1 owner attempt when it runs this very node (a
+    one-shot route): the line then reads ``owner`` with the owner's own model, never
+    ``worker``, which names only a depth-2 attempt the owner launched."""
     if node is None:
         return None
     harness = _text(node.get("harness"))
@@ -552,8 +556,9 @@ def _worker_segments(node, resources, state_text=None):
     if harness is None:
         return None
     segs = [[harness, "hb_" + harness]]
-    pair = _model_pair(node.get("model"))
-    effort = _effort(node.get("effort"))
+    pair = _model_pair(node.get("model")) or (
+        _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+    effort = _effort(node.get("effort")) or (_effort(_get(owner, "effort")) if owner is not None else None)
     if pair:
         segs += [[" (", _SEG_DIM], [pair[0], pair[1]]]
         if effort:
@@ -563,14 +568,30 @@ def _worker_segments(node, resources, state_text=None):
     if state_text:
         state.append([state_text, _SEG_DIM])
     elif elapsed:
-        state.append([(f"running {elapsed}" if running else f"{elapsed} · worker ended"), _SEG_DIM])
+        role = "owner" if owner is not None else "worker"
+        state.append([(f"running {elapsed}" if running else f"{elapsed} · {role} ended"), _SEG_DIM])
+    if owner is not None:
+        return ["owner", segs, state]
     return ["frame" if _is_frame_leg(node) else "worker", segs, state]
 
 
 def _owner_jobs(jobs):
+    """The route's depth-1 owner attempts. A one-shot route's owner runs its single
+    ``one-shot`` node itself, so it carries that node id with ``worker_type=owner``;
+    a frame leg's depth-1 attempt (``worker_type=frame``) is never the owner."""
     return [job for job in jobs
             if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
-            and not _get(job, "route_node")]
+            and (not _get(job, "route_node") or _get(job, "worker_type") == "owner"
+                 or _get(job, "route_node") == "one-shot")]
+
+
+def _runs_node(owner, node):
+    """True when the route's owner attempt is the one running ``node`` (one-shot)."""
+    if owner is None or node is None or not _get(owner, "route_node"):
+        return False
+    attempt = _text(node.get("attempt_id")) or _text(_get(node.get("job"), "attempt_id"))
+    return (_get(owner, "route_node") == node.get("id")
+            and (attempt is None or attempt == _text(_get(owner, "attempt_id"))))
 
 
 def _owner_job(jobs):
@@ -978,7 +999,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 worker_node = earlier[-1]
                 state_text = f"{_dur(worker_node.get('elapsed_min')) or ''} ⊸ · next " \
                              f"{shown_node.get('id')} · owner ended".strip()
-        worker = _worker_segments(worker_node, run_children, state_text)
+        worker = _worker_segments(worker_node, run_children, state_text,
+                                  owner if _runs_node(owner, worker_node) else None)
         dead = state in ("dead", "stale")
         owner_model = None if dead else (
             _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
@@ -3078,6 +3100,34 @@ def current_route_counts(routes):
     return counts, opened
 
 
+def _owner_text(route):
+    """``codex (GPT-5.5·high)``: the route owner exactly as Fleet's HARNESS column reads it."""
+    harness = _text(route.get("harness"))
+    if not harness:
+        return ""
+    pair, effort = route.get("model"), _text(route.get("effort"))
+    name = _text(pair[0]) if isinstance(pair, (list, tuple)) and pair else None
+    if name:
+        return f"{harness} ({name}{'·' + effort if effort else ''})"[:160]
+    return (harness + ("·" + effort if effort else ""))[:160]
+
+
+def _worker_pieces(worker):
+    """Fleet's route body line ``[label, harness segments, state segments]`` as flat text pieces:
+    ``owner codex (GPT-5.5·high) · running 5m`` / ``worker codex · running 3m``."""
+    if not isinstance(worker, (list, tuple)) or not worker:
+        return []
+    pieces = [[str(worker[0])[:16], "dim"]]
+    segments = worker[1] if len(worker) > 1 and isinstance(worker[1], (list, tuple)) else ()
+    states = worker[2] if len(worker) > 2 and isinstance(worker[2], (list, tuple)) else ()
+    texts = [str(part[0]) for part in segments if isinstance(part, (list, tuple)) and part]
+    if texts:
+        pieces.append([" " + "".join(texts)[:120], "dim"])
+    for index, part in enumerate(part for part in states if isinstance(part, (list, tuple)) and part):
+        pieces.append([(" · " if index == 0 else " ") + str(part[0])[:120], "dim"])
+    return pieces[:8]
+
+
 def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
@@ -3128,8 +3178,8 @@ def session_route_status(snapshot, now=None, *, include_details=False):
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             if type(route.get("result_at")) in (int, float):
                 row["result_at"] = route["result_at"]
-            row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
-                             if isinstance(part, (tuple, list)) and part]
+            row["worker"] = _worker_pieces(route.get("worker"))
+            row["owner"] = _owner_text(route)
             visibility = route.get("visibility")
             if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
                 row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
