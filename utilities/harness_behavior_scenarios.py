@@ -160,6 +160,37 @@ def _last_turn(payload: dict, protocol: str):
     return last.get("role", "user"), _flatten_text(last.get("content"))
 
 
+def _user_inputs(payload: dict, protocol: str) -> list[dict]:
+    """Every person-role input in the request, oldest first: ``{"id", "text"}``.
+
+    One item per user text part (Anthropic, chat) or user message (Responses, which
+    carries the message id).  Tool results are not inputs.  A scenario reads what
+    actually reached the model from this, not from the newest item alone.
+    """
+    out: list[dict] = []
+
+    def parts(content):
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [p.get("text") for p in content if isinstance(p, dict)
+                    and p.get("type") in ("text", "input_text") and isinstance(p.get("text"), str)]
+        return []
+    if protocol == "responses":
+        items = payload.get("input") or []
+        if isinstance(items, str):
+            return [{"id": None, "text": items}]
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == "user" \
+                    and item.get("type", "message") == "message":
+                out.append({"id": item.get("id"), "text": "\n".join(parts(item.get("content")))})
+        return out
+    for message in payload.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user":
+            out.extend({"id": None, "text": text} for text in parts(message.get("content")))
+    return out
+
+
 def _tool_names(payload: dict) -> list[str]:
     names = []
     for tool in payload.get("tools") or []:
@@ -193,8 +224,10 @@ def _shell_call(protocol: str, names: list[str], command: str):
 class ModelFixture:
     """Threaded loopback server for all three model wire protocols."""
 
-    def __init__(self, script):
-        self.script = script
+    def __init__(self, script, side=None):
+        # ``side`` answers a request that offers no tools (a title, or a harness's own
+        # compaction request); returning None keeps the default title reply.
+        self.script, self.side = script, side
         self.requests: list[dict] = []
         self.lock = threading.Lock()
         owner = self
@@ -277,10 +310,11 @@ class ModelFixture:
                 "main_index": index if main else None,
                 "last_kind": kind, "last_text": last_text[-4000:],
                 "text": text, "tools": names[:60],
+                "user_inputs": _user_inputs(payload, protocol),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
             reply = self.script(record, [r for r in self.requests if r["main"]]) if main \
-                else Reply("fixture title")
+                else (self.side and self.side(record)) or Reply("fixture title")
             record["reply"] = reply.as_dict()
             self.requests.append(record)
         streaming = bool(payload.get("stream", protocol != "anthropic"))
@@ -1067,7 +1101,7 @@ class Run:
                   else f"hb-{self.harness}-{self.scenario.name}-")
         root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(runtime)))
         row["fixture_root"] = str(root)
-        fixture = ModelFixture(self.scenario.script(self))
+        fixture = ModelFixture(self.scenario.script(self), self.scenario.side_script(self))
         tui = None
         try:
             self.home = InstalledHome(root, self.harness, fixture)
@@ -1193,6 +1227,10 @@ class Scenario:
         def answer(record, earlier):
             return Reply(f"OK {record['main_index']}")
         return answer
+
+    def side_script(self, run: Run):
+        """Answer for a request without tools; None keeps the fixture title reply."""
+        return None
 
     def prepare(self, run: Run):
         return None

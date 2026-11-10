@@ -16,16 +16,30 @@ nobody types.  The oracle is what reaches the model and the native history:
   own compaction boundary (``status=cleared`` with ``clear_claim.command=compact``);
 * ``same_session``: the booking continues its own SID and the harness's newest
   native session is still that SID, so its Fleet number cannot change;
-* ``continue_untyped`` / ``card_on_continue``: an untyped request carries the
-  booked continue text and the card;
+* ``resumed_untyped`` / ``card_on_resume``: the first untyped turn after the
+  compaction reaches the model and carries the card;
+* ``one_resumption``: exactly one new ``이어서해`` input reached the model, or none
+  did and the booking skipped it because another automatic turn took the card;
 * ``completion_woke`` / ``next_action_ran``: the child's completion reaches the
   same session without typing and the model's next shell call runs.
 
+``read_flow`` reads the recorded requests and keeps four things apart: the new
+inputs that reached the model (the booked ``이어서해``, automatic notices, the
+person's prompts), how many ``이어서해`` inputs arrived, the booking's own
+continue receipt (``pending``/``native-queue-accepted`` is an unsettled receipt,
+not a missing input; a later extra input then stays ``unobserved``), and the
+harness's own compaction requests.  An input is read from every user item of a
+request, not from its newest item, so a continue followed by a developer notice
+in the same request still counts.
+
 ``tidy_turn_requests`` counts the main-session requests of the tidy turn (the
 prompt up to the reply after the tool result); ``compaction_requests`` counts
-the requests the harness itself made for the booked ``/compact`` (between that
-reply and the continue).  Memory-worker requests (a separate headless session)
-are counted apart.  Only when the oracle misses does it type one probe prompt.
+the harness's own compaction requests after it, whether or not they offer tools
+(Codex sends its ``/compact`` summary request without tools; ``side_script``
+answers it as a summary, not as a title).  Memory-worker requests (a separate
+headless session) are counted apart.  Only when the oracle misses does it type
+one probe prompt.  ``python3 harness_behavior_cases_tidy_compact.py --replay
+<results.json>...`` re-judges stored runs with the same reader.
 
 Surfaces: ``tidy-compact`` uses the private tmux socket with an interactive host
 shell (herdr hidden).  ``-herdr`` starts a private Herdr server (default
@@ -41,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -214,6 +229,111 @@ def _is_compaction(record) -> bool:
     return any(mark in record["last_text"] for mark in COMPACTION_MARKS)
 
 
+PERSON_MARK = "SCENARIO-TIDYK-"   # every prompt the driver types as the person carries it
+ATTEMPT_RE = re.compile(r"att-tidyk-[0-9a-f]{20}")
+# Records stored before ``user_inputs`` existed: the flattened request text keeps each
+# Responses user message as ``message / <id> / user / input_text / <text>``.  For the
+# other protocols the continue is one text part of its own (a line by itself).
+_RESPONSES_INPUT = re.compile(r"(?:^|\n)message\n([^\n]+)\nuser\ninput_text\n(.*?)"
+                              r"(?=\n(?:message|function_call|function_call_output|reasoning|"
+                              r"custom_tool_call|custom_tool_call_output|local_shell_call|"
+                              r"local_shell_call_output|compaction)\n|\Z)", re.S)
+
+
+def _inputs(record) -> list[tuple[str, str]]:
+    """(key, text) for every user input in the request, oldest first.
+
+    The key is the message id when the wire carries one, otherwise the input's
+    ordinal among equal texts, so the same input repeated in later history keeps
+    its key and a second equal input gets a new one.
+    """
+    if "user_inputs" in record:
+        items = [(i.get("id"), i.get("text") or "") for i in record["user_inputs"]]
+    elif record.get("protocol") == "responses":
+        items = [(mid, body) for mid, body in _RESPONSES_INPUT.findall(record["text"])]
+    else:
+        items = [(None, CONTINUE_TEXT)] * sum(
+            1 for line in record["text"].split("\n") if line.strip() == CONTINUE_TEXT)
+    seen: dict[str, int] = {}
+    out = []
+    for mid, text in items:
+        if mid:
+            out.append((mid, text))
+            continue
+        n = seen[text.strip()] = seen.get(text.strip(), 0) + 1
+        out.append((f"#{n}:{text.strip()[:80]}", text))
+    return out
+
+
+def _fresh_continue(record, earlier) -> bool:
+    """The request carries a continue input no earlier main request carried."""
+    before = {k for r in earlier for k, t in _inputs(r) if t.strip() == CONTINUE_TEXT}
+    return any(t.strip() == CONTINUE_TEXT and k not in before for k, t in _inputs(record))
+
+
+def _input_kind(text: str) -> str:
+    if text.strip() == CONTINUE_TEXT:
+        return "continue"
+    return "person" if PERSON_MARK in text else "automatic"
+
+
+def read_flow(requests, booking=None) -> dict:
+    """Judge one recorded run from its model requests and its booking.
+
+    Reads the stored request list (main and tool-less requests in arrival order)
+    up to the first prompt the driver typed after the tidy turn.  Returns the
+    observations the verdict uses; the booking's continue receipt is reported
+    beside them and decides only whether a later extra input stays unobserved.
+    """
+    flow: dict = {}
+    tidy = next((i for i, r in enumerate(requests) if r["main"] and r["last_kind"] == "tool"
+                 and "FX-TIDY-RC" in r["last_text"]), None)
+    if tidy is None:
+        return flow
+    start = next((i for i, r in enumerate(requests) if r["main"] and START in r["text"]), 0)
+    flow["tidy_turn_requests"] = sum(1 for r in requests[start:tidy + 1]
+                                     if r["main"] and not _is_memory_worker(r))
+    known = {k for r in requests[:tidy + 1] if r["main"] for k, _t in _inputs(r)}
+    window = []
+    for r in requests[tidy + 1:]:
+        if _is_memory_worker(r):
+            continue
+        fresh = [(k, t) for k, t in _inputs(r) if k not in known] if r["main"] else []
+        if any(_input_kind(t) == "person" for _k, t in fresh):
+            break                                   # the driver typed: the untyped window ends
+        window.append((r, fresh))
+        known.update(k for k, _t in fresh)
+    compactions = [r for r, _f in window if _is_compaction(r)]
+    flow["compaction_requests"] = len(compactions)
+    flow["compaction_main"] = [bool(r["main"]) for r in compactions]
+    after = compactions[0]["at"] if compactions else 0
+    turns = [(r, f) for r, f in window if r["main"] and not _is_compaction(r) and r["at"] >= after]
+    flow["new_inputs"] = [{"main_index": r["main_index"], "kind": _input_kind(t)}
+                          for r, fresh in turns for _k, t in fresh]
+    continues = [(r, k) for r, fresh in turns for k, t in fresh if _input_kind(t) == "continue"]
+    flow["continue_inputs"] = [{"main_index": r["main_index"], "has_card": CARD_MARK in r["text"]}
+                               for r, _k in continues]
+    first = turns[0][0] if turns else None
+    flow["first_untyped_after_compaction"] = None if first is None else {
+        "main_index": first["main_index"], "last_kind": first["last_kind"],
+        "has_card": CARD_MARK in first["text"],
+        "has_continue": any(r is first for r, _k in continues),
+        "has_attempt": bool(ATTEMPT_RE.search(first["text"]))}
+    flow["resumed_untyped"] = first is not None
+    flow["card_on_resume"] = bool(first and CARD_MARK in first["text"])
+    flow["continue_sent"] = bool(continues)
+    receipt = ((booking or {}).get("continued") or {})
+    flow["continue_receipt"] = {k: receipt.get(k) for k in ("state", "reason")}
+    count = len(continues)
+    flow["one_resumption"] = count == 1 or (
+        count == 0 and flow["resumed_untyped"]
+        and receipt.get("reason") in ("card-taken", "not-idle-working"))
+    # An unsettled receipt (queued but not reported sent) may still deliver later.
+    flow["late_extra_continue"] = ("unobserved" if receipt.get("state") in ("pending", "sending")
+                                   else "none" if receipt else "-")
+    return flow
+
+
 class TidyCompact(Scenario):
     name = "tidy-compact"
     summary = ("A manually invoked tidy compacts the same session; with no typing it "
@@ -242,25 +362,33 @@ class TidyCompact(Scenario):
             last, kind = record["last_text"], record["last_kind"]
             done_next = any(NEXT in (r["reply"].get("shell") or "") for r in earlier)
             tidied = any("FX-TIDY-RC" in (r["reply"].get("shell") or "") for r in earlier)
-            if tidied and CONTINUE_TEXT not in last and _is_compaction(record) \
+            fresh = _fresh_continue(record, earlier)
+            if tidied and not fresh and _is_compaction(record) \
                     and not _is_memory_worker(record):
                 # The harness's own compaction request: answer it the way a model would.
                 return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY "
                              f"{record['main_index']}</summary>")
             if kind == "tool":
                 return Reply("Next action finished." if NEXT in last else "정리 요청 완료")
-            if self.attempt in record["text"] and tidied and not done_next \
-                    and CONTINUE_TEXT not in last:
+            if self.attempt in record["text"] and tidied and not done_next and not fresh:
                 return Reply(shell=f"echo {NEXT}-$((20+22))")
             if START in record["text"] and not tidied:
                 return Reply(shell=tidy())
-            if CONTINUE_TEXT in last:
+            if fresh:
                 if self.attempt in record["text"] and not done_next and self.between:
                     return Reply(shell=f"echo {NEXT}-$((20+22))")
                 return Reply("이어서 진행합니다 TIDYK-CONTINUED")
             # Anything else after the tidy (the harness's own compaction request) gets a summary.
             return Reply(f"TIDYK-SUMMARY {record['main_index']}")
         return answer
+
+    def side_script(self, run):
+        def side(record):
+            # Codex sends its own /compact summary request without tools.
+            if _is_compaction(record) and not _is_memory_worker(record):
+                return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY side</summary>")
+            return None
+        return side
 
     def _booking(self, run):
         paths = sorted((cc.state_home(run) / "hearting" / "session-tidy" / "clear").glob("*.json"))
@@ -335,23 +463,6 @@ class TidyCompact(Scenario):
         ev["compacted"] = (booking.get("status") == "cleared"
                            and (booking.get("clear_claim") or {}).get("command") == "compact")
         ev["same_session_booking"] = booking.get("new_session") == booking.get("sid") == sid
-        resumed = [r for r in conversation() if not _is_compaction(r)
-                   and SUMMARY_TAG not in str((r.get("reply") or {}).get("text") or "")]
-        first = resumed[0] if resumed else None
-        ev["first_untyped_after_compaction"] = None if first is None else {
-            "last_text": first["last_text"][-240:], "has_card": CARD_MARK in first["text"],
-            "has_continue": CONTINUE_TEXT in first["last_text"],
-            "has_attempt": self.attempt in first["text"]}
-        ev["resumed_untyped"] = bool(first)
-        ev["card_on_resume"] = bool(first and CARD_MARK in first["text"])
-        ev["continue_sent"] = any(CONTINUE_TEXT in r["last_text"] for r in conversation())
-        cont_state = (booking.get("continued") or {})
-        # One resumption: the booked continue, or another automatic turn that took the card first
-        # (then the continue is skipped quietly as card-taken).
-        ev["one_resumption"] = (ev["continue_sent"] and cont_state.get("state") == "sent") or (
-            not ev["continue_sent"] and cont_state.get("reason") in ("card-taken", "not-idle-working"))
-        ev["compaction_requests"] = sum(1 for r in run.fixture.requests
-                                        if SUMMARY_TAG in str((r.get("reply") or {}).get("text") or ""))
         run.wait_idle(8, 60)
         if not self.between:
             time.sleep(4)
@@ -370,6 +481,18 @@ class TidyCompact(Scenario):
         ev["side_requests"] = sum(1 for r in run.fixture.requests
                                   if not r["main"] and not _is_memory_worker(r))
         ev["probe_after_wait"] = ca._helper(run, "probe")
+        # The whole untyped window, read from what reached the model; the receipt is the
+        # booking's state at the end of the observation.
+        booking = self._brief(self._booking(run)) or booking
+        ev["booking_at_end"] = booking
+        with run.fixture.lock:
+            recorded = list(run.fixture.requests)
+        flow = read_flow(recorded, booking)
+        for key in ("first_untyped_after_compaction", "resumed_untyped", "card_on_resume",
+                    "continue_sent", "continue_inputs", "new_inputs", "continue_receipt",
+                    "one_resumption", "late_extra_continue", "compaction_requests",
+                    "compaction_main"):
+            ev[key] = flow.get(key)
         ok = (ev["compacted"] and ev["same_session"] and ev["resumed_untyped"]
               and ev["card_on_resume"] and ev["one_resumption"]
               and ev["completion_woke"] and ev["next_action_ran"])
@@ -383,8 +506,8 @@ class TidyCompact(Scenario):
                                  "attempt": any(self.attempt in r["text"] for r in later)}
         yes = {True: "yes", False: "no"}
         run.note(f"compacted={yes[bool(ev['compacted'])]} same_sid={yes[bool(ev['same_session'])]} "
-                 f"resumed={yes[ev['resumed_untyped']]} card={yes[ev['card_on_resume']]} "
-                 f"continue={yes[ev['continue_sent']]} one={yes[bool(ev['one_resumption'])]} "
+                 f"resumed={yes[bool(ev['resumed_untyped'])]} card={yes[bool(ev['card_on_resume'])]} "
+                 f"continue={yes[bool(ev['continue_sent'])]} one={yes[bool(ev['one_resumption'])]} "
                  f"completion={yes[ev['completion_woke']]} next={yes[ev['next_action_ran']]} "
                  f"tidy_turn={ev['tidy_turn_requests']} compaction={ev['compaction_requests']}")
         return "pass" if ok else "fail"
@@ -397,11 +520,10 @@ class TidyCompact(Scenario):
         time.sleep(0.5)
         count = len(run.fixture.requests)
         run.tui.type_text("/compact")
-        wait_for(lambda: any(SUMMARY_TAG in str((r.get("reply") or {}).get("text") or "")
-                             for r in run.fixture.requests[count:]), 90, 1)
+        wait_for(lambda: any(_is_compaction(r) for r in run.fixture.requests[count:]), 90, 1)
         run.wait_idle(8, 90)
         ev["compaction_requests"] = sum(1 for r in run.fixture.requests[count:]
-                                        if SUMMARY_TAG in str((r.get("reply") or {}).get("text") or ""))
+                                        if _is_compaction(r) and not _is_memory_worker(r))
         mark = len(run.main_requests())
         run.prompt("SCENARIO-TIDYK-AFTER 이어서 해 주세요")
         run.wait_idle(8, 90)
@@ -434,3 +556,52 @@ class TidyCompactHerdrBetween(TidyCompactHerdr):
 
 
 SCENARIOS = [TidyCompact, TidyCompactBetween, TidyCompactHerdr, TidyCompactHerdrBetween]
+
+
+def replay(results_path) -> list[dict]:
+    """Re-judge stored rows of a ``results.json`` from their ``requests.json``.
+
+    Observations that need the live run (compaction confirmed, SID, completion,
+    next action) keep the stored evidence; the inputs, resumptions and compaction
+    requests are read again with ``read_flow``.  A manual (``gap``) row stays gap.
+    """
+    results_path = Path(results_path)
+    out = []
+    for row in json.loads(results_path.read_text(encoding="utf-8")):
+        if not str(row.get("scenario", "")).startswith("tidy-compact"):
+            continue
+        requests_path = results_path.parent / f"{row['harness']}-{row['scenario']}" / "requests.json"
+        if not requests_path.exists():
+            continue
+        ev = row.get("evidence") or {}
+        booking = ev.get("booking") or {}
+        flow = read_flow(json.loads(requests_path.read_text(encoding="utf-8")), booking)
+        judged = {"harness": row["harness"], "scenario": row["scenario"],
+                  "stored_verdict": row.get("verdict")}
+        for key in ("compacted", "same_session", "completion_woke", "next_action_ran"):
+            judged[key] = ev.get(key)
+        judged.update({k: flow.get(k) for k in (
+            "tidy_turn_requests", "compaction_requests", "compaction_main", "resumed_untyped",
+            "card_on_resume", "continue_inputs", "new_inputs", "continue_receipt",
+            "one_resumption", "late_extra_continue")})
+        judged["stored"] = {k: ev.get(k) for k in ("continue_sent", "one_resumption",
+                                                   "compaction_requests")}
+        if row.get("verdict") in ("gap", "error", "inconclusive", "harness-missing") \
+                or "compacted" not in ev:
+            judged["verdict"] = row.get("verdict")
+        else:
+            ok = all(judged.get(k) for k in ("compacted", "same_session", "resumed_untyped",
+                                             "card_on_resume", "one_resumption",
+                                             "completion_woke", "next_action_ran"))
+            judged["verdict"] = "pass" if ok else "fail"
+        out.append(judged)
+    return out
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--replay", nargs="+", required=True, metavar="RESULTS_JSON")
+    args = parser.parse_args()
+    rows = [dict(r, source=str(p)) for p in args.replay for r in replay(p)]
+    print(json.dumps(rows, ensure_ascii=False, indent=1))
