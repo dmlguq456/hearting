@@ -7293,7 +7293,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(st.waiting_notice_display(display, harness, "sid-A")[0], "")
             self.assertTrue(self.clear._finish(self.seat_obj.key, "n0nce", "skipped", "draft-unknown"))
             text, _paths = st.waiting_notice_display(display, harness, "sid-A")
-            self.assertIn(self.clear.CLEAR_COMMAND[harness], text, harness)
+            self.assertIn(self.clear.COMPACT_COMMAND, text, harness)
 
     def test_unproven_new_session_proven_on_a_later_look_continues(self):
         answers = iter(["new-session-unknown", "new-session-unknown", None, None, None])
