@@ -2127,8 +2127,46 @@ def _retire_pane_info(pane, timeout=5, *, server=None):
         return None
 
 
+def _wrapped_foreground(pane, harness, info):
+    """The native lifetime behind a proved carrier; never reinterpret the owner as native."""
+    if harness not in {"claude", "codex"} or not isinstance(info, dict):
+        return None, False
+    observed = False
+    try:
+        binding, reason = _pane_shell_binding_result(pane, harness, info=info)
+        if binding is None:
+            return None, bool(reason)
+        observed = True
+        from pane_ownership import _wrapped_native_session
+        pid = binding["native_pid"]
+        identity = _retire_process_record(pid)
+        shell_start = _proc_start_ticks(info.get("shell_pid"))
+        if (not identity or identity["start"] != binding["native_start"] or not shell_start):
+            return None, True
+        tmux = terminal_surface.pane_surface(pane) if terminal_surface.is_tmux_pane(pane) else None
+        socket_path = (herdr_observation.socket_path_for_endpoint(_HERDR_SESSION or "default")
+                       or _herdr_env_for_server(_HERDR_SESSION).get("HERDR_SOCKET_PATH", ""))
+        selected = _wrapped_native_session(pane, harness, pid, binding["sid"],
+            executable=shutil.which("tmux" if tmux else "herdr"), server=_HERDR_SESSION,
+            socket_path=socket_path, tmux=tmux.socket if tmux else None, info=info, expected=binding)
+        if selected != binding["sid"]:
+            return None, True
+        keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                "native_pid", "native_start", "broker_pid", "broker_start")
+        return {"pid": pid, **identity, "shell_pid": info["shell_pid"],
+                "shell_start": shell_start, "session_id": selected,
+                "attachment": {key: binding[key] for key in keys if key in binding}}, True
+    except ImportError:
+        return None, observed  # Optional reader absence keeps independent bare proof available.
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None, observed
+
+
 def _retire_foreground(pane, harness, *, strict=True, info=None):
     info = _retire_pane_info(pane) if info is None else info
+    wrapped, observed = _wrapped_foreground(pane, harness, info)
+    if observed:
+        return wrapped
     if info is None or (strict and len(info["foreground_processes"]) != 1):
         return None
     leaders = [item for item in info["foreground_processes"]
@@ -2190,6 +2228,10 @@ def _effective_retire_state(state, ident):
 
 
 def _retire_request_identity(ident, foreground):
+    if (foreground and foreground.get("session_id")
+            and peer_message.usable_session_id(ident.get("session_id"))
+            and foreground["session_id"] != ident["session_id"]):
+        foreground = None
     exact = {"server": _HERDR_SESSION or "default", "pane": ident["pane"],
              "harness": ident["harness"], "session_id": ident["session_id"],
              "name": ident["name"], "foreground": foreground}
@@ -2296,6 +2338,44 @@ def _retire_requester_matches(duty, requester):
         return False
     projected = _legacy_requester_projection(duty, expected_pane=requester.get("pane"))
     return projected == requester
+
+
+def _unbound_retire_requester_matches(duty, requester):
+    """Logical ownership only for a no-input settlement, never permission to retire."""
+    saved = (duty.get("intent") or {}).get("requester")
+    if (not isinstance(saved, dict) or _retire_booked_foreground(duty) is not None
+            or not requester.get("session_id") or requester.get("harness") not in _PROMPT_HARNESSES):
+        return False
+    settled = duty.get("state") == "cancelled" and duty.get("result") == "target-closed-unproven"
+    if not settled and (duty.get("observation") or {}).get("phase", "waiting") != "waiting":
+        return False
+    return (all(saved.get(key) == requester.get(key) for key in ("session_id", "harness", "server"))
+            and saved.get("pane") in (None, "", "-", requester.get("pane")))
+
+
+def _settle_closed_unbound_retire(store, duty, requester):
+    if not _unbound_retire_requester_matches(duty, requester):
+        return False
+    already = duty.get("state") == "cancelled" and duty.get("result") == "target-closed-unproven"
+    if not already:
+        identity = (duty.get("intent") or {}).get("identity") or {}
+        pane, server = identity.get("pane"), identity.get("server")
+        if not pane or terminal_surface.is_tmux_pane(pane) or server != requester.get("server"):
+            return False
+        census = herdr_observation.pane_census(session=server)
+        if not herdr_observation.confirms_absence(census, pane, endpoint=server):
+            return False
+        settled = store.update(duty["id"], state="cancelled", result="target-closed-unproven",
+            delivery="not-required", cleanup="complete", expected_phases={"waiting"},
+            observation={"phase": "cancelled", "reason": "target-closed-unproven"})
+        if settled.get("state") != "cancelled" or settled.get("result") != "target-closed-unproven":
+            return False
+        _record(to_harness=identity.get("harness"), to_name=identity.get("name"), kind="notice",
+                to_session_id=identity.get("session_id"), to_pane=pane,
+                summary_text="[retire] request settled; native exit unproven",
+                receipt="target-closed-unproven", status="failed")
+    print(f"retired=false reason=target-closed-unproven request_id={duty['id']}")
+    return True
 
 
 def reserve_handoff_retire(target, exact, requester):
@@ -2613,10 +2693,12 @@ def cmd_retire(args):
         own_pane = _caller_pane()
         current_requester = {"session_id": own_sid, "harness": own_harness,
                              "pane": own_pane, "server": _HERDR_SESSION or "default"}
-        matches = [row for row in store.list(states=peer_obligations._PENDING_STATES | {"complete"},
+        matches = [row for row in store.list(states=peer_obligations._PENDING_STATES | {"complete", "cancelled"},
                                              kinds={"retire"})
                    if row["intent"].get("target") == target
-                   and _retire_requester_matches(row, current_requester)]
+                   and (row.get("state") != "cancelled" or row.get("result") == "target-closed-unproven")
+                   and (_retire_requester_matches(row, current_requester)
+                        or _unbound_retire_requester_matches(row, current_requester))]
         if own_sid and own_pane and len(matches) == 1:
             saved = matches[0]
             if saved.get("state") == "complete" and saved.get("result") in {"normal-exit", "target-already-gone"}:
@@ -2625,6 +2707,8 @@ def cmd_retire(args):
                       + (f" handover={handover}" if handover else ""))
                 return 0
             if _retire_subject_state(saved) == "gone" and _complete_gone_retire(store, saved):
+                return 0
+            if _settle_closed_unbound_retire(store, saved, current_requester):
                 return 0
         return finish(reason or "pane-unverified")
     pane, harness = ident["pane"], ident["harness"]
@@ -4664,6 +4748,9 @@ def _prompt_foreground(pane, harness, *, info=None):
     info = info if info is not None else _retire_pane_info(pane)
     if not isinstance(info, dict):
         return None
+    wrapped, observed = _wrapped_foreground(pane, harness, info)
+    if observed:
+        return wrapped
     found = []
     for process in info.get("foreground_processes", ()):
         pid = process.get("pid") if isinstance(process, dict) else None
