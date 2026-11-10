@@ -294,6 +294,38 @@ class Integration:
                 raise failure
         return result
 
+    GENERATOR = ("tools", "generate.py")
+
+    def regenerate(self, conflicts):
+        """Finish a merge whose only conflicts are generated copies.
+
+        Sources merged cleanly, so the repository's own generator rebuilds the
+        copies. Any file still holding conflict markers afterwards is a real
+        source conflict, which stays on the single-PR path. The integration CI
+        then checks the result like any other merge.
+        """
+        root = Path(self.temp.name)
+        generator = root.joinpath(*self.GENERATOR)
+        if not generator.is_file():
+            return False
+        try:
+            for args in ((), ("--check",)):
+                done = subprocess.run([sys.executable, str(generator), *args], cwd=root,
+                                      capture_output=True, timeout=900)
+                if done.returncode:
+                    return False
+                if not args:
+                    for name in conflicts:
+                        path = root / name
+                        if path.exists() and any(line.startswith((b"<<<<<<< ", b">>>>>>> "))
+                                                 for line in path.read_bytes().splitlines()):
+                            return False
+                    self.git("add", "-A")
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        self.git("commit", "-q", "--no-edit")
+        return True
+
     def save(self):
         self.record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, name = tempfile.mkstemp(dir=self.record.parent)
@@ -318,11 +350,16 @@ class Integration:
                 if result.returncode:
                     # A real content conflict alone goes to the single-PR path.
                     conflicts = self.git("diff", "--name-only", "--diff-filter=U").stdout
+                    if conflicts and self.regenerate(conflicts.split()):
+                        self.entries.append(dict(row, tree=self.git("rev-parse", "HEAD^{tree}").stdout.strip(),
+                                                 commit=self.git("rev-parse", "HEAD").stdout.strip()))
+                        continue
                     if not conflicts:
                         if hasattr(result, "git_failure"):
                             raise GitCommandFailure.from_completed(result, self.temp.name)
                         raise MergeError(one_line(result.stderr or result.stdout))
                     self.git("merge", "--abort")
+                    self.git("clean", "-fdq")  # files a refused regeneration left in this disposable clone
                     if self.git("rev-parse", "HEAD").stdout.strip() != before:
                         raise MergeError("integration conflict changed the saved prefix")
                     self.conflicts.append(row["pr"])

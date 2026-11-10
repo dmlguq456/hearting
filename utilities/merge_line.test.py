@@ -877,5 +877,69 @@ class RealIntegration(unittest.TestCase):
             self.assertEqual(client.api.call_count, 1)
 
 
+class GeneratedConflict(unittest.TestCase):
+    """Union census rows and rebuilt generated copies keep a PR in the batch."""
+
+    GENERATOR = ("import pathlib, sys\n"
+                 "root = pathlib.Path(__file__).resolve().parent.parent\n"
+                 "want = root.joinpath('src').read_text()\n"
+                 "copy = root.joinpath('copy')\n"
+                 "if sys.argv[1:] == ['--check']:\n"
+                 "    sys.exit(copy.read_text() != want)\n"
+                 "copy.write_text(want)\n")
+
+    def run_batch(self, edits):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"XDG_STATE_HOME": td}):
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture",
+                    "-c", "user.email=fixture@example.test", *args], check=True,
+                    capture_output=True, text=True).stdout.strip()
+            git("init", "-q", "-b", "main")
+            (repo / "tools").mkdir()
+            (repo / "tools" / "generate.py").write_text(self.GENERATOR)
+            (repo / "tools" / "adaptation-census.tsv").write_text("list\ta\nlist\tz\n")
+            (repo / ".gitattributes").write_text("tools/adaptation-census.tsv merge=union\n")
+            (repo / "src").write_text("one\ntwo\nthree\n")
+            (repo / "copy").write_text("one\ntwo\nthree\n")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            rows = []
+            for pr, (src, row) in edits.items():
+                git("checkout", "-qb", f"pr-{pr}", base)
+                (repo / "src").write_text(src)
+                (repo / "copy").write_text(src)
+                census = repo / "tools" / "adaptation-census.tsv"
+                census.write_text(census.read_text().replace("list\tz\n", f"list\t{row}\nlist\tz\n"))
+                git("commit", "-qam", f"PR {pr}")
+                rows.append({"pr": pr, "head": git("rev-parse", "HEAD")})
+            git("checkout", "-q", "main")
+            client = mock.Mock(identity="local/fixture", url=str(repo), base="main", repo="owner/fixture")
+            client.api.side_effect = lambda endpoint, *args: {"number": 99} if endpoint == "pulls" else []
+            client.delete_branch.side_effect = lambda branch, head: None
+            with M.Integration(client, base, rows) as integration:
+                head = integration.data.get("head")
+                files = {name: git("show", f"{head}:{name}")
+                         for name in ("copy", "tools/adaptation-census.tsv")}
+                return integration.entries, integration.conflicts, files.get
+
+    def test_generated_copy_conflict_is_rebuilt_and_census_rows_are_kept(self):
+        entries, conflicts, show = self.run_batch({
+            11: ("ONE\ntwo\nthree\n", "b"), 22: ("one\ntwo\nTHREE\n", "c")})
+        self.assertEqual([row["pr"] for row in entries], [11, 22])
+        self.assertEqual(conflicts, [])
+        self.assertEqual(show("copy"), "ONE\ntwo\nTHREE")
+        self.assertEqual(show("tools/adaptation-census.tsv"), "list\ta\nlist\tb\nlist\tc\nlist\tz")
+
+    def test_source_conflict_still_uses_original_path(self):
+        entries, conflicts, show = self.run_batch({
+            11: ("ONE\ntwo\nthree\n", "b"), 22: ("uno\ntwo\nthree\n", "c")})
+        self.assertEqual([row["pr"] for row in entries], [11])
+        self.assertEqual(conflicts, [22])
+        self.assertEqual(show("copy"), "ONE\ntwo\nthree")
+
+
 if __name__ == "__main__":
     unittest.main()

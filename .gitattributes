@@ -1,0 +1,4 @@
+# Lists that every PR only appends to: Git keeps both sides' new lines instead
+# of a conflict, so one landed PR does not block the next. Rows stay one name
+# per line; an out-of-order pair after a union is harmless to the census checks.
+tools/adaptation-census.tsv merge=union
