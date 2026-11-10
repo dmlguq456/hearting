@@ -1109,7 +1109,10 @@ class OwnerGatePromptTest(unittest.TestCase):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 source = (ROOT / "adapters" / harness / "bin" / "dispatch-headless.py").read_text(encoding="utf-8")
-                self.assertIn("assignment_prompt(args, task, os.environ)", source)
+                self.assertIn("DISPATCH_MAIN.assignment_prompt_tail(_ADAPTER, args, task,", source)
+        # The wrappers render the assignment through the prompt tail they share.
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+        self.assertIn("h.assignment_prompt(args, task, os.environ)", shared)
 
 
 class WorkerEndingPromptTest(unittest.TestCase):

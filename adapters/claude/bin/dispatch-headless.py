@@ -374,23 +374,7 @@ def dispatch_prompt(
     task_input: tuple[str, str] | None = None,
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
-    args.worker_type = resolve_worker_type(
-        explicit=args.worker_type,
-        dispatch_depth=args.dispatch_depth,
-        worker_role=args.worker_role,
-        route_node=args.route_node,
-        profile_type=profile_worker_type(ROOT, args.profile),
-    )
-    bootstrap = render_worker_bootstrap(ROOT, args.worker_type, unit=(args.unit or None))
-    args.assigned_contract = assigned_contract(
-        capability=args.capability,
-        worker_type=args.worker_type,
-        route_node=args.route_node,
-        completion_gate=args.completion_gate,
-        explicit=args.assigned_contract,
-        unit=args.unit,
-        root=ROOT,
-    )
+    bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
     profile_note = (
         f"masked specialization profile={args.profile}; its CLAUDE.md contains only the runtime attach layer and selected specialization"
         if args.profile
@@ -417,30 +401,7 @@ def dispatch_prompt(
     return (
         f"{sync_wait_clause}"
         f"{bootstrap}\n"
-        "Dispatch metadata:\n"
-        f"- capability: {args.capability}\n"
-        f"- capability_mode: {args.capability_mode}\n"
-        f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
-        f"- dispatch_depth: {args.dispatch_depth}\n"
-        f"- worker_type: {args.worker_type}\n"
-        f"- guard_session_id: {args.attempt_id}\n"
-        f"- assigned_contract: {args.assigned_contract}\n"
-        f"- route_node: {args.route_node or '-'}\n"
-        # quick carries it as an argument, standard+ as the env binding;
-        # the owner needs the path either way.
-        f"- route_file: {getattr(args, 'route_file', None) or getattr(getattr(args, 'owner_route_binding', None), 'route_file', None) or '-'}\n"
-        f"{diff_attribution_prompt(args)}"
-        f"- model_role: {getattr(args, 'resolved_model_settings', {}).get('role') or args.model_role or '-'}\n"
-        f"- model_profile: {getattr(args, 'resolved_model_settings', {}).get('profile') or getattr(args, 'model_profile', None) or '-'}\n"
-        f"- parent: {args.parent_slug or '-'}\n"
-        f"- parent_session_id: {args.parent_session_id or '-'}\n"
-        f"- owner: {args.capability_owner or '-'}\n"
-        f"- owner_harness: {args.owner_harness or '-'}\n"
-        f"- worktree: {args.worktree}\n"
-        f"- artifact_root: {args.artifact_root}\n"
-        f"{artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{DISPATCH_MAIN.dispatch_metadata_prompt(_ADAPTER, args)}"
         f"- route_state: {'consume the immutable record already validated by the wrapper' if args.route_file else 'validated dispatch metadata'}\n"
         f"- {profile_note}\n\n"
         "Claude realization:\n"
@@ -448,12 +409,7 @@ def dispatch_prompt(
         f"{contract_read_prompt(args, 'claude')}"
         "- An owner has no worker mode and must not load any unit persona.\n"
         "- Owner workers use the inherited registry, launch checked adapter wrappers directly, consume typed completion receipts, harvest artifacts, and close rows; stage/review/support workers do not dispatch.\n\n"
-        f"{heartbeat}"
-        f"{commit_policy.prompt_clause(args)}"
-        f"{stage_session_prompt(args)}"
-        f"{released_task_prompt(args)}"
-        f"{unit_bootstrap_prompt(args, task, os.environ)}"
-        f"{assignment_prompt(args, task, os.environ)}"
+        f"{DISPATCH_MAIN.assignment_prompt_tail(_ADAPTER, args, task, heartbeat=heartbeat, commit_clause=commit_policy.prompt_clause(args))}"
         f"{ending}",
         source,
     )

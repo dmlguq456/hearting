@@ -837,49 +837,11 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         task, source = "Run the requested portable harness work.", "generated"
     args.replacement_raw_task = task
     args.assignment_sha256 = "sha256:" + hashlib.sha256(task.encode("utf-8")).hexdigest()
-    args.worker_type = resolve_worker_type(
-        explicit=args.worker_type,
-        dispatch_depth=args.dispatch_depth,
-        worker_role=args.worker_role,
-        route_node=args.route_node,
-        profile_type=None,
-    )
-    bootstrap = render_worker_bootstrap(ROOT, args.worker_type, unit=(args.unit or None))
-    args.assigned_contract = assigned_contract(
-        capability=args.capability,
-        worker_type=args.worker_type,
-        route_node=args.route_node,
-        completion_gate=args.completion_gate,
-        explicit=args.assigned_contract,
-        unit=args.unit,
-        root=ROOT,
-    )
+    bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=None)
     heartbeat = runtime_progress_prompt(args)
     return (
         f"{bootstrap}\n"
-        "Dispatch metadata:\n"
-        f"- capability: {args.capability}\n"
-        f"- capability_mode: {args.capability_mode}\n"
-        f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
-        f"- dispatch_depth: {args.dispatch_depth}\n"
-        f"- worker_type: {args.worker_type}\n"
-        f"- assigned_contract: {args.assigned_contract}\n"
-        f"- route_node: {args.route_node or '-'}\n"
-        # quick carries it as an argument, standard+ as the env binding;
-        # the owner needs the path either way.
-        f"- route_file: {getattr(args, 'route_file', None) or getattr(getattr(args, 'owner_route_binding', None), 'route_file', None) or '-'}\n"
-        f"{diff_attribution_prompt(args)}"
-        f"- model_role: {getattr(args, 'resolved_model_settings', {}).get('role') or args.model_role or '-'}\n"
-        f"- model_profile: {getattr(args, 'resolved_model_settings', {}).get('profile') or getattr(args, 'model_profile', None) or '-'}\n"
-        f"- parent: {args.parent_slug or '-'}\n"
-        f"- parent_session_id: {args.parent_session_id or '-'}\n"
-        f"- owner: {args.capability_owner or '-'}\n"
-        f"- owner_harness: {args.owner_harness or '-'}\n"
-        f"- worktree: {args.worktree}\n"
-        f"- artifact_root: {args.artifact_root}\n"
-        f"{artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{DISPATCH_MAIN.dispatch_metadata_prompt(_ADAPTER, args, guard_session_id=False)}"
         f"- route_state: {'consume the immutable record already validated by the wrapper' if args.route_file else 'validated dispatch metadata'}\n\n"
         "OpenCode realization:\n"
         "- The wrapper already validated capability mode, optional worker mode, QA, artifact-root access, and any route record. Use worker-route only for a safety recheck.\n"
@@ -887,12 +849,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         f"- Run {ROOT / 'adapters' / 'opencode' / 'bin' / 'preflight.sh'} qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
         f"{contract_read_prompt(args, 'opencode')}"
         "- Preserve the reported QA/tool contracts in the artifact; owner workers launch checked adapter wrappers directly.\n\n"
-        f"{heartbeat}"
-        f"{commit_policy.prompt_clause(args)}"
-        f"{stage_session_prompt(args)}"
-        f"{released_task_prompt(args)}"
-        f"{unit_bootstrap_prompt(args, task, os.environ)}"
-        f"{assignment_prompt(args, task, os.environ)}"
+        f"{DISPATCH_MAIN.assignment_prompt_tail(_ADAPTER, args, task, heartbeat=heartbeat, commit_clause=commit_policy.prompt_clause(args))}"
         f"{worker_ending_prompt(supervised_owner=_supervised_owner(args))}",
         source,
     )

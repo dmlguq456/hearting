@@ -518,23 +518,7 @@ def dispatch_prompt(
     task_input: tuple[str, str] | None = None,
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
-    args.worker_type = resolve_worker_type(
-        explicit=args.worker_type,
-        dispatch_depth=args.dispatch_depth,
-        worker_role=args.worker_role,
-        route_node=args.route_node,
-        profile_type=profile_worker_type(ROOT, args.profile),
-    )
-    bootstrap = render_worker_bootstrap(ROOT, args.worker_type, unit=(args.unit or None))
-    args.assigned_contract = assigned_contract(
-        capability=args.capability,
-        worker_type=args.worker_type,
-        route_node=args.route_node,
-        completion_gate=args.completion_gate,
-        explicit=args.assigned_contract,
-        unit=args.unit,
-        root=ROOT,
-    )
+    bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
     route_state = (
         "consume the assigned route only (wrapper-validated immutable record)"
         if args.route_file
@@ -565,30 +549,7 @@ def dispatch_prompt(
     return (
         f"{sync_wait_clause}"
         f"{bootstrap}\n"
-        "Dispatch metadata:\n"
-        f"- capability: {args.capability}\n"
-        f"- capability_mode: {args.capability_mode}\n"
-        f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
-        f"- dispatch_depth: {args.dispatch_depth}\n"
-        f"- worker_type: {args.worker_type}\n"
-        f"- guard_session_id: {args.attempt_id}\n"
-        f"- assigned_contract: {args.assigned_contract}\n"
-        f"- route_node: {args.route_node or '-'}\n"
-        # quick carries it as an argument, standard+ as the env binding;
-        # the owner needs the path either way.
-        f"- route_file: {getattr(args, 'route_file', None) or getattr(getattr(args, 'owner_route_binding', None), 'route_file', None) or '-'}\n"
-        f"{diff_attribution_prompt(args)}"
-        f"- model_role: {getattr(args, 'resolved_model_settings', {}).get('role') or args.model_role or '-'}\n"
-        f"- model_profile: {getattr(args, 'resolved_model_settings', {}).get('profile') or getattr(args, 'model_profile', None) or '-'}\n"
-        f"- parent: {args.parent_slug or '-'}\n"
-        f"- parent_session_id: {args.parent_session_id or '-'}\n"
-        f"- owner: {args.capability_owner or '-'}\n"
-        f"- owner_harness: {args.owner_harness or '-'}\n"
-        f"- worktree: {args.worktree}\n"
-        f"- artifact_root: {args.artifact_root}\n"
-        f"{artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{DISPATCH_MAIN.dispatch_metadata_prompt(_ADAPTER, args)}"
         f"- route_state: {route_state}\n\n"
         "Codex realization:\n"
         f"{contract_read_prompt(args, 'codex')}"
@@ -596,12 +557,7 @@ def dispatch_prompt(
         f"- Run $AGENT_HOME/adapters/codex/bin/preflight.sh qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
         "- The wrapper already validated capability mode, worker unit/mode, QA, artifact root, and any route record. Re-run worker-route only for a safety recheck.\n"
         "- Codex may still auto-discover project AGENTS.md; do not explicitly load the full harness adapter bootstrap or another runtime's adapter.\n\n"
-        f"{heartbeat}"
-        f"{no_commit_clause}"
-        f"{stage_session_prompt(args)}"
-        f"{released_task_prompt(args)}"
-        f"{unit_bootstrap_prompt(args, task, os.environ)}"
-        f"{assignment_prompt(args, task, os.environ)}"
+        f"{DISPATCH_MAIN.assignment_prompt_tail(_ADAPTER, args, task, heartbeat=heartbeat, commit_clause=no_commit_clause)}"
         f"{ending}",
         source,
     )
