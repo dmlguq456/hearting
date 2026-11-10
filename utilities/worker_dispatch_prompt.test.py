@@ -561,7 +561,7 @@ class ReleasedTaskPromptTest(unittest.TestCase):
         route_file = self.root / "route.json"
         route_id = "rt-0123456789abcdef"
         route = {"route_id": route_id, "artifact_root": str(self.root), "work_request": {
-            "text": "의도: Seal the intent once.\n안 할 것: new gates\n\nBody.", "owner_harness": None}}
+            "text": "의도: Seal the intent once.\n안 할 것: new gates\n\n사용자: \"의도 확인은 중요해\"", "owner_harness": None}}
         route_file.write_text(json.dumps(route))
         record = self.root / ".runtime/intent" / f"{route_id}.json"
         record.parent.mkdir(parents=True)
