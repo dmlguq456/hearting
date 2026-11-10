@@ -6940,8 +6940,8 @@ class CardWordLanguage(unittest.TestCase):
                                  "a compaction.")
         self.assertEqual(kept, "[tidy] /compact was not typed automatically (the card was already "
                                "delivered). Run /compact if needed.")
-        self.assertEqual(cont, '[tidy] The window was cleared, but "이어서해" could not be typed (the new session '
-                               'did not start waiting for input). To continue, type "이어서해".')
+        self.assertEqual(cont, '[tidy] The session was compacted, but "이어서해" could not be typed (the session '
+                               'did not start waiting for input after the compaction). To continue, type "이어서해".')
         self.assertTrue(request.startswith("This is an automatic idle tidy request. Write one handoff card"), request)
         self.assertNotIn("/clear", request)
         self.assertTrue(request.endswith("Request id: n9"), request)
