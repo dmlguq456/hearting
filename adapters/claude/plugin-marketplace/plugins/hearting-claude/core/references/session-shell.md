@@ -54,6 +54,11 @@ client socket. Its PID/birth and exact wrapped PTY checks still apply. After
 `/resume`, retained roots are membership, not selection. The existing strict
 native footer judgment may select one of those roots from two unchanged raw
 PTY viewport observations, joined to that same live TUI's fresh native origin.
+The host frame and that judgment accept the same footer forms, including
+Codex 0.163's status line with no help row. A repaint between the two reads
+(same rows, no input) is no observation, so the exact process-native proof
+decides as when no frame exists. A TUI without a daemon has no membership,
+and its exact native proof of the same thread corroborates the footer instead.
 This reuses the existing attachment and selection event; projected status text,
 model/context telemetry and an arbitrary screen UUID never supply authority.
 Unknown, conflicting, worker, remote or changed evidence grants no attachment or input.
