@@ -460,6 +460,85 @@ def _route_needs_attention(metadata, jobs, now):
         return None
 
 
+_TOOL_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,40}")
+
+
+def _comm(pid):
+    """The kernel's executable name for pid; never its arguments or environment."""
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _running_tool_command(metadata):
+    """(start epoch, program) of what the attempt's oldest live tool shell is running now.
+
+    Read only from the attempt's existing process census at the moment of the notice: the
+    tool shell is the topmost shell below the runtime, and the program is the kernel name of
+    that shell's oldest live child. The shell's command text is never read. None whenever
+    the runtime is not observed live, the shell has no child, or nothing can be read.
+    """
+    try:
+        from dispatch_contract import attempt_execution_observation, attempt_tagged_descendants
+        execution = attempt_execution_observation(metadata)
+        if execution.state != "active":
+            return None
+        runtimes = {int(identity[0]) for identity in execution.identities}
+        members = {int(pid): start for pid, start, _state in attempt_tagged_descendants(metadata).members}
+
+        def stat(pid):
+            raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+            tail = raw[raw.rfind(")") + 2:].split()
+            return (int(tail[1]), int(tail[19])) if tail[19] == members[pid] else None
+
+        stats = {}
+        for pid in members:
+            try:
+                observed = stat(pid)
+            except OSError:
+                continue  # exited since the census
+            if observed:
+                stats[pid] = observed
+        with open("/proc/stat", encoding="utf-8") as handle:
+            boot = next(float(line.split()[1]) for line in handle if line.startswith("btime "))
+        ticks = os.sysconf("SC_CLK_TCK")
+        shells = {pid for pid in stats if pid not in runtimes and _comm(pid) in _TOOL_SHELLS}
+        found = []
+        for shell in shells:
+            # The tool shell the runtime started: its nearest observed ancestor is the runtime.
+            seen, current = set(), stats[shell][0]
+            while current in stats and current not in runtimes and current not in seen:
+                seen.add(current)
+                current = stats[current][0]
+            if current not in runtimes or seen & shells:
+                continue
+            children = sorted((start, pid) for pid, (parent, start) in stats.items() if parent == shell)
+            if not children:
+                continue
+            start, child = children[0]
+            name = _comm(child)
+            try:
+                alive = stat(child) == (shell, start)
+            except OSError:
+                alive = False
+            if alive and _PROGRAM_NAME.fullmatch(name):
+                found.append((boot + start / ticks, name))
+        return min(found) if found else None
+    except (ImportError, OSError, ValueError, TypeError, IndexError, StopIteration, AttributeError):
+        return None
+
+
+def _running_tool_text(metadata):
+    running = _running_tool_command(metadata)
+    if not running:
+        return ""
+    started, program = running
+    return (f"; a tool command started {time.strftime('%H:%M', time.localtime(started))} "
+            f"is still running: {program}")
+
+
 def _runtime_tool_active(event):
     if not isinstance(event, list) or len(event) != 3:
         return False
@@ -1704,7 +1783,7 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                     age = None
                 duration = f"; last comparable progress {age}s ago" if age is not None else ""
                 messages.append(f"{route_id}/{route_node} attempt {aid}: no comparable progress for "
-                                f"{quiet} watchdog windows{duration}")
+                                f"{quiet} watchdog windows{duration}{_running_tool_text(metadata)}")
         if route_commands:
             kind, command = route_commands[0]
             next_command = f"Existing next-command for the current parent ({kind}): {command}. "
