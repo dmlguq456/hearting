@@ -56,8 +56,9 @@ def main():
             if index + 1 < len(sys.argv) and sys.argv[index + 1] in {"claude", "codex", "opencode"}:
                 harness = sys.argv[index + 1]
         if action == "clear":
-            # OpenCode clears a question or permission by its exact request id; a
-            # session-wide clear (tool finished, turn ended) says so with scope=session.
+            # OpenCode clears a question or permission by its exact request id; the
+            # plugin sends scope=session only for a wait without one (tool finished,
+            # turn ended).
             if (harness == "opencode" and payload.get("request_id") is None
                     and payload.get("scope") != "session"):
                 return 0

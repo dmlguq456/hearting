@@ -299,6 +299,7 @@ const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'read
    ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
    const completionCarrier = createCompletionCarrier(ctx);
    const observeCompactRuntimeStatus = () => {};
+   const noteInteractionRequest = () => {};
    const event = event => {
      ${extract('    if (event && ["question.asked", "permission.asked"]', '    if (event && event.type === "session.idle")')}
    };
@@ -1266,6 +1267,101 @@ try {
                    "TEMP_ROOT": tmp, "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
             result = subprocess.run([node, "--input-type=module", "-e", script],
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v2_tool_and_execution_end_keep_an_unanswered_form_wait(self):
+        # PR #1498 review: through setup, native form events and execute.after, with the
+        # real wait writer. Answering form A neither lets a finished tool call nor the
+        # execution end remove unanswered form B; a cancelled form clears by its id and a
+        # wait with no request id clears at tool end.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        script = r"""
+import assert from "node:assert/strict"
+import fs from "node:fs"
+import path from "node:path"
+import childProcess from "node:child_process"
+import { EventEmitter } from "node:events"
+import { syncBuiltinESMExports } from "node:module"
+import { pathToFileURL } from "node:url"
+const realSpawn = childProcess.spawn
+const keepAlive = setInterval(() => {}, 1000)
+const children = new Set()
+childProcess.spawn = (command, args, options) => {
+  if (args?.some(arg => String(arg).endsWith("/hooks/fleet-interaction-state.py"))) {
+    const child = realSpawn(command, args, options)
+    children.add(child); child.on("close", () => children.delete(child)); return child
+  }
+  const child = new EventEmitter()
+  child.unref = () => {}; child.kill = () => {}; child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter(); child.stdin = { on() {}, end() {} }
+  setImmediate(() => child.emit("close", 0)); return child
+}
+childProcess.spawnSync = () => ({ status: 0, stdout: "{}", stderr: "" })
+syncBuiltinESMExports()
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+let wake
+const queued = [], callbacks = new Map()
+const ctx = { location: { directory: process.cwd() }, app: { version: "2.0.32" },
+  session: { hook: async () => {}, get: async ({ sessionID }) => ({ id: sessionID, title: "Main",
+    parentID: null, directory: process.cwd() }) },
+  tool: { hook: async (name, fn) => callbacks.set(name, fn) }, shell: { hook: async () => {} },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    signal.addEventListener("abort", () => wake?.(), { once: true })
+    while (!signal.aborted) {
+      if (!queued.length) await new Promise(resolve => { wake = resolve })
+      while (queued.length) yield queued.shift()
+    }
+  } } }
+const cleanup = await plugin.setup(ctx)
+const root = path.join(process.env.FLEET_INTERACTION_STATE_DIR, "opencode")
+const read = sid => { try { return JSON.parse(fs.readFileSync(path.join(root, sid + ".json"), "utf8")) } catch { return null } }
+async function settled() {
+  for (let n = 0; n < 200; n++) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    if (!children.size) { await new Promise(resolve => setTimeout(resolve, 25)); if (!children.size) return }
+  }
+  throw Error("wait writer did not finish")
+}
+const native = async event => { queued.push(event); wake?.(); await new Promise(r => setTimeout(r, 50)); await settled() }
+const created = (sid, id) => native({ type: "form.created", data: { form: { sessionID: sid, id } } })
+const after = async sid => {
+  await callbacks.get("execute.after")({ tool: "read", sessionID: sid, input: {}, status: "completed",
+    result: { content: [{ type: "text", text: "tool complete" }], metadata: {} } })
+  await settled()
+}
+try {
+  await created("ses-foreign", "f-foreign")
+  await created("ses-pair", "f-a"); await created("ses-pair", "f-b")
+  await native({ type: "form.replied", data: { sessionID: "ses-pair", id: "f-a" } })
+  await after("ses-pair"); assert.equal(read("ses-pair")?.request_id, "f-b")
+  await native({ type: "session.execution.succeeded", data: { sessionID: "ses-pair" } })
+  assert.equal(read("ses-pair")?.request_id, "f-b")
+  await native({ type: "form.cancelled", data: { sessionID: "ses-pair", id: "f-b" } })
+  assert.equal(read("ses-pair"), null)
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(root, "ses-bare.json"), JSON.stringify({ schema_version: 1,
+    harness: "opencode", session_id: "ses-bare", kind: "decision", source: "opencode-form",
+    waiting_since: Date.now() / 1000 }), { mode: 0o600 })
+  await after("ses-bare"); assert.equal(read("ses-bare"), null)
+  assert.equal(read("ses-foreign")?.request_id, "f-foreign")
+} finally { cleanup(); await settled(); clearInterval(keepAlive) }
+"""
+        with ExitStack() as stack:
+            tmp = fixture_tempdir(stack)
+            env = {"PATH": BASE_ENV.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8",
+                   "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
+                   "XDG_CONFIG_HOME": str(Path(tmp) / "config"),
+                   "FLEET_INTERACTION_STATE_DIR": str(Path(tmp) / "interactions"),
+                   "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "sessions"),
+                   "AGENT_ARTIFACT_CHECKPOINT": "off", "AGENT_PEER_LEDGER_ROOT": str(Path(tmp) / "peer"),
+                   "HERDR_SOCKET_PATH": str(Path(tmp) / "absent.sock"), "OPENCODE_VERSION": "2.0.32",
+                   "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=tmp, env=env,
+                                    text=True, capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_v2_primary_context_is_bound_to_selected_tui(self):

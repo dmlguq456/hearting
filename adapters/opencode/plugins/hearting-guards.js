@@ -33,11 +33,15 @@ const interactionWrites = new Map()
 function publishInteraction(action, sessionID, refs = {}, kind = null) {
   // Observation stays off the native event consumer. Serialize the existing
   // short-lived hook per session so a slow set cannot land after its reply.
+  // `refs` may be a function, decided when this write's turn comes (after every
+  // earlier set/clear of the session landed); returning null writes nothing.
   const previous = interactionWrites.get(sessionID) || Promise.resolve()
   const pending = previous.catch(() => {}).then(() => new Promise((resolve) => {
     let timer
     const done = () => { clearTimeout(timer); resolve() }
     try {
+      if (typeof refs === "function") refs = refs()
+      if (!refs) { done(); return }
       const args = [fleetInteractionState, action, "--harness", "opencode"]
       if (kind) args.push("--kind", kind)
       const child = spawn("python3", args, { stdio: ["pipe", "ignore", "ignore"], detached: true })
@@ -56,14 +60,55 @@ function publishInteraction(action, sessionID, refs = {}, kind = null) {
   return pending
 }
 
-function interactionWaitPresent(sessionID) {
-  // fleet.interaction.sidecar_path: a cheap check so a session with no wait spawns nothing.
-  if (!/^[A-Za-z0-9_.-]+$/.test(sessionID || "")) return false
+function interactionWaitPath(sessionID) {
+  // fleet.interaction.sidecar_path for this session's OpenCode wait.
+  if (!/^[A-Za-z0-9_.-]+$/.test(sessionID || "")) return ""
   const home = process.env.HOME || ""
   const base = process.env.FLEET_INTERACTION_STATE_DIR || path.join(process.env.XDG_STATE_HOME
     || (home ? path.join(home, ".local", "state") : ""), "agent-fleet", "interactions")
-  if (!path.isAbsolute(base)) return false
-  try { return existsSync(path.join(base, "opencode", `${sessionID}.json`)) } catch { return false }
+  if (!path.isAbsolute(base)) return ""
+  return path.join(base, "opencode", `${sessionID}.json`)
+}
+
+function interactionWaitPresent(sessionID) {
+  // A cheap check so a session with no wait spawns nothing.
+  const file = interactionWaitPath(sessionID)
+  try { return !!file && existsSync(file) } catch { return false }
+}
+
+// Native question/permission request ids of each session, as this process saw them:
+// "open" from `*.asked` (V2 `form.created`), "closed" from `*.replied`/`*.rejected`
+// (V2 `form.replied`/`form.cancelled`). An id never seen here is unknown, not closed.
+const interactionRequests = new Map()
+
+function noteInteractionRequest(sessionID, requestID, state) {
+  if (!sessionID || requestID === undefined || requestID === null) return
+  let ids = interactionRequests.get(sessionID)
+  if (!ids) interactionRequests.set(sessionID, ids = new Map())
+  ids.delete(requestID)
+  ids.set(requestID, state)
+  while (ids.size > 64) ids.delete(ids.keys().next().value)
+}
+
+function settledInteractionClear(sessionID) {
+  // Claude's PostToolUse/PostToolUseFailure/Stop clear, narrowed to what a finished
+  // tool call or turn can settle: a wait with no request id (it belongs to no native
+  // question or permission), or a wait whose request id this process saw closed by
+  // its own reply/rejection/cancel. A request still open or unknown here keeps its
+  // wait; its own reply clears it by exact id. Session status is not consulted.
+  const file = interactionWaitPath(sessionID)
+  let wait
+  try { wait = JSON.parse(readFileSync(file, "utf8")) } catch { return null }
+  if (!wait || typeof wait !== "object") return null
+  const requestID = wait.request_id
+  if (requestID === undefined || requestID === null) return { scope: "session" }
+  return interactionRequests.get(sessionID)?.get(requestID) === "closed"
+    ? { request_id: requestID } : null
+}
+
+function clearSettledInteraction(sessionID) {
+  if (!sessionID || !interactionWaitPresent(sessionID)) return null
+  return publishInteraction("clear", sessionID, () => settledInteractionClear(sessionID))
 }
 
 const herdrProjection = path.join(root, "tools", "fleet", "herdr_projection.py")
@@ -1447,7 +1492,7 @@ async function setupOpenCodeV2(ctx) {
   void (async () => {
     try {
       for await (const native of ctx.event.subscribe({ signal: controller.signal })) {
-            const data = native?.data || native?.properties || {}
+        const data = native?.data || native?.properties || {}
         const info = data.info || data.session || null
         const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
@@ -3407,6 +3452,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       const sid = event.properties?.sessionID || ""
       if (sid) { pendingPeerStatus.set(sid, "blocked"); completionCarrier.status(sid, "blocked") }
       observeCompactRuntimeStatus(ctx, sid, "blocked")
+      if (sid) noteInteractionRequest(sid, event.properties?.id, "open")
       if (sid && !isWorkerSession()) {
         publishInteraction("set", sid, { request_id: event.properties?.id, source: event.properties?.source },
           event.type === "permission.asked" ? "permission" : "decision")
@@ -3416,6 +3462,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       const sid = event.properties?.sessionID || ""
       if (sid) { pendingPeerStatus.set(sid, "working"); completionCarrier.status(sid, "working") }
       observeCompactRuntimeStatus(ctx, sid, "working")
+      if (sid) noteInteractionRequest(sid, event.properties?.requestID, "closed")
       if (sid && !isWorkerSession()) {
         publishInteraction("clear", sid, { request_id: event.properties?.requestID })
       }
@@ -3441,10 +3488,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         })
       }
       if (!isWorkerSession()) {
-        // Claude's Stop clear: a finished, failed or interrupted turn waits on no one.
-        if (eventSid && interactionWaitPresent(eventSid)) {
-          publishInteraction("clear", eventSid, { scope: "session" })
-        }
+        // Claude's Stop clear, limited to settled waits (settledInteractionClear).
+        clearSettledInteraction(eventSid)
         spawnIdleObserver(eventSid, baseDir(ctx))
         spawnTurnChangeRecord("end", eventSid, baseDir(ctx))
         spawnSummary(eventSid, "final")
@@ -3482,6 +3527,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         paneProjectionRetryAt.delete(sid)
         runtimeStatusBySession.delete(sid)
         pendingPeerStatus.delete(sid)
+        interactionRequests.delete(sid)
         invalidatePaneOrigin(sid)
       }
     }
@@ -3715,12 +3761,10 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       if (isDesignHtml(file)) runPreflight("design", [file])
     }
     await projectPane(input.sessionID || "", ctx, true)
-    if (!isWorkerSession() && input.sessionID && pendingPeerStatus.get(input.sessionID) !== "blocked"
-        && interactionWaitPresent(input.sessionID)) {
-      // Claude's PostToolUse/PostToolUseFailure clear: a finished tool call (a failed one
-      // too) means the session is no longer waiting on the person. An open question or
-      // permission of this session keeps its exact wait until its own reply clears it.
-      await publishInteraction("clear", input.sessionID, { scope: "session" })
+    if (!isWorkerSession() && input.sessionID) {
+      // Claude's PostToolUse/PostToolUseFailure clear (a failed tool call too), limited
+      // to settled waits (settledInteractionClear).
+      await clearSettledInteraction(input.sessionID)
     }
     if (!isWorkerSession() && input.sessionID && typeof output?.output === "string"
         && input.peerContext !== false && pendingPeerStatus.get(input.sessionID) !== "blocked") {
