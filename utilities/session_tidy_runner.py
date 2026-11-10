@@ -1456,9 +1456,14 @@ def resume_handoff_acceptance(ref, *, steward=None):
 
 
 def _handoff_delivered(row):
-    """Whether the card reached the successor: received, or steered into its live turn."""
-    return row.get("state") == "received" or (
-        row.get("state") == "queued" and row.get("receipt") == "native-steer-accepted")
+    """Whether the card was handed to the successor's input at all.
+
+    A ``pending`` row was never given to any carrier. Once queued, steered or
+    written, the successor can see it before its receipt is confirmed (OpenCode
+    confirms ``received`` from native history after the turn), so only a row
+    still ``pending`` counts as undelivered.
+    """
+    return row.get("state") != "pending"
 
 
 def accept_handoff(ref, caller, *, steward=None):

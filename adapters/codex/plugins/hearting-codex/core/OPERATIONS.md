@@ -3612,10 +3612,10 @@ ordinary messages and cards have no accept command or successor authority.
 Logical transfer records the current holder's explicit request independently
 of content delivery — the holder's own command, or a supervisor's `--from`
 command whose sealed sender is the observed holder and whose executor is
-informational only. Acceptance records only a card that reached the successor
-(received, or steered into its live turn); on an undelivered card the command
-answers `accepted=false reason=handoff-not-delivered` and records nothing, while
-the courier keeps delivering it. Acceptance revalidates the exact native receiver, replays
+informational only. Acceptance records only a card that was handed to the
+successor's input (queued, steered, written or received); on a card still
+pending the command answers `accepted=false reason=handoff-not-delivered` and
+records nothing, while the courier keeps delivering it. Acceptance revalidates the exact native receiver, replays
 the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
