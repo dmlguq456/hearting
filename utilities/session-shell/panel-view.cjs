@@ -67,7 +67,16 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const m=formatted?model.model:selected?line(selected+' · '+(effort||'?'),'loc_repo'):(model.model||line(t('checking','Checking')+' · ?'));
     add(m);
     if(model.warning)add(line(model.warning,'lvl_r'));
-    if(model.notice)wrap(line('⚠ '+model.notice,'lvl_y'),3);
+    // A waiting result line (string; Claude's `notice` is its native row's
+    // segments). Side: up to 3 rows; bottom: one row with an ellipsis. An open
+    // question comes first, so the line waits until the answer is done.
+    const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
+    if(tidy&&!asking){
+      const parts=line('⚠ '+tidy,'lvl_y');
+      if(side)wrap(parts,3);
+      else if(measure(clean(parts[0].text))<=inner)add(parts);
+      else add([...clip(parts,inner-1).parts,text('…','lvl_y')]);
+    }
     if(status&&side)add(line(status,color));
     if(routeDetail){
       add(line(t('routes','Route')+' · '+t('back','Back'),'loc_repo'),'route');
