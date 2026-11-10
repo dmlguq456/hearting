@@ -169,9 +169,12 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
         // Partial session rows would spend the spare rows on the folder first.
         room+=session.length;session.length=0;
         const items=model.brief||[];
-        const slots=Array.from({length:room},()=>[]);slots.push(edge);
+        // Only rows already painted: a filled side panel's rows or the spacer.
+        // A bottom panel does not grow for this; it uses its edge.
+        const spare=fill?room:Math.min(room,reserved);
+        const slots=Array.from({length:spare},()=>[]);slots.push(edge);
         const size=parts=>measure(parts.map(p=>clean(p.text)).join(''));
-        const limit=i=>i<room?inner:width-6;
+        const limit=i=>i<spare?inner:width-6;
         for(const item of items){
           let i=slots.findIndex((slot,n)=>size(slot)+(slot.length?3:0)+size(item)<=limit(n));
           if(i<0)i=slots.findIndex(slot=>!slot.length);
@@ -179,7 +182,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
           if(slots[i].length)slots[i].push(text(' · '));
           slots[i].push(...item);
         }
-        for(const slot of slots.slice(0,room))if(slot.length){session.push(slot);room--;}
+        for(const slot of slots.slice(0,spare))if(slot.length){session.push(slot);room--;}
       }
       const tail=[];
       if(!quiet)for(const row of sections?.tail||[]){const rows=[];wrap(row,2,undefined,rows);if(rows.length>room)break;tail.push(...rows);room-=rows.length;}

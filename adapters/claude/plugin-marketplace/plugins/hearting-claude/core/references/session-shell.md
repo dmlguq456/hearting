@@ -68,9 +68,10 @@ observation, quota resets and running jobs), then peer news and the last
 input, each only in rows left after the question, and an item without a value
 is left out. Running jobs join the last session row when they fit. While a
 question leaves too few rows for every session row, the title, running jobs
-and branch, in that order, are packed into the rows left (a side panel's spacer
-row included) and then into the panel's bottom edge, so they never leave the
-screen; the question keeps the rows it had. Claude's exact statusline callback remains the source of its
+and branch, in that order, are packed into rows the panel already paints (a
+filled side panel's rows, or its spacer row) and then into the panel's bottom
+edge, so they never leave the screen; the question keeps the rows it had and a
+bottom panel does not grow for them. Claude's exact statusline callback remains the source of its
 values; the panel shows them in the same header, compact status and session
 rows as the other harnesses.
 Fields already painted in a native-owned status area are omitted from the compact duplicate.

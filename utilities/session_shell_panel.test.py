@@ -140,18 +140,20 @@ assert(!r.hits.some(h=>h.action==='details'));
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
 const question=['◑ 질문 1 · 1/1 · 답변 필요','REVIEW1463: 결과를 어디에 둘까요?','1 현재 프로젝트 (추천)','2 다른 폴더','Ctrl+] · 답변 필요','more','more 2'].map(text=>[{text}]);
 const routes=[{title:'REVIEW1463_ROUTE',state:'blocked',stages:[{name:'one-shot',current:true}],visibility:{summary:'검증 ?'}}];
-const paint=(width,height,side,focused,model)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
- model:{...model,answerable:true,routes},sections:{tail:[[{text:'› last input'}]]},questions:o=>question.slice(0,o.budget)})
+const paint=(width,height,side,focused,model,n=question.length)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
+ model:{...model,answerable:true,routes},sections:{tail:[[{text:'› last input'}]]},questions:o=>question.slice(0,Math.min(n,o.budget))})
  .rows.map(r=>r.map(p=>p.text).join(''));
 const asked=rows=>rows.filter(s=>question.some(q=>s.includes(q[0].text)));
-for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
- const model=models[width===35?35:80],rows=paint(width,height,side,focused,model);
+// A five-row question leaves the focused editor a spare row it never painted.
+for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,true],[80,14,false,true,5],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
+ const model=models[width===35?35:80],rows=paint(width,height,side,focused,model,n);
  for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
  if(width===80)assert(rows.some(s=>s.includes('values-fixture*')),'branch lost at 80');
- // The question keeps exactly the rows it has without any session value.
- assert.deepEqual(asked(rows),asked(paint(width,height,side,focused,{...model,session:[],brief:[]})));
- assert(rows.length<=height);
+ // The question keeps its rows and the panel does not grow for these values.
+ const bare=paint(width,height,side,focused,{...model,session:[],brief:[]},n);
+ assert.deepEqual(asked(rows),asked(bare));
+ if(!rows.some(s=>s.includes('📁 project')))assert.equal(rows.length,bare.length,`${width}x${height} focused=${focused} grew`);
 }
 // Running jobs join the branch row at 80, saving the row a separate job row took.
 const idle=view.render({width:80,height:14,side:false,sid:'s',configuration:{},model:{...models[80],routes:[{...routes[0],state:'working'}]},
