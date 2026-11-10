@@ -1162,12 +1162,12 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
             ("r3", "feedback", '["backlog"]', "백로그는 기억에 항목별로 쓰고 정본 문서를 만들지 않는다"),
             ("r4", "unresolved-obligation", "[]", "사용자 결정 대기 묶음: D-5"))
 
-    def real_open_work(self):
+    def real_open_work(self, project="proj", env=()):
         """``_open_work`` through the real ``session_work.observe`` on a synthetic store."""
         import datetime
         import sqlite3
         from fleet.collectors import memory
-        store, repo = self.tmp / "mem", self.tmp / "proj"
+        store, repo = self.tmp / "mem", self.tmp / project
         store.mkdir()
         (repo / ".git").mkdir(parents=True)
         con = sqlite3.connect(store / "memory.db")
@@ -1186,9 +1186,24 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
             _session_keys=lambda row: {(HARNESS, SID)})
         memory._project_cache.clear()
         self.addCleanup(memory._project_cache.clear)
-        with mock.patch.dict(os.environ, {"MEM_STORE": str(store)}), \
+        with mock.patch.dict(os.environ, {"MEM_STORE": str(store), **dict(env)}), \
                 mock.patch.object(SC, "_collector", return_value=collector):
             return SC._open_work(HARNESS, SID)
+
+    def test_parity_register_rows_are_not_steward_work(self):
+        """PR #1443 review P1: register rows stay on the Fleet screen, not in every check."""
+        from fleet.collectors import memory
+        home = self.tmp / "agent-home"
+        (home / "core").mkdir(parents=True)
+        (home / "core" / "ADAPTATION.md").write_text(
+            "<!-- parity-register:start -->\n"
+            "| PG-1 | Codex | no wake | open | fix |\n"
+            "| PG-2 | Claude | choice | needs-user-decision | ask |\n"
+            "<!-- parity-register:end -->\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(home)}):
+            self.assertEqual(len(memory.parity_open_items()), 2)   # the Fleet screen still reads them
+        work, decisions = self.real_open_work("hearting", {"AGENT_HOME": str(home)})
+        self.assertEqual((work, decisions), ([], ["사용자 결정 대기 묶음: D-5"]))
 
     def test_finished_memory_records_are_not_open_work(self):
         self.assertEqual(self.real_open_work(), ([], ["사용자 결정 대기 묶음: D-5"]))

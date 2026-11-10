@@ -275,6 +275,7 @@ def _carrying(requests, marker, start: int):
 class CompletionReceiptScenario(Scenario):
     name = "completion-receipt"
     summary = "A registered child completes while the parent is idle; the parent is woken."
+    carrier = "parent_completion"
     PROMPT = "SCENARIO-RECEIPT start the registered child and end your turn"
     PROBE = "SCENARIO-RECEIPT-NEXT anything new?"
     NEXT = "HB-NEXT-ACTION"

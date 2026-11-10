@@ -252,14 +252,17 @@ def open_stage(record, routes=()):
 
 
 # Harness differences the docs still carry (core/ADAPTATION.md, "Open harness
-# differences").  Each open row is shown with the project's open records, so a
-# documented difference stays visible work or a visible user decision instead of
-# being closed by wording such as "separate decision" or "known difference".
+# differences").  Each open row is shown with the project's open records on the
+# Fleet screen and its counts, so a documented difference stays visible instead of
+# being closed by wording such as "separate decision" or "known difference".  The
+# session work list (periodic steward check, session shell) does not read them:
+# a register row is not a task for every supervising session.
 PARITY_REGISTER = Path("core") / "ADAPTATION.md"
 PARITY_PROJECT = "hearting"
 _REGISTER_START = "<!-- parity-register:start -->"
 _REGISTER_END = "<!-- parity-register:end -->"
 _REGISTER_STATES = {"open": "미결", "needs-user-decision": "결정 필요"}
+_REGISTER_CLOSED = frozenset({"resolved", "limit"})
 _parity_cache = {}
 
 
@@ -271,8 +274,8 @@ def parity_open_items(path=None):
     """Open rows of the parity register as open-record dicts (headline only).
 
     Row shape: ``| PG-n | harnesses | user-visible effect | state | next |``.  Only
-    ``open`` and ``needs-user-decision`` rows are returned; any other state (for
-    example ``resolved``) is finished.  A missing or unreadable register yields none.
+    ``resolved`` and ``limit`` close a row; any other state, a typo included, stays
+    open so a row cannot disappear unclosed.  A missing or unreadable register yields none.
     """
     path = Path(path) if path is not None else _register_path()
     try:
@@ -295,13 +298,15 @@ def parity_open_items(path=None):
             if len(cells) < 5 or not re.fullmatch(r"PG-\d{1,4}", cells[0]):
                 continue
             ident, harnesses, effect, state, follow = cells[:5]
-            label = _REGISTER_STATES.get(state.strip("`").casefold())
-            if label is None:
+            state = state.strip("`").casefold()
+            if state in _REGISTER_CLOSED:
                 continue
+            label = _REGISTER_STATES.get(state, "미결")
+            tags = ("parity", "backlog") + (("user-decision",) if state == "needs-user-decision" else ())
             items.append({
                 "id": f"parity:{ident}", "type": "unresolved-obligation",
                 "headline": f"[{label}] {ident} {harnesses}: {effect}"[:240],
-                "updated": updated, "tags": ("parity", "backlog"),
+                "updated": updated, "tags": tags,
                 "links": (), "artifact_refs": (f"{PARITY_REGISTER}#{ident}"[:512],),
                 "next": follow[:240],
             })
@@ -345,7 +350,7 @@ def _db_stamp(path):
 
 
 def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
-                         open_limit=OPEN_PER_PROJECT, repo=None):
+                         open_limit=OPEN_PER_PROJECT, repo=None, parity=True):
     """Per project, the newest decisions and the open records, headline only.
 
     Open candidates are classified with ``open_stage`` before the ``open_limit`` cut, so
@@ -355,6 +360,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
     One read-only query ranks records within each (origin, kind) so every project keeps its
     own newest rows; record bodies are never selected. ``headlines`` maps the given journal
     ids to their stored headline. The result is reused while the database files are unchanged.
+    ``parity=False`` leaves out the parity register rows (the session work list).
     """
     path = _db_path()
     if not path.is_file():
@@ -362,7 +368,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
     scope_repo = repo   # the row loop below reuses ``repo`` for each record's project
     register = _register_path()
     key = (str(path), _db_stamp(path), _db_stamp(register), today, tuple(journal_ids),
-           decisions, open_limit, repo)
+           decisions, open_limit, repo, parity)
     cached = _project_cache.get("value")
     if cached is not None and _project_cache.get("key") == key:
         return dict(cached)
@@ -445,7 +451,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 continue
             entry["open"].append(record)
         entry["updated"] = max(entry["updated"], record["updated"])
-    if scope_repo is None or scope_repo == PARITY_PROJECT:
+    if parity and (scope_repo is None or scope_repo == PARITY_PROJECT):
         parity = parity_open_items(register)
         if parity:
             entry = by_repo.setdefault(PARITY_PROJECT, {"decisions": [], "decisions_today": 0,

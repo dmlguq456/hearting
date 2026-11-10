@@ -741,10 +741,33 @@ def retire_fixture_processes(root: Path, grace: float = 5) -> list[int]:
     deadline = _now() + grace
     while _now() < deadline and any(Path(f"/proc/{pid}").exists() for pid in pids):
         time.sleep(0.2)
-    for pid in fixture_processes(root):
+    killed = fixture_processes(root)
+    for pid in killed:
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGKILL)
+    # The fixture tree is removed only after its processes are gone, so a late
+    # write (Codex's state sqlite WAL) cannot recreate files under it.
+    deadline = _now() + grace
+    while _now() < deadline and fixture_processes(root):
+        time.sleep(0.2)
     return pids
+
+
+def declared_carrier(harness: str, scenario) -> str | None:
+    """The carrier the installed tree declares for ``scenario``'s delivery, or None.
+
+    ``gap`` means the harness declares no carrier for it; ``fail`` means a declared
+    carrier (or a wired path) did not deliver.  Read from the measured ``SOURCE``.
+    """
+    section = getattr(scenario, "carrier", None)
+    if not section:
+        return None
+    try:
+        import harness_capabilities
+        declared = harness_capabilities.capabilities(harness, SOURCE)[section]
+    except Exception:  # noqa: BLE001 - an unreadable declaration declares nothing
+        return None
+    return declared.get("carrier") if isinstance(declared, dict) else None
 
 
 def wait_for(predicate, timeout: float, step: float = 0.5):
@@ -869,6 +892,10 @@ class Run:
             self.evidence["ready"] = bool(ready)
             self._dismiss_startup(tui)
             verdict = self.scenario.drive(self)
+            declared = declared_carrier(self.harness, self.scenario)
+            if verdict == "gap" and declared:
+                verdict = "fail"
+                self.note(f"declared carrier {declared} did not deliver")
             row["verdict"] = verdict
         except Exception as exc:  # the row carries the failure; other rows still run
             row["verdict"] = "error"
@@ -894,6 +921,9 @@ class Run:
                                                 encoding="utf-8")
             if not self.keep:
                 shutil.rmtree(root, ignore_errors=True)
+                if root.exists():   # a write that raced the removal
+                    time.sleep(1)
+                    shutil.rmtree(root, ignore_errors=True)
         return row
 
     def _ready(self, screen: str) -> bool:
@@ -947,6 +977,10 @@ class Run:
 class Scenario:
     name = "base"
     summary = ""
+    # The ``harness-capabilities.json`` section whose ``carrier`` this scenario's
+    # delivery rides.  When that harness declares a carrier and nothing arrived, the
+    # row is ``fail`` (a declared carrier that does not deliver), never ``gap``.
+    carrier = None
 
     def script(self, run: Run):
         def answer(record, earlier):

@@ -99,6 +99,17 @@ class EnvironmentTest(unittest.TestCase):
         table = hb.render_markdown(rows)
         self.assertIn("| boot | pass | gap — x | - |", table)
 
+    def test_gap_is_only_for_a_harness_without_a_declared_carrier(self):
+        import harness_behavior_cases_a as cases
+        receipt = cases.CompletionReceiptScenario()
+        for harness in hb.HARNESSES:
+            self.assertTrue(hb.declared_carrier(harness, receipt))
+        self.assertTrue(hb.declared_carrier("claude", cases.StopWithRemainingActionScenario()))
+        self.assertIsNone(hb.declared_carrier("claude", hb.BootScenario()))
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(hb, "SOURCE", Path(tmp)):
+            self.assertIsNone(hb.declared_carrier("claude", receipt))
+
 
 if __name__ == "__main__":
     unittest.main()
