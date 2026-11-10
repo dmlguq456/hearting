@@ -21,7 +21,6 @@ seen at the latest on the user's next prompt.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -37,6 +36,7 @@ from dispatch_session_sweep import (  # noqa: E402
     CLAUDE_CONTEXT_CHARS,
     activate,
     ack_delivered,
+    claude_hook_evidence,
     fit_inline,
     release_claims,
     settle_stop_sends,
@@ -108,7 +108,6 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
         cwd = payload.get("cwd")
         if isinstance(transcript_path, str) and isinstance(cwd, str):
-            runtime_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
             cached_signature = object()
             cached_evidence = None
 
@@ -121,10 +120,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
                     signature = None
                 if signature != cached_signature:
                     try:
-                        from dispatch_recipient_receipt import claude_transcript_evidence
-                        cached_evidence = claude_transcript_evidence(
-                            transcript_path=transcript_path, session_id=session_id, cwd=cwd,
-                            expected_cwd=os.getcwd(), runtime_home=runtime_home)
+                        cached_evidence = claude_hook_evidence(payload, session_id)
                     except (OSError, RuntimeError, TypeError, ValueError):
                         cached_evidence = None
                     cached_signature = signature
@@ -134,11 +130,12 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
     from dispatch_notice_state import NoticeReadContext
     notice_context = NoticeReadContext()
     if _event_name(payload) == "UserPromptSubmit":
-        # A new prompt is no proof that the last Stop block of the previous turn
-        # was taken (Claude Code may have overridden it): owe its records again.
+        # The previous turn's Stop blocks: ACK what the transcript holds, owe
+        # the rest again (Claude Code may have overridden a block at its cap).
         try:
-            settle_stop_sends(session_id, roots, RECIPIENT_KIND, taken=False,
-                              deadline_ns=deadline_ns)
+            settle_stop_sends(session_id, roots, RECIPIENT_KIND,
+                              receipt_observer(None, None, None) if receipt_observer else None,
+                              new_prompt=True, deadline_ns=deadline_ns)
         except Exception:  # noqa: BLE001 -- they wait for their lease
             pass
     for root in roots:

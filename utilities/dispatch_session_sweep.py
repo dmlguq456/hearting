@@ -1575,8 +1575,28 @@ def release_claims(session_id: str, batches, recipient_kind: str, *, reason: str
 
 # The send source a Claude Stop `block` reason leaves on each record it showed.
 CLAUDE_STOP_SEND_SOURCE = "claude-stop-block"
-# The courier retry base delay `release_claim` applies (its 0.05 s minimum).
-STOP_RELEASE_SETTLE_SECONDS = 0.06
+# A handed-back record is claimable again after the courier retry base delay.
+STOP_RELEASE_SETTLE_SECONDS = pending_delivery.COURIER_RETRY_BASE_SECONDS
+
+
+def claude_hook_evidence(payload, session_id: str):
+    """This session's native Claude receipts at a hook call, or ``None`` (unknown).
+
+    Reads the transcript the hook payload names through the same verified
+    reader the prompt sweep uses; nothing else (a later call, a tool run,
+    another hook's block) counts as a receipt.
+    """
+    if not isinstance(payload, dict):
+        return None
+    transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
+    cwd = payload.get("cwd")
+    if not isinstance(transcript_path, str) or not isinstance(cwd, str):
+        return None
+    from dispatch_recipient_receipt import claude_transcript_evidence
+    return claude_transcript_evidence(
+        transcript_path=transcript_path, session_id=session_id, cwd=cwd,
+        expected_cwd=os.getcwd(),
+        runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
 
 
 def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
@@ -1585,8 +1605,8 @@ def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
     Claude Code may override a block and end the turn (its consecutive-Stop
     cap), so printing the reason is not the model reading it. Each shown record
     stays this process's open claim as ``sent-ambiguous`` with the Stop as its
-    send source; :func:`settle_stop_sends` ACKs it at the next hook call that
-    proves the continuation ran, or hands it back. A record that cannot be held
+    send source; :func:`settle_stop_sends` ACKs it once the session's native
+    record holds its receipt, or hands it back at a new prompt. A record that cannot be held
     is handed back pending now (shown twice rather than marked unseen received).
     """
     owner_prefix = f"session-sweep:{recipient_kind}:{os.getpid()}:"
@@ -1613,16 +1633,18 @@ def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
                                reason="claude-stop-hold-failed")
 
 
-def settle_stop_sends(session_id: str, roots, recipient_kind: str, *, taken: bool,
-                      deadline_ns: int | None = None) -> int:
+def settle_stop_sends(session_id: str, roots, recipient_kind: str, evidence, *,
+                      new_prompt: bool = False, deadline_ns: int | None = None) -> int:
     """Settle the records an earlier Stop `block` showed; returns how many.
 
-    ``taken`` is true at a hook call that only runs when that continuation ran
-    (the next Stop with ``stop_hook_active``, a tool boundary of the same
-    session): the records are ACKed. Otherwise (a new prompt) they are handed
-    back pending so this boundary shows them again.
+    A record is ACKed only when its exact receipt is in ``evidence``, this
+    session's native Claude record read at this boundary: its body reached the
+    conversation. A record not found there stays held within the turn and is
+    looked for again at the next boundary; at a new prompt (``new_prompt``) it
+    is handed back pending so this boundary shows it again.
     """
-    settled = 0
+    from dispatch_recipient_receipt import settle_native_receipt
+    settled = released = 0
     for root in dict.fromkeys(roots):
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
             break
@@ -1641,24 +1663,22 @@ def settle_stop_sends(session_id: str, roots, recipient_kind: str, *, taken: boo
             storage = record.get(STORAGE_KEY) or session_id
             delivery_id = record["delivery_id"]
             try:
-                if taken:
-                    pending_delivery.ack(root, storage, delivery_id,
-                                         acked_by=f"session-sweep:{session_id}",
-                                         expected_states=("sent-ambiguous",))
-                else:
+                if settle_native_receipt(root, storage, "claude", session_id, record, evidence,
+                                         acked_by=f"native-receipt:claude:{session_id}")["received"]:
+                    settled += 1
+                elif new_prompt:
                     pending_delivery.release_claim(
                         root, storage, delivery_id, claim_owner=record.get("claim_owner"),
-                        failure_reason=f"claude-stop-not-taken:{time.time_ns()}",
+                        failure_reason=f"claude-stop-not-received:{time.time_ns()}",
                         expected_identity=pending_delivery.received_ack_identity(
                             record, storage, delivery_id))
-                settled += 1
+                    released += 1
             except (pending_delivery.PendingDeliveryError, KeyError, OSError):
                 continue
-    if settled and not taken:
-        # A released claim waits the courier's base retry delay before it can be
-        # claimed again; wait it out once so this same boundary shows them.
+    if released:
+        # Wait out the retry base delay once so this same boundary shows them.
         time.sleep(STOP_RELEASE_SETTLE_SECONDS)
-    return settled
+    return settled + released
 
 
 def _opencode_expected_message(text: str, identities: list[tuple[str, dict]]) -> dict:

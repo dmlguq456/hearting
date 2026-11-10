@@ -170,6 +170,38 @@ class SharedFitTest(unittest.TestCase):
 class ClaudePromptSweepTest(FixtureHome):
     SID = "pg40-claude-session"
 
+    def setUp(self):
+        super().setUp()
+        from claude_project_dir import encode_project_dir
+        self.workspace = Path(self._tmp.name) / "workspace"
+        self.workspace.mkdir()
+        project = Path(self.env["CLAUDE_CONFIG_DIR"]) / "projects" / encode_project_dir(
+            str(self.workspace))
+        project.mkdir(parents=True)
+        self.transcript = project / f"{self.SID}.jsonl"
+        self.transcript.touch()
+
+    def taken(self, reason: str) -> None:
+        # What Claude Code writes when the conversation carries a Stop block reason.
+        with self.transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "user", "isMeta": True, "sessionId": self.SID,
+                "message": {"role": "user", "content": "Stop hook feedback:\n" + reason}}) + "\n")
+
+    def hook(self, script: str, payload: dict, *args: str):
+        payload = {"session_id": self.SID, "transcript_path": str(self.transcript),
+                   "cwd": str(self.workspace), **payload}
+        done = subprocess.run([sys.executable, str(ROOT / "hooks" / script), *args],
+                              input=json.dumps(payload), capture_output=True, text=True,
+                              timeout=60, cwd=self.workspace, env={**os.environ, **self.env})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def post_tool(self) -> None:
+        self.hook("peer-message-record.py", {"hook_event_name": "PostToolUse",
+                                             "tool_name": "Bash",
+                                             "tool_input": {"command": "true"}}, "post-tool")
+
     def notify(self, count: int):
         import session_notice
         tails = []
@@ -183,14 +215,10 @@ class ClaudePromptSweepTest(FixtureHome):
         return tails
 
     def prompt(self) -> str:
-        payload = json.dumps({"session_id": self.SID, "hook_event_name": "UserPromptSubmit"})
-        done = subprocess.run([sys.executable, str(ROOT / "hooks" / "dispatch-session-sweep.py")],
-                              input=payload, capture_output=True, text=True, timeout=60,
-                              env={**os.environ, **self.env})
-        self.assertEqual(done.returncode, 0, done.stderr)
-        if not done.stdout.strip():
+        stdout = self.hook("dispatch-session-sweep.py", {"hook_event_name": "UserPromptSubmit"})
+        if not stdout.strip():
             return ""
-        return json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"]
+        return json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
 
     def test_twenty_notices_reach_the_model_over_several_prompts_none_acked_unseen(self):
         import dispatch_pending_delivery as pending
@@ -214,64 +242,84 @@ class ClaudePromptSweepTest(FixtureHome):
                             for _tail, did in tails))
 
 
-    def test_a_stop_block_the_native_cap_overrode_is_not_acked_and_the_next_prompt_shows_it(self):
-        # RV-PR1477-R2 P2: Claude Code overrides the block past its consecutive-Stop cap
-        # and ends the turn, so no further hook call comes. Printed is not read.
+    def held(self, tails, reason, first=""):
         import dispatch_pending_delivery as pending
-        tails = self.notify(20)
-        first = self.prompt()
-        reason = self.stop(active=False)       # the turn's first Stop: block 1
         shown = [(tail, did) for tail, did in tails if tail in reason and tail not in first]
         self.assertTrue(shown)
-        for _tail, did in shown:              # no next call: held, never received
+        for _tail, did in shown:
             record = pending.read(self.root, self.SID, did)
             self.assertEqual(record["state"], "sent-ambiguous")
             self.assertFalse(record.get("received_at_utc"))
-        again = self.prompt()                  # the person's next prompt
-        for tail, did in shown:
-            self.assertIn(tail, again)         # shown again, not lost
-            self.assertEqual(pending.read(self.root, self.SID, did)["state"], "acked")
+        return shown
 
-    def test_a_stop_block_is_acked_when_claude_continues_with_it(self):
+    def states(self, shown):
         import dispatch_pending_delivery as pending
+        return {pending.read(self.root, self.SID, did)["state"] for _tail, did in shown}
+
+    def test_a_stop_block_the_native_cap_overrode_is_not_acked_and_the_next_prompt_shows_it(self):
+        # RV-PR1477-R2 P2: Claude Code overrides the block past its consecutive-Stop cap
+        # and ends the turn, so no further hook call comes. Printed is not read.
+        tails = self.notify(20)
+        first = self.prompt()
+        shown = self.held(tails, self.stop(active=False), first)  # no native record of it
+        again = self.prompt()                  # the person's next prompt
+        for tail, _did in shown:
+            self.assertIn(tail, again)         # shown again, not lost
+        self.assertEqual(self.states(shown), {"acked"})
+
+    def test_a_capped_block_the_transcript_kept_is_acked_at_the_next_prompt_not_shown_again(self):
+        # Claude Code keeps the reason it overrode at its cap in the history.
         tails = self.notify(20)
         first = self.prompt()
         reason = self.stop(active=False)
-        shown = [did for tail, did in tails if tail in reason and tail not in first]
-        self.assertTrue(shown)
-        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "sent-ambiguous"
-                            for did in shown))
-        follow = self.stop(active=True)        # this call is the continuation's evidence
-        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "acked"
-                            for did in shown))
-        self.assertFalse(any(tail in follow for tail, did in tails if did in shown))
+        shown = self.held(tails, reason, first)
+        self.taken(reason)
+        again = self.prompt()
+        self.assertFalse(any(tail in again for tail, _did in shown))
+        self.assertEqual(self.states(shown), {"acked"})
 
-    def test_a_tool_call_after_a_stop_block_acks_it(self):
-        import dispatch_pending_delivery as pending
+    def test_a_stop_block_is_acked_when_the_transcript_holds_it(self):
+        tails = self.notify(20)
+        first = self.prompt()
+        reason = self.stop(active=False)
+        shown = self.held(tails, reason, first)
+        self.taken(reason)                     # Claude continued with this reason
+        follow = self.stop(active=True)
+        self.assertEqual(self.states(shown), {"acked"})
+        self.assertFalse(any(tail in follow for tail, _did in shown))
+
+    def test_a_continuation_without_our_reason_in_the_transcript_acks_nothing(self):
+        # RV-PR1477-R3 A: our Stop output failed and another Stop hook blocked, so
+        # Claude continued with that reason; `stop_hook_active` proves nothing about ours.
+        tails = self.notify(20)
+        first = self.prompt()
+        shown = self.held(tails, self.stop(active=False), first)
+        self.taken("PRIVATE-OTHER-STOP continuation without peer report")
+        follow = self.stop(active=True)
+        self.assertEqual(self.states(shown), {"sent-ambiguous"})
+        self.assertFalse(any(tail in follow for tail, _did in shown))  # held, not shown twice
+        again = self.prompt()                  # a new prompt owes them again
+        for tail, _did in shown:
+            self.assertIn(tail, again)
+        self.assertEqual(self.states(shown), {"acked"})
+
+    def test_a_tool_call_after_a_stop_block_acks_only_what_the_transcript_holds(self):
         tails = self.notify(20)
         self.prompt()
         reason = self.stop(active=False)
-        shown = [did for tail, did in tails if tail in reason]
-        self.assertTrue(shown)
-        payload = json.dumps({"session_id": self.SID, "hook_event_name": "PostToolUse",
-                              "tool_name": "Bash", "tool_input": {"command": "true"}})
-        done = subprocess.run([sys.executable, str(ROOT / "hooks" / "peer-message-record.py"),
-                               "post-tool"], input=payload, capture_output=True, text=True,
-                              timeout=60, env={**os.environ, **self.env})
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "acked"
-                            for did in shown))
+        shown = self.held(tails, reason)
+        self.post_tool()                       # RV-PR1477-R3 B: no native record of it
+        self.assertEqual(self.states(shown), {"sent-ambiguous"})
+        self.taken(reason)
+        self.post_tool()
+        self.assertEqual(self.states(shown), {"acked"})
 
     def stop(self, active: bool = True) -> str:
-        payload = json.dumps({"session_id": self.SID, "hook_event_name": "Stop",
-                              "stop_hook_active": active})
-        done = subprocess.run([sys.executable, str(ROOT / "hooks" / "peer-message-record.py"),
-                               "stop"], input=payload, capture_output=True, text=True,
-                              timeout=60, env={**os.environ, **self.env})
-        self.assertEqual(done.returncode, 0, done.stderr)
-        if not done.stdout.strip():
+        stdout = self.hook("peer-message-record.py", {"hook_event_name": "Stop",
+                                                      "stop_hook_active": active}, "stop")
+        if not stdout.strip():
             return ""
-        output = json.loads(done.stdout)
+        output = json.loads(stdout)
         self.assertEqual(output["decision"], "block")
         return output["reason"]
 
@@ -292,6 +340,7 @@ class ClaudePromptSweepTest(FixtureHome):
             reason = self.stop()
             if not reason:
                 break
+            self.taken(reason)                 # Claude continues with each block
             self.assertLessEqual(len(reason), 10_000)
             shown = sorted(tail for tail, _did in tails if tail in reason)
             self.assertTrue(shown, reason[:200])

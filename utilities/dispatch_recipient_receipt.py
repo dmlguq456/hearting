@@ -22,6 +22,7 @@ OPENCODE_MARKER_LINE_RE = re.compile(
     r"(?m)^HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]{1,128}) ([0-9a-f]{64})$"
 )
 MAX_CLAUDE_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+CLAUDE_STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
 CLAUDE_TASK_NOTIFICATION_SUMMARY_RE = re.compile(
     r"<task-notification>(?:(?!</task-notification>).)*?"
     r"<summary>Stop hook feedback</summary>(?:(?!</task-notification>).)*?"
@@ -111,6 +112,9 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
         content = message.get("content") if isinstance(message, dict) else event.get("content")
         text = _text_content(content)
         legacy_feedback = event.get("summary") == "Stop hook feedback"
+        # A Stop `block` reason Claude Code put in the conversation: the meta
+        # user message it continues with, or keeps in history past its cap.
+        stop_feedback = event.get("isMeta") is True and text.startswith(CLAUDE_STOP_FEEDBACK_PREFIX)
         native_notification = (
             isinstance(event.get("origin"), dict)
             and event["origin"].get("kind") == "task-notification"
@@ -118,7 +122,7 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             and event.get("turnOrigin") == "task_notification"
             and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is not None
         )
-        if not (legacy_feedback or native_notification):
+        if not (legacy_feedback or stop_feedback or native_notification):
             continue
         if text:
             texts.append(text)
