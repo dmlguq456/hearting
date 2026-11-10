@@ -88,14 +88,21 @@ class ShellSeatTest(unittest.TestCase):
 
     def test_wrapped_retire_foreground_is_the_seat_native_for_every_harness(self):
         info = {**self.info, "shell_pid": os.getpid()}
+        record = {"sessionId": self.sid, "procStart": self.native["start"]}
         for harness in ("claude", "opencode"):
-            with self.subTest(harness=harness):
+            with self.subTest(harness=harness), \
+                 mock.patch("fleet.collectors.claude.read_registry", return_value=record):
                 value = self.publish(harness)
                 found, observed = fixture.peer._wrapped_foreground(self.pane, harness, info)
                 self.assertTrue(observed)
                 self.assertEqual((found["pid"], found["session_id"]), (self.native["pid"], self.sid))
                 self.assertEqual(found["attachment"]["broker_pid"], self.broker["pid"])
                 session_shell.binding_path(harness, value["host_pid"]).unlink()
+        # Claude's own record naming another session (a /resume) is no exit target.
+        self.publish("claude")
+        with mock.patch("fleet.collectors.claude.read_registry",
+                        return_value={**record, "sessionId": "another-session"}):
+            self.assertEqual(fixture.peer._wrapped_foreground(self.pane, "claude", info), (None, True))
 
     def test_native_screen_replaces_the_framed_pane_for_judgments(self):
         self.publish("claude")

@@ -2154,6 +2154,11 @@ def _wrapped_foreground(pane, harness, info):
         if harness == "codex" and not session_shell._codex_current_root(
                 pid, binding["native_start"], binding["sid"]):
             return None, True
+        # Protection: Claude's own record must still show the attachment's session
+        # (a /resume to another session in the same TUI is not the booked target).
+        from pane_ownership import _native_session
+        if harness == "claude" and _native_session(pid, harness) != binding["sid"]:
+            return None, True
         keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
         return {"pid": pid, **identity, "shell_pid": info["shell_pid"],
