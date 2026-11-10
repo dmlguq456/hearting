@@ -482,6 +482,16 @@ class ProjectMemoryAndCurrentTaskProjection(unittest.TestCase):
                 self.assertEqual(_open_stage(linked, routes), expected)
         resolved = self.open_record("x", "[해결 확인] done", rtype="unresolved-obligation")
         self.assertIsNone(_open_stage(resolved, routes))
+        # Finished kinds and resolved tags are not open work even when tagged backlog.
+        finished = (self.open_record("c", "closed 17", rtype="completion", tags=("backlog",)),
+                    self.open_record("a", "pointer", rtype="artifact-pointer", tags=("backlog",)),
+                    self.open_record("b", "[관찰] seen", rtype="observation"),
+                    self.open_record("p", "tidy note", tags=('["resolved"', '"backlog"]')))
+        for record in finished:
+            with self.subTest(record=record["id"]):
+                self.assertIsNone(_open_stage(record, routes))
+        self.assertEqual(_open_stage(self.open_record("q", "[백로그] cleanup", tags=("backlog",)), routes),
+                         "open")
 
     def test_project_memory_groups_decisions_open_work_and_last_change_per_project(self):
         from tools.fleet.explorer.live import _journal_groups, _project_memory

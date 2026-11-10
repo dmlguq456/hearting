@@ -525,7 +525,7 @@ def _wrapped_codex_thread(pane, pid=None, session_id=None, *, executable,
 
 
 def _wrapped_native_session(pane, harness, pid=None, session_id=None, *, executable,
-                            server=None, socket_path=None, info=None, tmux=None):
+                            server=None, socket_path=None, info=None, tmux=None, expected=None):
     """Reuse the common attachment join and the inner runtime's native identity."""
     try:
         import importlib.util
@@ -545,7 +545,8 @@ def _wrapped_native_session(pane, harness, pid=None, session_id=None, *, executa
         if not isinstance(info, dict) or info.get("pane_id") != pane:
             return ""
         join = sys.modules[name]._pane_shell_binding_result
-        binding, reason = join(pane, harness, info=info)
+        binding, reason = join(pane, harness, info=info,
+                               **({"expected": expected} if expected is not None else {}))
         if binding is None or reason or session_id is not None and binding["sid"] != session_id:
             return ""
         inner = binding["native_pid"]

@@ -309,6 +309,58 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertEqual(open_items[0]["links"], ("rt-0123456789abcdef",))
         self.assertIn("backlog", open_items[1]["tags"])
 
+    def test_session_block_counts_only_the_records_the_repo_page_counts(self):
+        origin = "git:github.com/team/repo"
+        rows = [{"id": "work-%02d" % i, "cwd_origin": origin, "type": "backlog",
+                 "headline": "work %d" % i, "updated": "2026-11-%02d" % (1 + i % 9)} for i in range(40)]
+        rows += [
+            {"id": "closed", "cwd_origin": origin, "type": "completion", "headline": "17 closed",
+             "updated": "2026-11-09", "tags": '["backlog"]'},
+            {"id": "tidy", "cwd_origin": origin, "type": "project", "headline": "tidy note",
+             "updated": "2026-11-09", "tags": '["[\\"resolved\\"", "\\"backlog\\"]"]'},
+            {"id": "seen", "cwd_origin": origin, "type": "observation", "headline": "[관찰] seen",
+             "updated": "2026-11-09"},
+            {"id": "fixed", "cwd_origin": origin, "type": "artifact-pointer",
+             "headline": "[해결 확인] fixed", "updated": "2026-11-09", "tags": '["backlog"]'},
+        ]
+        self._make_db(rows)
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual(sorted(row["id"] for row in work), sorted("work-%02d" % i for i in range(40)))
+
+    def test_open_work_behind_many_finished_records_is_not_hidden(self):
+        origin = "git:github.com/team/repo"
+        rows = [{"id": "done-%03d" % i, "cwd_origin": origin, "type": "completion",
+                 "headline": "closed %d" % i, "updated": "2026-11-09", "tags": '["backlog"]'}
+                for i in range(memcol.OPEN_PER_PROJECT)]
+        rows.append({"id": "real", "cwd_origin": origin, "type": "unresolved-obligation",
+                     "headline": "the real open item", "updated": "2026-10-01"})
+        self._make_db(rows)
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual([row["id"] for row in work], ["real"])
+        self.assertEqual(session_work.open_count(work), 1)
+
+    def test_open_total_is_not_the_bounded_list_length(self):
+        origin = "git:github.com/team/repo"
+        count = memcol.OPEN_PER_PROJECT + 1
+        self._make_db([{"id": "work-%03d" % i, "cwd_origin": origin, "type": "backlog",
+                        "headline": "work %d" % i, "updated": "2026-11-%02d" % (1 + i % 9)}
+                       for i in range(count)])
+        database = memcol._read_project_memory("2026-11-10", decisions=0, repo="repo")
+        project = database["by_repo"]["repo"]
+        self.assertEqual(len(project["open"]), memcol.OPEN_PER_PROJECT)
+        self.assertEqual(project["open_total"], count)
+        self.assertTrue(project["limited"])
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual(len(work), memcol.OPEN_PER_PROJECT)
+        self.assertEqual(session_work.open_count(work), count)
+        self.assertNotIn("PRIVATE-BODY-SENTINEL", repr(database))
+
     def test_journal_rows_take_their_stored_headline(self):
         self._make_db([{"id": "rec-1", "cwd_origin": "git:github.com/team/repo", "type": "note",
                         "headline": "the stored one-liner", "updated": "2026-11-02"}])
