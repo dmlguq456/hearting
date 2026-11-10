@@ -341,7 +341,12 @@ class ComputeRunAdoptionTest(unittest.TestCase):
             mock.patch.object(OWNER_RESOURCE, "resource_body_digest", return_value="body"),
             mock.patch.object(OWNER_RESOURCE, "resource_evidence_paths_conflict",
                               return_value=late_conflict == "evidence-path"),
-            mock.patch.object(RR, "classify_identity", return_value=("exited", None, "process-absent")),
+            # A row recording this live test process is alive; any other
+            # recorded identity is treated as finished.
+            mock.patch.object(RR, "classify_identity", side_effect=lambda run, *_a, **_k: (
+                ("working", None, "exact-identity-match")
+                if isinstance(run, dict) and run.get("pid") == os.getpid()
+                else ("exited", None, "process-absent"))),
             mock.patch.object(RR, "resource_process_group_quiescent", return_value=True),
             mock.patch("dispatch_owner_input._locked", side_effect=fake_inputs._locked),
             mock.patch("dispatch_owner_input._target", side_effect=fake_inputs._target),
@@ -497,6 +502,49 @@ class ComputeRunAdoptionTest(unittest.TestCase):
         self.assertEqual(adopted["route"], str(self.route_file.resolve()))
         self.assertEqual(adopted["parent_attempt_id"], "att-owner")
         self.assertEqual(adopted["compute_run_id"], "compute-1")
+
+    def test_direct_baseline_publish_then_arm_interruption_converges(self):
+        # PR #1437 review F1: publication settled the leftover row, then the arm
+        # was interrupted. The advertised retry of the same start must replay
+        # the one published row and finish the arm, not refuse "no eligible row".
+        runs = self._run_adoption(baseline_running=True, interrupt_before_arm=True)
+        self.assertEqual(sorted(runs), ["full-run", "full-run__a1"])
+        self.assertEqual(runs["full-run"]["status"], "succeeded")
+        self.assertEqual(runs["full-run"]["liveness_reason"], "compute-run-receipt")
+        self.assertEqual(runs["full-run__a1"]["compute_run_id"], "compute-1")
+        self.assertEqual(json.loads(self.pre_replay_registry)["runs"], runs,
+                         "the replay converges without another registry write")
+
+    def test_direct_baseline_refuses_a_live_leftover_process(self):
+        # PR #1437 review F2: a leftover row whose recorded local process is
+        # positively alive is not settled as succeeded.
+        self.original.update(pid=os.getpid(), starttime="1", process_group=os.getpgid(0))
+        with self.assertRaises(SystemExit) as refused:
+            self._run_adoption(baseline_running=True)
+        self.assertIn("resource-compute-not-quiescent", refused.exception.resource_message)
+        runs = json.loads(self.registry.read_text())["runs"]
+        self.assertEqual(list(runs), ["full-run"])
+        self.assertEqual(runs["full-run"]["status"], "running")
+
+    def test_direct_baseline_adopts_a_finished_recorded_process(self):
+        # Only evidence of life refuses: a recorded identity that has exited
+        # adopts exactly like a row with no identity.
+        self.original.update(pid=2 ** 22 + 7, starttime="1", process_group=2 ** 22 + 7)
+        runs = self._run_adoption(baseline_running=True)
+        self.assertEqual(runs["full-run"]["status"], "succeeded")
+        self.assertIn("full-run__a1", runs)
+
+    def test_direct_baseline_binding_mismatch_is_a_binding_conflict(self):
+        # PR #1437 review F4: a binding mismatch on the direct seat is reported
+        # as a binding conflict, not as a changed contract needing a new smoke.
+        self.provenance["parent_attempt_id"] = "att-other"
+        with self.assertRaises(SystemExit) as refused:
+            self._run_adoption(baseline_running=True)
+        message = refused.exception.resource_message
+        self.assertIn("resource-compute-binding-conflict", message)
+        self.assertNotIn("smoke/config", message)
+        runs = json.loads(self.registry.read_text())["runs"]
+        self.assertEqual(runs["full-run"]["status"], "running")
 
     def test_adopt_compute_run_refuses_another_route_running_lineage(self):
         # A completed receipt is adopted only for this exact route: a run whose

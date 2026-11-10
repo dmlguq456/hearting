@@ -1569,8 +1569,16 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
             # never an inherited lineage, another route, or a live watch.
             leftover = (json.loads(registry.read_text(encoding="utf-8"))
                         .get("runs", {}).get(direct_run_id))
-            if (isinstance(leftover, dict) and leftover.get("status") == "running"
-                    and leftover.get("resource_policy") == "supervised-owner"):
+            # A retry after publication but before the arm finished finds the
+            # leftover already settled by that receipt, next to exactly one
+            # published row: the same seat re-opens so the existing identity
+            # replay below finishes the arm instead of refusing the retry.
+            leftover_open = isinstance(leftover, dict) and (
+                leftover.get("status") == "running"
+                or (leftover.get("status") == "succeeded"
+                    and leftover.get("liveness_reason") == "compute-run-receipt"
+                    and len(replay_rows) == 1))
+            if leftover_open and leftover.get("resource_policy") == "supervised-owner":
                 direct_holder = OWNER_RESOURCE.resource_holder(leftover)
                 if not direct_holder.get("observed", True):
                     fail_compute("resource-compute-observation-unavailable", differences=[
@@ -1595,13 +1603,33 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                 else:
                     direct_node = WS.route_node(route, provenance.get("node"))
                     if isinstance(direct_node, dict) and direct_node.get("kind") == "resource-runner":
-                        direct_differences, _conflict = seat_binding_differences(
+                        direct_differences, direct_conflict = seat_binding_differences(
                             provenance.get("node"), direct_node, leftover, origin,
                             (provenance.get("contract") or {}).get("artifact_base"))
+                        if direct_differences and direct_conflict:
+                            refusal_reason = "resource-compute-binding-conflict"
                     else:
                         direct_differences = [{"field": "resource.node",
                                                "expected": "route resource-runner node",
                                                "actual": provenance.get("node")}]
+                if not direct_differences and (leftover.get("execution") or {}).get(
+                        "kind") != "compute-hosts":
+                    # The compute run itself was observed quiescent above; a
+                    # local process the row recorded is refused only when it is
+                    # positively still alive. Absent or finished identity adopts.
+                    from resource_run_registry import classify_identity
+                    try:
+                        leftover_liveness, _identity, leftover_reason = classify_identity(leftover)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        leftover_liveness, leftover_reason = "stale", "identity-unreadable"
+                    if leftover_liveness in {"working", "reaping"}:
+                        fail_compute("resource-compute-not-quiescent", differences=[
+                            {"field": "resource.process", "expected": "exited or unrecorded",
+                             "actual": {"liveness": leftover_liveness, "reason": leftover_reason,
+                                        "pid": leftover.get("pid")}}],
+                            next_action=("wait for the recorded process to exit, then repeat "
+                                         "the same compute-run start"),
+                            retryable=True)
                 if direct_differences:
                     differences.extend(direct_differences)
                 else:
@@ -1617,8 +1645,12 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
         if eligible:
             fail_compute("resource-compute-baseline-ambiguous")
         if differences:
-            fail_compute(refusal_reason if refusal_reason == "resource-compute-binding-conflict"
-                         else "resource-compute-contract-mismatch", differences=differences,
+            if refusal_reason == "resource-compute-binding-conflict":
+                # A binding mismatch is not a changed contract: re-running the
+                # smoke/config flow would only lead to another GPU run.
+                fail_compute(refusal_reason, differences=differences,
+                             next_action="repair the existing route/resource binding before retrying")
+            fail_compute("resource-compute-contract-mismatch", differences=differences,
                          next_action="run the existing smoke/config flow for the changed contract")
         fail_compute(refusal_reason, differences=[{"field": "resource-candidate",
                     "expected": ("one exactly bound failed resource row, or a route-bound "
