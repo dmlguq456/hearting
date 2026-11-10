@@ -288,7 +288,11 @@ def _db_stamp(path):
 
 def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                          open_limit=OPEN_PER_PROJECT, repo=None):
-    """Per project, the newest decisions and the possibly-open records, headline only.
+    """Per project, the newest decisions and the open records, headline only.
+
+    Open candidates are classified with ``open_stage`` before the ``open_limit`` cut, so
+    ``open_total`` is every open record of the project and ``limited`` says the listed
+    ``open`` rows are only the newest ``open_limit`` of them.
 
     One read-only query ranks records within each (origin, kind) so every project keeps its
     own newest rows; record bodies are never selected. ``headlines`` maps the given journal
@@ -340,9 +344,11 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 f" FROM (SELECT {select}, rowid AS seq,"
                 f"  CASE WHEN type='decision' THEN 'decision' ELSE 'open' END AS kind"
                 f"  FROM records WHERE {' AND '.join(where)}))"
-                f" WHERE rank <= CASE kind WHEN 'decision' THEN ? ELSE ? END"
+                # Open candidates are not cut here: finished records are dropped by
+                # open_stage() below, so a raw cut could hide real open work behind them.
+                f" WHERE kind='open' OR rank <= ?"
                 f" ORDER BY cwd_origin, kind, rank",
-                (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions)), max(1, int(open_limit))),
+                (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions))),
             ).fetchall()
             ids = [str(item) for item in journal_ids if item][:256]
             headlines = dict(con.execute(
@@ -374,9 +380,9 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
         else:
             record.update(tags=_json_strings(tags_raw), links=_json_strings(links_raw, 256),
                           artifact_refs=_json_strings(refs_raw, 512))
+            if open_stage(record) is None:   # finished, observed or resolved: not open work
+                continue
             entry["open"].append(record)
-            if int(total or 0) > int(open_limit):
-                entry["limited"] = limited = True
         entry["updated"] = max(entry["updated"], record["updated"])
     for entry in by_repo.values():
         entry.pop("_origins", None)
@@ -384,6 +390,11 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
         entry["decisions"].sort(key=lambda item: item["updated"], reverse=True)
         del entry["decisions"][max(0, int(decisions)):]
         entry["open"].sort(key=lambda item: item["updated"], reverse=True)
+        # The total counts every open record; only the listed rows are bounded.
+        entry["open_total"] = len(entry["open"])
+        if entry["open_total"] > max(1, int(open_limit)):
+            entry["limited"] = limited = True
+            del entry["open"][max(1, int(open_limit)):]
     result = {"state": "success", "by_repo": by_repo, "limited": limited,
               "record_count": sum(len(e["decisions"]) + len(e["open"]) for e in by_repo.values()),
               "headlines": {str(rid): str(text)[:240] for rid, text in headlines.items() if text}}
