@@ -48,6 +48,37 @@ class SessionRouteStatusTests(unittest.TestCase):
         snapshot["jobs"][1].work_projection._route_view["view"]["nodes"][0]["id"] = "\x1b[31mPRIVATE\n"
         self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"], "⏳ route 2 · frame")
 
+    def test_shell_detail_reuses_the_same_interpretation_and_only_actual_stages(self):
+        snapshot = self.snapshot(stage="inline")
+        with mock.patch.object(live, "_route_records", wraps=live._route_records) as reader:
+            labels, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(labels, live.session_route_status(snapshot))
+        rows = panels["claude\0sid-current"]
+        self.assertEqual(rows, panels["claude\0sid-before"])
+        self.assertEqual([stage["name"] for stage in rows[0]["stages"]], ["inline"])
+        self.assertNotIn("opencode\0sid-current", panels)
+
+    def test_shell_carries_exact_route_visibility_without_another_read(self):
+        snapshot = self.snapshot(stage="inline")
+        interpret = live._route_records
+        evidence = {"schema": "route_visibility_v1", "route_id": "rt-0",
+                    "summary": "direct · CI reported", "next": "closed",
+                    "lines": [["CI", "CI fixture PASS same-head", "good"]]}
+        def with_visibility(*args):
+            rows = interpret(*args)
+            for row in rows:
+                row["visibility"] = evidence
+            return rows
+        with mock.patch.object(live, "_route_records", side_effect=with_visibility) as read:
+            _, panels = live.session_route_status(snapshot, include_details=True)
+            self.assertEqual(read.call_count, 1)
+            actual = panels["claude\0sid-current"][0]["visibility"]
+            self.assertEqual(actual["lines"], evidence["lines"])
+            evidence["route_id"] = "rt-other"
+            _, other = live.session_route_status(snapshot, include_details=True)
+            self.assertNotIn("visibility", other["claude\0sid-current"][0])
+
     def test_scoped_rows_reuse_existing_job_and_evidence_interpreters(self):
         with tempfile.TemporaryDirectory() as tmp:
             jobs = Path(tmp) / "jobs.log"
