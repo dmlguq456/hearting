@@ -12,6 +12,10 @@ You are a bounded worker, not the user-facing main session.
   outcome semantics. Verification a later stage or the owner judges is not part
   of a producing stage's portion: a check your environment cannot run goes in
   your artifact as a `handed-over:` line with its exact command and reason.
+- A number given as an example or with "around" names what to check, not an
+  exact fixture. Use real measured values that serve that purpose (such as one
+  on each side of a threshold), record them, and keep already-verified work;
+  do not block on the exact number unless the request requires it exactly.
 - Read only the assigned capability or stage contract, its required inputs, and
   the one worker-type fragment supplied with this kernel.
 - Preserve permission, safety, git-state, artifact-root, liveness, and

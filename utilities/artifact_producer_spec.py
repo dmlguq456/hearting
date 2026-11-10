@@ -347,27 +347,11 @@ def _spec_inventory_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 
 def _verified_shared_spec(root: Path, ref_id: str, revision_id: str):
     """Validate each immutable input against its own inventory, including bytes."""
-    if not artifact_identity.is_well_formed(revision_id, "shared_reference_revision"):
-        raise ProducerError("shared-base-invalid", str(revision_id))
-    directory = root / "shared/spec" / ref_id / "revisions" / revision_id
-    for parent in (directory, directory.parent, directory.parent.parent):
-        if parent.is_symlink():
-            raise ProducerError("shared-base-invalid", str(parent))
-    record = _read_json(directory / REVISION_RECORD_NAME)
-    if (not isinstance(record, dict) or record.get("shared_reference_id") != ref_id
-            or record.get("shared_reference_revision_id") != revision_id):
-        raise ProducerError("shared-base-invalid", revision_id)
-    tree = _spec_bytes(directory, revision=True)
-    rows = record.get("files")
+    from artifact_spec_storage import StorageError, read_revision
     try:
-        valid = (isinstance(rows, list)
-                 and sorted(rows, key=lambda r: r["path"]) == _spec_inventory(tree)
-                 and record.get("content_digest") == _spec_inventory_digest(rows))
-    except (KeyError, TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise ProducerError("shared-revision-integrity", revision_id)
-    return tree, record
+        return read_revision(root, ref_id, revision_id)
+    except StorageError as error:
+        raise ProducerError(error.code, str(error)) from error
 
 
 def _spec_seed_components(source_tree: Mapping[str, bytes]) -> Optional[Tuple[str, ...]]:
@@ -610,6 +594,9 @@ def _commit_shared(root: Path, journal: Mapping[str, Any]) -> None:
         _ensure_dir(path.parent)
         _write_atomic(path, _json_bytes(reference))
     # An already committed journal is cleanup only: never rewind a newer latest.
+    if kind == 'spec':
+        from artifact_spec_current import refresh
+        refresh(root, ref_id, journal['revision_id'])
     try:
         shared_journal_path(root, journal["revision_id"]).unlink()
     except FileNotFoundError:

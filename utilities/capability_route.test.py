@@ -11154,4 +11154,44 @@ class U7TargetResolutionTest(unittest.TestCase):
             self.assertEqual(R._current_owner_attempt(self.jobs,"att-plain"),"att-plain")   # nothing was replaced
 
 
+
+class DeterministicSmokeOwnerRunTest(unittest.TestCase):
+ """BC-AMI-SMOKE-ROUND-CAP-1109 req. 4: the owner-run path a spent smoke
+ budget prints is the existing check and inline completion, end to end."""
+
+ setUp=InlineStageCompletionRecipeTest.setUp
+ _restore=InlineStageCompletionRecipeTest._restore
+
+ def test_printed_owner_run_path_attests_verifies_and_completes_degraded(self):
+  gate={"spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
+        "drift_verdict":"within-spec","workflow_mode":"tracked",
+        "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"}}
+  compile_route=R.compile_route
+  def lab(_capability,_mode,_intensity,*args,**kwargs):
+   return compile_route("autopilot-lab","setup","standard",*args,**{**kwargs,"signals":[]})
+  with mock.patch.object(R,"compile_route",lab):
+   route=InlineStageCompletionRecipeTest._route(self,self.base/"artifacts")
+  route_file=self.base/"route.json"; route_file.write_text(json.dumps(route),encoding="utf-8")
+  node=next(n for n in route["nodes"] if n["id"]=="smoke")
+  fields=R.REVIEW_ROUND_CAP.recovery_fields("review-worker","exhausted",route=route,node=node,
+                                            jobs=self.jobs,route_file=str(route_file))
+  self.assertEqual(fields["required_action"],"run-deterministic-check")
+  config=self.base/"config.yaml"; config.write_text("seed: 0\n",encoding="utf-8")
+  attestation=self.base/"artifacts"/"reviews"/"smoke-attestation.json"
+  env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_")}
+  smoke=Path(R.ROOT)/"tools"/"smoke-attestation.py"
+  subprocess.run([sys.executable,str(smoke),"attest","--input",str(config),"--cwd",str(self.base),
+                  "--output",str(attestation),"--",sys.executable,"-c","pass"],env=env,check=True)
+  placeholder=shlex.quote("<current-cycle reviews/smoke-attestation.json>")
+  check=shlex.split(fields["recovery_check_command"].replace(placeholder,shlex.quote(str(attestation))))
+  self.assertIn("smoke_attestation=valid",subprocess.run(check,env=env,check=True,
+                capture_output=True,text=True).stdout)
+  complete=shlex.split(fields["recovery_complete_command"].replace(placeholder,shlex.quote(str(attestation))))
+  result=subprocess.run(complete+["--attempt-id","att-owner-smoke-inline"],env=env,
+                        capture_output=True,text=True)
+  self.assertEqual(result.returncode,0,result.stderr)
+  marker=json.loads(result.stdout.splitlines()[0])
+  self.assertEqual((marker["reviewer_kind"],marker["review_independence"]),("owner-inline","degraded"))
+  self.assertIn("completed-review-degraded",result.stderr)
+
 if __name__=="__main__": unittest.main()
