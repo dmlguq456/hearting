@@ -292,6 +292,46 @@ caps or the process count per turn. Regression evidence: the original
 token" while the matching capsule candidate existed — reproduces before the fix
 and disappears after it (`mem show` → `mm me/teams/channels/read`).
 
+## Behavior carriers (Claude parity, measured 2026-11-10)
+
+Claude keeps the next action in the runtime through hook carriers: the `Stop` and
+`PostToolUse(Bash)` `asyncRewake` hooks (`dispatch-owner-rewake.py`,
+`peer-steward-rewake.py`) wake an idle session when a registered child finishes,
+`PostToolUse` `peer-message-record.py` puts a report into the working turn, and the
+`UserPromptSubmit` sweeps re-deliver whatever is still owed. The plugin realizes the
+same meanings with no extra process or input:
+
+| Claude carrier | OpenCode realization |
+|---|---|
+| completion receipt, human-gate and supervision notice wake (`asyncRewake` exit 2) | `opencode-turn` completion carrier: at `session.idle` and every 5 s while idle it asks the shared sweep (`dispatch_session_sweep.py recipients/deliver/settle`) for records owed to the exact session, starts the next turn with the shared `delivery_context` text, and acks once that exact text is in the native user history |
+| steward periodic check and other `session_notice` records | the same carrier (a notice is an SD-111 record of kind `opencode-turn`) |
+| idle peer report | idle courier: reserve, begin-write, one native prompt, then queued against the one persisted user message and received at the next idle pass |
+| report during work (`PostToolUse` `additionalContext`) | `tool.execute.after` appends `peer-message.py context --event PostToolUse --native-delivery` to the finished tool result; the shared writer records the receipt after the flush; an open question or permission keeps bodies pending |
+| booked session-tidy continue (no-trailer row) | idle courier, with the existing no-trailer time bound |
+
+**OpenCode 2 hosting.** OpenCode 2.0.32 runs server plugins inside its shared
+background service (`opencode serve --service`, started by the first TUI with the
+service's own argv, pid and cwd), not inside the TUI process, and gives plugins no
+host logger. The TUI-process origin proof (argv selector, TUI selection record keyed
+by pid) therefore never matched, and every wake above was withheld. A V2 context now
+admits the exact session the record names when the native session is a root session
+located in that plugin instance's directory and is natively idle (`session.wait`).
+Diagnostics that V1 sent to `app.log` go to a capped per-service file,
+`$XDG_STATE_HOME/hearting/opencode-plugin-log/<pid>.jsonl`. The hearting session shell
+(`utilities/session-shell/entry.py`) wraps only the TUI, so the same carriers apply.
+
+**Measured** (real OpenCode 2.0.32 TUI in an isolated HOME, private tmux socket and
+private service port, synthetic records only):
+
+| scenario | before | after |
+|---|---|---|
+| completion receipt to an idle session | pending after 63 s, no turn | new turn, record acked in 4 s |
+| peer report to an idle session | pending after 84 s | answered, `received` (exact native history) in 7 s |
+| peer report while a 20 s tool runs | pending after 97 s, model saw nothing | appended to the tool result, model reported it, `received` in 16 s |
+| booked continue (no trailer) | pending after 85 s | answered, `received` in 7 s |
+| periodic check notice | pending after 63 s | new turn, acked in 4 s |
+| completion receipt through the session shell | — | acked in 4–7 s |
+
 ## Explicit Non-Support
 
 OpenCode must not consume these Claude-native files as native configuration:

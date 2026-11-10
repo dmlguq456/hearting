@@ -2409,6 +2409,75 @@ console.log(JSON.stringify({gets, saves}));
         self.assertEqual(result["saves"], 0)
         self.assertEqual(pm._read_pending(ref)["state"], "pending")
 
+    def test_opencode_post_tool_boundary_delivers_body_and_records_receipt(self):
+        # Claude's PostToolUse parity: the OpenCode plugin appends this context to
+        # the finished tool result, so a report reaches a working session mid-turn.
+        recipient = {"harness": "opencode", "session_id": "ses_tool"}
+        _text, ref = pm.prepare_peer_message("working OpenCode body", self.sender, recipient, defer=True)
+        plain = io.StringIO()
+        pm.emit_peer_context(recipient, stream=plain)
+        self.assertNotIn("working OpenCode body", plain.getvalue())
+        self.assertEqual(pm._read_pending(ref)["state"], "pending")
+        hooked = io.StringIO()
+        pm.emit_peer_context(recipient, "PostToolUse", native_delivery=True, stream=hooked)
+        context = json.loads(hooked.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("working OpenCode body", context)
+        self.assertEqual(pm._read_pending(ref)["state"], "received")
+        again = io.StringIO()
+        pm.emit_peer_context(recipient, "PostToolUse", native_delivery=True, stream=again)
+        self.assertNotIn("working OpenCode body", again.getvalue())
+
+    def test_opencode_v2_service_idle_delivers_once_and_receives_from_exact_history(self):
+        # OpenCode 2 hosts plugins in its shared `serve --service` process, so no TUI
+        # origin exists there. The exact session, root and directory admit the idle
+        # send; the persisted user message queues it and the next idle receives it.
+        recipient = {"harness": "opencode", "session_id": "ses_V2"}
+        _text, ref = pm.prepare_peer_message("idle OpenCode 2 body", self.sender, recipient, defer=True)
+        script = r"""
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(PLUGIN))).default;
+const sessionID = "ses_V2", prompts = [], rows = [], hooks = new Map();
+let release, next;
+const gates = [new Promise(r => { release = r }), new Promise(r => { next = r })];
+const ctx = {
+  location: { directory: process.cwd(), project: { id: "fixture" } },
+  app: { name: "opencode", version: "2.0.32", channel: "latest" },
+  session: {
+    get: async ({ sessionID: sid }) => ({ id: sid, projectID: "fixture", title: "Main",
+      time: { created: 1, updated: 1 }, location: { directory: process.cwd() } }),
+    wait: async () => {},
+    prompt: async (request) => { prompts.push(request); rows.push({ id: "msg_v2_" + prompts.length,
+      type: "user", text: request.text, time: { created: Date.now() } }) },
+    context: async () => rows,
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    for (const gate of gates) { await gate; yield { type: "session.execution.succeeded", data: { sessionID } } }
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+  } },
+};
+const cleanup = await plugin.setup(ctx);
+const settle = () => new Promise(resolve => setTimeout(resolve, 2500));
+try {
+  release(); await settle();
+  next(); await settle();
+  console.log(JSON.stringify({ prompts: prompts.map(p => ({ text: p.text, delivery: p.delivery })) }));
+} finally { await cleanup() }
+""".replace("PLUGIN", json.dumps(str(ROOT / "adapters/opencode/plugins/hearting-guards.js")))
+        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", script],
+                                cwd=str(self.state), env=dict(os.environ, AGENT_HOME=str(ROOT)),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        prompts = json.loads(result.stdout.strip().splitlines()[-1])["prompts"]
+        self.assertEqual(len(prompts), 1, prompts)
+        self.assertIn("idle OpenCode 2 body", prompts[0]["text"])
+        row = pm._read_pending(ref)
+        self.assertEqual(row["state"], "received", row)
+        self.assertEqual(row["actual_message_id"], "msg_v2_1")
+
     def test_claude_actual_prompt_observes_ref_once_without_output_ack(self):
         recipient = {"harness": "claude", "session_id": "recipient-a"}
         text, ref = pm.prepare_peer_message("original peer body", self.sender, recipient, defer=True)

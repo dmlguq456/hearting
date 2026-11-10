@@ -2432,13 +2432,19 @@ for (let i = 0; i < 100 && !prompts.length; i++) await new Promise(r => setTimeo
     def test_v2_execution_and_form_events_preserve_waits_and_one_delivery(self):
         self.v2_turn_carrier_case(interleave_events=True)
 
-    def test_v2_carrier_withholds_unknown_native_identity_idle_and_changed_selection(self):
+    def test_v2_carrier_withholds_unknown_native_identity_idle_and_late_execution(self):
         for scenario in ("wrong-session", "child", "directory", "get-error", "history-error",
-                         "wait-error", "missing-wait", "busy", "selection-at-second-wait"):
+                         "wait-error", "missing-wait", "busy", "busy-at-second-wait"):
             with self.subTest(scenario=scenario):
                 self.v2_turn_carrier_case(scenario)
 
-    def v2_turn_carrier_case(self, scenario="success", *, interleave_events=False):
+    def test_v2_service_hosted_carrier_needs_no_tui_selection_of_its_own_process(self):
+        # OpenCode 2.0.32 runs server plugins in `opencode serve --service`; the TUI's
+        # selection record names the TUI pid, never the service. Measured 2026-11-10:
+        # the old process-bound proof withheld every wake there.
+        self.v2_turn_carrier_case(selection=False)
+
+    def v2_turn_carrier_case(self, scenario="success", *, interleave_events=False, selection=True):
         self.seed_turn()
         plugin = ROOT / "adapters/opencode/plugins/hearting-guards.js"
         js = r'''
@@ -2476,10 +2482,9 @@ const ctx = {
       if (scenario === "wait-error") throw new Error("native idle unavailable");
       if (scenario === "busy") await new Promise((_, reject) =>
         signal.addEventListener("abort", () => reject(new Error("native wait aborted")), {once: true}));
-      if (scenario === "selection-at-second-wait" && waits === 2) {
-        carrierFs.writeFileSync(`${selection}/${process.pid}-${ownStart}.json`, JSON.stringify({
-          schema: "hearting-tui-selection-v1", sessionID: "other", pid: process.pid, start: ownStart }));
-      }
+      // OpenCode 2 hosts plugins in its shared service, so no TUI selection is the
+      // authority there; a native execution that starts before the send withholds it.
+      if (scenario === "busy-at-second-wait" && waits === 2) throw new Error("native execution started");
     },
     prompt: async (request) => {
       if (!request || typeof request.text !== "string" || request.prompt) {
@@ -2552,14 +2557,14 @@ try {
   releaseIdle();
   if (scenario !== "success") {
     const reason = scenario === "history-error" ? "native-history-unavailable"
-      : scenario === "selection-at-second-wait" ? "final-admission-withheld-released"
+      : scenario === "busy-at-second-wait" ? "final-admission-withheld-released"
       : "native-admission-withheld";
     for (let i = 0; i < 200 && !carrierLog("skip", reason); i++) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.ok(carrierLog("skip", reason), JSON.stringify(logs));
     assert.equal(prompts.length, 0, "unknown native evidence or another selection cannot admit a prompt");
-    if (scenario === "selection-at-second-wait") assert.equal(waits, 2);
+    if (scenario === "busy-at-second-wait") assert.equal(waits, 2);
     console.log(JSON.stringify({ prompts, logs }));
   } else {
   for (let i = 0; i < 200 && !carrierLog("settle", "native-receipt"); i++) {
@@ -2585,7 +2590,7 @@ try {
 '''.replace("PLUGIN", json.dumps(str(plugin))).replace("SCENARIO", json.dumps(scenario)).replace(
             "INTERLEAVE_EVENTS", json.dumps(interleave_events))
         env = self.env()
-        js = self.admitted_plugin_script(js)
+        js = self.admitted_plugin_script(js, selection=selection)
         run = subprocess.run([self.native_node(), "--input-type=module", "-e", js], env=env, cwd=str(self.root),
                              capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
@@ -2708,7 +2713,7 @@ try {
             native_node.symlink_to(shutil.which("node"))
         return str(native_node)
 
-    def admitted_plugin_script(self, script):
+    def admitted_plugin_script(self, script, *, selection=True):
         # A private Node process with a synthetic process-bound TUI selection
         # and native SDK responses. The production plugin/root reader is exact.
         prelude = r'''
@@ -2717,10 +2722,10 @@ const ownStat = carrierFs.readFileSync("/proc/self/stat", "utf8");
 const ownStart = ownStat.slice(ownStat.lastIndexOf(") ") + 2).trim().split(/\s+/)[19];
 const selection = `${process.env.XDG_STATE_HOME}/hearting/tui-identity`;
 carrierFs.mkdirSync(selection, {recursive: true});
-carrierFs.writeFileSync(`${selection}/${process.pid}-${ownStart}.json`, JSON.stringify({
+if (WRITE_SELECTION) carrierFs.writeFileSync(`${selection}/${process.pid}-${ownStart}.json`, JSON.stringify({
   schema: "hearting-tui-selection-v1", sessionID: "ses-oc-parent", pid: process.pid, start: ownStart,
 }));
-'''
+'''.replace("WRITE_SELECTION", json.dumps(selection))
         api = '''
   get: async () => ({data: {id: "ses-oc-parent", projectID: "fixture", directory: process.cwd(),
     slug: "fixture", title: "fixture", version: "1", time: {created: 1, updated: 1}},

@@ -2,7 +2,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync, spawn } from "node:child_process"
-import { existsSync, mkdirSync, writeFileSync, renameSync, utimesSync, openSync, readSync, closeSync, realpathSync, readFileSync, readdirSync, constants, fstatSync, lstatSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, renameSync, utimesSync, openSync, readSync, closeSync, realpathSync, readFileSync, readdirSync, constants, fstatSync, lstatSync } from "node:fs"
 import { createHash } from "node:crypto"
 
 if (!process.env.PYTHONPYCACHEPREFIX && !process.env.PYTHONDONTWRITEBYTECODE) {
@@ -982,6 +982,24 @@ async function v2ContextModel(ctx, ref) {
   finally { clearTimeout(timer) }
 }
 
+// Bounded diagnostics for a V2 service: one JSONL file per service process under
+// the user's state root, capped so a long-lived service cannot grow it without end.
+const V2_DIAGNOSTIC_LIMIT = 2 * 1024 * 1024
+let v2DiagnosticBytes = 0
+function v2DiagnosticLog(input) {
+  try {
+    if (v2DiagnosticBytes >= V2_DIAGNOSTIC_LIMIT) return
+    const home = process.env.HOME || ""
+    const base = process.env.XDG_STATE_HOME || (home ? path.join(home, ".local", "state") : "")
+    if (!base) return
+    const directory = path.join(base, "hearting", "opencode-plugin-log")
+    const line = JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...(input?.body || {}) }) + "\n"
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    appendFileSync(path.join(directory, `${process.pid}.jsonl`), line, { mode: 0o600 })
+    v2DiagnosticBytes += Buffer.byteLength(line)
+  } catch { /* Diagnostics never affect a callback. */ }
+}
+
 async function setupOpenCodeV2(ctx) {
   const controller = new AbortController()
   const contextObservations = new Map()
@@ -1093,6 +1111,7 @@ async function setupOpenCodeV2(ctx) {
   }
   const legacyContext = {
     ...ctx,
+    nativeHost: "v2",
     directory: ctx.location?.directory || "",
     client: {
       session: {
@@ -1118,7 +1137,9 @@ async function setupOpenCodeV2(ctx) {
         messages: sessionMessages,
         promptAsync: sessionPrompt,
       },
-      app: { log: (input) => ctx.app?.log?.(input) },
+      // V2 hands plugins no host logger (ctx.app carries name/version/channel
+      // only), so carrier diagnostics go to a bounded per-process file instead.
+      app: { log: (input) => typeof ctx.app?.log === "function" ? ctx.app.log(input) : v2DiagnosticLog(input) },
       tui: { showToast: async () => {} },
       permission: ctx.permission,
       project: ctx.project,
@@ -1909,10 +1930,10 @@ function createCompletionCarrier(ctx) {
     if (paused()) {
       log("skip", sid, `session-${status.get(sid)}`); return
     }
-    const origin = paneNativeOrigin
+    const origin = carrierOrigin(ctx)
     const client = prompter()
     const current = () => available() && sessions.has(sid) && !paused()
-      && prompter() === client && paneNativeOrigin === origin && pendingPeerRoot(ctx, sid)
+      && prompter() === client && carrierOrigin(ctx) === origin && pendingPeerRoot(ctx, sid)
     // Use the peer carrier's exact root and native status interpretation. An
     // empty complete status map is idle; unavailable or malformed is unknown.
     const nativeIdle = async () => {
@@ -2024,9 +2045,18 @@ function createCompletionCarrier(ctx) {
       // SDK acceptance and process completion are not receipt evidence. Settle
       // only if this exact marker now exists in this native session's user
       // history; otherwise release the claim for the existing fallback.
-      const observed = await command("settle", sid, {
+      let observed = await command("settle", sid, {
         records: beforeSend.records, messages: await compactMessages(ctx, sid), text: beforeSend.text,
       })
+      // OpenCode 2 accepts the prompt before its user message is persisted
+      // (measured 2.0.32: the history read right after acceptance can miss it).
+      // Look again briefly before handing the claim back to the fallback.
+      for (let retry = 0; taken && retry < 6 && !(observed?.received_ids || []).length; retry++) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        observed = await command("settle", sid, {
+          records: beforeSend.records, messages: await compactMessages(ctx, sid), text: beforeSend.text,
+        })
+      }
       const received = new Set(observed?.received_ids || [])
       const releaseRecords = (beforeSend.records || []).filter(
         record => !received.has(record.delivery_id))
@@ -2242,6 +2272,7 @@ function pendingPeerSdkMeta(result, sid) {
 }
 
 function pendingPeerRoot(ctx, sid) {
+  if (ctx?.nativeHost === "v2") return typeof sid === "string" && !!sid && !!carrierOrigin(ctx)
   const origin = paneNativeOrigin
   const binding = paneContexts.get(ctx)
   if (!binding?.active || !binding.ownsOrigin || paneOwningContext !== ctx
@@ -2251,6 +2282,7 @@ function pendingPeerRoot(ctx, sid) {
 }
 
 function pendingPeerRootBlockReason(ctx, sid) {
+  if (ctx?.nativeHost === "v2") return carrierOrigin(ctx) ? "owned" : "directory-unavailable"
   const origin = paneNativeOrigin
   const binding = paneContexts.get(ctx)
   if (!origin) return "origin-unavailable"
@@ -2266,6 +2298,25 @@ function pendingPeerRootBlockReason(ctx, sid) {
     if (realpathSync(ctx.directory) !== origin.directory) return "directory-mismatch"
   } catch { return "directory-unavailable" }
   return "owned"
+}
+
+// OpenCode 2 runs server plugins inside its shared background service
+// (`opencode serve --service`), not inside the TUI process: one service hosts
+// every session of every TUI attached to it, with its own argv, pid and cwd.
+// The TUI-process origin proof below can never match there (measured on
+// 2.0.32, 2026-11-10), so a V2 context proves the exact native session
+// instead: the delivery record names the session id, and the carriers admit it
+// only when the native session is a root session located in this plugin
+// instance's directory (pendingPeerIsNativeRoot with carrierOrigin).
+const v2CarrierOrigins = new WeakMap()
+function carrierOrigin(ctx) {
+  if (ctx?.nativeHost !== "v2") return paneNativeOrigin
+  let origin = v2CarrierOrigins.get(ctx)
+  if (!origin) {
+    try { origin = { directory: realpathSync(ctx.directory), state: "v2-service", v2: true } } catch { return null }
+    v2CarrierOrigins.set(ctx, origin)
+  }
+  return origin
 }
 
 function pendingPeerSdkData(result) {
@@ -2322,6 +2373,7 @@ async function pendingPeerDelivery(ctx, sid) {
     })
     return "inactive-session"
   }
+  if (ctx?.nativeHost === "v2") return pendingPeerDeliveryV2(ctx, sid)
   const client = ctx.client?.session
   if (!pendingPeerRoot(ctx, sid)) {
     const origin = paneNativeOrigin
@@ -2613,6 +2665,132 @@ async function pendingPeerDelivery(ctx, sid) {
   finally { pendingPeerBusy.delete(sid) }
 }
 
+// OpenCode 2 peer delivery. V2 has no noReply save plus messageID resume pair, so
+// an idle session receives the exact text once through the native prompt (the same
+// call the completion carrier uses). Receipt stays exact: a row is queued only
+// against the one persisted user message carrying its text, and received only at a
+// later pass that still finds exactly that message after the session went idle
+// again (the turn it started has ended). An unverified row without a matching
+// message is ambiguous and is never sent a second time.
+async function pendingPeerDeliveryV2(ctx, sid) {
+  const client = ctx.client?.session
+  if (typeof client?.messages !== "function" || typeof client?.promptAsync !== "function"
+      || typeof client?.get !== "function" || typeof client?.wait !== "function") {
+    pendingPeerTrace(ctx, sid, "guard", "native-api-unavailable", { host: "v2" })
+    return "native-api-unavailable"
+  }
+  const local = pendingPeerStatus.get(sid)
+  if (["blocked", "working", "busy", "retry"].includes(local)) {
+    pendingPeerTrace(ctx, sid, "guard", "locally-blocked", { local_status: local, host: "v2" })
+    return "root-or-status-blocked"
+  }
+  const origin = carrierOrigin(ctx)
+  if (!origin) return "root-or-status-blocked"
+  pendingPeerBusy.add(sid)
+  let timer
+  const bounded = async (call, timeoutMs = 1000) => {
+    try {
+      return await Promise.race([call, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("peer-context-timeout")), timeoutMs)
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  const history = async () => {
+    try {
+      const rows = pendingPeerSdkData(await bounded(client.messages({ path: { id: sid } })))
+      return Array.isArray(rows) ? rows : null
+    } catch { return null }
+  }
+  const exact = (messages, row) => messages.filter((m) => m?.info?.sessionID === sid
+    && m.info.role === "user" && promptText(m) === row.text
+    && (!row.no_trailer || (nativeMessageTime(m.info) > 0
+      && nativeMessageTime(m.info) >= Number(row.created) * 1000 - 2000)))
+  try {
+    const rows = pendingPeerCommand(sid)
+    if (!Array.isArray(rows)) { pendingPeerTrace(ctx, sid, "pending", "pending-read-unavailable"); return "pending-read-unavailable" }
+    if (!rows.length) return "no-pending-rows"
+    pendingPeerTrace(ctx, sid, "pending", "rows-found", { row_count: rows.length, host: "v2" })
+    let info = null
+    try { info = pendingPeerSdkData(await bounded(client.get({ path: { id: sid } }))) } catch {}
+    if (!pendingPeerIsNativeRoot(info, sid, origin)) {
+      pendingPeerTrace(ctx, sid, "native-root", "rejected", { host: "v2" })
+      return "not-root-session"
+    }
+    try { await bounded(client.wait({ sessionID: sid }), 1500) } catch {
+      pendingPeerTrace(ctx, sid, "native-status", "not-idle", { host: "v2" })
+      return "not-idle:busy"
+    }
+    let messages = await history()
+    if (!messages) { pendingPeerTrace(ctx, sid, "native-history", "unavailable", { host: "v2" }); return "history-unavailable" }
+    let sent = false
+    for (const row of rows.slice(0, 5)) {
+      if (!row || typeof row.ref !== "string" || !row.ref || typeof row.text !== "string") continue
+      const matches = exact(messages, row)
+      if (matches.length > 1) continue // Ambiguous history is never an exact receipt.
+      if (matches.length === 1) {
+        const mid = matches[0].info.id
+        if (typeof mid !== "string" || !mid || (row.actual_message_id && row.actual_message_id !== mid)) continue
+        if (row.state === "queued") {
+          const received = pendingPeerTransition(sid, ["--received", row.ref, "--message-id", mid])
+          pendingPeerTrace(ctx, sid, "receipt", received ? "received" : "receipt-refused", { refs: [row.ref], host: "v2" })
+        } else if (pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])) {
+          // A persisted send whose queue step was lost: queued now, received next pass.
+          pendingPeerTrace(ctx, sid, "receipt", "queued-from-history", { refs: [row.ref], host: "v2" })
+        }
+        continue
+      }
+      // One send per pass: the prompt starts a native turn, so the session is busy afterwards.
+      if (sent || row.state !== "pending") continue
+      const identity = pendingPeerProcessIdentity()
+      if (!identity) return "claim-unavailable"
+      const reserved = pendingPeerCommand(sid, ["--reserve", row.ref,
+        "--claim-pid", String(identity.pid), "--claim-start", identity.start])
+      if (!reserved) { pendingPeerTrace(ctx, sid, "reserve", "failed", { host: "v2" }); return "claim-unavailable" }
+      const releaseReservation = () => pendingPeerTransition(sid, ["--release-reservation", row.ref,
+        "--claim-token", reserved.rpc_claim?.token || "",
+        "--claim-pid", String(identity.pid), "--claim-start", identity.start])
+      if (reserved.ref !== row.ref || reserved.state !== "pending" || reserved.text !== row.text
+          || !pendingPeerRoot(ctx, sid) || carrierOrigin(ctx) !== origin) {
+        releaseReservation(); return "claim-mismatch"
+      }
+      const claimed = pendingPeerCommand(sid, ["--begin-write", row.ref,
+        "--claim-token", reserved.rpc_claim?.token || "",
+        "--claim-pid", String(identity.pid), "--claim-start", identity.start])
+      if (!claimed || claimed.ref !== row.ref || claimed.state !== "unverified"
+          || claimed.rpc_claim?.token !== reserved.rpc_claim?.token) {
+        releaseReservation(); continue
+      }
+      sent = true
+      let accepted = false
+      try {
+        const result = await bounded(client.promptAsync({ path: { id: sid },
+          body: { parts: [{ type: "text", text: claimed.text }] } }), 5000)
+        accepted = !!result && result.error == null && result.response?.ok !== false
+      } catch {}
+      messages = (await history()) || []
+      let saved = exact(messages, claimed)
+      for (let retry = 0; accepted && retry < 6 && saved.length === 0; retry++) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        messages = (await history()) || []
+        saved = exact(messages, claimed)
+      }
+      const mid = saved.length === 1 ? saved[0].info.id : ""
+      const queued = typeof mid === "string" && !!mid
+        && pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])
+      if (queued) pendingPeerStatus.set(sid, "submitted")
+      pendingPeerTrace(ctx, sid, "prompt", queued ? "persisted-queued" : "persisted-unverified", {
+        refs: [row.ref], prompt_accepted: accepted, match_count: saved.length, host: "v2",
+      })
+    }
+    return "processed"
+  } catch (error) {
+    pendingPeerTrace(ctx, sid, "delivery", "delivery-error", {
+      error_name: typeof error?.name === "string" ? error.name : null, host: "v2",
+    })
+    return "delivery-error"
+  } finally { pendingPeerBusy.delete(sid) }
+}
+
 function promptText(output) {
   if (typeof output?.message?.content === "string") return output.message.content
   if (!Array.isArray(output?.parts)) return ""
@@ -2897,7 +3075,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       observeCompactRuntimeStatus(ctx, eventSid, "idle")
       observePaneCallback(ctx, "session.idle", eventSid)
       const exactCurrentRoot = eventSid && pendingPeerRoot(ctx, eventSid)
-      if (exactCurrentRoot && paneNativeOrigin?.bare) completionCarrier.env(eventSid)
+      if (exactCurrentRoot && (paneNativeOrigin?.bare || ctx.nativeHost === "v2")) completionCarrier.env(eventSid)
       if (eventSid && (exactCurrentRoot || paneNativeOrigin?.bare)) {
         const binding = paneContexts.get(ctx)
         pendingPeerTrace(ctx, eventSid, "idle-event", exactCurrentRoot
@@ -3157,16 +3335,22 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       if (isDesignHtml(file)) runPreflight("design", [file])
     }
     await projectPane(input.sessionID || "", ctx, true)
-    if (!isWorkerSession() && input.sessionID && typeof output?.output === "string") {
-      // The shared sender notice uses this existing model-context boundary.
-      // OpenCode's body delivery remains on the native API above.
+    if (!isWorkerSession() && input.sessionID && typeof output?.output === "string"
+        && pendingPeerStatus.get(input.sessionID) !== "blocked") {
+      // Claude's PostToolUse peer context: a report owed to this session while it
+      // works is appended to the finished tool result (the shared sweep claims it
+      // and records the receipt after this flush), together with the shared
+      // sender notice. Between turns the idle courier keeps delivering bodies; an
+      // open question or permission keeps every body pending until it is answered.
       const notice = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
-        "context", "--to-harness", "opencode", "--to-session-id", input.sessionID], {
+        "context", "--to-harness", "opencode", "--to-session-id", input.sessionID,
+        "--event", "PostToolUse", "--native-delivery"], {
         cwd: root, env: { ...process.env, AGENT_HOME: root },
-        encoding: "utf8", timeout: 1500,
+        encoding: "utf8", timeout: 2500,
       })
       try {
-        const text = JSON.parse(notice.stdout || "{}").context
+        const printed = JSON.parse(notice.stdout || "{}")
+        const text = printed.hookSpecificOutput?.additionalContext ?? printed.context
         if (notice.status === 0 && typeof text === "string" && text) output.output += "\n" + text
       } catch { /* No new turn, prompt input, or callback retry. */ }
     }
