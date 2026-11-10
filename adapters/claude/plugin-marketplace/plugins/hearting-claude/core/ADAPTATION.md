@@ -779,6 +779,13 @@ to five un-acked receipts for the current session and acks them, so a dead hook 
 restarted session loses nothing. Wake is at-least-once and display is idempotent — the ack
 file is created `O_EXCL` by whichever carrier gets there first.
 
+On Codex, `watch --wake auto` arms `wake=queue` while the steward's App Server queue socket
+exists, and the armed line says `parent_next=end-turn`. The observer's receipt notice is handed
+to the normal message courier (the same duty a peer report gets), which starts a turn on the
+idle thread through the native queue; the in-turn carrier's `Stop` still carries a receipt
+that lands before the turn ends. Without the socket the watch stays `wake=none` and the line
+is a bounded `join`. Measured on a private Herdr server, 2026-11-10 (`watch-wake`).
+
 ### 7.4. Carrier taxonomy and selection
 
 Startup/resume context is not a processing turn. `dispatch_session_sweep.activate`
@@ -831,37 +838,34 @@ documented hook outputs, through `adapters/codex/hooks/turn-carrier.py` and the 
 | exit-2 wake of an idle session with the completion receipt or notice | native thread queue (`codex-native-queue`, §7.2), unchanged |
 | receipt or notice that arrives while the session works (`PostToolUse`/`UserPromptSubmit` `additionalContext`) | `PostToolUse` `hookSpecificOutput.additionalContext` with the owed records for this exact thread, rendered by the shared `delivery_context` and ACKed like the prompt path (`codex-native-prompt:<thread>`) |
 | a turn that ends while records are owed is woken again by the still-armed async hook | `Stop` `decision: block` continues the same turn with the owed records and un-acked steward watch receipts; Codex then runs `Stop` again with `stop_hook_active=true` |
-| — (Claude relies on the model) | once per turn, when the turn received a record whose required action is more than reading (or a peer report whose sealed transfer the shared `prompt_origin` verifies for this thread arrived as its prompt; a quoted `(peer-from: …)` is not one) and no tool ran afterwards, `Stop` continues the turn with that required action; the model may end with a one-line reason |
+| — (Claude relies on the model) | once per turn, when the turn received a record whose required action is more than reading or reporting to the person (or a peer report whose sealed transfer the shared `prompt_origin` verifies for this thread arrived as its prompt; a quoted `(peer-from: …)` is not one) and nothing acted on it, `Stop` continues the turn with that required action; the model may end with a one-line reason. A completion counts as acted on only when a later tool names its attempt (or route) handle; a record with no handle, when any tool ran after it |
 
 The carrier renders only records the bridge may ACK and each at most once per turn, so a
 continuation always ends. Its output is never cut: it chooses the leading records (a sealed
 batch as one unit) whose rendering fits the 8000-character budget whole, ACKs only those,
 and hands the rest back pending for the next boundary. A completion without an exact running
 native turn is not claimed and stays with the native queue and the next prompt exactly as
-before; a notice in the same state root, which needs no turn binding, is still carried. It
+before; a notice in the same state root, which needs no turn binding, is still carried. When
+the App Server socket does not exist at all, nothing else can reach the running turn: such a
+completion is shown in the turn once per session and left pending, not ACKed, so the prompt
+carrier still shows it at the next prompt. It
 never waits, never parks, never blocks a tool, asks nothing, and adds no input; worker
 sessions are skipped. Per-turn state
 (tool count, records received, the one follow-through) lives under the dispatch state root in
 `codex-turn-carrier/`. OpenCode keeps its plugin turn carrier (`opencode-turn`).
 
-This carrier is not yet the same behavior as Claude end to end. Open differences, measured
-by the independent review of 2026-11-10 and not closed by this carrier:
+Claude's `PostToolUse` (`hooks/peer-message-record.py post-tool`) hands the running turn the
+same owed records through the same shared sweep and claim as its prompt carrier, so a notice
+or a completion that closes during a tool call reaches that turn on both harnesses; the
+`asyncRewake` hook stays silent for a record another carrier claimed or ACKed.
 
-- **Codex watch line.** A Codex steward watch line still says `parent_next=bounded-wait/join`;
-  that Codex ends the turn and the runtime carries the receipt on, as with Claude's armed
-  watch, is not measured end to end (Herdr included).
-- **Completion without the App Server socket.** Without the exact running turn a completion
-  is still held to the native queue and the next prompt, so work that finishes mid-turn does
-  not reach that turn in such an environment. Notices beside it are no longer held back.
-- **Follow-through judgment.** The one pass checks only that no tool ran after the record;
-  it does not judge that the owed action was done, so an unrelated tool call clears it. A
-  quoted trailer no longer starts a pass; a verified peer report still gets one, because
-  peer messages carry no typed read-only marker.
-- **When ordinary notices land.** Codex hands a notice to the running turn at its next tool
-  boundary; Claude's `PostToolUse` path carries peer bodies, not ordinary session
-  notices, which wait for the next prompt or the owner's async rewake. The two do
-  not yet surface the same notice at the same point.
-- **OpenCode and installed trust.** Not measured by that review.
+The four differences the 2026-11-10 review left open were measured on the real TUIs
+(`notice-mid-turn`, `completion-mid-turn`, `completion-mid-turn-nosocket`,
+`follow-through-unrelated`, `watch-wake`; plain terminal and private Herdr) and fixed as
+above. What still differs is kept in the parity register (§10): Claude has no turn-end
+follow-through pass, a verified read-only peer report still gets one Codex pass, and under
+Herdr the peer courier hands Codex an ordinary notice as the next turn rather than at the
+tool boundary. OpenCode was not part of that measurement.
 
 A Claude owner's async-rewake carrier retries a timed-out readiness probe within
 its existing absolute deadline. A transient probe timeout does not end the wait
@@ -1127,4 +1131,11 @@ inputs; review `RV-PR1443-1110.md`.
 | PG-33 | all | The real Herdr pane injection path is unmeasured: the fixture hides Herdr and suppresses prompt suggestions, so a peer prompt held for a Claude autocomplete suggestion mistaken for a draft (E9-TASK-GHOST-TEXT, `not-idle-empty`) is not caught | open | measure peer-prompt pane injection under a private Herdr server (`utilities/herdr_integration_live.py`, with PG-25), suggestions enabled |
 | PG-34 | all | Owner execution posture (sandbox, network) differs per harness: a Codex owner was blocked at push (BC-CODEX-OWNER-PUBLISH, #1438). No scenario compares it | open | add a scenario that runs a registered owner's push and network step on each harness |
 | PG-35 | Claude | A Claude owner route's completion summary names `adapters/codex/bin/preflight.sh harvest` (E9-TASK-COMPLETION-SUMMARY) | open | check the route summary text against the owner harness and name that harness's command |
+| PG-40 | Codex | A Codex steward watch line said `parent_next=bounded-wait`, so the steward held a foreground `join` until the target finished instead of ending its turn and being woken | resolved | branch `codex-carrier-open-diffs-1110`: `wake=queue` and the message courier carry the receipt; `watch-wake` under a private Herdr: Claude pass, Codex gap on main, pass on the branch |
+| PG-41 | Codex | Without the App Server socket (`codex --no-daemon`) a completion that closed mid-turn reached the session only at the next typed prompt | resolved | same branch: shown in the turn once and left pending; `completion-mid-turn-nosocket` pass in a plain terminal and under Herdr (fail on main) |
+| PG-42 | Codex | Any unrelated tool cleared the one follow-through pass, so a failed child's owed action was dropped when the model ran something else | resolved | same branch: a completion is met only by a tool naming its attempt or route; `follow-through-unrelated` pass in a plain terminal and under Herdr (fail on main) |
+| PG-43 | Claude | An ordinary notice or a completion that closed during a tool call waited for the next typed prompt instead of reaching the running turn | resolved | same branch: `PostToolUse` carries owed records through the shared sweep; `notice-mid-turn` pass (gap on main), `completion-mid-turn` pass |
+| PG-44 | Claude | When a turn ends with an owed action the model ignored, nothing asks again; Codex's one `Stop` follow-through pass has no Claude counterpart | open | `follow-through-unrelated` fails on Claude in a plain terminal and under Herdr. Fix: a synchronous Claude `Stop` hook applying the shared follow-through rule (`utilities/codex_turn_carrier.py` `unmet`), then rerun that scenario |
+| PG-45 | Codex | Under Herdr an ordinary notice written mid-turn reaches Codex as the next automatic turn, not at the tool boundary: the peer courier puts it on the native queue first, while Claude gets it mid-turn | open | `notice-mid-turn` gap under Herdr on main and on the branch (pass in a plain terminal). Fix: steer a runtime notice into an active turn (`peer-message._codex_steer_eligible` keeps notices on the queue) or leave it to the in-turn carrier while a turn is active |
+| PG-46 | Codex | A verified peer report that needs only reading still gets one follow-through continuation, because peer messages carry no typed read-only marker | open | add a read-only kind to the sealed peer transfer, skip the pass for it, and add the negative scenario PG-32 asks for |
 <!-- parity-register:end -->
