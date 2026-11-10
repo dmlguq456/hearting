@@ -49,12 +49,14 @@ class WrappedClaudeSeatTest(unittest.TestCase):
             with self.subTest(row=row), mock.patch.object(claude, "read_registry", return_value=row):
                 self.assertEqual(self.verify(), "")
 
-    def test_native_selection_is_rechecked_after_the_final_foreground_observation(self):
+    def test_one_seat_observation_decides_with_the_native_selection(self):
+        # The seat join is one observation; Claude's own record must name the
+        # attachment's session at that look (a reselected TUI is not the seat).
         for row in (None, {**self.native_row, "sessionId": "another-session"}):
             with self.subTest(row=row), mock.patch.object(claude, "read_registry",
-                    side_effect=[self.native_row, row]) as read:
+                    return_value=row) as read:
                 self.assertEqual(self.verify(), "")
-                self.assertEqual(read.call_count, 2)
+                self.assertGreaterEqual(read.call_count, 1)
 
     def test_inherited_pane_hint_never_claims_another_native_or_service(self):
         for own, service in ((tuple([self.native["pid"] + 100, *self.record[1:]]), False),
@@ -65,52 +67,37 @@ class WrappedClaudeSeatTest(unittest.TestCase):
         with mock.patch.object(po, "_registered_worker", return_value=True):
             self.assertEqual(self.verify(), "")
 
-    def test_other_endpoint_and_changed_foreground_or_attachment_are_rejected(self):
+    def test_the_requested_endpoint_join_decides_and_changed_births_are_rejected(self):
+        # The pane is read from the requested endpoint; its foreground owning the
+        # attachment is the proof. An inherited native env hint changes nothing.
         for changes in ({"HERDR_PANE_ID": "another:p1"},
                         {"HERDR_SOCKET_PATH": self.socket + ".other"}):
             with self.subTest(changes=changes), mock.patch("fleet.collectors.procscan.read_environ",
                     return_value={"HERDR_PANE_ID": self.pane, "HERDR_SOCKET_PATH": self.socket, **changes}):
-                self.assertEqual(self.verify(), "")
+                self.assertEqual(self.verify(), self.pane)
         for key in ("native_start", "host_start", "broker_start"):
             with self.subTest(key=key):
                 self.publish("claude", **{key: "reused"})
                 self.assertEqual(self.verify(), "")
                 self.publish("claude")
-        with mock.patch.object(po, "_pane_process_info", side_effect=[self.info,
-                {**self.info, "foreground_process_group_id": self.native["pid"]}]):
+        with mock.patch.object(po, "_pane_process_info", return_value={
+                **self.info, "foreground_process_group_id": self.native["pid"]}):
             self.assertEqual(self.verify(), "")
 
-    def test_ambiguous_attachment_and_last_look_replacement_are_not_a_pane(self):
-        def replace(*args, **kw):
-            self.publish("claude", incarnation="b" * 32)
-            return self.info
-        with mock.patch.object(po, "_pane_process_info", side_effect=[self.info]) as observe:
-            observe.side_effect = lambda *a, **kw: replace() if observe.call_count == 2 else self.info
-            self.assertEqual(self.verify(), "")
-        self.publish("claude")
+    def test_swapped_attachment_roles_are_not_a_pane(self):
         self.publish("claude", host_pid=self.native["pid"], host_start=self.native["start"],
                      native_pid=self.host["pid"], native_start=self.host["start"])
         self.assertEqual(self.verify(), "")
 
-    def test_role_change_at_final_observation_is_not_a_caller_pane(self):
+    def test_service_or_registered_worker_caller_is_not_the_seat(self):
         for mode in ("service", "registered-worker"):
             with self.subTest(mode=mode):
-                switched, observations = False, 0
-                def observe(*args, **kwargs):
-                    nonlocal switched, observations
-                    observations += 1
-                    if observations == 2:
-                        switched = True
-                    return self.info
                 def runtime(pid):
-                    return ("claude", switched and mode == "service") if pid == self.native["pid"] else ("", False)
-                with mock.patch.object(po, "_pane_process_info", side_effect=observe), \
-                     mock.patch.object(po, "_runtime", side_effect=runtime), \
+                    return ("claude", mode == "service") if pid == self.native["pid"] else ("", False)
+                with mock.patch.object(po, "_runtime", side_effect=runtime), \
                      mock.patch.object(po, "_registered_worker", side_effect=lambda pid:
-                                       switched and mode == "registered-worker"):
+                                       mode == "registered-worker"):
                     self.assertEqual(self.verify(), "")
-                self.assertEqual(observations, 2)
-
 
 if __name__ == "__main__":
     unittest.main()

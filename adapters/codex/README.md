@@ -606,3 +606,8 @@ therefore keeps Fleet OVERVIEW as the route display. A terminal-side integration
 could read the same derived cache, but is outside Codex's native footer. Hearting
 does not rewrite thread titles, emit hook labels, or inject route text into model input. Claude and OpenCode use native
 human-visible display interfaces where supported.
+
+New installations enable the shared session shell for new Claude, Codex and OpenCode
+terminals. Updates preserve existing choices and older absent policies. Use
+`hearting session shell disable` to restore native launch behavior, or
+`hearting session shell enable` to enable it again. Existing sessions keep running.

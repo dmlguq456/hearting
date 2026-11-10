@@ -123,6 +123,28 @@ class WrappedForegroundTest(unittest.TestCase):
                 self.retire(duty["id"])
                 self.assertEqual(self.actions, prior)
 
+    def test_public_retire_refuses_a_service_worker_or_other_harness_behind_the_seat(self):
+        # The seat join proves birth and foreground, not the native's role: a service,
+        # a registered worker, or another harness's TUI is no requested user seat.
+        native = self.native["pid"]
+        cases = {
+            "service": (lambda pid: (self.harness, pid == native), lambda pid: False),
+            "registered-worker": (lambda pid: (self.harness, False) if pid == native
+                                  else ("", False), lambda pid: pid == native),
+            "other-harness": (lambda pid: ("opencode", False) if pid == native
+                              else ("", False), lambda pid: False),
+        }
+        for harness in ("claude", "codex"):
+            for name, (runtime, worker) in cases.items():
+                with self.subTest(harness=harness, case=name), \
+                     mock.patch.object(po, "_runtime", side_effect=runtime), \
+                     mock.patch.object(po, "_registered_worker", side_effect=worker):
+                    self.select(harness)
+                    _rc, output = self.retire()
+                    self.assertEqual(self.actions, [])
+                    self.assertNotIn("retired=true", output)
+                    self.assertIsNone(peer._prompt_foreground_proof(self.pane, harness, self.sid))
+
     def test_prompt_and_handoff_share_the_inner_native_lifetime(self):
         for harness in ("claude", "codex"):
             with self.subTest(harness=harness):

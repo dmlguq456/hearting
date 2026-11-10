@@ -539,3 +539,8 @@ It requires the same UID/state root, exact command and PID birth, and the actual
 projection flock. It sends one pidfd-bound SIGTERM and starts the new producer
 only after acquiring that lock; ambiguous/current/foreign/unverifiable or slow
 producers are left alone. Rendering never performs this handoff.
+
+New installations enable the shared session shell for new Claude, Codex and OpenCode
+terminals. Updates preserve existing choices and older absent policies. Use
+`hearting session shell disable` to restore native launch behavior, or
+`hearting session shell enable` to enable it again. Existing sessions keep running.
