@@ -98,6 +98,8 @@ const turnContextBySession = new Map()
 //     candidate probe) and the kept text is re-emitted on every model call of
 //     that turn, so a tool-loop continuation never consumes a second card.
 const cardBySession = new Map()
+// Completion records the courier stopped sending on its own, carried by this user turn.
+const carriedCompletionBySession = new Map()
 const historyNoticeSettledBySession = new Set()
 const peerGuidanceBySession = new Map()
 // One threshold notice per native session, retained for the triggering turn so
@@ -1768,6 +1770,10 @@ const CARRIER_INTERVAL_MS = 5000
 const CARRIER_ROOTS_RETRY_MS = 60000
 const CARRIER_RECIPIENT_CACHE_MS = 10000
 const CARRIER_NEGATIVE_CACHE_MS = 1200
+// A record sent this many times in a row (prompt accepted, exact text never seen in the
+// native history) opens no further turn: it stays owed and rides the session's next
+// natural turn instead (a user prompt or a completed tool of a running turn).
+const CARRIER_UNOBSERVED_SEND_LIMIT = 2
 const sweepRel = path.join("utilities", "dispatch_session_sweep.py")
 const OWED_STATES = new Set(["pending", "claimed", "sent-ambiguous"])
 
@@ -1836,6 +1842,19 @@ function createCompletionCarrier(ctx) {
   const status = new Map()
   const busy = new Set()
   const recipientCache = new Map()
+  // delivery_id -> consecutive accepted sends whose receipt was never observed, and
+  // sid -> delivery ids that reached CARRIER_UNOBSERVED_SEND_LIMIT (in-turn only).
+  const unobservedSends = new Map()
+  const deferred = new Map()
+  // delivery_id -> {record, text} of the limited send: its claim may still be live,
+  // and the next natural turn takes that claim over instead of claiming anew.
+  const heldSends = new Map()
+  const deferredIds = sid => deferred.get(sid) || new Set()
+  const forgetDeferred = (sid, ids) => {
+    const held = deferred.get(sid)
+    for (const id of ids) { unobservedSends.delete(id); heldSends.delete(id); held?.delete(id) }
+    if (held && !held.size) deferred.delete(sid)
+  }
   let roots = null
   let rootsAt = 0
   let timer = null
@@ -1888,7 +1907,11 @@ function createCompletionCarrier(ctx) {
       } else {
         cached.deliveryIds = deliveryIds
       }
-      if (cached.deliveryIds.length) {
+      // A deferred record no longer owed was settled elsewhere; one still owed
+      // opens no turn of its own and waits for the session's next natural turn.
+      const held = deferredIds(sid)
+      forgetDeferred(sid, [...held].filter(id => !deliveryIds.includes(id)))
+      if (cached.deliveryIds.some(id => !held.has(id))) {
         cached.negativeUntil = 0
         return true
       }
@@ -1986,6 +2009,13 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, claimed === null ? "claim-unavailable" : "nothing-claimed"); return
       }
       log("claim", sid, "claimed", { deliveries: claimed.records.map(record => record.delivery_id) })
+      const held = deferredIds(sid)
+      if (claimed.records.every(record => held.has(record.delivery_id))) {
+        // Nothing new to say: the deferred records keep waiting for a natural turn.
+        await command("release", sid, { records: claimed.records })
+        log("skip", sid, "resend-limit-deferred", { deliveries: [...held] })
+        return
+      }
       const canSend = await nativeIdle()
       // A second native read is the final output/send recheck. If another
       // carrier's exact receipt appeared after our first read, settle it here
@@ -2076,13 +2106,30 @@ function createCompletionCarrier(ctx) {
       // persist: it is sent, not unsent. Keep the claim, as the V2 peer courier
       // keeps an unverified row: the next idle pass settles it from history, and
       // only the existing claim lease, once expired, makes it deliverable again.
-      const held = taken || promptReason === "timeout"
-      const released = releaseRecords.length && !held
+      const sent = taken || promptReason === "timeout"
+      const released = releaseRecords.length && !sent
         ? await command("release", sid, { records: releaseRecords }) : { count: 0 }
+      forgetDeferred(sid, [...received])
+      // After CARRIER_UNOBSERVED_SEND_LIMIT such sends in a row the record opens no
+      // further turn; its claim lease still expires, so it stays owed, not dropped.
+      const limited = []
+      if (sent) {
+        for (const record of releaseRecords) {
+          const count = (unobservedSends.get(record.delivery_id) || 0) + 1
+          unobservedSends.set(record.delivery_id, count)
+          if (count >= CARRIER_UNOBSERVED_SEND_LIMIT) {
+            if (!deferred.has(sid)) deferred.set(sid, new Set())
+            deferred.get(sid).add(record.delivery_id)
+            heldSends.set(record.delivery_id, { record, text: beforeSend.text })
+            limited.push(record.delivery_id)
+          }
+        }
+      }
       log("settle", sid, received.size ? "native-receipt"
-        : held ? "sent-unobserved-held" : "release-fallback", {
+        : sent ? "sent-unobserved-held" : "release-fallback", {
         received: received.size, acked: observed?.settled_count ?? null,
         released: released?.count ?? null, prompt_accepted: taken,
+        ...(limited.length ? { resend_limit_reached: limited } : {}),
       })
     } catch (error) {
       log("skip", sid, "delivery-error", { error: String(error?.message || error).slice(0, 180) })
@@ -2139,10 +2186,45 @@ function createCompletionCarrier(ctx) {
       log("env", sid, "carrier-armed")
       return `${CARRIER_KIND}:${sid}`
     },
+    // The natural-turn leg for deferred records: a user prompt or a completed tool of a
+    // running turn carries them, as Claude's UserPromptSubmit/PostToolUse context does.
+    // The text reaches this turn's next model call, so it is acked here (at-least-once).
+    async inTurn(sid) {
+      if (!sid || !deferredIds(sid).size || !available() || knownChildSession(sid)) return ""
+      if (busy.has(sid)) return ""
+      busy.add(sid)
+      try {
+        const messages = await compactMessages(ctx, sid)
+        const history = Array.isArray(messages) ? messages : []
+        // The limited send still holds its claim lease (a fresh claim is refused until
+        // it expires). Take that exact claim over: settle revalidates the record, its
+        // claim owner, live lease and recipient, and returns only what is still owed.
+        // An expired or changed claim comes back empty and the ordinary claim follows.
+        let claimed = null
+        const sends = [...deferredIds(sid)].map(id => heldSends.get(id)).filter(Boolean)
+        const sent = sends.find(item => item.text)
+        if (sent) {
+          const inherited = await command("settle", sid, {
+            records: sends.map(item => item.record), messages: history, text: sent.text })
+          forgetDeferred(sid, inherited?.received_ids || [])
+          if (inherited?.text && inherited.records?.length && !inherited.unknown_ids?.length) claimed = inherited
+        }
+        if (!claimed) claimed = await command("deliver", sid, { messages: history })
+        if (!claimed?.text || !Array.isArray(claimed.records) || !claimed.records.length) return ""
+        const acked = await command("ack", sid, { records: claimed.records })
+        const ids = claimed.records.map(record => record.delivery_id)
+        forgetDeferred(sid, ids)
+        log("in-turn", sid, "carried", { deliveries: ids, acked: acked?.count ?? null })
+        return claimed.text
+      } catch (error) {
+        log("skip", sid, "in-turn-error", { error: String(error?.message || error).slice(0, 180) })
+        return ""
+      } finally { busy.delete(sid) }
+    },
     status(sid, type) { if (sid && type) status.set(sid, type) },
     // A finished turn also looks past its own records (a seat handover stores them elsewhere).
     async idle(sid) { if (!sid) return; status.set(sid, "idle"); if (sessions.has(sid)) await deliver(sid, false) },
-    forget(sid) { sessions.delete(sid); status.delete(sid) },
+    forget(sid) { sessions.delete(sid); status.delete(sid); forgetDeferred(sid, [...deferredIds(sid)]) },
     dispose(silent = false) { if (!silent) log("dispose", "", "context-disposed", { sessions: [...sessions] }); if (timer) clearInterval(timer); timer = null; sessions.clear() },
   }
 }
@@ -2289,11 +2371,14 @@ async function pendingPeerTransitionAsync(sid, options, timeoutMs = 1500) {
 // The helper records a receipt only after it has flushed one complete JSON line,
 // so a complete line is delivered text even if the child is killed afterwards; a
 // partial line means no flush, and the rows stay with their recovery owner.
-function peerToolContextAsync(sid, timeoutMs = 2500) {
+// On timeout the child is killed and its stdout is still drained to `close`, so a
+// line it flushed before the kill is parsed, not dropped; `drainMs` bounds that.
+function peerToolContextAsync(sid, timeoutMs = 2500, drainMs = 1000) {
   return new Promise((resolve) => {
     let out = ""
     let child
     let finished = false
+    let drain
     const parse = () => {
       const line = out.split("\n").find((value) => value.trim())
       if (!line) return ""
@@ -2303,8 +2388,15 @@ function peerToolContextAsync(sid, timeoutMs = 2500) {
         return typeof text === "string" ? text : ""
       } catch { return "" }
     }
-    const finish = () => { if (finished) return; finished = true; clearTimeout(timer); resolve(parse()) }
-    const timer = setTimeout(() => { try { child?.kill("SIGKILL") } catch {} finish() }, timeoutMs)
+    const finish = () => {
+      if (finished) return
+      finished = true; clearTimeout(timer); clearTimeout(drain); resolve(parse())
+    }
+    const timer = setTimeout(() => {
+      try { child?.kill("SIGKILL") } catch {}
+      if (!child?.stdout) { finish(); return }
+      drain = setTimeout(finish, drainMs)
+    }, timeoutMs)
     try {
       child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
         "context", "--to-harness", "opencode", "--to-session-id", sid,
@@ -3282,6 +3374,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       showContextAlert(ctx, text)
     }
     const cardTurn = turn || prompt
+    if (eventSid && carriedCompletionBySession.get(sid)?.turn !== cardTurn) {
+      const text = await completionCarrier.inTurn(eventSid)
+      if (text) carriedCompletionBySession.set(sid, { turn: cardTurn, text })
+      else carriedCompletionBySession.delete(sid)
+    }
     if (eventSid && (!cardTurn || cardBySession.get(sid)?.turn !== cardTurn)) {
       const cardResult = collectCard("prompt", eventSid, baseDir(ctx), prompt)
       collectHistoryNotice(ctx, eventSid, baseDir(ctx), prompt, true)
@@ -3329,6 +3426,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
 
     const prompt = promptBySession.get(sid) || ""
     const turn = turnBySession.get(sid) || ""
+    const carried = carriedCompletionBySession.get(sid)
+    if (carried && carried.turn === (turn || prompt)) appendContext(output, carried.text)
     const cached = turnContextBySession.get(sid)
     // A turn is new when chat.message recorded a prompt this plugin has not
     // built context for yet. Sessions whose runtime supplies no message ID fall
@@ -3461,6 +3560,9 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       // so the shared service keeps serving every other window meanwhile.
       const text = await peerToolContextAsync(input.sessionID)
       if (text && typeof output.output === "string") output.output += "\n" + text
+      // A completion record the idle courier stopped re-sending rides this result too.
+      const carried = await completionCarrier.inTurn(input.sessionID)
+      if (carried && typeof output.output === "string") output.output += "\n" + carried
     }
     // Record actual spec reads for workflow and display evidence.
     // Non-blocking: a marker failure must never abort a successful read.
