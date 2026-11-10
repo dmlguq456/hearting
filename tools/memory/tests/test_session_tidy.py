@@ -1866,7 +1866,7 @@ def codex_row(kind: str, text: str) -> dict:
 class TailFirstReadingTest(TidyCase):
     """The newest unread range is read first; an old unread front is never overwritten by a newer end."""
 
-    SID = "sid-tail"
+    SID = "ses_tail"        # an OpenCode session id; the JSONL harnesses take any id
     ROWS = 4000
 
     def setUp(self):
@@ -4137,9 +4137,90 @@ class OpenCodeTransactionReadTest(TidyCase):
         with self.library(), mock.patch.object(tt.time, "sleep"):
             before = tt.read_watermark("opencode", self.SID)
             chunk = tt.read_pending("opencode", self.SID, self.iso.opencode_db)
-            self.assertIn("DatabaseError: file is not a database", chunk.error)
+            self.assertIn("file is not a database", chunk.error)
             self.assertNotIn("\n", chunk.error)
             self.assertLessEqual(len(chunk.error), 220)
+            self.assertEqual(tt.read_watermark("opencode", self.SID), before)
+
+
+class OpenCodeV2ReadTest(TidyCase):
+    """OpenCode 2 keeps sessions in ``session_v2``/``session_message``; tidy reads them like V1 ones."""
+
+    SID = "ses_fixturev2000000000000001"
+    V1_SID = "ses_fixture0000000000000001"
+
+    def load(self, *, upgraded=False):
+        con = sqlite3.connect(self.iso.opencode_db)
+        try:
+            if upgraded:            # a home used before 2.x keeps its old tables and sessions
+                con.executescript((FIXTURES / "opencode-choice.sql").read_text(encoding="utf-8"))
+            con.executescript((FIXTURES / "opencode-v2-choice.sql").read_text(encoding="utf-8"))
+            con.commit()
+        finally:
+            con.close()
+
+    def pending(self, sid):
+        return tt.read_pending("opencode", sid, self.iso.opencode_db, 1 << 20)
+
+    def discovered(self):
+        with mock.patch.object(tt, "opencode_db_path", return_value=self.iso.opencode_db):
+            return [item["sid"] for item in tt._discover("opencode", 0)]
+
+    def test_a_fresh_opencode_2_home_is_read_and_holds_at_an_open_question(self):
+        self.load()
+        with self.library(), mock.patch.object(tt, "now_epoch", return_value=FIXTURE_NOW):
+            first = self.pending(self.SID)
+            self.assertEqual(first.error, "")
+            self.assertEqual((first.unit, first.cursor_from, first.cursor_to, first.blocked),
+                             ("seq", 0, 9, "open-question"))
+            self.assertEqual(first.text, "[user] v2 정리 시험을 시작합니다\n[assistant] v2 질문을 드립니다.\n"
+                                         "[assistant] v2 파일 저장으로 진행합니다.")
+            self.assertEqual([(c["question"], c["answers"]) for c in first.choices],
+                             [("v2 저장 방식을 어떻게 할까요?", ["파일로 저장 (권장)"])])
+            self.assertEqual(first.pending_after, [[9, 13]])
+            tt.mark_applied("opencode", self.SID, first)
+            con = sqlite3.connect(self.iso.opencode_db)
+            data = json.loads(con.execute("SELECT data FROM session_message WHERE seq = 9").fetchone()[0])
+            data["content"][0]["state"].update({"status": "completed", "metadata": {"answers": [["진행 (권장)"]]}})
+            con.execute("UPDATE session_message SET data = ?, time_updated = time_updated + 5000 WHERE seq = 9",
+                        (json.dumps(data, ensure_ascii=False),))
+            con.commit()
+            con.close()
+            second = self.pending(self.SID)
+            self.assertEqual([c["answers"] for c in second.choices], [["진행 (권장)"]])
+            tt.mark_applied("opencode", self.SID, second)
+            third = self.pending(self.SID)
+            self.assertEqual((third.cursor_from, third.cursor_to, third.pending_after), (13, 13, []))
+            idle_card = tt.read_chunk("opencode", self.iso.opencode_db, 0, self.SID)
+            self.assertEqual((idle_card.error, idle_card.unit, idle_card.cursor_to), ("", "seq", 12))
+            self.assertIn("[user] v2 정리 시험을 시작합니다", idle_card.text)
+        self.assertEqual(self.discovered(), [self.SID])
+
+    def test_an_upgraded_home_reads_the_new_session_and_still_reads_the_old_one(self):
+        self.load(upgraded=True)
+        with self.library(), mock.patch.object(tt, "now_epoch",
+                                               return_value=FIXTURE_NOW + 2 * tt.OPEN_QUESTION_STALE_SEC):
+            new = self.pending(self.SID)
+            old = self.pending(self.V1_SID)
+        self.assertEqual((new.error, new.unit, new.cursor_to), ("", "seq", 13))
+        self.assertIn("[user] v2 정리 시험을 시작합니다", new.text)
+        self.assertEqual((old.error, old.unit, old.cursor_to), ("", "rowid", 7))
+        self.assertIn("[user] 정리 시험을 시작합니다", old.text)
+        self.assertIn("[assistant] 파일 저장으로 진행합니다.", old.text)
+        self.assertEqual(len(old.choices), 3)
+        self.assertEqual(sorted(self.discovered()), sorted([self.SID, self.V1_SID]))
+
+    def test_a_session_in_both_generations_is_unreadable_and_does_not_advance(self):
+        self.load(upgraded=True)
+        con = sqlite3.connect(self.iso.opencode_db)
+        con.execute("INSERT INTO part VALUES ('prt_both', 'msg_fix01', ?, 1, 1, '{\"type\":\"text\",\"text\":\"x\"}')",
+                    (self.SID,))
+        con.commit()
+        con.close()
+        with self.library(), mock.patch.object(tt.time, "sleep"):
+            before = tt.read_watermark("opencode", self.SID)
+            chunk = self.pending(self.SID)
+            self.assertEqual(chunk.error, "unreadable: session-generation-ambiguous")
             self.assertEqual(tt.read_watermark("opencode", self.SID), before)
 
 
