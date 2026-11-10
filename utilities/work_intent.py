@@ -642,8 +642,10 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         original = (t("completion.intent_original", original=_line(intent["original"], 100))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
-    result = (t("completion.result_audit_findings") if route.get("capability") == "audit" and assessment == "FAIL"
-              else _result_line(route, t))
+    result = _result_line(route, t)
+    if route.get("capability") == "audit" and assessment == "FAIL":
+        findings = t("completion.result_audit_findings")
+        result = findings if result == t("completion.result_done") else result + " · " + findings
     lines.append(t("completion.result", result=result))
     for state in ("undelivered", "unknown"):
         if (corrections or {}).get(state):

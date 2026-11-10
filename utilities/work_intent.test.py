@@ -395,6 +395,9 @@ class CompletionSummaryTest(unittest.TestCase):
         plan = {"decision": str(decision.relative_to(self.root)), "digest": "sha256:" + "0" * 64}
         first = WI.completion_summary({**self.route, "route_plan": {**plan, "index": 0}}, self.report)
         self.assertIn("결과: 이 leg(1/2) 완료 — 다음 leg가 남음", first)
+        reviewed = WI.completion_summary({**self.route, "capability": "audit", "route_plan": {**plan, "index": 0}}, self.report, assessment="FAIL")
+        self.assertIn("이 leg(1/2) 완료 — 다음 leg가 남음", reviewed)
+        self.assertIn("검토 완료 · 지적 사항 있음", reviewed)
         last = WI.completion_summary({**self.route, "route_plan": {**plan, "index": 1}}, self.report)
         self.assertIn("결과: 완료", last)
 
