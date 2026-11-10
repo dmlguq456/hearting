@@ -6,6 +6,7 @@ Runnable directly or via `python3 -m unittest fleet.tests.test_f19_memory -v` (f
 import datetime
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -308,6 +309,67 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertEqual([item["id"] for item in open_items], ["ob", "tagged", "marked"])
         self.assertEqual(open_items[0]["links"], ("rt-0123456789abcdef",))
         self.assertIn("backlog", open_items[1]["tags"])
+
+    def test_parity_register_rows_stay_open_hearting_work(self):
+        self._make_db([{"id": "ob", "cwd_origin": "git:github.com/team/repo",
+                        "type": "unresolved-obligation", "headline": "repo work",
+                        "updated": "2026-10-30"}])
+        home = self.store / "agent-home"
+        (home / "core").mkdir(parents=True)
+        (home / "core" / "ADAPTATION.md").write_text(
+            "| PG-1 | outside | not in the register | open | - |\n"
+            "<!-- parity-register:start -->\n"
+            "| ID | Harness | Effect | State | Next |\n|---|---|---|---|---|\n"
+            "| PG-1 | Codex | no wake on receipt | open | fix in hooks |\n"
+            "| PG-2 | OpenCode | herdr only | needs-user-decision | ask |\n"
+            "| PG-3 | Claude | fixed | resolved | - |\n"
+            "| PG-4 | Codex | platform | limit | official docs (https://example.test/docs) |\n"
+            "| PG-5 | Codex | typo | opne | - |\n"
+            "| PG-6 | Codex | still fixable | limit | - |\n"
+            "| PG-7 | Codex | still fixable | limit | official docs |\n"
+            "<!-- parity-register:end -->\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(home)}):
+            memcol._project_cache.clear()
+            full = memcol._read_project_memory("2026-11-02")["by_repo"]
+            scoped = memcol._read_project_memory("2026-11-02", repo="repo")["by_repo"]
+            own = memcol._read_project_memory("2026-11-02", repo="hearting")["by_repo"]
+        rows = full["hearting"]["open"]
+        # Only resolved and a linked limit close a row; an unknown state (a typo) and a
+        # limit whose Next carries no link stay open.
+        self.assertEqual(sorted(row["id"] for row in rows),
+                         ["parity:PG-1", "parity:PG-2", "parity:PG-5", "parity:PG-6", "parity:PG-7"])
+        headlines = {row["id"]: row["headline"] for row in rows}
+        self.assertTrue(headlines["parity:PG-1"].startswith("[미결] PG-1 Codex"))
+        self.assertTrue(headlines["parity:PG-2"].startswith("[결정 필요] PG-2"))
+        self.assertTrue(headlines["parity:PG-5"].startswith("[미결] PG-5"))
+        self.assertTrue(headlines["parity:PG-6"].startswith("[limit 근거 없음] PG-6"))
+        self.assertTrue(headlines["parity:PG-7"].startswith("[limit 근거 없음] PG-7"))
+        self.assertIn("user-decision", {row["id"]: row for row in rows}["parity:PG-2"]["tags"])
+        self.assertTrue(all(memcol.open_stage(row) == "open" for row in rows))
+        self.assertEqual(full["hearting"]["open_total"], 5)
+        self.assertNotIn("hearting", scoped)
+        self.assertEqual(len(own["hearting"]["open"]), 5)
+        self.assertEqual([row["id"] for row in full["repo"]["open"]], ["ob"])
+
+    def test_shipped_parity_register_parses_with_known_states(self):
+        """The real core/ADAPTATION.md register: rows exist and every state is a known value."""
+        register = Path(__file__).resolve().parents[3] / "core" / "ADAPTATION.md"
+        text = register.read_text(encoding="utf-8")
+        body = text[text.index("<!-- parity-register:start -->"):text.index("<!-- parity-register:end -->")]
+        states = {}
+        for line in body.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 5 and re.fullmatch(r"PG-\d{1,4}", cells[0]):
+                states[cells[0]] = (cells[3].strip("`").casefold(), cells[4])
+        self.assertTrue(states)
+        known = set(memcol._REGISTER_STATES) | set(memcol._REGISTER_CLOSED)
+        self.assertEqual({k: v for k, (v, _) in states.items() if v not in known}, {})
+        # Every shipped limit row links its evidence, so none is listed as unlinked.
+        self.assertEqual({k for k, (v, n) in states.items()
+                          if v == "limit" and not memcol.register_row_closed(v, n)}, set())
+        listed = {row["id"] for row in memcol.parity_open_items(register)}
+        self.assertEqual(listed, {f"parity:{k}" for k, (v, n) in states.items()
+                                  if not memcol.register_row_closed(v, n)})
 
     def test_session_block_counts_only_the_records_the_repo_page_counts(self):
         origin = "git:github.com/team/repo"

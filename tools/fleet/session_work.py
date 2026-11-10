@@ -17,7 +17,9 @@ def observe(cwd):
         return WorkRows(), []
     path = memory._db_path()
     repo = project_of(cwd)
-    data = memory._read_project_memory(datetime.date.today().isoformat(), decisions=0, repo=repo)
+    # Parity register rows stay on the Fleet screen; they are not every session's task.
+    data = memory._read_project_memory(datetime.date.today().isoformat(), decisions=0, repo=repo,
+                                       parity=False)
     project = data.get("by_repo", {}).get(repo, {})
     # The collector applies the repo page's classification before its display cut, so
     # finished records never count and never hide open work behind the cut.
