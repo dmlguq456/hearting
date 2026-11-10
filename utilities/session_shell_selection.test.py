@@ -101,6 +101,18 @@ class ResumedSelectionTests(unittest.TestCase):
         with mock.patch.object(shell, 'control', side_effect=[first, moved]):
             self.assertFalse(shell.answer_attachment_current(self.fx.binding))
 
+    def test_a_tui_without_a_daemon_is_corroborated_by_its_own_native_proof(self):
+        # --no-daemon has no daemon membership; the exact native proof of the same
+        # thread stands in for it. Membership of another process still refuses.
+        self.select_resumed()
+        for native, member, expected in ((self.resumed, None, True), (None, None, False),
+                                         (self.old, None, False),
+                                         (self.resumed, (self.fx.native.pid + 1, self.member[1]), False)):
+            self.fx.selected = native
+            with self.subTest(native=native, member=member), \
+                    mock.patch.object(codex, 'process_for_thread', return_value=member):
+                self.assertEqual(shell.answer_attachment_current(self.fx.binding), expected)
+
     def test_a_repaint_between_the_reads_leaves_the_decision_to_native_proof(self):
         # A working turn repaints the screen between the two reads. The frame is
         # then no observation: only an independent native proof of this same root

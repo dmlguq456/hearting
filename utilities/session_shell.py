@@ -420,9 +420,11 @@ def _codex_selected_root(binding):
     if native_sid and native_sid != selected:
         return {"selected_sid": None}
     # Membership corroborates the native viewport; alone it never selects one
-    # of several roots retained by a shared daemon after /resume.
+    # of several roots retained by a shared daemon after /resume. A TUI with no
+    # daemon (--no-daemon) has no membership; there the exact process-native
+    # proof of the same thread corroborates it instead.
     member = codex.process_for_thread(selected, environ=procscan.read_environ(pid), fresh=True)
-    if member != (pid, birth):
+    if member != (pid, birth) and not (member is None and native_sid == selected):
         return {"selected_sid": None}
     latest_native = codex.session_id_of_process(pid, fresh=True)
     if latest_native and latest_native != selected:
