@@ -71,11 +71,11 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertEqual(ver["worker_records"][0]["kind"], "RV")
         self.assertTrue(ver["worker_records"][0]["path"].endswith("RV-BC-FIXTURE.md"))
         self.assertEqual(desc["next"]["kind"], "closed")
-        self.assertEqual(ver["result"], "Three focused suites pass.")
-        self.assertIn(("result", "Three focused suites pass.", "info"), rv.detail_lines(desc))
+        self.assertIsNone(ver["result"])           # already shown as a test line, not repeated
+        self.assertIn(("test", "Three focused suites pass.", "info"), rv.detail_lines(desc))
         text = json.dumps(desc)
         self.assertNotIn("hidden-value", text)
-        self.assertEqual(rv.summary_text(desc), "direct·default · RV record · CI recorded same-head · gate ✓")
+        self.assertEqual(rv.summary_text(desc), "direct·default · RV record · CI same-head · gate ✓")
 
     def test_open_solo_route_without_reviewer_says_so_and_names_next_step(self):
         record = _record(self.root, "rt-solo", "solo", [
@@ -86,7 +86,8 @@ class RouteVisibilityTests(unittest.TestCase):
         desc = rv.describe(record, view)
         self.assertEqual(desc["current"], "one-shot")
         self.assertFalse(desc["verification"]["independent_review"])
-        self.assertEqual(desc["next"], {"kind": "wait", "text": "wait · one-shot (claude) running"})
+        self.assertEqual(desc["next"], {"kind": "wait", "node": "one-shot", "harness": "claude",
+                                        "text": "wait · one-shot (claude) running"})
         labels = [label for label, _text, _tone in rv.detail_lines(desc)]
         self.assertEqual(labels[:4], ["route", "why", "owner", "stages"])
         self.assertIn(("review", "no independent reviewer stage in this route", "dim"), rv.detail_lines(desc))
@@ -133,7 +134,8 @@ class RouteVisibilityTests(unittest.TestCase):
                           {"id": "frame-alternative", "state": "done", "gate_passed": True},
                           {"id": "route-decision", "state": "pending"}]}
         desc = rv.describe(record, view)
-        self.assertEqual(desc["next"], {"kind": "person", "text": "answer · frame-review"})
+        self.assertEqual(desc["next"], {"kind": "person", "node": "route-decision", "harness": None,
+                                        "text": "answer · frame-review"})
         self.assertEqual([g["node"] for g in desc["verification"]["completion_gates"]], ["route-decision"])
         self.assertIn("frame 2-way", rv.summary_text(desc))
         self.assertNotIn("no reviewer", rv.summary_text(desc))
@@ -186,6 +188,156 @@ class RouteVisibilityTests(unittest.TestCase):
             self.assertTrue(all(isinstance(v, str) for v in (label, text, tone)))
             self.assertLessEqual(len(text), 200)
         self.assertNotIn("one-shot", out["card"])   # the card leaves the stage rail to the row
+
+    # --- PR #1429 review (RV-PR1429-1110) regressions: each uses the recorded counterexample ---
+
+    def test_p1_1_card_marks_ci_only_for_a_same_head_record(self):
+        record = _record(self.root, "rt-ci", "direct", [
+            {"id": "inline", "completion_gate": "inline-complete", "terminal": True}],
+            intensity="direct", topology="inline")
+        head = "a0e73fd49c88e15c6bd4c891ea9b36c301e159be"
+        for summary in ("CI42465679913 is not green: two jobs failed.",
+                        "외부push/PR/CI·설치·pending수정0.",
+                        "CI and independent review evidence are recorded in the author report."):
+            with self.subTest(summary=summary):
+                rv._OUTCOME_CACHE.clear()
+                _write_outcome(self.root, record, closed_at="2026-11-10T01:00:00Z", head_commit=head,
+                               terminal_gate_proven=True, terminal_gates={"inline": {"passed": True}},
+                               summary=summary)
+                desc = rv.describe(record)
+                self.assertNotIn("CI", rv.summary_text(desc, current=False))
+                self.assertNotIn("CI", rv.summary_text(desc))
+                self.assertEqual(rv.bounded(desc)["codes"]["verification"]["ci"], "recorded")
+                # the detail line still shows the sentence as written
+                self.assertIn(("CI", summary, "info"), rv.detail_lines(desc))
+        rv._OUTCOME_CACHE.clear()
+        _write_outcome(self.root, record, closed_at="2026-11-10T01:00:00Z", head_commit=head,
+                       terminal_gate_proven=True, terminal_gates={"inline": {"passed": True}},
+                       summary="CI 77 all jobs SUCCESS for " + head + ".")
+        desc = rv.describe(record)
+        self.assertIn("CI same-head", rv.summary_text(desc))
+        codes = rv.bounded(desc)["codes"]["verification"]
+        self.assertEqual(codes["ci"], "same-head")
+        self.assertEqual(codes["head"], head[:7])
+        self.assertEqual(codes["head_full"], head)
+        self.assertEqual(codes["ci_text_short"], "CI 77 all jobs SUCCESS for a0e73fd.")
+
+    def test_p1_2_route_fleet_reads_as_no_response_is_not_shown_running(self):
+        nodes = [{"id": "execute", "completion_gate": "code-execute"},
+                 {"id": "test", "unit": "qa/test", "completion_gate": "code-test",
+                  "depends_on": ["execute"], "terminal": True}]
+        record = _record(self.root, "rt-stale", "staged", nodes, intensity="standard", topology="staged")
+        view = {"liveness": "unknown",
+                "nodes": [{"id": "execute", "state": "done", "gate_passed": True},
+                          {"id": "test", "state": "reconciling", "harness": "codex"}]}
+        desc = rv.describe(record, view)
+        self.assertEqual(desc["next"]["kind"], "no-response")
+        self.assertNotIn("running", desc["next"]["text"])
+        self.assertIn("test last reconciling", desc["next"]["text"])
+        self.assertNotIn("running", rv.summary_text(desc))
+        self.assertEqual(rv.bounded(desc)["codes"]["next"], {"kind": "no-response", "node": "test", "harness": "codex"})
+        live = rv.describe(record, dict(view, liveness="working"))
+        self.assertEqual(live["next"]["text"], "wait · test (codex) reconciling")
+
+    def test_p1_3_bounded_carries_structured_codes_beside_the_sentences(self):
+        nodes = [{"id": "execute", "completion_gate": "code-execute"},
+                 {"id": "impl-review", "unit": "qa/code-review", "kind": "review-worker",
+                  "completion_gate": "code-impl-review", "depends_on": ["execute"]},
+                 {"id": "report", "completion_gate": "code-report", "depends_on": ["impl-review"],
+                  "terminal": True}]
+        record = _record(self.root, "rt-codes", "staged", nodes, intensity="standard", topology="staged")
+        record["selection"]["selection_basis"] = []          # no basis recorded at all
+        view = {"liveness": "working", "nodes": [
+            {"id": "execute", "state": "done", "gate_passed": True},
+            {"id": "impl-review", "state": "active", "harness": "codex"},
+            {"id": "report", "state": "pending"}]}
+        job = {"attempt_id": "att-c", "liveness": "working", "harness": "claude", "route_node": "execute",
+               "_context_execution_started_at": 1794277391.0, "elapsed_min": 7}
+        out = rv.bounded(rv.describe(record, view, owner=rv.owner_from_job(job)))
+        codes = out["codes"]
+        self.assertEqual(codes["schema"], "route_visibility_codes_v1")
+        self.assertEqual(codes["stages"], [["execute", "work", "done", "1"], ["impl-review", "review", "active", "0"],
+                                           ["report", "work", "pending", "0"]])
+        self.assertEqual(codes["basis"], {"kind": "unknown", "codes": []})
+        self.assertEqual(codes["next"], {"kind": "wait", "node": "impl-review", "harness": "codex"})
+        self.assertEqual(codes["owner"], {"liveness": "working", "started_at": "1794277391",
+                                          "elapsed_min": "7", "harness": "claude", "attempt_id": "att-c"})
+        self.assertEqual(codes["verification"]["review"], "stages")
+        self.assertEqual(codes["verification"]["review_total"], "1")
+        self.assertEqual(codes["verification"]["gate"], "unproven")
+        self.assertNotIn("?", json.dumps(out, ensure_ascii=False))
+
+        def leaves(value):
+            if isinstance(value, dict):
+                return [leaf for item in value.values() for leaf in leaves(item)]
+            if isinstance(value, list):
+                return [leaf for item in value for leaf in leaves(item)]
+            return [value]
+        self.assertTrue(all(isinstance(leaf, str) for leaf in leaves(codes)))
+        from tools.fleet.tests.test_explorer_live_shape import route_extension
+        self.assertTrue(route_extension("visibility", out))
+
+    def test_p2_1_why_names_the_direct_predicates_that_did_not_hold(self):
+        record = _record(self.root, "rt-gap", "solo", [{"id": "one-shot", "completion_gate": "g", "terminal": True}])
+        record["selection"]["selection_basis"] += [
+            {"axis": "direct-predicate-gap", "signal": signal, "source": "compiler"}
+            for signal in ("atomic-outcome", "focused-verification", "known-scope", "no-artifact-handoff")]
+        desc = rv.describe(record)
+        why = next(text for label, text, _tone in rv.detail_lines(desc) if label == "why")
+        self.assertIn("not direct: atomic-outcome, focused-verification, known-scope +1", why)
+        self.assertIn("not-direct:no-artifact-handoff", rv.bounded(desc)["codes"]["basis"]["codes"])
+        self.assertIn("intensity-default", rv.bounded(desc)["codes"]["basis"]["codes"])
+
+    def test_p2_2_review_independence_and_failed_terminal_gate_are_shown_as_recorded(self):
+        nodes = [{"id": "impl-review", "unit": "qa/code-review", "kind": "review-worker",
+                  "completion_gate": "code-impl-review"},
+                 {"id": "report", "completion_gate": "code-report", "depends_on": ["impl-review"],
+                  "terminal": True}]
+        record = _record(self.root, "rt-ind", "staged", nodes, intensity="standard", topology="staged")
+        _write_outcome(self.root, record, closed_at="2026-11-07T02:03:18Z", terminal_gate_proven=False,
+                       terminal_gates={"report": {"passed": False, "reason": "completion-marker-absent"}},
+                       review_independence={"impl-review": {"review_independence": "independent",
+                                                            "reviewer_kind": "registered-worker"}})
+        view = {"nodes": [{"id": "impl-review", "state": "done", "gate_passed": True, "harness": "codex"},
+                          {"id": "report", "state": "pending"}]}
+        desc = rv.describe(record, view)
+        lines = rv.detail_lines(desc)
+        review = next(text for label, text, _tone in lines if label == "review")
+        self.assertIn("independent (registered-worker)", review)
+        gate = next(text for label, text, _tone in lines if label == "gate")
+        self.assertIn("code-report ✕ completion-marker-absent", gate)
+        self.assertIn("gate ✕", rv.summary_text(desc))
+        codes = rv.bounded(desc)["codes"]["verification"]
+        self.assertEqual(codes["gate"], "failed")
+        self.assertEqual(codes["gate_reasons"], ["completion-marker-absent"])
+        self.assertEqual(codes["independence"], "independent")
+
+    def test_p3_ended_owner_heading_unfound_rv_and_date_noise(self):
+        record = _record(self.root, "rt-p3", "solo", [{"id": "one-shot", "completion_gate": "g", "terminal": True}])
+        job = {"attempt_id": "att-d", "liveness": "done", "harness": "claude",
+               "_context_execution_started_at": 1794277391.0}
+        owner_line = next(text for label, text, _tone in rv.detail_lines(
+            rv.describe(record, owner=rv.owner_from_job(job))) if label == "owner")
+        self.assertIn("done · started", owner_line)
+        self.assertNotIn("since", owner_line)
+        _write_outcome(self.root, record, closed_at="2026-11-10T01:00:00Z", terminal_gate_proven=True,
+                       terminal_gates={"one-shot": {"passed": True}},
+                       summary="# Wrapped foreground and retirement settlement\n"
+                               "검토 반영 완료, 11/10 배포 준비.\n"
+                               "Reviewer record: inputs/RV-MISSING-1110.md\n"
+                               "#1403 CI42 is not green: download HTTP504.")
+        desc = rv.describe(record)
+        ver = desc["verification"]
+        self.assertEqual(ver["result"], None)                # the first sentence already shows as review
+        self.assertNotIn("Wrapped foreground", json.dumps(desc["verification"], ensure_ascii=False))
+        self.assertFalse(ver["independent_review"])         # a named but missing RV is not a review
+        self.assertEqual(ver["tests"], [])                   # a date is not a test count
+        self.assertEqual([r["text"] for r in ver["review_notes"]], ["검토 반영 완료, 11/10 배포 준비."])
+        self.assertIn("no reviewer", rv.summary_text(desc))   # a named but missing RV is no card mark
+        self.assertNotIn("RV record", rv.summary_text(desc))
+        self.assertEqual(rv.bounded(desc)["codes"]["verification"]["review"], "none")
+        # ``#1403`` is a PR reference, not a heading: its sentence still shows
+        self.assertEqual([r["text"] for r in ver["ci"]], ["#1403 CI42 is not green: download HTTP504."])
 
     def test_module_never_writes(self):
         source = Path(rv.__file__).read_text(encoding="utf-8")

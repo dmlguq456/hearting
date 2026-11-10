@@ -24,7 +24,9 @@ Contract:
   owner_from_job(job)                         -> owner attempt progress from a registry row.
   observe(record, jobs=None, node_evidence=None, now=None)
                                               -> (view, owner) from the dispatch registry.
-  bounded(desc)                               -> the same dict clipped for a shell projection.
+  codes(desc)                                 -> string-only enums/codes of the same reading.
+  bounded(desc)                               -> the same dict clipped for a shell projection,
+                                                 English sentences plus ``codes``.
 
 CLI: ``python3 route_visibility.py <rt-id|route.json> [--artifact-root DIR] [--json]``.
 """
@@ -47,11 +49,13 @@ _SECRET = re.compile(
 _CI = re.compile(r"\bCI(?:\b|(?=\d))|GitHub Actions", re.I)
 _RECORD = re.compile(r"(?:[\w.~/-]*/)?(?:RV|BC)-[\w.-]+\.md")
 _TEST = re.compile(r"\bchecks?\b(?=.*\b(?:pass|fail))|\b(?:tests?|suites?|pytest|unittest|assertions?|regression|"
-                   r"passing|passed|\d+/\d+)\b|시험|테스트|회귀", re.I)
+                   r"passing|passed)\b|\b\d+/\d+\s*(?:pass(?:ed|ing)?|ok|tests?|green|통과|성공)|시험|테스트|회귀", re.I)
 _REVIEW = re.compile(r"\b(?:review(?:er|ed)?|impl-review|plan-check)\b|검토", re.I)
 _STATE_WORDS = {"unrecorded": "no marker", "done": "done", "active": "running", "reconciling": "reconciling",
                 "recovering": "recovering", "attention": "attention", "failed": "failed",
                 "degraded": "degraded", "pending": "pending"}
+_HEADING = re.compile(r"#{1,6}(?:\s|$)|```")
+_FULL_HEAD = re.compile(r"\b[0-9a-f]{40}\b")
 _MAX_EVIDENCE = 3
 _MAX_LINE = 220
 
@@ -115,19 +119,22 @@ def _shape(record):
 def _basis(record, shape):
     """Why the route has this shape: the person's choice, the default, or a frame proposal."""
     selection = record.get("selection") if isinstance(record.get("selection"), dict) else {}
-    rows = {row.get("axis"): row for row in selection.get("selection_basis") or ()
-            if isinstance(row, dict)}
+    basis_rows = [row for row in selection.get("selection_basis") or () if isinstance(row, dict)]
+    rows = {row.get("axis"): row for row in basis_rows}
+    gaps = [_text(row.get("signal"), 48) for row in basis_rows
+            if row.get("axis") == "direct-predicate-gap" and row.get("signal")]
     intensity = rows.get("compose-intensity") or {}
     requested = record.get("requested_intensity")
     effective = record.get("effective_intensity")
     escalation = [row for row in selection.get("escalation_basis") or () if isinstance(row, dict)]
-    notes = []
+    notes, codes = [], []
     if isinstance(record.get("route_plan"), dict):
         kind = "frame-proposal"
         notes.append("approved frame proposal")
     elif intensity.get("source") == "explicit":
         kind = "user"
         notes.append("intensity %s given" % _text(intensity.get("signal") or requested, 24))
+        codes.append("intensity-explicit")
     elif selection.get("route_origin") == "preset":
         kind = "preset"
         notes.append("capability preset")
@@ -135,19 +142,29 @@ def _basis(record, shape):
         kind = "default"
         if shape == "direct" and selection.get("direct_predicates"):
             notes.append("all direct predicates held")
+            codes.append("direct-predicates-held")
         elif shape == "framed":
             notes.append("frame shape requested")
         else:
             notes.append("intensity unspecified → %s" % _text(effective, 24))
+            codes.append("intensity-default")
     else:
         kind = "unknown"
+    if gaps and shape != "direct":
+        # The compiler's own record of the direct predicates that did not hold.
+        notes.append("not direct: %s%s" % (", ".join(gaps[:3]), " +%d" % (len(gaps) - 3) if len(gaps) > 3 else ""))
+        codes.extend("not-direct:" + gap for gap in gaps)
     if requested and effective and requested != effective:
         notes.append("requested %s → %s" % (_text(requested, 24), _text(effective, 24)))
+        codes.append("requested:%s>%s" % (_text(requested, 24), _text(effective, 24)))
     for row in escalation[:2]:
-        notes.append("escalated: %s" % _text(row.get("signal") or row.get("axis"), 48))
+        signal = _text(row.get("signal") or row.get("axis"), 48)
+        notes.append("escalated: %s" % signal)
+        codes.append("escalated:" + signal)
     if selection.get("inline_reason"):
         notes.append("inline: %s" % _text(selection.get("inline_reason"), 48))
-    return {"kind": kind, "notes": notes}
+        codes.append("inline:" + _text(selection.get("inline_reason"), 48))
+    return {"kind": kind, "notes": notes, "codes": codes}
 
 
 def _view_nodes(view):
@@ -210,7 +227,8 @@ def _sentences(summary):
     found = []
     for line in summary.splitlines():
         line = line.strip(" -*\t")
-        if not line or _SECRET.search(line):
+        # A markdown heading (``# Title``) or fence is layout, not a sentence; ``#1403`` is.
+        if not line or _HEADING.match(line) or _SECRET.search(line):
             continue
         for piece in re.split(r"(?<=[.;])\s+(?=[A-Z가-힣`])", line):
             piece = piece.strip()
@@ -268,6 +286,8 @@ def _verification(record, stages, outcome):
     head = head if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{7,40}", head) else None
     tests = [s for s in stages if s["role"] == "test"]
     reviews = [s for s in stages if s["role"] == "review"]
+    independence = (outcome or {}).get("review_independence")
+    independence = independence if isinstance(independence, dict) else {}
     ci = _evidence(sentences, _CI)
     for row in ci:
         row["same_head"] = bool(head and (head in row["text"] or head[:7] in row["text"]))
@@ -280,18 +300,30 @@ def _verification(record, stages, outcome):
     for nid in terminal_ids or list(terminal):
         tg = terminal.get(nid) if isinstance(terminal.get(nid), dict) else {}
         stage = next((s for s in stages if s["id"] == nid), {})
-        passed = True if tg.get("passed") is True or stage.get("gate_passed") else None
+        passed = True if tg.get("passed") is True or stage.get("gate_passed") else \
+            False if tg.get("passed") is False else None
         gates.append({"node": nid, "gate": stage.get("gate"), "passed": passed,
                       "reason": _text(tg.get("reason"), 48) or None})
     closed = (outcome or {}).get("closed_at") if isinstance((outcome or {}).get("closed_at"), str) else None
+    tests_found = _evidence(sentences, _TEST, (_CI,))
+    review_notes = _evidence(sentences, _REVIEW, (_CI, _RECORD))
+    shown = {row["text"] for row in tests_found + review_notes + ci}
+    result = _text(sentences[0]) if sentences else None
+
+    def _independence(nid):
+        row = independence.get(nid) if isinstance(independence.get(nid), dict) else {}
+        return (_text(row.get("review_independence"), 32) or None,
+                _text(row.get("reviewer_kind"), 32) or None)
     return {
         "test_stages": [{"id": s["id"], "state": s["state"], "gate_passed": s["gate_passed"],
                          "harness": s["harness"]} for s in tests],
-        "tests": _evidence(sentences, _TEST, (_CI,)),
+        "tests": tests_found,
         "reviewers": [{"id": s["id"], "state": s["state"], "gate_passed": s["gate_passed"],
-                       "harness": s["harness"], "model": s["model"]} for s in reviews],
-        "review_notes": _evidence(sentences, _REVIEW, (_CI, _RECORD)),
-        "independent_review": bool(reviews) or any(r["kind"] == "RV" for r in worker_records),
+                       "harness": s["harness"], "model": s["model"],
+                       "independence": _independence(s["id"])[0],
+                       "reviewer_kind": _independence(s["id"])[1]} for s in reviews],
+        "review_notes": review_notes,
+        "independent_review": bool(reviews) or any(r["kind"] == "RV" and r["path"] for r in worker_records),
         "worker_records": worker_records,
         "ci": ci,
         "head_commit": head,
@@ -299,7 +331,8 @@ def _verification(record, stages, outcome):
         "terminal_gate_proven": (outcome or {}).get("terminal_gate_proven") is True,
         "closed_at": closed,
         "finish_id": bool((outcome or {}).get("inline_finish_id")),
-        "result": _text(sentences[0]) if sentences else None,
+        # The first report sentence, unless it already shows as test, review or CI evidence.
+        "result": result if result not in shown else None,
     }
 
 
@@ -371,7 +404,19 @@ def _sealed_at(record):
         return None
 
 
-def _next_action(record, stages, verification, outcome, owner=None, inline=None):
+def _no_response(view, verification):
+    """Fleet's own read (``route.route_liveness``): a route still in flight with nothing running."""
+    return isinstance(view, dict) and view.get("liveness") == "unknown" and not verification["closed_at"]
+
+
+def _next_action(record, stages, verification, outcome, owner=None, inline=None, view=None):
+    nxt = _next_step(record, stages, verification, outcome, owner, inline, view)
+    nxt.setdefault("node", None)
+    nxt.setdefault("harness", None)
+    return nxt
+
+
+def _next_step(record, stages, verification, outcome, owner, inline, view):
     if verification["closed_at"] and verification["terminal_gate_proven"]:
         return {"kind": "closed", "text": "closed · nothing pending"}
     if outcome is not None and verification["closed_at"] and not verification["terminal_gate_proven"]:
@@ -381,16 +426,27 @@ def _next_action(record, stages, verification, outcome, owner=None, inline=None)
             owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
     by_id = {s["id"]: s for s in stages}
     active = [s for s in stages if s["state"] in ("active", "reconciling", "recovering")]
+    if _no_response(view, verification):
+        last = active[0] if active else next(
+            (s for s in stages if s["state"] not in ("done", "unrecorded") and not s["gate_passed"]), None)
+        return {"kind": "no-response", "node": last["id"] if last else None,
+                "harness": last["harness"] if last else None,
+                "text": "no response" + (" · %s last %s" % (
+                    last["id"], _STATE_WORDS.get(last["state"], last["state"])) if last else "")}
     if active:
-        names = ", ".join(s["id"] + (" (" + s["harness"] + ")" if s["harness"] else "") for s in active[:3])
-        return {"kind": "wait", "text": "wait · %s running" % names}
+        names = ", ".join(s["id"] + (" (" + s["harness"] + ")" if s["harness"] else "") + " "
+                          + _STATE_WORDS.get(s["state"], s["state"]) for s in active[:3])
+        return {"kind": "wait", "node": active[0]["id"], "harness": active[0]["harness"],
+                "text": "wait · %s" % names}
     failed = [s for s in stages if s["state"] in ("failed", "attention", "degraded")]
     if failed:
-        return {"kind": "resume", "text": "inspect · %s %s" % (failed[0]["id"], failed[0]["state"])}
+        return {"kind": "resume", "node": failed[0]["id"], "harness": failed[0]["harness"],
+                "text": "inspect · %s %s" % (failed[0]["id"], failed[0]["state"])}
     if owner and owner.get("liveness") in _LIVE:
         since = _clock(owner.get("started_at"))
-        return {"kind": "wait", "text": "wait · owner %s %s%s" % (
-            owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
+        return {"kind": "wait", "node": owner.get("node"), "harness": owner.get("harness"),
+                "text": "wait · owner %s %s%s" % (
+                    owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
     if inline and _shape(record) == "direct":
         return {"kind": "start" if inline != "finished" else "close",
                 "text": "inline finish %s in the main session" % inline}
@@ -402,10 +458,11 @@ def _next_action(record, stages, verification, outcome, owner=None, inline=None)
         if all(d is None or d["state"] == "done" or d["gate_passed"] for d in deps):
             gates = [g for g in record.get("human_gates") or () if isinstance(g, str)]
             if stage["role"] == "gate" and gates and deps:
-                return {"kind": "person", "text": "answer · %s" % ", ".join(gates)}
+                return {"kind": "person", "node": stage["id"], "text": "answer · %s" % ", ".join(gates)}
             if not known:
-                return {"kind": "unknown", "text": "no live stage evidence · %s next" % stage["id"]}
-            return {"kind": "start", "text": "start · %s" % stage["id"]}
+                return {"kind": "unknown", "node": stage["id"],
+                        "text": "no live stage evidence · %s next" % stage["id"]}
+            return {"kind": "start", "node": stage["id"], "text": "start · %s" % stage["id"]}
     if stages and all(s["state"] == "done" or s["gate_passed"] for s in stages):
         return {"kind": "close", "text": "all stages done · route close pending"}
     return {"kind": "unknown", "text": "no next step recorded"}
@@ -433,7 +490,8 @@ def _describe(record, view, outcome, owner=None):
     stages = _stages(record, view, terminal, closed)
     if owner is not None and not isinstance(owner, dict):
         owner = owner_from_job(owner)
-    if owner and owner.get("node") and owner.get("liveness") in _LIVE:
+    if owner and owner.get("node") and owner.get("liveness") in _LIVE and not (
+            isinstance(view, dict) and view.get("liveness") == "unknown" and not closed):
         for stage in stages:      # the owner's own node runs while its attempt is live
             if stage["id"] == owner["node"] and stage["state"] in ("unknown", "pending"):
                 stage["state"] = "active"
@@ -475,13 +533,13 @@ def _describe(record, view, outcome, owner=None):
         "owner": owner or None,
         "inline_finish": inline,
         "sealed_at": _sealed_at(record),
-        "next": _next_action(record, stages, verification, outcome, owner, inline),
+        "next": _next_action(record, stages, verification, outcome, owner, inline, view),
         "links": links,
     }
 
 
 _BASIS_WORD = {"user": "user", "default": "default", "frame-proposal": "frame proposal",
-               "preset": "preset", "unknown": "?"}
+               "preset": "preset", "unknown": "basis unrecorded"}
 _MARK = {True: "✓", None: "·", False: "✕"}
 
 
@@ -491,19 +549,37 @@ def _review_mark(verification, desc=None):
     if not reviewers and frames:
         return "frame %d-way" % len(frames)
     if not reviewers:
-        rv = [r for r in verification.get("worker_records") or () if r.get("kind") == "RV"]
+        # Only an RV record that was found on disk marks the card.
+        rv = [r for r in verification.get("worker_records") or () if r.get("kind") == "RV" and r.get("path")]
         return "RV record" if rv else "no reviewer"
     passed = sum(1 for r in reviewers if r.get("gate_passed"))
     failed = sum(1 for r in reviewers if r.get("state") == "failed")
     return "review %d/%d%s" % (passed, len(reviewers), " ✕" if failed else "")
 
 
-def _ci_mark(verification):
+def _ci_code(verification):
     rows = verification.get("ci") or ()
     if not rows:
-        return None
-    row = rows[0]
-    return "CI recorded" + (" same-head" if row.get("same_head") else "")
+        return "none"
+    return "same-head" if any(row.get("same_head") for row in rows) else "recorded"
+
+
+def _ci_mark(verification):
+    """The card names CI only when a recorded CI sentence names this route's own head.
+
+    Any other CI sentence (not run, failed, a mention) stays on the detail line as written."""
+    return "CI same-head" if _ci_code(verification) == "same-head" else None
+
+
+def _gate_code(verification):
+    gates = verification.get("completion_gates") or ()
+    if not gates:
+        return "proven" if verification.get("terminal_gate_proven") else "none"
+    if verification.get("terminal_gate_proven") or all(g.get("passed") is True for g in gates):
+        return "proven"
+    if any(g.get("passed") is False for g in gates):
+        return "failed"
+    return "unproven"
 
 
 def summary_text(desc, current=True):
@@ -511,19 +587,20 @@ def summary_text(desc, current=True):
     if not desc:
         return ""
     verification = desc.get("verification") or {}
-    parts = ["%s·%s" % (desc.get("shape") or "?",
-                        _BASIS_WORD.get((desc.get("basis") or {}).get("kind"), "?"))]
+    parts = ["%s·%s" % (desc.get("shape") or "unknown",
+                        _BASIS_WORD.get((desc.get("basis") or {}).get("kind"), "basis unrecorded"))]
     if current and desc.get("current"):
-        parts.append("%s %s" % (desc["current"], _STATE_WORDS.get(desc.get("current_state"),
-                                                                  desc.get("current_state") or "")))
+        if (desc.get("next") or {}).get("kind") == "no-response":
+            parts.append("%s no response" % desc["current"])
+        else:
+            parts.append("%s %s" % (desc["current"], _STATE_WORDS.get(desc.get("current_state"),
+                                                                      desc.get("current_state") or "")))
     parts.append(_review_mark(verification, desc))
     ci = _ci_mark(verification)
     if ci:
         parts.append(ci)
-    gates = verification.get("completion_gates") or ()
-    if gates:
-        proven = verification.get("terminal_gate_proven") or all(g.get("passed") for g in gates)
-        parts.append("gate " + ("✓" if proven else "·"))
+    if verification.get("completion_gates"):
+        parts.append("gate " + {"proven": "✓", "failed": "✕"}.get(_gate_code(verification), "·"))
     # The card (current=False) sits beside a stage rail in a narrow column: tighter joins.
     return (" · " if current else "  ").join(part.strip() for part in parts if part)
 
@@ -535,7 +612,7 @@ def detail_lines(desc):
     basis = desc.get("basis") or {}
     verification = desc.get("verification") or {}
     lines = [("route", "%s · %s · %s %s" % (
-        desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "?"),
+        desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),
         desc.get("capability") or "·", desc.get("intensity") or ""), "info")]
     if basis.get("notes"):
         lines.append(("why", "; ".join(basis["notes"]), "dim"))
@@ -545,7 +622,8 @@ def detail_lines(desc):
         lines.append(("owner", " · ".join(x for x in (
             " ".join(x for x in (owner.get("harness"), owner.get("model"), owner.get("effort")) if x) or None,
             "%s%s" % (owner.get("liveness") or owner.get("status") or "·",
-                      " since " + since if since else ""),
+                      ((" since " if owner.get("liveness") in _LIVE else " · started ") + since)
+                      if since else ""),
             "%dm" % owner["elapsed_min"] if owner.get("elapsed_min") is not None else None,
             owner.get("attempt_id"),
             "registry: %s (%s)" % (owner["action"], owner.get("reason") or "·") if owner.get("action") else None)
@@ -572,6 +650,9 @@ def detail_lines(desc):
             who = " ".join(x for x in (reviewer.get("harness"), reviewer.get("model")) if x) or "harness ·"
             verdict = "gate ✓" if reviewer.get("gate_passed") else \
                 _STATE_WORDS.get(reviewer.get("state"), reviewer.get("state") or "·")
+            if reviewer.get("independence"):
+                verdict += " · %s%s" % (reviewer["independence"], " (%s)" % reviewer["reviewer_kind"]
+                                         if reviewer.get("reviewer_kind") else "")
             lines.append(("review", "%s · %s · %s" % (reviewer["id"], who, verdict),
                           "good" if reviewer.get("gate_passed") else
                           "bad" if reviewer.get("state") == "failed" else "info"))
@@ -592,24 +673,110 @@ def detail_lines(desc):
     if not verification.get("ci"):
         lines.append(("CI", "no CI result in the route outcome", "dim"))
     gates = verification.get("completion_gates") or ()
-    gate_text = ", ".join("%s %s" % (g.get("gate") or g.get("node"), _MARK.get(g.get("passed"), "·"))
+    gate_text = ", ".join("%s %s%s" % (g.get("gate") or g.get("node"), _MARK.get(g.get("passed"), "·"),
+                                       " " + g["reason"] if g.get("passed") is False and g.get("reason") else "")
                           for g in gates) or "·"
     if verification.get("closed_at"):
         gate_text += " · closed " + verification["closed_at"][:19].replace("T", " ")
     if verification.get("head_commit"):
         gate_text += " · head " + verification["head_commit"][:10]
-    lines.append(("gate", gate_text, "good" if verification.get("terminal_gate_proven") else "info"))
+    lines.append(("gate", gate_text, "good" if verification.get("terminal_gate_proven") else
+                  "bad" if _gate_code(verification) == "failed" else "info"))
     if verification.get("result"):
         lines.append(("result", verification["result"], "info"))
     nxt = desc.get("next") or {}
     lines.append(("next", nxt.get("text") or "·",
                   "good" if nxt.get("kind") == "closed" else
-                  "bad" if nxt.get("kind") in ("resume", "attention") else "info"))
+                  "bad" if nxt.get("kind") in ("resume", "attention", "no-response") else "info"))
     return lines
 
 
+CODES_SCHEMA = "route_visibility_codes_v1"
+
+
+def _s(value, limit=64):
+    """A code value as a string; ``""`` when absent (never a placeholder like ``?``)."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return _text(value, limit)
+
+
+def _review_code(verification, desc):
+    if verification.get("reviewers"):
+        return "stages"
+    if any(s.get("role") == "frame" for s in desc.get("stages") or ()):
+        return "frame"
+    if any(r.get("kind") == "RV" and r.get("path") for r in verification.get("worker_records") or ()):
+        return "rv-record"
+    return "none"
+
+
+def codes(desc):
+    """Structured, string-only codes beside the English sentences, for a display layer that
+    translates or abbreviates on its own (the session shell). Enums, not prose:
+
+    * ``stages``: ``[[id, role, state, gate_passed "1"|"0"], ...]``; ``state`` is one of
+      done|active|reconciling|recovering|pending|failed|attention|degraded|unrecorded|unknown;
+    * ``basis``: ``{kind: user|default|frame-proposal|preset|unknown, codes: [...]}``;
+    * ``next``: ``{kind: closed|attention|no-response|wait|resume|person|start|close|unknown,
+      node, harness}``;
+    * ``verification``: review none|stages|rv-record|frame, review_passed/total, independence,
+      ci none|recorded|same-head, ci_text (as written), ci_text_short (40-hex heads cut to 7),
+      gate none|proven|unproven|failed, gate_reasons, head (7), head_full, closed_at (ISO);
+    * ``owner``: liveness, started_at (epoch seconds), elapsed_min, harness, attempt_id;
+    * ``quoted``: ``[[label, text], ...]`` report sentences as written (never translate).
+    Absent values are ``""``."""
+    if not desc:
+        return {}
+    verification = desc.get("verification") or {}
+    basis = desc.get("basis") or {}
+    nxt = desc.get("next") or {}
+    owner = desc.get("owner") or {}
+    reviewers = verification.get("reviewers") or ()
+    head = verification.get("head_commit") or ""
+    ci_rows = verification.get("ci") or ()
+    ci_text = ci_rows[0]["text"] if ci_rows else ""
+    independence = sorted({r.get("independence") for r in reviewers if r.get("independence")})
+    quoted = [[label, row["text"]] for label, key in (("test", "tests"), ("review", "review_notes"), ("CI", "ci"))
+              for row in verification.get(key) or ()]
+    if verification.get("result"):
+        quoted.append(["result", verification["result"]])
+    return {
+        "schema": CODES_SCHEMA,
+        "stages": [[_s(s.get("id")), _s(s.get("role"), 16), _s(s.get("state"), 16),
+                    "1" if s.get("gate_passed") else "0"] for s in desc.get("stages") or ()],
+        "basis": {"kind": _s(basis.get("kind"), 24) or "unknown",
+                  "codes": [_s(code, 80) for code in basis.get("codes") or ()]},
+        "next": {"kind": _s(nxt.get("kind"), 16) or "unknown", "node": _s(nxt.get("node")),
+                 "harness": _s(nxt.get("harness"), 24)},
+        "verification": {
+            "review": _review_code(verification, desc),
+            "review_passed": str(sum(1 for r in reviewers if r.get("gate_passed"))),
+            "review_total": str(len(reviewers)),
+            "independence": ",".join(independence),
+            "ci": _ci_code(verification),
+            "ci_text": _s(ci_text, 200),
+            "ci_text_short": _s(_FULL_HEAD.sub(lambda m: m.group(0)[:7], ci_text), 200),
+            "gate": _gate_code(verification),
+            "gate_reasons": [_s(g.get("reason"), 48) for g in verification.get("completion_gates") or ()
+                             if g.get("passed") is not True and g.get("reason")],
+            "head": head[:7], "head_full": head,
+            "closed_at": _s(verification.get("closed_at"), 40),
+        },
+        "owner": {"liveness": _s(owner.get("liveness"), 16), "started_at": _s(owner.get("started_at"), 24),
+                  "elapsed_min": _s(owner.get("elapsed_min"), 12), "harness": _s(owner.get("harness"), 16),
+                  "attempt_id": _s(owner.get("attempt_id"))},
+        "quoted": [[_s(label, 12), _s(text, 200)] for label, text in quoted],
+    }
+
+
 def bounded(desc, max_lines=14):
-    """A compact, string-only projection for another display surface (session shell)."""
+    """A compact, string-only projection for another display surface (session shell).
+
+    The sentences (``summary``/``card``/``next``/``owner``/``lines``) are the English fallback;
+    ``codes`` carries the same reading as enums and codes (see ``codes``)."""
     if not desc:
         return {}
     return {"schema": SCHEMA, "route_id": _text(desc.get("route_id"), 40),
@@ -622,7 +789,8 @@ def bounded(desc, max_lines=14):
                 ((desc.get("owner") or {}).get("liveness")),
                 _clock((desc.get("owner") or {}).get("started_at"))) if x), 48),
             "lines": [[_text(label, 12), _text(text, 200), _text(tone, 8)]
-                      for label, text, tone in detail_lines(desc)[:max_lines]]}
+                      for label, text, tone in detail_lines(desc)[:max_lines]],
+            "codes": codes(desc)}
 
 
 def observe(record, jobs=None, node_evidence=None, now=None):

@@ -39,9 +39,15 @@ def route_extension(key, value):
         return type(value) is int and value >= 0
     if key == "visibility":
         text = lambda item: isinstance(item, str)
+        # ``codes``: structured string-only enums beside the sentences (route_visibility.codes).
+        string_tree = lambda item: text(item) or (
+            isinstance(item, dict) and all(text(k) and string_tree(v) for k, v in item.items())) or (
+            isinstance(item, (list, tuple)) and all(map(string_tree, item)))
+        base = {"schema", "route_id", "summary", "card", "shape", "basis", "next", "owner", "lines"}
         return isinstance(value, dict) and (not value or (
-            set(value) == {"schema", "route_id", "summary", "card", "shape", "basis", "next", "owner", "lines"}
-            and all(text(value[name]) for name in value if name != "lines")
+            set(value) in (base, base | {"codes"})
+            and all(text(value[name]) for name in value if name not in ("lines", "codes"))
+            and ("codes" not in value or isinstance(value["codes"], dict) and string_tree(value["codes"]))
             and isinstance(value["lines"], (list, tuple))
             and all(isinstance(row, (list, tuple)) and len(row) == 3 and all(map(text, row))
                     for row in value["lines"])))
@@ -357,7 +363,13 @@ class SectionShapes(unittest.TestCase):
                        {"visibility": {}},
                        {"visibility": {"schema": "route_visibility_v1", "route_id": "rt-1", "summary": "s",
                                        "card": "c", "shape": "solo", "basis": "default", "next": "n",
-                                       "owner": "working 11-10 11:23", "lines": [["route", "solo · default", "info"]]}}):
+                                       "owner": "working 11-10 11:23", "lines": [["route", "solo · default", "info"]]}},
+                       {"visibility": {"schema": "route_visibility_v1", "route_id": "rt-1", "summary": "s",
+                                       "card": "c", "shape": "solo", "basis": "default", "next": "n",
+                                       "owner": "", "lines": [],
+                                       "codes": {"schema": "route_visibility_codes_v1",
+                                                 "stages": [["one-shot", "work", "active", "0"]],
+                                                 "basis": {"kind": "default", "codes": ["intensity-default"]}}}}):
             with self.subTest(fields=fields):
                 problems = []
                 conform({**samples[0], **fields}, samples, "routes[]", problems)
@@ -383,6 +395,10 @@ class SectionShapes(unittest.TestCase):
             {"visibility": None}, {"visibility": {"lines": "x"}},
             {"visibility": {"schema": "v", "route_id": "r", "summary": "s", "card": "c", "shape": "s",
                             "basis": "b", "next": "n", "owner": "", "lines": [["route", 7, "info"]]}},
+            {"visibility": {"schema": "v", "route_id": "r", "summary": "s", "card": "c", "shape": "s",
+                            "basis": "b", "next": "n", "owner": "", "lines": [], "codes": {"stages": [["a", 1]]}}},
+            {"visibility": {"schema": "v", "route_id": "r", "summary": "s", "card": "c", "shape": "s",
+                            "basis": "b", "next": "n", "owner": "", "lines": [], "codes": "x"}},
         ]
         for fields in invalid:
             with self.subTest(fields=fields):
