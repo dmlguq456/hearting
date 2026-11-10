@@ -4117,7 +4117,7 @@ _NATIVE_BOUNDARY_EVENTS = frozenset({"UserPromptSubmit", "PostToolUse", "PostToo
 
 
 def _fit_claude_context(claims, context):
-    """Keep one Claude hook context within the native inline limit (PG-40).
+    """Keep one Claude hook context within the native inline limit (PG-47).
 
     Claude Code shows at most about 10,000 characters of one hook context and
     puts the rest in a file it does not ask the model to read, so a body that
@@ -4308,7 +4308,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
 
 
 # `context` is the OpenCode tool-output boundary, whose plugin kills the child
-# 1.5 s after spawning it; stop claiming 1.0 s after this process started.
+# 2.5 s after spawning it (then still reads what it flushed); stop claiming 1.0 s
+# after this process started.
 _CONTEXT_CLI_BUDGET_S = 1.0
 
 

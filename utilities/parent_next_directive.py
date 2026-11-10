@@ -63,6 +63,13 @@ JOIN_SLACK_MS = 5_000
 # other value (`none`, or `auto` resolved with no Claude session) leaves the
 # receipt on disk with nothing to deliver it -- ending the turn there loses it.
 STEWARD_CARRIER_WAKE = "hook"
+# A Codex steward's watch: the observer queues its receipt as an exact notice to
+# the steward thread, and the steward's own App Server queue (the one that wakes
+# an idle Codex for completions and peer reports) carries it into a turn. Chosen
+# by `watch --wake auto` only while that queue socket exists.
+STEWARD_QUEUE_WAKE = "queue"
+STEWARD_WAKES = {STEWARD_CARRIER_WAKE: "carrier-steward-watch",
+                 STEWARD_QUEUE_WAKE: "carrier-steward-watch-codex-queue"}
 
 
 def command_home(agent_home) -> str:
@@ -205,9 +212,10 @@ def steward_next(
       arms on a `watch` command printing `state=armed`; a line the session
       prints from `rearm` reaches no hook even when the watch behind it is
       perfectly healthy, so it must not claim a carrier.
-    * `wake` is the hook mechanism. A watch armed with `wake=none` (or `auto`
-      resolved outside a Claude session) leaves its receipt on disk with nothing
-      to deliver it.
+    * `wake` names a carrier: Claude's rewake hook (`hook`) or a Codex
+      steward's native thread queue (`queue`). A watch armed with `wake=none`
+      (or `auto` resolved where neither exists) leaves its receipt on disk with
+      nothing to deliver it.
 
     Otherwise this is a `bounded-wait` on the steward's own foreground surface.
     That surface is `join <watch_id>`, not `wait <target>`: join waits on *this
@@ -218,8 +226,8 @@ def steward_next(
     which does not take a watch at all. The bound is explicit, because both
     surfaces wait forever without one.
     """
-    if arms_hook and (wake or "").strip() == STEWARD_CARRIER_WAKE:
-        return NEXT_END_TURN, "carrier-steward-watch", ""
+    if arms_hook and (wake or "").strip() in STEWARD_WAKES:
+        return NEXT_END_TURN, STEWARD_WAKES[(wake or "").strip()], ""
     if not arms_hook:
         reason = "steward-line-does-not-arm"
     else:

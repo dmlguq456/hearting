@@ -44,6 +44,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,14 @@ POST_TOOL_BUDGET_SECONDS = 1.5
 STOP_BUDGET_SECONDS = 6.0
 STATE_MAX_AGE_SECONDS = 7 * 86400
 NON_ACTION_CHILD = frozenset({"advance-completed"})
-NON_ACTION_NOTICE = frozenset({"read-notice"})
+# The answer to these is the turn's own final message to the person, so a turn
+# that ends with no tool after them has done what they ask.
+NON_ACTION_NOTICE = frozenset({"read-notice", "report-to-user", "report-capacity-wait",
+                               "report-unresolved-verification"})
+# Exact handles a receipt's own command names: a tool that runs one of them has
+# acted on that record, an unrelated tool has not.
+_HANDLE_RE = re.compile(r"\b(?:rt-[0-9a-f]{16}|att-[0-9a-f]{8,})\b")
+SESSION_STATE_DIR = "codex-turn-carrier-session"
 STOP_HEADER = "[hearting] Arrived before this turn ended:"
 WATCH_HEADER = "[peer-steward] undelivered watch receipts:"
 
@@ -144,12 +152,34 @@ def read_state(sid: str, tid: str, root: Path | None = None) -> dict:
     return state if isinstance(state, dict) and state.get("turn_id") == tid else {}
 
 
-def note_tool(sid: str, tid: str, root: Path | None = None) -> None:
+def tool_command(payload: dict) -> str:
+    """The text of the tool call a PostToolUse payload reports ("" when absent)."""
+    tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    if isinstance(tool_input, str):
+        return tool_input
+    if not isinstance(tool_input, dict):
+        return ""
+    value = tool_input.get("command") or tool_input.get("cmd") or ""
+    if isinstance(value, list):
+        value = " ".join(str(part) for part in value)
+    return value if isinstance(value, str) else ""
+
+
+def note_tool(sid: str, tid: str, root: Path | None = None, command: str = "") -> None:
+    """Count one tool; an owed record with exact handles is met only by a tool naming one."""
     if not sid or not tid:
         return
     with _locked_state(sid, tid, root) as state:
         state["tools"] = int(state.get("tools") or 0) + 1
-        state["tools_after_receipt"] = int(state.get("tools_after_receipt") or 0) + 1
+        owed = list(state.get("owed") or [])
+        remaining = [item for item in owed
+                     if not (isinstance(item, dict) and item.get("handles")
+                             and any(handle in command for handle in item["handles"]))]
+        if len(remaining) != len(owed):
+            state["owed"] = remaining
+        if not any(isinstance(item, dict) and item.get("handles") for item in remaining):
+            # Records without an exact handle keep the earlier rule: any tool after them.
+            state["tools_after_receipt"] = int(state.get("tools_after_receipt") or 0) + 1
 
 
 def note_received(sid: str, tid: str, items: list[dict], *, rendered: list[str] = (),
@@ -169,6 +199,61 @@ def note_received(sid: str, tid: str, items: list[dict], *, rendered: list[str] 
             state["tools_after_receipt"] = 0
 
 
+def unmet(state: dict) -> list:
+    """Owed items the turn has not acted on: a handled item until a tool named it,
+    the rest until any tool ran after them."""
+    owed = [item for item in state.get("owed") or [] if isinstance(item, dict)]
+    handled = [item for item in owed if item.get("handles")]
+    if int(state.get("tools_after_receipt") or 0) == 0:
+        return owed
+    return handled
+
+
+@contextlib.contextmanager
+def _locked_session(sid: str, root: Path | None = None):
+    """Session-wide carrier state (not reset per turn), under an exclusive lock."""
+    base = root if root is not None else _roots()[0]
+    digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:32]
+    path = Path(base) / SESSION_STATE_DIR / f"{digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        yield state
+        state["updated"] = time.time()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        os.close(fd)
+
+
+def shown_unbound(sid: str, root: Path | None = None) -> set[str]:
+    try:
+        with _locked_session(sid, root) as state:
+            return set(state.get("shown_unbound") or [])
+    except OSError:
+        return set()
+
+
+def note_shown_unbound(sid: str, delivery_ids, root: Path | None = None) -> None:
+    ids = [str(item) for item in delivery_ids if item]
+    if not ids:
+        return
+    with _locked_session(sid, root) as state:
+        known = list(state.get("shown_unbound") or [])
+        for item in ids:
+            if item not in known:
+                known.append(item)
+        state["shown_unbound"] = known[-200:]
+
+
 def mark_nudged(sid: str, tid: str, root: Path | None = None) -> bool:
     """Claim the turn's one follow-through pass; False when already spent."""
     with _locked_state(sid, tid, root) as state:
@@ -181,8 +266,10 @@ def mark_nudged(sid: str, tid: str, root: Path | None = None) -> bool:
 def prune_states(root: Path | None = None, now: float | None = None) -> None:
     now = time.time() if now is None else now
     try:
-        directory = _state_path("x", root).parent
-        for path in directory.glob("*.json"):
+        base = root if root is not None else _roots()[0]
+        paths = [*(_state_path("x", root).parent.glob("*.json")),
+                 *((Path(base) / SESSION_STATE_DIR).glob("*.json"))]
+        for path in paths:
             with contextlib.suppress(OSError):
                 if now - path.stat().st_mtime > STATE_MAX_AGE_SECONDS:
                     path.unlink()
@@ -206,9 +293,12 @@ def owed_items(records: list[dict]) -> list[dict]:
                     continue
                 action = str(child.get("required_action") or "")
                 if action and action not in NON_ACTION_CHILD:
+                    attempt = str(child.get("attempt_id") or "")
+                    handles = sorted({attempt} if attempt else set()) + sorted(
+                        set(_HANDLE_RE.findall(json.dumps(child, sort_keys=True))) - {attempt})
                     items.append({"kind": "completion", "delivery_id": delivery_id,
-                                  "attempt_id": str(child.get("attempt_id") or "-"),
-                                  "required_action": action})
+                                  "attempt_id": attempt or "-",
+                                  "required_action": action, "handles": handles[:6]})
             continue
         action = str(receipt.get("required_action") or "")
         if action and action not in NON_ACTION_NOTICE:
@@ -278,6 +368,20 @@ def native_receiving_turn(sid: str, tid: str) -> dict | None:
     return {"thread_id": sid, "turn_id": tid, "status": turn["status"]}
 
 
+def queue_endpoint_absent() -> bool:
+    """No App Server socket for this Codex home: the native queue cannot carry anything.
+
+    Only then may a completion be shown in the turn without an ACK; with a
+    socket present the native queue still owns it and showing it here could
+    repeat it as a queued turn.
+    """
+    try:
+        from codex_queue_dispatch import queue_endpoint_present
+        return queue_endpoint_present() is False
+    except Exception:  # noqa: BLE001 - an unreadable endpoint is not proof of absence
+        return False
+
+
 def _is_completion(record: dict) -> bool:
     return isinstance((record.get("receipt") or {}).get("children"), list)
 
@@ -289,15 +393,19 @@ def fit(batches, render, max_chars: int):
 
 
 def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = frozenset(),
-            request_context: str | None = None, max_chars: int = MAX_REASON_CHARS):
+            request_context: str | None = None, max_chars: int = MAX_REASON_CHARS,
+            shown: list | None = None):
     """Claim this thread's owed records; return ``(text, ackable_batches)``.
 
     Records the bridge cannot ACK (a completion without an exact running native
-    turn) are not claimed or rendered here: their existing queue and prompt
-    carriers keep them, so a Stop continuation never repeats one. A notice in
-    the same root needs no turn binding and is still carried. Only records
-    whose text fits ``max_chars`` whole are returned for ACK; the rest are
-    handed back pending.
+    turn) are not claimed or rendered here while the App Server socket exists:
+    the native queue and prompt carriers keep them, so a Stop continuation never
+    repeats one. Without that socket nothing else can reach the running turn, so
+    such a completion is shown once per session and left pending, never ACKed:
+    the prompt carrier still shows it at the next prompt exactly as before. Its
+    record is appended to ``shown``. A notice in the same root needs no
+    turn binding and is still carried. Only records whose text fits
+    ``max_chars`` whole are returned for ACK; the rest are handed back pending.
     """
     from dispatch_notice_state import NoticeReadContext
     from dispatch_session_sweep import (addressed_records, delivery_context,
@@ -307,6 +415,8 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
     batches = []
     receiving: dict | None = None
     receiving_read = False
+    socketless: bool | None = None
+    already_shown: set[str] = set()
     for root in _roots():
         if time.monotonic_ns() >= deadline_ns:
             break
@@ -324,9 +434,16 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
             if not receiving_read:
                 receiving, receiving_read = native_receiving_turn(sid, tid), True
             if receiving is None:
-                if all(_is_completion(record) for record in fresh):
+                if socketless is None:
+                    socketless = queue_endpoint_absent()
+                    already_shown = shown_unbound(sid) if socketless else set()
+                if socketless:
+                    select = lambda record: (not _is_completion(record)  # noqa: E731
+                                             or record.get("delivery_id") not in already_shown)
+                elif all(_is_completion(record) for record in fresh):
                     continue
-                select = lambda record: not _is_completion(record)  # noqa: E731
+                else:
+                    select = lambda record: not _is_completion(record)  # noqa: E731
         records, _count = sweep_deliver(root, RECIPIENT_KIND, sid, notice_context=notice_context,
                                        deadline_ns=deadline_ns, select=select)
         records = [record for record in records if record.get("delivery_id") not in skip]
@@ -339,22 +456,34 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
             _is_completion(record)
             for _root, records in batches for record in records) else None
     ackable = retain_receiving_turn(batches, sid, receiving, request_context=request_context)
-    kept, left = [], []
+    display, left = [], []
     for root, records in batches:
-        exact = [record for record in records if (str(root), record.get("delivery_id")) in ackable]
-        other = [record for record in records if (str(root), record.get("delivery_id")) not in ackable]
+        exact = [record for record in records if (str(root), record.get("delivery_id")) in ackable
+                 or (socketless and _is_completion(record)
+                     and record.get("delivery_id") not in already_shown)]
+        other = [record for record in records if record not in exact]
         if exact:
-            kept.append((root, exact))
+            display.append((root, exact))
         if other:
             left.append((root, other))
-    if not kept:
+    if not display:
         release(sid, left)
         return "", []
-    text, kept, over = fit(kept, delivery_context, max_chars)
+    text, chosen, over = fit(display, delivery_context, max_chars)
+    kept, unbound = [], []
+    for root, records in chosen:
+        exact = [record for record in records if (str(root), record.get("delivery_id")) in ackable]
+        if exact:
+            kept.append((root, exact))
+        unbound.extend((root, record) for record in records
+                       if (str(root), record.get("delivery_id")) not in ackable)
+    if unbound and shown is not None:
+        shown.extend(record for _root, record in unbound)
     # A tool boundary comes far more often than a prompt: hand back at once the
     # claims this bridge will not ACK (or that did not fit whole), so the
-    # native queue courier is not held off for the claim lease.
-    release(sid, left + over)
+    # native queue courier is not held off for the claim lease. A completion
+    # shown without its turn binding is handed back too: it stays pending.
+    release(sid, left + over + [(root, [record]) for root, record in unbound])
     return text, kept
 
 
@@ -371,6 +500,15 @@ def acknowledge(sid: str, batches) -> list[str]:
         ack_delivered(root, sid, records, acked_by=ACKED_BY_PREFIX + sid)
         delivered.extend(str(record.get("delivery_id")) for record in records)
     return delivered
+
+
+def _settle_shown(sid: str, tid: str, batches, shown: list[dict]) -> None:
+    """After the output reached Codex: ACK what may be ACKed, remember the rest as shown."""
+    delivered = acknowledge(sid, batches) if batches else []
+    shown_ids = [str(record.get("delivery_id")) for record in shown]
+    note_shown_unbound(sid, shown_ids)
+    note_received(sid, tid, owed_items(_all_records(batches) + list(shown)),
+                  rendered=delivered + shown_ids)
 
 
 def _all_records(batches) -> list[dict]:
@@ -442,11 +580,12 @@ def post_tool(payload: dict, stream) -> int:
     if is_worker() or not sid or not tid:
         return 0
     with contextlib.suppress(Exception):
-        note_tool(sid, tid)
+        note_tool(sid, tid, command=tool_command(payload))
+    shown: list[dict] = []
     try:
         state = read_state(sid, tid)
         text, batches = collect(sid, tid, budget_seconds=POST_TOOL_BUDGET_SECONDS,
-                                skip=set(state.get("rendered") or []))
+                                skip=set(state.get("rendered") or []), shown=shown)
     except Exception:  # noqa: BLE001
         return 0
     if not text:
@@ -454,8 +593,7 @@ def post_tool(payload: dict, stream) -> int:
     if _emit({"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                      "additionalContext": text}}, stream):
         with contextlib.suppress(Exception):
-            delivered = acknowledge(sid, batches)
-            note_received(sid, tid, owed_items(_all_records(batches)), rendered=delivered)
+            _settle_shown(sid, tid, batches, shown)
     else:
         with contextlib.suppress(Exception):
             release(sid, batches)
@@ -471,6 +609,7 @@ def stop(payload: dict, stream) -> int:
         prune_states()
     parts: list[str] = []
     batches = []
+    shown: list[dict] = []
     module, watches = None, []
     # The reason is never cut: each part is sized so that every record and
     # watch row it names is whole, and only those are ACKed.
@@ -492,7 +631,7 @@ def stop(payload: dict, stream) -> int:
     try:
         state = read_state(sid, tid)
         text, batches = collect(sid, tid, budget_seconds=STOP_BUDGET_SECONDS,
-                                skip=set(state.get("rendered") or []),
+                                skip=set(state.get("rendered") or []), shown=shown,
                                 max_chars=room - (len(watch_block) + 2 if watch_block else 0) - 2)
         if text:
             parts.append(text)
@@ -504,8 +643,7 @@ def stop(payload: dict, stream) -> int:
         reason = "\n\n".join([STOP_HEADER, *parts])
         if _emit({"decision": "block", "reason": reason}, stream):
             with contextlib.suppress(Exception):
-                delivered = acknowledge(sid, batches) if batches else []
-                note_received(sid, tid, owed_items(_all_records(batches)), rendered=delivered)
+                _settle_shown(sid, tid, batches, shown)
             if module is not None and watches:
                 with contextlib.suppress(Exception):
                     ack_watches(module, sid, watches)
@@ -515,8 +653,8 @@ def stop(payload: dict, stream) -> int:
         return 0
     try:
         state = read_state(sid, tid)
-        owed = state.get("owed") or []
-        if owed and int(state.get("tools_after_receipt") or 0) == 0 and not state.get("nudged"):
+        owed = unmet(state)
+        if owed and not state.get("nudged"):
             if mark_nudged(sid, tid):
                 _emit({"decision": "block", "reason": nudge_text(owed)}, stream)
     except Exception:  # noqa: BLE001

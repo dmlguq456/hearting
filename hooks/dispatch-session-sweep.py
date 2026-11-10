@@ -170,7 +170,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         # Rendering happens after the claims and is not an authority decision:
         # one observation covers the delivery text and every followup.
         # Claude Code shows at most CLAUDE_CONTEXT_CHARS of one hook context
-        # inline (PG-40): only the leading records whose text fits whole are
+        # inline (PG-47): only the leading records whose text fits whole are
         # shown and ACKed; the rest are handed back pending for the next prompt.
         context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
     prompt = _event_name(payload) == "UserPromptSubmit"

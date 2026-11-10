@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""PG-40/PG-41: a native hook context carries only what its runtime shows inline.
+"""PG-47/PG-48: a native hook context carries only what its runtime shows inline.
 
 Claude Code shows at most 10,000 characters of one hook context and Codex about
 2,500 tokens; the rest goes to a file the model is not asked to read. A burst
 of notices must therefore be ACKed only for what the context holds whole, the
 rest staying pending for the next boundary, and a single text over the limit
-must point to a whole copy instead of being ACKed cut. PG-41: the Claude peer
+must point to a whole copy instead of being ACKed cut. PG-48: the Claude peer
 carrier also runs at a failed tool's end.
 """
 

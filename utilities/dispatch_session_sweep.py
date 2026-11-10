@@ -1365,7 +1365,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     return "\n\n".join(blocks)
 
 
-# Native inline limit on one hook context string, measured 2026-11-10 (PG-40).
+# Native inline limit on one hook context string, measured 2026-11-10 (PG-47).
 # Claude Code (hooks reference, "JSON output"): additionalContext is capped at
 # 10,000 characters; past it the text goes to a file and Claude sees the path
 # and a 2,000-character preview, and is not asked to read the file (a burst of
@@ -1489,8 +1489,11 @@ def fit_inline(batches, max_size: int, *, measure=len, render=None):
 def release_claims(session_id: str, batches, recipient_kind: str, *, reason: str) -> None:
     """Return this process's own sweep claims on records it did not ACK.
 
-    A distinct reason per release keeps the courier retry delay at its base,
-    so the next boundary claims them again at once.
+    A tool boundary comes far more often than a prompt, so a boundary carrier
+    hands back at once what it claimed but will not ACK (or did not fit whole)
+    instead of holding other carriers off for the claim lease. A distinct
+    reason per release keeps the courier retry delay at its base, so the next
+    boundary claims them again at once.
     """
     owner_prefix = f"session-sweep:{recipient_kind}:{os.getpid()}:"
     for root, records in batches:

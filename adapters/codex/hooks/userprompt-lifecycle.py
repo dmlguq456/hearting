@@ -417,7 +417,7 @@ def fit_prompt_receipts(sid: str, batches, other_parts: list[str], *, rendered=(
     """The receipts text that fits, whole, beside the rest of this hook's context.
 
     Codex shows one hook context of at most about 2,500 tokens inline and
-    elides the middle of a longer one (PG-40), so only the leading records
+    elides the middle of a longer one (PG-47), so only the leading records
     whose text fits in what the other parts leave are rendered and ACKed; the
     rest are handed back pending for the next boundary. Returns
     ``(text, kept_batches)``; ``rendered`` is the whole text already rendered.
