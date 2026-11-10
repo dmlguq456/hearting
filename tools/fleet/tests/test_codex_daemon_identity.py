@@ -165,6 +165,15 @@ class CodexDaemonIdentityTest(unittest.TestCase):
         self.assertEqual(codex.process_for_thread(SECOND, {"CODEX_HOME": "/fake"}),
                          (PID, "778899"))
 
+    def test_selection_membership_refreshes_an_already_loaded_roots_origin(self):
+        env = {"CODEX_HOME": "/fake"}
+        empty = (frozenset(), frozenset())
+        with mock.patch.object(codex, '_tcp_listener_snapshot',
+                side_effect=lambda port, *args: self.listener if port == 41301 else empty):
+            self.assertEqual(codex.process_for_thread(ROOT, env), (PID, "778899"))
+            self.threads[ROOT] = (41302, "user")
+            self.assertIsNone(codex.process_for_thread(ROOT, env, fresh=True))
+
     def test_loaded_list_pages_are_followed_with_schema_cursor(self):
         self.threads[SECOND] = (41301, "user")
         self.client.loaded_pages = [
