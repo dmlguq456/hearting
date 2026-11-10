@@ -2429,6 +2429,21 @@ declared outputs, then rechecks the remote process group. The run id alone is
 not completion evidence. A successful handoff creates a new same-node retry
 while retaining the original row and history; the route owner's ordinary
 successor start remains responsible for verification admission.
+A run that an owner of the same route launched directly with `compute-hosts
+run` carries route provenance but no resource contract, row or `outputs.json`.
+The same command adopts it as `<node>__aN` (`--node`, or the route's one current
+resource stage) when it is this route's run, finished with exit 0 and an empty
+process group, and no other row already holds it. Owner lineage, cwd, command
+write scope, smoke/config and GPU lease are recorded as matched, mismatched or
+unverified, so missing evidence is a record. Declared outputs that exist are
+hashed into the receipt; missing ones are recorded. A run is plainly another
+node's and refuses when its launch receipt `started_at` precedes the earliest
+recorded completion (`<dep>.json` or a `<dep>.N.json` history marker) of one of
+the node's dependencies, such as the route's own smoke run, or when its command
+writes only into another resource-runner node's write scope; an unreadable
+time is only recorded. An unanswered human gate on the node also refuses.
+Adoption records that the run ran outside the resource-runner and adds
+no approval.
 
 `claim <host> <pid> [--harness <runtime> --session <id>]` (default: the calling
 session, when it is one unique harness session) is the narrow bridge for
