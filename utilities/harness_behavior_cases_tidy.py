@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -296,6 +297,26 @@ with open(out, 'a', encoding='utf-8') as sink:
         sink.write(json.dumps(row, default=str) + chr(10)); sink.flush()
 for proc in child or ():
     proc.wait(timeout=120)
+"""
+
+
+# The input-box judgement the clear look makes, on the same screen read, for a skip.
+DRAFT_DIAG = r"""
+import importlib.util, json, sys
+src, harness, pane = sys.argv[1:4]
+sys.path[:0] = [src + '/utilities', src + '/tools']
+spec = importlib.util.spec_from_file_location('ps', src + '/utilities/peer-steward.py')
+ps = importlib.util.module_from_spec(spec); spec.loader.exec_module(ps)
+import peer_steward_duties as d
+lines = ps._read_screen(pane) or []
+marker = {'codex': '\u203a', 'claude': '\u276f'}.get(harness, '')
+idx = next((i for i in range(len(lines) - 1, -1, -1)
+            if marker and d._marker_remainder(lines[i], marker) is not None), None)
+near = [] if idx is None else [d._plain(c) for c in lines[idx:idx + 3]]
+print(json.dumps({'draft': d._draft_state(harness, lines), 'ready': d._screen_ready(harness, lines),
+                  'marker_row': idx, 'rows': near,
+                  'bright_after_marker': None if idx is None else
+                  d._marker_remainder(lines[idx], marker)[1]}, ensure_ascii=False)[:3000])
 """
 
 
@@ -627,5 +648,116 @@ class TidyContinueHerdrShellTwice(TidyContinueHerdrShell):
         return "pass" if ev["tag_kept"] and ev["second_continue"] == "sent" else "fail"
 
 
+class TidyContinueNoticeHerdr(TidyContinueHerdr):
+    """A continue that is not sent shows its line on the window with no typing.
+
+    2026-11-10: the expired continue's line reached the person ~55 minutes later, with
+    their next input. The booking window is shortened so the continue expires (the
+    real case); Herdr keeps its default toast setting (``disabled``). The oracle is
+    the pane's own screen: the result line painted by Hearting's existing display.
+    """
+    name = "tidy-continue-notice-herdr"
+    summary = "an expired continue's line appears on the private Herdr pane before any typing."
+    WINDOW = "0"      # expired at the first look, as the 2026-11-10 continue was
+
+    def prepare(self, run):
+        super().prepare(run)
+        run.home.env["HEARTING_TIDY_TEST_ROOT"] = str(cc.state_home(run))
+        run.home.env["HEARTING_TIDY_CONTINUE_WINDOW"] = self.WINDOW
+
+    def script(self, run):
+        first = super().script(run)
+
+        def answer(record, earlier):
+            if CONTINUE_TEXT in record["last_text"] and record["last_kind"] != "tool":
+                return Reply("TIDYC-UNEXPECTED-CONTINUE")
+            return first(record, earlier)
+        return answer
+
+    def drive(self, run):
+        ev = run.evidence
+        run.prompt("SCENARIO-TIDYC-START 등록하고 세션을 정리해 주세요")
+        run.wait_idle(8, 120)
+        mains = run.main_requests()
+        split = next((i + 1 for i, r in enumerate(mains)
+                      if r["last_kind"] == "tool" and "FX-TIDY-RC" in r["last_text"]), len(mains))
+        tool = next((t for t in cc.tool_texts(run) if "FX-TIDY-RC" in t), "")
+        ev["tidy_output"] = tool[-800:]
+        if "FX-TIDY-RC" not in tool:
+            run.note("tidy shell call never reached the model")
+            return "inconclusive"
+
+        def settled():
+            rows = self._reservations(run)
+            if any(r.get("status") in ("skipped", "failed", "unverified") for r in rows):
+                return "clear-not-sent"       # probed at once: a later hook takes the line
+            rows = [r for r in rows
+                    if (r.get("continued") or {}).get("state") not in (None, "pending", "sending")]
+            return rows or None
+        done = wait_for(settled, 200, 0.5)
+        ev["reservations_final"] = self._reservations(run)
+        if done == "clear-not-sent":
+            done = None
+        if not done:
+            ev["diag"] = self.diag(run)
+            last = (ev["reservations_final"] or [{}])[-1]
+            ev["screen_tail"] = run.tui.screen()[-2500:]
+            if last.get("status") in ("skipped", "failed", "unverified"):
+                # The clear itself was not sent: its own result line is the one to show.
+                pane = getattr(run.tui, "pane", "")
+                probe = subprocess.run([sys.executable, "-B", "-c", DRAFT_DIAG, str(cc._source(run)),
+                                        run.harness, pane], env=run.home.env, text=True,
+                                       capture_output=True, timeout=90)
+                ev["draft_diag"] = (probe.stdout or probe.stderr)[-3000:]
+                any_re = re.compile(r"(?:\[정리\]|\[tidy\])[^\[]{0,160}")
+                seen = wait_for(lambda: self._painted(run, any_re), 100, 1)
+                ev["clear_notice_painted"] = seen
+            run.note(f"continue never settled: status={last.get('status')} "
+                     f"reason={last.get('reason')} continued={last.get('continued')} "
+                     f"clear_notice_painted={'yes' if ev.get('clear_notice_painted') else 'no'}")
+            return "fail"
+        settled_at = time.time()
+        continued = done[-1]["continued"]
+        ev["continued"] = continued
+
+        # The result line names the input in quotes, "[정리] ... "이어서해"를 넣지 ...";
+        # panel rows may wrap it, so frame bars and line breaks are folded first.
+        line_re = re.compile(r'(?:\[정리\]|\[tidy\])[^\[]{0,120}?"' + re.escape(CONTINUE_TEXT) + '"')
+
+        seen = wait_for(lambda: self._painted(run, line_re), 100, 1)   # status line: 60 s refresh
+        ev["painted_after_s"] = round(time.time() - settled_at, 1) if seen else None
+        ev["painted_lines"] = seen
+        ev["screen_tail"] = run.tui.screen()[-2500:]
+        typed_after = [r for r in run.main_requests()[split:] if not _is_memory_worker(r)]
+        ev["requests_after_clear"] = [r["last_text"][-160:] for r in typed_after]
+        run.note(f"continued={continued.get('state')}/{continued.get('reason')} "
+                 f"painted={'yes' if seen else 'no'} after_s={ev['painted_after_s']}")
+        return "pass" if seen else "fail"
+
+
+    @staticmethod
+    def _painted(run, pattern):
+        lines = run.tui.screen().splitlines()
+        # The side panel is the text between a row's last two frame bars; the
+        # native rows (status line) are read without it.
+        panel = [line.rsplit("│", 2)[1] for line in lines if line.count("│") >= 2]
+        native = [line.rsplit("│", 2)[0] if line.count("│") >= 2 else line for line in lines]
+        found = []
+        for where, rows in (("panel", panel), ("native", native)):
+            folded = " ".join(re.sub(r"[│┌┐└┘─]", " ", "\n".join(rows)).split())
+            found += [{"where": where, "text": hit} for hit in pattern.findall(folded)]
+        if found:
+            found.append({"rows": [line.rstrip() for line in lines
+                                   if "[tidy]" in line or "[정리]" in line or CONTINUE_TEXT in line]})
+        return found or None
+
+
+class TidyContinueNoticeHerdrShell(TidyContinueNoticeHerdr, TidyContinueHerdrShell):
+    """The same expired continue in a window started through Hearting's session shell."""
+    name = "tidy-continue-notice-herdr-shell"
+    summary = "tidy-continue-notice-herdr with the TUI launched through Hearting's session shell."
+
+
 SCENARIOS = (TidyContinue, TidyContinueHerdr, TidyContinueHerdrNow, TidyContinueHerdrGone,
-             TidyContinueHerdrShell, TidyContinueHerdrShellTwice)
+             TidyContinueHerdrShell, TidyContinueHerdrShellTwice,
+             TidyContinueNoticeHerdr, TidyContinueNoticeHerdrShell)

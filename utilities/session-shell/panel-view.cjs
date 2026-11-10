@@ -89,6 +89,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const m=formatted?model.model:selected?line(selected+' · '+(effort||'?'),'loc_repo'):(model.model||line(t('checking','Checking')+' · ?'));
     add(m);
     if(model.warning)add(line(model.warning,'lvl_r'));
+    if(model.notice)wrap(line('⚠ '+model.notice,'lvl_y'),3);
     if(status&&side)add(line(status,color));
     if(details){
       add(line(t('details','Session details'),'loc_repo'),'details');

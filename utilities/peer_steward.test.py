@@ -11961,8 +11961,9 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         data = self.booking()
         data["herdr_transport"] = {"socket_path": "/run/herdr/booked.sock"}
         self.path.write_text(json.dumps(data), encoding="utf-8")
+        shown = subprocess.CompletedProcess([], 0, stdout='{"result":{"shown":true,"type":"notification_show"}}')
         with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
-             mock.patch.object(self.clear.subprocess, "run") as run:
+             mock.patch.object(self.clear.subprocess, "run", return_value=shown) as run:
             self.assertTrue(self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped",
                                                         "new-session-unknown"))
         argv = run.call_args.args[0]
@@ -11976,6 +11977,72 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(self.clear.subprocess, "run") as run:
             self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped", "new-session-unknown")
         run.assert_not_called()
+
+    def test_disabled_herdr_toast_is_not_shown_and_the_line_waits_on_screen(self):
+        """#1466 review P2: Herdr's default answers ``shown:false / disabled`` with exit 0.
+
+        That call shows nothing; the cleared window's new session still has the line on
+        its own display (shell panel, Claude status line) before anyone types.
+        """
+        st = self.st
+        self.cleared()
+        disabled = subprocess.CompletedProcess(
+            [], 0, stdout='{"result":{"reason":"disabled","shown":false,"type":"notification_show"}}')
+        req = {**self.booking(), "herdr_transport": {"socket_path": "/run/herdr/booked.sock"}}
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"):
+            with mock.patch.object(self.clear.subprocess, "run", return_value=disabled):
+                self.assertFalse(self.clear._show_on_herdr(req, "line"))
+            with mock.patch.object(self.clear.subprocess, "run",
+                                   return_value=subprocess.CompletedProcess([], 0, stdout="")):
+                self.assertFalse(self.clear._show_on_herdr(req, "line"))
+            with mock.patch.object(self.clear.subprocess, "run",
+                                   return_value=subprocess.CompletedProcess([], 1, stdout="")):
+                self.assertFalse(self.clear._show_on_herdr(req, "line"))
+        # The new session started after the clear (its start hook records the edge).
+        seat = self.seat_obj
+        now = st.now_epoch()
+        with st.session_state_lock(st.session_seat(seat, "claude", "sid-B")):
+            st.record_event(seat, "claude", "sid-B", "start", source="clear", now=now)
+            st._append_ledger_entry(st.session_seat(seat, "claude", "sid-B"), {
+                "ts": now + 0.001, "harness": "claude", "sid": "sid-B", "event": "handover",
+                "from": {"harness": "claude", "sid": "sid-A"}, "source": "clear"})
+        display = st.resolve_seat("claude", env={}, sid="sid-B")
+        self.assertEqual(st.waiting_notice_display(display, "claude", "sid-B")[0], "")
+        with mock.patch.object(self.clear.shutil, "which", return_value=None):
+            self.assertTrue(self.clear._finish_continue(seat.key, "n0nce", "skipped", "expired"))
+        text, paths = st.waiting_notice_display(display, "claude", "sid-B")
+        self.assertIn(f'"{self.clear.CONTINUE_TEXT}"', text)
+        self.assertTrue(any(Path(p).exists() for p in paths))
+        # Painting it settles nothing: the next hook still gives the session the same line.
+        self.assertEqual(st.waiting_notice_display(display, "claude", "sid-B")[0], text)
+        # Claude outside the shell: the real status line (refreshInterval 60) prints it.
+        repo = Path(__file__).resolve().parents[1]
+        config = self.tmp_root / "claude-config"
+        config.mkdir()
+        env = {**os.environ, "AGENT_HOME": str(repo), "CLAUDE_CONFIG_DIR": str(config),
+               "HOME": str(self.tmp_root), "HARNESS_CAPACITY_REFRESH_DISABLE": "1",
+               "FLEET_TITLE_DISABLE": "1", "NO_COLOR": "1"}
+        env.pop("HEARTING_SHELL_SOCKET", None)
+        done = subprocess.run(["bash", str(repo / "adapters/claude/statusline.sh")],
+                              input=json.dumps({"session_id": "sid-B", "cwd": str(self.tmp_root),
+                                                "model": {"display_name": "Fixture"}}),
+                              capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("⚠ " + text, done.stdout)
+
+    def test_clear_not_sent_line_waits_on_the_same_sessions_display(self):
+        """A skipped clear keeps the window; its line is painted for the same session."""
+        st = self.st
+        for harness in ("claude", "codex"):
+            self.cleared(harness=harness)
+            data = {**self.booking(), "status": "reserved", "new_session": None}
+            data.pop("continued", None)
+            self.path.write_text(json.dumps(data), encoding="utf-8")
+            display = st.resolve_seat(harness, env={}, sid="sid-A")
+            self.assertEqual(st.waiting_notice_display(display, harness, "sid-A")[0], "")
+            self.assertTrue(self.clear._finish(self.seat_obj.key, "n0nce", "skipped", "draft-unknown"))
+            text, _paths = st.waiting_notice_display(display, harness, "sid-A")
+            self.assertIn(self.clear.CLEAR_COMMAND[harness], text, harness)
 
     def test_unproven_new_session_proven_on_a_later_look_continues(self):
         answers = iter(["new-session-unknown", "new-session-unknown", None, None, None])

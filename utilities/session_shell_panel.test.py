@@ -66,6 +66,21 @@ assert.equal(unknown.color,'dim'); // Native permission state is not route failu
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_waiting_result_line_is_painted_without_the_next_input(self):
+        # 2026-11-10: a continue that was not sent stayed unseen until the next input.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const notice='[정리] 창은 비웠지만 "이어서해"를 넣지 않았습니다(예약 시간이 지났습니다)';
+for(const [width,side] of [[40,true],[80,false],[35,true]]){
+ const v=view.render({width,height:side?24:12,side,model:{notice},questions:()=>[],configuration:{}});
+ const text=v.rows.map(r=>r.map(s=>s.text).join('')).join(' ').replace(/[│ ]+/g,' ');
+ assert(text.includes('⚠ [정리]'),text);assert(text.includes('이어서해'),text);
+}
+const quiet=view.render({width:40,height:24,side:true,model:{},questions:()=>[],configuration:{}});
+assert(!quiet.rows.flat().some(s=>s.text.includes('⚠')));
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);

@@ -679,6 +679,11 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     native_footer = None
     native_owned = (native_badges or {}).get("owned", ()) if isinstance(native_badges, dict) else ()
     panel = presentation(values, view, harness, sid, columns, native_owned=native_owned)
+    # A result line (a continue that was not sent) otherwise waits for the next hook,
+    # which in a cleared window is the person's next input. Display only.
+    notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
+    panel["notice"] = _plain(notice, 400)
+    watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
     panel["summary"] = [styled(line) for line in panel["summary"]]
