@@ -2703,11 +2703,17 @@ acceptance and native receipt are not a completed check. A harness whose transpo
 unconfirmed stays unconfirmed. `steward check` shows only the caller's own
 `role_targets` (one winner per target) and uses only existing observations (herdr
 state, liveness, undelivered messages and notices): a live PID alone is not health and
-an unobserved session is not declared dead. With no change since the previous check it
-prints `changes=none`, and the steward leaves a line or two of status and starts no new
-work. When the role has no targets, every target is finished or the sessions are ready
-to tidy, one short request recommends closing ended sessions and releasing the flag
-through the ordinary `steward off` path; while that state is unchanged the next due
+an unobserved session is not declared dead. It also matches waiting targets against
+remaining work from existing sources only — the holder repository's open records
+(`fleet.session_work.observe`, the repo page's work source), peer requests still pending
+for the holder or a target — and prints each as a `next=` action (for example
+`next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
+duty's own earlier observations. `changes=none` does not mean nothing remains: while
+any next action exists the request names those actions (`assign-next`), repeats each
+interval, and leaves release or stop advice out. Only when the role has no targets, every
+target is finished or the sessions are ready to tidy, and no open work or pending peer
+request remains, one short request recommends closing ended sessions and releasing the
+flag through the ordinary `steward off` path; while that state is unchanged the next due
 point produces no model turn. A session that closed through an ordinary path lets go of
 what it held at that moment: a retire that finished (`normal-exit`, `target-already-gone`),
 a confirmed same-seat `/clear` (for what the successor did not take over), and a window
@@ -3551,9 +3557,10 @@ the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
 remain receipt facts.
-For an actionable peer request that can be completed now, reply once with the
-result. For work that will wait or take sustained effort, send one short receipt and
-continue through the existing registered continuation. Informational/no-reply
+For an actionable peer request, do the requested work now; an acknowledgement
+alone is not completion. Reply once with the result. When part has to wait or take
+sustained effort, say so in one line and keep working on it in this turn or the
+existing registered continuation. Informational/no-reply
 notices need no reply. Put the condition, result, and any required decision or
 blocker first; keep PID, start, exit, digest, and path detail in existing
 evidence. Completion reception requires actual approved result

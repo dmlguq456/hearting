@@ -6,8 +6,10 @@ obligation runner; there is no second process, timer or ledger. Once the
 configured interval (``steward.check_interval_seconds``) has passed with no
 undelivered notice, the duty sends ONE ordinary ``session_notice`` to the holder.
 While that notice is undelivered nothing more is created, a long gap is never
-caught up, and a role with nothing left to supervise gets one short release
-reminder and then no further model turn while its state is unchanged. Only
+caught up. While open work (the repository's ``fleet.session_work`` records) or a
+pending peer request remains, the notice names concrete next actions and repeats
+every interval; only a role with nothing left gets one short release reminder and
+then no further model turn while its state is unchanged. Only
 ``peer-steward steward check`` records ``last_checked``. A released role, a
 changed holder or a proven-ended session retires the duty and its undelivered
 notice, so nothing keeps retrying toward the old holder.
@@ -39,17 +41,25 @@ _THROTTLE: dict[tuple[str, str], float] = {}
 _MODULES: dict[str, object] = {}
 
 TEXT_RELEASE_IF_IDLE = (
-    "Steward check: no targets remain for you. Leave one status line and start no new work. "
-    "If nothing else remains, tidy finished sessions through the existing tidy path and "
-    "release your flag with `peer-steward steward off`.")
+    "Steward check: no targets, peer requests or open work remain for you. Tidy finished "
+    "sessions through the existing tidy path and release your flag with "
+    "`peer-steward steward off`.")
 TEXT_TIDY_AND_RELEASE = (
-    "Steward check: all {count} of your targets look finished ({names}). Tidy those sessions "
-    "through the existing tidy path, then release your own flag with "
-    "`peer-steward steward off` if nothing else remains. Start no new work.")
+    "Steward check: all {count} of your targets look finished ({names}) and no open work "
+    "or peer request remains. Tidy those sessions through the existing tidy path, then "
+    "release your own flag with `peer-steward steward off`.")
 TEXT_RUN_CHECK = (
-    "Periodic steward check is due. Run `peer-steward steward check` and act only on the "
-    "targets it lists for you. If it shows no change, leave one or two status lines and "
-    "start no new work.")
+    "Periodic steward check is due. Run `peer-steward steward check` now and act on the "
+    "next actions it lists: assign open work to waiting targets and follow up owed peer "
+    "requests. An unchanged state does not mean nothing remains.")
+TEXT_ASSIGN_NEXT = (
+    "Steward check: work remains. Do these now: {actions}. Then run "
+    "`peer-steward steward check`. A status line alone does not move the work.")
+
+# Herdr states in which a live target is waiting for its next step.
+_WAITING_STATES = frozenset({"idle", "done", "unused", "stale"})
+_MAX_ACTIONS = 4
+_MAX_HEADLINE = 70
 
 
 # ---------------------------------------------------------------- seams / lazy modules
@@ -425,10 +435,62 @@ def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
         return False
 
 
-def _observe_role(harness: str, session_id: str) -> dict:
-    """``{"targets": [{name, harness, session_id, state, liveness}], "pending_messages": n}``
-    for this holder's own winner targets only."""
+def _holder_cwd(harness: str, session_id: str):
+    """The holder's own single cwd from the collector's session rows, or None."""
     collector = _collector()
+    rows_of = getattr(collector, "_projection_sessions", None)
+    keys_of = getattr(collector, "_session_keys", None)
+    if rows_of is None or keys_of is None:
+        return None
+    try:
+        cwds = {row.cwd for row in rows_of() or ()
+                if getattr(row, "cwd", None) and (harness, session_id) in keys_of(row)}
+    except Exception:  # noqa: BLE001
+        return None
+    return cwds.pop() if len(cwds) == 1 else None
+
+
+def _open_work(harness: str, session_id: str) -> list[str]:
+    """Open work headlines for the holder's repository from the existing Fleet work source
+    (``fleet.session_work.observe``, the repo page's open memory records); [] when unknown."""
+    cwd = _holder_cwd(harness, session_id)
+    if not cwd:
+        return []
+    try:
+        tools = _UTILITIES.parent / "tools"
+        if str(tools) not in sys.path:
+            sys.path.insert(0, str(tools))
+        from fleet.session_work import observe
+        rows, _watched = observe(cwd)
+    except Exception:  # noqa: BLE001 - backlog is optional evidence
+        return []
+    headlines = []
+    for row in rows or ():
+        headline = " ".join(str((row or {}).get("headline") or "").split())
+        if headline:
+            headlines.append(headline)
+    return headlines
+
+
+def _pending_count(module, harness: str, session_id) -> int:
+    if module is None or not session_id:
+        return 0
+    try:
+        rows = module.pending_messages({"harness": harness, "session_id": session_id})
+    except Exception:  # noqa: BLE001
+        return 0
+    return len([row for row in rows or () if row.get("state") == "pending"])
+
+
+def _observe_role(harness: str, session_id: str) -> dict:
+    """``{"targets": [{name, harness, session_id, state, liveness, owed}],
+    "pending_messages": n, "open_work": [headline, ...]}`` for this holder's own winner
+    targets only; ``owed`` counts peer requests still pending for that target."""
+    collector = _collector()
+    try:
+        module = collector._peer_message_module() if collector is not None else None
+    except Exception:  # noqa: BLE001
+        module = None
     targets = []
     agents = _agents()
     observation = _end_observation()
@@ -449,31 +511,106 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 "harness": t_harness or "-", "session_id": t_sid,
                 "state": state,
                 "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid else "unknown")})
-    pending = 0
-    try:
-        module = collector._peer_message_module() if collector is not None else None
-        rows = module.pending_messages({"harness": harness, "session_id": session_id}) if module else []
-        pending = len([row for row in rows if row.get("state") == "pending"])
-    except Exception:  # noqa: BLE001
-        pending = 0
-    return {"targets": targets, "pending_messages": pending}
+                             if t_sid else "unknown"),
+                "owed": _pending_count(module, t_harness, t_sid)})
+    pending = _pending_count(module, harness, session_id)
+    return {"targets": targets, "pending_messages": pending,
+            "open_work": _open_work(harness, session_id)}
+
+
+def _remaining(observation: dict) -> bool:
+    """Whether open work or an owed peer request remains for this role."""
+    return bool(observation.get("open_work")) or observation.get("pending_messages", 0) > 0 \
+        or any(int(t.get("owed") or 0) > 0 for t in observation["targets"])
+
+
+def _waiting(target: dict) -> bool:
+    return target.get("liveness") != "ended" and target.get("state") in _WAITING_STATES
+
+
+def _track_waiting(previous, targets: list[dict], now: float) -> dict:
+    """``{session_id: first-seen-waiting ts}`` for targets waiting now, from this duty's own
+    earlier observations; a target that resumed work drops out."""
+    previous = previous if isinstance(previous, dict) else {}
+    result = {}
+    for target in targets:
+        sid = str(target.get("session_id") or "")
+        if sid and _waiting(target):
+            try:
+                result[sid] = min(float(previous.get(sid, now)), now)
+            except (TypeError, ValueError):
+                result[sid] = now
+    return result
+
+
+def _label(name: str) -> str:
+    name = str(name or "-")
+    return name if name.startswith("[") else f"[{name}]"
+
+
+def next_actions(observation: dict, waiting_since=None, now: float | None = None) -> list[str]:
+    """Concrete next steps: waiting targets paired with open work, owed peer requests,
+    then unassigned open work. Empty when nothing remains to move."""
+    now = _now() if now is None else now
+    waiting_since = waiting_since or {}
+    targets = observation["targets"]
+    work = [h if len(h) <= _MAX_HEADLINE else h[:_MAX_HEADLINE - 1] + "…"
+            for h in observation.get("open_work") or ()]
+    waiting = sorted((t for t in targets if _waiting(t) and not int(t.get("owed") or 0)),
+                     key=lambda t: waiting_since.get(str(t.get("session_id")), now))
+    actions = []
+    for target in targets:
+        owed = int(target.get("owed") or 0)
+        if owed and target.get("liveness") != "ended":
+            actions.append(f"{_label(target['name'])} {owed} peer request(s) unanswered "
+                           "→ follow up now")
+    for target in waiting:
+        minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)
+        since = f" {minutes} min" if minutes else ""
+        if not work:
+            break
+        actions.append(f"{_label(target['name'])} waiting{since} · {work.pop(0)} → assign now")
+    for headline in work:
+        actions.append(f"open: {headline} → assign or do now")
+    pending = int(observation.get("pending_messages") or 0)
+    if pending:
+        actions.insert(0, f"{pending} peer request(s) to you → do that work now")
+    return actions
 
 
 def _signature(action: str, observation: dict) -> str:
-    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"])
+    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"],
+                   int(t.get("owed") or 0))
                   for t in observation["targets"])
-    raw = repr((action, rows, observation["pending_messages"]))
+    raw = repr((action, rows, observation["pending_messages"],
+                tuple(observation.get("open_work") or ())))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _classify(observation: dict) -> str:
+    """Release or tidy advice only when nothing remains; remaining work names next steps."""
     targets = observation["targets"]
-    if not targets and observation["pending_messages"] == 0:
+    if _remaining(observation):
+        return "assign-next" if next_actions(observation) else "run-steward-check"
+    if not targets:
         return "release-if-idle"
-    if targets and all(t["state"] == "done" or t["liveness"] == "ended" for t in targets):
+    if all(t["state"] == "done" or t["liveness"] == "ended" for t in targets):
         return "tidy-and-release"
     return "run-steward-check"
+
+
+def _actions_text(actions: list[str]) -> str:
+    """The assign-next notice within the carrier's text limit."""
+    import session_notice
+    limit = getattr(session_notice, "MAX_TEXT", 600)
+    shown = list(actions[:_MAX_ACTIONS])
+    while True:
+        more = len(actions) - len(shown)
+        joined = "; ".join(shown) + (f"; +{more} more" if more else "")
+        text = TEXT_ASSIGN_NEXT.format(actions=joined)
+        if len(text) <= limit or len(shown) <= 1:
+            return text[:limit]
+        shown.pop()
 
 
 # ---------------------------------------------------------------- notices
@@ -721,9 +858,11 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
             "reason": "no-steward-flag"})
         return
     seen = _observe_role(harness, session_id)
+    waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)
+    observation = {**observation, "waiting_since": waiting_since}
     action = _classify(seen)
     signature = _signature(action, seen)
-    quiet = action != "run-steward-check"
+    quiet = action in {"release-if-idle", "tidy-and-release"}
     if quiet and signature == observation.get("quiet_signature"):
         store.update(duty["id"], observation={
             **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
@@ -733,6 +872,8 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":
         text = TEXT_TIDY_AND_RELEASE.format(count=len(seen["targets"]), names=_names(seen["targets"]))
+    elif action == "assign-next":
+        text = _actions_text(next_actions(seen, waiting_since, now))
     else:
         text = TEXT_RUN_CHECK
     cycle = int(observation.get("cycle") or 0)
@@ -819,9 +960,11 @@ def reconcile_all(store) -> None:
 # ---------------------------------------------------------------- steward check command
 
 def _check_digest(seen: dict) -> str:
-    parts = [f"{t['name']}@{t['harness']}={hashlib.sha256(repr((t['state'], t['liveness'])).encode()).hexdigest()[:8]}"
+    parts = [f"{t['name']}@{t['harness']}={hashlib.sha256(repr((t['state'], t['liveness']) + ((int(t['owed']),) if t.get('owed') else ())).encode()).hexdigest()[:8]}"
              for t in seen["targets"]]
     parts.append("pending=" + str(seen["pending_messages"]))
+    if seen.get("open_work"):
+        parts.append("open=" + hashlib.sha256(repr(tuple(seen["open_work"])).encode()).hexdigest()[:8])
     return "|".join(sorted(parts))
 
 
@@ -846,6 +989,7 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
     seen = _observe_role(harness, session_id)
     digest = _check_digest(seen)
     observation = dict((duty or {}).get("observation") or {})
+    waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)
     changes = _changes(observation.get("check_signature"), digest)
     undelivered = 0
     delivery_id = observation.get("notice_delivery_id")
@@ -857,7 +1001,7 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
         st.update(duty["id"], observation={
             **(observation or _new_observation(now)), "phase": "scheduled", "last_checked": now,
             "anchor": now, "check_signature": digest, "notice_delivery_id": None,
-            "reason": "checked"})
+            "waiting_since": waiting_since, "reason": "checked"})
         if delivery_id:
             _retire_notice(session_id, delivery_id, duty["id"])
         _THROTTLE.pop((duty["id"], "notified"), None)
@@ -868,13 +1012,21 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
           f"targets={count} changes={changes} checked_at={stamp}", file=out)
     for warning in policy_warnings():
         print(f"warning={warning}", file=out)
-    if not targets:
+    actions = next_actions(seen, waiting_since, now)
+    if not targets and not actions:
         print("hint=nothing to supervise; tidy finished sessions and release with "
               "peer-steward steward off", file=out)
         return 0
     for target in targets:
+        owed = int(target.get("owed") or 0)
         print(f"target name={target['name']} harness={target['harness']} "
-              f"state={target['state']} liveness={target['liveness']}", file=out)
-    print(f"pending_messages={seen['pending_messages']} undelivered_notices={undelivered}", file=out)
+              f"state={target['state']} liveness={target['liveness']}"
+              + (f" owed={owed}" if owed else ""), file=out)
+    print(f"pending_messages={seen['pending_messages']} undelivered_notices={undelivered}"
+          f" open_work={len(seen.get('open_work') or ())}", file=out)
+    for action in actions:
+        print(f"next={action}", file=out)
+    if actions:
+        print("hint=do the next actions now; release only when none remain", file=out)
     print(f"next_due_in_minutes={-(-interval // 60)}", file=out)
     return 0
