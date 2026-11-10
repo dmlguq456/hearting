@@ -1103,6 +1103,7 @@ _AUDIT_INCOMPLETE = re.compile(
     r"\b(?:audit|review)\b[^\n.]{0,40}\b(?:not\s+(?:performed|completed|conducted)|"
     r"incomplete|could\s+not|cannot|blocked|aborted)\b|"
     r"\b(?:unable\s+to|could\s+not|cannot)\s+(?:perform|complete|conduct)\s+(?:the\s+)?(?:audit|review)\b|"
+    r"\b(?:not(?:\s+yet)?|will\s+be|to\s+be)\s+reviewed\b|"
     r"\btarget\s+read\s+failed\b", re.I)
 _AUDIT_FINDING = re.compile(r"^(?:\[?(?:P[0-3](?:-\w+)?|F\d+)\b|finding\s+\d+\b).+", re.I)
 _AUDIT_PERFORMED = re.compile(

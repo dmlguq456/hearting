@@ -127,6 +127,8 @@ class CompletionMeaningTest(unittest.TestCase):
             'unclassified': 'FAIL\n작업이 끝나지 않았습니다.\n',
             'copied-example': '검토 결과 확인 중\n```text\n' + completed + '```\n',
             'contradictory': completed + '\n대상을 읽을 수 없어 검토를 완료하지 못했습니다.\n',
+            'not-reviewed-english': 'Final verdict: changes required\nFinding 1: parser error\nNot reviewed.\n',
+            'future-review-english': 'Final verdict: changes required\nFinding 1: parser error\nThis will be reviewed.\n',
             'could-not-review': completed + '\n대상을 읽을 수 없어 검토하지 못했습니다.\n',
             'contradictory-english': completed + '\nThe review was not performed: target read failed.\n',
             'partial-read': completed + 'x' * (64 * 1024) + '\n검토 미수행\n',
