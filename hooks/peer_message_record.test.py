@@ -531,7 +531,7 @@ class PromptTest(_BaseTest):
         }
         proc = self._run("prompt", payload)
         context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("answer once", context)
+        self.assertIn("acknowledgement alone is not completion", context)
 
     def test_prompt_guidance_receives_exact_claude_payload_identity(self):
         from types import SimpleNamespace
@@ -872,7 +872,7 @@ class F100cTrailerAndNameTest(_BaseTest):
         self.assertEqual(rec["from"]["session_id"], "thread-9")
         self.assertEqual(rec["from"]["name"], "f100-codex")
         self.assertEqual(rec["summary"], "herdr steer received")
-        self.assertIn(b"answer once", result.stdout)
+        self.assertIn(b"acknowledgement alone is not completion", result.stdout)
 
     def test_plain_prompt_still_writes_nothing(self):
         self._run("prompt", {"session_id": "sid-recv", "cwd": "/tmp/proj", "prompt": "peer-from: x"})

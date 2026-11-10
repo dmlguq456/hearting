@@ -517,6 +517,38 @@ class RecoveryFieldsTest(unittest.TestCase):
             self.assertNotIn('recovery_complete_command', fields)
             self.assertNotIn('recovery_check_command', fields)
 
+    def test_deterministic_smoke_gate_names_an_owner_run_check_not_a_report(self):
+        # BC-AMI-SMOKE-ROUND-CAP-1109 (req. 4): a spent reviewer budget left the
+        # hash-bound smoke with only `report-unresolved-verification`, so the
+        # corrected GPU check never ran.  The check itself stays runnable.
+        node = {"id": "smoke", "kind": "review-worker", "completion_gate": "hash-bound-smoke"}
+        for state in ("exhausted", "verdictless-bound"):
+            with self.subTest(state=state):
+                fields = CAP.recovery_fields("review-worker", state, node=node,
+                                             route_file="/r/route.json")
+                self.assertEqual(fields["required_action"], "run-deterministic-check")
+                self.assertEqual(fields["next_action"], "owner-inline")
+                self.assertEqual(fields["recovery_surface"], "capability-route complete --inline")
+                self.assertEqual(fields["review_independence_when_owner_run"], "degraded")
+                self.assertIn("verification-background-lease.py", fields["recovery_run_command"])
+                self.assertIn("smoke-attestation.py attest", fields["recovery_run_command"])
+                self.assertIn("smoke-attestation.py verify", fields["recovery_check_command"])
+                self.assertIn("complete --inline --route /r/route.json --node smoke",
+                              fields["recovery_complete_command"])
+                self.assertIn("unverified", fields["recovery_hint"])
+
+    def test_model_review_and_owner_closure_keep_their_existing_recovery(self):
+        # A model-review gate keeps the report; an available owner closure is not replaced.
+        self.assertEqual(CAP.recovery_fields("review-worker", node=review_node())["required_action"],
+                         "report-unresolved-verification")
+        node = {"id": "smoke", "kind": "review-worker", "completion_gate": "hash-bound-smoke"}
+        closure = {"required_action": "resolve-review-findings", "next_action": "owner-closure",
+                   "recovery_complete_command": "complete --attempt-id att-x"}
+        with mock.patch.object(CAP, "_review_recovery_fields", return_value=dict(closure)):
+            self.assertEqual(CAP.recovery_fields("review-worker", node=node), closure)
+        self.assertEqual(CAP.recovery_fields("review-worker", "review-correction-required",
+                                             node=node)["required_action"], "resolve-review-findings")
+
     def test_exhausted_non_review_names_existing_inline_completion(self):
         fields = CAP.recovery_fields("pipeline-stage")
         self.assertEqual(fields["recovery_surface"], "capability-route complete --inline")

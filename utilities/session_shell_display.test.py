@@ -31,7 +31,7 @@ class WrappedDisplayTest(unittest.TestCase):
             with self.subTest(percentage=percentage):
                 line=self.statusline(True,percentage)
                 self.assertIn('context ',line);self.assertIn(reading,line)
-                self.assertIn('Opus',line);self.assertIn('7d 42%',line)
+                self.assertNotIn('Opus',line);self.assertIn('7d 42%',line)  # model is in the shared panel header
                 self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
 
 

@@ -57,7 +57,7 @@ class SessionShellInstallTest(unittest.TestCase):
         policy=install._client().policy_path();policy.parent.mkdir(parents=True,exist_ok=True)
         policy.write_text(json.dumps({'enabled':False,'layout':'side','side_width':48,'side_min_columns':150}));policy.chmod(0o600)
         install.set_enabled(True)
-        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150})
+        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150,'narrow':'bottom','auxiliary':'summary','bottom_rows':14})
         install.set_enabled(False)
         self.assertEqual(json.loads(policy.read_text())['side_width'],48)
 

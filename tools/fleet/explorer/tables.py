@@ -688,7 +688,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     grid.put(x1 - _seg_width(age), y, age, "dim")
 
 
-def _draw_route_progress(grid, x, end, y, route):
+def _draw_route_progress(grid, x, end, y, route, card=True):
     if route.get("state") == "stale" and x < end:
         # Still marked in flight, but nothing of it runs: said in words before its stages.
         x = grid.put(x, y, "no response ", "lvl_y", limit=end)
@@ -709,7 +709,9 @@ def _draw_route_progress(grid, x, end, y, route):
                           "failed": "✕"}.get(str(stages[-1].get("st") or ""), "·")
             cursor = grid.put(cursor, y, "  (" + stage_name + " " + stage_mark + ")", "dim",
                               limit=end)
-        grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
+        cursor = grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
+        if card:
+            _put_route_card(grid, cursor, end, y, route)
         return
     legs = tuple(route.get("legs") or ())
     stages = tuple(route.get("stages") or ())
@@ -752,7 +754,17 @@ def _draw_route_progress(grid, x, end, y, route):
         cursor = grid.put(cursor, y, opening, "dim", limit=end)
         cursor = _put_segments(grid, cursor, y, stage_rail, end)
         cursor = grid.put(cursor, y, ")", "dim", limit=end)
-    _put_segments(grid, cursor, y, after, end)
+    cursor = _put_segments(grid, cursor, y, after, end)
+    if card:
+        _put_route_card(grid, cursor, end, y, route)
+
+
+def _put_route_card(grid, cursor, end, y, route):
+    """How the route was chosen and what verified it, only where the row has room."""
+    visibility = route.get("visibility")
+    card = str(visibility.get("card") or "") if isinstance(visibility, Mapping) else ""
+    if card and end - cursor >= _seg_width(card) + 2:
+        grid.put(cursor, y, "  " + card, "dim", limit=end)
 
 
 def _seg_width(text):
@@ -1041,7 +1053,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 else:
                     pct, window = None, None
                 _draw_context_gauge(grid, x + cols["ctx"], y, pct, window)
-            _draw_route_progress(grid, x + cols["prog"], age_edge - gap, y, route)
+            # The route's card goes on its worker line below, where the column has room.
+            _draw_route_progress(grid, x + cols["prog"], age_edge - gap, y, route, card=False)
             grid.put(age_edge, y, age, "dim")
             if is_open:
                 _tint_row(grid, y, x - 1, right, 236)
@@ -1113,6 +1126,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 grid.put(cursor, y, text, style, limit=worker_progress_end)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
+            _put_route_card(grid, cursor, worker_progress_end, y, route)
             if inline_context:
                 if slim:
                     grid.put(context_x, y, context_text, "dim", limit=progress_end)

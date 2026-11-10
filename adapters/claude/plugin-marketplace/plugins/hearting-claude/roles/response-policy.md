@@ -232,6 +232,15 @@ an unnecessary question just to make the UI more visible.
   to resume the same exact duty rather than making an agent remember a rearm.
   *Violation signal:* settled work or an accepted message loses its delivery
   or cleanup owner when a turn or watcher exits.
+- **A repeated refusal is not progress** — when the user presses for execution
+  and a child or route returns the same refusal again, do not relay it again as
+  the whole answer. Within existing approvals, run what is possible now: the
+  check or path the refusal prints, approved independent work, or an existing
+  registered run. Report its actual run ID and current step as observed, and
+  raise only the part that needs a person's decision. Do not reset counters,
+  edit registries, or ask for approval again to get past the refusal.
+  *Violation signal:* two reports in a row give the same refusal with no new
+  run ID, check result, or decision request.
 - **Auto-continue in-flow follow-ups** — inside an explicit "do X" flow, do not
   re-confirm each follow-up step (commit, stage, push, save, cleanup);
   auto-proceed without another confirmation, then use the applicable concise
@@ -246,10 +255,10 @@ an unnecessary question just to make the UI more visible.
   *Violation signal:* "should I also update the record / re-commit?" after the
   fact.
 
-- **Peer follow-through** — when an actionable request can be completed now,
-  reply once with its result. When it must wait or take sustained work, send one
-  short receipt and continue through the existing registered continuation;
-  informational/no-reply notices need no reply. Put the condition, result, and
+- **Peer follow-through** — do the requested work now; an acknowledgement alone
+  is not completion. Reply once with its result. When part must wait or take
+  sustained work, say so in one line and keep working on it in this turn or the
+  existing registered continuation; informational/no-reply notices need no reply. Put the condition, result, and
   any required decision or blocker first. Keep PID, start, exit, digest, and path
   detail in existing evidence and refer to it only when useful. Preserve exact
   typed handoff acceptance commands and predecessor duties. Read exact completion

@@ -5,6 +5,48 @@ import os
 import stat
 
 
+def codex_selected_model(pid, start, sid):
+    """One loaded thread's official display values; no selection/input effect.
+
+    A visible ID is only a read address. This does not subscribe, resume, bind,
+    write a registry, or claim that the thread belongs to an input recipient.
+    """
+    import re
+    import time
+    from .collectors import codex, procscan
+    if not isinstance(sid, str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid):
+        return {}
+    if procscan.read_proc_start(pid) != start or codex._live_tui_start(pid) != start:
+        return {}
+    client = None
+    try:
+        endpoint = codex._control_socket(procscan.read_environ(pid))
+        stamp = codex._control_socket_identity(endpoint)
+        if stamp is None:
+            return {}
+        from codex_queue_delivery import _connect
+        deadline = time.monotonic() + .75
+        client = _connect(endpoint, .75, deadline=deadline)
+        response = codex._daemon_request(client, "thread/read", {"threadId": sid, "includeTurns": False}, deadline)
+        thread = response.get("thread")
+        if (not isinstance(thread, dict) or thread.get("id") != sid
+                or codex._thread_source(thread) != "user"
+                or not isinstance(thread.get("status"), dict)
+                or thread["status"].get("type") not in {"idle", "active"}
+                or procscan.read_proc_start(pid) != start
+                or codex._control_socket_identity(endpoint) != stamp):
+            return {}
+        model, effort = thread.get("model"), thread.get("reasoningEffort")
+        if not isinstance(model, str) or not model or len(model) > 128 or re.search(r"[\x00-\x1f\x7f]", model):
+            return {}
+        return {"model": model, "effort": effort if effort in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} else ""}
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
+        return {}
+    finally:
+        if client is not None:
+            client.close()
+
+
 def claude_callback(path, sid, pid, start):
     """Read the existing bounded, exact-session display tap, never latest-global."""
     try:

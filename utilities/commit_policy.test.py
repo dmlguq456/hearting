@@ -217,6 +217,20 @@ class CommitPolicyTest(unittest.TestCase):
         route["entry_execution_scope"] = "report"
         write_route()
         self.assertIsNone(commit_policy.task_publish_scope(args))
+        # A direct compose seals no entry scope: nothing declared a stop
+        # before publication, so the owner keeps the same capacity on every
+        # harness (Codex owners otherwise lose their sandbox network).
+        del route["entry_scope_contract_version"], route["entry_execution_scope"]
+        write_route()
+        unscoped = commit_policy.task_publish_scope(args)
+        self.assertEqual((unscoped["branch"], unscoped["base"]), ("fx", "main"))
+        for version, marker in ((1, None), (None, "complete"), (2, "complete"), (1, "partial")):
+            with self.subTest(version=version, marker=marker):
+                route["entry_scope_contract_version"] = version
+                route["entry_execution_scope"] = marker
+                write_route()
+                self.assertIsNone(commit_policy.task_publish_scope(args))
+        route["entry_scope_contract_version"] = 1
         route["entry_execution_scope"] = "complete"
         for wording in (
             "Create a pull request and verify automated checks.",

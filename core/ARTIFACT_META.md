@@ -257,6 +257,45 @@ continue without the optional viewer. Entrance files retain relative links. HTML
 is served unchanged in a sandbox; absolute filesystem links inside existing HTML
 are not rewritten. Markdown is rendered at its original URL with a raw view.
 
+### Shared spec revisions and the latest view
+
+A spec revision's `files[]`, `file_count`, `byte_size` and `content_digest`
+describe its complete logical inventory. Physical storage is a separate fact.
+Full-tree revisions remain readable. Schema 1 `stored_in` maps a logical path
+to the same path in an earlier revision; schema 2 maps it to
+`{revision_id, source_path}`. Each source is a regular file in an earlier
+revision of the same reference, with the declared digest and size. A source
+names actual bytes, not another storage reference. Logical revision identity
+and the physical provider's identity remain distinct.
+
+The common reader resolves inventory, files, transaction seeds and history
+before a delta writer is introduced. Missing, corrupt, linked or ambiguous
+storage remains an integrity error, rather than a successful partial tree.
+Unselected components, exact preimages, explicit deletion, merge/CAS and
+publication proof keep their existing meanings. New storage leaves old
+immutable revisions untouched and measures physical and logical size separately.
+
+`shared/spec/<ref>/current/` is a derived latest view, maintained by the normal
+writer with atomic file replacements and the latest ID/content digest. It is
+neither authoring source nor historical proof. A missing or drifting view reads
+through the verified immutable revision. Read-only lookup does not repair it;
+view failure does not overturn an already admitted revision. Directory-copy
+and external mirror consumers need the logical reader before delta publication.
+Canonical-topic entrance rows use the existing reference/component and logical
+revision, retaining unknown ownership instead of deriving new IDs from paths.
+
+`artifact_reader.py resolve --artifact-root ROOT --path <logical-path>` returns
+the logical revision and verified physical source separately. `spec-dir` and
+`bucket-dirs --bucket spec` expose `logical_files` with their exact source paths,
+digests and sizes, plus `physical_complete`. Directory locations are not a promise
+of a full physical copy. File and directory-copy consumers use these addresses;
+they must not infer a revision ID from `current` or copy a sparse revision blindly.
+The viewer serves the same logical files and directory inventory without
+materializing them. Exact read markers continue to name immutable PRD sources.
+Changed public files store full bytes; new history slots can reuse a matching
+old PRD at a different source path. Single-component logical behavior is preserved
+while versioned physical storage and its separate size metrics can change.
+
 ## Internal files (no reader duty)
 
 - `.runtime/artifact-producer/v1/artifact-meta-state.json` (`artifact-meta-state/v1`):

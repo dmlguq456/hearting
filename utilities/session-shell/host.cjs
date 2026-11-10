@@ -7,7 +7,7 @@ const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
 const args = process.argv.slice(2), harness = args.shift(), command = args;
-let activated = false, child, inputOwner, backend, server, projectionTimer, frameTimer, ended = false;
+let activated = false, child, inputOwner, mouseInput, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
   const fd = Number(process.env.HEARTING_SHELL_START_FD);
   fs.writeSync(fd, value + '\n'); fs.closeSync(fd);
@@ -37,11 +37,15 @@ const socketPath = path.join(dir, 'control.sock');
 let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
-let displayConfiguration={layout:'bottom'},nativeSidebar=false;
+const panelView=require('./panel-view.cjs');
+let displayConfiguration={...panelView.defaults},nativeSidebar=false;
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
-const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration});
+const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration,nativeSidebar:harness==='opencode'});
 const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
+let widthProvider;
+new Unicode11Addon().activate({unicode:{register:provider=>{widthProvider=provider;}}});
+const cellWidth=text=>[...text].reduce((width,char)=>width+widthProvider.wcwidth(char.codePointAt(0)),0);
 const incarnation = crypto.randomBytes(24).toString('hex'), token = process.env.HEARTING_SHELL_TOKEN;
 function processRow(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return null;
@@ -80,7 +84,12 @@ let callID = 0, projecting = false, projectionPending = false;
 let actionWorker;
 let nativeContext;
 let displayValues={};
+let nativeSelected={};
+let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
+let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,sessionDetails=false,dragging=false;
+let panelSubscribers=new Set(),sidebarMounted=false,nativeLayoutPending=false,displaySequence=0;
+let sidebarViews=[],sidebarMouseHeld=false;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -95,18 +104,66 @@ function publishNativeDisplay() {
     ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !fleetView,alive:live(),expanded,focused:block.focused,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
-  if (!backend || backend.exitCode !== null || !sid) return Promise.resolve({ok:false,reason:'source-unavailable'});
+  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
-    const timer=setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
+    // Startup display replies are finite, asynchronous reads. A busy backend
+    // must not discard its eventual language/model result before first input.
+    // They never delay native start or keys; backend exit settles all callers.
+    const timer=['display-bootstrap','display-model'].includes(op)?null:
+      setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
     if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
     backend.stdin.write(frame);
   });
+}
+function nativeSelectionFrame() {
+  // Original native VT only: neither concealed paint nor the Hearting panel.
+  const lines=Array.from({length:terminal.rows},(_,i)=>
+    terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
+  while(lines.length&&!lines[lines.length-1].trim())lines.pop();
+  const prompt=lines.findLastIndex(line=>line.trimStart().startsWith('›'));
+  const tail=prompt<0?[]:lines.slice(prompt+1).map(line=>line.trim()).filter(Boolean);
+  const frame={revision:screenRevision,epoch,lines:[]};
+  // Refuse interstitial body without returning it. Keep the strict parser's
+  // location-menu veto even when a menu happens to occupy only two rows.
+  const flat=tail.join('').replace(/\s/g,'').toLowerCase();
+  const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
+    'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
+  if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  const hint=tail[tail.length-1]||'';
+  const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
+  const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
+  if(!help)return frame;
+  if(tail.length!==2)return {...frame,invalid:true};
+  // Only identity-shaped tokens leave the native viewport. Titles, telemetry
+  // and even footer-shaped draft text never travel in this read-only response.
+  const fields=tail[0].split('·'),safe=value=>/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f-]{0,27}…)$/.test(value.trim())?value.trim():'?';
+  const status=fields.length===1?safe(fields[0]):safe(fields[0])+' · '+safe(fields[fields.length-1]);
+  return {...frame,lines:['›',status,help]};
+}
+let checkingNativeSelection=false,nativeSelectionRevision=-1;
+function observeNativeSelection() {
+  if(harness!=='codex'||!sid||ended||relay||checkingNativeSelection||nativeSelectionRevision===screenRevision)return;
+  const frame=nativeSelectionFrame();
+  // This is only an observation hint. Python owns the strict footer judgment,
+  // native root ownership and repeated, birth-bound snapshot verification.
+  const fields=(frame.lines.slice(1).find(line=>line.trim())||'').split('·');
+  const ids=[fields[0],fields[fields.length-1]].map(value=>value.trim())
+    .filter(value=>/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value));
+  if(!ids.some(id=>id!==sid))return;
+  checkingNativeSelection=true;nativeSelectionRevision=frame.revision;
+  const selected=selection;
+  source('selection').then(data=>{
+    if(!data.ok||relay||ended||selected!==selection||frame.revision!==screenRevision||frame.epoch!==epoch
+       ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
+    return lifecycle({token,harness,pid:native.pid,start:native.start,
+      sid:data.selected_sid,seq:sequence+1,event:'select'});
+  }).finally(()=>{checkingNativeSelection=false;});
 }
 function readAction(extra,operation='action') {
   // A person-requested read or answer may be slow. It must not queue ahead
@@ -149,54 +206,72 @@ function serialize(line,width) {
   }
   return s+'\x1b[0m';
 }
-function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,nativeSidebar});}
+function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,nativeSidebar:harness==='opencode'||nativeSidebar});}
 function panelColumns(){return geometry().panelCols;}
 function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return geometry().side?rows:rows-height();}
-function panelRow(){return geometry().side?2:rows-height();}
-function maxHeight(){return geometry().side?Math.max(1,rows-2):Math.min(10,Math.max(1,rows-6));}
+function panelRow(){return geometry().side?0:rows-height();}
+function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 function panelContent(){
-  if(!panelSections)return panelLines;
-  const prefix=panelSections.prefix||[],tail=panelSections.tail||[];
-  const question=actionLines.length&&block.focused?actionLines:block.detail({budget:Math.max(2,maxHeight()-prefix.length-(tail.length?1:0)),columns:panelColumns()});
-  const room=Math.max(0,maxHeight()-prefix.length-question.length);
-  const ancillary=tail.length>room&&room>0?[...tail.slice(0,room-1),[{text:`+${tail.length-room+1} · ${panelSections.labels?.more||'more'}`,dim:true}]]:tail.slice(0,room);
-  let lines=[...prefix,...question,...ancillary];
-  if(lines.length>maxHeight()){
-    const omitted=lines.length-maxHeight()+1;
-    lines=[...lines.slice(0,maxHeight()-1),[{text:`+${omitted} · ${panelSections.labels?.more||'more'}`,dim:true}]];
-  }
-  return lines.map(line=>[{text:'  '},...line]);
+  const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
+    model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
+    settings,routeDetail,routePage,details:sessionDetails,focused:block.focused,cwd:process.cwd(),harness,
+    cellWidth,
+    questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+  panelHits=view.hits;routePageCount=view.routePages;return view.rows;
 }
 function height(){
   if(fleetView)return 0;
+  if(harness==='opencode'&&nativeLayoutPending)return 0;
+  if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side')return 0;
   if(!expanded)return harness==='claude'?0:1;
+  if(geometry().side)return rows;
   const content=panelContent();
-  if(panelSections)return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
-  const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
-  return nativeDisplay.blockHeight({harness,count:Math.max(panelLines.length,currentDelivery?1:0),
-    detail:detail.length,limit:maxHeight(),loaded:!!projectionKey});
+  return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
+
 }
 function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
+function displayModelKey(lines){return lines.slice(-4).join('\n');}
+function observeSelectedModel(lines){
+  if(harness!=='codex'||modelReading||!native||nativeSelected.model)return;
+  const key=displayModelKey(lines);
+  if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
+  modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
+  source('display-model',{lines}).then(data=>{
+    const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
+    if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
+      nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
+    }
+  }).finally(()=>{modelReading=false;});
+}
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
+    observeNativeSelection();
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
+    observeSelectedModel(nativeLines);
+    const selectedChanged=!!observed?.model&&(observed.model!==displayValues.model||(observed.effort||'')!==(displayValues.effort||''));
     if(harness==='opencode'&&observed&&!nativeSidebar){
       // A confirmed native sidebar keeps this attachment at bottom. Do not
       // oscillate geometry across partial native redraws or compete with it.
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon);
+    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
-      nativeContext=observed;publishNativeDisplay();if(harness!=='codex')queueProjection();}
+      nativeContext=observed;
+      if(observed?.model){bootstrapModel=false;nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
+      if(typeof observed?.percent==='number')displayValues.context_percent=observed.percent;
+      publishNativeDisplay();queueDisplay();if(harness!=='codex')queueProjection();}
+    // Paint the observed selected model with the same native frame, rather
+    // than first emitting a known model beside an obsolete Checking row.
+    if(selectedChanged)return;
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
       let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
-      if(!fleetView&&geometry().side){const panel=y-2;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel>=0&&panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
+      if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
@@ -211,7 +286,8 @@ function render() {
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
     text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
     text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
-    if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
+    if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
+    else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
     text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(block.focused&&!fleetView?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
     emit(text);
   } catch { rawRelay(); }
@@ -255,25 +331,29 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;publishPanel();schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
   if(expanded){
-    const base=panelSections?panelContent():panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
-      [[{text:`📁 ${path.basename(process.cwd())} · ${harness} · CTX ?`,dim:true}]]:[]);
-    const detail=!panelSections&&block.focused?(actionLines.length?actionLines:block.detail()):[];
+    const base=panelContent();
+    const detail=[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
       const at=visible.findIndex(line=>Array.isArray(line)&&line.some(part=>String(part.text).startsWith('› ')));
       edit=at<0?-1:prefix.length+at;lines=[...prefix,...visible];
     }else lines=base;
-    if(panelSections&&block.focused)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
+    if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
+  const editParts=edit>=0?lines[edit]:[];
+  const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
+  const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
-    blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns(),lengths[edit]+1)}:null;
-    panelRows=painted;paintedCommon=plain;displayFooter=painted[0];footerLast='\0';rebuilding=false;
+    blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
+    panelRows=painted;
+    paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
+    displayFooter=painted[0];footerLast='\0';rebuilding=false;publishPanel();
     if(rebuildPending)rebuildDisplay();
   });
 }
@@ -316,6 +396,7 @@ function applyLayout() {
 }
 function queueProjection() {
   if(ended||relay||projectionTimer)return;
+  nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
 function observeFiles(paths) {
@@ -347,13 +428,15 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const data=await source('projection',{columns:sidebarMounted?panelView.nativeSidebarColumns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,cols,expanded,currentDelivery,heldBytes]);
-    displayValues=data.native_display||{};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes]);
+    const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
+    if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
+    displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
@@ -361,6 +444,7 @@ function rawRelay() {
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);frameTimer=projectionTimer=undefined;
+  mouseInput?.flush();
   try{terminal.dispose();}catch{}
   for(const vt of displayVTs)try{vt.dispose();}catch{}
   displayVTs.clear();
@@ -411,22 +495,151 @@ async function refreshReadiness() {
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
-  const previous=nativeEpoch;epoch+=data.length;nativeEpoch+=data.length;empty=false;
+  epoch+=data.length;empty=false;
   for(let offset=0;offset<data.length;offset++) {
+    nativeEpoch++;
     const c=String.fromCharCode(data[offset]);
-    if(keyTail){keyTail+=c;if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
+    if(keyTail){keyTail+=c;
+      // FocusIn/FocusOut report terminal focus, not a composer edit. Keep the
+      // observation epoch above, including split reports; pasted bytes count.
+      if(!paste&&(keyTail==='\x1b[I'||keyTail==='\x1b[O')){nativeEpoch-=keyTail.length;keyTail='';}
+      else if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
       else if(keyTail.length>2&&/[\x40-\x7e]/.test(c)||keyTail.length>64)keyTail='';}
     else if(c==='\x1b')keyTail=c;
-    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=previous+offset+1;
+    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;
   }
 }
-function userInput(data) {
-  if(!data.length)return;
-  if(currentDelivery){
-    inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
-    if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
+function openSettings(){
+  settings={value:{...panelView.defaults,...displayConfiguration},before:{...displayConfiguration},index:0};
+  block.leave();epoch++;queueLayout();
+}
+function previewSettings(){displayConfiguration={...settings.value};queueLayout();}
+async function applySettings(){
+  const current=settings;if(!current||current.saving)return;current.saving=true;
+  const result=await source('display-settings',{settings:current.value});
+  if(settings!==current)return;
+  if(result.ok){displayConfiguration=result.settings;settings=undefined;}
+  else{current.saving=false;current.error=true;}
+  queueLayout();
+}
+function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
+function panelAction(action){
+  epoch++;empty=false;
+  if(settings?.saving)return;
+  if(action==='settings'){openSettings();return;}
+  if(action==='fleet'){openFleet();return;}
+  if(action==='apply'){applySettings();return;}
+  if(action==='cancel'){cancelSettings();return;}
+  if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
+  if(action==='route'){routeDetail=!routeDetail;routePage=0;sessionDetails=false;block.leave();}
+  if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
+  if(action==='details'){sessionDetails=!sessionDetails;routeDetail=false;block.leave();}
+  if(action==='question'){routeDetail=false;sessionDetails=false;block.enter();}
+  if(action.startsWith('setting:')&&settings){
+    const [,field,operation]=action.split(':'),index=Number(field);if(index<0||index>=panelView.fields.length)return;
+    if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[index]))return;
+    settings.index=index;if(operation!=='select')settings.value=panelView.change(settings.value,panelView.fields[index],operation==='down'?-1:1);previewSettings();return;
   }
+  queueDisplay();
+}
+let settingsTail='',settingsEscapeTimer,settingsPaste=false;
+function settingsInput(data){
+  clearTimeout(settingsEscapeTimer);
+  if(settings?.saving)return;
+  settingsTail+=data.toString('utf8');
+  while(settingsTail&&settings){
+    if(settingsPaste){const end=settingsTail.indexOf('\x1b[201~');if(end<0){settingsTail=settingsTail.slice(-5);return;}settingsTail=settingsTail.slice(end+6);settingsPaste=false;continue;}
+    if(settingsTail.startsWith('\x1b[200~')){settingsTail=settingsTail.slice(6);settingsPaste=true;continue;}
+    if('\x1b[200~'.startsWith(settingsTail)&&settingsTail.length>2)return;
+    if(/^\x1b\[?$/.test(settingsTail)){
+      settingsEscapeTimer=setTimeout(()=>{if(settingsTail==='\x1b'){settingsTail='';cancelSettings();}},25);return;
+    }
+    const key=/^\x1b\[[ABCDZ]/.exec(settingsTail)?.[0]||settingsTail[0];settingsTail=settingsTail.slice(key.length);
+    if(key==='\x1b'||key==='\x1d'){cancelSettings();break;}
+    if(key==='\r'||key==='\n'){applySettings();continue;}
+    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%(harness==='opencode'?5:panelView.fields.length);
+    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+(harness==='opencode'?5:panelView.fields.length)-1)%(harness==='opencode'?5:panelView.fields.length);
+    else if(['\x1b[D','\x1b[C','-','+'].includes(key)){
+      if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[settings.index]))continue;
+      settings.value=panelView.change(settings.value,panelView.fields[settings.index],['\x1b[D','-'].includes(key)?-1:1);previewSettings();
+    }else if(key==='d'){settings.value={...panelView.defaults};previewSettings();}
+  }
+  settingsTail='';queueDisplay();
+}
+function panelMouse(code,x,y,release){
+  if(fleetView||paste||relay)return false;
+  if(sidebarMouseHeld){if(release)sidebarMouseHeld=false;return true;}
+  if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side'&&!release&&(code&3)===0&&code<32){
+    // Native may still be painting the preceding frame after focus changed.
+    // Retain only four bounded published frames; match the actual full VT.
+    const hit=sidebarViews.map(view=>panelView.nativePanelHit(terminal,view,x-1,y-1)).find(Boolean);
+    if(hit){sidebarMouseHeld=true;if(hit.action)panelAction(hit.action);return true;}
+  }
+  const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
+  if(dragging){
+    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
+    else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
+    return true;
+  }
+  if(g.side&&local===0&&(code&3)===0&&!release){dragging=true;return true;}
+  if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
+  if(release||code>=32||(code&3)!==0)return true;
+  const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
+  if(hit){
+    if(hit.action==='settings-buttons')panelAction(local<panelColumns()/3?'apply':local<panelColumns()*2/3?'cancel':'defaults');
+    else panelAction(hit.action);
+  }
+  return true;
+}
+function displayReporter(req){
+  const row=processRow(req.pid),root=rootNative&&processRow(rootNative.pid);
+  return harness==='opencode'&&req.token===token&&row&&row.start===req.start&&root&&root.start===rootNative.start
+    &&row.pid===native?.pid&&row.start===native?.start&&descends(req.pid,root.pid)&&sameTerminal(req.pid,root.pid);
+}
+function publishPanel(){
+  if(!panelSubscribers.size)return;
+  const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
+    native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
+    routeDetail,routePage,details:sessionDetails,focused:block.focused,harness,cellWidth,
+    questions:options=>block.detail(options)});
+  if(JSON.stringify(sidebarViews[0]?.rows)!==JSON.stringify(view.rows))sidebarViews=[view,...sidebarViews].slice(0,4);
+  routePageCount=view.routePages;
+  const nativeRows=view.rows.map(row=>{
+    const compact=[];
+    for(const part of row){
+      const last=compact.at(-1),columns=cellWidth(part.text);
+      if(last&&['foreground','bold','dim','reverse'].every(key=>last[key]===part[key])){last.text+=part.text;last.columns+=columns;}
+      else compact.push({...part,columns});
+    }
+    return compact;
+  });
+  const data=JSON.stringify({sid,visible:displayConfiguration.layout==='side'&&expanded,rows:nativeRows,hits:view.hits,focused:block.focused,settings:!!settings})+'\n';
+  for(const conn of panelSubscribers)if(!conn.destroyed&&conn.lastPanel!==data){conn.lastPanel=data;if(conn.writableLength<65536)conn.write(data);else conn.destroy();}
+}
+mouseInput=require('./panel-mouse.cjs')({
+  suppressed:()=>paste||block.pasting||settingsPaste||relay||!!fleetView,
+  bytes:inputBytes,
+  mouse:(code,x,y,release,raw)=>{
+    if(panelMouse(code,x,y,release))return;
+    if(terminal.modes.mouseTrackingMode==='none')return;
+    if(!release&&(code&3)===0){block.leave();queueDisplay();}
+    if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
+    observeInput(raw);child.write(raw);
+  }
+});
+function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
+function inputBytes(data) {
+  if(!data.length)return;
   while(data.length){
+    // Mouse-opened shell editors own their visible keys even while a peer's
+    // paste is admitted. Only native-directed bytes enter the retained queue.
+    if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
+    if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
+    if(!relay&&(routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
+    if(currentDelivery&&(!block.focused||relay)){
+      inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
+      if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
+    }
     if(relay){child.write(data);return;}
     if(fleetView){
       const view=fleetView;
@@ -474,9 +687,17 @@ async function lifecycle(req) {
   if(req.event==='start'||req.event==='select') {
     nativeFooter=null;paintedCommon=[];
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
-    displayValues={};
+    // Preserve a current TUI-selected model across its first SID binding only.
+    // Context and session data are never carried from the previous selection.
+    if(sid&&harness!=='opencode')nativeSelected={};
+    if(typeof req.native_model==='string'&&req.native_model.length>0&&req.native_model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.native_model)){
+      nativeSelected={model:req.native_model,...(nativeSelected.model===req.native_model?{effort:nativeSelected.effort}:{})};
+    }
+    displayValues={...nativeSelected};
+    panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
+    projectionKey='';footer='';footerSegments=[];routeDetail=false;sessionDetails=false;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
-    publishNativeDisplay();
+    publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
     // Display collection must never delay the native start hook or input.
@@ -486,7 +707,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;nativeSidebar=false;block.update([]);
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;sessionDetails=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
@@ -499,15 +720,36 @@ async function lifecycle(req) {
   projection();return {ok:true,...status()};
 }
 async function request(req) {
+  if(req.op==='display-observation'){
+    if(!displayReporter(req))return {ok:false};
+    if(!Number.isSafeInteger(req.seq)||req.seq<=displaySequence)return {ok:false};
+    displaySequence=req.seq;
+    // Native selected model is display-only and may precede a session ID.
+    if(typeof req.model==='string'&&req.model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.model))nativeSelected.model=req.model;
+    if(typeof req.effort==='string'&&req.effort.length<=64&&!/[\x00-\x1f\x7f]/.test(req.effort))nativeSelected.effort=req.effort;
+    displayValues={...displayValues,...nativeSelected};
+    if(typeof req.visible==='boolean'){
+      sidebarMounted=req.visible;
+      if(req.native_columns===cols&&req.native_rows===rows)nativeLayoutPending=false;
+      queueLayout();
+    }
+    publishNativeDisplay();queueDisplay();return {ok:true};
+  }
+  if(req.op==='display-action'){
+    if(!displayReporter(req)||req.sid!==sid)return {ok:false};
+    if(['settings','route','route-prev','route-next','details','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
+    return {ok:true};
+  }
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
+  if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
   if(deliveries.has(req.ref))return {ok:true,duplicate:true,state:deliveries.get(req.ref)};
-  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&!block.focused&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
+  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
   if(!safe())return {ok:false,reason:'not-idle-empty',not_started:true};
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
@@ -532,7 +774,12 @@ server=net.createServer(conn=>{
     if(consumed)return;raw=Buffer.concat([raw,chunk]);if(raw.length>65536)return conn.destroy();
     const newline=raw.indexOf(10);if(newline<0)return;consumed=true;conn.pause();
     setImmediate(async()=>{
-      let result;try{result=await request(JSON.parse(raw.subarray(0,newline).toString()));}
+      let result;try{
+        const req=JSON.parse(raw.subarray(0,newline).toString());
+        if(req.op==='display-subscribe'&&displayReporter(req)){
+          conn.setTimeout(0);panelSubscribers.add(conn);conn.on('close',()=>{panelSubscribers.delete(conn);if(!panelSubscribers.size){sidebarMounted=false;nativeLayoutPending=false;queueLayout();}});publishPanel();return;
+        }
+        result=await request(req);}
       catch{result={ok:false,reason:'control-unavailable',not_started:false};}
       conn.end(JSON.stringify({...result,...identity()})+'\n');
     });
@@ -561,6 +808,7 @@ server.listen(socketPath,()=>{
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
+  source('display-bootstrap').then(data=>{if(data.ok&&!projectionKey){panelModel=data.panel;queueDisplay();}});
   emit('\x1b[?1049h\x1b[2J');
   terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
   terminal.onTitleChange(title=>{
@@ -568,7 +816,14 @@ server.listen(socketPath,()=>{
   });
   child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
-  process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}});
+  process.stdout.on('resize',()=>{
+    cols=process.stdout.columns;rows=process.stdout.rows;
+    // Let the native sidebar choose its placement at the final new terminal
+    // size before reserving a fallback bottom. Its existing resize event
+    // reports that choice; never guess native sidebar preferences.
+    nativeLayoutPending=harness==='opencode'&&panelSubscribers.size>0;
+    try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
+  });
   child.onExit(async event=>{
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();

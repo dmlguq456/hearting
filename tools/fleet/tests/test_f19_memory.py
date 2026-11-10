@@ -6,6 +6,7 @@ Runnable directly or via `python3 -m unittest fleet.tests.test_f19_memory -v` (f
 import datetime
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -308,6 +309,119 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertEqual([item["id"] for item in open_items], ["ob", "tagged", "marked"])
         self.assertEqual(open_items[0]["links"], ("rt-0123456789abcdef",))
         self.assertIn("backlog", open_items[1]["tags"])
+
+    def test_parity_register_rows_stay_open_hearting_work(self):
+        self._make_db([{"id": "ob", "cwd_origin": "git:github.com/team/repo",
+                        "type": "unresolved-obligation", "headline": "repo work",
+                        "updated": "2026-10-30"}])
+        home = self.store / "agent-home"
+        (home / "core").mkdir(parents=True)
+        (home / "core" / "ADAPTATION.md").write_text(
+            "| PG-1 | outside | not in the register | open | - |\n"
+            "<!-- parity-register:start -->\n"
+            "| ID | Harness | Effect | State | Next |\n|---|---|---|---|---|\n"
+            "| PG-1 | Codex | no wake on receipt | open | fix in hooks |\n"
+            "| PG-2 | OpenCode | herdr only | needs-user-decision | ask |\n"
+            "| PG-3 | Claude | fixed | resolved | - |\n"
+            "| PG-4 | Codex | platform | limit | official docs (https://example.test/docs) |\n"
+            "| PG-5 | Codex | typo | opne | - |\n"
+            "| PG-6 | Codex | still fixable | limit | - |\n"
+            "| PG-7 | Codex | still fixable | limit | official docs |\n"
+            "<!-- parity-register:end -->\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(home)}):
+            memcol._project_cache.clear()
+            full = memcol._read_project_memory("2026-11-02")["by_repo"]
+            scoped = memcol._read_project_memory("2026-11-02", repo="repo")["by_repo"]
+            own = memcol._read_project_memory("2026-11-02", repo="hearting")["by_repo"]
+        rows = full["hearting"]["open"]
+        # Only resolved and a linked limit close a row; an unknown state (a typo) and a
+        # limit whose Next carries no link stay open.
+        self.assertEqual(sorted(row["id"] for row in rows),
+                         ["parity:PG-1", "parity:PG-2", "parity:PG-5", "parity:PG-6", "parity:PG-7"])
+        headlines = {row["id"]: row["headline"] for row in rows}
+        self.assertTrue(headlines["parity:PG-1"].startswith("[미결] PG-1 Codex"))
+        self.assertTrue(headlines["parity:PG-2"].startswith("[결정 필요] PG-2"))
+        self.assertTrue(headlines["parity:PG-5"].startswith("[미결] PG-5"))
+        self.assertTrue(headlines["parity:PG-6"].startswith("[limit 근거 없음] PG-6"))
+        self.assertTrue(headlines["parity:PG-7"].startswith("[limit 근거 없음] PG-7"))
+        self.assertIn("user-decision", {row["id"]: row for row in rows}["parity:PG-2"]["tags"])
+        self.assertTrue(all(memcol.open_stage(row) == "open" for row in rows))
+        self.assertEqual(full["hearting"]["open_total"], 5)
+        self.assertNotIn("hearting", scoped)
+        self.assertEqual(len(own["hearting"]["open"]), 5)
+        self.assertEqual([row["id"] for row in full["repo"]["open"]], ["ob"])
+
+    def test_shipped_parity_register_parses_with_known_states(self):
+        """The real core/ADAPTATION.md register: rows exist and every state is a known value."""
+        register = Path(__file__).resolve().parents[3] / "core" / "ADAPTATION.md"
+        text = register.read_text(encoding="utf-8")
+        body = text[text.index("<!-- parity-register:start -->"):text.index("<!-- parity-register:end -->")]
+        states = {}
+        for line in body.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 5 and re.fullmatch(r"PG-\d{1,4}", cells[0]):
+                states[cells[0]] = (cells[3].strip("`").casefold(), cells[4])
+        self.assertTrue(states)
+        known = set(memcol._REGISTER_STATES) | set(memcol._REGISTER_CLOSED)
+        self.assertEqual({k: v for k, (v, _) in states.items() if v not in known}, {})
+        # Every shipped limit row links its evidence, so none is listed as unlinked.
+        self.assertEqual({k for k, (v, n) in states.items()
+                          if v == "limit" and not memcol.register_row_closed(v, n)}, set())
+        listed = {row["id"] for row in memcol.parity_open_items(register)}
+        self.assertEqual(listed, {f"parity:{k}" for k, (v, n) in states.items()
+                                  if not memcol.register_row_closed(v, n)})
+
+    def test_session_block_counts_only_the_records_the_repo_page_counts(self):
+        origin = "git:github.com/team/repo"
+        rows = [{"id": "work-%02d" % i, "cwd_origin": origin, "type": "backlog",
+                 "headline": "work %d" % i, "updated": "2026-11-%02d" % (1 + i % 9)} for i in range(40)]
+        rows += [
+            {"id": "closed", "cwd_origin": origin, "type": "completion", "headline": "17 closed",
+             "updated": "2026-11-09", "tags": '["backlog"]'},
+            {"id": "tidy", "cwd_origin": origin, "type": "project", "headline": "tidy note",
+             "updated": "2026-11-09", "tags": '["[\\"resolved\\"", "\\"backlog\\"]"]'},
+            {"id": "seen", "cwd_origin": origin, "type": "observation", "headline": "[관찰] seen",
+             "updated": "2026-11-09"},
+            {"id": "fixed", "cwd_origin": origin, "type": "artifact-pointer",
+             "headline": "[해결 확인] fixed", "updated": "2026-11-09", "tags": '["backlog"]'},
+        ]
+        self._make_db(rows)
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual(sorted(row["id"] for row in work), sorted("work-%02d" % i for i in range(40)))
+
+    def test_open_work_behind_many_finished_records_is_not_hidden(self):
+        origin = "git:github.com/team/repo"
+        rows = [{"id": "done-%03d" % i, "cwd_origin": origin, "type": "completion",
+                 "headline": "closed %d" % i, "updated": "2026-11-09", "tags": '["backlog"]'}
+                for i in range(memcol.OPEN_PER_PROJECT)]
+        rows.append({"id": "real", "cwd_origin": origin, "type": "unresolved-obligation",
+                     "headline": "the real open item", "updated": "2026-10-01"})
+        self._make_db(rows)
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual([row["id"] for row in work], ["real"])
+        self.assertEqual(session_work.open_count(work), 1)
+
+    def test_open_total_is_not_the_bounded_list_length(self):
+        origin = "git:github.com/team/repo"
+        count = memcol.OPEN_PER_PROJECT + 1
+        self._make_db([{"id": "work-%03d" % i, "cwd_origin": origin, "type": "backlog",
+                        "headline": "work %d" % i, "updated": "2026-11-%02d" % (1 + i % 9)}
+                       for i in range(count)])
+        database = memcol._read_project_memory("2026-11-10", decisions=0, repo="repo")
+        project = database["by_repo"]["repo"]
+        self.assertEqual(len(project["open"]), memcol.OPEN_PER_PROJECT)
+        self.assertEqual(project["open_total"], count)
+        self.assertTrue(project["limited"])
+        from fleet import session_work
+        with mock.patch.object(session_work, "project_of", return_value="repo"):
+            work, _paths = session_work.observe("/home/demo/repo")
+        self.assertEqual(len(work), memcol.OPEN_PER_PROJECT)
+        self.assertEqual(session_work.open_count(work), count)
+        self.assertNotIn("PRIVATE-BODY-SENTINEL", repr(database))
 
     def test_journal_rows_take_their_stored_headline(self):
         self._make_db([{"id": "rec-1", "cwd_origin": "git:github.com/team/repo", "type": "note",

@@ -32,6 +32,105 @@ def row(attempt, *, status="open", **metadata):
     return f"2026-09-11T00:00:00Z\t{status}\t/r\t/w\ttest\t" + ",".join(f"{k}={v}" for k,v in meta.items()) + "\n"
 
 
+class SupervisorExitedSettlementTest(unittest.TestCase):
+    """2026-11-10: six PASS owners whose supervisor exit reached the parent as "needs attention"
+    minutes before their own completion (att-37f6788f, att-dc522c7d, att-6070b0f5, att-466d33ea)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / "jobs.log"
+
+    def receipt(self, *attempts):
+        return {"schema_version": 1, "kind": supervision.KIND, "state": "attention",
+                "owner_attempt_id": attempts[0], "monitored_attempt_ids": list(attempts),
+                "recipient_thread_id": "parent", "sealed_batch_id": "", "job_registry": str(self.jobs),
+                "reason": "supervisor-exited", "obligation_revision": "",
+                "responsible": "supervision-controller", "required_action": "inspect-recovery",
+                "pending_delivery_id": "delivery-x"}
+
+    def render(self, rows, process_state, reason="supervisor-exited"):
+        from types import SimpleNamespace
+        self.jobs.write_text("".join(row(aid, status=status, **{k: v for k, v in meta.items() if k != "attempt_id"})
+                                     for aid, (status, meta) in rows.items()))
+        receipt = {**self.receipt(*sorted(rows)), "reason": reason, "owner_attempt_id": next(iter(rows))}
+        with patch_split(contract, "observed_attempt_liveness",
+                         return_value=SimpleNamespace(process_state=process_state, process_reason="attempt-descendant-live")), \
+             mock.patch("codex_dispatch_terminal.terminal_envelope_observed", return_value=False):
+            return supervision.render_text(receipt)
+
+    def owner(self, harness, **extra):
+        return {**CURRENT, "parent_attempt_id": "-", "worker_type": "owner", "harness": harness,
+                "workflow_completion": "runtime-v1", "failure_class": "pass", "note": "completed-supervisor",
+                "parent_sid": "parent", **extra}
+
+    def test_a_pass_owner_still_settling_is_not_called_a_blockage_in_any_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):   # completion not delivered yet, nothing running
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "quiescent")
+                self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
+                self.assertIn("att-owner finished with PASS", text)
+                self.assertIn("Do not report this to the user as blocked", text)
+                self.assertIn("dispatch-registry.py reconcile --jobs", text)
+                self.assertNotIn("Explain the blockage", text)
+
+    def test_a_pass_owner_with_a_running_process_is_neither_blocked_nor_called_settlement(self):
+        """RV-PR1444-1110 F1: a live tagged descendant may be work the worker started, not a helper."""
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "live")
+                self.assertIn("not a blockage, and not finished either", text)
+                self.assertIn("Do not report the work as finished while it runs", text)
+                for claim in ("only Hearting's own settlement", "do not restart, retry, cancel",
+                              "Explain the blockage"):
+                    self.assertNotIn(claim, text)
+
+    def test_a_real_running_descendant_is_named_by_pid_before_any_residue_seal(self):
+        """No liveness mock: a real process tagged with the attempt keeps the notice from settling."""
+        self.jobs.write_text(row("att-owner", status="done", **{k: v for k, v in self.owner("claude").items()}))
+        receipt = self.receipt("att-owner")
+        work = subprocess.Popen(["sleep", "60"], env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-owner"},
+                                start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while supervision.settling_after_pass(receipt) != [("att-owner", "wait")] and time.monotonic() < deadline:
+                time.sleep(0.05)
+            text = supervision.render_text(receipt)
+            self.assertIn("not a blockage, and not finished either", text)
+            self.assertIn(f"pid {work.pid}", text)
+            self.assertNotIn("only Hearting's own settlement", text)
+            self.assertNotIn("Explain the blockage", text)
+        finally:
+            work.kill()
+            work.wait()
+
+    def test_a_real_stop_or_unknown_evidence_keeps_the_attention_notice(self):
+        cases = {
+            "blocked-owner": ("done", {"failure_class": "blocked", "note": "dead-worker-blocked"}, "quiescent"),
+            "died-without-result": ("done", {"failure_class": "fail", "note": "dead-runtime"}, "quiescent"),
+            "no-verdict": ("done", {"failure_class": "", "note": "dead-silent"}, "quiescent"),
+            "row-still-open": ("open", {}, "quiescent"),
+            "process-unverifiable": ("done", {}, "unverifiable"),
+            "evidence-conflict": ("done", {"terminal_conflict": "1", "conflicting_failure_class": "fail"}, "quiescent"),
+        }
+        for name, (status, extra, process) in cases.items():
+            with self.subTest(case=name):
+                text = self.render({"att-owner": (status, self.owner("codex", attempt_id="att-owner", **extra))}, process)
+                self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
+                self.assertIn("Explain the blockage", text)
+
+    def test_one_unsettled_attempt_or_another_reason_keeps_the_attention_notice(self):
+        rows = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner")),
+                "att-child": ("done", {**self.owner("claude", attempt_id="att-child", failure_class="fail",
+                                                   note="dead-runtime"), "parent_attempt_id": "att-owner"})}
+        self.assertIn("Explain the blockage", self.render(rows, "quiescent"))
+        only = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner"))}
+        closure = self.render(only, "quiescent", reason="closure-blocked")   # keeps its own wording
+        self.assertNotIn("settlement in progress", closure)
+        self.assertIn("Explain this to the user", closure)
+        self.assertEqual(supervision.settling_after_pass({**self.receipt("att-gone")}), [])   # unreadable row
+
+
 class ResponsibilityTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

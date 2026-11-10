@@ -613,13 +613,32 @@ def main() -> int:
             pass
     # Commit acknowledgement only after successful synchronous hook rendering.
     from dispatch_session_sweep import ack_delivered
+    received = []
     for root, records in batches:
         retained = [record for record in records
                     if (str(root), record.get("delivery_id")) in ackable]
         if retained:
             ack_delivered(root, interaction_sid, retained,
                           acked_by="codex-native-prompt:" + interaction_sid)
+            received.extend(retained)
+    note_turn_received(interaction_sid, first_string(payload, "turn_id"), received, current_prompt)
     return 0
+
+
+def note_turn_received(sid: str, native_turn: str, records: list, prompt: str) -> None:
+    """Tell the in-turn carrier what this turn received, for its one Stop follow-through."""
+    if not sid or not native_turn:
+        return
+    try:
+        import codex_turn_carrier as carrier
+        items = carrier.owed_items(records)
+        peer = carrier.peer_report_item(prompt, sid)
+        if peer:
+            items.append(peer)
+        carrier.note_received(sid, native_turn, items,
+                              rendered=[str(record.get("delivery_id")) for record in records])
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

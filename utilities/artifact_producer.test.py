@@ -210,6 +210,11 @@ class ProducerTestBase(unittest.TestCase):
         result = P.begin(self.root, route_file=route_file, capability=capability, intensity=intensity, **kw)
         return route, route_file, result
 
+    def shared_file(self, admission, logical):
+        from artifact_spec_storage import read_file
+        return read_file(self.root, admission['shared_reference_id'],
+            admission['shared_reference_revision_id'], logical).path
+
     def write_output(self, result, rel="plans/cycle/plan.md", data=b"plan body\n"):
         target = Path(result["cycle_dir"]) / "artifacts" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -248,6 +253,8 @@ class ProducerTestBase(unittest.TestCase):
 
         def record(path):
             try:
+                if isinstance(path, int):
+                    path = os.readlink(f'/proc/self/fd/{path}')
                 candidate = Path(os.fsdecode(path)).resolve()
                 candidate.relative_to(shared_root)
             except (TypeError, ValueError, OSError):
@@ -263,8 +270,10 @@ class ProducerTestBase(unittest.TestCase):
             record(path)
             yield from real_iterdir(path)
 
-        with mock.patch.object(os, "scandir", side_effect=observe_scandir), \
-                mock.patch.object(Path, "iterdir", observe_iterdir):
+        with mock.patch.object(os, "scandir", side_effect=observe_scandir) as wrapped, \
+                mock.patch.object(Path, "iterdir", observe_iterdir), \
+                mock.patch.object(os, 'supports_fd', os.supports_fd | {wrapped}
+                                  if real_scandir in os.supports_fd else os.supports_fd):
             yield visited
 
     def assert_only_exact_spec_revision_enumerated(self, visited, reference_id, revision_id):
@@ -3585,7 +3594,7 @@ class CompletedSpecPublicationTest(ProducerTestBase):
         merged = self._publish(delta)
         self.assertEqual(merged["status"], "admitted", merged)
         self.assertEqual(merged["shared_reference_id"], initial["shared_reference_id"])
-        self.assertEqual((Path(merged["admission"]["revision_dir"]) / "b/prd.md").read_bytes(), b"# B\nkept\n")
+        self.assertEqual(self.shared_file(merged["admission"], "b/prd.md").read_bytes(), b"# B\nkept\n")
         next_seed = self._seed(merged["admission"])
         _, _, later = self._completed({"a/prd.md": b"# A\nchanged\n", "b/prd.md": b"# B\nnew\n",
                                       P.SPEC_BASE_RECEIPT: json.dumps(next_seed).encode()})
@@ -5567,9 +5576,13 @@ class QuickOwnerBindingIntegrationTest(ProducerTestBase):
         for harness in ("claude", "codex", "opencode"):
             source = (root / "adapters" / harness / "bin" / "dispatch-headless.py").read_text()
             self.assertIn("bind_owner_launch,", source)
-            call = source.index("bind_owner_launch(args, jobs)")
-            self.assertLess(source.index("Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text"), call)
-            self.assertLess(call, source.index("spawn_claimed_attempt(", call))
+            claim = source.index("DISPATCH_MAIN.claim_registered_attempt(")
+            self.assertLess(claim, source.index("DISPATCH_MAIN.launch_claimed_attempt(", claim))
+        # The wrappers share the claim and the launch (utilities/dispatch_headless_main.py).
+        shared = (root / "utilities" / "dispatch_headless_main.py").read_text()
+        call = shared.index("h.bind_owner_launch(args, jobs)")
+        self.assertLess(shared.index("Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text"), call)
+        self.assertLess(call, shared.index("h.spawn_claimed_attempt(", call))
 
 
 class TerminalTransactionIntegrationTest(ProducerTestBase):
@@ -8357,6 +8370,67 @@ class PrimarySupportExclusionTest(unittest.TestCase):
 
 class SharedSpecMergeTest(SharedBaseGuardTest):
     """D-122 integration: immutable inputs, derived publication and exact CAS."""
+    def test_delta_keeps_full_logical_tree_with_only_changed_physical_bytes(self):
+        cycle, initial, winner = self.fixture()
+        ref, old, new = winner['shared_reference_id'], initial['shared_reference_revision_id'], winner['shared_reference_revision_id']
+        expected = P._spec_bytes(Path(cycle['cycle_dir']) / 'artifacts/gen1')
+        logical, record = P._verified_shared_spec(self.root, ref, new)
+        self.assertEqual(logical, expected)
+        self.assertEqual(record.get('stored_in', {}).get('b/prd.md'), {'revision_id': old, 'source_path': 'b/prd.md'})
+        physical = P._spec_bytes(Path(winner['revision_dir']), revision=True)
+        self.assertEqual(physical, {'a/prd.md': expected['a/prd.md']})
+        self.assertEqual(record['file_count'], 2)
+        self.assertEqual(record['physical_file_count'], 1)
+        self.assertEqual(record['physical_byte_size'], len(expected['a/prd.md']))
+
+    def test_new_preimage_slot_points_directly_to_the_previous_prd_bytes(self):
+        prior = b'# Original exact bytes\n'
+        cycle = self.trees({'a/prd.md': prior},
+            {'a/prd.md': b'# Next\n', 'a/_internal/versions/v1/prd.md': prior},
+            {'a/prd.md': b'# Third\n', 'a/_internal/versions/v1/prd.md': prior})
+        first = self._admit(cycle, 0)
+        second = self._admit(cycle, 1, base_revision=first['shared_reference_revision_id'])
+        third = self._admit(cycle, 2, base_revision=second['shared_reference_revision_id'])
+        record = json.loads((Path(third['revision_dir']) / 'revision.json').read_text())
+        self.assertEqual(record.get('stored_in', {}).get('a/_internal/versions/v1/prd.md'),
+            {'revision_id': first['shared_reference_revision_id'], 'source_path': 'a/prd.md'})
+        self.assertEqual(P._verified_shared_spec(self.root, third['shared_reference_id'], third['shared_reference_revision_id'])[0],
+            P._spec_bytes(Path(cycle['cycle_dir']) / 'artifacts/gen2'))
+
+    def test_current_view_is_derived_and_drift_falls_back_without_read_time_repair(self):
+        import artifact_reader
+        cycle, initial, winner = self.fixture()
+        ref = winner['shared_reference_id']
+        view = self.root / 'shared/spec' / ref / 'current'
+        self.assertTrue((view / 'a/prd.md').is_file(), 'normal publication maintains the current view')
+        expected = P._spec_bytes(Path(cycle['cycle_dir']) / 'artifacts/gen1')['a/prd.md']
+        self.assertEqual(artifact_reader.spec_file(self.root, 'a/prd.md'), view / 'a/prd.md')
+        (view / 'a/prd.md').write_bytes(b'drift')
+        file = artifact_reader.spec_file(self.root, 'a/prd.md')
+        self.assertEqual(file.read_bytes(), expected)
+        self.assertNotEqual(file, view / 'a/prd.md')
+        self.assertEqual((view / 'a/prd.md').read_bytes(), b'drift')
+
+    def test_unavailable_view_does_not_reverse_a_durable_shared_admission(self):
+        import artifact_reader
+        cycle, initial, winner = self.fixture()
+        ref = winner['shared_reference_id']
+        view = self.root / 'shared/spec' / ref / 'current'
+        foreign = view / 'foreign'; foreign.write_bytes(b'preserved')
+        latest = self._admit(cycle, 2, base_revision=winner['shared_reference_revision_id'])
+        self.assertEqual(latest['status'], 'admitted')
+        self.assertEqual(self._reference(ref)['latest_revision_id'], latest['shared_reference_revision_id'])
+        expected = P._spec_bytes(Path(cycle['cycle_dir']) / 'artifacts/gen2')['a/prd.md']
+        self.assertEqual(artifact_reader.spec_file(self.root, 'a/prd.md').read_bytes(), expected)
+        self.assertEqual(foreign.read_bytes(), b'preserved')
+
+    def test_changed_public_prd_remains_a_full_file_when_its_bytes_equal_old_history(self):
+        cycle = self.trees({'a/prd.md': b'A', 'b/prd.md': b'B'}, {'a/prd.md': b'B', 'b/prd.md': b'B'})
+        initial = self._admit(cycle, 0)
+        latest = self._admit(cycle, 1, base_revision=initial['shared_reference_revision_id'])
+        self.assertEqual((Path(latest['revision_dir']) / 'a/prd.md').read_bytes(), b'B')
+        self.assertEqual(self.shared_file(latest, 'b/prd.md').read_bytes(), b'B')
+
     def trees(self, *trees):
         self.activate()
         route, route_file, result = self.begin("direct", "autopilot-spec", "update")
@@ -8399,7 +8473,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
         initial = self._admit(cycle, 0)
         self._admit(cycle, 1, base_revision=initial["shared_reference_revision_id"])
         merged = self._admit(cycle, 2, base_revision=initial["shared_reference_revision_id"])
-        self.assertEqual((Path(merged["revision_dir"]) / "c/prd.md").read_bytes(), b"c")
+        self.assertEqual(self.shared_file(merged, "c/prd.md").read_bytes(), b"c")
         with self.assertRaises(P.ProducerError) as exc:
             self._admit(cycle, 3, base_revision=initial["shared_reference_revision_id"])
         self.assertEqual(exc.exception.code, "component-set-regressed")
@@ -8432,7 +8506,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
     def test_base_and_latest_bytes_are_verified_before_admission(self):
         cycle, initial, winner = self.fixture()
         for record in (initial, winner):
-            path = Path(record["revision_dir"]) / "b/prd.md"
+            path = self.shared_file(record, "a/prd.md")
             old = path.read_bytes()
             path.write_bytes(b"tampered")
             try:
@@ -8477,7 +8551,7 @@ class SharedSpecMergeTest(SharedBaseGuardTest):
         cycle, initial, winner = self.fixture()
         for base, operation in ((winner, lambda: self._admit(cycle, 2, base_revision=winner["shared_reference_revision_id"])),
                                 (initial, lambda: self._admit(cycle, 1))):
-            path = Path(base["revision_dir"]) / "b/prd.md"
+            path = self.shared_file(base, "a/prd.md")
             data = path.read_bytes(); path.write_bytes(b"tampered base")
             try:
                 with self.assertRaises(P.ProducerError) as exc: operation()

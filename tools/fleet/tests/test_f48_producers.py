@@ -76,6 +76,17 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(interaction.read_wait("claude-sid", "claude")["kind"],
                          "permission")
 
+    def test_claude_question_permission_keeps_the_decision_wait(self):
+        # Claude raises PermissionRequest for AskUserQuestion after PreToolUse.
+        self.run_hook(CLAUDE, {"session_id": "claude-q", "tool_name": "AskUserQuestion"},
+                      "set", "--kind", "decision")
+        self.run_hook(CLAUDE, {"session_id": "claude-q", "tool_name": "AskUserQuestion",
+                               "hook_event_name": "PermissionRequest"},
+                      "set", "--kind", "permission")
+        record = interaction.read_wait("claude-q", "claude")
+        self.assertEqual((record["kind"], record["source"]),
+                         ("decision", "claude-asktool"))
+
     def test_claude_subagent_and_each_worker_gate_are_noops(self):
         payload = {"session_id": "sid", "agent_id": "subagent"}
         interaction.set_wait("sid", "claude", "decision", "claude-asktool")
