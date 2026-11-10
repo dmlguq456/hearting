@@ -21,11 +21,15 @@ UserPromptSubmit bridge already uses for queued receipts:
    (including a due steward check) that is pending for this exact thread is
    rendered at the next tool boundary, or at Stop, instead of waiting for the
    turn to end and the native queue to start another one. Only records that the
-   bridge may ACK are rendered, and each one at most once per turn, so a Stop
-   continuation always ends: an ACKed record is gone, an unACKable one is left
-   for the native queue and the next prompt exactly as before.
+   bridge may ACK are rendered, each whole and at most once per turn, and only
+   the records whose text fits the output budget whole are ACKed; the rest stay
+   pending for the next boundary. A Stop continuation therefore always ends: an
+   ACKed record is gone, an unACKable one (a completion without the exact
+   running turn) is left unclaimed for the native queue and the next prompt
+   exactly as before, and a notice beside it is still carried.
 2. **One follow-through pass.** When this turn received a Hearting record whose
-   required action is not plain reading (or a peer report), and the model ended
+   required action is not plain reading (or a verified peer report addressed to
+   this thread, not a quoted trailer), and the model ended
    the turn without running any tool after it, Stop continues the turn once with
    that required action. The model may still end with a one-line reason; there
    is no second pass, approval, or required input.
@@ -58,6 +62,8 @@ STOP_BUDGET_SECONDS = 6.0
 STATE_MAX_AGE_SECONDS = 7 * 86400
 NON_ACTION_CHILD = frozenset({"advance-completed"})
 NON_ACTION_NOTICE = frozenset({"read-notice"})
+STOP_HEADER = "[hearting] Arrived before this turn ended:"
+WATCH_HEADER = "[peer-steward] undelivered watch receipts:"
 
 
 def is_worker() -> bool:
@@ -211,9 +217,24 @@ def owed_items(records: list[dict]) -> list[dict]:
     return items
 
 
-def peer_report_item(prompt: str) -> dict | None:
-    """A peer or runtime report that arrived as this turn's prompt."""
-    if not prompt or ("peer-from:" not in prompt and "runtime-from:" not in prompt):
+def peer_report_item(prompt: str, sid: str = "") -> dict | None:
+    """A verified peer report that arrived as this turn's prompt.
+
+    The existing receive classification (``peer-message.prompt_origin``, read
+    through ``session_tidy``) decides: only a sealed transfer addressed to this
+    exact thread counts. A quoted ``(peer-from: ...)`` in an ordinary prompt
+    has no such envelope, and a runtime completion or human answer carries its
+    own required action in the receipt the bridge already rendered, so neither
+    adds a pass here.
+    """
+    if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt):
+        return None
+    try:
+        import session_tidy
+        origin = session_tidy._current_request_origin(prompt, "codex", sid)
+    except Exception:  # noqa: BLE001 - an unreadable envelope is not a report
+        return None
+    if not isinstance(origin, dict) or origin.get("kind") != "peer":
         return None
     return {"kind": "peer-report", "required_action": "follow-through"}
 
@@ -257,13 +278,77 @@ def native_receiving_turn(sid: str, tid: str) -> dict | None:
     return {"thread_id": sid, "turn_id": tid, "status": turn["status"]}
 
 
+def _is_completion(record: dict) -> bool:
+    return isinstance((record.get("receipt") or {}).get("children"), list)
+
+
+def _units(batches) -> list[tuple[Path, list[dict]]]:
+    """Split claimed batches into the units that are rendered and ACKed together.
+
+    Members of one sealed batch share their group claim owner, so a unit never
+    splits a batch; every other record is its own unit.
+    """
+    units: list[tuple[Path, list[dict]]] = []
+    index: dict[tuple, int] = {}
+    for root, records in batches:
+        for record in records:
+            owner = record.get("claim_owner")
+            key = ((str(root), str(owner)) if isinstance(owner, str) and owner
+                   else (str(root), "delivery", str(record.get("delivery_id"))))
+            if key in index:
+                units[index[key]][1].append(record)
+            else:
+                index[key] = len(units)
+                units.append((root, [record]))
+    return units
+
+
+def _batches(units) -> list[tuple[Path, list[dict]]]:
+    merged: list[tuple[Path, list[dict]]] = []
+    for root, records in units:
+        if merged and merged[-1][0] == root:
+            merged[-1][1].extend(records)
+        else:
+            merged.append((root, list(records)))
+    return merged
+
+
+def fit(batches, render, max_chars: int):
+    """Choose the leading units whose full rendering fits ``max_chars``.
+
+    Returns ``(text, chosen_batches, rest_batches)``. The text is never cut:
+    only what it contains whole is ACKed, and the rest stays pending for the
+    next boundary. The first unit is always chosen so a single large receipt
+    still moves.
+    """
+    units = _units(batches)
+    if not units:
+        return "", [], []
+    whole = render(_batches(units))
+    if len(whole) <= max_chars or len(units) == 1:
+        return whole, _batches(units), []
+    best_n, best_text = 1, render(_batches(units[:1]))
+    lo, hi = 2, len(units) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        text = render(_batches(units[:mid]))
+        if len(text) <= max_chars:
+            best_n, best_text, lo = mid, text, mid + 1
+        else:
+            hi = mid - 1
+    return best_text, _batches(units[:best_n]), _batches(units[best_n:])
+
+
 def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = frozenset(),
-            request_context: str | None = None):
+            request_context: str | None = None, max_chars: int = MAX_REASON_CHARS):
     """Claim this thread's owed records; return ``(text, ackable_batches)``.
 
     Records the bridge cannot ACK (a completion without an exact running native
-    turn) are not rendered here: their existing queue and prompt carriers keep
-    them, so a Stop continuation never repeats one.
+    turn) are not claimed or rendered here: their existing queue and prompt
+    carriers keep them, so a Stop continuation never repeats one. A notice in
+    the same root needs no turn binding and is still carried. Only records
+    whose text fits ``max_chars`` whole are returned for ACK; the rest are
+    handed back pending.
     """
     from dispatch_notice_state import NoticeReadContext
     from dispatch_session_sweep import (addressed_records, delivery_context,
@@ -278,19 +363,23 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
             break
         # Read before claiming: a completion needs the exact running native turn
         # to be ACKed, and claiming one this bridge cannot ACK would hold the
-        # native queue courier off. Such a root is left wholly to its existing
-        # queue and prompt carriers.
+        # native queue courier off. Without that turn the completions are left
+        # unclaimed to their existing queue and prompt carriers; the root's
+        # notices, which need no turn binding, are still carried.
         addressed, _count = addressed_records(root, RECIPIENT_KIND, sid, deadline_ns=deadline_ns)
         fresh = [record for record in addressed if record.get("delivery_id") not in skip]
         if not fresh:
             continue
-        if any(isinstance((record.get("receipt") or {}).get("children"), list) for record in fresh):
+        select = None
+        if any(_is_completion(record) for record in fresh):
             if not receiving_read:
                 receiving, receiving_read = native_receiving_turn(sid, tid), True
             if receiving is None:
-                continue
+                if all(_is_completion(record) for record in fresh):
+                    continue
+                select = lambda record: not _is_completion(record)  # noqa: E731
         records, _count = sweep_deliver(root, RECIPIENT_KIND, sid, notice_context=notice_context,
-                                       deadline_ns=deadline_ns)
+                                       deadline_ns=deadline_ns, select=select)
         records = [record for record in records if record.get("delivery_id") not in skip]
         if records:
             batches.append((root, records))
@@ -298,7 +387,7 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
         return "", []
     if not receiving_read:
         receiving = native_receiving_turn(sid, tid) if any(
-            isinstance((record.get("receipt") or {}).get("children"), list)
+            _is_completion(record)
             for _root, records in batches for record in records) else None
     ackable = retain_receiving_turn(batches, sid, receiving, request_context=request_context)
     kept, left = [], []
@@ -309,13 +398,15 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
             kept.append((root, exact))
         if other:
             left.append((root, other))
-    # A tool boundary comes far more often than a prompt: hand back at once the
-    # claims this bridge will not ACK, so the native queue courier is not held
-    # off for the claim lease while the turn keeps working.
-    release(sid, left)
     if not kept:
+        release(sid, left)
         return "", []
-    return delivery_context(kept), kept
+    text, kept, over = fit(kept, delivery_context, max_chars)
+    # A tool boundary comes far more often than a prompt: hand back at once the
+    # claims this bridge will not ACK (or that did not fit whole), so the
+    # native queue courier is not held off for the claim lease.
+    release(sid, left + over)
+    return text, kept
 
 
 def release(sid: str, batches) -> None:
@@ -433,7 +524,7 @@ def post_tool(payload: dict, stream) -> int:
     if not text:
         return 0
     if _emit({"hookSpecificOutput": {"hookEventName": "PostToolUse",
-                                     "additionalContext": text[:MAX_REASON_CHARS]}}, stream):
+                                     "additionalContext": text}}, stream):
         with contextlib.suppress(Exception):
             delivered = acknowledge(sid, batches)
             note_received(sid, tid, owed_items(_all_records(batches)), rendered=delivered)
@@ -453,24 +544,37 @@ def stop(payload: dict, stream) -> int:
     parts: list[str] = []
     batches = []
     module, watches = None, []
+    # The reason is never cut: each part is sized so that every record and
+    # watch row it names is whole, and only those are ACKed.
+    room = MAX_REASON_CHARS - len(STOP_HEADER)
+    watch_block = ""
+    try:
+        module, watches = watch_receipts(sid, budget_seconds=1.5)
+        lines = []
+        for row in watches:
+            line = _watch_line(row)
+            if len(WATCH_HEADER) + sum(len(item) + 1 for item in lines) + len(line) + 1 > room // 2:
+                break
+            lines.append(line)
+        watches = watches[:len(lines)]
+        if lines:
+            watch_block = "\n".join([WATCH_HEADER, *lines])
+    except Exception:  # noqa: BLE001
+        module, watches = None, []
     try:
         state = read_state(sid, tid)
         text, batches = collect(sid, tid, budget_seconds=STOP_BUDGET_SECONDS,
-                                skip=set(state.get("rendered") or []))
+                                skip=set(state.get("rendered") or []),
+                                max_chars=room - (len(watch_block) + 2 if watch_block else 0) - 2)
         if text:
             parts.append(text)
     except Exception:  # noqa: BLE001
         batches = []
-    try:
-        module, watches = watch_receipts(sid, budget_seconds=1.5)
-        if watches:
-            parts.append("\n".join(["[peer-steward] undelivered watch receipts:"]
-                                   + [_watch_line(row) for row in watches]))
-    except Exception:  # noqa: BLE001
-        module, watches = None, []
+    if watch_block:
+        parts.append(watch_block)
     if parts:
-        reason = "\n\n".join(["[hearting] Arrived before this turn ended:", *parts])
-        if _emit({"decision": "block", "reason": reason[:MAX_REASON_CHARS]}, stream):
+        reason = "\n\n".join([STOP_HEADER, *parts])
+        if _emit({"decision": "block", "reason": reason}, stream):
             with contextlib.suppress(Exception):
                 delivered = acknowledge(sid, batches) if batches else []
                 note_received(sid, tid, owed_items(_all_records(batches)), rendered=delivered)

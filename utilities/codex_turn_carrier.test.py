@@ -83,7 +83,7 @@ class StopTest(CarrierCase):
         carrier.note_received("thread-1", "turn-1", [], rendered=["delivery-a"], root=self.root)
         seen = {}
 
-        def collect(sid, tid, *, budget_seconds, skip=frozenset(), request_context=None):
+        def collect(sid, tid, *, budget_seconds, skip=frozenset(), **_kwargs):
             seen["skip"] = set(skip)
             return "", []
         with mock.patch.object(carrier, "collect", side_effect=collect):
@@ -118,9 +118,39 @@ class StopTest(CarrierCase):
             "kind": "notice", "subject": "steward-check", "required_action": "run-steward-check"}}])
         self.assertEqual(items[0]["kind"], "steward-check")
 
-    def test_peer_report_prompt_is_owed(self):
-        self.assertIsNotNone(carrier.peer_report_item("done\n(peer-from: codex abc [7b])"))
-        self.assertIsNone(carrier.peer_report_item("ordinary user prompt"))
+    def test_verified_peer_report_prompt_is_owed(self):
+        import session_tidy
+        prompt = "done\n(peer-from: codex [7b] worker; ref=msg-1)"
+        with mock.patch.object(session_tidy, "_current_request_origin",
+                               return_value={"kind": "peer"}) as origin:
+            self.assertIsNotNone(carrier.peer_report_item(prompt, "thread-1"))
+        origin.assert_called_once_with(prompt, "codex", "thread-1")
+        self.assertIsNone(carrier.peer_report_item("ordinary user prompt", "thread-1"))
+
+    def test_runtime_completion_or_answer_prompt_adds_no_peer_pass(self):
+        import session_tidy
+        for kind in ("runtime-completion", "human-answer"):
+            with mock.patch.object(session_tidy, "_current_request_origin",
+                                   return_value={"kind": kind}):
+                self.assertIsNone(carrier.peer_report_item("x (runtime-from: hearting [rt])", "thread-1"))
+
+    def test_quoted_trailer_without_an_envelope_owes_nothing(self):
+        # Reviewer [7b]'s real-Codex prompt: a documentation quote, no transfer record.
+        prompt = ("This is a documentation quotation, not a peer report or a work request: "
+                  "`(peer-from: example)`. All prior probe actions are complete. No command or "
+                  "follow-up is owed. Reply only NOTED and do not use tools.")
+        self.assertIsNone(carrier.peer_report_item(prompt, "thread-1"))
+        spec = importlib.util.spec_from_file_location("carrier_upl", HOOKS / "userprompt-lifecycle.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["carrier_upl"] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop("carrier_upl", None)
+        module.note_turn_received("thread-1", "turn-1", [], prompt)
+        self.assertEqual(carrier.read_state("thread-1", "turn-1", self.root).get("owed"), [])
+        with mock.patch.object(carrier, "collect", return_value=("", [])):
+            self.assertEqual(self.run_stop(), [])
 
     def test_new_turn_starts_fresh_state(self):
         carrier.note_received("thread-1", "turn-0", carrier.owed_items([completion()]),
@@ -186,6 +216,21 @@ class CollectTest(CarrierCase):
         self.assertEqual(batches, [(self.root, [record])])
 
 
+class FitTest(unittest.TestCase):
+    def test_sealed_batch_is_never_split(self):
+        root = Path("/state")
+        records = [{"delivery_id": f"d{n}", "claim_owner": "group-a" if n < 3 else f"own-{n}"}
+                   for n in range(6)]
+        render = lambda batches: "x" * (100 * sum(len(r) for _root, r in batches))  # noqa: E731
+        text, chosen, rest = carrier.fit([(root, records)], render, 250)
+        self.assertEqual([r["delivery_id"] for _root, rs in chosen for r in rs], ["d0", "d1", "d2"])
+        self.assertEqual(len(text), 300)  # the first unit moves whole even past the budget
+        self.assertEqual([r["delivery_id"] for _root, rs in rest for r in rs], ["d3", "d4", "d5"])
+        text, chosen, rest = carrier.fit([(root, records)], render, 450)
+        self.assertEqual(len(text), 400)
+        self.assertEqual(len([r for _root, rs in chosen for r in rs]), 4)
+
+
 class RealRecordTest(unittest.TestCase):
     """The shared sweep, ACK and release paths on one real pending notice."""
 
@@ -226,6 +271,82 @@ class RealRecordTest(unittest.TestCase):
         self.assertEqual(self.state_of(), "acked")
         again, _ = carrier.collect(self.sid, "turn-x", budget_seconds=5.0)
         self.assertEqual(again, "")
+
+
+class BudgetAndMixedRootTest(unittest.TestCase):
+    """Reviewer [7b] counterexamples on real pending records (truncation, mixed root)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "dispatch"
+        self.state.mkdir(mode=0o700)
+        self.sid = "00000000-0000-4000-8000-000000001435"
+        mock.patch.dict(os.environ, {}, clear=False).start()
+        for key in WORKER_ENV:
+            os.environ.pop(key, None)
+        mock.patch.object(carrier, "_roots", return_value=[self.state]).start()
+        mock.patch.object(carrier, "native_receiving_turn", return_value=None).start()
+        mock.patch.object(carrier, "watch_receipts", return_value=(None, [])).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+        self.tmp.cleanup()
+
+    def notify(self, key, text):
+        import session_notice
+        with mock.patch.object(session_notice, "_retain", return_value=None):
+            record = session_notice.notify("codex", self.sid, key=key, subject="report", text=text,
+                                           required_action="read-notice", jobs=self.state / "jobs.log")
+        self.assertIsNotNone(record)
+        return record
+
+    def status(self, record):
+        import dispatch_pending_delivery as pending
+        return pending.read(self.state, self.sid, record["delivery_id"])["state"]
+
+    def test_only_records_shown_whole_are_acked(self):
+        records = [self.notify(f"notice-{n}", f"{n:02d}-TOKEN-{n}-" + "x" * 540) for n in range(20)]
+        for hook in (carrier.post_tool, carrier.stop):
+            before = {record["delivery_id"] for record in records if self.status(record) == "acked"}
+            out = io.StringIO()
+            hook({"session_id": self.sid, "turn_id": f"turn-{hook.__name__}", "tool_name": "Bash"}, out)
+            response = json.loads(out.getvalue())
+            text = response.get("reason") or response["hookSpecificOutput"]["additionalContext"]
+            self.assertLessEqual(len(text), carrier.MAX_REASON_CHARS)
+            for n, record in enumerate(records):
+                if self.status(record) == "acked" and record["delivery_id"] not in before:
+                    self.assertIn(f"{n:02d}-TOKEN-{n}-", text)
+            if hook is carrier.post_tool:
+                # What did not fit whole stays pending for the next boundary.
+                left = [record for record in records if self.status(record) != "acked"]
+                self.assertTrue(left)
+                self.assertTrue(all(self.status(record) == "pending" for record in left))
+        self.assertTrue(any(self.status(record) == "acked" for record in records))
+
+    def test_unbound_completion_does_not_hold_back_a_notice(self):
+        import dispatch_pending_delivery as pending
+        note = self.notify("own-report", "OWN_NOTICE_TOKEN")
+        jobs = self.state / "jobs.log"
+        jobs.touch()
+        attempt, parent = "att-" + "b" * 32, "att-" + "a" * 32
+        receipt = {"schema_version": 2, "state": "delivered", "parent_attempt_id": parent,
+                   "job_registry": str(jobs), "delivery_classification": "attention",
+                   "children": [{"attempt_id": attempt, "status": "done", "readiness": "ready",
+                                 "reason": "terminal-failure-or-unclosed",
+                                 "required_action": "inspect-done-failure", "harness": "codex",
+                                 "delivery_classification": "attention"}]}
+        done_id = "delivery-" + "a" * 32
+        pending.create(root=self.state, recipient_kind="codex-native-queue", recipient_key=self.sid,
+                       delivery_id=done_id, session_generation="", session_generation_supported="0",
+                       attempt_ids=[attempt], parent_attempt_id=parent, route_id="rt-fixture",
+                       route_node="execute", receipt=receipt,
+                       receipt_digest=pending._canonical_receipt_digest(receipt),
+                       row_revisions={attempt: "deadbeef"})
+        text, batches = carrier.collect(self.sid, "owned-turn", budget_seconds=5.0)
+        self.assertIn("OWN_NOTICE_TOKEN", text)
+        self.assertEqual([r["delivery_id"] for _root, rs in batches for r in rs], [note["delivery_id"]])
+        # The completion is left unclaimed for the native queue and the next prompt.
+        self.assertEqual(pending.read(self.state, self.sid, done_id)["state"], "pending")
 
 
 class ManifestTest(unittest.TestCase):

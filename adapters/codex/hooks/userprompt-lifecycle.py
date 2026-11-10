@@ -632,7 +632,7 @@ def note_turn_received(sid: str, native_turn: str, records: list, prompt: str) -
     try:
         import codex_turn_carrier as carrier
         items = carrier.owed_items(records)
-        peer = carrier.peer_report_item(prompt)
+        peer = carrier.peer_report_item(prompt, sid)
         if peer:
             items.append(peer)
         carrier.note_received(sid, native_turn, items,

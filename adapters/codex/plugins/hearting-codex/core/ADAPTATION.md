@@ -808,14 +808,37 @@ documented hook outputs, through `adapters/codex/hooks/turn-carrier.py` and the 
 | exit-2 wake of an idle session with the completion receipt or notice | native thread queue (`codex-native-queue`, §7.2), unchanged |
 | receipt or notice that arrives while the session works (`PostToolUse`/`UserPromptSubmit` `additionalContext`) | `PostToolUse` `hookSpecificOutput.additionalContext` with the owed records for this exact thread, rendered by the shared `delivery_context` and ACKed like the prompt path (`codex-native-prompt:<thread>`) |
 | a turn that ends while records are owed is woken again by the still-armed async hook | `Stop` `decision: block` continues the same turn with the owed records and un-acked steward watch receipts; Codex then runs `Stop` again with `stop_hook_active=true` |
-| — (Claude relies on the model) | once per turn, when the turn received a record whose required action is more than reading (or a peer report arrived as its prompt) and no tool ran afterwards, `Stop` continues the turn with that required action; the model may end with a one-line reason |
+| — (Claude relies on the model) | once per turn, when the turn received a record whose required action is more than reading (or a peer report whose sealed transfer the shared `prompt_origin` verifies for this thread arrived as its prompt; a quoted `(peer-from: …)` is not one) and no tool ran afterwards, `Stop` continues the turn with that required action; the model may end with a one-line reason |
 
 The carrier renders only records the bridge may ACK and each at most once per turn, so a
-continuation always ends: a completion without an exact running native turn stays with the
-native queue and the next prompt exactly as before. It never waits, never parks, never
-blocks a tool, asks nothing, and adds no input; worker sessions are skipped. Per-turn state
+continuation always ends. Its output is never cut: it chooses the leading records (a sealed
+batch as one unit) whose rendering fits the 8000-character budget whole, ACKs only those,
+and hands the rest back pending for the next boundary. A completion without an exact running
+native turn is not claimed and stays with the native queue and the next prompt exactly as
+before; a notice in the same state root, which needs no turn binding, is still carried. It
+never waits, never parks, never blocks a tool, asks nothing, and adds no input; worker
+sessions are skipped. Per-turn state
 (tool count, records received, the one follow-through) lives under the dispatch state root in
 `codex-turn-carrier/`. OpenCode keeps its plugin turn carrier (`opencode-turn`).
+
+This carrier is not yet the same behavior as Claude end to end. Open differences, measured
+by the independent review of 2026-11-10 and not closed by this carrier:
+
+- **Codex watch line.** A Codex steward watch line still says `parent_next=bounded-wait/join`;
+  that Codex ends the turn and the runtime carries the receipt on, as with Claude's armed
+  watch, is not measured end to end (Herdr included).
+- **Completion without the App Server socket.** Without the exact running turn a completion
+  is still held to the native queue and the next prompt, so work that finishes mid-turn does
+  not reach that turn in such an environment. Notices beside it are no longer held back.
+- **Follow-through judgment.** The one pass checks only that no tool ran after the record;
+  it does not judge that the owed action was done, so an unrelated tool call clears it. A
+  quoted trailer no longer starts a pass; a verified peer report still gets one, because
+  peer messages carry no typed read-only marker.
+- **When ordinary notices land.** Codex hands a notice to the running turn at its next tool
+  boundary; Claude's `PostToolUse` path carries peer bodies, not ordinary session
+  notices, which wait for the next prompt or the owner's async rewake. The two do
+  not yet surface the same notice at the same point.
+- **OpenCode and installed trust.** Not measured by that review.
 
 A Claude owner's async-rewake carrier retries a timed-out readiness probe within
 its existing absolute deadline. A transient probe timeout does not end the wait
