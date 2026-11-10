@@ -681,7 +681,8 @@ def _design_review_subject(route: dict, node: dict) -> dict:
                 "cycle_id": cycle.get("cycle_id"), "route_id": cycle.get("route_id")}}
 
 
-def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
+def _generic_artifact_review_subject(route: dict, node: dict, *,
+                                     resolve_logical_directories: bool = True) -> dict | None:
     """Observe only concrete, sealed artifact inputs a capped review consumes."""
     if node.get("kind") != "review-worker":
         return None
@@ -695,12 +696,6 @@ def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
     except ImportError:
         pass
     sources = node.get("input_sources") if isinstance(node.get("input_sources"), dict) else {}
-    selectors = [value for value in (node.get("inputs") or ())
-                 if isinstance(value, str) and value and "<" not in value and ">" not in value
-                 and ("/" in value or PurePosixPath(value).suffix)
-                 and value not in {"logs/**", "checkpoints/**", "raw-results/**"}]
-    if not sources and not selectors:
-        return None
     ancestors = _ancestor_ids(route, node)
     by_id = {str(item.get("id")): item for item in route.get("nodes", [])
              if isinstance(item, dict)}
@@ -708,6 +703,41 @@ def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
     producer_scopes = [scope for producer in producer_nodes
                        for scope in (producer.get("write_scope") or ())
                        if isinstance(scope, str)]
+    # A bare logical input name (``experiment-scaffold``) is concrete when a
+    # sealed producer declares it as a directory output (``experiment-scaffold/**``).
+    # Without that declaration it stays an unresolved symbol on its legacy identity.
+    logical_directories = {
+        (scope[len("artifacts/"):] if scope.startswith("artifacts/") else scope)[:-3]
+        for scope in producer_scopes if scope.endswith("/**")} - {
+        "logs", "checkpoints", "raw-results", "models", "experiment-artifact"}
+    if not resolve_logical_directories:
+        logical_directories = set()
+    # Newly resolved directory inputs must cover the whole logical payload.
+    # A partial subject (apply-log without applied-artifact, for example)
+    # would bypass upstream completion currency and preserve an unverified PASS.
+    if any(isinstance(value, str) and value in logical_directories
+           for value in node.get("inputs") or ()):
+        ignored = {"logs", "checkpoints", "raw-results", "models", "experiment-artifact"}
+        for value in node.get("inputs") or ():
+            if (not isinstance(value, str) or not value or "<" in value or ">" in value
+                    or "/" in value or PurePosixPath(value).suffix or value in ignored):
+                continue
+            source = sources.get(value)
+            if (value not in logical_directories
+                    and not (isinstance(source, dict) and isinstance(source.get("path"), str)
+                             and source["path"])):
+                return None
+
+    def concrete_selector(value: str) -> bool:
+        return ("/" in value or bool(PurePosixPath(value).suffix)
+                or value in logical_directories)
+
+    selectors = [value for value in (node.get("inputs") or ())
+                 if isinstance(value, str) and value and "<" not in value and ">" not in value
+                 and concrete_selector(value)
+                 and value not in {"logs/**", "checkpoints/**", "raw-results/**", "experiment-artifact"}]
+    if not sources and not selectors:
+        return None
     artifact_root = Path(str(route.get("artifact_root") or ""))
     output_root = None
     cycle_id = None
@@ -814,7 +844,7 @@ def _generic_artifact_review_subject(route: dict, node: dict) -> dict | None:
             raise SourceSubjectError("review-artifact-input-path-invalid", selector)
         if selector in {"logs/**", "checkpoints/**", "raw-results/**", "experiment-artifact"}:
             continue
-        if not ("/" in selector or PurePosixPath(selector).suffix):
+        if not concrete_selector(selector):
             continue
         matching_scopes = [normalized_scope(scope) for scope in producer_scopes
                            if matches_scope(selector, normalized_scope(scope))]
@@ -1530,7 +1560,11 @@ def marker_currency(route: dict, node: dict, marker: dict, completion_dir: str |
             and not artifact_review and not (implementation_review or source_test
                                              or is_deploy_review(route, node))):
         try:
-            artifact_review = _generic_artifact_review_subject(route, node) is not None
+            # Newly resolvable logical directories change admission identity,
+            # not the validity of already-issued legacy evidence. Preserve its
+            # upstream-completion currency; never bind old PASS to today's bytes.
+            artifact_review = _generic_artifact_review_subject(
+                route, node, resolve_logical_directories=False) is not None
         except SourceSubjectError as exc:
             return "completion-evidence-unreadable", exc.reason
     if (not isinstance(subject, dict) and node.get("kind") == "review-worker"

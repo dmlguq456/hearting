@@ -27,7 +27,7 @@ import sys
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_cutover as C  # noqa: E402
@@ -245,7 +245,27 @@ def _cycle_bucket_dirs(root: Path, bucket: str) -> List[Tuple[Path, Dict[str, st
 
 
 def latest_shared_dir(root: Path, kind: str) -> Optional[Path]:
+    """Immutable revision location; its physical tree may be sparse.
+
+    File consumers use spec_file/resolve_path. Directory-copy consumers use
+    shared_spec_description's logical files rather than walking this path.
+    """
     return C.latest_shared_revision(Path(root), kind)
+
+
+def shared_spec_description(root, revision):
+    """Complete logical file addresses for the existing directory CLI surfaces."""
+    from artifact_spec_storage import revision_address, read_files
+    address = revision_address(root, revision)
+    if address is None:
+        return {}
+    files, record = read_files(root, address[0], address[1])
+    return {'reference_id': address[0], 'revision_id': address[1],
+        'physical_complete': not bool(record.get('stored_in')),
+        'content_digest': record['content_digest'],
+        'logical_files': [{'logical_path': name, 'path': str(file.path),
+            'source_revision_id': file.source_revision_id, 'source_path': file.source_path,
+            'sha256': file.sha256, 'byte_size': file.byte_size} for name, file in files.items()]}
 
 
 def legacy_bucket_dir(root: Path, bucket: str) -> Optional[Path]:
@@ -262,7 +282,8 @@ def bucket_dirs(root: Path, bucket: str, *, include_shared: bool = True,
         shared = latest_shared_dir(root, SHARED_KIND_FOR_BUCKET[bucket])
         if shared is not None:
             rows.append((shared, {"layout": LAYOUT_SHARED, "kind": SHARED_KIND_FOR_BUCKET[bucket],
-                                  "revision_id": shared.name}))
+                                  "revision_id": shared.name,
+                                  **(shared_spec_description(root, shared) if bucket == 'spec' else {})}))
     if include_legacy:
         legacy = legacy_bucket_dir(root, bucket)
         if legacy is not None:
@@ -273,6 +294,14 @@ def bucket_dirs(root: Path, bucket: str, *, include_shared: bool = True,
 def iter_bucket_children(root: Path, bucket: str, **kw) -> Iterator[Tuple[Path, Dict[str, str]]]:
     """Direct child directories of every bucket candidate (a cycle/component each)."""
     for base, meta in bucket_dirs(root, bucket, **kw):
+        if 'logical_files' in meta:
+            # A component exists in the logical inventory even if all of its
+            # physical bytes are in older revisions. This is a locator, not a
+            # materialized directory; its file addresses are carried in meta.
+            for name in sorted({row['logical_path'].split('/')[0] for row in meta['logical_files']
+                                if '/' in row['logical_path'] and not row['logical_path'].startswith('.')}):
+                yield base / name, meta
+            continue
         if bucket == "designs" and is_flat_design_layout(base):
             # The producer cycle is already the outer boundary. Treat the
             # flat anchors as one design payload instead of five cycles.
@@ -293,7 +322,7 @@ def glob_bucket(root: Path, bucket: str, pattern: str, **kw) -> List[Path]:
 
 
 def spec_dir(root: Path, *, open_cycle_dir: Optional[str] = None) -> Optional[Tuple[Path, str]]:
-    """The spec tree a reader should consult.
+    """The spec location a reader should consult (not a materialization).
 
     Order: the open producer cycle handed in (a writer's own in-progress tree),
     the latest shared/spec revision (canonical), then the legacy `spec/` only
@@ -312,6 +341,62 @@ def spec_dir(root: Path, *, open_cycle_dir: Optional[str] = None) -> Optional[Tu
     if _is_real_dir(legacy) and ((legacy / "prd.md").is_file() or (legacy / "pipeline_state.yaml").is_file()):
         return legacy, LAYOUT_LEGACY
     return None
+
+
+class _PlainSpecFile(NamedTuple):
+    data: bytes
+    path: Path
+
+
+def _plain_spec_file(base, parts):
+    from artifact_nofollow import open_root, open_relative
+    fd = None
+    try:
+        fd = open_root(base)
+        child = open_relative(fd, parts)
+        with os.fdopen(child, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): return None
+            return _PlainSpecFile(stream.read(), Path(base).joinpath(*parts))
+    except (OSError, RuntimeError):
+        return None
+    finally:
+        if fd is not None: os.close(fd)
+
+
+def read_spec_file(root: Path, logical_path: str, *, open_cycle_dir=None):
+    """A current spec's observed bytes and address, or known absence.
+
+    Corrupt shared storage raises; it never selects an older legacy spec.
+    Directory APIs identify locations, not a promise of physical completeness.
+    """
+    from artifact_spec_storage import _parts, revision_address, read_file
+    parts = _parts(logical_path)
+    supplied_root = Path(root).absolute()
+    root = supplied_root.resolve()
+    hint = os.environ.get('AGENT_ARTIFACT_CYCLE_DIR') if open_cycle_dir is None else open_cycle_dir
+    if hint:
+        hint = Path(hint).absolute()
+        try: hint = root / hint.relative_to(supplied_root)
+        except ValueError: pass
+        candidate = _plain_spec_file(hint / 'artifacts/spec', parts)
+        if candidate is not None: return candidate
+    shared = latest_shared_dir(root, 'spec')
+    if shared is not None:
+        address = revision_address(root, shared)
+        if address is not None:
+            from artifact_spec_current import read_file as current_file
+            current = current_file(root, address[0], address[1], logical_path)
+            if current is not None:
+                return current
+            return read_file(root, address[0], address[1], logical_path, missing_ok=True)
+        return _plain_spec_file(shared, parts)
+    return _plain_spec_file(root / 'spec', parts)
+
+
+def spec_file(root: Path, logical_path: str, *, open_cycle_dir=None) -> Optional[Path]:
+    """Observed file address for links. Byte consumers use read_spec_file."""
+    file = read_spec_file(root, logical_path, open_cycle_dir=open_cycle_dir)
+    return file.path if file is not None else None
 
 
 def resolve_path(root: Path, rel: str) -> Dict[str, object]:
@@ -394,7 +479,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if found is None:
             _emit({"path": None, "layout": None})
             return 1
-        _emit({"path": str(found[0]), "layout": found[1]})
+        _emit({"path": str(found[0]), "layout": found[1],
+            **(shared_spec_description(root, found[0]) if found[1] == LAYOUT_SHARED else {})})
     elif args.command == "hold":
         hold = migration_hold(root)
         if hold is None:

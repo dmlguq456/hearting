@@ -1387,6 +1387,11 @@ def route_state_next_action(reason: str, detail: str, route_file: str | None,
             f"rerun dependency node {target} to publish fresh completion evidence "
             "after its upstream revision, then retry this launch"
         )
+    if reason == "completion-review-subject-unknown":
+        return (
+            f"rerun review node {target} with its existing start to publish a PASS "
+            "bound to the current inputs, then retry this launch"
+        )
     if reason == "review-round-budget-exhausted":
         return "close the node via owner-closure (review) or report the FAIL and open an SD-116 continuation (test)"
     if reason == "review-subject-unchanged":

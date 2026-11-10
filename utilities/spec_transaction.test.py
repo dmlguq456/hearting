@@ -397,7 +397,7 @@ class CycleLayoutTest(unittest.TestCase):
   self.assertEqual((spec/"a/_internal/versions/v3/prd.md").read_text(),"older a\n")
   before=self.P._spec_bytes(spec)
   published=self._publish_components(r,f,b)
-  output=self.P._spec_bytes(Path(published["revision_dir"]),revision=True)
+  output=self.P._verified_shared_spec(self.artifact,published["shared_reference_id"],published["shared_reference_revision_id"])[0]
   self.assertEqual(output["b/prd.md"],b"# B\nbefore\n")
   self.assertIn(b"after\n",output["a/prd.md"])
   self.assertEqual(self.P._spec_bytes(spec),before)
@@ -412,7 +412,7 @@ class CycleLayoutTest(unittest.TestCase):
   (spec/"a").mkdir(); (spec/"a/prd.md").write_text("# A\nfirst\n")
   before=self.P._spec_bytes(spec)
   published=self._publish_components(r,f,b)
-  output=self.P._spec_bytes(Path(published["revision_dir"]),revision=True)
+  output=self.P._verified_shared_spec(self.artifact,published["shared_reference_id"],published["shared_reference_revision_id"])[0]
   self.assertEqual(output["a/prd.md"],b"# A\nfirst\n")
   self.assertFalse(any(p.startswith("b/") for p in output))
   self.assertEqual(self.P._spec_bytes(spec),before)
@@ -447,7 +447,7 @@ class CycleLayoutTest(unittest.TestCase):
   journal_path=next(self.P.shared_journal_path(self.artifact,"probe").parent.glob("*.json"))
   journal=json.loads(journal_path.read_text()); output=self.artifact/journal["target"]
   original=(output/"a/prd.md").read_bytes()
-  self.assertEqual((output/"b/prd.md").read_bytes(),b"# B\nlatest\n")
+  self.assertEqual(self.P._verified_shared_spec(self.artifact,journal["reference_id"],journal["revision_id"])[0]["b/prd.md"],b"# B\nlatest\n")
   (output/"a/prd.md").write_bytes(b"corruption")
   self.assertTrue(self.P._recover_locked(self.artifact)["unresolved"])
   reference=self.P.find_reference_by_key(self.artifact,"spec","spec")
@@ -469,7 +469,7 @@ class CycleLayoutTest(unittest.TestCase):
   TX.seed_cycle_spec(lp,self.artifact,spec_root=lp/"b"); (lp/"b/prd.md").write_text("# B\nlatest\n")
   self._publish_components(l,lf,lb)
   merged=self._publish_components(a,af,ab)
-  output=self.P._spec_bytes(Path(merged["revision_dir"]),revision=True)
+  output=self.P._verified_shared_spec(self.artifact,merged["shared_reference_id"],merged["shared_reference_revision_id"])[0]
   self.assertEqual(output["b/prd.md"],b"# B\nlatest\n")
   self.assertIn(b"ours\n",output["a/prd.md"])
   x,xf,xb=self._cycle("component-conflict"); xp=Path(xb["cycle_dir"])/"artifacts/spec"
@@ -545,7 +545,9 @@ class CycleLayoutTest(unittest.TestCase):
    if path.parent==spec/"a" and path.name.startswith(".prd.md.tmp-"):
     return PartialWriter(handle,path)
    return handle
-  with mock.patch.object(os,"open",track_open),mock.patch.object(os,"fdopen",partial_fdopen):
+  with mock.patch.object(os,"open",track_open),mock.patch.object(os,"fdopen",partial_fdopen), \
+       mock.patch.object(os,"supports_dir_fd",os.supports_dir_fd|{track_open}
+                         if original_open in os.supports_dir_fd else os.supports_dir_fd):
    with self.assertRaises(OSError):TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
   self.assertEqual(partial,[base_before["a/prd.md"][:4]])
   self.assertFalse((spec/"a/prd.md").exists())

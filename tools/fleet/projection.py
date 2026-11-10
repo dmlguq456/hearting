@@ -985,19 +985,35 @@ def _strip_comment(value):
     return (value if idx < 0 else value[:idx]).strip()
 
 
-def _spec_pipeline_state_path(root, slug):
+def _spec_pipeline_state_source(root, slug):
     reader = _artifact_reader()
     for reports_dir in (".agent_reports", ".claude_reports"):
         artifacts = os.path.join(root, reports_dir)
         # A project/topic read marker does not identify a campaign cycle.
         # Resolve the shared pointer or direct legacy path, never all cycles.
-        shared = reader.latest_shared_dir(Path(artifacts), "spec") if reader is not None else None
-        bases = ([str(shared)] if shared is not None else []) + [os.path.join(artifacts, "spec")]
+        if reader is not None:
+            try:
+                file = reader.read_spec_file(Path(artifacts),
+                    f'{slug}/pipeline_state.yaml' if slug else 'pipeline_state.yaml', open_cycle_dir='')
+            except (OSError, ValueError):
+                return None
+            if file is not None:
+                return str(file.path), file.data
+            continue
+        bases = [os.path.join(artifacts, "spec")]
         for base in bases:
             path = os.path.join(base, slug, "pipeline_state.yaml") if slug else os.path.join(base, "pipeline_state.yaml")
             if os.path.isfile(path):
-                return path
+                try:
+                    with open(path, 'rb') as stream: return path, stream.read()
+                except OSError:
+                    return None
     return None
+
+
+def _spec_pipeline_state_path(root, slug):
+    source = _spec_pipeline_state_source(root, slug)
+    return source[0] if source is not None else None
 
 
 def _spec_stage_parts(root, slug):
@@ -1009,12 +1025,11 @@ def _spec_stage_parts(root, slug):
     string ``in_progress`` is matched. Topic is the slug string for a slug
     marker, or ``project_name:`` (else ``None``) for a root marker."""
     topic, phase = slug, None
-    path = _spec_pipeline_state_path(root, slug)
-    if not path:
+    source = _spec_pipeline_state_source(root, slug)
+    if source is None:
         return topic, phase
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
+        lines = source[1].decode('utf-8').splitlines(keepends=True)
     except (OSError, UnicodeDecodeError):
         return topic, phase
     project_name = None
