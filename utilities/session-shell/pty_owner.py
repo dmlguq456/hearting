@@ -67,6 +67,10 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             if mode==b'S':
                 env.update(HEARTING_SHELL_SOCKET=environment['HEARTING_SHELL_SOCKET'],
                            HEARTING_SHELL_TOKEN=environment['HEARTING_SHELL_TOKEN'])
+                # Only the started shell's native child gets the panel-side
+                # native settings; a fallback start keeps the user's own.
+                if 'OPENCODE_CLI_CONFIG_CONTENT' in environment:
+                    env['OPENCODE_CLI_CONFIG_CONTENT']=environment['OPENCODE_CLI_CONFIG_CONTENT']
             command=wrapped if mode==b'S' else original
             os.execvpe(command[0],command,env)
         except BaseException as exc:

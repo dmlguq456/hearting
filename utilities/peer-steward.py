@@ -3315,6 +3315,15 @@ def _shell_seat_turn(payload, target):
     return {**payload, "result": {**payload["result"], "agent": {**agent, "agent_status": state}}}
 
 
+def _codex_queue_present():
+    """The Codex steward's App Server queue socket exists (the carrier `wake=queue` names)."""
+    try:
+        from codex_queue_dispatch import queue_endpoint_present
+        return queue_endpoint_present()
+    except Exception:  # noqa: BLE001 - unknown is not a carrier
+        return False
+
+
 def cmd_watch(args):
     root = _watch_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -3333,7 +3342,8 @@ def cmd_watch(args):
     until = list(args.until or [])
     wake = args.wake
     if wake == "auto":
-        wake = "hook" if _caller_is_claude() else "none"
+        wake = "hook" if _caller_is_claude() else (
+            "queue" if steward_harness == "codex" and _codex_queue_present() else "none")
 
     server = _HERDR_SESSION or "default"
     # Resolve before choosing a logical claim: names, pane IDs and agent IDs can
