@@ -210,7 +210,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
    value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
      id:'rt-detail',title:'ROUTE_PAGE',state:'working',worker_stage:'inline',stages:[{name:'inline',st:'active'}],
-     visibility:{summary:'direct',next:'closed',lines:Array.from({length:14},(_,i)=>['test','EVIDENCE_'+i+' '.repeat(1)+'bounded detail '.repeat(5),'info'])}}];
+     visibility:{codes:{schema:'route_visibility_codes_v1',shape:'direct',next:{kind:'closed'},verification:{gate:'unproven'},quoted:Array.from({length:8},(_,i)=>['test','EVIDENCE_'+i+' '+'bounded detail '.repeat(5)])}}}];
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/ROUTE_PAGE/);
    await new Promise(resolve=>sideTerm.write('',resolve));
