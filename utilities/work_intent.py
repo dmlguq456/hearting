@@ -15,10 +15,7 @@ values now travel with every route, neither of them part of its identity:
   written (not a peer/runtime transfer or a bare approval), with credentials
   masked -- and stored once in
   `.runtime/intent/<work key>.json` beside the route. Every leg of a framed route
-  shares the frame route's record and never reads the session itself. The
-  latest prompt of a session that opens many routes is often about something
-  else, so readers show only the part of it the route's own request quotes
-  (`quoted_original`); a prompt the request does not quote is left out.
+  shares the frame route's record and never reads the session itself.
 
 Every value is optional and every failure leaves only that value out: this is a
 record and a carrier, never a gate or a required input.
@@ -115,7 +112,7 @@ def draft(text: str) -> dict:
     if found.get("intent"):
         return {**found, "basis": "header"}
     import frame_interview
-    first = re.sub(r"^#{1,6}\s+", "", frame_interview.understanding_draft(body) or "")
+    first = frame_interview.understanding_draft(body)
     if first:
         found = {**found, "intent": _line(first), "basis": "first-sentence"}
     return found
@@ -331,43 +328,11 @@ def read_original(route) -> str:
 # Readers: the compose card and the owner/worker prompt
 # ---------------------------------------------------------------------------
 
-_QUOTE_MARKS = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u300c": '"',
-                              "\u300d": '"'})
-_QUOTE_PIECE = re.compile(r"(?<=[.!?。？！…])\s+|\n+")
-MIN_QUOTED_WHOLE = 4   # a bare word the request happens to use is no quote
-MIN_QUOTED_PIECE = 6
-
-
-def _quote_form(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").translate(_QUOTE_MARKS)).strip().strip("\"'").strip()
-
-
-def quoted_original(original, request_text) -> str:
-    """The person's words only as far as the route's own request quotes them; else empty.
-
-    The sealed excerpt is the latest prompt of the session that opened the route. A
-    supervising session opens many routes, so that prompt is often about something else;
-    it is shown only when the request carries the same words (whole, or sentence by
-    sentence -- an excerpt ends with `…` and a request may quote part of it)."""
-    words = original if isinstance(original, str) else ""
-    request = _quote_form(request_text if isinstance(request_text, str) else "")
-    whole = _quote_form(words.rstrip("…"))
-    if not whole or not request:
-        return ""
-    if len(whole) >= MIN_QUOTED_WHOLE and whole in request:
-        return words
-    pieces = [_quote_form(piece.rstrip("…")) for piece in _QUOTE_PIECE.split(words)]
-    found = [piece for piece in pieces if len(piece) >= MIN_QUOTED_PIECE and piece in request]
-    return " … ".join(dict.fromkeys(found))
-
-
 def route_intent(route, *, original=None) -> dict:
-    """What the route says the person wants: the prompt file's lines and the person's words
-    the request itself quotes (`quoted_original`)."""
+    """What the route says the person wants: the prompt file's lines and the person's words."""
     request = route.get("work_request") if isinstance(route, dict) else None
-    text = (request.get("text") or "") if isinstance(request, dict) else ""
-    value = draft(text) if isinstance(request, dict) else {}
-    words = quoted_original(read_original(route) if original is None else original, text)
+    value = draft(request.get("text") or "") if isinstance(request, dict) else {}
+    words = read_original(route) if original is None else original
     return {"original": words, **value} if words else value
 
 
@@ -438,23 +403,17 @@ MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{2,3}\s+(?P<title>.+?)\s*$")
 _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
-# (field, words of a heading). A heading is read by its words only, never by its number or place:
-# reports number and order their own sections (`## 1. 원인`, `## 4. 변경 파일`, `## 5. 검증`), and
-# the code-report template's own headings (`## 4. QA Summary`, `## 6. Follow-Ups`) carry the words.
-# Words of an earlier field are taken out before a later one is matched ("미검증" is not "검증"); a
-# heading still matching two fields ("수정 전 실패 → 후 통과 시험", "검증과 남은 것") is not sorted.
+# (field, sections of the code-report template by number, words of any other heading). The numbers
+# hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
+# other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
-    ("remaining", ("미검증", "미확인", "실패", "건너뛴", "건너뜀", "남은", "후속", "한계", "인계", "경고", "주의",
-                   "다음 단계", "unverified", "unconfirmed", "failed", "skipped", "follow-up", "follow up",
-                   "follow-ups", "remaining", "limitation", "limitations", "limits", "open risk", "handoff",
-                   "handover", "handed over", "warning", "warnings", "caveat", "caveats", "next steps")),
-    ("verified", ("검증", "시험", "검사", "qa", "verification", "validation", "tests", "testing", "checks")),
-    ("changed", ("변경 개요", "변경 사항", "변경 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "고친 자리",
-                 "보정 내용", "사용자용", "change overview", "changes", "what changed", "changed files",
-                 "files changed")),
+    ("remaining", ("5", "6"), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "후속", "한계", "unverified", "failed",
+                               "skipped", "follow-up", "follow up", "follow-ups", "remaining", "limitation", "limits",
+                               "open risk")),
+    ("verified", ("4",), ("검증", "시험", "qa", "verification", "tests", "testing")),
+    ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "바뀐 것", "고친 것", "고친 행동", "사용자용",
+                         "change overview", "changes", "what changed")),
 )
-# The worker kernel's own line for a check its environment could not run, wherever it stands.
-_HANDED_OVER = re.compile(r"^\s*(?:[-*+]\s+)?handed-over:\s*\S", re.I)
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
 
@@ -485,46 +444,31 @@ def _has_word(title: str, word: str) -> bool:
     return word in title
 
 
-UNSORTED = "unsorted"
-
-
-def _section_field(title: str) -> str | None:
-    """The one field a heading's words name; None for none, `UNSORTED` for more than one."""
+def _section_field(title: str, *, numbered: bool) -> str | None:
     number = _NUMBER.match(title)
-    rest = (title[number.end():] if number else title).lower()
-    found = []
-    for field, words in _SECTION_FIELDS:
-        hits = [word for word in words if _has_word(rest, word)]
-        if hits:
-            found.append(field)
-            for word in sorted(hits, key=len, reverse=True):
-                rest = rest.replace(word, " ")
-    return found[0] if len(found) == 1 else (UNSORTED if found else None)
+    if number and numbered:
+        return next((field for field, numbers, _words in _SECTION_FIELDS if number["num"] in numbers), None)
+    lowered = (title[number.end():] if number else title).lower()
+    return next((field for field, _numbers, words in _SECTION_FIELDS
+                 if any(_has_word(lowered, word) for word in words)), None)
 
 
-def report_sections(text: str) -> dict[str, list[str]]:
+def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]]:
     """The report's own lines under its overview, verification and remaining-work headings.
 
-    Headings are matched by their words alone. A `###` heading naming nothing stays in its
-    `##` section. Lines under a section no field names -- or under one naming two -- are kept
-    under `UNSORTED`, so a reader can tell "nothing written" from "written where I cannot sort
-    it". A `handed-over:` line is unverified wherever it stands."""
+    `numbered` reads `1`/`4`/`5`/`6` as the code-report template's sections; any other heading
+    is matched by its words."""
     sections: dict[str, list[str]] = {}
-    current = parent = None
+    current = None
     for raw in (text or "").splitlines():
         match = _SECTION.match(raw)
         if match:
-            field = _section_field(match["title"].strip())
-            if raw.startswith("## "):
-                current = parent = field or UNSORTED
-            else:
-                current = field or parent or UNSORTED
+            current = _section_field(match["title"].strip(), numbered=numbered)
             continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
                 and not any(marker in line for marker in _CARRIER_MARKERS)):
-            field = "remaining" if _HANDED_OVER.match(raw) else current
-            sections.setdefault(field, []).append(line.strip("|").strip())
+            sections.setdefault(current, []).append(line.strip("|").strip())
     return sections
 
 
@@ -648,19 +592,16 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         text = Path(primary).read_text(encoding="utf-8") if primary else ""
     except (OSError, UnicodeError):
         text = ""
-    sections = report_sections(text)
+    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
+    sections = report_sections(text, numbered=code_report)
     degraded = _review_degraded(route_file)
-    # "none written" only when every section was sorted; else the rest may be in a section
-    # this reader could not sort, and the summary points to the report instead.
-    unsorted = bool(sections.pop(UNSORTED, None))
     if sections:
-        absent = t("completion.see_report") if unsorted else None
         if sections.get("changed"):
             lines.append(t("completion.changed", items=_joined(sections["changed"])))
-        checks = _joined(sections.get("verified") or []) or absent or t("completion.no_checks")
+        checks = _joined(sections.get("verified") or []) or t("completion.no_checks")
         lines.append(t("completion.checks", items=checks))
         lines.append(t("completion.remaining", items=_joined(sections.get("remaining") or [])
-                       or absent or t("completion.no_remaining")))
+                       or t("completion.no_remaining")))
     else:
         lines.append(t("completion.unreadable"))
     if degraded:

@@ -106,10 +106,6 @@
    "en": "This leg ({index}/{legs}) is done — a later leg remains",
    "ko": "이 leg({index}/{legs}) 완료 — 다음 leg가 남음"
   },
-  "completion.see_report": {
-   "en": "some sections could not be sorted — read the report itself",
-   "ko": "분류하지 못한 절이 있음 — 보고서 본문을 볼 것"
-  },
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
