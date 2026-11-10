@@ -457,13 +457,18 @@ async function refreshReadiness() {
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
-  const previous=nativeEpoch;epoch+=data.length;nativeEpoch+=data.length;empty=false;
+  epoch+=data.length;empty=false;
   for(let offset=0;offset<data.length;offset++) {
+    nativeEpoch++;
     const c=String.fromCharCode(data[offset]);
-    if(keyTail){keyTail+=c;if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
+    if(keyTail){keyTail+=c;
+      // FocusIn/FocusOut report terminal focus, not a composer edit. Keep the
+      // observation epoch above, including split reports; pasted bytes count.
+      if(!paste&&(keyTail==='\x1b[I'||keyTail==='\x1b[O')){nativeEpoch-=keyTail.length;keyTail='';}
+      else if(keyTail==='\x1b[200~'){paste=true;keyTail='';}else if(keyTail==='\x1b[201~'){paste=false;keyTail='';}
       else if(keyTail.length>2&&/[\x40-\x7e]/.test(c)||keyTail.length>64)keyTail='';}
     else if(c==='\x1b')keyTail=c;
-    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=previous+offset+1;
+    else if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;
   }
 }
 function userInput(data) {
