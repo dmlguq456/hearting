@@ -354,7 +354,18 @@ The post-tool context helper is asynchronous too. Service `/global/health` laten
 A completion prompt that OpenCode accepted but whose exact text did not appear in the
 native history keeps its claim (log `sent-unobserved-held`): a later idle pass settles it
 from history, and only the existing 120 s claim lease, once expired, makes it deliverable
-again. Measured with the history read forced empty: one turn in 120 s (before: 11).
+again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
+carrier opens no further turn for it (log `resend_limit_reached`, then
+`resend-limit-deferred`): the record stays owed, and the session's next natural turn
+carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
+it in that turn's context, a completed tool of a running turn appends it to the result,
+and either acks it there. A natural turn that comes while the limited send's claim is
+still live takes that exact claim over (the shared `settle` revalidates owner, lease and
+recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
+limit again; nothing is dropped. Measured with the history read forced empty: before the
+limit, one turn per expired lease without end (300 s: 3, 450 s: 4); after it, 2 turns and
+then none (450 s: 2), the next user prompt carried and acked it. A receipt that is only
+late (history hidden for 8 s) still settles at the next pass with one turn.
 
 **Open differences from Claude** (not closed by this measurement):
 
@@ -367,9 +378,12 @@ again. Measured with the history read forced empty: one turn in 120 s (before: 1
 - The herdr pane status projection (`recordNativeTurnStatus`, the pane publisher) still
   assumes the V1 TUI-process origin; under the OpenCode 2 service its pane state is not
   re-measured here.
-- Each 5 s pass still starts one asynchronous helper per idle root session (no service
-  stall, but CPU on the host); every plugin instance of the service evaluates its own
-  directory's sessions.
+- Each 5 s pass still starts two asynchronous helpers per idle root session (the idle
+  peer courier's `pending` read and the completion carrier's `recipients` look, which the
+  base already had): no service stall, but CPU on the host, linear in idle root sessions;
+  every plugin instance of the service evaluates its own directory's sessions. Measured at
+  40 idle root sessions: about 960 helpers a minute, about 1.9 cores of helper CPU (base
+  before the carriers: about 2.2).
 
 ## Explicit Non-Support
 
