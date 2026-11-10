@@ -27,15 +27,116 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 
-# The first final-verdict line of a review report is its current verdict; later
-# lines are kept history. A bare initial note ("초도 판정", "first pass") is not final.
-_FINAL = re.compile(
-    r"^[\s>*#_-]*(?:최종\s*판정|final\s+verdict|verdict)\s*[:：]\s*[*_`\s]*(?P<value>[^\n]*)",
-    re.IGNORECASE | re.MULTILINE)
-_MERGE = ("병합 가능", "merge-ready", "mergeable", "ready to merge", "approve", "pass")
-_FIX = ("수정 후 병합", "수정 필요", "changes requested", "request changes", "fix", "fail")
+# A verdict is one of three line forms (the line's own `>*#_-` decoration aside):
+#   labeled   `최종 판정:` / `판정:` / `Final verdict:` / `Verdict:` (an optional
+#             parenthesised date before the colon); "초도 판정", "변경분 판정" are notes
+#   first     the report's first non-heading line starts with a verdict phrase
+#             ("병합 가능 — 검토 head …", "수정 후 병합 …")
+#   title     a heading ending `— 최종 <verdict>`, read only when no other form exists
+# The head a verdict names is looked for only in its own block: the verdict line and
+# the lines after it up to a blank line or the next verdict, plus a heading directly
+# above it ("## 재검토 head …"); a title also takes the paragraph under it.
+_DECOR = r"[\s>*#_\-]*"
+_LABELED = re.compile(
+    rf"^{_DECOR}(?:최종\s*판정|판정|final\s+verdict|verdict)\s*(?:\([^)\n]*\))?\s*[:：]\s*[*_`\s]*(?P<value>.*)$",
+    re.IGNORECASE)
+_TITLE = re.compile(r"^\s*#{1,6}\s.*[—–-]\s*최종\s+(?P<value>[^\n]+?)\s*$")
+_HEADING = re.compile(r"^\s*#{1,6}\s")
+# Rejection and conditional wording; checked before any merge word, on word boundaries.
+_FIX = re.compile(
+    r"수정\s*후\s*병합|수정\s*(?:이\s*)?(?:필요|요구|요청)|병합\s*불가|거부|반려"
+    r"|병합\s*(?:가능\s*)?(?:하지|하진|하면)?\s*(?:않|안\s*됨|안\s*된|못|없|아니)"
+    r"|\b(?:changes?\s+requested|request(?:ing|ed)?\s+changes|with\s+changes|do\s+not\s+merge"
+    r"|don'?t\s+merge|not\s+(?:yet\s+)?(?:mergeable|merge-?ready|ready|approved?)|unmergeable"
+    r"|reject(?:ed)?|fix(?:es)?|fail(?:ed|s)?)\b", re.IGNORECASE)
+_MERGE = re.compile(
+    r"병합\s*가능|머지\s*가능|\b(?:merge-?ready|mergeable|ready\s+to\s+merge|approve[ds]?|pass(?:ed)?|lgtm)\b",
+    re.IGNORECASE)
+# Any other negation inside the verdict clause keeps a merge word from reading as merge.
+_NEGATION = re.compile(r"\b(?:not|never|cannot|no)\b|n't\b|않|불가|못|아니|금지", re.IGNORECASE)
+_FIRST = re.compile(rf"^{_DECOR}(?:{_FIX.pattern}|{_MERGE.pattern})", re.IGNORECASE)
 # Only the verdict's own first clause is read: "병합 가능. 차단0, 수정 불필요" stays a merge.
 _CLAUSE_END = re.compile(r"[.,;(*—。]")
+_HEX = re.compile(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", re.IGNORECASE)
+
+
+def classify(value):
+    """merge | fix | none for one verdict value."""
+    clause = _CLAUSE_END.split(value or "", 1)[0].strip()
+    if _FIX.search(clause):
+        return "fix"
+    if _MERGE.search(clause):
+        return "fix" if _NEGATION.search(clause) else "merge"
+    return "none"
+
+
+def _verdicts(text):
+    """[(value, block, kind)] in document order; title verdicts only as a fallback."""
+    lines = (text or "").splitlines()
+    found, titles = [], []
+    first = next((i for i, line in enumerate(lines) if line.strip() and not _HEADING.match(line)), None)
+    for i, line in enumerate(lines):
+        labeled = _LABELED.match(line)
+        if labeled:
+            found.append((i, labeled.group("value"), "labeled"))
+        elif i == first and _FIRST.match(line):
+            found.append((i, line.strip(" >*#_-"), "first"))
+        else:
+            title = _TITLE.match(line)
+            if title and classify(title.group("value")) != "none":
+                titles.append((i, title.group("value"), "title"))
+    rows = found or titles
+    starts = {i for i, _, _ in rows}
+    out = []
+    for i, value, kind in rows:
+        block = [lines[i]]
+        j = i - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        if j >= 0 and _HEADING.match(lines[j]) and j not in starts:
+            block.append(lines[j])
+        j = i + 1
+        if kind == "title":
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+        while j < len(lines) and lines[j].strip() and j not in starts:
+            block.append(lines[j])
+            j += 1
+        out.append((value, "\n".join(block), kind))
+    return out
+
+
+def _names(block, head):
+    head = (head or "").lower()
+    return len(head) >= 7 and any(head.startswith(run.lower()) for run in _HEX.findall(block))
+
+
+def review_reading(text, head):
+    """{verdict, names_head, line}: verdict merge | fix | none; line is the verdict read.
+
+    The current verdict is the first one whose block names the current head (a review
+    added below an older one, or kept above it, both count); without one, the first
+    verdict. Different readable verdicts naming the current head are left unread.
+    """
+    rows = _verdicts(text)
+    if not rows:
+        return {"verdict": "none", "names_head": False, "line": ""}
+    current = [(value, classify(value)) for value, block, _ in rows if _names(block, head)]
+    if current:
+        readable = {verdict for _, verdict in current if verdict != "none"}
+        if len(readable) > 1:
+            return {"verdict": "none", "names_head": True, "line": "conflicting verdicts for this head",
+                    "conflict": True}
+        value, verdict = current[0]
+        return {"verdict": verdict, "names_head": True, "line": value.strip()}
+    value = rows[0][0]
+    return {"verdict": classify(value), "names_head": False, "line": value.strip()}
+
+
+def review_verdict(text, head):
+    """(verdict, names_head): verdict is merge | fix | none."""
+    reading = review_reading(text, head)
+    return reading["verdict"], reading["names_head"]
 
 
 def _merge_line():
@@ -94,10 +195,21 @@ def decide(snapshot, review_text=None, merge_line=None):
         row.update(state="needs-review", role="author",
                    next=f"send the review request for PR #{pr} head {head[:12]} to the reviewer named in the assignment")
         return row
-    verdict, names_head = review_verdict(review_text, head)
+    reading = review_reading(review_text, head)
+    verdict, names_head = reading["verdict"], reading["names_head"]
     row["review"] = verdict if verdict == "none" or names_head else f"{verdict}-other-head"
-    if verdict == "none":
-        row.update(state="awaiting-review", role="reviewer", next="write the final verdict for this head")
+    if verdict == "none" and reading.get("conflict"):
+        row.update(state="awaiting-review", role="reviewer",
+                   next=(f"the report gives both a merge and a fix verdict for head {head[:12]}; a person "
+                         "reads it, and the reviewer keeps one current verdict for that head"))
+    elif verdict == "none" and reading["line"]:
+        quoted = " ".join(reading["line"].split())[:80]
+        row.update(state="awaiting-review", role="reviewer",
+                   next=(f"verdict `{quoted}` is not readable as merge or fix; a person reads the report, "
+                         f"and the reviewer restates it as `최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}`"))
+    elif verdict == "none":
+        row.update(state="awaiting-review", role="reviewer",
+                   next=f"write the final verdict for this head as `최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}`")
     elif verdict == "fix":
         row.update(state="fix-requested", role="author", next="apply the requested fix, push, then request review of the new head")
     elif not names_head:
@@ -140,10 +252,15 @@ def github_remote(cwd):
     return result.returncode == 0 and "github.com" in result.stdout
 
 
-def finish_line(cwd, timeout=20):
+# Capabilities whose finished route is the author's source result; a review, audit or
+# research route finished on the same PR branch is not the author asking for review.
+SOURCE_CAPABILITIES = ("autopilot-code", "code-execute")
+
+
+def finish_line(cwd, timeout=20, capability="autopilot-code"):
     """Best-effort `next:` line for a finished source route whose branch has an open PR, or ""."""
     try:
-        if not cwd or not github_remote(cwd):
+        if capability not in SOURCE_CAPABILITIES or not cwd or not github_remote(cwd):
             return ""
         branch = subprocess.run(["git", "-C", str(cwd), "symbolic-ref", "-q", "--short", "HEAD"],
                                 capture_output=True, text=True, timeout=10).stdout.strip()

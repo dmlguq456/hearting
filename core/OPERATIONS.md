@@ -1667,12 +1667,18 @@ already named in the assignment, not by a supervisor relay.
 chain's current step again from the PR's GitHub state (head, draft,
 mergeability, and the head's checks read the same way as `merge-line`) and the
 reviewer's report, and prints one line `pr_chain=<state> … role=<role>
-next=<action>`; it stores, sends, merges and comments nothing. The report's first
-`최종 판정:`/`Final verdict:`/`Verdict:` line is its current verdict (later
-lines are history); a verdict that does not name the current head (at least its
-7-hex prefix) is `review-stale`. A finished source route
-(`capability-route finish`) prints the same line as `next:` on stderr when its
-branch has an open PR. The author sends the review request (PR, exact head,
+next=<action>`; it stores, sends, merges and comments nothing. A verdict is a
+`최종 판정:`/`판정:`/`Final verdict:`/`Verdict:` line, a first line that starts
+with the verdict (`병합 가능 — head <7hex>`, `수정 후 병합 …`), or, when neither
+exists, a title ending `— 최종 <verdict>`. It names a head only in its own
+block (the line and the lines under it up to a blank line, plus a heading
+directly above). The current verdict is the first that names the current head,
+otherwise the first (later lines are history); a merge verdict without the
+current head is `review-stale`. Negated or conditional wording
+(`not mergeable`, `병합 불가`, `approve with changes`) reads as a fix, not a
+merge; an unreadable or conflicting verdict stays `awaiting-review` with a next step
+for a person. A finished `autopilot-code` route (`capability-route finish`)
+prints the same line as `next:` on stderr when its branch has an open PR. The author sends the review request (PR, exact head,
 author report) directly to the reviewer named in its assignment and copies the
 requester; the reviewer sends its final verdict directly to the named publisher
 and copies the requester; the publisher, on `awaiting-ci` or `ready-to-publish`,

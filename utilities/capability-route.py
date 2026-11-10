@@ -2417,7 +2417,7 @@ def main():
             _spec=_ilu.spec_from_file_location("pr_chain", Path(__file__).with_name("pr-chain.py"))
             _chain=_ilu.module_from_spec(_spec); _spec.loader.exec_module(_chain)
             chain=("" if route.get("source_commit") in (None,"","unversioned")
-                   else _chain.finish_line(route.get("cwd")))
+                   else _chain.finish_line(route.get("cwd"),capability=route.get("capability")))
         except Exception:
             chain=""
         if chain:

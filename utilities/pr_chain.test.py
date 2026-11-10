@@ -96,5 +96,91 @@ class FinishLineTest(unittest.TestCase):
             self.assertEqual(C.finish_line("/repo"), "")
 
 
+OLD = "3918ef4d1234abcd5678ef901234abcd5678ef90"
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    """RV-PR1430-1110 counterexamples: rejection never publishes; real verdict forms are read."""
+
+    def state(self, review, snapshot=None):
+        return C.decide(snapshot or snap(), review)["state"]
+
+    def test_negated_or_conditional_merge_is_never_ready(self):
+        for text in (f"Final verdict: not mergeable ({HEAD[:7]})\n",
+                     f"최종 판정: 병합 가능하지 않음 {HEAD[:7]}\n",
+                     f"Verdict: approve with changes {HEAD[:7]}\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.state(text), "fix-requested")
+
+    def test_explicit_rejection_returns_to_author(self):
+        for text in (f"최종 판정: 병합 불가 {HEAD[:7]}\n", f"Verdict: do not merge {HEAD[:7]}\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.state(text), "fix-requested")
+
+    def test_token_inside_a_word_is_not_a_verdict(self):
+        row = C.decide(snap(), f"Verdict: bypassed {HEAD[:7]}\n")
+        self.assertEqual((row["state"], row["review"]), ("awaiting-review", "none"))
+
+    def test_appended_rereview_of_current_head_wins(self):
+        text = (f"최종 판정: 병합 가능 (head {OLD[:7]})\n\n본문\n\n"
+                f"## 재검토 head {HEAD[:7]}\n\n최종 판정: 수정 후 병합\n")
+        self.assertEqual(self.state(text), "fix-requested")
+
+    def test_head_mentioned_away_from_the_verdict_is_stale(self):
+        text = (f"최종 판정: 병합 가능 head {OLD[:7]}\n\n"
+                f"author가 {HEAD[:7]}로 push, 재검토 전\n")
+        self.assertEqual(self.state(text), "review-stale")
+
+    def test_conflicting_verdicts_on_the_current_head_are_not_read(self):
+        text = (f"최종 판정: 병합 가능 {HEAD[:7]}\n\n## 이력\n\n"
+                f"최종 판정: 수정 후 병합 {HEAD[:7]}\n")
+        row = C.decide(snap(), text)
+        self.assertEqual((row["state"], row["review"]), ("awaiting-review", "none"))
+        self.assertIn("person", row["next"])
+
+    def test_unreadable_verdict_names_a_next_action_for_a_person(self):
+        row = C.decide(snap(), f"verdict: BLOCKED {HEAD[:7]}\n")
+        self.assertEqual((row["state"], row["review"], row["role"]), ("awaiting-review", "none", "reviewer"))
+        self.assertIn("BLOCKED", row["next"])
+        self.assertIn("person", row["next"])
+
+    def test_assignment_first_line_form(self):
+        self.assertEqual(self.state(f"병합 가능 {HEAD[:7]}\n\n# 검토\n"), "ready-to-publish")
+        self.assertEqual(self.state(f"병합 가능 — 검토 head {HEAD[:7]} (PR #1425)\n"), "ready-to-publish")
+        self.assertEqual(self.state(f"수정 후 병합 — 검토 head {HEAD[:7]}\n"), "fix-requested")
+
+    def test_bare_verdict_label_form(self):
+        text = f"# PR #1427 검토\n\n**판정: 수정 후 병합 — P2 1건.** exact head `{HEAD}`\n"
+        self.assertEqual(self.state(text), "fix-requested")
+        text = f"# PR #1424 검토\n\n**판정: 병합 가능. 차단 지적 없음.** exact head `{HEAD}`\n"
+        self.assertEqual(self.state(text), "ready-to-publish")
+
+    def test_title_verdict_form(self):
+        text = f"# #1421 Fleet 독립 검토 — 최종 병합 가능\n\n대상 head `{HEAD}`, CI 13/13 SUCCESS.\n"
+        self.assertEqual(self.state(text), "ready-to-publish")
+
+    def test_draft_notes_stay_unread(self):
+        for text in (f"**변경분 판정: 원 두 P2 종결. 최종 병합 가능은 CI 대기.** head `{HEAD}`\n",
+                     f"**초안: 수정 필요(P2 2건). 최종 병합 가능 판정 전이다.** 대상 `{HEAD}`\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.state(text), "awaiting-review")
+
+    def test_other_sha_sharing_a_short_prefix_is_not_the_head(self):
+        other = HEAD[:7] + "0" * 33
+        self.assertEqual(self.state(f"최종 판정: 병합 가능 exact `{other}`\n"), "review-stale")
+
+
+class FinishCapabilityTest(unittest.TestCase):
+    def test_only_source_routes_print_the_author_line(self):
+        with mock.patch.object(C, "github_remote", return_value=True), \
+             mock.patch.object(C.subprocess, "run", return_value=mock.Mock(stdout="topic\n")), \
+             mock.patch.object(C, "snapshot", return_value=snap(RUNNING)) as view:
+            self.assertTrue(C.finish_line("/repo", capability="autopilot-code").startswith("next: pr_chain="))
+            for capability in ("audit", "autopilot-research", "analyze-project"):
+                with self.subTest(capability=capability):
+                    self.assertEqual(C.finish_line("/repo", capability=capability), "")
+        view.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
