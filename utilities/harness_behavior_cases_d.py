@@ -697,7 +697,8 @@ class CompletionNoticeSameRootScenario(Scenario):
 # --------------------------------------------------------------------------
 
 def source_status() -> str | None:
-    done = subprocess.run(["git", "-C", str(_base().SOURCE), "status", "--porcelain"],
+    done = subprocess.run(["git", "--no-optional-locks", "-C", str(_base().SOURCE), "status",
+                           "--porcelain"],
                           text=True, capture_output=True, timeout=30)
     return done.stdout if done.returncode == 0 else None
 
