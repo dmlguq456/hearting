@@ -86,8 +86,10 @@ class NativeCase(unittest.TestCase):
         if continuing:
             clear._finish(self.seat.key, req["nonce"], "cleared", observed="session-B")
             self.publish(sessionId="session-B")
-            # The real start hook consumes the native seat's card.
-            self.assertIn("진행 중인 일", st.run_hook("claude", "start", "session-B", source="clear", cwd=self.cwd))
+            # The real start hook (session-card-inject.sh) records the session but renders
+            # no card; the continue's own prompt hook hands it over.
+            self.assertEqual(st.run_hook("claude", "start", "session-B", source="clear", cwd=self.cwd,
+                                         render_context=False), "")
             req = clear.read_reservation(self.seat.key)
         return req, path
 
@@ -582,15 +584,27 @@ class NativeCommandTest(NativeCase):
         self.write.assert_called_once()
 
     def test_continue_once_after_real_card_receipt(self):
+        # 2026-11-10: the start hook renders no card, so the continue goes without a
+        # start receipt and its own prompt hook carries the card.
         req, path = self.book(continuing=True); self.prepare_transport()
+        delivered = []
         def sent(fd, text):
             self.assertEqual(text, (clear.CONTINUE_TEXT + "\r").encode())
-            st.run_hook("claude", "prompt", "session-B", cwd=self.cwd)
+            delivered.append(st.run_hook("claude", "prompt", "session-B", cwd=self.cwd,
+                                         prompt_text=clear.CONTINUE_TEXT))
             return len(text)
         self.write.side_effect = sent
         self.assertEqual(self.run_command(req, path, continuing=True)["continued"], "true")
         self.assertEqual(self.run_command(req, path, continuing=True)["reason"], "superseded")
         self.write.assert_called_once()
+        self.assertIn("진행 중인 일", delivered[0])
+
+    def test_continue_is_not_typed_when_a_prompt_already_took_the_card(self):
+        req, path = self.book(continuing=True); self.prepare_transport()
+        self.assertIn("진행 중인 일", st.run_hook("claude", "prompt", "session-B", cwd=self.cwd))
+        result = self.run_command(req, path, continuing=True)
+        self.assertEqual(result["continued"], "skipped")
+        self.write.assert_not_called()
 
     def test_draft_after_continue_claim_releases_only_unsent_claim(self):
         req, path = self.book(continuing=True); self.prepare_transport()
