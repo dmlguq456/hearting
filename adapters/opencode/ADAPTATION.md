@@ -550,9 +550,12 @@ No retry — detection/closure/surfacing only.
 error (`provider.quota`, measured 0.9 s) but follows a retryable 429's back-off: with a one-hour
 `retry-after` it proposes a 900 s delay and stays silent (measured: still running at 90 s). The
 plugin's V2 `retry` session hook (https://opencode.ai/docs/build/plugins/server, Retry policy)
-vetoes a proposed retry longer than 60 s for a registered worker session (`hearting-worker-*`
-title or `hearting-*` agent), so the run prints the provider error line and exits 1 within about
-a second (standalone and shared service), and the launch watch and terminal row see it. Shorter
+vetoes a proposed retry longer than 60 s only inside a registered dispatch's own process
+(`AGENT_DISPATCH_REGISTERED_WORKER=1`, which `dispatch-headless` exports to each standalone V2
+worker), so the run prints the provider error line and exits 1 within about a second, and the
+launch watch and terminal row see it. A session title or agent name alone does not qualify: an
+ordinary `opencode run --title hearting-worker-notes` keeps OpenCode's retry (measured: still
+waiting at 20 s). Shorter
 retries keep OpenCode's own policy and its attempt ceiling (2 s back-off: 11 attempts, exit at
 82 s); interactive sessions are unchanged.
 

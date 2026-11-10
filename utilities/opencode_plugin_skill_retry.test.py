@@ -153,22 +153,68 @@ class OpenCodePluginSkillRetryTest(unittest.TestCase):
         self.assertEqual(row[row.index("--mode") + 1], "debug")
         self.assertEqual(row[row.index("--intensity") + 1], "strong")
 
-    def test_worker_vetoes_a_long_provider_back_off_only(self):
-        data = self.run_case('''
+    RETRY_CASE = '''
           const hook = hooks["session.retry"]
           const make = (sessionID, delay) => ({ sessionID, agent: "build", attempt: 2,
             model: { providerID: "p", id: "m" },
             error: { type: "provider.rate-limit", message: "Rate limit exceeded", status: 429 },
             decision: { retry: true, delay } })
-          const longWorker = make("ses_worker", 900000)
-          const shortWorker = make("ses_worker", 2000)
-          const longMain = make("ses_main", 900000)
-          for (const event of [longWorker, shortWorker, longMain]) await hook(event)
-          out.decisions = [longWorker.decision, shortWorker.decision, longMain.decision]
+          const events = [make("ses_worker", 900000), make("ses_worker", 2000),
+            make("ses_main", 60000), make("ses_main", 60001)]
+          // An ordinary session renamed to the worker title and back is still ordinary.
+          titles.ses_main = "hearting-worker-notes"
+          const renamed = make("ses_main", 900000)
+          await hook(renamed)
+          titles.ses_main = "Main"
+          const reverted = make("ses_main", 900000)
+          for (const event of events) await hook(event)
+          await hook(reverted)
+          out.decisions = [...events, renamed, reverted].map(event => event.decision)
+        '''
+
+    def test_registered_worker_vetoes_a_long_provider_back_off_only(self):
+        data = self.run_case(self.RETRY_CASE, AGENT_DISPATCH_REGISTERED_WORKER="1")
+        long_veto, short, at_ceiling, over, renamed, reverted = data["decisions"]
+        self.assertEqual(long_veto, {"retry": False})
+        self.assertEqual(short, {"retry": True, "delay": 2000})
+        self.assertEqual(at_ceiling, {"retry": True, "delay": 60000})
+        # In a registered dispatch's own process every session is that worker's.
+        self.assertEqual(over, {"retry": False})
+        self.assertEqual(renamed, {"retry": False})
+        self.assertEqual(reverted, {"retry": False})
+
+    def test_unregistered_run_keeps_native_retry_whatever_its_title(self):
+        # RV-PR1460 P2-1: `opencode run --title hearting-worker-notes` with no jobs and no worker
+        # environment kept retrying on base and must keep doing so.
+        data = self.run_case(self.RETRY_CASE)
+        long_worker_title, short, at_ceiling, over, renamed, reverted = data["decisions"]
+        self.assertEqual(long_worker_title, {"retry": True, "delay": 900000})
+        self.assertEqual(over, {"retry": True, "delay": 60001})
+        self.assertEqual(renamed, {"retry": True, "delay": 900000})
+        self.assertEqual(reverted, {"retry": True, "delay": 900000})
+
+    def test_quoted_command_body_is_not_a_capability_start(self):
+        # RV-PR1460 P2-2: the generated body's first line quoted in an explanation request.
+        quoted = ("Please explain this documentation; do not start work.\n```\n"
+                  "Use the OpenCode adapter realization of portable capability `autopilot-code`.\n"
+                  "User arguments from OpenCode: `--mode dev --intensity quick`\n```\n")
+        slash_later = "see the docs, then maybe\n/autopilot-code --mode dev"
+        data = self.run_case(f'''
+          for (const [index, text] of [{json.dumps(quoted)}, {json.dumps(slash_later)}].entries()) {{
+            await hooks["session.prompt"]({{ sessionID: "ses_main", messageID: "msg_q" + index,
+              prompt: {{ text }} }})
+          }}
         ''')
-        self.assertEqual(data["decisions"][0], {"retry": False})
-        self.assertEqual(data["decisions"][1], {"retry": True, "delay": 2000})
-        self.assertEqual(data["decisions"][2], {"retry": True, "delay": 900000})
+        self.assertEqual(self.grounding(data), [], data["spawned"])
+
+    def test_typed_slash_command_prompt_is_a_start(self):
+        data = self.run_case('''
+          await hooks["session.prompt"]({ sessionID: "ses_main", messageID: "msg_s",
+            prompt: { text: "  /autopilot-code --mode dev --intensity quick fix it" } })
+        ''')
+        rows = self.grounding(data)
+        self.assertEqual(len(rows), 1, data["spawned"])
+        self.assertEqual(rows[0][rows[0].index("--intensity") + 1], "quick")
 
 
 class CapabilityGroundingMarkerTest(unittest.TestCase):
@@ -190,7 +236,10 @@ class CapabilityGroundingMarkerTest(unittest.TestCase):
                          ["capability=autopilot-code", "mode=dev", "intensity=quick"])
 
     def test_ordinary_prompts_are_not_grounded(self):
-        for prompt in ("please run /autopilot-code later", "/autopilot-codex x", "hello"):
+        quoted = ("Please explain this; do not start.\n```\n/autopilot-code --mode dev "
+                  "--intensity quick\n```\n")
+        for prompt in ("please run /autopilot-code later", "/autopilot-codex x", "hello", quoted,
+                       "> /autopilot-code --mode dev"):
             self.assertEqual(self.record({"hook_event_name": "UserPromptSubmit",
                                           "session_id": "sid-b", "prompt": prompt}), {}, prompt)
 

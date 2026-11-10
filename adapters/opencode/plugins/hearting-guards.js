@@ -462,9 +462,11 @@ function stageDispatchReminder(skill) {
 // The entry capability a generated OpenCode command body starts
 // (adapters/opencode/commands/<name>.md, written by sync-native-commands.py).
 // A prompt that is still the typed `/autopilot-<name> args` names it directly.
+// Both are matched only at the start of the prompt: the same line quoted inside an
+// explanation or a code block is not a start.
 function commandCapabilityID(prompt) {
   const text = typeof prompt === "string" ? prompt : ""
-  const match = /^Use the OpenCode adapter realization of portable capability `(autopilot-[a-z]+)`\./m
+  const match = /^\s*Use the OpenCode adapter realization of portable capability `(autopilot-[a-z]+)`\./
     .exec(text) || /^\s*\/(autopilot-[a-z]+)(?![\w-])/.exec(text)
   return match ? match[1] : ""
 }
@@ -1383,13 +1385,15 @@ async function setupOpenCodeV2(ctx) {
   // retry (a 429 with a one-hour retry-after) is vetoed, so `opencode run` reports the provider
   // error and exits and the launch watch and terminal row see it. Short retries keep OpenCode's
   // own policy and attempt ceiling; interactive sessions are unchanged.
+  // Only the registered dispatch's own process qualifies: dispatch-headless runs each V2 worker
+  // as a standalone `opencode run` whose environment carries AGENT_DISPATCH_REGISTERED_WORKER.
+  // A session title or agent name alone (an ordinary `run --title hearting-worker-…`) does not.
   // https://opencode.ai/docs/build/plugins/server (Retry policy).
   try {
     await ctx.session.hook("retry", async (event) => {
       const decision = event?.decision
       if (!decision?.retry || !(Number(decision.delay) > workerRetryDelayCeilingMs)) return
-      await markSession(event.sessionID, event.agent)
-      if (!v2WorkerSessions.has(event.sessionID)) return
+      if (process.env.AGENT_DISPATCH_REGISTERED_WORKER !== "1") return
       event.decision = { retry: false }
       v2DiagnosticLog({ body: { service: "hearting", level: "warn",
         message: "worker-provider-retry-vetoed", extra: { sessionID: event.sessionID,
