@@ -108,6 +108,7 @@ def is_worker_session() -> bool:
         or bool(os.environ.get("AGENT_DISPATCH_DEPTH"))
         or bool(os.environ.get("OPENCODE_DISPATCH_SLUG"))
         or os.environ.get("FLEET_TITLE_REFRESH") == "1"
+        or os.environ.get("MEM_DISTILL") == "1"
     )
 
 
@@ -164,8 +165,10 @@ def main() -> int:
                         cwd=current_cwd, render_context=False, **display)
                 except Exception:
                     pass
-            # This independent, opt-in profile injection has no prompt duplicate.
-            if env_truthy("CODEX_SESSION_MEMORY_INJECT"):
+            # Use the same bounded summary as Claude/OpenCode. Only an absent
+            # flag opts into the new default; every explicit value retains its
+            # previous meaning (including empty/false disabling injection).
+            if "CODEX_SESSION_MEMORY_INJECT" not in os.environ or env_truthy("CODEX_SESSION_MEMORY_INJECT"):
                 parts.append(run_preflight("memory", current_cwd))
         emit_context("SessionStart", parts)
     finally:
