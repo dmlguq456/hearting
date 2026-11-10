@@ -21,6 +21,8 @@ vm.createContext(c);vm.runInContext(src.slice(a,b)+'this.source=source;',c);
         script = r'''const assert=require('node:assert/strict'),d=require(process.argv[1]);
 const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 7d ?'],'exact');
 assert.deepEqual(seen.owned,['context','quota']);assert.equal(seen.percent,undefined);assert.equal(seen.model,undefined);
+const numeric=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · 5h ? · 7d ?'],'exact');
+assert.equal(numeric.percent,42);assert.equal(numeric.model,undefined,'quota must not replace the observed model');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)

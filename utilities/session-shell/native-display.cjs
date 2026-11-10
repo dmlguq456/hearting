@@ -16,7 +16,7 @@ function observe(harness, lines, sid) {
       if(route||wait||context||owned.length)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
         owned,
         ...(context&&valid(+context[1])?{percent:+context[1]}:{}),
-        ...(selected&&!/…|\.\.\./.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})};
+        ...(selected&&!/…|\.\.\.|^(?:\d+[hd]|weekly)\b/i.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})};
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
