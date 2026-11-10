@@ -36,8 +36,12 @@ def _remaining(reset):
     return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
 
 
-def line_segments(values, columns, *, complete=False):
+def line_segments(values, columns, *, complete=False, reported_only=False):
     """Shorten words before losing a known count; never invent an unknown value.
+
+    ``reported_only`` leaves out the context and quota readings the native
+    callback has not reported yet (Claude sends them only after its first
+    response), as the native statusline did, instead of painting ``?``.
 
     Input is the same observed Session fields plus the shared question/route
     projection and the account's seven-day window. Exact native display telemetry
@@ -53,8 +57,6 @@ def line_segments(values, columns, *, complete=False):
     groups = []
 
     def words(name, text, key, maximum, priority, before=(), after=(), minimum=1):
-        if values.get("_panel_owned") and name in {"model", "route", "wait"}:
-            return
         text = _text(text)
         groups.append({"name": name, "text": text, "key": key, "budget": min(maximum, cell_width(text)),
                        "minimum": min(minimum, cell_width(text)), "priority": priority,
@@ -94,11 +96,13 @@ def line_segments(values, columns, *, complete=False):
     percent = values.get("ctx_pct")
     level = _level(percent)
     gauge = []
+    unreported = reported_only and _percent(percent) == "?"
     if _percent(percent) != "?":
         filled = max(0, min(10, _half_up(percent / 10)))
         gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
-    words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
-          cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
+    if not unreported:
+        words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
+              cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
     from .token_budget import compaction_imminent
     if compaction_imminent(values.get("compaction_pressure")):
         from .config import ui_text
@@ -106,7 +110,10 @@ def line_segments(values, columns, *, complete=False):
         words("compaction", warning, "lvl_r", cell_width(warning), 99,
               minimum=cell_width(warning))
     words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
-    for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
+    windows = values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]
+    if reported_only:
+        windows = [window for window in windows if _percent(window[1]) != "?"]
+    for label, used, reset in windows:
         remaining = _remaining(reset)
         words("quota", _percent(used), _level(used) if used is not None else "dim", 8, 99,
               before=[(_text(label) + " ", "dim")],
@@ -178,9 +185,9 @@ def wrap_segments(parts, columns):
 
 
 
-def status_lines(values, columns, *, wrap_long=False):
+def status_lines(values, columns, *, wrap_long=False, reported_only=False):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000, complete=True)
+    parts = line_segments(values, 10000, complete=True, reported_only=reported_only)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):
@@ -270,16 +277,66 @@ def claude_native_statusline(callback, environ):
     values.update(title=environ.get("S_SESSION_DISPLAY"), git=git, branch=branch,
                   jobs=environ.get("git_jobs"), state=state, tag=assigned_tag("claude", sid),
                   route_label=route, answer_wait=waiting)
-    # In a wrapped session these fields have one stable home in the work panel.
-    # Claude still owns its reserved context/quota/Git rows and exact callback.
-    values["_panel_owned"] = bool(environ.get("HEARTING_SHELL_SOCKET"))
     try:
         columns = max(20, min(10000, int(environ.get("COLUMNS", "100"))))
     except ValueError:
         columns = 100
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
-    return "\n".join(ansi_segments(clip_segments(line, columns), colors=colors, no_color="NO_COLOR" in environ)
-                     for line in status_lines(values, columns))
+    # Every field stays in this row on every callback. While the visible panel
+    # paints these values, the shell blanks exactly this recorded output; if the
+    # panel goes away, the native row is already complete.
+    rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
+    _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
+    return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
+
+
+def _shell_directory(environ):
+    """The wrapper's private directory; any doubt means no shell display state."""
+    import os, stat
+    from pathlib import Path
+    endpoint = environ.get("HEARTING_SHELL_SOCKET")
+    if not endpoint:
+        return None
+    directory = Path(environ.get("HEARTING_SHELL_DIRECTORY") or Path(endpoint).parent)
+    try:
+        info = directory.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        return None
+    return directory
+
+
+def _record_claude_rows(environ, sid, rows):
+    """Record the plain text Claude is about to paint, for exact-match blanking."""
+    import json, os
+    if environ.get("HEARTING_SHELL_INITIAL_REFRESH") or not sid:
+        return  # That refresh's output is discarded and never painted.
+    directory = _shell_directory(environ)
+    if not directory:
+        return
+    path = directory / "claude-status.json"
+    previous = []
+    try:
+        if path.lstat().st_size <= 65536:
+            old = json.loads(path.read_text())
+            if isinstance(old, dict) and old.get("session_id") == sid and isinstance(old.get("lines"), list):
+                previous = old["lines"]
+    except (OSError, ValueError):
+        pass
+    if previous == rows:
+        return
+    temp = directory / (".claude-status." + str(os.getpid()))
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"session_id": sid, "lines": rows, "previous": previous}, stream, ensure_ascii=False)
+        os.replace(temp, path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
 
 
 _CLAUDE_DISPLAY_FIELDS=('S_SESSION_DISPLAY','git_repo','git_branch','git_operation','git_merged',
@@ -363,6 +420,22 @@ def claude_first_statusline(callback, environ, script):
                     for key,value in (old.get('hearting_display') or {}).items():
                         if isinstance(value,str) and key in _CLAUDE_DISPLAY_FIELDS:env[key]=value
         except (OSError,ValueError,TypeError):pass
+    # The same shared Git observation the full callback reads: a file read, no
+    # Git command. A new session has no retained display yet, and Claude only
+    # calls again on its first response or refreshInterval.
+    try:
+        from . import gitinfo
+        workspace=callback.get('workspace') if isinstance(callback.get('workspace'),dict) else {}
+        cwd=callback.get('cwd') or workspace.get('current_dir')
+        if isinstance(cwd,str) and cwd:
+            project=workspace.get('project_dir') if isinstance(workspace.get('project_dir'),str) else None
+            observed=gitinfo.cached_display(cwd,request=False,project_dir=project or cwd)
+            if observed is not None:
+                for key,item in gitinfo.display_fields(observed).items():
+                    if 'git_'+key in _CLAUDE_DISPLAY_FIELDS:
+                        text='unknown' if item is None else str(item)
+                        env['git_'+key]=''.join(c for c in text if c>=' ' and c!='\x7f')
+    except (OSError,ValueError,TypeError,ImportError):pass
     # Preserve the same native PID/SID and birth check when the finite refresh
     # outlives this short native callback shell.
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'utilities'))

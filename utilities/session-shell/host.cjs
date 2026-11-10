@@ -259,6 +259,12 @@ function render() {
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    let notice=-1;
+    if(harness==='claude'){
+      // The first concealed row (the top of the status area) carries the notice;
+      // any further concealed row stays blank.
+      if(claudePanelPainted())for(const y of nativeDisplay.claudeStatusRows(nativeLines,sid,claudeStatusRecord())){concealed.add(y);if(notice<0||y<notice)notice=y;}
+    }
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;
       if(observed?.model){bootstrapModel=false;nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
@@ -270,7 +276,7 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
@@ -438,6 +444,37 @@ async function projection() {
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
+}
+// Claude's statusline row may be blanked only while this visible panel paints
+// the same session's model and compact status. Any other state shows it.
+function claudePanelPainted(){
+  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
+  const rows=(panelModel.summary||[]).map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
+  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
+}
+// The blanked Claude row carries the panel's one-line notice (empty by default),
+// at the native statusline's own two-cell indent.
+function noticeRow(width){
+  let used=2,text='\x1b[0m  ';
+  for(const part of panelModel.notice||[]){
+    const attrs=[0];
+    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
+    let chunk='';
+    for(const c of String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')){const w=cellWidth(c);if(used+w>width-1)break;chunk+=c;used+=w;}
+    text+=`\x1b[${attrs.join(';')}m${chunk}`;if(used>=width-1)break;
+  }
+  return text+'\x1b[0m'+' '.repeat(Math.max(0,width-used));
+}
+let claudeStatus={key:'',value:null};
+function claudeStatusRecord(){
+  try{
+    const s=fs.lstatSync(path.join(dir,'claude-status.json'));
+    if(!s.isFile()||s.uid!==process.getuid()||s.size>65536)return null;
+    const key=[s.ino,s.size,s.mtimeMs].join(':');
+    if(key!==claudeStatus.key)claudeStatus={key,value:JSON.parse(fs.readFileSync(path.join(dir,'claude-status.json'),'utf8'))};
+    return claudeStatus.value;
+  }catch{return null;}
 }
 function rawRelay() {
   if(relay||ended)return;

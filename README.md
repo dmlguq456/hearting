@@ -160,8 +160,10 @@ for new Claude, Codex and OpenCode terminals. It is off by default;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-Claude draws the shared status fields in its own native statusline rows; its
-panel keeps that native area and shows the selected model beside its header.
+Claude shows the same status area inside the panel as Codex and OpenCode; while
+the panel shows it, Claude's own statusline row below becomes a notice row that
+stays empty unless you owe an answer, a warning applies or news just arrived.
+The full statusline returns whenever the panel is hidden.
 The panel's four colored edges separate Hearting's current work, actual route
 flow and questions from the native conversation. Its background stays neutral.
 Click a route for its stages and result; the bottom edge opens session details,
