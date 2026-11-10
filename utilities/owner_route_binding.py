@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import time
@@ -102,6 +103,49 @@ class OwnerRouteAdvance:
     route_family_key: str
     record_id: str
     path: str
+
+
+# The statuses under which resolve_owner_route_lifecycle names a clean current route.
+# Every other status (known today or added later) is not a confirmed current route.
+CURRENT_ROUTE_STATUSES = frozenset({
+    "owner-route-launch-binding", "owner-route-post-launch-attachment",
+    "owner-route-advance-current",
+})
+
+
+def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
+    """The one absence rule for a binding record beside the jobs registry.
+
+    Walk the record path from the filesystem root down to its leaf (the jobs
+    directory followed by ``parts``).  The record is absent only when the first
+    component that ``lstat`` cannot find is reached; nothing below it can exist.
+    A component that is there but cannot be passed (a link whose target is
+    missing, a non-directory where a directory belongs, a permission or other
+    lookup error) is a read error, never absence.  A link whose target exists
+    is followed as normal.
+    """
+    jobs_path = Path(jobs).expanduser()
+    if not jobs_path.is_absolute():
+        raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
+    target = jobs_path.parent.joinpath(*parts)
+    walked = Path(target.anchor)
+    names = target.parts[1:]
+    for index, name in enumerate(names):
+        walked = walked / name
+        try:
+            entry = os.lstat(walked)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise OwnerRouteBindingError(reason) from exc
+        if stat.S_ISLNK(entry.st_mode):
+            try:  # the link is there, so a missing target is a read error
+                entry = os.stat(walked)
+            except OSError as exc:
+                raise OwnerRouteBindingError(reason) from exc
+        if index < len(names) - 1 and not stat.S_ISDIR(entry.st_mode):
+            raise OwnerRouteBindingError(reason)
+    return True
 
 
 def _attachment_root(jobs: str | Path) -> Path:
@@ -561,7 +605,8 @@ def _resolve_attachment_locked(jobs: Path, owner_attempt_id: str,
     path = _attachment_root(jobs) / _attachment_key(owner_attempt_id)
     if observer is not None:
         observer("file", path)
-    if not path.exists():
+    if not _record_present(jobs, OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key(owner_attempt_id),
+                           reason="owner-route-attachment-record-invalid"):
         return None
     try:
         attachment = _attachment_from_payload(
@@ -650,7 +695,9 @@ def resolve_owner_route_lifecycle(jobs: str | Path, *, owner_attempt_id: str,
     if observer is not None:
         observer("file", attachment_path)
     if row_binding is not None:
-        if attachment_path.exists():
+        if _record_present(canonical_jobs, OWNER_ROUTE_ATTACHMENT_DIR,
+                           _attachment_key(owner_attempt_id),
+                           reason="owner-route-attachment-record-invalid"):
             raise OwnerRouteBindingError("owner-route-attachment-conflicts-sealed-binding")
         anchor = row_binding
         anchor_status = "owner-route-launch-binding"
@@ -686,8 +733,7 @@ def default_owner_route_file(jobs: str | Path | None = None, environ=None) -> st
     if not owner_attempt_id or not registry:
         raise OwnerRouteBindingError("owner-route-default-outside-owner")
     current, status = resolve_owner_route_lifecycle(registry, owner_attempt_id=owner_attempt_id)
-    if current is None or status not in {"owner-route-launch-binding", "owner-route-post-launch-attachment",
-                                         "owner-route-advance-current"}:
+    if current is None or status not in CURRENT_ROUTE_STATUSES:
         raise OwnerRouteBindingError(f"owner-route-default-unresolved:{status}")
     return current.route_file
 
@@ -752,6 +798,18 @@ def _candidate_started_by_owner(
     return any(continuation_attempt_state(meta) == "started" for _fields, meta in relevant)
 
 
+def _advance_candidates(jobs: str | Path, predecessor: Path) -> list[Path]:
+    """Candidate records under one predecessor; an entry that is there but unreadable is an error."""
+    if not _record_present(jobs, OWNER_ROUTE_ADVANCE_DIR, predecessor.name,
+                           reason="owner-route-advance-record-invalid"):
+        return []
+    try:
+        names = os.listdir(predecessor)
+    except OSError as exc:
+        raise OwnerRouteBindingError("owner-route-advance-record-invalid") from exc
+    return [predecessor / name for name in names if name.endswith(".json") and not name.startswith(".")]
+
+
 def resolve_owner_route_advance(
     jobs: str | Path, *, owner_attempt_id: str, anchor: OwnerRouteBinding,
     anchor_generation: int | None = None,
@@ -774,10 +832,11 @@ def resolve_owner_route_advance(
         jobs_path = Path(jobs).expanduser()
         if observer is not None:
             observer("file", jobs_path)
-        registry_rows = registry_view(jobs_path) if jobs_path.is_file() else []
+        registry_rows = registry_view(jobs_path) if _record_present(
+            jobs_path, jobs_path.name, reason="owner-route-jobs-unreadable") else []
     if observer is not None:
         observer("members", first_path)
-    first_candidates = list(first_path.glob("*.json")) if first_path.is_dir() else []
+    first_candidates = _advance_candidates(jobs, first_path)
     try:
         _current_raw, current_route = _verified_binding(anchor, observer=observer)
         route_generation = int(current_route.get("advance_generation") or 0)
@@ -800,7 +859,7 @@ def resolve_owner_route_advance(
         )
         if observer is not None:
             observer("members", predecessor)
-        paths = sorted(predecessor.glob("*.json")) if predecessor.is_dir() else []
+        paths = sorted(_advance_candidates(jobs, predecessor))
         if not paths:
             return current, (
                 "owner-route-advance-absent"
