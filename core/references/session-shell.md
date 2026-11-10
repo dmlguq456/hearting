@@ -180,12 +180,19 @@ compact status for the callback's exact session does the shell blank Claude's
 statusline area, the rows directly under the input box, when their text equals
 the callback's latest recorded output. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude has no supported way to
-remove those rows, so as many blank rows remain as the complete status takes
+remove those rows, so as many rows remain as the complete status takes
 (measured: two at 133 and 80 columns, three with a running job); keeping every
-value visible comes first. A
-hidden, collapsed, focused or not-yet-bound panel, a lost display host and
-unwrapped sessions show the complete native rows unchanged. Unwrapped
-displays remain intact.
+value visible comes first. The first of
+them is a notice row, empty unless the person must know something now, and any
+other stays blank. One function picks a single item by priority from existing
+values: an answer this session owes, then an already computed warning
+(compaction imminent, a context or usage reading at Fleet's red level, a
+failed, blocked or attention-needing route), then news that arrived since the
+last human input within ten minutes (a received peer report or a completed
+route result). It reuses Fleet's glyphs and colors and adds no collection,
+setting or judgment. A hidden, collapsed, focused or not-yet-bound panel, a
+lost display host and unwrapped sessions show the complete native rows
+unchanged. Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.
