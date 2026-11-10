@@ -11,7 +11,13 @@ class FocusFrontierTest(unittest.TestCase):
         script = r"""
 const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict');
 const text=fs.readFileSync(process.argv[1],'utf8');
-const observation=text.slice(text.indexOf('async function refreshReadiness()'),text.indexOf('function userInput(data)'));
+function declaration(name){
+  const begin=text.search(new RegExp('^(?:async )?function '+name+'\\(','m'));
+  const end=text.indexOf('\n}',begin);
+  a.ok(begin>=0&&end>begin,'standalone function '+name+' is present');
+  return text.slice(begin,end+2);
+}
+const observation=declaration('refreshReadiness')+'\n'+declaration('observeInput');
 function make(){
   const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
     relay:false,currentDelivery:null,sid:'owned-sid',selection:0,screenRevision:0,state:'idle',
