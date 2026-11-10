@@ -47,6 +47,30 @@ def wrapped_command(harness, command):
     return list(command)
 
 
+def native_environment(harness, environment):
+    """OpenCode's official CLI-config merge hides its own sidebar in this window.
+
+    The HEARTING panel takes that right side, as it does for Claude and Codex;
+    OpenCode then shows Context in its footer. An explicit choice wins.
+    """
+    if harness != "opencode":
+        return environment
+    raw = environment.get("OPENCODE_CLI_CONFIG_CONTENT")
+    try:
+        content = json.loads(raw) if raw else {}
+    except ValueError:
+        return environment
+    if not isinstance(content, dict):
+        return environment
+    session = content.get("session")
+    if session is None:
+        session = {}
+    if not isinstance(session, dict) or "sidebar" in session:
+        return environment
+    content = dict(content, session=dict(session, sidebar="hide"))
+    return dict(environment, OPENCODE_CLI_CONFIG_CONTENT=json.dumps(content, separators=(",", ":")))
+
+
 def herdr_environment(harness, environment):
     """Herdr's official foreground-wrapper hint, scoped to this eligible exec."""
     if (environment.get("HERDR_ENV") != "1" or environment.get("HERDR_AGENT")
@@ -82,7 +106,7 @@ def main(argv=None):
         # PID before starting any native child; the explicit hint prevents a loop.
         os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve()), *args], hinted)
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
-        env = dict(os.environ, HEARTING_SHELL_DIRECTORY=directory,
+        env = dict(native_environment(harness, os.environ), HEARTING_SHELL_DIRECTORY=directory,
                    HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
                    HEARTING_SHELL_TOKEN=os.urandom(32).hex(),
                    HEARTING_SHELL_PYTHON=sys.executable,

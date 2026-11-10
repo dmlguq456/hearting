@@ -15,7 +15,6 @@ assert.equal(g.side,true);assert.equal(g.nativeCols,138);assert.equal(g.panelCol
 assert.equal(d.layout({cols:131,rows:40,configuration}).side,false);
 assert.equal(d.layout({cols:132,rows:40,configuration}).side,true);
 assert.equal(d.layout({cols:180,rows:40,configuration,expanded:false}).side,false);
-assert.equal(d.layout({cols:180,rows:40,configuration,nativeSidebar:true}).side,false);
 for(const configuration of [null,{}, {layout:'side',side_width:-1,side_min_columns:132}, {layout:'side',side_width:80,side_min_columns:80}])
  assert.equal(d.layout({cols:100,rows:24,configuration}).side,false);
 assert.equal(d.layout({cols:180,rows:40,configuration:{...configuration,layout:'bottom'}}).side,false);
