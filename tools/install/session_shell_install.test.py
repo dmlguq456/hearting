@@ -87,6 +87,7 @@ class SessionShellInstallTest(unittest.TestCase):
                 record.parent.mkdir(parents=True, exist_ok=True)
                 record.write_text("{}")
                 self.assertFalse(installer._new_global_install("global"))
+                # destructive-ok: reason=remove this test's own fixture record before the next one; boundary=one record file under this test's temporary HOME
                 record.unlink()
         state = installer.distribution.state_path()
         state.parent.mkdir(parents=True, exist_ok=True)
