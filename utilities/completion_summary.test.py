@@ -128,6 +128,8 @@ class CompletionMeaningTest(unittest.TestCase):
             'negation-en': 'Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch has not been reviewed.\n',
             'contraction-en': "Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch wasn't reviewed.\n",
             'negation-ko': '최종 판정: 수정 후 병합\nP1 — 대상 파일에 접근할 수 없음.\n검토를 할 수 없었습니다.\n검증: PASS 없음.\n',
+            'indented': '    ' + closed,
+            'tab-indented': '\t' + closed,
             'fenced': '```text\n' + closed + '\n```\n',
             'quoted': '> ' + closed,
             'condition': closed + ' (검토할 수 있을 때)',
@@ -155,6 +157,30 @@ class CompletionMeaningTest(unittest.TestCase):
                         supervisor.classify_supervisor_log(self.log, harness), None,
                         jobs=self.jobs, attempt_id=self.aid)
                     self.assertEqual(recovered.failure_class, 'fail')
+
+    def test_fence_character_length_and_closing_boundary_keep_examples_non_authoritative(self):
+        closed = 'Final verdict: changes requested — head abcdef0'
+        examples = (
+            '````markdown\n```\n' + closed + '\n```\n````\n',
+            '~~~markdown\n```\n' + closed + '\n```\n~~~\n',
+            '```markdown\n~~~\n' + closed + '\n~~~\n```\n',
+            '````markdown\n```\n' + closed + '\n',
+            '```markdown\n``` not a closing fence\n' + closed + '\n```\n',
+        )
+        for harness in ('claude', 'codex', 'opencode'):
+            for example in examples:
+                with self.subTest(harness=harness, example=example):
+                    self.report.write_text(example); self.seed(harness)
+                    self.assertEqual(self.live(harness).failure_class, 'fail')
+                    view = terminal_reader.inspect_terminal_attempt(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(view['verdict'], 'FAIL')
+                    carrier, _ = terminal_reader.carrier_terminal_note(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(carrier['verdict'], 'FAIL')
+        for opening, closing in (('```text', '```'), ('~~~~text', '~~~~~  '), ('   ````', '  ````')):
+            self.report.write_text(opening + '\nexample\n' + closing + '\n' + closed)
+            self.seed(); self.assertEqual(self.live().failure_class, 'pass')
 
     def test_closed_verdict_normalization_and_prose_is_not_an_authority_source(self):
         for report in (

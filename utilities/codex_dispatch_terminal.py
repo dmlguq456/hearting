@@ -1121,13 +1121,21 @@ def _completed_negative_audit_report(path):
         text = raw.decode("utf-8")
     except (OSError, UnicodeError):
         return False
-    declarations, fenced = set(), False
+    declarations, fence = set(), None
     for line in text.splitlines():
-        if re.match(r"^\s*(?:```|~~~)", line):
-            fenced = not fenced
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is not None:
+            # CommonMark 4.5: the same character, at least the opening length,
+            # and only whitespace after it can close this example block.
+            if (marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence)
+                    and not marker[2].strip()):
+                fence = None
             continue
-        if fenced:
+        if marker and (marker[1][0] == "~" or "`" not in marker[2]):
+            fence = marker[1]
             continue
+        if line.startswith(("    ", "\t")):
+            continue  # indented code is not a verdict declaration either
         line = line.replace("**", "").replace("__", "").strip()
         line = line[:-1].rstrip() if line.endswith(".") else line
         match = _AUDIT_CLOSED.fullmatch(line)
