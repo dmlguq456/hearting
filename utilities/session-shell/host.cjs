@@ -90,7 +90,9 @@ let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
 let displaySequence=0,nativeMcp;
 function binding() {
-  return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
+  // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
+  // session lookup can match it, so nothing is ever delivered to an old session.
+  return {schema:'hearting-session-shell-v1',harness,sid:sid||'-',incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
     broker_pid:Number(process.env.HEARTING_SHELL_BROKER_PID),broker_start:process.env.HEARTING_SHELL_BROKER_START};
 }
@@ -106,7 +108,7 @@ function live() { const row = native && processRow(native.pid); return !!row && 
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
-  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
+  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
     // Startup display replies are finite, asynchronous reads. A busy backend
@@ -727,9 +729,9 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
-    backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
+    source('register');rebuildDisplay();return {ok:true};
   }
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
@@ -758,6 +760,8 @@ async function request(req) {
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
+  // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
+  if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
@@ -816,6 +820,8 @@ server.listen(socketPath,()=>{
   startupResult('STARTED');activated=true;process.stdin.resume();
   backend=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
   backend.on('error',rawRelay);backend.on('exit',rawRelay);backend.stdin.on('error',()=>{});
+  // OpenCode starts on its home route with no session: publish the seat now.
+  if(harness==='opencode'&&!sid){state='idle';source('register');}
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
