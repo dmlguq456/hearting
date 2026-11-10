@@ -96,6 +96,23 @@ class ResumedSelectionTests(unittest.TestCase):
         second = dict(ok=True, native_frame={**first['native_frame'], 'epoch': 13})
         with mock.patch.object(shell, 'control', side_effect=[first, second]):
             self.assertFalse(shell.answer_attachment_current(self.fx.binding))
+        moved = dict(ok=True, native_frame={**first['native_frame'], 'revision': 10,
+                                            'lines': ['›', self.old + ' · Context 10% used']})
+        with mock.patch.object(shell, 'control', side_effect=[first, moved]):
+            self.assertFalse(shell.answer_attachment_current(self.fx.binding))
+
+    def test_a_repaint_between_the_reads_leaves_the_decision_to_native_proof(self):
+        # A working turn repaints the screen between the two reads. The frame is
+        # then no observation: only an independent native proof of this same root
+        # can pass, exactly as when no frame is available at all.
+        self.select_resumed()
+        first = self.observe(self.fx.binding, 'native-selection')
+        repaint = dict(ok=True, native_frame={**first['native_frame'], 'revision': 10})
+        for native, expected in ((None, False), (self.old, False), (self.resumed, True)):
+            self.fx.selected = native
+            with self.subTest(native=native), \
+                    mock.patch.object(shell, 'control', side_effect=[first, repaint]):
+                self.assertEqual(shell.answer_attachment_current(self.fx.binding), expected)
         with mock.patch.object(pane_ownership, '_runtime', side_effect=[('codex', False), ('codex', True)]):
             self.assertFalse(shell.answer_attachment_current(self.fx.binding))
         with mock.patch.object(codex, 'session_id_of_process', side_effect=[None, None, self.old]):

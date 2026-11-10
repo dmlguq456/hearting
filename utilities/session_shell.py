@@ -428,9 +428,16 @@ def _codex_selected_root(binding):
     if latest_native and latest_native != selected:
         return {"selected_sid": None}
     second = control(binding, "native-selection")
-    if (not second.get("ok") or second.get("native_frame") != frame
-            or _process(pid) != record or not same_owner()):
+    later = second.get("native_frame") if second.get("ok") else None
+    if not isinstance(later, dict) or _process(pid) != record or not same_owner():
         return {"selected_sid": None}
+    if later != frame:
+        # Only a repaint (a working turn's spinner) between the reads: the same
+        # selection and no input. That is no stable observation, so the
+        # independent native proof decides, as when no frame is available.
+        repaint = (type(later.get("revision")) is int and later["revision"] > frame["revision"]
+                   and {**later, "revision": frame["revision"]} == frame)
+        return None if repaint else {"selected_sid": None}
     return {"selected_sid": selected, "native_revision": frame["revision"], "native_epoch": frame["epoch"]}
 
 
