@@ -10,11 +10,15 @@ import sys
 import unittest
 from pathlib import Path
 
-_FIXTURE_SPEC = importlib.util.spec_from_file_location(
-    "peer_steward_test_fixture", Path(__file__).resolve().with_name("peer_steward.test.py"))
-FIXTURE = importlib.util.module_from_spec(_FIXTURE_SPEC)
-sys.modules[_FIXTURE_SPEC.name] = FIXTURE
-_FIXTURE_SPEC.loader.exec_module(FIXTURE)
+# A suite that borrows classes from both parts gets one fixture instance, so
+# both see the same loaded peer-steward module.
+FIXTURE = sys.modules.get("peer_steward_test_fixture")
+if FIXTURE is None:
+    _FIXTURE_SPEC = importlib.util.spec_from_file_location(
+        "peer_steward_test_fixture", Path(__file__).resolve().with_name("peer_steward.test.py"))
+    FIXTURE = importlib.util.module_from_spec(_FIXTURE_SPEC)
+    sys.modules[_FIXTURE_SPEC.name] = FIXTURE
+    _FIXTURE_SPEC.loader.exec_module(FIXTURE)
 # The classes below use the fixture module's imports, helpers and constants by
 # their bare names, as they did before the split. Its own test classes are not
 # imported, so they run only in peer_steward.test.py.
