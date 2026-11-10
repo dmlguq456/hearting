@@ -911,16 +911,19 @@ def _read_jsonl(harness: str, path: Path, cursor: int, limit: int) -> Chunk:
     return chunk
 
 
-def _opencode_session(db_path: Path, session_id: str, after: int = 0):
+def _opencode_session(db_path: Path, session_id: str, after: int = 0, limit: Optional[int] = None,
+                      sized: bool = True):
     """``(unit, rows, error)`` of one exact OpenCode session after ``after``.
 
     The shared generation-aware reader (``opencode_runtime.read_session_parts``)
     picks the V1 ``part`` rows or the OpenCode 2 ``session_message`` rows from
     one read-only snapshot; a session found in both is refused there. Each row
-    becomes ``(cursor, updated_ms, size, role, parts)`` with V1-shaped parts.
+    becomes ``(cursor, updated_ms, size, role, parts, source)`` with V1-shaped parts.
+    ``limit`` uses that reader's existing row budget (the oldest ``limit`` rows).
+    With ``sized=False`` the size is left ``None`` for ``_row_size`` to fill on demand.
     """
     import opencode_runtime
-    snapshot = opencode_runtime.read_session_parts(session_id, db_path=db_path, after_cursor=after)
+    snapshot = opencode_runtime.read_session_parts(session_id, db_path=db_path, after_cursor=after, limit=limit)
     if snapshot.get("state") != "observed":
         reason = str(snapshot.get("reason") or "unknown")
         if reason == "exact-session-not-found":
@@ -931,14 +934,27 @@ def _opencode_session(db_path: Path, session_id: str, after: int = 0):
     rows = []
     for row in snapshot["parts"]:
         data, raw = row.get("data"), row.get("raw")
-        size = len(raw) if isinstance(raw, (str, bytes)) else len(json.dumps(data, ensure_ascii=False))
+        source = raw if isinstance(raw, (str, bytes)) else data
+        size = _row_size((None, None, None, None, None, source)) if sized else None
         role = str(row.get("role") or "")
         if generation == "v2":
             parts = _opencode_v2_parts(role, data)
         else:
             parts = [data] if isinstance(data, dict) else []
-        rows.append((int(row["cursor"]), int(row.get("updated") or 0), size, role, parts))
+        rows.append((int(row["cursor"]), int(row.get("updated") or 0), size, role, parts, source))
     return ("seq" if generation == "v2" else "rowid"), rows, ""
+
+
+def _row_size(row) -> int:
+    """The budget size of one ``_opencode_session`` row: its native JSON length."""
+    if row[2] is not None:
+        return row[2]
+    source = row[5]
+    return len(source) if isinstance(source, (str, bytes)) else len(json.dumps(source, ensure_ascii=False))
+
+
+OPENCODE_CHUNK_PAGE = 16          # first page of rows a bounded chunk asks the shared reader for
+OPENCODE_CHUNK_PAGE_MAX = 512
 
 
 def _opencode_v2_parts(role: str, data) -> list:
@@ -973,7 +989,8 @@ def _open_question(part, updated_ms) -> bool:
 def _digest_opencode(rows, chunk: Chunk) -> None:
     """Fill ``chunk`` (rows, text, choices) from ``_opencode_session`` rows, oldest first."""
     texts = []
-    for _cursor, _updated, _size, role, parts in rows:
+    for row in rows:
+        role, parts = row[3], row[4]
         chunk.rows += 1
         for part in parts:
             chunk.choices.extend(_opencode_choices(part))
@@ -990,21 +1007,35 @@ def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> C
     if not session_id:
         chunk.error = "no session id"
         return chunk
-    unit, rows, error = _opencode_session(db_path, session_id, cursor)
-    if error:
-        chunk.error = error
-        return chunk
-    used, last, taken, exhausted = 0, int(cursor), [], True
-    for row in rows:
-        if used and used + row[2] > limit:
+    # Read only the rows this budget can take: small pages through the shared reader's row
+    # limit, doubling while the budget lasts, so a long session is not decoded per chunk.
+    used, last, taken, exhausted, unit, page = 0, int(cursor), [], True, None, OPENCODE_CHUNK_PAGE
+    while True:
+        page_unit, rows, error = _opencode_session(db_path, session_id, last, page)
+        if error:
+            chunk.error = error
+            return chunk
+        if unit is not None and rows and page_unit != unit:
+            exhausted = False                   # the generation changed between pages: stop here
+            break
+        unit = unit or page_unit
+        stopped = False
+        for row in rows:
+            if used and used + row[2] > limit:
+                stopped = True
+                break
+            if any(_open_question(part, row[1]) for part in row[4]):
+                chunk.blocked, stopped = "open-question", True
+                break
+            used += row[2]
+            last = row[0]
+            taken.append(row)
+        if stopped:
             exhausted = False
             break
-        if any(_open_question(part, row[1]) for part in row[4]):
-            chunk.blocked, exhausted = "open-question", False
+        if len(rows) < page:
             break
-        used += row[2]
-        last = row[0]
-        taken.append(row)
+        page = min(page * 2, OPENCODE_CHUNK_PAGE_MAX)
     _digest_opencode(taken, chunk)
     chunk.cursor_to, chunk.eof, chunk.unit = last, exhausted, unit
     return chunk
@@ -1422,7 +1453,9 @@ def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chun
     if not sid:
         chunk.error = "no session id"
         return chunk
-    unit, rows, error = _opencode_session(db_path, sid)
+    # The plan needs every row's cursor and update time (``_plan_opencode``), so this read
+    # stays whole; only the rows the budget takes are sized.
+    unit, rows, error = _opencode_session(db_path, sid, sized=False)
     if error:
         chunk.error = error
         return chunk
@@ -1441,10 +1474,11 @@ def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chun
     if hi > lo:
         low = lo
         for row in reversed([row for row in inside if row[0] < hi]):
-            if used and used + row[2] > limit:
+            size = _row_size(row)
+            if used and used + size > limit:
                 low = row[0] + 1
                 break
-            used += row[2]
+            used += size
             taken.append(row)
     _digest_opencode(list(reversed(taken)), chunk)
     chunk.cursor_from, chunk.cursor_to = low, hi

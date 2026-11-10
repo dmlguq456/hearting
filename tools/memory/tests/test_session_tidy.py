@@ -4223,6 +4223,50 @@ class OpenCodeV2ReadTest(TidyCase):
             self.assertEqual(chunk.error, "unreadable: session-generation-ambiguous")
             self.assertEqual(tt.read_watermark("opencode", self.SID), before)
 
+    def test_a_bounded_chunk_decodes_only_near_its_budget_and_chained_chunks_cover_the_session(self):
+        # Review [e7] P2: a chunk used to decode the whole remaining session before its budget.
+        import opencode_runtime
+        self.load(upgraded=True)
+        con = sqlite3.connect(self.iso.opencode_db)
+        for i in range(400):
+            text = json.dumps({"type": "text", "text": "ROW-%04d " % i + "가" * 2000}, ensure_ascii=False)
+            con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                        ("msg_long%04d" % i, self.V1_SID, json.dumps({"role": "user" if i % 2 else "assistant"})))
+            con.execute("INSERT INTO part VALUES (?, ?, ?, 1, 1, ?)",
+                        ("prt_long%04d" % i, "msg_long%04d" % i, self.V1_SID, text))
+            con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                        ("msg_v2long%04d" % i, self.SID, 100 + i,
+                         json.dumps({"text": "ROW-%04d " % i + "가" * 2000}, ensure_ascii=False)))
+        con.commit()
+        con.close()
+        decode, decoded = opencode_runtime._decode_json, []
+        limit = 16 * 1024
+        with self.library(), mock.patch.object(tt, "now_epoch",
+                                               return_value=FIXTURE_NOW + 2 * tt.OPEN_QUESTION_STALE_SEC), \
+                mock.patch.object(opencode_runtime, "_decode_json",
+                                  side_effect=lambda raw: decoded.append(len(raw or "")) or decode(raw)):
+            for sid in (self.V1_SID, self.SID):
+                decoded.clear()
+                first = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, limit)
+                self.assertEqual(first.error, "")
+                self.assertGreater(first.rows, 1)
+                # The session holds about 2.4 MB after the cursor; this chunk decodes a few pages.
+                self.assertLess(sum(decoded), 8 * limit, sid)
+                whole = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, 1 << 30)
+                cursor, texts, choices, rows = 0, [], [], 0
+                while True:
+                    chunk = tt.read_chunk("opencode", self.iso.opencode_db, cursor, sid, limit)
+                    self.assertEqual((chunk.error, chunk.cursor_from), ("", cursor))
+                    self.assertGreater(chunk.cursor_to, cursor)
+                    texts.append(chunk.text)
+                    choices += chunk.choices
+                    rows += chunk.rows
+                    cursor = chunk.cursor_to
+                    if chunk.eof:
+                        break
+                self.assertEqual((rows, cursor, choices), (whole.rows, whole.cursor_to, whole.choices))
+                self.assertEqual("\n".join(t for t in texts if t), whole.text)
+
 
 class OpenCodeReadRetryTest(unittest.TestCase):
     """A snapshot of the shared OpenCode database is refused now and then; the read is tried again."""
