@@ -94,7 +94,7 @@ from dispatch_contract_base import (  # noqa: F401
     _REGISTRY_METADATA_SHARED_MAX, _REGISTRY_METADATA_SHARED_VALUE_CHARS, _RegistryCacheInfo,
     _RegistryMetadataCache, _ROUTE_MODULE, _route_module, _SD105_CANCELLED_NOTE,
     _terminal_delivery_receipt, _updated_attempt_metadata, agent_home_equivalent,
-    ARTIFACT_PROOF_RECEIPT, ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT, ATTEMPT_DESCENDANT_ENV,
+    ARTIFACT_PROOF_RECEIPT, ATTEMPT_CANCELLATION_QUIESCENCE_RECEIPT, ATTEMPT_DESCENDANT_ENV, CLEANUP_OWNER_ENV,
     ATTEMPT_DESCENDANT_PROOF, ATTEMPT_DESCENDANT_RESIDUE_PROOF, ATTEMPT_MUTABLE_METADATA,
     attempt_row_never_started, ATTEMPT_SCHEMA_VERSION, ATTEMPT_TERMINAL_EVIDENCE_KEYS,
     AttemptExecutionObservation, AttemptReadiness, AuthoritativeProcessIdentity,

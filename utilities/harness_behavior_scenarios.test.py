@@ -111,5 +111,27 @@ class EnvironmentTest(unittest.TestCase):
             self.assertIsNone(hb.declared_carrier("claude", receipt))
 
 
+class TidyContinueCaseTest(unittest.TestCase):
+    """The session-tidy continue scenarios register and patch the shared child helper."""
+
+    def test_registered_and_routed_helper_patch_applies(self):
+        import harness_behavior_cases_a as ca
+        import harness_behavior_cases_tidy as tidy
+        hb._load_extra()
+        names = [cls.name for cls in tidy.SCENARIOS]
+        self.assertEqual(len(names), len(set(names)))
+        for name in names:
+            self.assertIn(name, hb.SCENARIOS)
+            # The fixture root name carries the scenario; a Herdr client socket under it
+            # must stay within the UNIX socket path limit.
+            sock = f"/tmp/hb-opencode-{name}-xxxxxxxx/home/.config/herdr/herdr-client.sock"
+            self.assertLess(len(sock), 104)
+        self.assertEqual(ca.FX_HELPER.count(tidy.ROUTED_PATCH[0]), 1)
+        patched = ca.FX_HELPER.replace(tidy.ROUTED_PATCH[0], tidy.ROUTED_PATCH[1], 1)
+        compile(patched, "hb_fx.py", "exec")
+        self.assertIn('"worker_type=frame"', patched)
+        compile(tidy.SAMPLER, "continue-look-sampler", "exec")   # runs as `python3 -c`
+
+
 if __name__ == "__main__":
     unittest.main()
