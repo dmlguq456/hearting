@@ -2435,7 +2435,28 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
                 notice = _continue_notice_text(outcome, reason, prompt_text)
             st.write_notice(_booked_seat(req, seat_key), notice,
                             author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
+            _show_on_herdr(req, notice)
     return True
+
+
+def _show_on_herdr(req: dict, text: str) -> None:
+    """The same result line, now, on the booked pane's own Herdr server.
+
+    The seat notice reaches the conversation only with the next hook, and a cleared
+    window's next hook is the person's next input. Herdr's notification (the display
+    `human_wait_state` already uses) shows it without one. Display only, bounded, and
+    only for a booking that recorded its Herdr endpoint.
+    """
+    socket = str((req.get("herdr_transport") or {}).get("socket_path") or "")
+    herdr = shutil.which("herdr")
+    if not socket or not herdr or not text:
+        return
+    env = {**os.environ, "HERDR_SOCKET_PATH": socket}
+    env.pop("AGENT_HERDR_SESSION", None)
+    with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
+        subprocess.run([herdr, "notification", "show", "Hearting", "--body", text],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       env=env, timeout=5, check=False)
 
 def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], dict], *,
               sleep: Callable[[float], None] = time.sleep) -> str:

@@ -11955,6 +11955,28 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertIn("continued=skipped", printed[-1])
         self.assertIn("reason=new-session-unknown", printed[-1])
 
+    def test_failed_continue_shows_its_line_on_the_booked_herdr_without_input(self):
+        """2026-11-10: the skipped line reached the person only with their next input (~55 min)."""
+        self.cleared()
+        data = self.booking()
+        data["herdr_transport"] = {"socket_path": "/run/herdr/booked.sock"}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.assertTrue(self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped",
+                                                        "new-session-unknown"))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["/usr/bin/herdr", "notification", "show", "Hearting"])
+        self.assertIn(self.clear.CONTINUE_TEXT, argv[-1])
+        self.assertEqual(run.call_args.kwargs["env"]["HERDR_SOCKET_PATH"], "/run/herdr/booked.sock")
+        self.assertEqual(self.booking()["continued"]["state"], "skipped")
+        # A booking without its Herdr endpoint (tmux, native) keeps only the seat notice.
+        self.cleared()
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped", "new-session-unknown")
+        run.assert_not_called()
+
     def test_unproven_new_session_proven_on_a_later_look_continues(self):
         answers = iter(["new-session-unknown", "new-session-unknown", None, None, None])
         self.cleared()
