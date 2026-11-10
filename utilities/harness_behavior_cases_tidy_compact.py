@@ -334,6 +334,34 @@ def read_flow(requests, booking=None) -> dict:
     return flow
 
 
+LATE_WINDOW_SEC = 240
+
+
+def _tags(run) -> dict:
+    """Fleet session numbers (session id -> tag) in the fixture's state."""
+    path = cc.state_home(run) / "agent-fleet" / "tag-assignments.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    rows = data.get("assignments", data) if isinstance(data, dict) else data
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    return {row.get("session_id"): row.get("tag") for row in rows or []
+            if isinstance(row, dict) and row.get("session_id")}
+
+
+def _tui_surface(run) -> dict:
+    """Where the TUI actually runs: the private Herdr server's socket, or private tmux."""
+    tui = run.tui
+    socket = getattr(tui, "env", {}).get("HERDR_SOCKET_PATH") if hasattr(tui, "env") else None
+    kind = "herdr" if socket else "tmux"
+    return {"kind": kind, "class": type(tui).__name__, "pane": getattr(tui, "pane", None),
+            "herdr_socket": socket,
+            "private": bool(socket and socket.startswith(str(run.home.root)))
+            if socket else bool(getattr(tui, "socket_dir", None))}
+
+
 class TidyCompact(Scenario):
     name = "tidy-compact"
     summary = ("A manually invoked tidy compacts the same session; with no typing it "
@@ -434,6 +462,8 @@ class TidyCompact(Scenario):
         ev["invocation_seen"] = any(START in r["text"] for r in turn[:1])
         sid = cc.native_session_id(run)
         ev["sid_at_tidy"] = sid
+        ev["tag_at_tidy"] = _tags(run).get(sid)
+        ev["tui"] = _tui_surface(run)
         ev["booked"] = "clear=scheduled" in tool
         if not ev["booked"]:
             ev["booking"] = self._brief(self._booking(run))
@@ -485,6 +515,21 @@ class TidyCompact(Scenario):
         # booking's state at the end of the observation.
         booking = self._brief(self._booking(run)) or booking
         ev["booking_at_end"] = booking
+        if ((booking.get("continued") or {}).get("state")) in ("pending", "sending"):
+            # An unsettled continue receipt: keep watching, untyped, until it settles.
+            def receipt_settled():
+                value = self._brief(self._booking(run)) or {}
+                state = (value.get("continued") or {}).get("state")
+                return value if state not in ("pending", "sending") else None
+            began = time.time()
+            late = wait_for(receipt_settled, LATE_WINDOW_SEC, 2)
+            run.wait_idle(8, 60)
+            booking = late or self._brief(self._booking(run)) or booking
+            ev["late_window"] = {"seconds": round(time.time() - began, 1), "settled": bool(late),
+                                 "receipt": booking.get("continued")}
+            ev["booking_at_end"] = booking
+        ev["tag_at_end"] = _tags(run).get(sid)
+        ev["tag_kept"] = not ev["tag_at_tidy"] or ev["tag_at_end"] == ev["tag_at_tidy"]
         with run.fixture.lock:
             recorded = list(run.fixture.requests)
         flow = read_flow(recorded, booking)
@@ -495,7 +540,7 @@ class TidyCompact(Scenario):
             ev[key] = flow.get(key)
         ok = (ev["compacted"] and ev["same_session"] and ev["resumed_untyped"]
               and ev["card_on_resume"] and ev["one_resumption"]
-              and ev["completion_woke"] and ev["next_action_ran"])
+              and ev["completion_woke"] and ev["next_action_ran"] and ev["tag_kept"])
         if not ok:
             count = len(run.main_requests())
             run.prompt("SCENARIO-TIDYK-PROBE 왜 이어서 안 하지?")
@@ -509,7 +554,10 @@ class TidyCompact(Scenario):
                  f"resumed={yes[bool(ev['resumed_untyped'])]} card={yes[bool(ev['card_on_resume'])]} "
                  f"continue={yes[bool(ev['continue_sent'])]} one={yes[bool(ev['one_resumption'])]} "
                  f"completion={yes[ev['completion_woke']]} next={yes[ev['next_action_ran']]} "
-                 f"tidy_turn={ev['tidy_turn_requests']} compaction={ev['compaction_requests']}")
+                 f"tidy_turn={ev['tidy_turn_requests']} compaction={ev['compaction_requests']} "
+                 f"tag={ev['tag_at_tidy']}->{ev['tag_at_end']} surface={ev['tui']['kind']} "
+                 f"receipt={(booking.get('continued') or {}).get('state')}/"
+                 f"{(booking.get('continued') or {}).get('reason')}")
         return "pass" if ok else "fail"
 
 
@@ -531,6 +579,8 @@ class TidyCompact(Scenario):
         ev["card_after_manual_compact"] = any(CARD_MARK in r["text"] for r in later)
         ev["sid_at_end"] = cc.native_session_id(run)
         ev["same_session"] = bool(sid) and ev["sid_at_end"] == sid
+        ev["tag_at_end"] = _tags(run).get(sid)
+        run.note(f"surface={ev['tui']['kind']} tag={ev['tag_at_tidy']}->{ev['tag_at_end']}")
         run.note(f"manual /compact: compactions={ev['compaction_requests']} "
                  f"card_next_turn={'yes' if ev['card_after_manual_compact'] else 'no'} "
                  f"same_sid={'yes' if ev['same_session'] else 'no'} tidy_turn={ev['tidy_turn_requests']}")
@@ -555,7 +605,97 @@ class TidyCompactHerdrBetween(TidyCompactHerdr):
     between = True
 
 
-SCENARIOS = [TidyCompact, TidyCompactBetween, TidyCompactHerdr, TidyCompactHerdrBetween]
+class TidyCompactGuard(TidyCompactHerdr):
+    """The booked /compact is not typed while the session works, over a person's
+    unsent text, or over an open question form (private Herdr)."""
+    name = "tidy-compact-guard-draft"
+    summary = ("tidy-compact-herdr: no /compact while the tidy turn still works, nor over "
+               "text the person typed and has not sent.")
+    guard = "draft"
+    DRAFT = "TIDYK-DRAFT 쓰던 글"
+    WORK_SEC = 15
+    HOLD_SEC = 40
+
+    def script(self, run):
+        def answer(record, earlier):
+            tidied = any("FX-TIDY-RC" in (r["reply"].get("shell") or "") for r in earlier)
+            if record["last_kind"] == "tool" and "FX-TIDY-RC" in record["last_text"]:
+                if self.guard == "form":
+                    import harness_behavior_cases_b as cb
+                    return Reply(text="I need one choice.", shell=cb.native_question())
+                return Reply("정리 요청 완료")
+            if START in record["text"] and not tidied:
+                sleep = f"; sleep {self.WORK_SEC}" if self.guard == "draft" else ""
+                return Reply(shell=("python3 " + shlex.quote(str(run.home.root / "hb_fx.py"))
+                                    + " register routed && "
+                                    'python3 "$AGENT_HOME/utilities/session_tidy.py" tidy --text '
+                                    + shlex.quote(CARD_BODY) + " 2>&1; echo FX-TIDY-RC=$?" + sleep))
+            if _is_compaction(record):
+                return Reply(f"{SUMMARY_TAG}\n<summary>TIDYK-SUMMARY guard</summary>")
+            return Reply(f"guard reply {record['main_index']}")
+        return answer
+
+    def _send_text(self, run, text):
+        tui = run.tui
+        if hasattr(tui, "h") and getattr(tui, "pane", None):
+            tui.h("pane", "send-text", tui.pane, text)
+        else:
+            tui._tmux("send-keys", "-t", "scenario", "-l", text)
+        return wait_for(lambda: text[:12] in tui.screen(), 8)
+
+    def drive(self, run):
+        ev = run.evidence
+        ev["tui"] = _tui_surface(run)
+        start = len(run.fixture.requests)
+        run.prompt(f"{INVOKE[run.harness]} {START} 등록하고 세션을 정리해 주세요")
+
+        def compactions():
+            return sum(1 for r in run.fixture.requests[start:]
+                       if _is_compaction(r) and not _is_memory_worker(r))
+        booked = wait_for(lambda: self._booking(run), 120, 1)
+        ev["booking_when_booked"] = self._brief(booked)
+        if not booked:
+            tool = next((t for t in cc.tool_texts(run) if "FX-TIDY-RC" in t), "")
+            ev["tidy_output"] = tool[-1500:]
+            run.note("no booking: " + next((w for w in tool.split() if w.startswith("clear=")), "-"))
+            return "gap" if "clear=manual" in tool else "inconclusive"
+        if self.guard == "draft":
+            # The tidy turn still runs its tool for WORK_SEC: no /compact may land now.
+            time.sleep(3)
+            ev["draft_typed"] = bool(self._send_text(run, self.DRAFT))
+            ev["while_working"] = {"compactions": compactions(),
+                                   "booking": self._brief(self._booking(run))}
+        else:
+            ev["form_shown"] = bool(wait_for(lambda: "Alpha-route" in run.tui.screen(), 60))
+        run.wait_idle(8, 120)
+        time.sleep(self.HOLD_SEC)
+        ev["compactions_during_hold"] = compactions()
+        ev["booking_after_hold"] = self._brief(self._booking(run))
+        screen = run.tui.screen()
+        ev["screen_tail"] = screen[-1200:]
+        held = self.DRAFT[:12] in screen if self.guard == "draft" else ev["form_shown"]
+        ev["guard_still_visible"] = bool(held)
+        status = (ev["booking_after_hold"] or {}).get("status")
+        ok = (ev["compactions_during_hold"] == 0 and status != "cleared"
+              and (self.guard != "draft" or (ev["draft_typed"]
+                                             and ev["while_working"]["compactions"] == 0)))
+        claim = (ev["booking_after_hold"] or {}).get("clear_claim") or {}
+        run.note(f"guard={self.guard} surface={ev['tui']['kind']} compactions={ev['compactions_during_hold']} "
+                 f"booking={status}/{(ev['booking_after_hold'] or {}).get('reason')} "
+                 f"claim={claim.get('state')}/{claim.get('outcome')} still_visible={held}")
+        if not (ev.get("draft_typed", True) and ev.get("form_shown", True)):
+            return "inconclusive"
+        return "pass" if ok else "fail"
+
+
+class TidyCompactGuardForm(TidyCompactGuard):
+    name = "tidy-compact-guard-form"
+    summary = "tidy-compact-herdr: no /compact while the native question form is open."
+    guard = "form"
+
+
+SCENARIOS = [TidyCompact, TidyCompactBetween, TidyCompactHerdr, TidyCompactHerdrBetween,
+             TidyCompactGuard, TidyCompactGuardForm]
 
 
 def replay(results_path) -> list[dict]:
