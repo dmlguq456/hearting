@@ -3413,7 +3413,9 @@ one carrier.
 - Guarded PTY input: Claude and OpenCode with the exact session ID use the same guard
   (exact SID, pane, foreground PID birth and namespace, native idle state,
   registered-work readiness, an empty visible composer, and no open form or
-  question). A dim prompt suggestion counts as an empty composer.
+  question). A dim prompt suggestion counts as an empty composer. Terminal focus
+  reports invalidate the current observation without marking a draft; pasted
+  bytes, edits and uncertain input retain the existing input guard.
 - Blocked: busy, blocked, unknown, form-open, nonempty draft, unreadable screen,
   unproven identity, or a submission that provably did not start keeps the row
   `pending` under exactly one scheduled `message-<ref>` obligation. That runner
