@@ -5654,6 +5654,46 @@ class SeatHandoverTest(TidyCase):
         self.assertIn("capability-route.py start --route /tmp/rt-1.json --jobs " + str(self.jobs), text)
         self.assertIn("카드 본문", text)
 
+    def canonical_routes(self, count):
+        routes = self.cwd / ".runtime" / "routes"
+        routes.mkdir(parents=True, exist_ok=True)
+        made = []
+        for index in range(count):
+            route = f"rt-{index:016x}"
+            path = routes / f"{route}.json"
+            path.write_text(json.dumps({"route_id": route, "route_hash": "sha256:aa"}), encoding="utf-8")
+            made.append((route, self.row(f"att-{index}", route=route, route_file=str(path))))
+        return made
+
+    def test_the_card_lists_every_route_taken_over_with_one_command(self):
+        # 2026-11-11 01:38: five routes ran, the card showed two; three were found by hand.
+        routes = self.canonical_routes(5)
+        self.snapshot(now=st.now_epoch() - 5)
+        out, rows = self.start("sid-B")
+        text = "\n".join(out)
+        line = next(item for item in text.splitlines() if "[이어받은 진행 작업]" in item)
+        self.assertIn("route=" + ", ".join(route for route, _meta in routes) + " 이어서: ", line)
+        self.assertEqual(line.count("capability-route.py start --route <route>"), 1)
+        self.assertNotIn(" 외 ", line)
+        # Every route's completion goes to the new session, whether or not the line names it.
+        self.assertEqual({b["attempt"] for b in rows[-1]["bindings"]}, {f"att-{i}" for i in range(5)})
+        for _route, meta in routes:
+            self.assertEqual(self.effective(meta), "sid-B")
+            answer = self.handover.resolve_attempt_recipient(
+                self.jobs, meta["attempt_id"], registered="sid-A", harness="claude")
+            self.assertEqual(answer.session_id, "sid-B")
+
+    def test_the_card_counts_the_routes_its_line_cannot_hold(self):
+        routes = self.canonical_routes(40)
+        self.snapshot(now=st.now_epoch() - 5)
+        self.start("sid-B")
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            line = self.handover.resume_line(self.seat(), "claude", "sid-B")
+        self.assertLessEqual(len(line.encode("utf-8")), self.handover.LINE_MAX_BYTES)
+        listed = [route for route, _meta in routes if route in line]
+        self.assertGreater(len(listed), 2)
+        self.assertTrue(line.endswith(f" 외 {40 - len(listed)}개"), line)
+
     def test_the_card_drops_a_finished_attempt_once_its_route_is_closed(self):
         import dispatch_pending_delivery as pending
         path = Path(self.open_route("rt-1", "sha256:aa"))

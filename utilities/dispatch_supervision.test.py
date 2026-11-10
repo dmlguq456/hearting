@@ -1383,5 +1383,71 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
         self.assertEqual((observation["state"], observation["reason"]), ("stalled", "execution-absent"))
 
 
+class StallNoticeRunningToolTest(unittest.TestCase):
+    """2026-11-11 00:02: the notice for att-a9d2c7d7 read like a hang while its owner waited
+    on its own `sleep 1500; grep ITER ...` measurement window."""
+
+    CLAUDE = ("source /dev/null 2>/dev/null || true && eval 'sleep 60; grep ITER '\"'\"'log'\"'\"''"
+              " < /dev/null && pwd -P >| /dev/null")
+
+    def runtime(self, harness, script):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name) / harness
+        runtime.write_text("#!" + sys.executable + "\nimport subprocess,sys,time\n"
+                           "subprocess.Popen(['sleep','60'])\n"  # a long-lived non-shell child
+                           + (f"subprocess.Popen(['bash','-c',{script!r}])\n" if script else "")
+                           + "time.sleep(0.3); print('ready',flush=True); time.sleep(60)\n")
+        runtime.chmod(0o755)
+        aid = "att-tool-" + harness
+        process = subprocess.Popen([str(runtime)], stdout=subprocess.PIPE, text=True, start_new_session=True,
+                                   env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                        "AGENT_DISPATCH_ATTEMPT_ID": aid})
+        def reap():
+            try:
+                os.killpg(process.pid, 9)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            process.stdout.close()
+        self.addCleanup(reap)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        return {**CURRENT, "attempt_id": aid, "harness": harness, "worker_type": "owner",
+                **contract.process_launch_identity(process.pid)}
+
+    def notice(self, metadata):
+        receipt = {"schema_version": 1, "kind": supervision.KIND, "state": "attention",
+            "owner_attempt_id": metadata["attempt_id"], "monitored_attempt_ids": [metadata["attempt_id"]],
+            "recipient_thread_id": "parent", "sealed_batch_id": "", "job_registry": "/dev/null",
+            "reason": "attempt-stalled", "obligation_revision": "revision",
+            "responsible": "supervision-controller", "required_action": "inspect-recovery",
+            "pending_delivery_id": "delivery-stall"}
+        observation = {"state": "stalled", "reason": "no-comparable-progress",
+                       "quiet_windows": 5, "last_progress_at": time.time() - 1544}
+        with mock.patch.object(supervision, "_rows", return_value={metadata["attempt_id"]: ("open", metadata)}), \
+             mock.patch.object(supervision, "update_attempt_stall_observation", return_value=observation), \
+             mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
+             mock.patch("dispatch_replacement._plain_retry_successor", return_value=False), \
+             mock.patch("route_parent_close.row_requested", return_value=False):
+            return supervision.render_text(receipt)
+
+    def test_live_tool_command_is_named_with_its_start_time_on_every_harness(self):
+        for harness, script, shown in (("claude", self.CLAUDE, "sleep 60; grep ITER 'log'"),
+                                       ("codex", "sleep 60; grep ITER log", "sleep 60; grep ITER log"),
+                                       ("opencode", "sleep 60; grep ITER log", "sleep 60; grep ITER log")):
+            with self.subTest(harness=harness):
+                text = self.notice(self.runtime(harness, script))
+                self.assertIn("no comparable progress for 5 watchdog windows", text)
+                self.assertRegex(text, r"; a tool command started \d\d:\d\d is still running: "
+                                 + shown + r"\.")
+
+    def test_no_running_tool_or_no_runtime_keeps_the_existing_text(self):
+        text = self.notice(self.runtime("claude", None))
+        self.assertIn("watchdog windows; last comparable progress", text)
+        self.assertNotIn("tool command", text)
+        gone = {**CURRENT, "attempt_id": "att-gone", "harness": "codex", "pid": "999999999", "pid_start": "1"}
+        self.assertNotIn("tool command", self.notice(gone))
+
+
 if __name__ == "__main__":
     unittest.main()

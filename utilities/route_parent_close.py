@@ -166,10 +166,21 @@ def _owner(route, path, jobs, rows):
             continue
         if str(Path(fields[3]).resolve()) != str(Path(route["cwd"]).resolve()):
             continue
-        relevant = (meta.get("owner_route_id") == route["route_id"]
+        # `start --route` registers its owner with the route's own keys (route_id/route_hash)
+        # rather than an owner_route_* binding; that row is this route's owner as well.
+        launched = (not any(meta.get(k) for k in ("owner_route_file", "owner_route_id", "owner_route_hash"))
+                    and (meta.get("route_id"), meta.get("route_hash")) == (route["route_id"], route["route_hash"]))
+        relevant = (launched or meta.get("owner_route_id") == route["route_id"]
                     or meta.get("owner_route_file") == str(path.resolve())
                     or route.get("owner_attempt_id") == aid)
         owned = AUTH.owns(meta, AUTH.default_parent_session_id(), jobs)
+        if launched:
+            if fields[1] in OPEN and aid == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
+                continue  # the owner closing its own route finishes it; nothing to stop
+            if fields[1] in OPEN and not AUTH.require_known(owned, meta, jobs):
+                raise ValueError("parent-close-owner-not-owned")
+            candidates.append((aid, fields, meta))
+            continue
         if relevant and fields[1] in OPEN:
             # Only who holds this route's live owner changes the close; for it an unreadable
             # lineage is a wait. Another route's owner in the same folder is skipped as before.

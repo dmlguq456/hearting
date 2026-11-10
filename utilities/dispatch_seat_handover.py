@@ -2830,15 +2830,46 @@ def resume_line(seat, harness: str, sid: str) -> str:
                         _delivery_open(jobs, meta) and _route_open(jobs, meta))):
                     continue
                 shown.setdefault((jobs, route_identity(meta)[0]), meta.get("route_file", ""))
-        parts = []
-        for (jobs, route), route_file in list(shown.items())[:2]:
+        # The resume command differs only by its route, so it is written once per registry
+        # and every route taken over is listed; what the line cannot hold is counted.
+        from parent_next_directive import resume_command, route_reference
+        groups: dict = {}
+        for (jobs, route), route_file in shown.items():
             if route_file:
-                from parent_next_directive import resume_command
+                reference = route_reference(route_file)
                 command = resume_command(route_file, jobs, agent_home=ROOT)
-                parts.append(f"route={route} 이어서: {command}")
-        if not parts:
+                template = command.replace(" --route " + shlex.quote(reference), " --route <route>", 1)
+                groups.setdefault(template, []).append((route, reference, command))
+        total = sum(len(items) for items in groups.values())
+        if not total:
             return ""
-        text = "[이어받은 진행 작업] " + " | ".join(parts)
-        return _st()._cut_bytes(text, LINE_MAX_BYTES)[0]
+
+        def render(selected):
+            parts = []
+            for template, items in selected:
+                if len(items) == 1:
+                    parts.append(f"route={items[0][0]} 이어서: {items[0][2]}")
+                else:
+                    parts.append(f"route={', '.join(item[1] for item in items)} 이어서: {template}")
+            omitted = total - sum(len(items) for _template, items in selected)
+            return ("[이어받은 진행 작업] " + " | ".join(parts)
+                    + (f" 외 {omitted}개" if omitted else ""))
+
+        selected: list = []
+        full = False
+        for template, items in groups.items():
+            for item in items:
+                trial = [(t, list(i)) for t, i in selected]
+                if trial and trial[-1][0] == template:
+                    trial[-1][1].append(item)
+                else:
+                    trial.append((template, [item]))
+                if selected and len(render(trial).encode("utf-8")) > LINE_MAX_BYTES:
+                    full = True
+                    break
+                selected = trial
+            if full:
+                break
+        return _st()._cut_bytes(render(selected), LINE_MAX_BYTES)[0]
     except Exception:  # noqa: BLE001
         return ""

@@ -2033,6 +2033,42 @@ class ParentCloseTest(unittest.TestCase):
                     finally:
                         child.doCleanups()
 
+    def route_bound_owner(self, aid, process, harness):
+        # `start --route` registers its owner with the route's own keys, not owner_route_*.
+        return self.row(aid, process=process, harness=harness, owner_route_file="", owner_route_id="",
+                        owner_route_hash="", route_file=str(self.path), route_id=self.route["route_id"],
+                        route_hash=self.route["route_hash"], route_node="one-shot")
+
+    def test_route_bound_owner_stops_on_close_on_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    kept = child.base / "uncommitted.txt"
+                    kept.write_text("work in progress\n")
+                    owner = child.process("att-owner")
+                    child.route_bound_owner("att-owner", owner, harness)
+                    command = [sys.executable, str(HERE / "capability-route.py"), "close",
+                               "--route", str(child.path)]
+                    done = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual(json.loads(done.stdout)["state"], "cancelled", done.stdout)
+                    self.assertEqual(owner.wait(timeout=5), -signal.SIGTERM)
+                    self.assertIn("stopped_owner=" + child.aid("att-owner"), done.stderr)
+                    self.assertEqual(kept.read_text(), "work in progress\n")
+                    row = CLOSE._rows(child.jobs)[child.aid("att-owner")]
+                    self.assertEqual((row[0][1], row[1]["note"]), ("done", CLOSE.NOTE))
+                finally:
+                    child.doCleanups()
+
+    def test_route_bound_owner_closing_its_own_route_is_not_stopped(self):
+        owner = self.process("att-owner")
+        self.route_bound_owner("att-owner", owner, "claude")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-owner")}):
+            self.assertIsNone(self.close())
+        self.assertIsNone(owner.poll())
+
     def test_never_started_chain_and_post_nodes_fold_no_start_advice(self):
         owner = self.process("att-owner")
         self.row("att-owner", process=owner)

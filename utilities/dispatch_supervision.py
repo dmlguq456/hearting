@@ -460,6 +460,89 @@ def _route_needs_attention(metadata, jobs, now):
         return None
 
 
+_TOOL_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+
+
+def _shell_command_text(argv):
+    """The command a tool shell runs: the `-c` script, or the `eval` inside Claude's wrapper."""
+    if not argv or Path(argv[0]).name not in _TOOL_SHELLS:
+        return None
+    flag = next((i for i, arg in enumerate(argv[1:], 1)
+                 if arg.startswith("-") and not arg.startswith("--") and "c" in arg), None)
+    script = next((arg for arg in argv[flag + 1:] if not arg.startswith("-")), None) if flag else None
+    if not script:
+        return None
+    marker = script.find(" eval ")
+    if marker >= 0:
+        try:
+            lexer = shlex.shlex(script[marker + 6:], posix=True)
+            lexer.whitespace_split = True
+            script = lexer.get_token() or script
+        except ValueError:
+            pass
+    return " ".join(script.split())
+
+
+def _running_tool_command(metadata):
+    """(start epoch, command) of the oldest tool command the attempt's live runtime still runs.
+
+    Read only from the attempt's existing process census at the moment of the notice;
+    None whenever the runtime is not observed live or nothing can be read.
+    """
+    try:
+        from dispatch_contract import attempt_execution_observation, attempt_tagged_descendants
+        execution = attempt_execution_observation(metadata)
+        if execution.state != "active":
+            return None
+        runtimes = {int(identity[0]) for identity in execution.identities}
+        members = {int(pid): start for pid, start, _state in attempt_tagged_descendants(metadata).members}
+        stats = {}
+        for pid in members:
+            raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+            tail = raw[raw.rfind(")") + 2:].split()
+            if tail[19] == members[pid]:
+                stats[pid] = (int(tail[1]), int(tail[19]))
+        with open("/proc/stat", encoding="utf-8") as handle:
+            boot = next(float(line.split()[1]) for line in handle if line.startswith("btime "))
+        ticks = os.sysconf("SC_CLK_TCK")
+        found = []
+        for pid, (parent, start) in stats.items():
+            if pid in runtimes:
+                continue
+            command = _shell_command_text(_cmdline(pid))
+            if not command:
+                continue
+            # The tool shell the runtime started: its nearest observed ancestor is the runtime.
+            seen, current = set(), parent
+            while current in stats and current not in runtimes and current not in seen:
+                seen.add(current)
+                current = stats[current][0]
+            if current in runtimes and not any(
+                    _shell_command_text(_cmdline(ancestor)) for ancestor in seen):
+                found.append((boot + start / ticks, command))
+        return min(found) if found else None
+    except (ImportError, OSError, ValueError, TypeError, IndexError, StopIteration, AttributeError):
+        return None
+
+
+def _cmdline(pid):
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()[:8192]
+    except OSError:
+        return []
+    return [os.fsdecode(part) for part in raw.rstrip(b"\0").split(b"\0") if part]
+
+
+def _running_tool_text(metadata):
+    running = _running_tool_command(metadata)
+    if not running:
+        return ""
+    started, command = running
+    command = command if len(command) <= 80 else command[:79] + "…"
+    return (f"; a tool command started {time.strftime('%H:%M', time.localtime(started))} "
+            f"is still running: {command}")
+
+
 def _runtime_tool_active(event):
     if not isinstance(event, list) or len(event) != 3:
         return False
@@ -1704,7 +1787,7 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                     age = None
                 duration = f"; last comparable progress {age}s ago" if age is not None else ""
                 messages.append(f"{route_id}/{route_node} attempt {aid}: no comparable progress for "
-                                f"{quiet} watchdog windows{duration}")
+                                f"{quiet} watchdog windows{duration}{_running_tool_text(metadata)}")
         if route_commands:
             kind, command = route_commands[0]
             next_command = f"Existing next-command for the current parent ({kind}): {command}. "
