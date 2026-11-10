@@ -195,9 +195,9 @@ function color(c,bg) {
   if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
   return bg?'49':'39';
 }
-function serialize(line,width) {
+function serialize(line,width,from=0) {
   let s='',previous='';
-  for(let x=0;x<width;x++) {
+  for(let x=from;x<width;x++) {
     const c=line?.getCell(x); if(!c||!c.getWidth())continue;
     const a=[0,color(c,false),color(c,true)];
     for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
@@ -258,7 +258,8 @@ function render() {
       // oscillate geometry across partial native redraws or compete with it.
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const footerMask=fleetView?{rows:new Set(),cells:new Map()}:nativeDisplay.footerConcealment(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const concealed=footerMask.rows;
     let notice=-1;
     if(harness==='claude'){
       // The first concealed row (the top of the status area) carries the notice;
@@ -276,7 +277,9 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      const masked=fleetView?0:footerMask.cells.get(y)||0;
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):
+        (masked?'\x1b[0m'+' '.repeat(masked):'')+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked);
       if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }

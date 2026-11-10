@@ -517,7 +517,13 @@ def _plain(value, limit=256):
 
 
 def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="", panel_lines=None, detail_lines=None):
-    """Conceal only known native fields already represented in the common area."""
+    """Conceal Codex's thread-id field, and known native fields the common area painted.
+
+    The panel names a session by its number and title, so the shell owns the
+    managed footer's thread-id field outright: the value stays on the inner
+    screen, where shell-wrapped identification reads it. Every other field still
+    yields only to the same value the common area actually painted (``common``).
+    """
     from fleet.collectors import procscan
     from fleet.render_cells import _half_up
     import codex_tui_config
@@ -529,26 +535,25 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
         return None, None
     observed = codex_tui_config.managed_status_line_observation(home, argv=procscan._read_argv(pid))
     path = str(Path(home) / "config.toml")
-    if not observed or not status_rows or (panel_lines is None and painted_rows[:len(status_rows)] != status_rows):
+    if not observed or not sid:
         return None, path
     model, effort, percent = values.get("model"), values.get("effort"), values.get("ctx_pct")
-    if not model or type(percent) not in (int, float) or not 0 <= percent <= 100:
-        return None, path
-    common = "\n".join(detail_lines) if detail_lines is not None else "\n".join("".join(text for text, _key in row) for row in status_rows)
-    if sid not in common:
-        return None, path
+    common = bool(status_rows and (panel_lines is not None or painted_rows[:len(status_rows)] == status_rows)
+                  and model and type(percent) in (int, float) and 0 <= percent <= 100)
+    painted = ("\n".join(detail_lines) if detail_lines is not None
+               else "\n".join("".join(text for text, _key in row) for row in status_rows or ()))
     title = _plain(values.get("title"), 512)
     # Long names may be clipped even in expanded mode. Preserve the native row
     # whenever it carries a full name which the common area did not paint.
-    titles = [sid, *([title] if title and title in common else [])]
+    titles = [sid, *([title] if title and title in painted else [])]
     branch = values.get("branch")
-    if branch and branch != "no-git" and branch not in common:
-        return None, path
+    if branch and branch != "no-git" and branch not in painted:
+        common = False
     fields = {
         "thread-id": [sid], "thread-title": list(dict.fromkeys(titles)),
         "git-branch": [branch.removesuffix("*")] if branch and branch != "no-git" else None,
-        "context-used": ["Context " + str(_half_up(percent)) + "% used"],
-        "model-with-reasoning": [_plain(model) + (" " + _plain(effort) if effort else "")],
+        "context-used": ["Context " + str(_half_up(percent)) + "% used"] if common else None,
+        "model-with-reasoning": [_plain(model) + (" " + _plain(effort) if effort else "")] if common else None,
     }
     quotas = {label: used for label, used, _reset in values.get("quota_windows") or ()}
     for item, label, labels in (("five-hour-limit", "5h", ("5h",)),
@@ -561,8 +566,9 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
                 options.extend((f"{name}: {100-used}% left", f"{name} {100-used}% left",
                                 f"{name} {100-used}% remaining", f"{name} {used}% used"))
         fields[item] = options or None
-    plan = {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
-            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}
+    plan = {"sid": sid, "config": observed, "common": common,
+            "fields": [fields.get(item) if item == "thread-id" or common else None for item in observed["items"]],
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows or ()]}
     if panel_lines is not None and detail_lines:
         plan.update(presentation="session-panel", lines=panel_lines, detail_lines=detail_lines)
     return plan, path

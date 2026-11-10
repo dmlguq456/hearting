@@ -63,7 +63,7 @@ Keep the observed model/effort at the top (an unavailable effort is `?`) and
 compact session information at the bottom, never opportunistically in the
 middle. There is no separate session-details view: below the route and any
 question, the panel always paints the rest of the statusline (folder, title,
-full thread ID, branch with dirty, ahead/behind, worktrees and Git
+branch with dirty, ahead/behind, worktrees and Git
 observation, quota resets and running jobs), then peer news and the last
 input, each only in rows left after the question, and an item without a value
 is left out. Running jobs join the last session row when they fit. While a
@@ -100,11 +100,18 @@ Route details reuse the common route-visibility projection for shape, basis,
 tests, review, CI and completion evidence. Missing evidence is not a passing
 check. Bounded detail pages remain readable at narrow widths; opening them
 does not collect again or authorize an action.
-For the work panel, the managed Codex footer may yield duplicate paint only to
-its visible model, compact status and session rows, including the full thread
-ID, all actually painted. Exact native SID, unchanged
-managed configuration and matching native values are still required. Display
-availability does not establish selection or input authority.
+The panel paints no thread ID: sessions are told apart by their number and
+title. Inside the shell, Codex's footer field `thread-id` (the first
+`[tui].status_line` item) belongs to the shell and is not shown: a footer row
+holding only the ID is blanked, and otherwise only its leading ID cells are.
+The value stays on the inner screen, where shell-wrapped identification and
+peer delivery read it. The rest of that row may yield duplicate paint only to
+the panel's visible model, compact status and session rows, all actually
+painted. Exact native SID, the help row beneath, an unchanged configuration
+with `thread-id` first and matching native values are still required. Display
+availability does not establish selection or input authority. A Codex window
+started without the shell keeps the ID visible, since that footer row is then
+the only place Hearting reads it.
 
 The header's settings change only Hearting's existing session-shell policy:
 side/bottom layout, side width, narrow-window behavior and auxiliary detail.

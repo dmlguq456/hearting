@@ -75,4 +75,40 @@ a.equal(d.blockHeight({harness:'codex',count:0,limit:10,loaded:false}),1);
    run=subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs'),json.dumps(config)],text=True,capture_output=True)
    self.assertEqual(run.returncode,0,run.stderr)
 
+ def test_shell_owns_the_codex_thread_id_field_without_painting_it(self):
+  with tempfile.TemporaryDirectory(prefix='shell-footer-id-') as tmp:
+   for name,text in (('only','[tui]\nstatus_line = ["thread-id"]\n'),('full',codex_tui_config.merge_status_line_text(''))):
+    (Path(tmp)/name).mkdir();path=Path(tmp)/name/'config.toml';path.write_text(text);path.chmod(0o600)
+   only=codex_tui_config.managed_status_line_observation(Path(tmp)/'only')
+   full=codex_tui_config.managed_status_line_observation(Path(tmp)/'full')
+   script=r"""const a=require('node:assert/strict'),d=require(process.argv[1]);
+const only=JSON.parse(process.argv[2]),full=JSON.parse(process.argv[3]),sid='00000000-0000-4000-8000-000000000052';
+const make=(width,text)=>['body',text.slice(0,width).padEnd(width),'  ← for agents · ? for shortcuts'.padEnd(width),''];
+const mask=(rows,plan,painted=[],details=[],selected=sid)=>{const m=d.footerConcealment('codex',rows,selected,plan,painted,details);return {rows:[...m.rows],cells:[...m.cells]};};
+// An ID-only footer row is blanked although the panel paints no thread ID.
+const idPlan={sid,config:only,common:false,fields:[[sid]],lines:[]};
+a.deepEqual(mask(make(80,'  '+sid),idPlan),{rows:[1],cells:[]});
+a.deepEqual(mask(make(133,'  '+sid),idPlan),{rows:[1],cells:[]});
+// Exact current SID, the help row below it and an unchanged config stay required.
+a.deepEqual(mask(make(80,'  '+sid),idPlan,[],[],'00000000-0000-4000-8000-000000000053'),{rows:[],cells:[]});
+a.deepEqual(mask(['body','  '+sid,'not help',''],idPlan),{rows:[],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid),{...idPlan,config:{...only,stamp:['0']}}),{rows:[],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid),{...idPlan,config:{...only,items:['context-used','thread-id']}}),{rows:[],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid.slice(0,20)),idPlan),{rows:[],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid),null),{rows:[],cells:[]});
+a.equal(d.hiddenFooterRows('claude',make(80,'  '+sid),sid,idPlan).size,0);
+// With other fields the row stays, and only the leading ID cells are blanked,
+// unless the panel painted every other value (the existing whole-row rule).
+const footer='  '+[sid,'Title','branch','Context 10% used','fixture high'].join(' · ');
+const partial={sid,config:full,common:false,fields:[[sid],null,null,null,null,null,null],lines:[]};
+a.deepEqual(mask(make(133,footer),partial),{rows:[],cells:[[1,2+sid.length+3]]});
+const compact=['fixture · high','context 10%'],status='📁 project · Title · ⎇ branch';
+const painted={sid,config:full,common:true,presentation:'session-panel',fields:[[sid],[sid,'Title'],['branch'],['Context 10% used'],['fixture high'],null,null],lines:compact,detail_lines:[status]};
+a.deepEqual(mask(make(133,footer),painted,compact,[status]),{rows:[1],cells:[]});
+a.deepEqual(mask(make(133,footer),painted,[compact[0]],[status]),{rows:[],cells:[[1,2+sid.length+3]]});
+a.deepEqual(mask(make(133,footer.replace('Title','Other')),painted,compact,[status]),{rows:[],cells:[[1,2+sid.length+3]]});
+"""
+   run=subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs'),json.dumps(only),json.dumps(full)],text=True,capture_output=True)
+   self.assertEqual(run.returncode,0,run.stderr)
+
 if __name__=='__main__':unittest.main()

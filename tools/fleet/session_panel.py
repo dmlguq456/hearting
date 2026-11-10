@@ -88,13 +88,15 @@ def compact_status(values, columns, native_owned=()):
     return [parts] if parts else []
 
 
-SESSION_FIELDS = frozenset({"folder", "title", "thread", "branch", "model_quota"})
+# No thread ID: a session is told apart by its number and title. The shell
+# conceals Codex's own thread-id field instead (session_shell._codex_footer_plan).
+SESSION_FIELDS = frozenset({"folder", "title", "branch", "model_quota"})
 
 
 def session_status(values, columns):
     """The statusline items the panel paints besides its model row and summary.
 
-    Folder, title, thread, branch with its Git state and observation, per-model
+    Folder, title, branch with its Git state and observation, per-model
     quotas, quota resets and running jobs, in the native statusline's order and
     glyphs. Context, 5h/7d, model, route and answer counts are already painted
     elsewhere in the panel; an item without a value is left out.

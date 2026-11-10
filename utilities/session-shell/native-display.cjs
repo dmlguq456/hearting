@@ -96,32 +96,45 @@ function claudeStatusRows(lines,sid,record) {
   return new Set();
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-function hiddenFooterRows(harness,lines,sid,plan,painted=[],details=[]) {
-  const found=[];
+// Codex's managed footer row. The shell owns its first `thread-id` field: an
+// ID-only row is blanked, and otherwise only the leading `  <id> · ` cells are,
+// while the value stays on the inner screen for identification. The whole row
+// yields only when every other field equals what the common area painted.
+function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
+  const none={rows:new Set(),cells:new Map()};
   if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
-     ||!Array.isArray(plan.lines)||!plan.lines.length)return new Set();
-  if(plan.presentation==='session-panel'){
-    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
-       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
-       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))return new Set();
-  }else if(!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))return new Set();
+     ||plan.config?.items?.[0]!=='thread-id'||JSON.stringify(plan.fields[0])!==JSON.stringify([sid]))return none;
   try {
     const s=fs.lstatSync(plan.config.path,{bigint:true});
     const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
     if(!s.isFile()||s.uid!==BigInt(process.getuid())||s.mode&0o022n
-       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return new Set();
-  }catch{return new Set();}
+       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return none;
+  }catch{return none;}
+  let shown=Array.isArray(plan.lines)&&plan.lines.length>0&&plan.common!==false;
+  if(shown&&plan.presentation==='session-panel'){
+    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
+       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
+       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))shown=false;
+  }else if(shown&&!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))shown=false;
   const expected=plan.fields.filter(field=>Array.isArray(field)&&field.length);
-  const exact=/^ +([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · .+$/;
+  const id=sid.replace(/[^0-9a-f-]/gi,'');
+  if(id!==sid||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid))return none;
+  const only=new RegExp('^ +'+id+'\\s*$'),leading=new RegExp('^( +'+id+' · ).+$');
+  const found=[];
   for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
-    const match=lines[y].match(exact);
+    if(!/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))continue;
+    if(only.test(lines[y])){found.push({y});continue;}
+    const match=lines[y].match(leading);
+    if(!match)continue;
     const fields=lines[y].trim().split(' · ').map(text=>text.replace(/\s+/g,' '));
-    if(match&&match[1]===sid&&fields.length===expected.length
-       &&fields.every((value,i)=>expected[i].includes(value))
-       &&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
+    const whole=shown&&fields.length===expected.length&&fields.every((value,i)=>expected[i].includes(value));
+    found.push(whole?{y}:{y,cells:match[1].length});
   }
-  return new Set(found.length===1?found:[]);
+  if(found.length!==1)return none;
+  const [row]=found;
+  return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
+function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
 function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=configuration.side_width,minimum=configuration.side_min_columns;
@@ -176,4 +189,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,observe,firstLine,hiddenFooterRows,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

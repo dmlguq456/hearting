@@ -118,6 +118,12 @@ assert(!r.hits.some(h=>h.action==='details'));
             self.assertNotIn(already, painted)
         self.assertNotIn("?", text(session_status({"harness": "claude", "state": "idle"}, 36)))
         self.assertEqual(session_status({"harness": "claude", "state": "idle"}, 36), [])
+        # Sessions are told apart by number and title; the panel paints no Codex thread ID.
+        sid = "00000000-0000-4000-8000-000000000052"
+        codex = text(session_status({**values, "harness": "codex", "native_sid": sid}, 36))
+        self.assertIn("Title", codex)
+        self.assertNotIn(sid, codex)
+        self.assertNotIn(sid[:8], codex)
 
     def test_title_and_jobs_stay_on_screen_while_a_question_takes_the_session_rows(self):
         # Review [52] missing-field probe: a question at 80x14, its focused
