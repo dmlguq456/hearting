@@ -196,9 +196,9 @@ function color(c,bg) {
   if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
   return bg?'49':'39';
 }
-function serialize(line,width) {
+function serialize(line,width,from=0) {
   let s='',previous='';
-  for(let x=0;x<width;x++) {
+  for(let x=from;x<width;x++) {
     const c=line?.getCell(x); if(!c||!c.getWidth())continue;
     const a=[0,color(c,false),color(c,true)];
     for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
@@ -252,7 +252,8 @@ function render() {
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
     observeSelectedModel(nativeLines);
     const selectedChanged=!!observed?.model&&(observed.model!==displayValues.model||(observed.effort||'')!==(displayValues.effort||''));
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const footerMask=fleetView?{rows:new Set(),cells:new Map()}:nativeDisplay.footerConcealment(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const concealed=footerMask.rows;
     let notice=-1;
     if(harness==='claude'){
       // The first concealed row (the top of the status area) carries the notice;
@@ -270,8 +271,16 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
-      if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
+      // The rest of a Codex footer row whose ID cells are concealed keeps the
+      // row's own indent instead of starting after a blank gap.
+      const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
+        '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
+        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      if(!fleetView&&geometry().side){
+        const panel=y<panelRows.length?panelRows[y]:' '.repeat(panelColumns());
+        line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
+      }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
@@ -283,7 +292,7 @@ function render() {
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
-    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
+    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
     text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
     text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
     if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
@@ -306,6 +315,7 @@ function displayLines(lines,height,done) {
   const paint=line=>Array.isArray(line)?line.map(part=>{
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(Number.isInteger(part.background)&&part.background>=0&&part.background<=255)attrs.push(48,5,part.background);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
@@ -345,7 +355,8 @@ function rebuildDisplay() {
     }else lines=base;
     if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
-  }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
+  }else lines=footerSegments.length?panelView.appearance([[...footerSegments,{text:extra}]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true}):[footer||`${harness} · CTX ?`];
   const editParts=edit>=0?lines[edit]:[];
   const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
@@ -452,7 +463,10 @@ function claudePanelPainted(){
 // at the native statusline's own two-cell indent.
 function noticeRow(width){
   let used=2,text='\x1b[0m  ';
-  for(const part of panelModel.notice||[]){
+  // Claude's own status row: the panel's theme, never its shade.
+  const [notice=[]]=panelView.appearance([panelModel.notice||[]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true});
+  for(const part of notice){
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
@@ -600,11 +614,13 @@ function panelMouse(code,x,y,release){
   if(fleetView||paste||relay)return false;
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
-    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
+    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
     else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
-  if(g.side&&local===0&&(code&3)===0&&!release){dragging=true;return true;}
+  // The boundary beside the native area resizes: the left edge of a right
+  // panel, the right edge of a left one.
+  if(g.side&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
   if(release||code>=32||(code&3)!==0)return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
@@ -625,6 +641,9 @@ mouseInput=require('./panel-mouse.cjs')({
   mouse:(code,x,y,release,raw)=>{
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
+    // A left panel moves the native area right; native sees its own columns.
+    const offset=geometry().nativeColumn;
+    if(offset){if(x<=offset)return;raw=Buffer.from(`\x1b[<${code};${x-offset};${y}${release?'m':'M'}`,'latin1');}
     if(!release&&(code&3)===0){block.leave();queueDisplay();}
     if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
     observeInput(raw);child.write(raw);

@@ -97,13 +97,15 @@ def compact_status(values, columns, native_owned=()):
     return [parts] if parts else []
 
 
-SESSION_FIELDS = frozenset({"folder", "title", "thread", "branch", "model_quota"})
+# No thread ID: a session is told apart by its number and title. The shell
+# conceals Codex's own thread-id field instead (session_shell._codex_footer_plan).
+SESSION_FIELDS = frozenset({"folder", "title", "branch", "model_quota"})
 
 
 def session_status(values, columns):
     """The statusline items the panel paints besides its model row and summary.
 
-    Folder, title, thread, branch with its Git state and observation, per-model
+    Folder, title, branch with its Git state and observation, per-model
     quotas, quota resets and running jobs, in the native statusline's order and
     glyphs. Context, 5h/7d, model, route and answer counts are already painted
     elsewhere in the panel; an item without a value is left out.
@@ -239,7 +241,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
         "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
-        "detail", "working", "answer", "ready", "unknown", "saved", "save_failed")}
+        "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
+        "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
+        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,

@@ -11,6 +11,10 @@ unused for `IDLE_SECONDS`, the home is detached with one rename and removed
 outside every lock. Anything unproven stays: the policy never guesses, and every
 uncertain case is counted in ``homes/worker-retention/state.json`` instead of hidden.
 
+A shared nested Codex owner home ``homes/codex/<worktree-key>.<release-key>``
+follows the same rule for every attempt that claims it, after the worker homes
+of the same pass (`_codex_pass`).
+
 Two existing carriers call `sweep`: the post-exit reaper tail and a non-exact
 ``reconcile --apply``. Fleet calls `note_view` before it reads a displayed
 attempt's home. There is no command, flag, daemon or gate here.
@@ -85,6 +89,9 @@ ADMISSION_REREAD_LIMIT = 32
 _NO_SCAN = object()
 
 KEY_RE = re.compile(r"[0-9a-f]{32}")
+# A shared nested Codex owner home: <worktree key>.<release key>
+# (adapters/codex/bin/dispatch-headless.py nested_codex_home_path).
+CODEX_NAME_RE = re.compile(r"[0-9a-f]{32}\.[0-9a-f]{12}")
 # OpenCode rows served by the shared service record this exact token instead of
 # a per-attempt home (adapters/opencode/bin/dispatch-headless.py); it claims no
 # home. Any other non-matching value remains a conflict.
@@ -177,10 +184,17 @@ def _track_resolver_parent(parent):
         raise _Unreadable("evidence-overflow")
 
 
-def _route_observer(kind, path):
-    """Watch only authority the shared route resolver actually consults."""
+def _route_observer(kind, path, registry=None):
+    """Watch only authority the shared route resolver actually consults.
+
+    The registry itself is not stamped: any unrelated row rewrite would change
+    it. Its rows are fenced row by row at detach instead
+    (`_registry_delta_is_candidate_change`, including rows naming the attempt).
+    """
     path = Path(path)
     _track_resolver_parent(path.parent)
+    if registry is not None and path == registry:
+        return
     _track(path)
 
 
@@ -248,6 +262,11 @@ class _Layout:
             self.ret_fd = self._pin("worker-retention", self.homes_fd, create=create)
             self.retiring_fd = self._pin("retiring", self.ret_fd, create=create)
             self.views_fd = self._pin("views", self.ret_fd, create=create)
+            # Shared nested Codex owner homes; absent until one is prepared.
+            try:
+                self.codex_fd = self._pin("codex", self.homes_fd)
+            except _Unsafe:
+                self.codex_fd = None
         except BaseException:
             self.close()
             raise
@@ -429,6 +448,7 @@ class _Snapshot:
         self.jobs = jobs
         _track(jobs)
         self.registry_snapshot: tuple[int, int, int, int, int] | None = None
+        self.registry_key: list[int] | None = None
         self.rows: dict[str, _Row] = {}
         self.row_offsets: dict[str, int] = {}
         self.open_refs: dict[str, set[str]] = {}
@@ -451,6 +471,10 @@ class _Snapshot:
                 raise _Unreadable("registry-oversized")
             self.registry_snapshot = (info.st_dev, info.st_ino, size,
                                       info.st_mtime_ns, info.st_ctime_ns)
+            # The same version key `jobs.log.lineage.json` records for each
+            # atomic replacement (dispatch_registry_cache.registry_key).
+            self.registry_key = [info.st_dev, info.st_ino, size, info.st_mtime_ns,
+                                 info.st_mode, info.st_ctime_ns]
             remaining = size
             offset = 0
             while remaining:
@@ -509,7 +533,8 @@ class _HomeBinding:
     schema: int | None
 
 
-def _declared_home(root: Path, workers_real: str, value: str, parents: dict | None = None):
+def _declared_home(root: Path, workers_real: str, value: str, parents: dict | None = None,
+                   *, name_re=KEY_RE):
     """The key a declared ``runtime_home`` names, `None` if it names a different place.
 
     Only the *parent* of the declared path is resolved. The leaf is compared as a
@@ -519,7 +544,7 @@ def _declared_home(root: Path, workers_real: str, value: str, parents: dict | No
         return None
     norm = os.path.normpath(value)
     parent, name = os.path.split(norm)
-    if not KEY_RE.fullmatch(name):
+    if not name_re.fullmatch(name):
         return None
     try:
         _track_resolver_parent(parent)
@@ -1645,7 +1670,9 @@ def _route_evidence(jobs: Path, meta: dict):
             _track(meta[name])
     from dispatch_notice_state import bound_route, closed_outcome
     try:
-        bound = bound_route(meta, jobs, observer=_route_observer)
+        registry = Path(jobs).expanduser().resolve(strict=False)
+        bound = bound_route(meta, jobs, observer=lambda kind, path: _route_observer(
+            kind, path, registry))
         if bound is None:
             return "unknown", 0, "route-binding-missing"
         path, route = bound
@@ -1826,7 +1853,7 @@ class _Context:
         self.legacy[cache_key] = table
         return table
 
-    def home_process_evidence(self, key: str) -> tuple[str, str]:
+    def home_process_evidence(self, key: str, base: str | None = None) -> tuple[str, str]:
         """live | absent | unknown for a process that can address this HOME."""
         if self.home_process_scan is None:
             named: set[str] = set()
@@ -1892,7 +1919,7 @@ class _Context:
                     refs.add(os.path.realpath(clean) if value in named else clean)
             self.home_process_scan = (refs, reason)
         refs, reason = self.home_process_scan
-        home = os.path.realpath(self.workers_real + os.sep + key)
+        home = os.path.realpath((base or self.workers_real) + os.sep + key)
         prefix = home + os.sep
         if any(ref == home or ref.startswith(prefix) for ref in refs):
             return "live", "home-process-reference"
@@ -1931,12 +1958,18 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
                                         attempt: str | None, workers_real: str,
                                         by_key: dict[str, set[str]],
                                         deadline: float,
-                                        binding: _HomeBinding | None = None) -> bool | None:
-    """Inspect only bytes appended after the outside-lock registry snapshot.
+                                        binding: _HomeBinding | None = None,
+                                        *, name_re=KEY_RE) -> bool | None:
+    """Inspect only the registry bytes that changed after the outside-lock snapshot.
 
-    ``True`` means a candidate fact changed, ``False`` means only unrelated
-    complete rows were appended, and ``None`` means the delta was not safely
-    interpretable in the bounded lock window.
+    Rows are appended in place or the registry is replaced atomically with a
+    rewritten tail (``dispatch_contract_registry._atomic_registry_replace``).
+    For a replacement, ``jobs.log.lineage.json`` names the prefix the chain kept
+    and its anchor proves it, so only the rewritten tail is read; a row carried
+    over unchanged from the snapshot is not a new fact. ``True`` means a
+    candidate fact changed, ``False`` means only unrelated rows changed, and
+    ``None`` means the change was not safely interpretable in the bounded lock
+    window.
     """
     before = snapshot.registry_snapshot
     if before is None:
@@ -1948,8 +1981,12 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
     try:
         current = os.fstat(fd)
         dev, ino, size, mtime_ns, ctime_ns = before
-        if (current.st_dev != dev or current.st_ino != ino or current.st_size < size):
-            return None
+        start = size
+        replaced = current.st_dev != dev or current.st_ino != ino or current.st_size < size
+        if replaced:
+            start = _registry_lineage_start(jobs, snapshot.registry_key, fd, current)
+            if start is None:
+                return None
         row = snapshot.rows.get(attempt) if attempt else None
         related = ({attempt, *snapshot.intents.get(attempt, ())}
                    if attempt else set())
@@ -1967,16 +2004,21 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
             if old is None or offset is None:
                 continue
             expected = old.raw.encode("utf-8") + b"\n"
+            if offset + len(expected) > start:
+                continue  # in the rewritten tail: judged with it below
             observed = os.pread(fd, len(expected), offset)
             if observed != expected:
                 return True
-        if current.st_size == size:
+        if not replaced and current.st_size == size:
             return False if (current.st_mtime_ns == mtime_ns
                              and current.st_ctime_ns == ctime_ns) else None
-        delta_size = current.st_size - size
+        # Rows the snapshot read from the rewritten tail; each must come back.
+        displaced = ({identity for identity, offset in snapshot.row_offsets.items()
+                      if offset >= start} if replaced else set())
+        delta_size = current.st_size - start
         if delta_size > 4 * 1024 * 1024 or time.monotonic() >= deadline:
             return None
-        os.lseek(fd, size, os.SEEK_SET)
+        os.lseek(fd, start, os.SEEK_SET)
         chunks, remaining = [], delta_size
         while remaining:
             chunk = os.read(fd, min(65536, remaining))
@@ -1998,6 +2040,11 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
                 continue
             metadata = fields[5]
             identity = ATTEMPT_ID_RE.search(metadata)
+            if identity and identity.group(1) in displaced:
+                displaced.discard(identity.group(1))
+                old = snapshot.rows.get(identity.group(1))
+                if old is not None and blob.decode("utf-8", "replace").rstrip("\n") == old.raw:
+                    continue  # carried over unchanged by the replacement
             if identity and identity.group(1) in related:
                 return True
             if (binding is not None
@@ -2006,6 +2053,10 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
                 return True
             named = set(ATTEMPT_RE.findall(metadata))
             if fields[1] in OPEN and named.intersection(related):
+                return True
+            if attempt and attempt in named:
+                # A row naming this attempt, e.g. a child that adopted its
+                # owner route advance (owner_route_binding), whatever its status.
                 return True
             try:
                 parsed = _parse_metadata(metadata)
@@ -2017,15 +2068,45 @@ def _registry_delta_is_candidate_change(snapshot: _Snapshot, jobs: Path, key: st
                     and parsed.get("parent_attempt_id") in related):
                 return True
             raw_home = parsed.get("runtime_home", "")
-            if raw_home and _declared_home(jobs.parent, workers_real, raw_home) == key:
+            if raw_home and _declared_home(jobs.parent, workers_real, raw_home,
+                                           name_re=name_re) == key:
                 return True
             if candidate_log and parsed.get("log_file") == candidate_log:
                 return True
+        if displaced:
+            # A row the snapshot read is gone from the registry.
+            return True if displaced & related else None
         return False
     except OSError:
         return None
     finally:
         os.close(fd)
+
+
+def _registry_lineage_start(jobs: Path, before_key, fd: int, current) -> int | None:
+    """The line-aligned prefix a recorded replacement chain kept, or None.
+
+    Mirrors the existing lineage reader (dispatch_capacity_evidence): the
+    anchor proves the bytes before the prefix are the ones the snapshot read.
+    """
+    from dispatch_registry_cache import registry_key, resolve_lineage
+    if before_key is None:
+        return None
+    resolved = resolve_lineage(jobs, before_key, registry_key(current))
+    if resolved is None:
+        return None
+    start = min(resolved[0], before_key[2])
+    if not 0 <= start <= current.st_size:
+        return None
+    if start == 0:
+        return 0
+    verify_start = max(0, start - 4096)
+    chunk = os.pread(fd, start - verify_start, verify_start)
+    if len(chunk) != start - verify_start or chunk[-1:] != b"\n":
+        return None
+    if hashlib.sha256(chunk).hexdigest() != resolved[1]:
+        return None
+    return start
 
 
 def _parse_metadata(value: str) -> dict[str, str]:
@@ -3037,6 +3118,34 @@ def _registry_lock_until(jobs: Path, deadline: float):
         _REGISTRY_DEADLINE.reset(token)
 
 
+def _recheck_protections(ctx: _Context, key: str, attempts, watched: dict):
+    """Re-decide each attempt's protections at detach, recording what they read.
+
+    The worker-home and shared Codex detach both use it; ``_fresh(watched)``
+    under the final locks then rejects evidence that changed after this read.
+    """
+    token = _DEPENDENCIES.set(watched)
+    try:
+        activity = 0
+        for attempt in sorted(attempts):
+            _track(ctx.root / "supervisor-state" / f"{attempt}.json")
+            verdict = _protections(ctx, key, attempt, probe_processes=False)
+            if verdict.kind != "eligible":
+                return verdict
+            activity = max(activity, verdict.activity_ns)
+    finally:
+        _DEPENDENCIES.reset(token)
+    return _Verdict("eligible", activity_ns=activity, attempt=None, raw="")
+
+
+def _late_verdict_outcome(verdict) -> str:
+    if verdict.kind == "keep":
+        return "protected:" + verdict.reason
+    if verdict.kind in ("unknown", "deferred"):
+        return "defer:" + verdict.reason
+    return "activity:row-changed"
+
+
 # destructive-ok: reason=detach one expired worker home by pinned rename; boundary=one 32-hex leaf of homes/workers into homes/worker-retention/retiring
 def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw: str,
             first_ns: int, deadline: float | None = None, _rechecks: int = 0,
@@ -3092,15 +3201,11 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                 os.close(home)
             if (isinstance(rebound, _Verdict) or rebound != binding or found is None):
                 return "late-binding"
-            verdict = (_protections(current, key, attempt, probe_processes=False)
+            verdict = (_recheck_protections(current, key, (attempt,), watched)
                        if row is not None
                        else _orphan_protection(current, binding))
             if (row is not None and row.raw != raw) or verdict.kind != "eligible":
-                if verdict.kind == "keep":
-                    return "protected:" + verdict.reason
-                if verdict.kind in ("unknown", "deferred"):
-                    return "defer:" + verdict.reason
-                return "activity:row-changed"
+                return _late_verdict_outcome(verdict)
             ended = _ended_ns(row) if row is not None else None
             if ended is not None:
                 first_ns = max(first_ns, ended)
@@ -3289,6 +3394,356 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
         for fd in leaf_held:
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+# --- shared nested Codex owner homes -------------------------------------
+#
+# ``homes/codex/<worktree key>.<release key>`` is the CODEX_HOME nested Codex
+# owners of one worktree and release reuse. It follows the worker-home rule
+# for every attempt that claims it -- each registry row declaring it as its
+# runtime_home and the manifest identity -- and is retired only when every one
+# of them is eligible, the home itself is idle and no process can address it.
+# Detach takes the same locks, rename journal and removal as a worker home.
+
+
+def _codex_claims(snapshot: _Snapshot, root: Path, codex_real: str) -> dict[str, set[str]]:
+    claims: dict[str, set[str]] = {}
+    parents: dict[str, str] = {}
+    for attempt, row in snapshot.rows.items():
+        if "runtime_home=" not in row.fields[5]:
+            continue
+        name = _declared_home(root, codex_real, row.meta.get("runtime_home", ""), parents,
+                              name_re=CODEX_NAME_RE)
+        if name:
+            claims.setdefault(name, set()).add(attempt)
+    return claims
+
+
+def _codex_subject_id(name: str) -> str:
+    return "codex:" + name
+
+
+def _codex_leaf_key(name: str) -> str:
+    """A 32-hex retiring key, so journal recovery treats the leaf like any other."""
+    return hashlib.sha256(("codex\0" + name).encode()).hexdigest()[:32]
+
+
+def _codex_manifest_claims(ctx: _Context, name: str, claims: dict[str, set[str]]):
+    """(claimants, ident, newest entry mtime) or a verdict; reads one home by descriptor."""
+    try:
+        home = os.open(name, _DIR_FLAGS, dir_fd=ctx.layout.codex_fd)
+    except OSError:
+        return _Verdict("keep", "home-gone")
+    try:
+        st = os.fstat(home)
+        if st.st_uid != os.geteuid():
+            return _Verdict("unknown", "foreign-owner")
+        if _split_credential(home):
+            return _Verdict("keep", "split-credential")
+        try:
+            found = _read_json("worker-home.json", MAX_MANIFEST_BYTES, dir_fd=home)
+        except _Unreadable:
+            return _Verdict("unknown", "manifest-unreadable")
+        # The SQLite logs and session files change while an owner runs, without
+        # touching the home directory's own mtime.
+        newest = st.st_mtime_ns
+        with os.scandir(home) as listing:
+            for index, entry in enumerate(listing):
+                if index >= MAX_HOME_REFERENCE_ENTRIES:
+                    return _Verdict("unknown", "codex-home-over-limit")
+                newest = max(newest, entry.stat(follow_symlinks=False).st_mtime_ns)
+    finally:
+        os.close(home)
+    if found is None:
+        return _Verdict("unknown", "manifest-missing")
+    manifest = found[0]
+    if (manifest.get("harness") != "codex" or manifest.get("worker_type") != "owner"
+            or manifest.get("destination") is not True):
+        return _Verdict("unknown", "manifest-invalid")
+    claimants = set(claims.get(name, ()))
+    identity = manifest.get("identity")
+    if identity is not None:
+        if not isinstance(identity, str) or not ATTEMPT_RE.fullmatch(identity):
+            return _Verdict("unknown", "manifest-identity-invalid")
+        claimants.add(identity)
+    if not claimants:
+        return _Verdict("unknown", "codex-unclaimed")
+    return claimants, _identity(st) + [st.st_mtime_ns], newest
+
+
+def _codex_subjects(ctx: _Context, names, claims) -> list[dict]:
+    subjects = []
+    for name in names:
+        found = _codex_manifest_claims(ctx, name, claims)
+        if isinstance(found, _Verdict):
+            continue
+        related = set()
+        for attempt in found[0]:
+            related |= _candidate_related_attempts(ctx.root, ctx.snapshot, attempt)
+        subjects.append({"id": _codex_subject_id(name), "legacy": False,
+                         "related": sorted(related), "binding": None})
+    return subjects
+
+
+def _codex_examine(ctx: _Context, name: str, claims: dict[str, set[str]]):
+    """(verdict, ident, claimants) under the worker-home rule for every claimant."""
+    found = _codex_manifest_claims(ctx, name, claims)
+    if isinstance(found, _Verdict):
+        return found, None, None
+    claimants, ident, newest = found
+    ctx.delivery_subject_id = _codex_subject_id(name)
+    ctx.candidate_binding = None
+    try:
+        activity = newest
+        for attempt in sorted(claimants):
+            row = ctx.snapshot.rows.get(attempt)
+            if row is None:
+                return _Verdict("unknown", "claimant-row-missing"), None, None
+            claimed = row.meta.get("runtime_home", "")
+            if (claimed and _declared_home(ctx.root, ctx.codex_real, claimed,
+                                           name_re=CODEX_NAME_RE) != name):
+                return _Verdict("unknown", "runtime-home-conflict"), None, None
+            verdict = _protections(ctx, name, attempt, probe_processes=True)
+            if verdict.kind != "eligible":
+                return verdict, None, None
+            activity = max(activity, verdict.activity_ns, _ended_ns(row) or 0)
+    finally:
+        ctx.delivery_subject_id = None
+    # Every claimant's own processes were proven quiescent above, as for a
+    # worker home with a row. A process found naming the home still keeps it.
+    process, _reason = ctx.home_process_evidence(name, base=ctx.codex_real)
+    if process == "live":
+        return _Verdict("keep", "not-quiescent"), None, None
+    return _Verdict("eligible", activity_ns=activity, attempt=None, raw=""), ident, claimants
+
+
+# destructive-ok: reason=detach one expired shared nested Codex owner home by pinned rename; boundary=one <32-hex>.<12-hex> leaf of homes/codex into homes/worker-retention/retiring
+def _codex_detach(ctx: _Context, name: str, ident: list[int], claimants: set[str],
+                  idle_from: int, deadline: float) -> str:
+    """The worker-home final admission for a home every claimant shares."""
+    layout = ctx.layout
+    ctx.delivery_subject_id = _codex_subject_id(name)
+    ctx.candidate_binding = None
+    ctx.candidate_delivery_baseline = None
+    ctx.admission_scan = _NO_SCAN
+    leaf_held: list[int] = []
+    watched: dict = {}
+    try:
+        # Re-decide every claimant as a worker-home detach does: evidence
+        # outside the registry (replacement, route, supervisor state, the
+        # manifest) is read again here and must stay unchanged under the locks.
+        token = _DEPENDENCIES.set(watched)
+        try:
+            _track(ctx.root / "homes" / "codex" / name / "worker-home.json")
+        finally:
+            _DEPENDENCIES.reset(token)
+        found = _codex_manifest_claims(ctx, name, ctx.codex_claims)
+        if isinstance(found, _Verdict):
+            return _late_verdict_outcome(found)
+        if found[0] != claimants or found[1][:3] != ident:
+            return "late-binding"
+        verdict = _recheck_protections(ctx, name, claimants, watched)
+        if verdict.kind != "eligible":
+            return _late_verdict_outcome(verdict)
+        idle_from = max(idle_from, found[2], verdict.activity_ns)
+        late = _late_candidate_delivery_change(ctx, None, deadline)
+        if late is not None:
+            return _late_outcome(late, "delivery-refresh-budget")
+        baseline = ctx.candidate_delivery_baseline
+        if baseline is None:
+            return "late-evidence-unreadable"
+        with _registry_lock_until(ctx.jobs, deadline) as admitted:
+            if admitted is False:
+                return "registry-lock-busy"
+            with attempt_reference.admission(
+                    ctx.root, baseline.related, blocking=False) as reference_admitted:
+                if not reference_admitted:
+                    return "delivery-reference-busy"
+                final_deadline = min(deadline, time.monotonic() + 0.15)
+                for attempt in sorted(claimants):
+                    delta = _registry_delta_is_candidate_change(
+                        ctx.snapshot, ctx.jobs, name, attempt, ctx.codex_real,
+                        ctx.codex_claims, final_deadline, None, name_re=CODEX_NAME_RE)
+                    if delta is not False:
+                        return "late-evidence-changed"
+                if not _fresh(watched):
+                    return "late-evidence-changed"
+                with _flock(layout.ret_fd, "view.lock", fcntl.LOCK_EX | fcntl.LOCK_NB) as acquired:
+                    if not acquired:
+                        return "view-lock-busy"
+                    ctx.admission_scan = _admission_scan(ctx, deadline)
+                    if ctx.admission_scan is not None:
+                        return _late_outcome(ctx.admission_scan, "delivery-reread-budget")
+                    from dispatch_summary import home_consumer_evidence
+                    for attempt in sorted(claimants):
+                        row = ctx.snapshot.rows[attempt]
+                        lease = _lease_state(ctx.jobs, row.meta)
+                        if lease in ("held", "unknown"):
+                            return ("protected:" if lease == "held" else "defer:") + "lease-" + lease
+                        summary, _reason = home_consumer_evidence(row.meta)
+                        if summary in ("live", "unknown"):
+                            return ("protected:summary-live" if summary == "live"
+                                    else "defer:summary-owner-unknown")
+                    mark = _stat_mtime(name, dir_fd=layout.views_fd, follow_symlinks=False)
+                    if mark and ctx.now_ns - mark < IDLE_SECONDS * 10**9:
+                        return "recent-view"
+                    try:
+                        leaf = os.open(name, _DIR_FLAGS, dir_fd=layout.codex_fd)
+                    except OSError:
+                        return "home-gone"
+                    leaf_held.append(leaf)
+                    st = os.fstat(leaf)
+                    if _identity(st) != ident:
+                        return "identity-changed"
+                    try:
+                        fcntl.flock(leaf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return "protected:home-reader-active"
+                    except OSError:
+                        return "late-evidence-unreadable"
+                    if ctx.now_ns - max(idle_from, mark, st.st_mtime_ns) < IDLE_SECONDS * 10**9:
+                        return "late-activity"
+                    source_mount = _mount_id(layout.codex_fd)
+                    if (source_mount is None or source_mount != _mount_id(layout.retiring_fd)
+                            or _mount_id(leaf) != source_mount):
+                        return "mount-unproven"
+                    if not _fresh(watched):
+                        return "late-evidence-changed"
+                    late = _late_candidate_delivery_change(ctx, None, final_deadline)
+                    if late is not None:
+                        return _late_outcome(late, "delivery-reread-budget")
+                    key = _codex_leaf_key(name)
+                    retired = f"{key}.{ctx.now_ns}"
+                    journal = json.dumps({"schema": SCHEMA, "key": key, "name": retired,
+                                          "identity": ident, "codex_home": name},
+                                         sort_keys=True).encode()
+                    try:
+                        fd = os.open(retired + ".journal",
+                                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     0o600, dir_fd=layout.retiring_fd)
+                    except OSError:
+                        return "journal-failed"
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(journal)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.rename(name, retired, src_dir_fd=layout.codex_fd,
+                                  dst_dir_fd=layout.retiring_fd)
+                    except OSError:
+                        with contextlib.suppress(OSError):
+                            os.unlink(retired + ".journal", dir_fd=layout.retiring_fd)
+                        return "detach-failed"
+                    try:
+                        moved = os.stat(retired, dir_fd=layout.retiring_fd, follow_symlinks=False)
+                    except OSError:
+                        moved = None
+                    if moved is None or _identity(moved) != ident:
+                        with contextlib.suppress(OSError):
+                            os.unlink(retired + ".journal", dir_fd=layout.retiring_fd)
+                        return "detach-substituted"
+                    return "detached:" + retired
+    except attempt_reference.AttemptReferenceError:
+        return "late-evidence-unreadable"
+    except (OSError, _Unreadable):
+        return "late-evidence-unreadable"
+    finally:
+        ctx.delivery_subject_id = None
+        for fd in leaf_held:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _codex_pass(jobs: Path, root: Path, layout: _Layout, state: dict, snapshot: _Snapshot,
+                now_ns: int, budget: int, deadline: float) -> tuple[dict, set[str]]:
+    """One bounded pass over shared nested Codex owner homes, after worker homes."""
+    result = {"examined": 0, "eligible": 0, "removed": 0, "partial": 0, "kept": {}, "unknown": {}}
+    present: set[str] = set()
+    if layout.codex_fd is None:
+        return result, present
+    with os.scandir(layout.codex_fd) as listing:
+        for entry in listing:
+            try:
+                if (CODEX_NAME_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)
+                        and entry.stat(follow_symlinks=False).st_uid == os.geteuid()):
+                    present.add(entry.name)
+            except OSError:
+                continue
+    if not present or budget <= 0 or time.monotonic() > deadline:
+        return result, present
+    codex_state = state.setdefault("codex", {})
+    if not isinstance(codex_state, dict):
+        codex_state = state["codex"] = {}
+    since = codex_state.get("eligible_since")
+    since = {k: v for k, v in since.items() if k in present and type(v) is int} \
+        if isinstance(since, dict) else {}
+    cursor = codex_state.get("cursor") if isinstance(codex_state.get("cursor"), str) else ""
+    names = sorted(present)
+    batch = ([n for n in names if n > cursor] + [n for n in names if n <= cursor])[:EXAMINE_LIMIT]
+    ctx = _Context(jobs, root, layout, snapshot, now_ns)
+    ctx.codex_real = os.path.realpath(root / "homes" / "codex")
+    ctx.by_key = _declared_index(snapshot, root, ctx.workers_real)
+    ctx.codex_claims = _codex_claims(snapshot, root, ctx.codex_real)
+    examine_deadline = min(deadline, time.monotonic() + EXAMINE_BUDGET_SECONDS)
+    ctx.configure_delivery(codex_state, _codex_subjects(ctx, batch, ctx.codex_claims),
+                           examine_deadline)
+    due = []
+    scan = contextlib.ExitStack()
+    try:
+        from dispatch_contract import process_table_scan_scope
+        from dispatch_summary import provider_reference_scan_scope
+        scan.enter_context(process_table_scan_scope())
+        scan.enter_context(provider_reference_scan_scope())
+        for name in batch:
+            if time.monotonic() > examine_deadline or len(due) >= budget:
+                break
+            cursor = name
+            result["examined"] += 1
+            try:
+                verdict, ident, claimants = _codex_examine(ctx, name, ctx.codex_claims)
+            except Exception:  # noqa: BLE001 -- one bad home must not stall every pass
+                verdict, ident, claimants = _Verdict("unknown", "examine-error"), None, None
+            if verdict.kind != "eligible":
+                if verdict.kind == "keep":
+                    since.pop(name, None)
+                _count(result["unknown" if verdict.kind == "unknown" else "kept"], verdict.reason)
+                continue
+            result["eligible"] += 1
+            first = since.setdefault(name, now_ns)
+            mark = _stat_mtime(name, dir_fd=layout.views_fd, follow_symlinks=False)
+            idle_from = max(verdict.activity_ns, mark, ident[3])
+            if now_ns - idle_from >= IDLE_SECONDS * 10**9 and now_ns - first >= 0:
+                due.append((name, ident[:3], claimants, idle_from))
+            else:
+                _count(result["kept"], "within-window")
+    finally:
+        scan.close()
+    for name, ident, claimants, idle_from in due:
+        if time.monotonic() > deadline:
+            _count(result["kept"], "deferred")
+            break
+        outcome = _codex_detach(ctx, name, ident, claimants, idle_from, deadline)
+        if not outcome.startswith("detached:"):
+            if outcome.startswith("protected:") or outcome in ("home-gone", "identity-changed"):
+                since.pop(name, None)
+            _count(result["kept"], outcome)
+            continue
+        retired = outcome.split(":", 1)[1]
+        since.pop(name, None)
+        present.discard(name)
+        with contextlib.suppress(OSError):
+            # destructive-ok: reason=drop the view marker of a detached shared Codex home; boundary=one marker file directly under homes/worker-retention/views
+            os.unlink(name, dir_fd=layout.views_fd)
+        if _remove_leaf(layout, retired, ident, deadline) == "removed":
+            result["removed"] += 1
+        else:
+            result["partial"] += 1
+    if ctx.observation is not None:
+        ctx.observation.checkpoint()
+        if len(json.dumps(ctx.observation.data).encode()) > MAX_STATE_BYTES // 4:
+            codex_state.pop("delivery_observation", None)
+    codex_state.update(cursor=cursor, eligible_since=since)
+    return result, present
 
 
 # --- carriers ------------------------------------------------------------
@@ -3537,8 +3992,20 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 result["removed"] += 1
             else:
                 result["partial"] += 1
+    codex_present: set[str] = set()
+    if batch or layout.codex_fd is not None:
+        try:
+            codex_snapshot = snapshot if batch else _Snapshot(jobs)
+            result["codex"], codex_present = _codex_pass(
+                jobs, root, layout, state, codex_snapshot, now_ns, budget, deadline)
+            result["removed"] += result["codex"]["removed"]
+        except (OSError, _Unreadable) as exc:
+            result["codex"] = {"skipped": type(exc).__name__}
+            codex_present = None
     for name in _view_names(layout):
-        if name not in present:
+        if codex_present is None and CODEX_NAME_RE.fullmatch(name):
+            continue
+        if name not in present and name not in (codex_present or ()):
             with contextlib.suppress(OSError):
                 # destructive-ok: reason=drop a view marker whose home no longer exists; boundary=one marker file directly under homes/worker-retention/views
                 os.unlink(name, dir_fd=layout.views_fd)
@@ -3561,7 +4028,8 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
 def _view_names(layout: _Layout) -> list[str]:
     try:
         with os.scandir(layout.views_fd) as listing:
-            return [entry.name for entry in listing if KEY_RE.fullmatch(entry.name)]
+            return [entry.name for entry in listing
+                    if KEY_RE.fullmatch(entry.name) or CODEX_NAME_RE.fullmatch(entry.name)]
     except OSError:
         return []
 
@@ -3612,7 +4080,9 @@ def note_view(jobs, runtime_home, *, now: float | None = None) -> bool:
         parent, key = os.path.split(os.path.normpath(str(runtime_home)))
         resolved_parent = Path(parent).resolve(strict=True)
         workers = (root / "homes" / "workers").resolve(strict=False)
-        if resolved_parent != workers or not KEY_RE.fullmatch(key):
+        codex = (root / "homes" / "codex").resolve(strict=False)
+        shared = resolved_parent == codex and CODEX_NAME_RE.fullmatch(key) is not None
+        if not shared and (resolved_parent != workers or not KEY_RE.fullmatch(key)):
             home = os.stat(runtime_home, follow_symlinks=False)
             return stat.S_ISDIR(home.st_mode)
         now = time.time() if now is None else now
@@ -3620,7 +4090,10 @@ def note_view(jobs, runtime_home, *, now: float | None = None) -> bool:
             with _flock(layout.ret_fd, "view.lock", fcntl.LOCK_SH | fcntl.LOCK_NB) as held:
                 if not held:
                     return False
-                home = os.stat(key, dir_fd=layout.workers_fd, follow_symlinks=False)
+                home_fd = layout.codex_fd if shared else layout.workers_fd
+                if home_fd is None:
+                    return False
+                home = os.stat(key, dir_fd=home_fd, follow_symlinks=False)
                 if not stat.S_ISDIR(home.st_mode):
                     return False
                 marker = _read_regular(key, 1, dir_fd=layout.views_fd)

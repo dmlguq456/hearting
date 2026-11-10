@@ -66,11 +66,12 @@ prepared assets, without an auxiliary Node version probe. Native execution
 retains the existing display-ready boundary, exact binding and same-child
 input/relay ownership.
 
-The approved v3.3 shell opens as a right HEARTING work panel when space permits,
-with bottom placement at narrow widths. All four edges belong to Hearting and
-share its representative state color; never frame the native terminal itself.
-Use the terminal's neutral background, without tinted fills. Text and glyphs
-accompany state colors. Native permission UI remains native; idle alone means
+The approved v3.3 shell opens as a right HEARTING work panel when space permits
+(left by choice), with bottom placement at narrow widths. All four edges belong
+to Hearting and share its representative state color; never frame the native
+terminal itself. By default the panel uses the terminal's neutral background,
+without tinted fills; a chosen theme or shade recolors only the panel itself.
+Text and glyphs accompany state colors in every theme. Native permission UI remains native; idle alone means
 neither work complete nor failed. Unknown evidence stays unknown.
 The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
@@ -78,7 +79,7 @@ Keep the observed model/effort at the top (an unavailable effort is `?`) and
 compact session information at the bottom, never opportunistically in the
 middle. There is no separate session-details view: below the route and any
 question, the panel always paints the rest of the statusline (folder, title,
-full thread ID, branch with dirty, ahead/behind, worktrees and Git
+branch with dirty, ahead/behind, worktrees and Git
 observation, quota resets and running jobs), then peer news and the last
 input, each only in rows left after the question, and an item without a value
 is left out. Running jobs join the last session row when they fit. While a
@@ -119,14 +120,32 @@ Route details reuse the common route-visibility projection for shape, basis,
 tests, review, CI and completion evidence. Missing evidence is not a passing
 check. Bounded detail pages remain readable at narrow widths; opening them
 does not collect again or authorize an action.
-For the work panel, the managed Codex footer may yield duplicate paint only to
-its visible model, compact status and session rows, including the full thread
-ID, all actually painted. Exact native SID, unchanged
-managed configuration and matching native values are still required. Display
-availability does not establish selection or input authority.
+The panel paints no thread ID: sessions are told apart by their number and
+title. Inside the shell, Codex's footer field `thread-id` (the first
+`[tui].status_line` item) belongs to the shell and is not shown: a footer row
+holding only the ID (or the ID and a clip mark) is blanked, and otherwise only its leading ID cells are
+(with a working spinner, and an untitled thread's title, which repeats the ID).
+The value stays on the inner screen, where shell-wrapped identification and
+peer delivery read it. The rest of that row may yield duplicate paint only to
+the panel's visible model, compact status and session rows, all actually
+painted. Exact native SID, the help row beneath (or, while a draft hides it,
+the composer just above), an unchanged configuration
+with `thread-id` first and matching native values are still required. Display
+availability does not establish selection or input authority. A Codex window
+started without the shell keeps the ID visible, since that footer row is then
+the only place Hearting reads it.
 
 The header's settings change only Hearting's existing session-shell policy:
-side/bottom layout, side width, narrow-window behavior and auxiliary detail.
+side/bottom layout, panel position (right, the default, or left), side width,
+narrow-window behavior, auxiliary detail, theme and shade. One placement rule
+serves every harness. Themes are `terminal` (the default: the shared palette),
+`light` (darker hues for a light terminal) and `mono` (no hue; weight, glyphs
+and words remain). Shade is `none` (the default), `light` or `medium`: the
+panel's own background, painted with an explicit text color so it reads on
+either terminal background, in 256-color terminals and never under `NO_COLOR`.
+Neither recolors native space: the native area and Claude's status row keep
+their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
+default without disabling the shell.
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.
@@ -140,8 +159,9 @@ retain the normal input-occupied behavior. Native identity, idle/composer and
 effect-time checks still apply without a manual Escape step to wake the CLI.
 Respect a minimum native area; use configurable bounded bottom height at 80
 columns and preserve the same child through resize. No new global hotkey.
-OpenCode uses the same right and bottom HEARTING panel as Claude and Codex,
-with the same renderer, `layout`/`side_width` settings and content order. The
+OpenCode uses the same right (or chosen left) and bottom HEARTING panel as
+Claude and Codex, with the same renderer, settings (layout, position, width,
+theme, shade) and content order. The
 shell window hides OpenCode's own sidebar through its official CLI-config
 merge (`OPENCODE_CLI_CONFIG_CONTENT` with `session.sidebar: "hide"`, given only
 to the started shell's native child), so two right rails never appear; an

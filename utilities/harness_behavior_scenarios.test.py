@@ -131,6 +131,7 @@ class TidyContinueCaseTest(unittest.TestCase):
         compile(patched, "hb_fx.py", "exec")
         self.assertIn('"worker_type=frame"', patched)
         compile(tidy.SAMPLER, "continue-look-sampler", "exec")   # runs as `python3 -c`
+        compile(tidy.DRAFT_DIAG, "draft-diag", "exec")
 
 
 if __name__ == "__main__":

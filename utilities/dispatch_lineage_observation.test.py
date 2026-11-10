@@ -33,7 +33,9 @@ def ledger_copies(seat, row):
     return tuple(dict.fromkeys((tidy._native_ledger_path(logical), tidy._ledger_path(seat))))
 
 
-peer = fixture("lineage_peer_fixture", "utilities/peer_steward.test.py")
+peer = fixture("lineage_peer_fixture", "utilities/peer_steward_retire.test.py")
+# runner_discovery_observation.test.py also borrows from the other part.
+peer_prompt = fixture("lineage_peer_prompt_fixture", "utilities/peer_steward_prompt.test.py")
 steward = peer.peer_steward
 import dispatch_pending_delivery as pending
 import dispatch_seat_handover as handover

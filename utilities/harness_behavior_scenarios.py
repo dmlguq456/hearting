@@ -48,6 +48,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # another checkout (read-only) to measure that tree's uncommitted carriers.
 SOURCE = ROOT
 FIXTURE_MODEL = "hearting-fixture"
+# Further model ids the fixture lists (a scenario adds the ids its agents name).
+EXTRA_MODELS: list[str] = []
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 HARNESSES = ("claude", "codex", "opencode")
 NATIVE_ENV = {
@@ -220,9 +222,9 @@ class ModelFixture:
                 path = self.path.split("?")[0].rstrip("/")
                 if path.endswith("/models"):
                     body = json.dumps({"object": "list", "data": [{
-                        "id": FIXTURE_MODEL, "object": "model", "created": 0,
+                        "id": name, "object": "model", "created": 0,
                         "owned_by": "hearting-fixture", "type": "model",
-                        "display_name": FIXTURE_MODEL}]}).encode()
+                        "display_name": name} for name in (FIXTURE_MODEL, *EXTRA_MODELS)]}).encode()
                     self._send(200, body)
                     return
                 self._send(404, b"{}")
@@ -1080,21 +1082,19 @@ class Run:
                 self.evidence["hook_trust"] = self.home.trust_codex_hooks(binary)
             if SESSION_SHELL:
                 self.evidence["session_shell"] = enable_session_shell(self.home)
-            self.scenario.prepare(self)
-            argv = harness_argv(self.harness, binary) + list(
-                getattr(self.scenario, "extra_argv", lambda _harness: [])(self.harness))
-            if SURFACE == "herdr":
-                tui = PrivateHerdrTui(root, self.home.env, argv, self.home.workspace, self.harness)
-                self.surface = tui
-            else:
-                tui = PrivateTui(root, self.home.env, argv, self.home.workspace)
-            row["surface"] = SURFACE
-            self.tui = tui
+            self.binary = binary
             self.fixture = fixture
-            tui.start()
-            ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
-            self.evidence["ready"] = bool(ready)
-            self._dismiss_startup(tui)
+            self.scenario.prepare(self)
+            row["surface"] = SURFACE
+            if getattr(self.scenario, "needs_tui", True):
+                argv = harness_argv(self.harness, binary) + list(
+                    getattr(self.scenario, "extra_argv", lambda _harness: [])(self.harness))
+                tui = self.scenario.make_tui(self, root, argv)
+                self.tui = tui
+                tui.start()
+                ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
+                self.evidence["ready"] = bool(ready)
+                self._dismiss_startup(tui)
             verdict = self.scenario.drive(self)
             declared = declared_carrier(self.harness, self.scenario)
             if verdict == "gap" and declared:
@@ -1112,6 +1112,8 @@ class Run:
                     self.evidence["herdr_calls"] = tui.calls[-40:]
                     self.evidence["herdr_start"] = getattr(tui, "start_result", None)
                 tui.stop()
+            with contextlib.suppress(Exception):
+                self.scenario.cleanup(self)
             self.evidence["retired_fixture_pids"] = len(retire_fixture_processes(root))
             fixture.close()
             requests = fixture.requests
@@ -1197,6 +1199,22 @@ class Scenario:
     def prepare(self, run: Run):
         return None
 
+    # A headless scenario (``needs_tui = False``) drives the native CLI itself.
+    needs_tui = True
+
+    def make_tui(self, run: Run, root: Path, argv: list[str]):
+        """The terminal the TUI runs in: the selected ``--surface`` (a private
+        tmux server, or a private Herdr server for ``--surface herdr``)."""
+        if SURFACE == "herdr":
+            tui = PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
+            run.surface = tui
+            return tui
+        return PrivateTui(root, run.home.env, argv, run.home.workspace)
+
+    def cleanup(self, run: Run):
+        """Stop scenario-owned servers before the fixture processes are retired."""
+        return None
+
     def drive(self, run: Run) -> str:
         raise NotImplementedError
 
@@ -1242,7 +1260,11 @@ SCENARIOS = {cls.name: cls for cls in (BootScenario, ShellScenario)}
 
 
 def _load_extra():
-    """Register the behaviour scenarios defined in the companion modules."""
+    """Register the behaviour scenarios defined in the companion modules.
+
+    Name a new companion module by its topic (``harness_behavior_cases_<topic>.py``),
+    not the next letter: parallel branches picking the next letter collide.
+    """
     import importlib
     for path in sorted(Path(__file__).resolve().parent.glob("harness_behavior_cases*.py")):
         if path.name.endswith(".test.py"):

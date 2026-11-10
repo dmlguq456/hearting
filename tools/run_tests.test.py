@@ -1757,6 +1757,110 @@ class ExecutionPolicyFixture(unittest.TestCase):
         self.assertIn("--retries must be non-negative", errors)
 
 
+class RunDeadlineFixture(RunTestsFixtureBase):
+    """--timeout bounds one attempt; --deadline bounds the run. A hung suite
+    stops at the deadline, a suite not yet started is reported without
+    running, and the report is still written (2026-11-10: CI shard 5 held its
+    runner past the step limit and uploaded no report)."""
+
+    def test_deadline_stops_the_hung_suite_and_reports_the_unstarted_one(self):
+        write_suite(self.root, "a_hang.test.py", "import time\ntime.sleep(60)\n")
+        write_suite(self.root, "b_quick.test.py", """
+            from pathlib import Path
+            Path('b-ran').write_text('1')
+        """)
+        started = time.monotonic()
+        result, rows = self.run_fixture(
+            [], extra_args=["--jobs", "1", "--timeout", "30", "--deadline", "2", "--retries", "1"],
+        )
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(elapsed, 25, result.stdout)
+        by_suite = {row["suite_path"]: row for row in rows}
+        self.assertEqual(set(by_suite), {"a_hang.test.py", "b_quick.test.py"})
+        self.assertEqual({row["kind"] for row in rows}, {"deadline"})
+        self.assertEqual(by_suite["a_hang.test.py"]["detail"], "run-deadline=stopped")
+        self.assertEqual(by_suite["b_quick.test.py"]["detail"], "run-deadline=not-started")
+        self.assertFalse((self.root / "b-ran").exists())
+        self.assertIn('"event":"suite_not_started"', result.stdout)
+        self.assertRegex(result.stdout, r"hard-fail: b_quick\.test\.py::- verdict=TIMEOUT kind=deadline")
+
+    def test_a_timeout_baseline_does_not_absorb_the_run_deadline(self):
+        # RV-PR1478 [7b] counterexample 1: both suites allow their own timeout,
+        # yet one is cut by the run budget and the other never starts. That is
+        # an unfinished run, not two known failures.
+        write_suite(self.root, "a_hang.test.py", "import time\ntime.sleep(60)\n")
+        write_suite(self.root, "b_not_started.test.py", "")
+        baseline = [
+            f"{name}\t-\ttimeout\tisolated\tknown fixture timeout\tRV-TIMEOUT\t{TOMORROW}"
+            for name in ("a_hang.test.py", "b_not_started.test.py")
+        ]
+        result, rows = self.run_fixture(
+            baseline, extra_args=["--jobs", "1", "--deadline", "1", "--timeout", "30"],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        by_suite = {row["suite_path"]: row for row in rows}
+        self.assertEqual({row["verdict"] for row in rows}, {"TIMEOUT"})
+        self.assertEqual({row["kind"] for row in rows}, {"deadline"})
+        self.assertEqual(by_suite["b_not_started.test.py"]["detail"], "run-deadline=not-started")
+
+    def test_a_flaky_retry_cut_by_the_run_deadline_is_not_known_fail(self):
+        # RV-PR1478 [7b] counterexample 2: the first attempt passes, the retry
+        # is cut by the run budget. The aggregate names the cause.
+        write_suite(self.root, "flaky.test.py", """
+            from pathlib import Path
+            import time
+            p = Path('attempt-count')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            if n > 1:
+                time.sleep(60)
+        """)
+        result, rows = self.run_fixture(
+            [f"flaky.test.py\t-\ttimeout\tisolated\tflaky-timing: fixture\tRV-TIMEOUT\t{TOMORROW}"],
+            extra_args=["--jobs", "1", "--deadline", "1", "--timeout", "30", "--retries", "1"],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["verdict"], "TIMEOUT")
+        self.assertEqual(rows[0]["kind"], "deadline")
+        self.assertIn("outcomes=pass,deadline", rows[0]["detail"])
+        # Under host load the retry may find the budget already spent.
+        self.assertRegex(rows[0]["detail"], r"run-deadline=(stopped|not-started)")
+
+    def test_an_earlier_passing_retry_does_not_hide_a_later_deadline_cut(self):
+        # RV-PR1478-R2 [7b] residual: an unlisted suite fails, its first retry
+        # passes, its second retry is cut by the run budget. The pass must
+        # not turn the aggregate into FLAKY-PASS.
+        write_suite(self.root, "unlisted.test.py", """
+            from pathlib import Path
+            import sys, time
+            p = Path('attempt-count')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            if n == 1:
+                sys.exit(1)
+            if n >= 3:
+                time.sleep(60)
+        """)
+        result, rows = self.run_fixture(
+            [], extra_args=["--jobs", "1", "--timeout", "30", "--deadline", "5", "--retries", "2"],
+        )
+        self.assertEqual((self.root / "attempt-count").read_text(), "3", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["verdict"], "TIMEOUT")
+        self.assertEqual(rows[0]["kind"], "deadline")
+        self.assertIn("outcomes=fail,pass,deadline", rows[0]["detail"])
+        self.assertIn("policy=unlisted-serial-retry", rows[0]["detail"])
+        self.assertIn("run-deadline=stopped", rows[0]["detail"])
+
+    def test_a_non_positive_deadline_is_a_usage_error(self):
+        result = run_runner(["--root", str(self.root), "--deadline", "0"])
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("--deadline must be a positive", result.stderr)
+
+
 class RetryBudgetFixture(RunTestsFixtureBase):
     """P3: the serial retry pass is bounded in total, and the per-suite
     timeout still applies to every individual attempt."""
@@ -2857,6 +2961,40 @@ class ShardPartitionTest(unittest.TestCase):
         weights = self.mod.shard_weights(["a", "b", "new"], {"a": 2.0, "b": 8.0})
         self.assertEqual(weights["new"], 5.0)
         self.assertEqual(self.mod.shard_weights(["new"], {})["new"], 1.0)
+
+    def test_serial_suite_weighs_every_job_slot_it_keeps_idle(self):
+        serial = "utilities/hook_perf_budget.test.py"
+        self.assertIn(serial, self.mod.SERIAL_SUITES)
+        weights = self.mod.shard_weights([serial, "a.test.py"], {serial: 10.0, "a.test.py": 10.0}, 4)
+        self.assertEqual(weights, {serial: 40.0, "a.test.py": 10.0})
+        self.assertEqual(self.mod.shard_weights([serial], {serial: 10.0})[serial], 10.0)
+        # With four slots the serial suite fills a shard alone; 1 job would pair them.
+        self.assertEqual(self.mod.partition_shards([serial, "a.test.py", "b.test.py"],
+                                                   {serial: 10.0, "a.test.py": 6.0, "b.test.py": 6.0}, 2, 4),
+                         [[serial], ["a.test.py", "b.test.py"]])
+
+    def test_known_durations_start_the_longest_suite_first(self):
+        mod = self.mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            suites = [root / f"{name}.test.py" for name in ("a", "b", "c")]
+            for suite in suites:
+                suite.touch()
+            started = []
+
+            def fake_run_suite(suite, _root, _env, _profile, _timeout):
+                rel = suite.relative_to(root).as_posix()
+                started.append(rel)
+                return rel
+
+            with mock.patch.object(mod, "run_suite", side_effect=fake_run_suite):
+                ordered = mod.run_profile(suites, root, "isolated", 1, 5, None,
+                                          {"a.test.py": 1.0, "c.test.py": 9.0})
+                self.assertEqual(started, ["c.test.py", "b.test.py", "a.test.py"])
+                self.assertEqual(ordered, ["a.test.py", "b.test.py", "c.test.py"])
+                started.clear()
+                mod.run_profile(suites, root, "isolated", 1, 5, None)
+                self.assertEqual(started, ["a.test.py", "b.test.py", "c.test.py"])
 
     def test_more_shards_than_suites_leaves_empty_shards(self):
         shards = self.mod.partition_shards(["a.test.py"], {}, 3)
