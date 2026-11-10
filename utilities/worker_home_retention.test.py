@@ -6246,5 +6246,186 @@ print(json.dumps(r._directory_page(Path(sys.argv[2]),int(sys.argv[3]),3,time.mon
         self.assertNotIn("delivery-index-unknown", result["unknown"], result)
 
 
+class BusyRegistry(Fixture):
+    """Owners keep rewriting registry rows while a pass runs (2026-11-10 backlog).
+
+    Registry writers replace the file atomically with a rewritten tail
+    (`dispatch_contract_registry._atomic_registry_replace`). A change that does
+    not concern the candidate must not keep its home, however often it lands.
+    """
+
+    def replace_rows(self):
+        import dispatch_contract_registry as DCR
+        lines = []
+        for attempt, (status, meta) in self.rows.items():
+            pipe = ",".join(f"{k}={v}" for k, v in meta.items())
+            timestamp = self.timestamps.get(attempt) or datetime.fromtimestamp(
+                self.now / 10**9, timezone.utc).isoformat().replace("+00:00", "Z")
+            lines.append(f"{timestamp}\t{status}\t/repo\t/wt\t{attempt}\t{pipe}")
+        DCR._atomic_registry_replace(self.jobs, lines)
+
+    @contextlib.contextmanager
+    def every_lock(self, mutate):
+        """Run `mutate` before every registry lock a detach takes."""
+        original = R._registry_lock
+        fired = []
+
+        @contextlib.contextmanager
+        def lock(jobs):
+            fired.append(True)
+            mutate()
+            with original(jobs) as admitted:
+                yield admitted
+
+        with mock.patch.object(R, "_registry_lock", lock):
+            yield fired
+
+    def tick(self, attempt):
+        def mutate():
+            status, meta = self.rows[attempt]
+            meta = {**meta, "noise_tick": str(int(meta.get("noise_tick", "0")) + 1)}
+            self.rows[attempt] = (status, meta)
+            self.replace_rows()
+        return mutate
+
+    def test_repeated_unrelated_tail_rewrites_do_not_keep_the_home(self):
+        home = self.add("att-busy-candidate")
+        self.row("att-busy-noise", "running")
+        self.sweep(0)
+        with self.every_lock(self.tick("att-busy-noise")) as fired:
+            result = self.sweep(8 / 7)
+        self.assertGreaterEqual(len(fired), 2, result)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(home.exists())
+
+    def test_rewrite_of_the_candidate_row_keeps_the_home(self):
+        home = self.add("att-busy-rewritten")
+        self.row("att-busy-other", "running")
+        self.sweep(0)
+        with self.every_lock(self.tick("att-busy-rewritten")):
+            result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 0, result)
+        self.assertTrue(home.exists())
+
+    def test_rewrite_without_lineage_still_defers_instead_of_guessing(self):
+        home = self.add("att-busy-unproven")
+        self.row("att-busy-noise", "running")
+        self.sweep(0)
+
+        def mutate():
+            self.tick("att-busy-noise")()
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(self.jobs) + ".lineage.json")
+
+        with self.every_lock(mutate):
+            result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 0, result)
+        self.assertTrue(home.exists())
+        self.sweep(16 / 7)
+        self.assertFalse(home.exists())
+
+    def test_late_row_naming_the_candidate_keeps_the_home(self):
+        home = self.add("att-busy-parent")
+        self.sweep(0)
+        with self.landing(lambda: self.append_row(
+                "att-busy-child", "done", parent_attempt_id="att-busy-parent")):
+            result = self.sweep(8 / 7)
+        self.assertEqual(result["removed"], 0, result)
+        self.assertTrue(home.exists())
+        # The next pass judges the row it now sees; the deferral is not a keep.
+        self.sweep(16 / 7)
+        self.assertFalse(home.exists())
+
+    def test_homes_removed_by_hand_in_eligible_since_neither_stop_nor_fail_a_pass(self):
+        home = self.add("att-busy-survivor")
+        self.sweep(0)
+        state = self.state()
+        gone = {("%032x" % n): self.now for n in range(1, 1500)}
+        state["eligible_since"].update(gone)
+        (self.root / "homes/worker-retention/state.json").write_text(json.dumps(state))
+        result = self.sweep(8 / 7)
+        self.assertNotIn("skipped", result)
+        self.assertEqual(result["removed"], 1, result)
+        self.assertFalse(home.exists())
+        self.assertEqual(self.state()["eligible_since"], {})
+
+    def test_route_observer_fences_the_registry_by_rows_not_by_file_stamp(self):
+        watched = {}
+        token = R._DEPENDENCIES.set(watched)
+        try:
+            R._route_observer("file", self.jobs.resolve(), self.jobs.resolve())
+        finally:
+            R._DEPENDENCIES.reset(token)
+        self.assertNotIn(self.jobs.resolve(), watched)
+        self.replace_rows()
+        self.assertTrue(R._fresh(watched))
+
+
+class SharedCodexHomes(Fixture):
+    """Nested Codex owner homes follow the worker-home rule for every claimant."""
+
+    def codex_home(self, name="c" * 32 + "." + "d" * 12, identity="att-codex-owner"):
+        path = self.root / "homes" / "codex" / name
+        path.mkdir(parents=True)
+        manifest = {"harness": "codex", "worker_type": "owner", "source": SOURCE,
+                    "profile": None, "schema": 2, "key": "e" * 32, "destination": True}
+        if identity:
+            manifest["identity"] = identity
+        (path / "worker-home.json").write_text(json.dumps(manifest))
+        (path / "sessions").mkdir()
+        (path / "sessions" / "rollout.jsonl").write_text("x" * 100)
+        return path
+
+    def claim(self, attempt, path, status="done"):
+        self.row(attempt, status, harness="codex", worker_type="owner",
+                 runtime_home=str(path))
+
+    def test_home_whose_claimants_all_ended_is_retired(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.claim("att-codex-second", home)
+        result = self.expire()
+        self.assertEqual(result["codex"]["removed"], 1, result)
+        self.assertFalse(home.exists())
+        self.assertEqual(list((self.root / "homes/worker-retention/retiring").iterdir()), [])
+
+    def test_one_running_claimant_keeps_the_shared_home(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.claim("att-codex-running", home, status="running")
+        result = self.expire((30) / 7)
+        self.assertEqual(result["codex"]["removed"], 0, result)
+        self.assertTrue(home.is_dir())
+
+    def test_unclaimed_or_foreign_shaped_homes_are_kept(self):
+        unclaimed = self.codex_home(identity=None)
+        legacy = self.root / "homes" / "codex" / ("a" * 32)
+        legacy.mkdir()
+        old = (self.now - int(100 / 7 * RETENTION_NS)) / 1e9
+        for path in (unclaimed, legacy):
+            os.utime(path, (old, old))
+        result = self.expire((30) / 7)
+        self.assertEqual(result["codex"]["unknown"].get("codex-unclaimed"), 1, result)
+        self.assertTrue(unclaimed.is_dir() and legacy.is_dir())
+
+    def test_recent_session_write_and_fleet_view_keep_the_home(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.sweep(0)
+        later = (self.now + int(8 / 7 * RETENTION_NS)) / 1e9
+        os.utime(home / "sessions", (later, later))
+        result = self.sweep(8 / 7)
+        self.assertEqual(result["codex"]["removed"], 0, result)
+        viewed = (self.now + int(15 / 7 * RETENTION_NS)) / 1e9
+        self.assertTrue(R.note_view(self.jobs, str(home), now=viewed))
+        self.assertTrue((self.root / "homes/worker-retention/views" / home.name).is_file())
+        result = self.sweep(16 / 7)
+        self.assertEqual(result["codex"]["removed"], 0, result)
+        self.assertTrue(home.is_dir())
+        result = self.sweep(24 / 7)
+        self.assertEqual(result["codex"]["removed"], 1, result)
+        self.assertFalse((self.root / "homes/worker-retention/views" / home.name).exists())
+
+
 if __name__ == "__main__":
     unittest.main()
