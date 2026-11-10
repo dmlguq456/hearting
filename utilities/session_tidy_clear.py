@@ -1332,7 +1332,8 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                 "continue_off": bool(no_continue or inherit_stop),
                 "snapshot_state": ("deferred" if compact else "pending")
                 if seat.kind in ("pane", "native") else "not-applicable"}
-            if seat.kind == "pane" and harness == "codex":
+            if seat.kind == "pane" and (harness == "codex" or seat.socket_path):
+                # Every harness's helper reaches the pane's own Herdr endpoint.
                 booking["herdr_transport"] = {"socket_path": str(seat.socket_path or "")}
             if compact:
                 identity = operation_id or compact.get("identity")

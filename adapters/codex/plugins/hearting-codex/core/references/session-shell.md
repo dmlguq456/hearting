@@ -1,10 +1,25 @@
 # Optional session shell
 
 **Optional session shell.** Hearting may wrap an interactive native terminal
-with a shared status line and an expanded session block. Installation leaves
-this feature off; enabling it is a separate user choice. Noninteractive commands
+with a shared status line and an expanded session block. New global installations enable
+this feature by default for Claude, Codex and OpenCode. Updates preserve existing
+choices, including an absent policy on older installations. Use `hearting session
+shell disable` to restore native launch behavior, or `hearting session shell
+enable` to enable it again. Noninteractive commands
 and an unavailable shell runtime execute the original CLI without starting a
 second native session. Herdr, cmux and tmux remain optional attachments.
+
+A wrapped pane is its native session's seat. The one attachment whose PTY owner
+(with its exact birth) leads the pane's foreground names the native process and
+session; retire, session tidy and agent discovery use that join once instead of
+re-proving it per step. Draft, form and footer judgments read the native screen
+the host parses, not the framed pane, and the host's lifecycle state stands in
+where a runtime keeps no turn record of its own. The seat is exiting, not gone,
+until its PTY owner leaves the pane. When OpenCode returns to its home route the
+seat stays published as session `-`, which no session lookup can match.
+Protections stay: an empty composer and idle turn before any input, Codex input
+only to the thread the TUI currently selects, Claude's own record naming the
+attachment's session, and no seat for a service or registered worker.
 
 The delivery address is the exact `(harness, native session ID)`, never a pane
 or a display tag. A Fleet tag selects that identity once; subsequent tag or

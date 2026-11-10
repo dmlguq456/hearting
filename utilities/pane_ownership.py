@@ -44,10 +44,25 @@ _CODEX_KEY_LABEL = (r"(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*"
                     r"(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])")
 _CODEX_COMPACT_FOOTER_HINT_RE = re.compile(
     _CODEX_KEY_LABEL + r"(?: " + _CODEX_KEY_LABEL + r")? for agents(?![0-9A-Za-z])")
+# The help-row-less status line: a whole thread-id first, a Context field later.
+_CODEX_STATUS_ONLY_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} · (?:[^·]* · )*Context \d{1,3}% used(?: ·|$)")
 # A thread-id the TUI clipped at the right edge of the status line.
 _CLIPPED_THREAD_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f-]{0,27}…")
 _WORKER_ENV = ("AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH", "OPENCODE_DISPATCH_SLUG",
                "FLEET_TITLE_REFRESH", "MEM_DISTILL")
+
+
+def _codex_status_only(row):
+    """Codex 0.163's help-row-less status line: whole thread-id first, then a
+    Context field or the same thread-id clipped at the right edge."""
+    fields = [field.strip() for field in row.split("·")]
+    if len(fields) < 2 or not _THREAD_ID_RE.fullmatch(fields[0]):
+        return False
+    if _CODEX_STATUS_ONLY_RE.match(row):
+        return True
+    clipped = fields[-1]
+    return bool(_CLIPPED_THREAD_ID_RE.fullmatch(clipped) and fields[0].startswith(clipped[:-1]))
 
 
 def _codex_current_footer(lines):
@@ -67,7 +82,12 @@ def _codex_current_footer(lines):
     if any(token in flat for token in _CODEX_LOCATION_MENU):
         return "invalid", ""
     hint_row = "".join(tail[-1].lower().split()) if tail else ""
-    if not any(token in hint_row for token in _CODEX_FOOTER_HINT):
+    if len(tail) == 1 and _codex_status_only(tail[0]):
+        # Codex 0.163 draws a configured status line with no help row under an
+        # idle composer: the composer is followed only by that status line,
+        # whose first field is the whole thread-id and which carries Context.
+        tail = [tail[0], ""]
+    elif not any(token in hint_row for token in _CODEX_FOOTER_HINT):
         # The compact hint counts only in the exact status/help-row layout.
         if len(tail) != 2 or not _CODEX_COMPACT_FOOTER_HINT_RE.match(tail[-1]):
             return "none", ""
@@ -796,6 +816,57 @@ def _same_socket_endpoint(owner_socket, requested_socket, server):
     return os.path.realpath(owner_socket) == os.path.realpath(requested)
 
 
+def _shell_seat_pane(pane, harness, sid, pid, *, executable, server=None, socket_path=None,
+                     tmux=None):
+    """``pane`` when its session-shell seat is the caller's session, ``""`` when the
+    seat belongs to someone else, None when the pane is not a shell seat.
+
+    The seat join (``session_shell.pane_seat``) already proves the pane's foreground
+    owns the attachment and the native TUI's birth. The caller is that seat when its
+    nearest runtime is the attachment's native TUI or a service it started (OpenCode
+    runs tools in its own child server), or a shared Codex daemon caller naming the
+    attachment's thread. Nothing else is re-proved here.
+    """
+    if not pane or harness not in {"claude", "codex", "opencode"}:
+        return None
+    try:
+        import session_shell
+        if not session_shell.bindings(harness=harness):
+            return None
+        info = _pane_process_info(pane, executable=executable, server=server,
+                                  socket_path=socket_path, tmux=tmux)
+        binding = session_shell.pane_seat(info, harness)
+        if binding is None:
+            return None
+        caller = os.getpid() if pid is None else int(pid)
+        if _registered_worker(caller):
+            return ""
+        own, service = _caller_runtime(caller, harness)
+        target = sid or (os.environ.get("CODEX_THREAD_ID", "") if harness == "codex" else "")
+        if own is None or (target and binding["sid"] != target):
+            return ""
+        native = binding["native_pid"]
+        if _runtime(native) != (harness, False) or _registered_worker(native):
+            return ""  # a service or registered worker behind the shell is no user seat
+        # Protection, not re-proof: Codex input belongs only to the thread the TUI
+        # selects now (a shared daemon retains roots; /new keeps the old SID until
+        # the next start hook), and a proven different native session wins.
+        if harness == "codex" and not session_shell._codex_current_root(
+                native, binding["native_start"], binding["sid"]):
+            return ""
+        if harness == "claude" and _native_session(native, harness) != binding["sid"]:
+            return ""  # Claude's own record: a parked or reselected TUI no longer owns it
+        if own[0] == native and not service:
+            return str(pane)
+        if service and (harness == "opencode" and session_shell._descends(own[0], native)
+                        or harness == "codex" and target == binding["sid"]):
+            return str(pane)
+        return ""
+    except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError,
+            AttributeError, KeyError):
+        return None
+
+
 def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=None,
                   socket_path=None, codex_observation=None, tmux=None):
     """Return the hinted pane only with a live physical or exact session binding.
@@ -814,6 +885,10 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
     executable = _pane_reader(pane, executable)
     if not executable and not (harness == "codex" and not pane and shutil.which("tmux")):
         return ""
+    seat = _shell_seat_pane(pane, harness, sid, pid, executable=executable, server=server,
+                            socket_path=socket_path, tmux=tmux)
+    if seat is not None:
+        return seat
     if harness == "codex":
         try:
             caller_pid = os.getpid() if pid is None else int(pid)
@@ -847,14 +922,6 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
         own, service = _caller_runtime(os.getpid() if pid is None else pid, harness)
         if not own:
             return ""
-        if (harness == "claude" and sid and not service
-                and not _registered_worker(os.getpid() if pid is None else pid)):
-            selected = _wrapped_native_session(pane, harness, own[0], sid,
-                executable=executable, server=server, socket_path=socket_path,
-                info=info, tmux=tmux)
-            if (selected == sid and _process(own[0]) == own
-                    and not _registered_worker(os.getpid() if pid is None else pid)):
-                return str(pane)
         for item in info.get("foreground_processes") or []:
             foreground = _process(item.get("pid")) if isinstance(item, dict) else None
             if not foreground or not foreground[3] or foreground[2] != group or foreground[4] != group:

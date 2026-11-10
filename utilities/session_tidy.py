@@ -824,7 +824,11 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
         from terminal_surface import is_tmux_pane
         endpoint = "" if is_tmux_pane(pane) else _endpoint_scope(env if live_caller else {})
         key = _digest("pane", endpoint, pane) if endpoint else _digest("pane", pane)
-        return session_seat(Seat("pane", key, pane, harness or "", "", endpoint=endpoint),
+        # The pane's Herdr endpoint travels with the seat for every harness, so the
+        # detached clear helper reaches the same (possibly named) server.
+        transport = str(env.get("HERDR_SOCKET_PATH") or "") if live_caller and endpoint else ""
+        return session_seat(Seat("pane", key, pane, harness or "", "", endpoint=endpoint,
+                                 socket_path=transport),
                             harness or "", sid or "")
     from session_tidy_native import caller_target
     native = caller_target(harness, env)

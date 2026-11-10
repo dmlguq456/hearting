@@ -1002,5 +1002,25 @@ finally:
                 self.assertFalse(po.verified_terminal_caller({**info, "tty": tty}, pid=pid))
 
 
+class CodexStatusOnlyFooterTest(unittest.TestCase):
+    """Codex 0.163 draws a configured status line with no help row (PG-9 tidy)."""
+    T = "01a1c520-2193-71f0-a79c-b1fb86bd1a21"
+
+    def test_status_line_alone_under_the_composer_names_the_thread(self):
+        for row in (f"  {self.T} · {self.T} · master · Context 0% used · gpt default",
+                    f"  {self.T} · proj · Context 12% used",
+                    f"  {self.T} · {self.T[:-3]}…"):
+            with self.subTest(row=row):
+                self.assertEqual(po._codex_current_footer(["› Ask Codex to do anything", row]),
+                                 ("current", self.T))
+
+    def test_other_single_rows_supply_no_identity(self):
+        other = "99a1c520-2193-71f0-a79c-b1fb86bd1a21"
+        for row in (f"  text mentioning {self.T}", f"  {self.T} · master",
+                    f"  {self.T} · {other[:20]}…", f"  title · {self.T} · Context 1% used"):
+            with self.subTest(row=row):
+                self.assertEqual(po._codex_current_footer(["› Ask Codex", row]), ("none", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

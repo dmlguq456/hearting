@@ -1,7 +1,7 @@
-"""Explicit opt-in PATH attachment; native executables and user config stay intact.
+"""Create-once PATH attachment; native executables and user config stay intact.
 
 Only our private launcher directory and one exact profile block are owned here.
-Installation/updates call ensure; absent policy makes that call mutation-free.
+First global installs seed the default; updates preserve an absent policy.
 """
 from __future__ import annotations
 import hashlib
@@ -157,9 +157,13 @@ def prepare_assets(*, dry_run=False):
     return target
 
 
-def ensure(*, dry_run=False, enabled=None):
+def ensure(*, dry_run=False, enabled=None, default_enabled=False):
     client = _client()
-    selected = client.policy()[0] if enabled is None else enabled
+    # Presence is a user choice, even if invalid or unreadable. Seed only the
+    # exact absent leaf observed before preparing assets and launchers.
+    policy_before = safe_fs.capture_state(client.policy_path())
+    seed_default = default_enabled and policy_before.kind == "missing" and enabled is None
+    selected = (True if seed_default else client.policy()[0]) if enabled is None else enabled
     if not selected:
         return {"status": "disabled", "changed": False}
     # Validate every owned surface before publishing any launcher or policy.
@@ -178,6 +182,8 @@ def ensure(*, dry_run=False, enabled=None):
             if before.kind != "file" or launcher.read_bytes() != data:
                 _write(launcher, data, 0o755, expected=before)
         profile = _profile(True)
+        if seed_default:
+            _write(client.policy_path(), b'{"enabled":true}\n', expected=policy_before)
     return {"status": "planned" if dry_run else "enabled", "changed": profile["changed"],
             "assets": str(assets), "profile": profile, "launchers": [str(row[0]) for row in planned]}
 

@@ -249,3 +249,8 @@ evidence, not liveness. See [Claude background Bash documentation](https://code.
 Hearting records the exact native session's compaction boundary only. Native compact hooks add no card instructions, card or memory request, clear, or automatic continuation. Registered workers retain their separate stage-ledger flush and re-anchor behavior.
 
 Manual `정리만` / `--no-clear` saves the card and queues memory work while retaining the conversation. It does not shrink context or prevent native automatic compaction.
+
+New installations enable the shared session shell for new Claude, Codex and OpenCode
+terminals. Updates preserve existing choices and older absent policies. Use
+`hearting session shell disable` to restore native launch behavior, or
+`hearting session shell enable` to enable it again. Existing sessions keep running.
