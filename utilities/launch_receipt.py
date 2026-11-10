@@ -139,3 +139,74 @@ def attempt_lines(args, *, jobs, registry_source: str, action: str, launch_state
     else:
         lines.append("early_death=-")
     return lines
+
+
+def identity_lines(args, action: str, *, after_scope: Iterable[str] = ()) -> Iterable[str]:
+    """The launch's dispatch identity, from its action through its parent slug."""
+    yield f"status={action}"
+    yield f"worktree={args.worktree}"
+    yield f"artifact_root={args.artifact_root}"
+    yield "artifact_write_scope=canonical-only"
+    yield from after_scope
+    yield f"slug={args.slug}"
+    yield f"capability={args.capability}"
+    yield f"capability_mode={args.capability_mode}"
+    yield f"worker_mode={args.worker_mode or '-'}"
+    yield f"qa={args.qa}"
+    yield f"intensity={args.intensity}"
+    yield f"dispatch_depth={args.dispatch_depth}"
+    yield f"eligibility_probe={getattr(args, 'eligibility_probe', None) or '-'}"
+    yield f"parent={args.parent_slug or '-'}"
+
+
+def worker_lines(args) -> Iterable[str]:
+    """The worker's role, contract, owner and route."""
+    yield f"worker_role={args.worker_role or '-'}"
+    yield f"worker_type={args.worker_type}"
+    yield f"assigned_contract={args.assigned_contract}"
+    yield f"unit={args.unit or '-'}"
+    yield f"owner={args.capability_owner or '-'}"
+    yield f"owner_harness={args.owner_harness or '-'}"
+    yield f"route_file={args.route_file or '-'}"
+    yield f"route_validation={getattr(args, 'route_validation', None) or '-'}"
+
+
+def model_lines(args, settings, *, config_state, main_session_only_policy,
+                after_source=lambda: ()) -> Iterable[str]:
+    """The resolved model selection, from its source through the model name.
+
+    The callables are read at the line they print, as the wrappers did inline.
+    """
+    yield f"model_source={settings['source']}"
+    yield from after_source()
+    yield f"model_pin_status={settings.get('pin_status', 'none')}"
+    if getattr(args, 'explicit_adapter', None):
+        yield f"explicit_adapter={args.explicit_adapter}"
+    if settings.get("pin_model"):
+        yield f"model_pin={settings['pin_model']}"
+    yield f"model_role={settings['role']}"
+    yield f"model_profile={settings['profile']}"
+    yield f"model_tier={settings['tier']}"
+    config_source, config_reason = config_state()
+    yield f"model_config_source={config_source}"
+    yield f"model_config_reason={config_reason}"
+    yield f"profile_granularity={settings['granularity']}"
+    yield f"main_session_only_policy={main_session_only_policy()}"
+    for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
+        yield f"{key}={value}"
+    yield f"model={settings['model']}"
+
+
+def leg_lines(args, *, leg_fields) -> Iterable[str]:
+    """The route node's leg and the parent's cross-harness and sole-gate markers."""
+    leg_class, auxiliary_check = leg_fields(args)
+    yield f"leg_class={leg_class}"
+    yield f"auxiliary_check={auxiliary_check}"
+    yield f"parent_cross={os.environ.get('AGENT_DISPATCH_PARENT_CROSS', '-')}"
+    yield f"sole_gate={os.environ.get('AGENT_DISPATCH_SOLE_GATE', '-')}"
+
+
+def prompt_lines(prompt_source: str, prompt_path, log_path) -> Iterable[str]:
+    yield f"prompt_source={prompt_source}"
+    yield f"prompt_file={prompt_path}"
+    yield f"log_file={log_path}"
