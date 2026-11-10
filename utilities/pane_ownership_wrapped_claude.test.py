@@ -92,6 +92,25 @@ class WrappedClaudeSeatTest(unittest.TestCase):
                      native_pid=self.host["pid"], native_start=self.host["start"])
         self.assertEqual(self.verify(), "")
 
+    def test_role_change_at_final_observation_is_not_a_caller_pane(self):
+        for mode in ("service", "registered-worker"):
+            with self.subTest(mode=mode):
+                switched, observations = False, 0
+                def observe(*args, **kwargs):
+                    nonlocal switched, observations
+                    observations += 1
+                    if observations == 2:
+                        switched = True
+                    return self.info
+                def runtime(pid):
+                    return ("claude", switched and mode == "service") if pid == self.native["pid"] else ("", False)
+                with mock.patch.object(po, "_pane_process_info", side_effect=observe), \
+                     mock.patch.object(po, "_runtime", side_effect=runtime), \
+                     mock.patch.object(po, "_registered_worker", side_effect=lambda pid:
+                                       switched and mode == "registered-worker"):
+                    self.assertEqual(self.verify(), "")
+                self.assertEqual(observations, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

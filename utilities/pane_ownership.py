@@ -581,6 +581,9 @@ def _wrapped_native_session(pane, harness, pid=None, session_id=None, *, executa
                     if harness == "codex" else _native_session(inner, harness) == binding["sid"])
         if not selected:
             return ""
+        if harness == "claude" and (_runtime(inner) != (harness, False)
+                                     or _registered_worker(inner)):
+            return ""
         return binding["sid"] if _process(inner) == record else ""
     except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError,
             AttributeError, KeyError):
@@ -848,7 +851,8 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
             selected = _wrapped_native_session(pane, harness, own[0], sid,
                 executable=executable, server=server, socket_path=socket_path,
                 info=info, tmux=tmux)
-            if selected == sid and _process(own[0]) == own:
+            if (selected == sid and _process(own[0]) == own
+                    and not _registered_worker(os.getpid() if pid is None else pid)):
                 return str(pane)
         for item in info.get("foreground_processes") or []:
             foreground = _process(item.get("pid")) if isinstance(item, dict) else None
