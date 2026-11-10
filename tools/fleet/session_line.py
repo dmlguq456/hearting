@@ -36,8 +36,12 @@ def _remaining(reset):
     return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
 
 
-def line_segments(values, columns, *, complete=False):
+def line_segments(values, columns, *, complete=False, reported_only=False):
     """Shorten words before losing a known count; never invent an unknown value.
+
+    ``reported_only`` leaves out the context and quota readings the native
+    callback has not reported yet (Claude sends them only after its first
+    response), as the native statusline did, instead of painting ``?``.
 
     Input is the same observed Session fields plus the shared question/route
     projection and the account's seven-day window. Exact native display telemetry
@@ -92,11 +96,13 @@ def line_segments(values, columns, *, complete=False):
     percent = values.get("ctx_pct")
     level = _level(percent)
     gauge = []
+    unreported = reported_only and _percent(percent) == "?"
     if _percent(percent) != "?":
         filled = max(0, min(10, _half_up(percent / 10)))
         gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
-    words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
-          cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
+    if not unreported:
+        words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
+              cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
     from .token_budget import compaction_imminent
     if compaction_imminent(values.get("compaction_pressure")):
         from .config import ui_text
@@ -104,7 +110,10 @@ def line_segments(values, columns, *, complete=False):
         words("compaction", warning, "lvl_r", cell_width(warning), 99,
               minimum=cell_width(warning))
     words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
-    for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
+    windows = values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]
+    if reported_only:
+        windows = [window for window in windows if _percent(window[1]) != "?"]
+    for label, used, reset in windows:
         remaining = _remaining(reset)
         words("quota", _percent(used), _level(used) if used is not None else "dim", 8, 99,
               before=[(_text(label) + " ", "dim")],
@@ -176,9 +185,9 @@ def wrap_segments(parts, columns):
 
 
 
-def status_lines(values, columns, *, wrap_long=False):
+def status_lines(values, columns, *, wrap_long=False, reported_only=False):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000, complete=True)
+    parts = line_segments(values, 10000, complete=True, reported_only=reported_only)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):
@@ -276,7 +285,7 @@ def claude_native_statusline(callback, environ):
     # Every field stays in this row on every callback. While the visible panel
     # paints these values, the shell blanks exactly this recorded output; if the
     # panel goes away, the native row is already complete.
-    rows = [clip_segments(line, columns) for line in status_lines(values, columns)]
+    rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
     return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
 
@@ -411,6 +420,22 @@ def claude_first_statusline(callback, environ, script):
                     for key,value in (old.get('hearting_display') or {}).items():
                         if isinstance(value,str) and key in _CLAUDE_DISPLAY_FIELDS:env[key]=value
         except (OSError,ValueError,TypeError):pass
+    # The same shared Git observation the full callback reads: a file read, no
+    # Git command. A new session has no retained display yet, and Claude only
+    # calls again on its first response or refreshInterval.
+    try:
+        from . import gitinfo
+        workspace=callback.get('workspace') if isinstance(callback.get('workspace'),dict) else {}
+        cwd=callback.get('cwd') or workspace.get('current_dir')
+        if isinstance(cwd,str) and cwd:
+            project=workspace.get('project_dir') if isinstance(workspace.get('project_dir'),str) else None
+            observed=gitinfo.cached_display(cwd,request=False,project_dir=project or cwd)
+            if observed is not None:
+                for key,item in gitinfo.display_fields(observed).items():
+                    if 'git_'+key in _CLAUDE_DISPLAY_FIELDS:
+                        text='unknown' if item is None else str(item)
+                        env['git_'+key]=''.join(c for c in text if c>=' ' and c!='\x7f')
+    except (OSError,ValueError,TypeError,ImportError):pass
     # Preserve the same native PID/SID and birth check when the finite refresh
     # outlives this short native callback shell.
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'utilities'))

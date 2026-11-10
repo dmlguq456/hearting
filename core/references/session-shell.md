@@ -175,7 +175,11 @@ While wrapped, Claude's panel shows the common status area in the same place
 and with the same formatter as Codex and OpenCode. Claude keeps its reserved
 statusline row and keeps running its callback, which stays the value source and
 paints every former Hearting field with that formatter on every callback; the
-panel never shortens it. Only while the panel actually paints its model and
+panel never shortens it. Its first callback at session start reads the same
+shared Git observation as later callbacks, so folder, branch and model show
+before the first input; context and quota readings Claude has not reported yet
+(it sends them after its first response) are left out, as the native statusline
+did, rather than shown as `?`. Only while the panel actually paints its model and
 compact status for the callback's exact session does the shell blank Claude's
 statusline area, the rows directly under the input box, when their text equals
 the callback's latest recorded output. A screen without that input box, such
