@@ -662,7 +662,8 @@ recorded reason.
 For material work, the main agent shows the intent sealed at compose and the
 user confirms it before capability execution begins. The agent writes the
 prompt file's leading intent lines from the request and recovered context
-(Sealed intent, below); compose adds the person's words and prints them as
+(Sealed intent, below); compose adds the person's words explicitly quoted
+in that route's task and prints them as
 `[의도]` lines. The card shows those same values, so the user reviews a
 completed proposal rather than recalling capability names, invocation syntax,
 or pipeline options, and the card and the route say the same thing.
@@ -704,7 +705,9 @@ The card follows the user's communication language; the shared UI-text
 selection (`tools/i18n/ui_text.py`) governs only text the tools print, such as
 the `[경로]` notice, whose marker prints as `[Route]` in English.
 
-`원문` (Original) appears only when compose kept an excerpt; `경로` (Route) is
+`원문` (Original) appears only when the task explicitly quotes the person's words;
+an absent or uncertain quotation is omitted, including old unbound excerpts.
+`경로` (Route) is
 information, not a second question. `범위` (Scope) stays the approved scope that
 execution access reads for an owner's write roots (`OPERATIONS` execution
 access). `compose --explain` prints the same `[의도]` lines without writing
@@ -782,11 +785,11 @@ criterion, destructive risk, or touched external system.
 `;`-separated) and `완료:` / `Done:` are the intent; they are read from the
 sealed request text whenever needed, and without an intent line the request's
 first sentence is a marked draft. When a route is first written, the runtime
-also keeps an excerpt of the person's own prompt from the session record in
-`.runtime/intent/<route id>.json` beside the route, outside its identity: only
-when the current prompt boundary carries no peer or runtime transfer origin,
-skipping bare answers such as `진행`, with credentials masked, first write kept.
-Every leg reads its frame route's record, not the session. Nothing is
+may keep the person's words explicitly quoted in its assignment in
+`.runtime/intent/<route id>.json` beside the route, outside its identity, with
+credentials masked and the first write kept. A latest session utterance is not
+proof of this task's intent. Old unbound excerpts remain stored but are not
+displayed. Every leg uses its confirmed frame assignment, not the session. Nothing is
 required or refused. The `[경로]` notice shows these as `[의도]` lines, and a
 route without a frame-review release hands them to its owner and every worker.
 Questions and gates are unchanged.
@@ -1020,7 +1023,7 @@ Writing a report file does not by itself complete the user-facing report.
 
 **Runtime completion summary.** When the runtime seals a registered owner's
 completion it also writes `completion-summary.md`, once, beside the owner
-envelope: the intent (§0.4) with the person's words, the result (one leg of a
+envelope: the intent (§0.4) with any task-bound quotation, the result (one leg of a
 plan says a later leg remains), one cost line (time from the route's first
 registered attempt to the seal, and the session tokens its owner, workers and
 retries wrote into their own attempt logs, summed; a session that wrote none is
@@ -1029,9 +1032,10 @@ the total `at least`; the line shows token counts, not a share of a plan), what
 changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,
-Korean when declared). A code report's numbered sections 1/4/5/6 are read as the
-template; any other heading only by its words, and a report with unmatched
-headings is named, not summarised. The Claude wake receipt, the Codex queue item
+Korean when declared). Section meaning, rather than ordinal numbers, capability
+or filename, determines its summary field. Mixed or unknown headings stay
+unclassified and linked to the report; missing extracted checks or remaining
+work mean unknown, not absent. Existing report formats remain valid. The Claude wake receipt, the Codex queue item
 and the OpenCode carrier all carry this same text; the parent shows it first as
 written, then adds what it does not show of the content contract above. Without
 a sealed summary the contract above applies unchanged.
@@ -1254,7 +1258,10 @@ retry with `resource-runner start --compute-run <run-id>` after a completed
 the sealed command, inputs and provenance, exit evidence, output receipts, and
 fresh remote process-group quiescence; it preserves the prior failure row and
 sentinel. The owner's normal start admits verification separately; compute
-exit is execution evidence only.
+exit is execution evidence only. The same command adopts a run that an owner of
+this route launched directly with `compute-hosts run` (route provenance, no
+resource row) when it is this route's finished, unadopted run; other evidence
+is recorded, not required (see `core/OPERATIONS.md`).
 
 When an owner is replaced on the same route, its launched replacement may
 observe and consume the predecessor's supervised-resource result through the

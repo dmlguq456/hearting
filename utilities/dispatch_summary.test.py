@@ -965,8 +965,10 @@ class DispatchSummaryTest(unittest.TestCase):
         for harness in ("claude", "codex", "opencode"):
             source = (ROOT / "adapters" / harness / "bin" / "dispatch-headless.py").read_text()
             self.assertIn("from dispatch_summary import launch_summary_owner", source)
-            self.assertIn("pre_release=lambda identity: attach_summary_owner", source)
+            self.assertIn("DISPATCH_MAIN.launch_claimed_attempt(", source)
             self.assertIn(f'harness="{harness}"', source)
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text()
+        self.assertIn("pre_release=lambda identity: h.attach_summary_owner", shared)
         opencode = (ROOT / "adapters" / "opencode" / "bin" / "dispatch-headless.py").read_text()
         self.assertIn("args.command_attempt_id = args.attempt_id", opencode)
 

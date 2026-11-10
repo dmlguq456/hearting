@@ -922,9 +922,8 @@ def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
 def harvest_command_lines(prompt: str) -> list[str]:
     """Extract the exact harvest command lines a supervisor prompt prescribes.
 
-    Both ``completion_prompt`` and ``remediation_prompt`` (in either
-    supervisor) emit each harvest command on its own line, second shell token
-    ``harvest``; every other line is prose. Used by the producer<->guard
+    Both supervisors emit a command on its own line: the existing harvest
+    operation or portable read-only inspection. Used by the producer<->guard
     parity fixture (plan SS3.4 D1b) so that fixture never needs a
     hand-written command literal.
     """
@@ -940,6 +939,10 @@ def harvest_command_lines(prompt: str) -> list[str]:
             and tokens[1] == "harvest"
             and tokens[0].endswith("preflight.sh")
         ):
+            lines.append(line)
+        elif (len(tokens) >= 3 and tokens[0] in {"python", "python3"}
+              and tokens[1].endswith("/utilities/dispatch-registry.py")
+              and tokens[2] == "observed-status"):
             lines.append(line)
     return lines
 
@@ -1003,6 +1006,11 @@ def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surfa
         return f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(jobs)} --attempt {shlex.quote(attempt_id)}"
     if action not in {"complete-open", "inspect-done-failure"}:
         return ""
+    if action == "inspect-done-failure":
+        from parent_next_directive import entrypoint
+        utility = entrypoint(Path(__file__).resolve().parents[1], "utilities/dispatch-registry.py")
+        registry = f" --jobs {shlex.quote(jobs)}" if jobs else ""
+        return f"python3 {shlex.quote(str(utility))} observed-status{registry} --attempt {shlex.quote(attempt_id)}"
     registry = f"--jobs {shlex.quote(jobs)} " if jobs else ""
     status = "--status open --mark-done" if action == "complete-open" else "--status done"
     return f"{shlex.quote(surface)} harvest {registry}--attempt-id {shlex.quote(attempt_id)} {status}"
@@ -3255,6 +3263,20 @@ def classify_supervised_shell_command(
         return None
     extra_roots = _sealed_launch_home_roots(jobs, open_attempt_ids)
 
+    if (len(tokens) >= 3 and tokens[0] in {"python", "python3"}
+            and _local_contract_path(base, tokens[1], "utilities/dispatch-registry.py", extra_roots)
+            and tokens[2] == "observed-status"):
+        options = _parse_long_options(tokens[3:], {"--attempt", "--jobs"}, set())
+        if options is None or len(options.get("--attempt", [])) != 1 or any(len(v) != 1 for v in options.values()):
+            return None
+        supplied = options.get("--jobs", [])
+        if supplied and jobs is not None and Path(supplied[0]).resolve(strict=False) != Path(jobs).resolve(strict=False):
+            return None
+        attempt = options["--attempt"][0]
+        if attempt not in open_attempt_ids:
+            return None
+        return SupervisorShellAction("harvest", attempt, "done", False)
+
     if (
         len(tokens) >= 2
         and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
@@ -4884,7 +4906,11 @@ def settle_exited_owner_terminal(row: ChildRow, *, jobs: str | Path) -> str | No
                "process": attempt_process_quiescence(meta, terminal_receipt=True)})
     if not choice.allowed:
         return None if choice.state == "not-applicable" else choice.reason
-    terminal = classify_supervisor_log(meta["log_file"], meta.get("harness", "unknown"))
+    def observed_terminal():
+        from dispatch_supervisor_terminal import completed_owner_assessment
+        value = classify_supervisor_log(meta["log_file"], meta.get("harness", "unknown"))
+        return completed_owner_assessment(value, None, jobs=jobs, attempt_id=row.attempt_id)
+    terminal = observed_terminal()
     if terminal.reconcile_reason == "terminal-log-unreadable":
         return terminal.reconcile_reason
 
@@ -4892,7 +4918,7 @@ def settle_exited_owner_terminal(row: ChildRow, *, jobs: str | Path) -> str | No
         return (fields == row.raw.split("\t")
                 and not supervisor_lease_is_held(jobs, meta)
                 and attempt_process_quiescence(meta, terminal_receipt=True).state == "quiescent"
-                and classify_supervisor_log(meta["log_file"], meta.get("harness", "unknown")) == terminal)
+                and observed_terminal() == terminal)
 
     closed = close_attempt_row_if(Path(jobs), row.attempt_id, terminal.note,
                                   still_exited, evidence=terminal.evidence())

@@ -93,6 +93,7 @@ from dispatch_contract import (
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
+import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
 # Identical in every wrapper; the old names stay so callers and mock targets do not move.
 _is_report_bundle_publish_stage = WRAPPER_COMMON.is_report_bundle_publish_stage
@@ -111,6 +112,7 @@ resolve_report_bundle_root = WRAPPER_COMMON.resolve_report_bundle_root
 seed_launch_heartbeat = WRAPPER_COMMON.seed_launch_heartbeat
 _registered_owner = WRAPPER_COMMON.registered_owner
 completion_state_path = WRAPPER_COMMON.completion_state_path
+annotate_job_row = WRAPPER_COMMON.annotate_job_row
 from dispatch_summary import launch_summary_owner, summary_writable_dirs  # noqa: E402
 from artifact_producer import (  # noqa: E402
     ProducerError,
@@ -223,84 +225,14 @@ from route_authority import DEATH_PATTERNS, scan_anchored_death, scan_death  # n
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
-    action = p.add_mutually_exclusive_group()
-    action.add_argument("--dry-run", action="store_true", help="print the command without writing jobs.log")
-    action.add_argument("--register", action="store_true", help="append an open job without launching")
-    action.add_argument("--start", action="store_true", help="append an open job and launch in background")
-    p.add_argument("--worktree", required=True)
-    p.add_argument("--slug", required=True)
-    p.add_argument("--capability", required=True)
-    p.add_argument("--capability-mode", help="entry capability mode (for example dev)")
-    p.add_argument("--worker-mode", help="non-owner unit/persona compatibility path")
-    p.add_argument("--mode", help="legacy compatibility input; scalar=capability, slash=worker")
-    p.add_argument("--qa", default=None)  # optional/derived from --intensity (CONVENTIONS §1.1)
-    p.add_argument("--intensity", default="standard")
-    p.add_argument("--dispatch-depth", dest="dispatch_depth", type=int, default=1)
-    p.add_argument(
-        "--parent", dest="parent_slug",
-        help="logical parent slug (never an attempt id)",
-    )
-    p.add_argument(
-        "--parent-attempt-id",
-        default=os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or None,
-        help="exact parent attempt id (never a slug)",
-    )
-    p.add_argument(
-        "--parent-session-id",
-        default=parent_completion.default_parent_session_id(),
-    )
-    p.add_argument(
-        "--parent-cwd",
-        default=os.environ.get("AGENT_DISPATCH_PARENT_CWD") or None,
-    )
-    p.add_argument("--worker-role", help="legacy compatibility metadata; not bootstrap identity")
-    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support", "frame"))
-    p.add_argument("--review-output", help="exact durable report path for a route-free review worker")
-    from review_input import add_arguments as review_input_arguments
-    review_input_arguments(p)
-    p.add_argument("--unit", default="", help="catalog unit ref for the assigned route node (roles/units/<unit>.md)")
-    p.add_argument("--assigned-contract")
-    p.add_argument("--owner", dest="capability_owner")
-    p.add_argument("--route-file")
-    p.add_argument("--route-id")
-    p.add_argument("--route-hash")
-    p.add_argument("--route-node")
-    p.add_argument("--registry-digest")
-    p.add_argument("--write-scope")
-    p.add_argument("--completion-gate")
-    p.add_argument("--harness-affinity")
-    p.add_argument("--explicit-adapter")  # the request a sealed worker/owner pin replaced; recorded only
+    p = DISPATCH_MAIN.base_parser(__doc__)
     p.add_argument(
         "--owner-harness",
         default=os.environ.get("AGENT_DISPATCH_OWNER_HARNESS") or "codex",
     )
-    p.add_argument("--prompt-file")
-    p.add_argument("--prompt-text")
-    p.add_argument("--execution-access-file")
-    p.add_argument("--jobs")
-    p.add_argument("--attempt-id")
-    p.add_argument("--broker-request-id")
-    p.add_argument("--fallback-ordinal", type=int, default=0)
-    p.add_argument("--fallback-hop")
-    p.add_argument("--execution-surface", default="registered-headless")
-    p.add_argument("--registered-worker", type=int, choices=(0, 1), default=1)
-    p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
-    p.add_argument("--prior-attempt-id")
-    p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
-    p.add_argument("--cooled-model")
-    p.add_argument("--selection-source")
-    p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
+    DISPATCH_MAIN.add_launch_arguments(p)
     p.add_argument("--parent-harness", default=parent_completion.default_parent_harness("codex"))
-    p.add_argument("--parent-transport", default=os.environ.get("AGENT_DISPATCH_CURRENT_TRANSPORT") or "unknown")
-    p.add_argument("--parent-sandbox", default=os.environ.get("AGENT_DISPATCH_CURRENT_SANDBOX") or "unknown")
-    # default None (not "unknown"): an explicitly supplied `--nested-eligibility
-    # unknown` must stay distinguishable from an absent flag — explicit evidence,
-    # even unknown, is never overwritten by the internal probe.
-    p.add_argument("--nested-eligibility", choices=("supported", "unsupported", "unknown"), default=None)
-    p.add_argument("--eligibility-source", default="")
-    p.add_argument("--eligibility-failure-class", default="")
-    p.add_argument("--log-dir")
+    DISPATCH_MAIN.add_parent_runtime_arguments(p)
     p.add_argument(
         "--sandbox",
         choices=("read-only", "workspace-write", "danger-full-access"),
@@ -452,10 +384,7 @@ def role_map(role: str) -> dict[str, str]:
     return fields
 
 
-class ModelSelectionError(ValueError):
-    def __init__(self, reason: str, detail: str):
-        super().__init__(detail)
-        self.reason = reason
+ModelSelectionError = WRAPPER_COMMON.ModelSelectionError
 
 
 def _model_policy() -> dict[str, str]:
@@ -489,173 +418,46 @@ def _model_config_state() -> tuple[str, str]:
 
 
 def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
+    return DISPATCH_MAIN.select_model_settings(
+        _ADAPTER, args, harness="codex", label="Codex", knob="reasoning",
+        role_settings=_role_model_settings,
+    )
+
+
+def _role_model_settings(args: argparse.Namespace) -> dict[str, str]:
     try:
-        validate_registered_profile(
-            args.model_profile,
-            registered_worker=bool(args.registered_worker),
-            dispatch_depth=args.dispatch_depth,
-            worker_type=args.worker_type,
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-    try:
-        binding = getattr(args, "owner_route_binding", None)
-        require_top_route(
-            getattr(args, "route_file", None) or getattr(binding, "route_file", None),
-            profile=args.model_profile or "",
-            # Pass the launching node so a frame anchor leg is checked against
-            # ITS OWN sealed profile, not the owner's. Without this the route
-            # compiles `top` onto the anchor and this wrapper refuses it --
-            # and because each harness has its own copy of this call, omitting
-            # it in one place breaks that one harness only.
-            node=getattr(args, "route_node", None),
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError(exc.reason, str(exc)) from exc
-    if args.inherit_model_settings:
-        if args.model_profile or args.model_role or args.model or args.reasoning:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "--inherit-model-settings is mutually exclusive with --model-profile, --model-role, --model, and --reasoning",
-            )
-        # The shared rule (model_config.inheritance_refusal): refused while this
-        # adapter declares a main-session-only model -- on this machine the
-        # interactive default IS that model -- and off the documented surface.
-        refusal = inheritance_refusal(_model_policy(), "Codex")
-        if refusal:
-            raise ModelSelectionError(*refusal)
-        return {
-            "source": "inherit", "role": "inherit", "profile": "unsealed",
-            "tier": "inherit", "granularity": "legacy", "model": "inherit", "reasoning": "inherit",
-        }
-    if args.model_profile:
-        if not args.model_role and args.worker_type != "owner":
-            raise ModelSelectionError(
-                "model-profile-role-required",
-                "route-bound --model-profile requires the independently sealed --model-role",
-            )
-        if bool(args.model) != bool(args.reasoning):
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "capacity override requires --model and --reasoning together",
-            )
-        if (args.model or args.reasoning) and not args.capacity_retry:
-            raise ModelSelectionError(
-                "model-profile-override-forbidden",
-                "a route-sealed model profile may use a concrete override only on a checked capacity retry "
-                "(to choose a model, seal it at compose time: capability-route.py compose --pin <target>=<harness>:<model>[@<effort>])",
-            )
-        try:
-            resolved, _receipt = resolve_runtime_profile(
-                "codex", args.model_profile, source_root=ROOT
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-        model = args.model or resolved["model"]
-        if resolved["profile"] == TOP_PROFILE and args.model:
-            # No cascade in or out: nothing runs under the `top` label but the
-            # top model itself (top review m1).
-            raise ModelSelectionError(
-                "profile-top-override-forbidden",
-                "the top exception profile admits no concrete --model override, capacity retry included",
-            )
-        # A route-sealed selection pin (`compose --pin`) beats the profile's
-        # own model; a checked capacity retry still replaces it, and the receipt
-        # then says `pin+capacity` with the pinned model so nothing is
-        # overwritten silently.
-        try:
-            pin = route_selection_pin(
-                getattr(args, "route_file", None)
-                or getattr(getattr(args, "owner_route_binding", None), "route_file", None),
-                worker_type=args.worker_type, adapter="codex",
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError(exc.reason, str(exc)) from exc
-        pin_model = pin.get("model")
-        reasoning = args.reasoning or resolved["budget"]
-        if pin["status"] == "applied":
-            if not args.model:
-                model, reasoning = pin_model, pin["effort"] or resolved["budget"]
-            source = "pin+capacity" if args.model else "pin"
-            if pin_target(args.worker_type) != "frame":
-                # Compose already dropped a main-session-only pin model; this
-                # guards a route edited after sealing and the model a capacity
-                # retry actually substitutes.
-                _require_headless_model(model, source)
-        elif resolved["profile"] == TOP_PROFILE:
-            # The one door to the main-session-only model from registered
-            # dispatch: a route-sealed `top` profile (2026-09-09 maintainer decision).
-            # The waiver covers exactly the resolved model.
-            source = "profile-top"
-        else:
-            _require_headless_model(model, f"profile:{args.model_profile}")
-            source = "profile+capacity" if args.model else "profile"
-        return {
-            "source": source,
-            "role": args.model_role or "_kernel/owner",
-            "profile": resolved["profile"],
-            "tier": resolved["tier"],
-            "granularity": resolved["granularity"],
-            "model": model,
-            "reasoning": reasoning,
-            "pin_status": pin["status"],
-            **({"pin_model": pin_model} if pin["status"] == "applied" else {}),
-        }
-    if args.model_role and args.model:
+        fields = role_map(args.model_role)
+    except ValueError as exc:
         raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model-role is mutually exclusive with --model (tier-hopping); "
-            "situational tuning keeps the role's tier and adjusts --reasoning only",
+            "invalid-dispatch-model-role",
+            str(exc),
+        ) from exc
+    model = fields.get("exact_model_id")
+    reasoning = fields.get("reasoning")
+    if not model or not reasoning:
+        raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and reasoning")
+    if model in {"role-set", "role-profile", "unconfigured"}:
+        raise ModelSelectionError(
+            "invalid-dispatch-model-role",
+            f"model role {args.model_role!r} resolved to non-runnable model={model}",
         )
-    if args.model_role:
-        try:
-            fields = role_map(args.model_role)
-        except ValueError as exc:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-role",
-                str(exc),
-            ) from exc
-        model = fields.get("exact_model_id")
-        reasoning = fields.get("reasoning")
-        if not model or not reasoning:
-            raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and reasoning")
-        if model in {"role-set", "role-profile", "unconfigured"}:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-role",
-                f"model role {args.model_role!r} resolved to non-runnable model={model}",
+    _require_headless_model(model, f"role:{args.model_role}")
+    # 역할 티어 고정 + 상황별 reasoning 오버라이드 (2026-07-22 사용자 원칙).
+    if args.reasoning:
+        if args.model_role.startswith("deep ") and args.reasoning in ("medium", "low"):
+            # 사다리: deep 기본 xhigh → 아래는 high; medium 이하는 '정말 쉬운 것만'.
+            print(
+                f"caution=deep-tier-low-effort role={args.model_role!r} reasoning={args.reasoning} "
+                "(step-down is high; medium/low is for genuinely easy work only)",
+                file=sys.stderr,
             )
-        _require_headless_model(model, f"role:{args.model_role}")
-        # 역할 티어 고정 + 상황별 reasoning 오버라이드 (2026-07-22 사용자 원칙).
-        if args.reasoning:
-            if args.model_role.startswith("deep ") and args.reasoning in ("medium", "low"):
-                # 사다리: deep 기본 xhigh → 아래는 high; medium 이하는 '정말 쉬운 것만'.
-                print(
-                    f"caution=deep-tier-low-effort role={args.model_role!r} reasoning={args.reasoning} "
-                    "(step-down is high; medium/low is for genuinely easy work only)",
-                    file=sys.stderr,
-                )
-            return {
-                "source": "role+effort", "role": args.model_role, "profile": "unsealed",
-                "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": args.reasoning,
-            }
         return {
-            "source": "role", "role": args.model_role, "profile": "unsealed",
-            "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": reasoning,
+            "source": "role+effort", "role": args.model_role, "profile": "unsealed",
+            "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": args.reasoning,
         }
-    if not args.model and not args.reasoning:
-        raise ModelSelectionError(
-            "missing-dispatch-model-selection",
-            "main dispatch must choose --model-role or --model with --reasoning",
-        )
-    if not args.model or not args.reasoning:
-        raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model and --reasoning must be provided together",
-        )
-    _require_headless_model(args.model, "explicit")
     return {
-        "source": "explicit", "role": "-", "profile": "unsealed",
-        "tier": "explicit", "granularity": "legacy", "model": args.model, "reasoning": args.reasoning,
+        "source": "role", "role": args.model_role, "profile": "unsealed",
+        "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": reasoning,
     }
 
 
@@ -714,23 +516,7 @@ def dispatch_prompt(
     task_input: tuple[str, str] | None = None,
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
-    args.worker_type = resolve_worker_type(
-        explicit=args.worker_type,
-        dispatch_depth=args.dispatch_depth,
-        worker_role=args.worker_role,
-        route_node=args.route_node,
-        profile_type=profile_worker_type(ROOT, args.profile),
-    )
-    bootstrap = render_worker_bootstrap(ROOT, args.worker_type, unit=(args.unit or None))
-    args.assigned_contract = assigned_contract(
-        capability=args.capability,
-        worker_type=args.worker_type,
-        route_node=args.route_node,
-        completion_gate=args.completion_gate,
-        explicit=args.assigned_contract,
-        unit=args.unit,
-        root=ROOT,
-    )
+    bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
     route_state = (
         "consume the assigned route only (wrapper-validated immutable record)"
         if args.route_file
@@ -761,30 +547,7 @@ def dispatch_prompt(
     return (
         f"{sync_wait_clause}"
         f"{bootstrap}\n"
-        "Dispatch metadata:\n"
-        f"- capability: {args.capability}\n"
-        f"- capability_mode: {args.capability_mode}\n"
-        f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
-        f"- dispatch_depth: {args.dispatch_depth}\n"
-        f"- worker_type: {args.worker_type}\n"
-        f"- guard_session_id: {args.attempt_id}\n"
-        f"- assigned_contract: {args.assigned_contract}\n"
-        f"- route_node: {args.route_node or '-'}\n"
-        # quick carries it as an argument, standard+ as the env binding;
-        # the owner needs the path either way.
-        f"- route_file: {getattr(args, 'route_file', None) or getattr(getattr(args, 'owner_route_binding', None), 'route_file', None) or '-'}\n"
-        f"{diff_attribution_prompt(args)}"
-        f"- model_role: {getattr(args, 'resolved_model_settings', {}).get('role') or args.model_role or '-'}\n"
-        f"- model_profile: {getattr(args, 'resolved_model_settings', {}).get('profile') or getattr(args, 'model_profile', None) or '-'}\n"
-        f"- parent: {args.parent_slug or '-'}\n"
-        f"- parent_session_id: {args.parent_session_id or '-'}\n"
-        f"- owner: {args.capability_owner or '-'}\n"
-        f"- owner_harness: {args.owner_harness or '-'}\n"
-        f"- worktree: {args.worktree}\n"
-        f"- artifact_root: {args.artifact_root}\n"
-        f"{artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{DISPATCH_MAIN.dispatch_metadata_prompt(_ADAPTER, args)}"
         f"- route_state: {route_state}\n\n"
         "Codex realization:\n"
         f"{contract_read_prompt(args, 'codex')}"
@@ -792,12 +555,7 @@ def dispatch_prompt(
         f"- Run $AGENT_HOME/adapters/codex/bin/preflight.sh qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
         "- The wrapper already validated capability mode, worker unit/mode, QA, artifact root, and any route record. Re-run worker-route only for a safety recheck.\n"
         "- Codex may still auto-discover project AGENTS.md; do not explicitly load the full harness adapter bootstrap or another runtime's adapter.\n\n"
-        f"{heartbeat}"
-        f"{no_commit_clause}"
-        f"{stage_session_prompt(args)}"
-        f"{released_task_prompt(args)}"
-        f"{unit_bootstrap_prompt(args, task, os.environ)}"
-        f"{assignment_prompt(args, task, os.environ)}"
+        f"{DISPATCH_MAIN.assignment_prompt_tail(_ADAPTER, args, task, heartbeat=heartbeat, commit_clause=no_commit_clause)}"
         f"{ending}",
         source,
     )
@@ -2038,31 +1796,6 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
     )
 
 
-def annotate_job_row(jobs: Path, slug: str, worktree: str, extra_kv: str, attempt_id: str | None = None) -> bool:
-    """Attach launch identity to the exact open attempt row."""
-    if not jobs.is_file():
-        return False
-    with jobs_lock(jobs):
-        lines = jobs.read_text(encoding="utf-8").splitlines(keepends=True)
-        for i, line in enumerate(lines):
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 6:
-                continue
-            ts, status, repo, wt, row_slug, pipe = parts[:6]
-            if status != "open" or row_slug != slug or wt != worktree:
-                continue
-            metadata = parse_registry_metadata(pipe)
-            if metadata.get("attempt_schema_version") != "2":
-                continue
-            if attempt_id and f"attempt_id={attempt_id}" not in pipe.split(","):
-                continue
-            lines[i] = f"{ts}\t{status}\t{repo}\t{wt}\t{row_slug}\t{pipe},{extra_kv}\n"
-            # Lock-free readers (join, owner input) must never see a truncated registry.
-            _atomic_registry_replace(jobs, "".join(lines).splitlines())
-            return True
-    return False
-
-
 def resolve_agent_home() -> Path:
     # Delegates to the one canonical resolver, passing this runtime's bundle
     # pointer (~/.codex/hearting) so codex's deliberate bundle-first priority
@@ -2158,24 +1891,7 @@ def validate_dispatch_inputs(args: argparse.Namespace) -> int:
         )
         if rc != 0:
             return rc
-    try:
-        args.qa = resolve_qa(args.intensity, args.qa)
-    except DispatchModeContractError as exc:
-        return fail(exc.reason, 64, **exc.fields)
-    if args.intensity not in INTENSITY_LEVELS:
-        return fail(
-            "invalid-dispatch-intensity",
-            64,
-            intensity=args.intensity,
-            allowed_intensity="direct,quick,standard,strong,thorough,adversarial",
-        )
-    if args.dispatch_depth not in (1, 2):
-        return fail("invalid-dispatch-depth", 64, dispatch_depth=str(args.dispatch_depth), allowed_dispatch_depth="1,2")
-    if args.dispatch_depth == 2 and not args.parent_slug:
-        return fail("missing-dispatch-parent", 64, dispatch_depth=str(args.dispatch_depth))
-    if args.dispatch_depth == 2 and args.intensity in {"direct", "quick"}:
-        return fail("invalid-depth-two-intensity", 64, dispatch_depth=str(args.dispatch_depth), intensity=args.intensity)
-    return 0
+    return DISPATCH_MAIN.validate_dispatch_shape(_ADAPTER, args, qa_fields={})
 
 
 def bind_internal_eligibility_probe(args: argparse.Namespace) -> None:
@@ -2190,41 +1906,46 @@ def validate_route_record(args: argparse.Namespace) -> int:
     )
 
 
+def complete_foreground_wrapper_pass(args, jobs: Path, outcome, terminal: dict, terminal_closed: bool) -> None:
+    """Complete a settled foreground PASS route node from the outer wrapper."""
+    if (
+        not outcome.failure
+        and not terminal_closed
+        and args.registered_worker
+        and args.route_file
+        and args.route_node
+        and terminal.get("state") == "valid"
+        and terminal.get("verdict") == "PASS"
+        and terminal.get("artifact_state") == "readable"
+    ):
+        # Only this outer wrapper can prove its governed process group
+        # reaped.  Complete after that receipt, before returning.
+        try:
+            wrapper_row = exact_attempt_row(jobs, args.attempt_id)
+            completion_reason = close_wrapper_pass(wrapper_row, jobs=jobs)
+        except JoinContractError as exc:
+            completion_reason = str(exc)
+        if completion_reason:
+            args.worker_failure = "route-completion-rejected"
+
+
+# Shared main() phases read this wrapper's names at call time (see dispatch_headless_main).
+_ADAPTER = DISPATCH_MAIN.AdapterNamespace(globals())
+
+
 @frame_repository.process_entry
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
-    args.replacement_input_argv = frame_repository.durable_argv(argv[1:])
-    # parent_sandbox is used here only to tighten the override gate, never to
-    # loosen it, so consuming it before the tuple-validity check at :1939 is
-    # safe even though it has not yet been validated.
-    args.launch_lifecycle_resolution = reconcile_launch_lifecycle(
-        args.launch_lifecycle, dict(os.environ), parent_sandbox=args.parent_sandbox
-    )
-    args.launch_lifecycle_requested = args.launch_lifecycle_resolution.requested
-    args.launch_lifecycle = args.launch_lifecycle_resolution.effective
-    args.nested_eligibility_explicit = args.nested_eligibility is not None
-    if args.nested_eligibility is None:
-        args.nested_eligibility = "unknown"
-    if args.capacity_retry and not all(
-        (args.prior_attempt_id, args.cooled_model, args.selection_source)
-    ):
-        return fail("capacity-retry-evidence-missing", 64, child_spawned="0")
-    if not Path(args.worktree).is_absolute():
-        return fail("worktree-must-be-absolute", 64, worktree=args.worktree)
-    args.worktree = frame_repository.canonical_worktree(args.worktree)
+    rc = DISPATCH_MAIN.bind_entry(_ADAPTER, args, argv)
+    if rc is not None:
+        return rc
     forced_sandbox = os.environ.get("CODEX_DISPATCH_SANDBOX_FORCE")
     if forced_sandbox:
         if forced_sandbox not in ("read-only", "workspace-write", "danger-full-access"):
             return fail("invalid-forced-dispatch-sandbox", 64, sandbox=forced_sandbox)
         args.sandbox = forced_sandbox
     _bind_runtime_parent(args)
-    action = "start" if args.start else "register" if args.register else "dry-run"
-    args.action = action
-    args.command_attempt_id = args.attempt_id
-    if action == "dry-run":
-        # Preview output must never mint or echo an identity that resembles a
-        # registered attempt receipt.
-        args.attempt_id = None
+    action = DISPATCH_MAIN.bind_action(args)
     if args.broker_request_id or args.launch_authority == "ancestor-broker":
         return fail("launch-broker-retired", 76, child_spawned="0")
     # One execution root per launch (OPERATIONS §5.9a): the installed release when it reads this
@@ -2234,15 +1955,10 @@ def main(argv: list[str]) -> int:
         ROOT, sealed_launch_home(resolve_agent_home()), "codex", argv[1:],
         route_file=args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     bind_parent_completion_delivery(args)
+    rc = DISPATCH_MAIN.bind_repository(_ADAPTER, args)
+    if rc is not None:
+        return rc
     worktree = Path(args.worktree)
-    if not worktree.is_dir():
-        return fail("worktree-not-found", 66, worktree=args.worktree)
-    try:
-        from dispatch_contract import launch_repository_identity
-        args.repository_identity, args.repository_kind = launch_repository_identity(
-            frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
-    except DispatchContractError as exc:
-        return fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     invalid_mount = invalid_codex_mount_target(args, worktree)
     if invalid_mount is not None:
         return fail(
@@ -2279,44 +1995,12 @@ def main(argv: list[str]) -> int:
     rc = validate_dispatch_inputs(args)
     if rc != 0:
         return rc
-    args.eligibility_probe = "-"
-    bind_internal_eligibility_probe(args)
-    try:
-        validate_nested_eligibility(
-            dispatch_depth=args.dispatch_depth, action=action, parent_harness=args.parent_harness,
-            parent_transport=args.parent_transport, parent_sandbox=args.parent_sandbox,
-            child_harness="codex", launch_authority=args.launch_authority,
-            status=args.nested_eligibility, source=args.eligibility_source,
-        )
-    except DispatchContractError as e:
-        return fail(
-            e.reason, 69, detail=e.detail,
-            parent_harness=args.parent_harness or "-",
-            parent_transport=args.parent_transport or "-",
-            parent_sandbox=args.parent_sandbox or "-",
-            child_harness="codex",
-            launch_authority=args.launch_authority,
-            nested_eligibility=args.nested_eligibility,
-            eligibility_source=args.eligibility_source or "-",
-            eligibility_failure_class=args.eligibility_failure_class or "-",
-            eligibility_probe=args.eligibility_probe,
-        )
-    try:
-        args.owner_route_binding = binding_from_environment(
-            dict(os.environ),
-            worktree=args.worktree,
-            capability=args.capability,
-            capability_mode=args.capability_mode,
-            intensity=args.intensity,
-            harness="codex",
-        )
-        if args.owner_route_binding:
-            failure_fields = owner_binding_tuple_failure_fields(
-                dispatch_depth=args.dispatch_depth, worker_type=args.worker_type, route_file=args.route_file)
-            if failure_fields:
-                return fail("owner-route-binding-tuple-invalid", 65, child_spawned="0", **failure_fields)
-    except OwnerRouteBindingError as exc:
-        return fail(str(exc), 65, child_spawned="0")
+    rc = DISPATCH_MAIN.check_nested_eligibility(_ADAPTER, args, action, "codex")
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.bind_owner_route(_ADAPTER, args, "codex")
+    if rc is not None:
+        return rc
     rc = validate_route_record(args)
     if rc != 0:
         return rc
@@ -2325,65 +2009,15 @@ def main(argv: list[str]) -> int:
     except (DispatchContractError, OSError, ValueError) as exc:
         return fail(getattr(exc, "reason", "gpu-execution-selection-invalid"), 65,
                     detail=str(exc), child_spawned="0")
-    args.replica_batch_expectation = None
-    if action in {"register", "start"}:
-        try:
-            args.replica_batch_expectation = replica_batch_expectation(
-                args.route_file,
-                args.route_node,
-                action,
-                attempt_id=args.attempt_id or "",
-                parent_attempt_id=args.parent_attempt_id or "",
-                harness="codex",
-                fallback_hop=args.fallback_hop,
-                fallback_ordinal=args.fallback_ordinal,
-            )
-        except DispatchContractError as exc:
-            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
-        if (
-            args.replica_batch_expectation is not None
-            and not os.environ.get(GOVERNOR_RESERVATION_ENV)
-        ):
-            return fail(
-                "parallel-group-batch-required",
-                65,
-                detail="parallel-group start requires dispatch-batch admission",
-                child_spawned="0",
-            )
-    try:
-        attempt_policy = headless_attempt_policy(
-            route_file=args.route_file, route_node=args.route_node,
-            intensity=args.intensity, harness="codex",
-            dispatch_depth=args.dispatch_depth, parent_slug=args.parent_slug,
-            execution_surface=args.execution_surface,
-            registered_worker=bool(args.registered_worker),
-            fallback_hop=args.fallback_hop,
-            fallback_ordinal=args.fallback_ordinal,
-            parent_harness=args.parent_harness,
-            parent_transport=args.parent_transport,
-            parent_sandbox=args.parent_sandbox,
-            launch_authority=args.launch_authority,
-        )
-    except DispatchContractError as e:
-        return fail(e.reason, 65, detail=e.detail, child_spawned="0")
-    args.fallback_hop = str(attempt_policy["fallback_hop"])
-    args.fallback_ordinal = int(attempt_policy["fallback_ordinal"])
-    args.quick_attempt = bool(attempt_policy["quick"])
-    args.quick_attempt_limit = attempt_policy["terminal_attempt_limit"]
-    args.replacement_attempt_limit = attempt_policy["replacement_attempt_limit"]
-    args.replacement_notes = attempt_policy["replacement_notes"]
-    try:
-        args.resolved_model_settings = resolve_model_settings(args)
-        from model_profile import selection_receipt, ModelProfileError
-        try:
-            args.profile_selection_receipt = selection_receipt(args)
-        except (ModelProfileError, OSError, ValueError) as exc:
-            return fail(getattr(exc, "reason", "profile-selection-invalid"), 65, child_spawned="0")
-    except ModelSelectionError as e:
-        fields = {"detail": str(e)}
-        if args.model_role:
-            fields["model_role"] = args.model_role
-        return fail(e.reason, 64, **fields)
+    rc = DISPATCH_MAIN.expect_replica_batch(_ADAPTER, args, action, "codex")
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.apply_attempt_policy(_ADAPTER, args, "codex")
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.resolve_launch_models(_ADAPTER, args, model_error_fields={})
+    if rc is not None:
+        return rc
     try:
         validate_interactive_parent_launch(args)
     except DispatchContractError as exc:
@@ -2436,62 +2070,15 @@ def main(argv: list[str]) -> int:
             ensure_global_registry_writable(jobs)
     except DispatchContractError as e:
         return fail(e.reason, 73, detail=e.detail, child_spawned="0")
-    try:
-        prepare_review_output_request(args)
-    except ProducerError as exc:
-        return fail(
-            exc.code, 65, detail=exc.detail, registry_mutation="0",
-            child_spawned="0",
-        )
-    try:
-        bind_stage_session(args, artifact_root=args.artifact_root, action=action)
-    except DispatchContractError as e:
-        return fail(e.reason, 65, detail=e.detail, child_spawned="0")
-    refusal = route_authority.completion_gate(
-        args, action, agent_home, jobs, gate=completion_marker_gate,
-        before=(lambda: owner_frame_launch_gate(args.owner_route_binding, action, agent_home, jobs),))
-    if refusal:
-        reason, code, fields = refusal
-        return fail(reason, code, **fields)
-    args.parent_binding = None
-    if args.dispatch_depth == 2 and action in ("register", "start"):
-        try:
-            repo = args.repository_identity
-            args.parent_binding = resolve_live_parent_attempt(
-                jobs,
-                parent_slug=args.parent_slug or "",
-                repo=repo,
-                worktree=(
-                    parent_lookup_worktree(
-                        args.worktree, args.route_file, subsession=True,
-                        parent_attempt_id=args.parent_attempt_id,
-                    )
-                    if getattr(args, "subsession_id", None) else args.worktree
-                ),
-                expected_attempt_id=args.parent_attempt_id,
-                expected_harness=args.parent_harness,
-                expected_transport=args.parent_transport,
-                expected_sandbox=args.parent_sandbox,
-            )
-            args.parent_attempt_id = args.parent_binding.attempt_id
-        except (DispatchContractError, subprocess.SubprocessError) as e:
-            reason = e.reason if isinstance(e, DispatchContractError) else "parent-repo-unreadable"
-            detail = e.detail if isinstance(e, DispatchContractError) else str(e)
-            return fail(reason, 73, detail=detail, child_spawned="0")
-    if action == "start" and args.replica_batch_expectation is not None:
-        try:
-            args.replica_batch_expectation = replica_batch_expectation(
-                args.route_file,
-                args.route_node,
-                action,
-                attempt_id=args.attempt_id,
-                parent_attempt_id=args.parent_attempt_id or "",
-                harness="codex",
-                fallback_hop=args.fallback_hop,
-                fallback_ordinal=args.fallback_ordinal,
-            )
-        except DispatchContractError as exc:
-            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
+    rc = DISPATCH_MAIN.registry_gates(_ADAPTER, args, action, agent_home=agent_home, jobs=jobs)
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.bind_live_parent(_ADAPTER, args, action, jobs=jobs)
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.rebind_replica_batch(_ADAPTER, args, action, "codex")
+    if rc is not None:
+        return rc
     args.worker_type = resolve_worker_type(
         explicit=args.worker_type,
         dispatch_depth=args.dispatch_depth,
@@ -2528,21 +2115,9 @@ def main(argv: list[str]) -> int:
     assignment_sha256 = "sha256:" + hashlib.sha256(
         task_input[0].encode("utf-8")
     ).hexdigest()
-    if action == "start" and args.replica_batch_expectation is not None:
-        try:
-            args.replica_batch_expectation = replica_batch_expectation(
-                args.route_file,
-                args.route_node,
-                action,
-                attempt_id=args.attempt_id,
-                parent_attempt_id=args.parent_attempt_id or "",
-                harness="codex",
-                fallback_hop=args.fallback_hop,
-                fallback_ordinal=args.fallback_ordinal,
-                assignment_sha256=assignment_sha256,
-            )
-        except DispatchContractError as exc:
-            return fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
+    rc = DISPATCH_MAIN.rebind_replica_batch(_ADAPTER, args, action, "codex", assignment_sha256=assignment_sha256)
+    if rc is not None:
+        return rc
     permission_projection = commit_policy.capture_launch_permission_projection(args)
     args.task_publish_scope = permission_projection["task_publish_scope"]
     args.nested_headless_network_eligible = (
@@ -2633,167 +2208,32 @@ def main(argv: list[str]) -> int:
     )
     command = None if action == 'start' else shell_command(args, prompt_path, log_path)
 
-    governor = ROOT / "utilities" / "model-worker-governor.py"
-    try:
-        governor_root = resolve_model_governor_root(args.artifact_root)
-    except DispatchContractError as exc:
-        return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
-    reservation_token = ""
-    args.replica_batch_reservation = {}
-    if action in ("register", "start"):
+    def before_claim():
         try:
             assert_register_mkdir_containment(args, prompt_path.parent, log_path.parent)
         except DispatchContractError as e:
             return fail(e.reason, 73, detail=e.detail, child_spawned="0")
         Path(frame_repository.execution_path(prompt_path.parent)).mkdir(parents=True, exist_ok=True)
         Path(frame_repository.execution_path(log_path.parent)).mkdir(parents=True, exist_ok=True)
-        if action == "start":
-            try:
-                reservation_token, args.replica_batch_reservation = reserve_governor_token(
-                    governor,
-                    governor_root,
-                    "dispatch",
-                    provided_token=os.environ.get(GOVERNOR_RESERVATION_ENV, ""),
-                    expected_reservation=args.replica_batch_expectation,
-                )
-            except DispatchContractError as exc:
-                return fail(exc.reason, 75, detail=exc.detail, child_spawned="0",
-                            **governor_refusal_fields(exc))
-        try:
-            args.attempt_claimed = append_job(jobs, args)
-            if action == "start" and not args.attempt_claimed:
-                args.attempt_claimed = attempt_launch_is_available(
-                    jobs, args.attempt_id
-                )
-            parent_completion.validate_registered_delivery(args, jobs, read=registered_parent_delivery)
-        except DispatchContractError as e:
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            return fail(e.reason, 73, detail=e.detail, child_spawned="0")
-        except ManagedDispatchError as e:
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            return fail(str(e), 73, child_spawned="0")
-        if args.attempt_claimed:
-            initialize_supervised_owner_input(args, jobs)
-            try:
-                Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")
-            except OSError as exc:
-                annotate_attempt_row(
-                    jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-                )
-                cancel_governor_reservation(governor, governor_root, reservation_token)
-                close_job_row(
-                    jobs, args.slug, args.worktree,
-                    "prompt-materialization-failed", "", args.attempt_id,
-                )
-                return fail(
-                    "prompt-materialization-failed", 73,
-                    detail=str(exc), child_spawned="0",
-                )
-            if action == "start":
-                try:
-                    bind_owner_launch(args, jobs)
-                except ProducerError as exc:
-                    annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": "never-launched"})
-                    cancel_governor_reservation(governor, governor_root, reservation_token)
-                    close_job_row(jobs, args.slug, args.worktree, "producer-binding-failed", "", args.attempt_id)
-                    return fail(exc.code, 73, detail=exc.detail, child_spawned="0")
-    else:
-        args.attempt_claimed = False
-    if action == "start" and not args.attempt_claimed:
-        cancel_governor_reservation(governor, governor_root, reservation_token)
+        return None
+    claim = DISPATCH_MAIN.claim_registered_attempt(
+        _ADAPTER, args, action, jobs=jobs, prompt_path=prompt_path, prompt_text=prompt_text, before_claim=before_claim)
+    if claim.rc is not None:
+        return claim.rc
+    governor, governor_root, reservation_token = claim.governor, claim.governor_root, claim.reservation_token
     if action == "start" and args.attempt_claimed:
-        dispatch_env = {
-            **{key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")},
-            "AGENT_SESSION_ROLE": "worker",
-            "AGENT_DISPATCH_CHILD": "1",
-            "AGENT_DISPATCH_DEPTH": str(args.dispatch_depth),
-            "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION": "2",
-            "AGENT_DISPATCH_TRANSPORT": "headless",
-            "AGENT_DISPATCH_EXECUTION_SURFACE": args.execution_surface,
-            "AGENT_DISPATCH_REGISTERED_WORKER": str(int(bool(args.registered_worker))),
-            "AGENT_DISPATCH_FALLBACK_HOP": args.fallback_hop,
-            "AGENT_DISPATCH_INTENSITY": args.intensity,
-            "AGENT_DISPATCH_CAPABILITY_MODE": args.capability_mode,
-            "AGENT_DISPATCH_SELF_SLUG": args.slug,
-            "AGENT_DISPATCH_PARENT_SLUG": args.parent_slug or "",
-            "AGENT_DISPATCH_ATTEMPT_ID": args.attempt_id,
-            "AGENT_DISPATCH_PARENT_ATTEMPT_ID": args.parent_attempt_id or "",
-            "AGENT_DISPATCH_PARENT_SESSION_ID": args.parent_session_id or "",
-            "AGENT_DISPATCH_PARENT_CWD": (_effective_parent_cwd(args) if (args.parent_slug or args.parent_session_id) else ""),
-            "AGENT_DISPATCH_WORKER_TYPE": args.worker_type,
-            **commit_policy.runtime_permission_context_env(
+        dispatch_env = DISPATCH_MAIN.worker_environment(
+            _ADAPTER, args, harness="codex", jobs=jobs, governor_root=governor_root,
+            reservation_token=reservation_token,
+            permission_env=commit_policy.runtime_permission_context_env(
                 args, adapter="codex",
                 base_sandbox=base_runtime_sandbox(args),
                 network_eligible=bool(args.nested_headless_network_eligible),
             ),
-            "AGENT_DISPATCH_ASSIGNED_CONTRACT": args.assigned_contract,
-            "AGENT_DISPATCH_OWNER": args.capability_owner or "",
-            "AGENT_DISPATCH_OWNER_HARNESS": args.owner_harness or "",
-            "AGENT_ARTIFACT_ROOT": args.artifact_root,
-            "AGENT_DISPATCH_WORKTREE": (
-                args.review_output_binding["worktree"]
-                if args.review_output_binding else args.worktree
-            ),
-            "AGENT_REVIEW_CYCLE_ID": (
-                args.review_output_binding["cycle_id"]
-                if args.review_output_binding else ""
-            ),
-            "AGENT_REVIEW_PRODUCER_ID": (
-                args.review_output_binding["producer_id"]
-                if args.review_output_binding else ""
-            ),
-            "AGENT_REVIEW_OUTPUT": (
-                args.review_output_binding["output_path"]
-                if args.review_output_binding else ""
-            ),
-            # W7C producer lifecycle: the owner's open cycle (issued by
-            # `artifact_producer.py begin` before the first write) is passed
-            # through unchanged so stage workers write into the same
-            # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
-            # second lineage.
-            **artifact_cycle_environment(os.environ),
-            "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
-            "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
-            "AGENT_ROUTE_FILE": (
-                args.route_file
-                or (args.owner_route_binding.route_file if args.owner_route_binding else "")
-            ),
-            "AGENT_ROUTE_ID": (
-                args.route_id
-                or (args.owner_route_binding.route_id if args.owner_route_binding else "")
-            ),
-            "AGENT_ROUTE_NODE": args.route_node or "",
-            "AGENT_MODEL_GOVERNOR_ROOT": str(governor_root),
-            GOVERNOR_RESERVATION_ENV: reservation_token,
-            "AGENT_HOME": str(args.agent_home),
-            "AGENT_DISPATCH_JOBS": str(jobs),
-            # A worker inherits AGENT_HOME at the managed release; keep its
-            # bytecode out of that immutable tree (defect Q pairing).
-            **bytecode_cache_env(),
-            **parent_completion.worker_runtime_identity("codex"),
-            "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
-            "AGENT_DISPATCH_CURRENT_SANDBOX": effective_runtime_sandbox(args),
-            "AGENT_DISPATCH_COMPLETION_MODE": (
-                "supervised"
-                if args.resolved_completion_delivery == "app-server-supervised"
-                else "poll"
-            ),
-            **stage_session_environment(args),
-        }
-        if args.execution_access_grant is not None:
-            dispatch_env["AGENT_DISPATCH_EXECUTION_ACCESS_FILE"] = str(args.execution_access_grant.source_path)
-        if args.worker_role:
-            dispatch_env["AGENT_DISPATCH_WORKER_ROLE"] = args.worker_role
-        else:
-            dispatch_env.pop("AGENT_DISPATCH_WORKER_ROLE", None)
-        if args.worker_mode:
-            dispatch_env["AGENT_DISPATCH_WORKER_MODE"] = args.worker_mode
-        else:
-            dispatch_env.pop("AGENT_DISPATCH_WORKER_MODE", None)
-        if args.unit:
-            dispatch_env["AGENT_DISPATCH_UNIT"] = args.unit
-        else:
-            dispatch_env.pop("AGENT_DISPATCH_UNIT", None)
+            current_sandbox=effective_runtime_sandbox(args),
+            supervised=args.resolved_completion_delivery == "app-server-supervised",
+        )
+        DISPATCH_MAIN.apply_worker_fields(dispatch_env, args)
         if args.nested_headless_network:
             dispatch_env["AGENT_NESTED_HEADLESS_NETWORK"] = "1"
         else:
@@ -2815,452 +2255,36 @@ def main(argv: list[str]) -> int:
             env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
         dispatch_env.update(args.worker_runtime_env)
         command = shell_command(args, prompt_path, log_path)
-        launch_parent_completion_sidecar(args, jobs)
-        if args.managed_sidecar_state == "launch-failed":
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
-            cancel_governor_reservation(
-                governor, governor_root, reservation_token
-            )
-            close_job_row(
-                jobs,
-                args.slug,
-                args.worktree,
-                "managed-sidecar-launch-failed",
-                "",
-                args.attempt_id,
-            )
-            return fail(
-                "managed-sidecar-launch-failed",
-                75,
-                detail=args.managed_sidecar_reason,
-                attempt_id=args.attempt_id,
-                child_spawned="0",
-            )
-        fence_failure_read_fd, fence_failure_write_fd = os.pipe()
-        args.watchdog_budget = begin_finite_watchdog(args.foreground_timeout)
-        def spawn_worker(gate_fd: int) -> subprocess.Popen:
-            fence_command = [
-                sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
-                "--parent-pid", str(os.getpid()),
-                "--gate-fd", str(gate_fd),
-                "--failure-fd", str(fence_failure_write_fd),
-                "--jobs", str(jobs), "--attempt-id", args.attempt_id,
-            ]
-            if args.route_file:
-                fence_command.extend(
-                    [
-                        "--route-file", args.route_file,
-                        "--launch-phase", args.action,
-                    ]
-                )
-            fence_command.extend(
-                [
-                    "--post-release-parent-death-signal",
-                    "kill" if args.launch_lifecycle == FOREGROUND_SCOPED else "none",
-                    "--",
-                    sys.executable, str(governor), "--root", str(governor_root),
-                    "run", "--class", "dispatch", "--", "sh", "-c", command,
-                ]
-            )
-            if args.review_output and args.launch_lifecycle == DETACHED:
-                try:
-                    args.review_watchdog_handle = launch_review_watchdog(
-                        fence_command, gate_fd=gate_fd, budget=args.watchdog_budget,
-                        attempt_id=args.attempt_id,
-                        nonce=args.review_governed_lease_nonce,
-                        failure_fd=fence_failure_write_fd, env=dispatch_env,
-                        lease_release_spec={
-                            "root": args.artifact_root,
-                            "cycle_id": args.review_output_binding["cycle_id"],
-                            "attempt_id": args.attempt_id,
-                        }, jobs=jobs,
-                    )
-                finally:
-                    try:
-                        os.close(fence_failure_write_fd)
-                    except OSError:
-                        pass
-                return args.review_watchdog_handle.process
-            try:
-                return subprocess.Popen(
-                    fence_command,
-                    start_new_session=True,
-                    env=frame_repository.child_environment(dispatch_env),
-                    **frame_repository.child_process_options(pass_fds=(gate_fd, fence_failure_write_fd)),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            finally:
-                try:
-                    os.close(fence_failure_write_fd)
-                except OSError:
-                    pass
-        launch_metadata = {
-            **args.launch_lifecycle_resolution.metadata(),
-            "runtime_sandbox": effective_runtime_sandbox(args),
-            "runtime_home": dispatch_env["CODEX_HOME"],
-        }
-        from dispatch_capacity_evidence import launch_scope
-        launch_metadata.update(launch_scope("codex", dispatch_env))
-        grant_route_id, grant_route_hash = args.route_id, args.route_hash
-        if not grant_route_id and not grant_route_hash and args.owner_route_binding:
-            grant_route_id = args.owner_route_binding.route_id
-            grant_route_hash = args.owner_route_binding.route_hash
-        if grant_route_id and grant_route_hash:
-            from verification_runtime import effective_scope
-            local_verification = effective_scope(args, [*default_roots,
-                *(args.execution_access_grant.writable_roots if args.execution_access_grant else ())],
-                "codex", dispatch_env, sandbox=effective_runtime_sandbox(args),
-                network=bool(args.nested_headless_network),
-                read_roots=(args.execution_access_grant.read_roots
-                            if args.execution_access_grant else ()))
-            effective_path, effective_sha256 = publish_effective_grant(
-                jobs=jobs, attempt_id=args.attempt_id, route_id=grant_route_id,
-                route_hash=grant_route_hash,
-                runtime=("codex-app-server" if args.resolved_completion_delivery == "app-server-supervised" else "codex-exec"),
-                sandbox=effective_runtime_sandbox(args), grant=args.execution_access_grant,
-                default_writable_roots=default_roots,
-                verification_scope=local_verification,
-                unmet=getattr(args, "local_network_unmet", ()),
-                network_allowed=args.nested_headless_network,
-                execution_selection=args.gpu_execution_selection,
-            )
-            launch_metadata["execution_access_effective_file"] = str(effective_path)
-            launch_metadata["execution_access_effective_sha256"] = effective_sha256
-        if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
-            launch_metadata["pid_scope"] = "namespace-local"
-        # This is the final child environment merge: nested runtime-home and
-        # worker-home values cannot restore optional Git index writes.
-        dispatch_env.update(git_optional_locks_env())
-        try:
-            proc, launch_metadata = spawn_claimed_attempt(
-                jobs,
-                args.attempt_id,
-                parent_binding=args.parent_binding,
-                spawn=spawn_worker,
-                launch_metadata=launch_metadata,
-                preclaim=getattr(args, "launch_preclaim", None),
-                pre_release=lambda identity: attach_summary_owner(
-                    args, log_path, prompt_path, identity
-                ),
-                post_claim=lambda identity: acquire_review_lease_after_claim(args, jobs, identity),
-            )
-        except DispatchContractError as exc:
-            for fd in (fence_failure_read_fd, fence_failure_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if exc.reason == "attempt-launch-already-claimed":
-                cancel_governor_reservation(
-                    governor, governor_root, reservation_token
-                )
-                print("check=ok")
-                print("status=start")
-                print(f"attempt_id={args.attempt_id}")
-                print("duplicate_attempt=1")
-                existing_state, existing_reason = existing_attempt_launch_state(
-                    jobs, args.attempt_id
-                )
-                print(f"launch_state={existing_state}")
-                print("registered=0")
-                print("started=0")
-                print("child_spawned=0")
-                print(f"reason={existing_reason}")
-                if existing_state in EXISTING_ATTEMPT_NOTES:
-                    print(f"note={EXISTING_ATTEMPT_NOTES[existing_state]}")
-                return 0
-            reason = (
-                "parent-exited"
-                if exc.reason.startswith("parent-attempt-")
-                else (
-                    "summary-owner-launch-failed"
-                    if exc.reason.startswith("attempt-pre-release-")
-                    else "launch-error"
-                )
-            )
-            outcome = adapter_launch_failure_outcome(jobs, args.attempt_id, exc.reason)
-            annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": outcome})
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
-            return fail(
-                exc.reason, 73, detail=exc.detail,
-                attempt_id=args.attempt_id,
-                child_spawned="1" if outcome == "post-release-failed" else "0",
-            )
-        except OSError as exc:
-            for fd in (fence_failure_read_fd, fence_failure_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, "launch-error", "", args.attempt_id)
-            return fail("child-launch-failed", 70, detail=str(exc), attempt_id=args.attempt_id)
-        try:
-            args.governor_reservation = wait_governor_reservation_claim(
-                governor,
-                governor_root,
-                reservation_token,
-                proc,
-                expected_reservation=args.replica_batch_expectation,
-                watchdog_receipt=(args.review_watchdog_handle.receipt
-                                  if getattr(args, "review_watchdog_handle", None) else None),
-            )
-        except DispatchContractError as exc:
-            fence_failure, fence_released = read_launch_fence_failure(
-                fence_failure_read_fd
-            )
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    pass
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            if fence_failure is not None:
-                reason = str(fence_failure["reason"])
-                # The fence knows exactly which sealed root disagreed with the
-                # live one. This is a diagnostic on a path that is ALREADY
-                # failing, so it can never be allowed to prevent the row from
-                # closing: a raise here would leak the attempt open with a sealed
-                # launch_home, which then pins its release against pruning.
-                annotation = {"launch_outcome": "never-launched"}
-                try:
-                    annotation.update(
-                        launch_mismatch_annotation(str(fence_failure["detail"]))
-                    )
-                    annotate_attempt_row(jobs, args.attempt_id, annotation)
-                except DispatchContractError:
-                    annotate_attempt_row(
-                        jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-                    )
-                close_job_row(
-                    jobs, args.slug, args.worktree, reason, "", args.attempt_id,
-                )
-                return fail(
-                    reason, 73, detail=str(fence_failure["detail"]),
-                    attempt_id=args.attempt_id, registered="0", started="0",
-                    child_spawned="0",
-                )
-            post_exit = deterministic_post_exit_outcome(
-                proc, fence_released=fence_released,
-            )
-            if post_exit.launch_outcome:
-                annotate_attempt_row(
-                    jobs,
-                    args.attempt_id,
-                    {
-                        key: value
-                        for key, value in {
-                            "launch_outcome": post_exit.launch_outcome,
-                            "group_reap_proof": post_exit.group_reap_proof,
-                            "group_reap_pgid": post_exit.group_reap_pgid,
-                        }.items()
-                        if value
-                    },
-                )
-            close_job_row(
-                jobs, args.slug, args.worktree,
-                "governor-reservation-transfer", "", args.attempt_id,
-            )
-            return fail(
-                exc.reason, 75, detail=exc.detail,
-                attempt_id=args.attempt_id, child_spawned="1",
-            )
-        read_launch_fence_failure(fence_failure_read_fd)
-        foreground_review_handoff = (
-            getattr(args, "launch_lifecycle", DETACHED) == FOREGROUND_SCOPED
-            and getattr(args, "dispatch_depth", None) == 1
-            and getattr(args, "worker_type", None) == "review"
-            and getattr(args, "execution_surface", None) == "registered-headless"
-            and bool(getattr(args, "registered_worker", False))
-            and not any(foreground_review_launch_identity(args).values())
+        launch_spec = DISPATCH_MAIN.LaunchSpec(
+            harness="codex",
+            runtime_sandbox=lambda: effective_runtime_sandbox(args),
+            metadata_head=lambda env: {"runtime_home": env["CODEX_HOME"]},
+            scope_kwargs=lambda: {
+                "sandbox": effective_runtime_sandbox(args),
+                "network": bool(args.nested_headless_network),
+                "read_roots": (args.execution_access_grant.read_roots
+                               if args.execution_access_grant else ()),
+            },
+            grant_runtime=lambda: (
+                "codex-app-server"
+                if args.resolved_completion_delivery == "app-server-supervised"
+                else "codex-exec"
+            ),
+            grant_kwargs=lambda: {
+                "unmet": getattr(args, "local_network_unmet", ()),
+                "network_allowed": args.nested_headless_network,
+                "execution_selection": args.gpu_execution_selection,
+            },
+            after_foreground_settle=lambda outcome, terminal, terminal_closed: complete_foreground_wrapper_pass(
+                args, jobs, outcome, terminal, terminal_closed),
         )
-        start_ticks = launch_metadata.get("pid_start", "")
-        if (args.dispatch_depth == 1 and args.worker_type == "owner"
-                and args.launch_lifecycle == DETACHED):
-            try:
-                watcher_pid = launch_orphan_watch(
-                    jobs, agent_home, args.attempt_id, proc.pid, start_ticks or "")
-            except (DispatchContractError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "orphan-watch-launch-error",
-                    getattr(exc, "reason", "orphan-watch-launch-failed"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_job_row(
-                jobs, args.slug, args.worktree,
-                f"orphan_watch=post-exit,orphan_watch_pid={watcher_pid}",
-                args.attempt_id,
-            )
-        if args.launch_lifecycle == DETACHED:
-            try:
-                reap_watch_pid = launch_reap_watch(
-                    jobs,
-                    args.attempt_id,
-                    proc.pid,
-                    start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                )
-            except (DispatchContractError, ValueError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "reap-watch-launch-error",
-                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
-                            else "reap-watch-identity-invalid"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
-            )
-        args.child_pid = proc.pid
-        args.child_pid_start = start_ticks
-        args.launch_heartbeat = seed_launch_heartbeat(args, jobs, proc.pid, start_ticks)
-        activity_context = None
-        if args.launch_lifecycle == FOREGROUND_SCOPED and args.worker_type != "owner":
-            try:
-                from foreground_activity import build_activity_context
-                activity_context = build_activity_context(
-                    worker_type=args.worker_type, harness="codex", log_path=log_path,
-                    jobs=jobs, launch_metadata=launch_metadata, attempt_id=args.attempt_id,
-                    route_id=args.route_id, route_node=args.route_node,
-                    environment=dispatch_env, worktree=args.worktree,
-                )
-            except Exception as exc:
-                print(f"warning=foreground activity context unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
-        if args.launch_lifecycle == FOREGROUND_SCOPED and foreground_review_handoff:
-            binding = args.parent_binding
-            try:
-                outcome = wait_foreground(
-                    proc, args.foreground_timeout,
-                    watchdog_budget=args.watchdog_budget,
-                    activity_context=activity_context,
-                    parent_pid=binding.observed_pid if binding else None,
-                    parent_pid_start=binding.observed_pid_start if binding else None,
-                    parent_is_live=(
-                        (lambda: parent_attempt_binding_is_live(jobs, binding))
-                        if binding else None
-                    ),
-                )
-                foreground_seal = seal_foreground_result(
-                    jobs, args.attempt_id, proc.pid, start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                    exit_code=outcome.exit_code, failure=outcome.failure,
-                    group_empty=outcome.group_empty,
-                )
-            except (DispatchContractError, ValueError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    getattr(exc, "reason", "foreground-outcome-seal-error"),
-                    getattr(exc, "reason", "foreground-outcome-seal-error"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            try:
-                reap_watch_pid = launch_reap_watch(
-                    jobs, args.attempt_id, proc.pid, start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                    foreground_seal=foreground_seal,
-                )
-            except (DispatchContractError, ValueError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "reap-watch-launch-error",
-                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
-                            else "foreground-outcome-seal-error"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_attempt_row(
-                jobs, args.attempt_id,
-                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
-            )
-            args.worker_exit = outcome.exit_code
-            args.worker_failure = outcome.failure
-        elif args.launch_lifecycle == FOREGROUND_SCOPED:
-            binding = args.parent_binding
-            outcome = wait_foreground(
-                proc,
-                args.foreground_timeout,
-                parent_pid=binding.observed_pid if binding else None,
-                parent_pid_start=binding.observed_pid_start if binding else None,
-                parent_is_live=(
-                    (lambda: parent_attempt_binding_is_live(jobs, binding))
-                    if binding
-                    else None
-                ),
-                watchdog_budget=args.watchdog_budget,
-                activity_context=activity_context,
-            )
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                (
-                    {
-                        "launch_outcome": "governed-process-reaped",
-                        "group_reap_proof": GROUP_REAP_PROOF,
-                        "group_reap_pgid": str(proc.pid),
-                    }
-                    if outcome.group_empty
-                    else {"launch_outcome": "governed-process-reap-unverified"}
-                ),
-            )
-            args.worker_exit = outcome.exit_code
-            args.worker_failure = outcome.failure
-            settled = settle_foreground_exit(
-                jobs, args.attempt_id, log_path, outcome, worktree=args.worktree,
-                artifact_root=args.artifact_root, worker_type=args.worker_type,
-                legacy_close=lambda failure: close_job_row(
-                    jobs, args.slug, args.worktree, failure, "", args.attempt_id),
-            )
-            terminal = settled["inspection"]
-            args.terminal_inspection = terminal
-            args.terminal_verdict = settled["verdict"]
-            args.worker_failure = settled["worker_failure"]
-            terminal_closed = settled["closed"]
-            if (
-                not outcome.failure
-                and not terminal_closed
-                and args.registered_worker
-                and args.route_file
-                and args.route_node
-                and terminal.get("state") == "valid"
-                and terminal.get("verdict") == "PASS"
-                and terminal.get("artifact_state") == "readable"
-            ):
-                # Only this outer wrapper can prove its governed process group
-                # reaped.  Complete after that receipt, before returning.
-                try:
-                    wrapper_row = exact_attempt_row(jobs, args.attempt_id)
-                    completion_reason = close_wrapper_pass(wrapper_row, jobs=jobs)
-                except JoinContractError as exc:
-                    completion_reason = str(exc)
-                if completion_reason:
-                    args.worker_failure = "route-completion-rejected"
-        else:
-            # SD-15: detached launches retain the short early-death watch.
-            death = watch_early_death(proc, log_path, args.early_exit_watch)
-            if death:
-                reason, reset = death
-                close_job_row(jobs, args.slug, args.worktree, reason, reset, args.attempt_id)
-                if reason != "capacity":
-                    write_reset_cache(agent_home, "codex", reason, reset, args.jobs_path)
-                args.early_death = (reason, reset)
+        rc = DISPATCH_MAIN.launch_claimed_attempt(
+            _ADAPTER, launch_spec, args, jobs=jobs, env=dispatch_env, command=command, claim=claim,
+            log_path=log_path, prompt_path=prompt_path, agent_home=agent_home,
+            default_roots=default_roots,
+        )
+        if rc is not None:
+            return rc
 
     print("check=ok")
     print("adapter=codex")
@@ -3275,57 +2299,24 @@ def main(argv: list[str]) -> int:
             else "-"
         )
     )
-    print(f"status={action}")
-    print(f"worktree={args.worktree}")
-    print(f"artifact_root={args.artifact_root}")
-    print("artifact_write_scope=canonical-only")
-    print(f"slug={args.slug}")
-    print(f"capability={args.capability}")
-    print(f"capability_mode={args.capability_mode}")
-    print(f"worker_mode={args.worker_mode or '-'}")
-    print(f"qa={args.qa}")
-    print(f"intensity={args.intensity}")
-    print(f"dispatch_depth={args.dispatch_depth}")
-    print(f"eligibility_probe={getattr(args, 'eligibility_probe', None) or '-'}")
-    print(f"parent={args.parent_slug or '-'}")
+    for line in launch_receipt.identity_lines(args, action):
+        print(line)
     print(f"parent_attempt_id={args.parent_binding.attempt_id if args.parent_binding else '-'}")
     print(f"parent_session_id={args.parent_session_id or '-'}")
-    print(f"worker_role={args.worker_role or '-'}")
-    print(f"worker_type={args.worker_type}")
-    print(f"assigned_contract={args.assigned_contract}")
-    print(f"unit={args.unit or '-'}")
-    print(f"owner={args.capability_owner or '-'}")
-    print(f"owner_harness={args.owner_harness or '-'}")
-    print(f"route_file={args.route_file or '-'}")
-    print(f"route_validation={getattr(args, 'route_validation', None) or '-'}")
+    for line in launch_receipt.worker_lines(args):
+        print(line)
     settings = args.resolved_model_settings
-    print(f"model_source={settings['source']}")
-    print(f"model_pin_status={settings.get('pin_status', 'none')}")
-    if getattr(args, 'explicit_adapter', None):
-        print(f"explicit_adapter={args.explicit_adapter}")
-    if settings.get("pin_model"):
-        print(f"model_pin={settings['pin_model']}")
-    print(f"model_role={settings['role']}")
-    print(f"model_profile={settings['profile']}")
-    print(f"model_tier={settings['tier']}")
-    _config_source, _config_reason = _model_config_state()
-    print(f"model_config_source={_config_source}")
-    print(f"model_config_reason={_config_reason}")
-    print(f"profile_granularity={settings['granularity']}")
-    print(f"main_session_only_policy={_main_session_only_policy_state()}")
-    for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
-        print(f"{key}={value}")
-    print(f"model={settings['model']}")
+    for line in launch_receipt.model_lines(
+            args, settings, config_state=_model_config_state,
+            main_session_only_policy=_main_session_only_policy_state):
+        print(line)
     print(f"reasoning={settings['reasoning']}")
     print(f"context_window_requested={settings['context_window']}")
     print(f"context_window_source={settings['context_window_source']}")
     print("context_window_native_application=codex-config:model_context_window")
     print(f"approval={args.approval}")
-    leg_class, auxiliary_check = _route_node_leg_fields(args)
-    print(f"leg_class={leg_class}")
-    print(f"auxiliary_check={auxiliary_check}")
-    print(f"parent_cross={os.environ.get('AGENT_DISPATCH_PARENT_CROSS', '-')}")
-    print(f"sole_gate={os.environ.get('AGENT_DISPATCH_SOLE_GATE', '-')}")
+    for line in launch_receipt.leg_lines(args, leg_fields=_route_node_leg_fields):
+        print(line)
     print(f"profile={args.profile or '-'}")
     print(f"runtime_home_projection={runtime_home_projection or '-'}")
     for line in launch_receipt.attempt_lines(
@@ -3339,9 +2330,8 @@ def main(argv: list[str]) -> int:
                 "nested_owner_writable_dirs=" + (";".join(map(str, nested_owner_writable_dirs(args))) or "-"),
             ]):
         print(line)
-    print(f"prompt_source={prompt_source}")
-    print(f"prompt_file={prompt_path}")
-    print(f"log_file={log_path}")
+    for line in launch_receipt.prompt_lines(prompt_source, prompt_path, log_path):
+        print(line)
     if command is None:
         command = shell_command(args, prompt_path, log_path)
     print(f"command={command}")
