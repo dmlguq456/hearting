@@ -223,7 +223,7 @@ jobs:
       # Every shard reports even when a sibling fails, so one run shows all causes.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -308,8 +308,10 @@ jobs:
           PY
           }
           observe_claude full-suite-before | tee "${{ runner.temp }}/shard-out/progress.log"
+          # Runner speed varies by about 1.5x between hosts; keep the CPU next to the timings.
+          grep -m1 '^model name' /proc/cpuinfo | tee -a "${{ runner.temp }}/shard-out/progress.log" || true
           python3 tools/run-tests.py --retries 1 \
-            --shard ${{ matrix.shard }}/10 \
+            --shard ${{ matrix.shard }}/12 \
             --suite-list ${{ runner.temp }}/shard-out/suite-list.tsv \
             --xpass-nonfatal \
             --strict-leak-sweep \
@@ -322,7 +324,7 @@ jobs:
         if: always() && steps.scope.outputs.full_tests == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: run-tests-report-shard-${{ matrix.shard }}-of-10-attempt-${{ github.run_attempt }}
+          name: run-tests-report-shard-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shard-out
           if-no-files-found: ignore
 

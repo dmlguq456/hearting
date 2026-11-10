@@ -249,12 +249,12 @@ class ChecksWorkflowContractTest(unittest.TestCase):
                 for step in steps[2:]:
                     self.assertIn("steps.scope.outputs.full_tests == 'true'", step)
 
-    def test_ten_shards_run_in_parallel_within_the_old_time_budget(self):
+    def test_twelve_shards_run_in_parallel_within_the_old_time_budget(self):
         shard = job_block(self.checks, "full-suite-shard")
         self.assertIn("      fail-fast: false\n", shard)
-        self.assertIn("        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n", shard)
+        self.assertIn("        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]\n", shard)
         self.assertIn("    timeout-minutes: 40\n", shard)
-        for option in ("--shard ${{ matrix.shard }}/10", "--suite-list", "--retries 1", "--xpass-nonfatal",
+        for option in ("--shard ${{ matrix.shard }}/12", "--suite-list", "--retries 1", "--xpass-nonfatal",
                        "--strict-leak-sweep", "--diagnostics-dir", "--seed-baseline"):
             self.assertIn(option, shard)
         self.assertIn("bash tools/release/install-ci-fixtures.sh ripgrep strace", shard)
@@ -263,7 +263,7 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         shard = job_block(self.checks, "full-suite-shard")
         upload = shard.split("- name: Upload shard report", 1)[1]
         self.assertIn("if: always() && steps.scope.outputs.full_tests == 'true'", upload)
-        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-10-attempt-${{ github.run_attempt }}\n", upload)
+        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}\n", upload)
         self.assertIn("path: ${{ runner.temp }}/shard-out\n", upload)
         self.assertIn("if-no-files-found: ignore", upload)
         self.assertNotIn("overwrite:", upload)
@@ -272,8 +272,8 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         aggregate = job_block(self.checks, "full-test-suite")
         download = aggregate.split("- name: Download the shard reports", 1)[1].split("\n      - name:", 1)[0]
         pattern = re.search(r"(?m)^          pattern: (.+)$", download).group(1)
-        for name in ("run-tests-report-shard-1-of-10", "run-tests-report-shard-2-of-10-attempt-9",
-                     "run-tests-report-shard-10-of-10-attempt-10"):
+        for name in ("run-tests-report-shard-1-of-12", "run-tests-report-shard-2-of-12-attempt-9",
+                     "run-tests-report-shard-12-of-12-attempt-10"):
             self.assertTrue(fnmatch.fnmatchcase(name, pattern), name)
         self.assertIn("path: ${{ runner.temp }}/shards\n", download)
         self.assertIn("merge-multiple: false", download)
