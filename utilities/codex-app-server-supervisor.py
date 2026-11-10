@@ -1934,6 +1934,9 @@ def main(argv: list[str] | None = None) -> int:
                 next_prompt = "Address the pending user correction before finishing this same work."
                 continue
             terminal = classify_codex_result(final_text)
+            from dispatch_supervisor_terminal import completed_owner_assessment
+            terminal = completed_owner_assessment(terminal, final_text, jobs=args.jobs,
+                                                   attempt_id=args.parent_attempt_id)
             if terminal.failure_class == "pass":
                 from dispatch_terminal_commit import owner_workflow_continuation
                 correction = (owner_workflow_continuation(args.jobs, args.parent_attempt_id, args.route_file)

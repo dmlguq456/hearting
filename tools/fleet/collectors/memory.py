@@ -199,6 +199,135 @@ _OPEN_TYPES = ("unresolved-obligation", "backlog", "task", "todo", "obligation")
 _project_cache = {}
 
 
+# Kinds that record a finished outcome, an observation or a pointer, never open work by
+# themselves; a ``backlog`` tag on them names the topic, not a pending item.
+_FINISHED_TYPES = frozenset(("completion", "observation", "artifact-pointer", "feedback",
+                             "user-correction", "decision"))
+_FINISHED_TAGS = frozenset(("resolved", "done", "closed"))
+_OPEN_MARKER_WORDS = ("백로그", "진행", "미확인", "부분 설치", "미해결", "수리")
+_HEADLINE_MARKER = re.compile(r"^\s*\[([^\]]{1,40})\]")
+OPEN_STAGES = ("doing", "waiting", "open")
+
+
+def _refers_to_route(route_id, references):
+    if not route_id:
+        return False
+    for reference in references or ():
+        text = str(reference)
+        if text == route_id or re.search(r"(?<![A-Za-z0-9])" + re.escape(route_id) +
+                                         r"(?![A-Za-z0-9])", text):
+            return True
+    return False
+
+
+def open_stage(record, routes=()):
+    """How far a possibly-open record got: ``doing``, ``waiting``, ``open`` or None (not open work).
+
+    Only what the record and the routes already say is used: its type, tags, headline marker
+    (``[진행 중]``, ``[설치 완료·실사용 미확인]``, ``[해결 확인]`` …) and an exact route link.
+    An obligation or backlog record with neither stays open on record, never "in progress".
+    """
+    headline = record.get("headline")
+    match = _HEADLINE_MARKER.match(headline if isinstance(headline, str) else "")
+    marker = match.group(1) if match else ""
+    if "해결" in marker and "미해결" not in marker:
+        return None
+    rtype = str(record.get("type") or "").casefold()
+    tags = {str(tag).strip("[]\"' ").casefold() for tag in record.get("tags") or ()}
+    if rtype in _FINISHED_TYPES or tags & _FINISHED_TAGS:
+        return None
+    if not (rtype in _OPEN_TYPES or "backlog" in tags
+            or any(word in marker for word in _OPEN_MARKER_WORDS)):
+        return None
+    refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
+    linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
+    if "진행" in marker or any(route.get("state") in ("working", "blocked") or
+                              any(stage.get("st") == "active" for stage in route.get("stages") or ())
+                              for route in linked):
+        return "doing"
+    if "미확인" in marker or "부분 설치" in marker or any(
+            route.get("state") == "done" and route.get("outcome") == "success" for route in linked):
+        return "waiting"
+    return "open"
+
+
+# Harness differences the docs still carry (core/ADAPTATION.md, "Open harness
+# differences").  Each open row is shown with the project's open records on the
+# Fleet screen and its counts, so a documented difference stays visible instead of
+# being closed by wording such as "separate decision" or "known difference".  The
+# session work list (periodic steward check, session shell) does not read them:
+# a register row is not a task for every supervising session.
+PARITY_REGISTER = Path("core") / "ADAPTATION.md"
+PARITY_PROJECT = "hearting"
+_REGISTER_START = "<!-- parity-register:start -->"
+_REGISTER_END = "<!-- parity-register:end -->"
+_REGISTER_STATES = {"open": "미결", "needs-user-decision": "결정 필요"}
+_REGISTER_CLOSED = frozenset({"resolved", "limit"})
+_REGISTER_LINK = re.compile(r"https?://[^\s)>\]|]+")
+_parity_cache = {}
+
+
+def register_row_closed(state, follow):
+    """``resolved`` closes a row; ``limit`` closes it only when ``Next`` links its evidence.
+
+    A ``limit`` without a link is the documented definition unmet, so it stays open
+    rather than letting one word hide a fixable difference.
+    """
+    state = state.strip("`").casefold()
+    if state == "limit":
+        return bool(_REGISTER_LINK.search(follow))
+    return state in _REGISTER_CLOSED
+
+
+def _register_path():
+    return _agent_home() / PARITY_REGISTER
+
+
+def parity_open_items(path=None):
+    """Open rows of the parity register as open-record dicts (headline only).
+
+    Row shape: ``| PG-n | harnesses | user-visible effect | state | next |``.  Only
+    ``resolved`` and a ``limit`` whose ``Next`` links its evidence close a row; any
+    other state, a typo or an unlinked ``limit`` included, stays open so a row
+    cannot disappear unclosed.  A missing or unreadable register yields none.
+    """
+    path = Path(path) if path is not None else _register_path()
+    try:
+        info = path.stat()
+        key = (str(path), info.st_mtime_ns, info.st_size)
+    except OSError:
+        return []
+    if _parity_cache.get("key") == key:
+        return [dict(item) for item in _parity_cache["value"]]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    start, end = text.find(_REGISTER_START), text.find(_REGISTER_END)
+    items = []
+    if start >= 0 and end > start:
+        updated = datetime.datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%dT%H:%M:%S")
+        for line in text[start:end].splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 5 or not re.fullmatch(r"PG-\d{1,4}", cells[0]):
+                continue
+            ident, harnesses, effect, state, follow = cells[:5]
+            state = state.strip("`").casefold()
+            if register_row_closed(state, follow):
+                continue
+            label = "limit 근거 없음" if state == "limit" else _REGISTER_STATES.get(state, "미결")
+            tags = ("parity", "backlog") + (("user-decision",) if state == "needs-user-decision" else ())
+            items.append({
+                "id": f"parity:{ident}", "type": "unresolved-obligation",
+                "headline": f"[{label}] {ident} {harnesses}: {effect}"[:240],
+                "updated": updated, "tags": tags,
+                "links": (), "artifact_refs": (f"{PARITY_REGISTER}#{ident}"[:512],),
+                "next": follow[:240],
+            })
+    _parity_cache.update(key=key, value=items)
+    return [dict(item) for item in items]
+
+
 def _json_strings(value, limit=80):
     if isinstance(value, (list, tuple)):
         items = value
@@ -235,17 +364,25 @@ def _db_stamp(path):
 
 
 def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
-                         open_limit=OPEN_PER_PROJECT, repo=None):
-    """Per project, the newest decisions and the possibly-open records, headline only.
+                         open_limit=OPEN_PER_PROJECT, repo=None, parity=True):
+    """Per project, the newest decisions and the open records, headline only.
+
+    Open candidates are classified with ``open_stage`` before the ``open_limit`` cut, so
+    ``open_total`` is every open record of the project and ``limited`` says the listed
+    ``open`` rows are only the newest ``open_limit`` of them.
 
     One read-only query ranks records within each (origin, kind) so every project keeps its
     own newest rows; record bodies are never selected. ``headlines`` maps the given journal
     ids to their stored headline. The result is reused while the database files are unchanged.
+    ``parity=False`` leaves out the parity register rows (the session work list).
     """
     path = _db_path()
     if not path.is_file():
         return {"state": "unavailable", "by_repo": {}, "record_count": None}
-    key = (str(path), _db_stamp(path), today, tuple(journal_ids), decisions, open_limit, repo)
+    scope_repo = repo   # the row loop below reuses ``repo`` for each record's project
+    register = _register_path()
+    key = (str(path), _db_stamp(path), _db_stamp(register), today, tuple(journal_ids),
+           decisions, open_limit, repo, parity)
     cached = _project_cache.get("value")
     if cached is not None and _project_cache.get("key") == key:
         return dict(cached)
@@ -288,9 +425,11 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 f" FROM (SELECT {select}, rowid AS seq,"
                 f"  CASE WHEN type='decision' THEN 'decision' ELSE 'open' END AS kind"
                 f"  FROM records WHERE {' AND '.join(where)}))"
-                f" WHERE rank <= CASE kind WHEN 'decision' THEN ? ELSE ? END"
+                # Open candidates are not cut here: finished records are dropped by
+                # open_stage() below, so a raw cut could hide real open work behind them.
+                f" WHERE kind='open' OR rank <= ?"
                 f" ORDER BY cwd_origin, kind, rank",
-                (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions)), max(1, int(open_limit))),
+                (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions))),
             ).fetchall()
             ids = [str(item) for item in journal_ids if item][:256]
             headlines = dict(con.execute(
@@ -322,16 +461,29 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
         else:
             record.update(tags=_json_strings(tags_raw), links=_json_strings(links_raw, 256),
                           artifact_refs=_json_strings(refs_raw, 512))
+            if open_stage(record) is None:   # finished, observed or resolved: not open work
+                continue
             entry["open"].append(record)
-            if int(total or 0) > int(open_limit):
-                entry["limited"] = limited = True
         entry["updated"] = max(entry["updated"], record["updated"])
+    if parity and (scope_repo is None or scope_repo == PARITY_PROJECT):
+        parity = parity_open_items(register)
+        if parity:
+            entry = by_repo.setdefault(PARITY_PROJECT, {"decisions": [], "decisions_today": 0,
+                                                        "open": [], "limited": False,
+                                                        "updated": ""})
+            entry["open"].extend(parity)
+            entry["updated"] = max(entry["updated"], *(item["updated"] for item in parity))
     for entry in by_repo.values():
         entry.pop("_origins", None)
         # Origins that share a project name merge; the newest rows win across them.
         entry["decisions"].sort(key=lambda item: item["updated"], reverse=True)
         del entry["decisions"][max(0, int(decisions)):]
         entry["open"].sort(key=lambda item: item["updated"], reverse=True)
+        # The total counts every open record; only the listed rows are bounded.
+        entry["open_total"] = len(entry["open"])
+        if entry["open_total"] > max(1, int(open_limit)):
+            entry["limited"] = limited = True
+            del entry["open"][max(1, int(open_limit)):]
     result = {"state": "success", "by_repo": by_repo, "limited": limited,
               "record_count": sum(len(e["decisions"]) + len(e["open"]) for e in by_repo.values()),
               "headlines": {str(rid): str(text)[:240] for rid, text in headlines.items() if text}}

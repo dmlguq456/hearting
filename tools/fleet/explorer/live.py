@@ -16,7 +16,8 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import exec_child_is_wait
+from ..model import current_attempt_rank, exec_child_is_wait
+from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -1094,6 +1095,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        if record:
+            # Display only: shape and its basis, stages, verification and next step, read
+            # from this route's own record, Fleet's view and its outcome sidecar.
+            # A solo route's owner is its one-shot node's own attempt, not a separate row.
+            depth_one = [job for job in owner_jobs
+                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+            shown_owner = owner if owner is not None else (
+                max(depth_one, key=current_attempt_rank) if depth_one else None)
+            route["visibility"] = route_visibility.bounded(route_visibility.describe(
+                record, view, owner=route_visibility.owner_from_job(shown_owner)))
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -2247,48 +2258,8 @@ def _memory_records(journal, accepted_detail):
     return [[repo, [row for _stamp, row in rows]] for repo, rows in sorted(journal.items())]
 
 
-def _refers_to_route(route_id, references):
-    if not route_id:
-        return False
-    for reference in references or ():
-        text = str(reference)
-        if text == route_id or re.search(r"(?<![A-Za-z0-9])" + re.escape(route_id) +
-                                         r"(?![A-Za-z0-9])", text):
-            return True
-    return False
-
-
-_OPEN_RECORD_TYPES = frozenset(("unresolved-obligation", "backlog", "task", "todo", "obligation"))
-_OPEN_MARKER_WORDS = ("백로그", "진행", "미확인", "부분 설치", "미해결", "수리")
-_HEADLINE_MARKER = re.compile(r"^\s*\[([^\]]{1,40})\]")
-OPEN_STAGES = ("doing", "waiting", "open")
-
-
-def _open_stage(record, routes):
-    """How far a possibly-open record got: ``doing``, ``waiting``, ``open`` or None (not open work).
-
-    Only what the record and the routes already say is used: its headline marker
-    (``[진행 중]``, ``[설치 완료·실사용 미확인]``, ``[해결 확인]`` …) and an exact route link.
-    An obligation or backlog record with neither stays open on record, never "in progress".
-    """
-    match = _HEADLINE_MARKER.match(_text(record.get("headline")) or "")
-    marker = match.group(1) if match else ""
-    if "해결" in marker and "미해결" not in marker:
-        return None
-    tags = {str(tag).strip("[]\"' ").casefold() for tag in record.get("tags") or ()}
-    if not (str(record.get("type") or "").casefold() in _OPEN_RECORD_TYPES or "backlog" in tags
-            or any(word in marker for word in _OPEN_MARKER_WORDS)):
-        return None
-    refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
-    linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
-    if "진행" in marker or any(route.get("state") in ("working", "blocked") or
-                              any(stage.get("st") == "active" for stage in route.get("stages") or ())
-                              for route in linked):
-        return "doing"
-    if "미확인" in marker or "부분 설치" in marker or any(
-            route.get("state") == "done" and route.get("outcome") == "success" for route in linked):
-        return "waiting"
-    return "open"
+# One classifier shared with the session block (fleet/session_work.py).
+from ..collectors.memory import OPEN_STAGES, open_stage as _open_stage  # noqa: E402
 
 
 def _headline_text(text):
@@ -3107,7 +3078,7 @@ def current_route_counts(routes):
     return counts, opened
 
 
-def session_route_status(snapshot, now=None):
+def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
@@ -3136,7 +3107,43 @@ def session_route_status(snapshot, now=None):
         harness = _get(session, "harness")
         for sid in index[tag]["ids"]:
             result[str(harness) + "\0" + sid] = label
-    return result
+    if not include_details:
+        return result
+    # Reuse this very interpretation for the shell. No second collection or
+    # authority store: bounded display fields in the existing projection.
+    details = {}
+    for tag, info in index.items():
+        selected = [r for r in routes if r.get("session_tag") == tag and r.get("current") is True]
+        recent = sorted((r for r in routes if r.get("session_tag") == tag and not r.get("current")
+                         and r.get("state") == "done" and r.get("outcome") and r.get("result_at") is not None),
+                        key=lambda r: r["result_at"], reverse=True)
+        selected += recent[:2]
+        records = []
+        for route in selected[:8]:
+            row = {key: str(route.get(key) or "")[:320] for key in
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
+                              "st": str(stage.get("st") or "")[:24]}
+                             for stage in (route.get("stages") or ())[:16]]
+            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+            row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
+                             if isinstance(part, (tuple, list)) and part]
+            visibility = route.get("visibility")
+            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                                     "next": str(visibility.get("next") or "")[:120],
+                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                               for line in (visibility.get("lines") or ())[:14]
+                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
+                # Already bounded by the shared reader. Keep its codes intact;
+                # presentation translates them, never reinterprets report prose.
+                codes = visibility.get("codes")
+                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+                    row["visibility"]["codes"] = codes
+            records.append(row)
+        for sid in info["ids"]:
+            details[str(_get(info["session"], "harness")) + "\0" + sid] = records
+    return result, details
 
 
 def session_index(snapshot, now=None):

@@ -596,6 +596,7 @@ class WorkerBootstrapTest(unittest.TestCase):
         owner = W.render_worker_bootstrap(ROOT, "owner")
         self.assertIn("When the sealed entry scope is `complete`", owner)
         self.assertIn("sealed entry scope is `complete`", owner)
+        self.assertIn("only `report` withholds it", owner)
         self.assertIn("ordinary non-force push", owner)
         self.assertIn("request wording is not an additional authorization test.", owner)
         self.assertIn("supervisor responsibilities", owner)

@@ -91,12 +91,12 @@ class SessionShellTest(unittest.TestCase):
     def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
         path=shell.policy_path();path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
-        self.assertEqual(shell.display_policy(),{'layout':'bottom','side_width':40,'side_min_columns':132})
+        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14})
         path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
         self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
         for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
             path.write_text(json.dumps({'enabled':True,field:value}))
-            self.assertFalse(shell.policy()[0]);self.assertEqual(shell.display_policy()['layout'],'bottom')
+            self.assertFalse(shell.policy()[0]);self.assertEqual(shell.display_policy()['layout'],'side')
 
     def test_exact_live_birth_bound_native_attachment_is_found(self):
         row = self.binding(); path = self.save(row)
@@ -177,12 +177,15 @@ class SessionShellTest(unittest.TestCase):
         row = self.binding(); received = self.serve(row)
         from pane_ownership import _process
         owner = _process(row["native_pid"])
-        env = {"HEARTING_SHELL_SOCKET": row["socket"], "HEARTING_SHELL_TOKEN": "private-fixture"}
+        env = {"HEARTING_SHELL_SOCKET": row["socket"], "HEARTING_SHELL_TOKEN": "private-fixture",
+               "HEARTING_SHELL_NATIVE_MODEL": "native-selected-model"}
         with mock.patch("pane_ownership._caller_runtime", return_value=(owner, False)):
             shell.lifecycle("claude", "start", row["sid"], env=env)
         self.assertEqual(received[0]["pid"], row["native_pid"])
         self.assertNotEqual(received[0]["pid"], os.getpid())
         self.assertEqual(received[0]["start"], row["native_start"])
+        self.assertEqual(received[0]["native_model"], "native-selected-model")
+        self.assertEqual(received[0]["sid"], row["sid"])
 
     def test_native_callback_can_register_before_the_passive_session_registry_exists(self):
         row = self.binding()
