@@ -12,9 +12,11 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
 The server is a loopback stdio MCP server written into the fixture root with
 the same registration shape as ``tools/design-mcp/server.js`` (server id
 ``design``, tool ``preview``), so the run needs no Node packages or browser; it
-measures the approval path, not rendering. Codex gets the config keys release
-activation sets (``_merge_codex_managed_keys``); a source without them measures
-as it is. Everything stays in the fixture root.
+measures the approval path, not rendering. Codex gets the per-run arguments a
+Hearting-launched noninteractive run adds
+(``codex_permission_profile.design_mcp_run_arguments``); its config file keeps
+no approval value, so interactive sessions still ask. A source without that
+function measures as it is. Everything stays in the fixture root.
 """
 from __future__ import annotations
 
@@ -30,7 +32,15 @@ import harness_behavior_scenarios as base  # noqa: E402
 from harness_behavior_scenarios import Reply, Scenario  # noqa: E402
 import harness_behavior_cases_b as cb  # noqa: E402
 import harness_behavior_cases_e as ce  # noqa: E402
-from harness_behavior_cases_subagent_model import MANAGED_KEYS, _source  # noqa: E402
+from harness_behavior_cases_subagent_model import _source  # noqa: E402
+
+RUN_ARGUMENTS = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/utilities")
+import codex_permission_profile as profile
+build = getattr(profile, "design_mcp_run_arguments", None)
+print(json.dumps(None if build is None else build(sys.argv[2])))
+"""
 
 PG = {"design-mcp-exec": "PG-23"}
 
@@ -110,12 +120,18 @@ class DesignMcpExecScenario(Scenario):
         text += ("\n[mcp_servers.design]\ncommand = " + json.dumps(command[0])
                  + "\nargs = " + json.dumps(command[1:]) + "\n")
         config.write_text(text, encoding="utf-8")
-        done = subprocess.run([sys.executable, "-B", "-c", MANAGED_KEYS, str(_source()), str(config)],
+        done = subprocess.run([sys.executable, "-B", "-c", RUN_ARGUMENTS, str(_source()),
+                               str(config.parent)],
                               env=run.home.env, text=True, capture_output=True, timeout=120)
-        merged = config.read_text(encoding="utf-8")
-        return {"managed_keys": done.stdout.strip()[-300:] or done.stderr[-300:],
-                "approval_line": next((line for line in merged.splitlines()
-                                       if line.startswith("default_tools_approval_mode")), None)}
+        try:
+            arguments = json.loads(done.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            arguments = None
+        self.extra = list(arguments or [])
+        return {"run_arguments": arguments if done.returncode == 0 else done.stderr[-300:],
+                "config_approval_line": next((line for line in config.read_text(encoding="utf-8")
+                                              .splitlines()
+                                              if line.startswith("default_tools_approval_mode")), None)}
 
     def _register_opencode(self, run, command):
         self.extra = []
@@ -149,7 +165,7 @@ class DesignMcpExecScenario(Scenario):
         # `--mcp-config` takes several values: keep it ahead of the other flags.
         argv = {"claude": [run.binary, *self.extra, "-p", "--model", base.FIXTURE_MODEL,
                            "--permission-mode", "bypassPermissions"],
-                "codex": [run.binary, "exec", "--skip-git-repo-check"],
+                "codex": [run.binary, "exec", *self.extra, "--skip-git-repo-check"],
                 "opencode": [run.binary, "run"]}[run.harness]
         done = subprocess.run([*argv, f"{self.marker} render index.html"], env=run.home.env,
                               cwd=str(run.home.workspace), text=True, capture_output=True,

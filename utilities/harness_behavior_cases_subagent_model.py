@@ -11,20 +11,24 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
 The role default is the portable ``light`` profile
 (``utilities/native_agents.py`` ``NATIVE_SUBAGENT_PROFILE``): Claude injects it
 with ``hooks/subagent-model-default.sh``, Codex reads ``[agents]
-default_subagent_model`` that release activation writes, OpenCode gives its
-built-in subagents that model through the plugin ``config`` hook.
+default_subagent_model`` that release activation writes where the home's model
+list carries it; OpenCode's built-ins keep the session model (PG-13 limit).
 
 Each harness serves the role default the way a user's home does:
 
 * Codex selects its own ``openai`` provider with ``openai_base_url`` on the
-  loopback model, so the shipped pins and the default apply (a home that can
-  select another provider gets neither, PG-52). The agents and config keys are
-  then projected as release activation does (``sync-native-agents.py
-  --runtime-home`` and ``_merge_codex_managed_keys``); a source without those
-  keys measures as it is.
+  loopback model, so the shipped pins apply (a home that can select another
+  provider gets none, PG-52). The default is written only where the home's
+  model list is read and carries the light model: the home names, through
+  ``model_catalog_json``, the list this Codex binary ships (``codex debug
+  models --bundled``), as a home whose list carries it does. The agents and
+  config keys are then projected as release activation does
+  (``sync-native-agents.py --runtime-home`` and ``_merge_codex_managed_keys``);
+  a source without those keys measures as it is.
 * OpenCode gets a whole-file ``models.conf`` copy whose tiers name loopback
-  models, so the role default shares the session's provider; its agents are
-  rendered for that copy.
+  models and its agents rendered for that copy. Its built-ins keep the parent
+  session's model: no plugin seam sees the parent's model per spawn (PG-13
+  limit), so ``general`` measures as a gap.
 
 Everything stays in the fixture root; no user config is read or written.
 """
@@ -138,6 +142,15 @@ class SubagentModelScenario(Scenario):
         text = re.sub(r'(?m)^(model|model_provider)\s*=.*\n', "", text)
         text = re.sub(r'(?ms)^\[model_providers\.hearting_fixture\].*?(?=^\[|\Z)', "", text)
         text = (f'model = "{_codex_session()}"\nopenai_base_url = "{run.fixture.base}/v1"\n' + text)
+        listed = subprocess.run([run.binary, "debug", "models", "--bundled"], env=run.home.env,
+                                text=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        try:
+            catalog = json.loads(listed.stdout)
+            run.evidence["model_list"] = sorted(m["slug"] for m in catalog["models"])
+            (home / "catalog.json").write_text(listed.stdout, encoding="utf-8")
+            text = f'model_catalog_json = "{home / "catalog.json"}"\n' + text
+        except (ValueError, KeyError, TypeError):
+            run.evidence["model_list"] = {"unread": listed.stderr[-300:]}
         config.write_text(text, encoding="utf-8")
         run.home.env["OPENAI_API_KEY"] = run.home.env["CODEX_API_KEY"] = "sk-fixture-" + "0" * 20
         run.evidence["activation"] = _render_agents(run, "codex", home / "agents", home)

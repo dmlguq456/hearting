@@ -983,7 +983,7 @@ check_codex_bin_wrappers() {
   fi
   if ! grep -Fq 'runtime_surface=codex-native-mcp' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'claude_settings_mcp=unsupported' adapters/codex/bin/preflight.sh \
-    || ! grep -Fq 'design_mcp_projection=manual-registration-exec-approved' adapters/codex/bin/preflight.sh; then
+    || ! grep -Fq 'design_mcp_projection=manual-registration-per-run-approval' adapters/codex/bin/preflight.sh; then
     fail_msg "adapters/codex/bin/preflight.sh must report the Codex MCP contract without Claude settings MCP projection"
   fi
   if ! grep -Fq 'runtime_surface=codex-exec-headless' adapters/codex/bin/preflight.sh \

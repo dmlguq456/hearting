@@ -32,12 +32,19 @@ class NativeDefaultTests(unittest.TestCase):
         cfg["CFG_MAIN_SESSION_ONLY_MODELS"] = "gpt-6-luna"
         self.assertIsNone(native_agents.native_subagent_default("codex", cfg))
 
-    def test_codex_plan_carries_the_default_only_for_openai_homes(self):
+    def test_codex_plan_carries_the_default_only_where_the_home_lists_it(self):
         renderer = ROOT / "adapters/codex/bin/sync-native-agents.py"
+        cache = json.dumps({"models": [{"slug": "gpt-6-luna"}]})
         with tempfile.TemporaryDirectory(prefix="subagent-default-") as raw:
             home = Path(raw)
-            for text, expected in (('model = "gpt-6.1"\n', "gpt-6-luna"), ('model_provider = "ollama"\n', None)):
+            for text, listed, expected in (('model = "gpt-6.1"\n', cache, "gpt-6-luna"),
+                                           ('model = "gpt-6.1"\n', None, None),
+                                           ('model_provider = "ollama"\n', cache, None)):
                 (home / "config.toml").write_text(text, encoding="utf-8")
+                cache_path = home / "models_cache.json"
+                cache_path.unlink(missing_ok=True)
+                if listed:
+                    cache_path.write_text(listed, encoding="utf-8")
                 plan = json.loads(subprocess.run([sys.executable, "-B", str(renderer), "--runtime-home", str(home),
                                                   "--json"], text=True, capture_output=True, check=True).stdout)
                 value = plan["default_subagent"]

@@ -110,7 +110,7 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
     # The entry Skill's intro already says it is not a compatibility copy; its
     # byte budget (tools/entry-skill-layer.test.py) goes to the owner/route steps.
     legacy_note = "" if invocation_class == "entry-router" else (
-        "Do not use legacy compatibility Skill files or non-native adapter Skill files\n"
+        "\nDo not use legacy compatibility Skill files or non-native adapter Skill files\n"
         "as OpenCode-native source. Those files are compatibility/reference surfaces only.\n")
     description = compact(f"{invocation['use_when']} {invocation['not_for']}")
     if invocation_class == "entry-router":
@@ -179,7 +179,6 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 ## Workflow Evidence
 
 {workflow_evidence}
-
 {legacy_note}"""
     return identifier, body
 

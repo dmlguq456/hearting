@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import re
 import sys
 import shutil
 import subprocess
@@ -501,112 +500,6 @@ def apply_runtime_config(config: Mapping[str, object], *, environ: Mapping[str, 
     return json.loads(content) if applied else result
 
 
-# OpenCode's built-in subagents (https://opencode.ai/docs/agents/ "Built-ins").
-OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore")
-
-
-def subagent_default(values: Mapping[str, str], config: Mapping[str, object]) -> dict | None:
-    """The role default model for OpenCode's built-in subagents, or None (PG-13).
-
-    OpenCode gives a subagent with no configured model the parent session's model
-    and its ``subagent`` tool takes no model, so the built-ins get the portable
-    sub-agent profile through config, as the catalog agents carry it in their
-    files. Only when the session model uses the same provider: another provider
-    may not serve that model, and a built-in that cannot start is worse than one
-    on the session model.
-    """
-    try:
-        from native_agents import native_subagent_default
-    except ImportError:  # package import in focused unit tests
-        from utilities.native_agents import native_subagent_default
-    resolved = native_subagent_default("opencode", values)
-    session = config.get("model")
-    if not resolved or not isinstance(session, str) or "/" not in session:
-        return None
-    model = resolved["model"].partition("#")[0]
-    if "/" not in model or model.split("/", 1)[0] != session.split("/", 1)[0]:
-        return None
-    return {"model": model, "agents": list(OPENCODE_BUILTIN_SUBAGENTS)}
-
-
-def _jsonc_object(path: Path) -> dict:
-    """The JSON object in an OpenCode ``.json``/``.jsonc`` file, or ``{}``."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return {}
-    out, index, in_string = [], 0, False
-    while index < len(text):
-        char = text[index]
-        if in_string:
-            out.append(char)
-            if char == "\\" and index + 1 < len(text):
-                out.append(text[index + 1])
-                index += 1
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-            out.append(char)
-        elif text.startswith("//", index):
-            while index < len(text) and text[index] not in "\r\n":
-                index += 1
-            continue
-        elif text.startswith("/*", index):
-            end = text.find("*/", index + 2)
-            index = len(text) if end < 0 else end + 2
-            continue
-        else:
-            out.append(char)
-        index += 1
-    cleaned = re.sub(r",(\s*[}\]])", r"\1", "".join(out))
-    try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def configured_session_model(environ: Mapping[str, str], cwd: str) -> str | None:
-    """The ``model`` OpenCode's config files select for a session started in ``cwd``.
-
-    Global files, then ``OPENCODE_CONFIG``, then project files from the outermost
-    directory in; the last ``provider/model`` wins. None when no file names one
-    (OpenCode then picks a model itself and its provider is unknown here).
-    """
-    home = Path(environ.get("HOME") or Path.home()).expanduser()
-    config_dir = Path(environ.get("OPENCODE_CONFIG_DIR") or
-                      Path(environ.get("XDG_CONFIG_HOME") or home / ".config") / "opencode")
-    files = [config_dir / name for name in ("config.json", "opencode.json", "opencode.jsonc")]
-    if environ.get("OPENCODE_CONFIG"):
-        files.append(Path(environ["OPENCODE_CONFIG"]).expanduser())
-    start = Path(cwd).resolve()
-    for directory in reversed((start, *start.parents)):
-        if directory == home or home in directory.parents or directory == start:
-            files.extend(directory / name for name in (
-                "opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"))
-    model = None
-    for path in files:
-        value = _jsonc_object(path).get("model") if path.is_file() else None
-        if isinstance(value, str) and "/" in value:
-            model = value
-    return model
-
-
-def _subagent_default_main() -> None:
-    """``--subagent-default``: the role default for the V2 plugin's agent transform."""
-    try:
-        home = Path(os.environ.get("HOME") or Path.home()).expanduser()
-        runtime = Path(os.environ.get("OPENCODE_CONFIG_DIR") or
-                       Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
-                       / "opencode").expanduser()
-        values, _receipt = resolve_config("opencode", runtime=runtime, environ=os.environ)
-        model = configured_session_model(os.environ, os.getcwd())
-        print(json.dumps({"subagent_default": subagent_default(values, {"model": model})}))
-    except Exception:
-        return
-
-
 def _hook_main() -> None:
     try:
         raw = sys.stdin.readline(4 * 1024 * 1024 + 1)
@@ -623,9 +516,7 @@ def _hook_main() -> None:
         values, _receipt = resolve_config("opencode", runtime=runtime, environ=os.environ)
         requested, _source = resolve_context_window(values)
         print(json.dumps({"config": apply_runtime_config(config),
-                          "context_window_request": str(requested),
-                          "subagent_default": subagent_default(values, config)},
-                         ensure_ascii=False))
+                          "context_window_request": str(requested)}, ensure_ascii=False))
     except Exception:
         # The plugin retains its input config on any helper error.
         return
@@ -804,7 +695,4 @@ def prepare_launch_context(*, model: str, context_window: str | int,
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--subagent-default"]:
-        _subagent_default_main()
-    else:
-        _hook_main()
+    _hook_main()

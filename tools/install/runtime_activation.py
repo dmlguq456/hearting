@@ -802,6 +802,9 @@ def _native_agent_plan_key(runtime: str, active_root: Path, home: Path) -> tuple
         # The Codex renderer fits its model pins to the providers these files select.
         _bytes_sha256(home / "config.toml"),
         tuple((path.name, _bytes_sha256(path)) for path in native_agents.codex_profile_configs(home)),
+        # Its sub-agent default needs the model lists those files select (PG-13).
+        tuple((str(path), _bytes_sha256(path)) if path else None
+              for path in native_agents.codex_model_lists(home)),
     )
 
 
@@ -2246,149 +2249,196 @@ def _codex_table(data: dict, table: tuple):
     return node if isinstance(node, dict) else False
 
 
-def _codex_table_keys_insert(text: str, table: tuple, values: dict, previous: Optional[dict], *,
-                             create_table: bool):
-    """``(text, record)``: add ``values`` under ``[table]`` without touching a user byte.
+def _codex_key_line(key: str, value) -> str:
+    return f"{_toml_key(key)} = {json.dumps(value)}\n"
 
-    Any of the keys already present is the user's (or this receipt's own, which is carried
-    while its lines still hold the recorded values); nothing is added then. A missing table
-    is created at the end only with ``create_table``. Every candidate is parsed and may
-    differ from the original only by these keys; anything else leaves the text as it is.
+
+def _codex_owned_keys(record) -> Optional[tuple]:
+    """``(table, header, {key: {"value", "line"}})`` of a receipt, or ``None``.
+
+    Reads the per-key form and the earlier whole-block form (``values`` + ``lines``),
+    whose lines are exactly one `_codex_key_line` per key.
     """
-    import copy
+    if not isinstance(record, dict) or not isinstance(record.get("table"), list):
+        return None
+    table = tuple(record["table"])
+    header = record.get("header") if isinstance(record.get("header"), str) else ""
+    keys = record.get("keys")
+    if isinstance(keys, dict):
+        owned = {key: dict(entry) for key, entry in keys.items()
+                 if isinstance(entry, dict) and isinstance(entry.get("line"), str)
+                 and "value" in entry}
+    elif isinstance(record.get("values"), dict) and isinstance(record.get("lines"), str):
+        owned = {key: {"value": value, "line": _codex_key_line(key, value)}
+                 for key, value in record["values"].items()}
+        if "".join(entry["line"] for entry in owned.values()) != record["lines"]:
+            return None
+    else:
+        return None
+    return table, header, owned
+
+
+def _codex_parse(text: str):
     import tomllib
 
     try:
-        data = tomllib.loads(text) if text.strip() else {}
+        return tomllib.loads(text) if text.strip() else {}
     except ValueError:
+        return None
+
+
+def _codex_table_keys(text: str, table: tuple, values: Optional[dict], previous: Optional[dict], *,
+                      create_table: bool):
+    """``(text, record)``: settle Hearting's keys under ``[table]`` one key at a time.
+
+    Each key the receipt ``previous`` owns is kept while its own line still holds the
+    recorded value and ``values`` still wants that value, and its line is removed
+    otherwise; a key the user changed or removed is left as it is and stops being
+    owned. A wanted key that is absent is added only while no wanted key is held by the
+    user (a missing table is created at the end only with ``create_table``). Every
+    edit is parsed and may differ from the original only by that key; anything else
+    leaves the text as it is. ``values=None`` withdraws every owned key.
+    """
+    import copy
+
+    values = dict(values or {})
+    prior = _codex_owned_keys(previous)
+    _table, header, owned = prior if prior and prior[0] == tuple(table) else (table, "", {})
+    data = _codex_parse(text)
+    if data is None:
         return text, None
     current = _codex_table(data, table)
-    if current is False or (current is None and not create_table):
+    if current is False:
         return text, None
-    if current and any(key in current for key in values):
-        carried = previous if isinstance(previous, dict) and previous.get("lines") else None
-        if carried and (carried.get("values") != values or text.count(carried["lines"]) != 1
-                        or any(current.get(key) != value for key, value in values.items())):
-            carried = None
-        return text, carried
-    lines = "".join(f"{_toml_key(key)} = {json.dumps(value)}\n" for key, value in values.items())
+    for key, entry in list(owned.items()):
+        line = entry["line"]
+        if not current or current.get(key) != entry["value"] or text.count(line) != 1:
+            del owned[key]  # the user's now
+            continue
+        if values.get(key) == entry["value"]:
+            continue
+        expected = copy.deepcopy(data)
+        del _codex_table(expected, table)[key]
+        candidate = text.replace(line, "", 1)
+        if _codex_parse(candidate) != expected:
+            del owned[key]
+            continue
+        text, data = candidate, expected
+        current = _codex_table(data, table)
+        del owned[key]
+    missing = {key: value for key, value in values.items()
+               if not (isinstance(current, dict) and key in current)}
+    user_held = isinstance(current, dict) and any(key in current and key not in owned for key in values)
+    if missing and not user_held:
+        text, data, current, added, created = _codex_table_keys_add(
+            text, data, table, missing, create_table=create_table or bool(header))
+        owned.update(added)
+        header = header or created
+    if not owned and header:
+        text = _codex_table_header_remove(text, data, table, header)
+        header = ""
+    if not owned:
+        return text, None
+    return text, {"table": list(table), "header": header, "keys": owned}
+
+
+def _codex_table_keys_add(text: str, data: dict, table: tuple, values: dict, *, create_table: bool):
+    """``(text, data, table data, {key: entry}, created header)`` after adding ``values``."""
+    import copy
+
+    lines = "".join(_codex_key_line(key, value) for key, value in values.items())
     expected = copy.deepcopy(data)
     node = expected
     for part in table:
         node = node.setdefault(part, {})
     node.update(values)
-
-    def accepted(candidate: str) -> bool:
-        try:
-            return tomllib.loads(candidate) == expected
-        except ValueError:
-            return False
-
-    dotted = ".".join(_toml_key(part) for part in table)
+    added = {key: {"value": value, "line": _codex_key_line(key, value)} for key, value in values.items()}
+    current = _codex_table(data, table)
     header_re = re.compile(r"(?m)^[ \t]*\[[ \t]*" + r"[ \t]*\.[ \t]*".join(
         r"(?:%s|\"%s\"|'%s')" % (re.escape(part), re.escape(part), re.escape(part)) for part in table)
         + r"[ \t]*\][ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
     for match in header_re.finditer(text):
         lead = "" if match.group(0).endswith("\n") else "\n"
         candidate = text[:match.end()] + lead + lines + text[match.end():]
-        if accepted(candidate):
-            return candidate, {"table": list(table), "values": dict(values), "lines": lines, "header": ""}
-    if current is not None and not create_table:
-        return text, None
+        if _codex_parse(candidate) == expected:
+            return candidate, expected, _codex_table(expected, table), added, ""
+    if not create_table:
+        return text, data, current, {}, ""
+    # A table only implied by its sub-tables can still take a header; an inline or
+    # dotted one cannot, and the candidate then fails to parse.
     header = ("" if not text or text.endswith("\n") else "\n") + ("\n" if text else "")
-    header += f"[{dotted}]\n"
+    header += "[" + ".".join(_toml_key(part) for part in table) + "]\n"
     candidate = text + header + lines
-    if accepted(candidate):
-        return candidate, {"table": list(table), "values": dict(values), "lines": lines, "header": header}
-    return text, None
+    if _codex_parse(candidate) == expected:
+        return candidate, expected, _codex_table(expected, table), added, header
+    return text, data, current, {}, ""
+
+
+def _codex_table_header_remove(text: str, data: dict, table: tuple, header: str) -> str:
+    """Remove a header this receipt created once its table holds no key at all.
+
+    Removing it must parse to the same data (a table implied by its sub-tables) or to
+    the data without the now-empty table.
+    """
+    import copy
+
+    node = _codex_table(data, table)
+    if node is None or node is False:
+        return text
+    accepted = [data]
+    if not node:
+        without = copy.deepcopy(data)
+        parent = without
+        for part in table[:-1]:
+            parent = parent[part]
+        del parent[table[-1]]
+        accepted.append(without)
+    position = text.find(header)
+    while position != -1:
+        stripped = text[:position] + text[position + len(header):]
+        if _codex_parse(stripped) in accepted:
+            return stripped
+        position = text.find(header, position + 1)
+    return text
 
 
 def _codex_table_keys_remove(text: str, record: Optional[dict]) -> str:
-    """Remove only a receipt's own key lines (and its created header once the table is empty).
-
-    A key the user changed or removed leaves the text as it is.
-    """
-    import copy
-    import tomllib
-
-    if not isinstance(record, dict) or not isinstance(record.get("lines"), str) \
-            or not isinstance(record.get("values"), dict) or not isinstance(record.get("table"), list):
+    """Remove only a receipt's own key lines that still hold their recorded values."""
+    prior = _codex_owned_keys(record)
+    if prior is None:
         return text
-    table, values, lines = tuple(record["table"]), record["values"], record["lines"]
-    try:
-        data = tomllib.loads(text) if text.strip() else {}
-    except ValueError:
-        return text
-    current = _codex_table(data, table)
-    if not current or any(current.get(key) != value for key, value in values.items()) \
-            or text.count(lines) != 1:
-        return text
-    expected = copy.deepcopy(data)
-    node = _codex_table(expected, table)
-    for key in values:
-        del node[key]
-    candidate = text.replace(lines, "", 1)
-    try:
-        if tomllib.loads(candidate) != expected:
-            return text
-    except ValueError:
-        return text
-    header = record.get("header")
-    if isinstance(header, str) and header:
-        # The created header goes only while its table holds no user key: removing it must
-        # parse to the same data (a table implied by its sub-tables), or to the data without
-        # the now-empty table.
-        accepted = [expected]
-        if not node:
-            without = copy.deepcopy(expected)
-            parent = without
-            for part in table[:-1]:
-                parent = parent[part]
-            del parent[table[-1]]
-            accepted.append(without)
-        position = candidate.find(header)
-        while position != -1:
-            stripped = candidate[:position] + candidate[position + len(header):]
-            try:
-                if tomllib.loads(stripped) in accepted:
-                    return stripped
-            except ValueError:
-                pass
-            position = candidate.find(header, position + 1)
-    return candidate
+    return _codex_table_keys(text, prior[0], None, record, create_table=False)[0]
 
 
 # Keys Hearting sets in Codex's config so its sessions behave as the other runtimes do,
 # each only where the user has not set it. (record name, table, create a missing table)
-#   design-mcp-approval: a registered `[mcp_servers.design]` server's tools run in
-#     noninteractive `codex exec` too (`approval_policy = "never"` otherwise rejects every
-#     call, PG-23). Only that one server; registering it stays the user's choice.
-#   subagent-default: a sub-agent spawned with no model gets the role default instead of the
-#     session model (PG-13); from the activated renderer, None where the home cannot serve it.
-CODEX_DESIGN_MCP_APPROVAL = {"default_tools_approval_mode": "approve"}
+#   subagent_default: a sub-agent spawned with no model gets the role default instead of
+#     the session model (PG-13); from the activated renderer, None unless every model list
+#     a session of the home uses is read and carries it.
+# A receipt's record under any other name (the earlier `design_mcp_approval`, PG-23) is
+# withdrawn on the next refresh the same way, one key at a time.
 
 
 def _codex_managed_keys(active_root: Path, scope: str) -> List[tuple]:
     home = paths.runtime_home("codex", scope)
     return [
-        ("design_mcp_approval", ("mcp_servers", "design"), CODEX_DESIGN_MCP_APPROVAL, False),
         ("subagent_default", ("agents",), _native_agent_default("codex", active_root, home), True),
     ]
 
 
 def _merge_codex_managed_keys(text: str, active_root: Path, scope: str, previous: dict):
-    """``(text, records)`` after applying `_codex_managed_keys` to ``text``."""
+    """``(text, records)`` after settling `_codex_managed_keys` against ``previous``."""
+    previous = previous if isinstance(previous, dict) else {}
     records = {}
-    for name, table, values, create in _codex_managed_keys(active_root, scope):
-        prior = previous.get(name) if isinstance(previous, dict) else None
-        if isinstance(prior, dict) and prior.get("values") != values:
-            text = _codex_table_keys_remove(text, prior)
-            prior = None
-        if not values:
-            continue
-        text, record = _codex_table_keys_insert(text, table, values, prior, create_table=create)
+    managed = _codex_managed_keys(active_root, scope)
+    for name, table, values, create in managed:
+        text, record = _codex_table_keys(text, table, values, previous.get(name), create_table=create)
         if record:
             records[name] = record
+    names = {name for name, *_rest in managed}
+    for name, prior in previous.items():
+        if name not in names:
+            text = _codex_table_keys_remove(text, prior)
     return text, records
 
 

@@ -1136,7 +1136,7 @@ if "$CODEX" mcp >"$TMP/codex_mcp.out" 2>"$TMP/codex_mcp.err" \
   && grep -q '^adapter=codex$' "$TMP/codex_mcp.out" \
   && grep -q '^runtime_surface=codex-native-mcp$' "$TMP/codex_mcp.out" \
   && grep -q '^mcp_surface=codex mcp$' "$TMP/codex_mcp.out" \
-  && grep -q '^design_mcp_projection=manual-registration-exec-approved$' "$TMP/codex_mcp.out" \
+  && grep -q '^design_mcp_projection=manual-registration-per-run-approval$' "$TMP/codex_mcp.out" \
   && grep -q '^design_mcp_registration=stdio-mcp_servers.design-node-server.js$' "$TMP/codex_mcp.out" \
   && grep -q '^claude_settings_mcp=unsupported$' "$TMP/codex_mcp.out"; then
   ok "codex mcp wrapper reports native MCP contract"

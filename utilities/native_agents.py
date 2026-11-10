@@ -91,8 +91,9 @@ class Agent:
 # The portable profile a native sub-agent gets when neither the spawn nor its
 # agent definition names a model. Claude realizes it with
 # `hooks/subagent-model-default.sh` (CFG_NATIVE_SUBAGENT=light); Codex with
-# `[agents] default_subagent_model`; OpenCode by giving its built-in subagents
-# that model (PG-13, core/ADAPTATION.md §10).
+# `[agents] default_subagent_model` where the home's model list carries it.
+# OpenCode's built-ins keep the session model: no plugin seam sees the parent's
+# model per spawn (PG-13 limit, core/ADAPTATION.md §10).
 NATIVE_SUBAGENT_PROFILE = "light"
 
 
@@ -199,6 +200,88 @@ def codex_profile_configs(home: Path) -> list[Path]:
         path for path in sorted(Path(home).glob("*" + _CODEX_PROFILE_SUFFIX))
         if _CODEX_PROFILE_NAME.fullmatch(path.name[: -len(_CODEX_PROFILE_SUFFIX)])
     ]
+
+
+def _codex_tables(home: Path) -> list[dict]:
+    """Every session configuration of a Codex home, each already layered over `config.toml`.
+
+    An unreadable file stays in the list as ``None`` so that a reader treats it as unknown.
+    """
+    import tomllib
+
+    def load(path: Path):
+        try:
+            return tomllib.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+
+    top = load(Path(home) / "config.toml")
+    if top is None:
+        return [None]
+    tables = [top]
+    profiles = top.get("profiles")
+    for table in (profiles.values() if isinstance(profiles, dict) else ()):
+        tables.append({**top, **table} if isinstance(table, dict) else None)
+    for path in codex_profile_configs(home):
+        profile = load(path)
+        tables.append({**top, **profile} if isinstance(profile, dict) else None)
+    return tables
+
+
+def codex_model_lists(home: Path) -> list[Optional[Path]]:
+    """The model list each session configuration of a Codex home uses, deduplicated.
+
+    `model_catalog_json` names a file that replaces Codex's list; without it the list is
+    the home's own `models_cache.json`, which Codex writes from what its provider serves.
+    ``None`` marks a configuration this reader cannot follow.
+    """
+    home = Path(home)
+    lists: list[Optional[Path]] = []
+    for table in _codex_tables(home):
+        if table is None:
+            path = None
+        else:
+            catalog = table.get("model_catalog_json")
+            if catalog is None:
+                path = home / "models_cache.json"
+            elif isinstance(catalog, str) and catalog:
+                path = Path(catalog).expanduser()
+                path = path if path.is_absolute() else home / path
+            else:
+                path = None
+        if path not in lists:
+            lists.append(path)
+    return lists
+
+
+def codex_listed_models(home: Path) -> Optional[dict]:
+    """``{slug: entry}`` listed by every model list a session of `home` uses, or None.
+
+    None when any of them is absent or unreadable: an unconfirmed list is not a list that
+    serves the model (PG-13). Codex's bundled list inside the binary is not read here.
+    """
+    import json
+
+    listed: Optional[dict] = None
+    for path in codex_model_lists(home):
+        if path is None:
+            return None
+        try:
+            if path.stat().st_size > 16 * 1024 * 1024:
+                return None
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        models = document.get("models") if isinstance(document, dict) else None
+        if not isinstance(models, list):
+            return None
+        entries = {entry["slug"]: entry for entry in models
+                   if isinstance(entry, dict) and isinstance(entry.get("slug"), str)}
+        listed = entries if listed is None else {
+            slug: entry for slug, entry in listed.items() if slug in entries}
+    return listed
 
 
 def runtime_plan(fmt: Format, runtime_home: Path) -> dict:

@@ -149,7 +149,32 @@ def selectable_providers(runtime_home: Path) -> frozenset[str]:
     return frozenset(providers or {"openai"})
 
 
+# The models every session of the home is confirmed to list, as JSON `{slug: efforts}`
+# (efforts empty when the list names none); absent when that cannot be confirmed.
+LISTED_KEY = "_CODEX_HOME_LISTED_MODELS"
+
+
+def listed_models(runtime_home: Path) -> Optional[dict]:
+    """`{slug: [efforts]}` the home's model lists all carry, or None when unconfirmed."""
+    listed = native_agents.codex_listed_models(runtime_home)
+    if listed is None:
+        return None
+    result = {}
+    for slug, entry in listed.items():
+        if entry.get("multi_agent_version") == "disabled":
+            continue
+        levels = entry.get("supported_reasoning_levels")
+        result[slug] = sorted({
+            level.get("effort") for level in (levels if isinstance(levels, list) else ())
+            if isinstance(level, dict) and isinstance(level.get("effort"), str)})
+    return result
+
+
 def runtime_config(cfg: Mapping[str, str], runtime_home: Path) -> Mapping[str, str]:
+    import json
+    listed = listed_models(runtime_home)
+    if listed is not None:
+        cfg = {**cfg, LISTED_KEY: json.dumps(listed, sort_keys=True)}
     if selectable_providers(runtime_home) <= ACCOUNT_PROVIDERS:
         return cfg
     return {**cfg, UNPINNED_KEY: "1"}
@@ -216,14 +241,24 @@ def default_subagent(cfg: Mapping[str, str]) -> Optional[dict]:
 
     Codex gives a spawn with no model and an agent with no `model` the parent's
     model; this default takes its place (an explicit spawn model and an agent
-    file's own `model` still win). Same provider rule as the pins: Codex checks
-    the default against its own model list and refuses every such spawn when it
-    is not there, so a home that can select another provider gets none.
+    file's own `model` still win). Codex checks the default against the model
+    list of the session and refuses every such spawn when it is not there, so the
+    default is written only where every model list a session of this home uses
+    is read and carries it (and its effort, when the list names efforts). A
+    provider name is no such evidence; an unread list keeps the parent's model.
     """
-    if cfg.get(UNPINNED_KEY):
+    import json
+    if cfg.get(UNPINNED_KEY) or not cfg.get(LISTED_KEY):
         return None
     resolved = native_agents.native_subagent_default("codex", cfg)
     if resolved is None:
+        return None
+    try:
+        listed = json.loads(cfg[LISTED_KEY])
+    except ValueError:
+        return None
+    efforts = listed.get(resolved["model"]) if isinstance(listed, dict) else None
+    if not isinstance(efforts, list) or (efforts and resolved["budget"] not in efforts):
         return None
     return {"default_subagent_model": resolved["model"],
             "default_subagent_reasoning_effort": resolved["budget"]}

@@ -1295,7 +1295,6 @@ async function setupOpenCodeV2(ctx) {
   }
   registerPaneContext(legacyContext)
   const hooks = await AgentHarnessGuards(legacyContext, { initialize: false })
-  await applyV2SubagentDefault(ctx)
 
   await ctx.tool.hook("execute.before", async (event) => {
     const command = event.tool === "shell" && typeof event.input?.command === "string"
@@ -3321,57 +3320,6 @@ const inheritedIdentityEnv = [
   "CODEX_SESSION_ID",
 ]
 
-// PG-13: OpenCode gives a subagent with no model of its own the parent session's model,
-// and its `subagent` tool takes none. The helper resolves the role default (only on the
-// session's provider); the built-in subagents get it here, in memory. A model the user set
-// for one of them, in either config shape, stays.
-function applySubagentDefault(config, value) {
-  const model = value && typeof value.model === "string" ? value.model : ""
-  const ids = Array.isArray(value?.agents) ? value.agents : []
-  if (!model || !ids.length) return
-  const key = config.agents && typeof config.agents === "object" ? "agents" : "agent"
-  if (!config[key] || typeof config[key] !== "object") config[key] = {}
-  for (const id of ids) {
-    if (typeof id !== "string") continue
-    const own = [config.agent?.[id], config.agents?.[id]]
-    if (own.some((entry) => entry && typeof entry === "object" && entry.model)) continue
-    const entry = config[key][id]
-    if (entry !== undefined && (!entry || typeof entry !== "object")) continue
-    config[key][id] = { ...(entry || {}), model }
-  }
-}
-
-// V2 has no mutable config: the built-in subagents get the role default through the
-// agent domain transform (an agent's `model` is `{ providerID, id }`). The helper reads
-// the session model from the config files, so the provider rule above holds here too.
-async function applyV2SubagentDefault(ctx) {
-  if (typeof ctx?.agent?.transform !== "function") return
-  const child = spawnSync(python3, [contextWindowHelper, "--subagent-default"], {
-    cwd: ctx.location?.directory || process.cwd(),
-    env: { ...process.env, AGENT_HOME: root },
-    encoding: "utf8",
-    timeout: 2000,
-    maxBuffer: 1024 * 1024,
-  })
-  let value = null
-  try { value = child.status === 0 ? JSON.parse(child.stdout || "{}")?.subagent_default : null } catch {}
-  const model = value && typeof value.model === "string" ? value.model : ""
-  const slash = model.indexOf("/")
-  const ids = Array.isArray(value?.agents) ? value.agents.filter((id) => typeof id === "string") : []
-  if (slash <= 0 || slash === model.length - 1 || !ids.length) return
-  const target = { providerID: model.slice(0, slash), id: model.slice(slash + 1) }
-  try {
-    await ctx.agent.transform((editor) => {
-      for (const id of ids) {
-        if (!editor.get(id) || editor.get(id).model) continue
-        editor.update(id, (agent) => { if (!agent.model) agent.model = { ...target } })
-      }
-    })
-  } catch (error) {
-    process.stderr.write(`hearting: subagent default model not applied (${error?.message || error})\n`)
-  }
-}
-
 // The root session of a subagent (task tool) child, walking `parentID`; the session itself
 // for a root. An unreadable link stops the walk at what is known.
 const ROOT_SESSION_ENV = "OPENCODE_ROOT_SESSION_ID"
@@ -3436,7 +3384,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       const result = JSON.parse(child.stdout || "{}")
       contextPolicyRequestedWindow = typeof result?.context_window_request === "string"
         ? result.context_window_request : null
-      applySubagentDefault(config, result?.subagent_default)
       const projected = result?.config?.provider
       if (!projected || typeof projected !== "object") return config
       if (!config.provider || typeof config.provider !== "object") config.provider = {}

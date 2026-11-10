@@ -54,4 +54,3 @@ Read the complete portable procedure files listed here when they apply; this log
 
 - Before durable capability output: `adapters/opencode/bin/preflight.sh route --capability autopilot-lab <complete compile arguments>`
 - For workflow state: `adapters/opencode/bin/preflight.sh status [cwd] [session-id]` and `adapters/opencode/bin/preflight.sh prompt-signal [cwd] [session-id]`
-

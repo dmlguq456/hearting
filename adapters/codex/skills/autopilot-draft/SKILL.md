@@ -53,4 +53,3 @@ Read the complete portable procedure files listed here when they apply; this log
 - Capability grounding only: `adapters/codex/bin/preflight.sh route autopilot-draft [cwd] [session-id]`
 - Before durable capability output: `adapters/codex/bin/preflight.sh route --capability autopilot-draft <complete compile arguments>`
 - For workflow state: `adapters/codex/bin/preflight.sh status [cwd] [session-id]` and `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]`
-
