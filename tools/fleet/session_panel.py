@@ -226,7 +226,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
         "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
-        "detail", "working", "answer", "ready", "unknown", "fixed_width", "saved", "save_failed")}
+        "detail", "working", "answer", "ready", "unknown", "fixed_width", "saved", "save_failed",
+        "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
+        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,

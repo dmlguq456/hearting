@@ -42,7 +42,17 @@ def _private_json(path: Path, limit: int):
 
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
-                    "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14}
+                    "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
+                    "position": "right", "theme": "terminal", "shade": "none"}
+# Appearance choices. An unknown value falls back to its default on its own and
+# never disables the shell, so a hand-edited or newer value cannot cost the panel.
+APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
+              "shade": ("none", "light", "medium")}
+
+
+def _appearance(value):
+    return {key: value.get(key) if value.get(key) in choices else choices[0]
+            for key, choices in APPEARANCE.items()}
 
 
 def _validate_configuration(value):
@@ -80,7 +90,7 @@ def display_policy(environ=None):
         value = _configuration(environ)
     except (OSError, ValueError, TypeError):
         value = {}
-    return {key: value.get(key, default) for key, default in DISPLAY_DEFAULTS.items()}
+    return {**{key: value.get(key, default) for key, default in DISPLAY_DEFAULTS.items()}, **_appearance(value)}
 
 
 def save_display_policy(settings, environ=None):
@@ -89,6 +99,8 @@ def save_display_policy(settings, environ=None):
         raise ValueError("invalid shell settings")
     path = policy_path(environ)
     before = _private_json(path, MAX_RECORD_BYTES)
+    if _appearance(settings) != {key: settings[key] for key in APPEARANCE}:
+        raise ValueError("invalid shell appearance")
     value = _validate_configuration({**before, **settings})
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/install"))
     import safe_fs
@@ -695,6 +707,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+    panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
@@ -868,6 +881,7 @@ def _backend_operation(request: dict) -> dict:
             panel["summary"] = []
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                                for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+            panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:
             return {"ok": True, "settings": save_display_policy(request.get("settings"))}

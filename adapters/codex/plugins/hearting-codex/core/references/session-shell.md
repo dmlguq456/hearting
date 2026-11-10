@@ -51,11 +51,12 @@ prepared assets, without an auxiliary Node version probe. Native execution
 retains the existing display-ready boundary, exact binding and same-child
 input/relay ownership.
 
-The approved v3.3 shell opens as a right HEARTING work panel when space permits,
-with bottom placement at narrow widths. All four edges belong to Hearting and
-share its representative state color; never frame the native terminal itself.
-Use the terminal's neutral background, without tinted fills. Text and glyphs
-accompany state colors. Native permission UI remains native; idle alone means
+The approved v3.3 shell opens as a right HEARTING work panel when space permits
+(left by choice), with bottom placement at narrow widths. All four edges belong
+to Hearting and share its representative state color; never frame the native
+terminal itself. By default the panel uses the terminal's neutral background,
+without tinted fills; a chosen theme or shade recolors only the panel itself.
+Text and glyphs accompany state colors in every theme. Native permission UI remains native; idle alone means
 neither work complete nor failed. Unknown evidence stays unknown.
 The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
@@ -114,7 +115,17 @@ started without the shell keeps the ID visible, since that footer row is then
 the only place Hearting reads it.
 
 The header's settings change only Hearting's existing session-shell policy:
-side/bottom layout, side width, narrow-window behavior and auxiliary detail.
+side/bottom layout, panel position (right, the default, or left), side width,
+narrow-window behavior, auxiliary detail, theme and shade. One placement rule
+serves every harness. Themes are `terminal` (the default: the shared palette),
+`light` (darker hues for a light terminal) and `mono` (no hue; weight, glyphs
+and words remain). Shade is `none` (the default), `light` or `medium`: the
+panel's own background, painted with an explicit text color so it reads on
+either terminal background, in 256-color terminals and never under `NO_COLOR`.
+Neither recolors native space: the native area, Claude's status row and
+OpenCode's own sidebar keep their colors (Claude's notice row takes the theme,
+not the shade). An unknown position, theme or shade falls back to its own
+default without disabling the shell.
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.

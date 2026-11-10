@@ -954,6 +954,18 @@
    "en": "open in Fleet",
    "ko": "Fleet에서 열기"
   },
+  "fleet.session_panel.position": {
+   "en": "Panel position",
+   "ko": "패널 위치"
+  },
+  "fleet.session_panel.position_left": {
+   "en": "Left",
+   "ko": "왼쪽"
+  },
+  "fleet.session_panel.position_right": {
+   "en": "Right",
+   "ko": "오른쪽"
+  },
   "fleet.session_panel.ready": {
    "en": "Result ready",
    "ko": "결과 준비"
@@ -1017,6 +1029,22 @@
   "fleet.session_panel.settings_title": {
    "en": "Hearting shell settings",
    "ko": "하팅 셸 설정"
+  },
+  "fleet.session_panel.shade": {
+   "en": "Shade",
+   "ko": "음영"
+  },
+  "fleet.session_panel.shade_light": {
+   "en": "Light",
+   "ko": "옅게"
+  },
+  "fleet.session_panel.shade_medium": {
+   "en": "Medium",
+   "ko": "보통"
+  },
+  "fleet.session_panel.shade_none": {
+   "en": "None",
+   "ko": "없음"
   },
   "fleet.session_panel.shape_direct": {
    "en": "direct",
@@ -1129,6 +1157,22 @@
   "fleet.session_panel.test_recorded": {
    "en": "Tests recorded",
    "ko": "시험 기록"
+  },
+  "fleet.session_panel.theme": {
+   "en": "Theme",
+   "ko": "테마"
+  },
+  "fleet.session_panel.theme_light": {
+   "en": "Light terminal",
+   "ko": "밝은 터미널"
+  },
+  "fleet.session_panel.theme_mono": {
+   "en": "Monochrome",
+   "ko": "단색"
+  },
+  "fleet.session_panel.theme_terminal": {
+   "en": "Terminal",
+   "ko": "터미널"
   },
   "fleet.session_panel.threshold": {
    "en": "Side minimum columns",

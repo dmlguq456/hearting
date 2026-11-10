@@ -142,8 +142,12 @@ function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) 
     &&Number.isInteger(width)&&width>=32&&width<=80
     &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
     &&cols>=minimum&&cols-width-2>=48&&rows>=8;
-  return {side,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
-    panelColumn:side?cols-width:0,panelRow:side?0:null};
+  // The one placement rule for every harness: a side panel sits right (the
+  // default) or left of the native area, two blank cells apart. Only the
+  // shell's own panel moves; the native area keeps its own column count.
+  const left=side&&configuration.position==='left';
+  return {side,left,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+    panelColumn:side&&!left?cols-width:0,nativeColumn:left?width+2:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);

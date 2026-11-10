@@ -280,7 +280,10 @@ function render() {
       const masked=fleetView?0:footerMask.cells.get(y)||0;
       let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):
         (masked?'\x1b[0m'+' '.repeat(masked):'')+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked);
-      if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
+      if(!fleetView&&geometry().side){
+        const panel=y<panelRows.length?panelRows[y]:' '.repeat(panelColumns());
+        line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
+      }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
@@ -292,7 +295,7 @@ function render() {
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
-    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
+    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
     text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
     text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
     if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
@@ -315,6 +318,7 @@ function displayLines(lines,height,done) {
   const paint=line=>Array.isArray(line)?line.map(part=>{
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(Number.isInteger(part.background)&&part.background>=0&&part.background<=255)attrs.push(48,5,part.background);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
@@ -354,7 +358,8 @@ function rebuildDisplay() {
     }else lines=base;
     if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
-  }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
+  }else lines=footerSegments.length?panelView.appearance([[...footerSegments,{text:extra}]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true}):[footer||`${harness} · CTX ?`];
   const editParts=edit>=0?lines[edit]:[];
   const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
@@ -461,7 +466,10 @@ function claudePanelPainted(){
 // at the native statusline's own two-cell indent.
 function noticeRow(width){
   let used=2,text='\x1b[0m  ';
-  for(const part of panelModel.notice||[]){
+  // Claude's own status row: the panel's theme, never its shade.
+  const [notice=[]]=panelView.appearance([panelModel.notice||[]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true});
+  for(const part of notice){
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
@@ -598,8 +606,9 @@ function settingsInput(data){
     const key=/^\x1b\[[ABCDZ]/.exec(settingsTail)?.[0]||settingsTail[0];settingsTail=settingsTail.slice(key.length);
     if(key==='\x1b'||key==='\x1d'){cancelSettings();break;}
     if(key==='\r'||key==='\n'){applySettings();continue;}
-    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%(harness==='opencode'?5:panelView.fields.length);
-    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+(harness==='opencode'?5:panelView.fields.length)-1)%(harness==='opencode'?5:panelView.fields.length);
+    const count=harness==='opencode'?panelView.fields.length-1:panelView.fields.length;
+    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%count;
+    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+count-1)%count;
     else if(['\x1b[D','\x1b[C','-','+'].includes(key)){
       if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[settings.index]))continue;
       settings.value=panelView.change(settings.value,panelView.fields[settings.index],['\x1b[D','-'].includes(key)?-1:1);previewSettings();
@@ -618,11 +627,13 @@ function panelMouse(code,x,y,release){
   }
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
-    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
+    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
     else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
-  if(g.side&&local===0&&(code&3)===0&&!release){dragging=true;return true;}
+  // The boundary beside the native area resizes: the left edge of a right
+  // panel, the right edge of a left one.
+  if(g.side&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
   if(release||code>=32||(code&3)!==0)return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
@@ -639,7 +650,8 @@ function displayReporter(req){
 }
 function publishPanel(){
   if(!panelSubscribers.size)return;
-  const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
+  // OpenCode's own sidebar is native space: no shell theme or shade there.
+  const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,paint:false,model:panelModel,
     native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
     routeDetail,routePage,focused:block.focused,harness,cellWidth,
     questions:options=>block.detail(options)});
@@ -663,6 +675,9 @@ mouseInput=require('./panel-mouse.cjs')({
   mouse:(code,x,y,release,raw)=>{
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
+    // A left panel moves the native area right; native sees its own columns.
+    const offset=geometry().nativeColumn;
+    if(offset){if(x<=offset)return;raw=Buffer.from(`\x1b[<${code};${x-offset};${y}${release?'m':'M'}`,'latin1');}
     if(!release&&(code&3)===0){block.leave();queueDisplay();}
     if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
     observeInput(raw);child.write(raw);
@@ -778,7 +793,7 @@ async function request(req) {
   }
   if(req.op==='display-action'){
     if(!displayReporter(req)||req.sid!==sid)return {ok:false};
-    if(['settings','route','route-prev','route-next','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
+    if(['settings','route','route-prev','route-next','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-8]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
     return {ok:true};
   }
   if(req.op==='event')return lifecycle(req);

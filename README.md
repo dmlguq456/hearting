@@ -190,8 +190,10 @@ duplicate paint to the common area.
 Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
-**⚙ Settings** previews placement, width, narrow-window behavior and auxiliary
-detail. Use the value arrows or keyboard arrows, then Apply; Cancel restores
+**⚙ Settings** previews placement, panel position (right or left), width,
+narrow-window behavior, auxiliary detail, theme (terminal, light terminal or
+monochrome) and shade (none, light or medium); the defaults keep the original
+look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
 the previous view, and Defaults previews the defaults. Drag the side boundary
 to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
