@@ -1764,6 +1764,15 @@ def message_question_bindings(message):
             if "answer_binding" in record["receipt"]]
 
 
+def message_answer_submission_current(message):
+    """Recheck wrapped answers after waiting, outside peer metadata locks."""
+    bindings = message_question_bindings(message)
+    if not bindings:
+        return True
+    import human_wait_state
+    return all(human_wait_state.message_answer_submission_current(binding) for binding in bindings)
+
+
 def _current_session_notice_bindings(message):
     """Current authority for a new write; historical receipts use the immutable reader."""
     import dispatch_pending_delivery as pending

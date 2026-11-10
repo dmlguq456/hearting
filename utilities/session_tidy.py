@@ -3431,9 +3431,16 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
     caller's own final output.
     """
     env = os.environ if env is None else env
+    if harness == "codex" and sid and event in ("start", "prompt"):
+        # A shared daemon's inherited environment belongs to its first client.
+        # The common shell bridge resolves the current thread's actual TUI and
+        # applies its worker/attachment checks before selecting a terminal.
+        with contextlib.suppress(Exception):
+            import session_shell
+            session_shell.lifecycle(harness, event, sid, env=env)
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
-    if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness in {"claude", "codex"}:
+    if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness == "claude":
         with contextlib.suppress(Exception):
             import session_shell
             session_shell.lifecycle(harness, event, sid, env=env)
@@ -3512,10 +3519,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             projected = projected or {"items": [], "by_session": {}}
             # The caller's own S4 is exact and cheap; replace its possibly older
             # producer copy so a just-closed prompt cannot be resurrected.
-            own = human_wait_state._read(human_wait_state._path(seat.key))
+            own = human_wait_state._read(human_wait_state._signal_path(
+                {"harness": harness, "session_id": sid, "seat_key": seat.key}))
             projected["items"] = [item for item in projected["items"]
                                    if not (item.get("source") == "S4"
-                                           and (item.get("owner") or {}).get("seat_key") == seat.key)]
+                                           and (item.get("owner") or {}).get("seat_key") == seat.key
+                                           and (item.get("owner") or {}).get("harness") == harness
+                                           and (item.get("owner") or {}).get("session_id") == sid)]
             if own and (own.get("mode") != "message" or own.get("lifecycle") == "open"):
                 projected["items"].append(
                     {"id": own["id"], "source": "S4", "question": None if own.get("mode") == "message" else own.get("question"),

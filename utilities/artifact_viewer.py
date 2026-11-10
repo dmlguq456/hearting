@@ -2,6 +2,7 @@
 """Optional, foreground, loopback-only, read-only artifact viewer."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import html
 import http.client
@@ -135,7 +136,7 @@ def _translator():
         import ui_text
         return ui_text.translator()
     except Exception:
-        messages = {'viewer.start': 'Artifact viewer: {url}', 'viewer.busy': 'Port 8765 is already in use by another service or root.',
+        messages = {'viewer.start': 'Artifact viewer: {url}', 'viewer.busy': 'Port {port} is already in use by another service or root. Try hearting view --port 0 for a free port.',
                     'viewer.raw': 'View raw', 'viewer.too_large': 'This document is too large to render.',
                     'viewer.empty': 'No visible files.', 'viewer.next': 'Next', 'viewer.previous': 'Previous'}
         return lambda key, **kw: messages.get(key, key).format(**kw)
@@ -384,10 +385,25 @@ class ViewerHandler(BaseHTTPRequestHandler):
     do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_TRACE = do_CONNECT = _method
 
 
+def _port_number(value):
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('port must be an integer from 0 to 65535') from None
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError('port must be an integer from 0 to 65535')
+    return port
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
-    if args:
-        print('usage: hearting view', file=sys.stderr); return 2
+    parser = argparse.ArgumentParser(prog='hearting view', description='Read-only local artifact viewer.')
+    parser.add_argument('--port', type=_port_number, default=PORT,
+                        help='loopback port (default: 8765; 0 chooses a free port)')
+    try:
+        port = parser.parse_args(args).port
+    except SystemExit as exc:
+        return exc.code
     script = Path(__file__).resolve().parent / 'artifact-root.sh'
     try:
         result = subprocess.run(['sh', str(script), os.getcwd()], capture_output=True, text=True, timeout=30)
@@ -399,14 +415,14 @@ def main(argv=None):
         print('viewer: artifact root resolver returned no path', file=sys.stderr); return 2
     root = os.path.realpath(result.stdout.strip())
     try:
-        server = ViewerServer(root)
+        server = ViewerServer(root, port)
     except OSError as exc:
-        if exc.errno == getattr(__import__('errno'), 'EADDRINUSE') and _probe(root):
-            print(_translator()('viewer.start', url=f'http://127.0.0.1:{PORT}/'), flush=True); return 0
-        print(_translator()('viewer.busy') if exc.errno == getattr(__import__('errno'), 'EADDRINUSE') else 'viewer: cannot open artifact root or listener', file=sys.stderr); return 2
+        if exc.errno == getattr(__import__('errno'), 'EADDRINUSE') and port and _probe(root, port):
+            print(_translator()('viewer.start', url=f'http://127.0.0.1:{port}/'), flush=True); return 0
+        print(_translator()('viewer.busy', port=port) if exc.errno == getattr(__import__('errno'), 'EADDRINUSE') else 'viewer: cannot open artifact root or listener', file=sys.stderr); return 2
     except RuntimeError as exc:
         print('viewer: ' + str(exc), file=sys.stderr); return 2
-    print(server.t('viewer.start', url=f'http://127.0.0.1:{PORT}/'), flush=True)
+    print(server.t('viewer.start', url=f'http://127.0.0.1:{server.server_address[1]}/'), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

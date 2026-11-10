@@ -41,7 +41,7 @@ def _json(path):
     return json.loads(path.read_bytes())
 
 
-def _campaign(root, selector, *, read_record=None):
+def _campaign(root, selector, *, read_record=None, missing_ok=False):
     matches = []
     for path in sorted((root / "campaigns").glob("*/campaign.json")):
         _safe(root, path)
@@ -50,9 +50,41 @@ def _campaign(root, selector, *, read_record=None):
             matches.append((path, campaigns.fold_campaign(root, path, row)))
     active = [item for item in matches if item[1].get("state") == "active"]
     selected = active or matches
+    if not selected and missing_ok:
+        return None
     if len(selected) != 1:
         _error("campaign selection is not exact: " + str(selector))
     return selected[0]
+
+
+def _source_campaign(root, cycle_id, source_campaign):
+    if source_campaign:
+        return _campaign(root, source_campaign)
+    record = _json(P.cycle_record_path(root, cycle_id))
+    return _campaign(root, record['campaign_id'])
+
+
+def _creation_fields(source_row):
+    return {'title': source_row.get('title'), 'goal': source_row.get('goal') or '',
+        'completion_criterion': source_row.get('completion_criterion') or
+            {'statement': campaigns.DEFAULT_COMPLETION_CRITERION}}
+
+
+def _ensure_campaign(source, target, cycle_id, source_campaign, campaign, now):
+    """Only the short normal creation is locked; tree discovery/copy stays outside."""
+    _, original = _source_campaign(source, cycle_id, source_campaign)
+    selector = campaign or original['key']
+    with admission.lock_roots([target], now=now):
+        existing = _campaign(target, selector, missing_ok=campaign in (None, original['key']))
+        if existing is not None:
+            return None
+        if P.artifact_lifecycle.read_root_identity(target) is None:
+            _error('target root identity missing')
+        key = None if original['key'] == P.UNASSIGNED_KEY else original['key']
+        row = P._create_campaign_locked(target, key, started_on=P._rfc3339(now), **_creation_fields(original))
+        locator.update_indexes(target, [row['campaign_id']])
+        return {'key': row['key'], 'title': row['title'], 'locator': row['locator'],
+            'campaign_id': row['campaign_id'], 'created': True}
 
 
 def tree(path):
@@ -219,7 +251,124 @@ def _decision(root, journal):
     return result
 
 
-def _plan(source, target, *, operation_id, cycle_id, source_campaign, campaign, attachments, now):
+def _group_snapshot(source, journal):
+    """Observe original declarations before any payload or membership moves."""
+    import artifact_workflow_groups as W
+    state = {'state': 'discovered', 'observation': 'unknown', 'groups': []}
+    try:
+        row, directory, root_id, repo_id = W._context(source, journal['source_campaign'])
+        state['source_path'] = str((directory / W.NAME).relative_to(source))
+        raw = W._regular(directory / W.NAME, missing=True)
+        state['source_before_hex'] = raw.hex() if raw is not None else None
+        if raw is None:
+            state['observation'] = 'absent'
+            return state
+        doc = W._validate_document(source, row, directory, root_id, repo_id, W._json(raw))
+        selected = {item['cycle_id'] for item in journal['cycles']}
+        paths = {item['source']: item['target'] for item in journal['cycles']}
+        state['observation'] = 'present'
+        for group in doc['groups']:
+            members = {member['cycle_id'] for member in group['members']}
+            if not members & selected:
+                continue
+            entry = {'group_id': group['group_id'], 'title': group['title'],
+                     'cycle_ids': sorted(members), 'status': 'planned'}
+            state['groups'].append(entry)
+            if members - selected:
+                entry.update(status='not-moved', reason='members-outside-move',
+                             outside_cycle_ids=sorted(members - selected))
+                continue
+            proposal = json.loads(json.dumps(group))
+            for relation in proposal['relations']:
+                for ref in relation['evidence_refs']:
+                    prefix = next((old for old in paths if ref['path'].startswith(old + '/')), None)
+                    if prefix is None:
+                        raise W.WorkflowGroupError('evidence-endpoint-mismatch', ref['path'])
+                    ref['path'] = paths[prefix] + ref['path'][len(prefix):]
+            entry['proposal'] = proposal
+    except (W.WorkflowGroupError, P.ProducerError, OSError, ValueError, KeyError, TypeError) as error:
+        state.update(observation='unknown', reason=getattr(error, 'code', type(error).__name__))
+        state['groups'] = []
+    return state
+
+
+def _group_receipt(journal):
+    info = journal.get('workflow_groups')
+    if info is None:
+        return {'status': 'unknown', 'reason': 'not-recorded-in-old-operation', 'groups': []}
+    groups = [{key: value for key, value in entry.items() if key != 'proposal'} for entry in info['groups']]
+    statuses = {entry['status'] for entry in groups}
+    if info['observation'] == 'unknown': status = 'unknown'
+    elif not groups: status = 'none'
+    elif 'planned' in statuses: status = 'planned'
+    elif statuses == {'moved'}: status = 'moved'
+    elif 'moved' in statuses: status = 'partial'
+    elif 'unknown' in statuses: status = 'unknown'
+    else: status = 'not-moved'
+    return {'status': status, 'groups': groups,
+        **({'reason': info['reason']} if info.get('reason') else {}),
+        **({'source_withdrawal': info['source_withdrawal']} if info.get('source_withdrawal') else {})}
+
+
+def _apply_groups(source, target, journal):
+    """Normal group plans, persisted intent, and ordered metadata replacement."""
+    import artifact_workflow_groups as W
+    info = journal.get('workflow_groups')
+    if info is None or info.get('state') == 'done':
+        return  # old operations remain unobserved; never backfill them
+    if info['observation'] != 'present' or not info['groups']:
+        info['state'] = 'done'; _save(source, journal); return
+    if info['state'] != 'prepared':
+        try:
+            raw = W._regular(source / info['source_path'])
+            if raw != bytes.fromhex(info['source_before_hex']):
+                raise W.WorkflowGroupError('declaration-preimage-conflict')
+            source_plan = W.prepare_withdrawal(source, journal['source_campaign'],
+                                               [item['cycle_id'] for item in journal['cycles']])
+            accepted, target_plan = [], None
+            for entry in info['groups']:
+                if entry['status'] != 'planned': continue
+                try:
+                    candidate = W.prepare(target, journal['target_campaign'],
+                        {'groups': [*accepted, entry['proposal']]})
+                except W.WorkflowGroupError as error:
+                    entry.update(status='not-moved', reason=error.code)
+                else:
+                    accepted.append(entry['proposal']); target_plan = candidate
+            info.update(state='prepared', source_plan=source_plan, target_plan=target_plan)
+            _save(source, journal)  # intent precedes either metadata effect
+        except (W.WorkflowGroupError, P.ProducerError, OSError) as error:
+            for entry in info['groups']:
+                if entry['status'] == 'planned':
+                    entry.update(status='unknown', reason=getattr(error, 'code', type(error).__name__))
+            info.update(state='done', source_withdrawal={'status': 'unknown',
+                'reason': getattr(error, 'code', type(error).__name__)})
+            _save(source, journal); return
+    with admission.lock_roots([source, target]):
+        try:
+            source_ready = W._validated_apply_locked(source, info['source_plan']) if info['source_plan'] else None
+            target_ready = W._validated_apply_locked(target, info['target_plan']) if info['target_plan'] else None
+        except (W.WorkflowGroupError, P.ProducerError) as error:
+            for entry in info['groups']:
+                if entry['status'] == 'planned': entry.update(status='unknown', reason=error.code)
+            info.update(state='done', source_withdrawal={'status': 'unknown', 'reason': error.code})
+            _save(source, journal); return
+        # Replays accept only the existing normal plan's exact after-image.
+        # I/O interruptions retain the prepared pair and resume this same move.
+        if target_ready is not None and target_ready['status'] != 'already-applied':
+            P._write_atomic(target_ready['path'], target_ready['after_raw'])
+        _fault('group-target')
+        if source_ready is not None and source_ready['status'] != 'already-applied':
+            P._write_atomic(source_ready['path'], source_ready['after_raw'])
+        _fault('group-source')
+        for entry in info['groups']:
+            if entry['status'] == 'planned': entry['status'] = 'moved'
+        info.update(state='done', source_withdrawal={'status': 'applied' if source_ready else 'unchanged'})
+        _save(source, journal)
+
+
+def _plan(source, target, *, operation_id, cycle_id, source_campaign, campaign, attachments, now, preview=False,
+          inventory_hint=None):
     if source == target:
         _error("campaign batching and attachments require distinct roots; use local cycle-move for a local move")
     if source in target.parents or target in source.parents:
@@ -237,7 +386,18 @@ def _plan(source, target, *, operation_id, cycle_id, source_campaign, campaign, 
         record = _json(P.cycle_record_path(source, cycle_id))
         source_path, source_row = _campaign(source, record["campaign_id"])
         ids = [cycle_id]
-    target_path, target_row = _campaign(target, campaign or source_row["key"])
+    found = _campaign(target, campaign or source_row['key'],
+                      missing_ok=preview and campaign in (None, source_row['key']))
+    creation = None
+    if found is None:
+        key = None if source_row['key'] == P.UNASSIGNED_KEY else source_row['key']
+        target_row = dict(P._campaign_metadata(target, key, started_on=P._rfc3339(now),
+                          **_creation_fields(source_row)), campaign_id=None)
+        target_path = target / 'campaigns' / target_row['locator'] / 'campaign.json'
+        creation = {'key': target_row['key'], 'title': target_row['title'], 'locator': target_row['locator'],
+                    'campaign_id': None, 'created': False}
+    else:
+        target_path, target_row = found
     if target_row.get("state") != "active":
         _error("target campaign must be active")
     transfer = "rename" if _same_device(source, target) else "copy"
@@ -262,7 +422,11 @@ def _plan(source, target, *, operation_id, cycle_id, source_campaign, campaign, 
             suffix += 1
         used.add(name)
         destination = _safe(target, target_path.parent / name)
-        inventory, identities = listing(directory) if transfer == "rename" else (tree(directory), _identities(directory))
+        prior = (inventory_hint or {}).get(cid)
+        if prior and prior['record'] == record and prior['source'] == str(directory.relative_to(source)):
+            inventory, identities = prior['inventory'], prior['source_identities']
+        else:
+            inventory, identities = listing(directory) if transfer == "rename" else (tree(directory), _identities(directory))
         cycles.append({"cycle_id": cid, "record": record, "source": str(directory.relative_to(source)),
                        "target": str(destination.relative_to(target)), "inventory": inventory,
                        "source_identities": identities, "transfer": transfer, "state": "planned",
@@ -304,6 +468,9 @@ def _plan(source, target, *, operation_id, cycle_id, source_campaign, campaign, 
                "target_campaign_path": str(target_path.relative_to(target)), "merge": bool(source_campaign),
                "cycles": cycles, "attachments": attach, "at": P._rfc3339(now),
                "history_actor": P._history_actor("human")}
+    if creation is not None:
+        journal['campaign_creation'] = creation
+    journal['workflow_groups'] = _group_snapshot(source, journal)
     owned_routes = set()
     for item in cycles:
         record = item["record"]
@@ -640,7 +807,8 @@ def _receipt(journal):
                                       and "/historical/" not in rel],
             "cycles": [dict({key: item[key] for key in ("cycle_id", "source", "target")},
                             transfer=item.get("transfer", "copy")) for item in journal["cycles"]],
-            "attachments": journal["attachments"]}
+            "attachments": journal["attachments"], "workflow_groups": _group_receipt(journal),
+            **({'campaign_creation': journal['campaign_creation']} if journal.get('campaign_creation') else {})}
 
 
 def _local_preview(root, cycle_id, campaign, parent, no_parent):
@@ -690,12 +858,21 @@ def move(source, target, *, cycle_id, source_campaign, campaign, attach_logs=(),
         return _receipt(journal)
     if dry_run:
         journal = journal or _plan(source, target, operation_id=op, cycle_id=cycle_id,
-            source_campaign=source_campaign, campaign=campaign, attachments=attachments, now=now)
+            source_campaign=source_campaign, campaign=campaign, attachments=attachments, now=now, preview=True)
         _upgrade_controls(journal)
         return dict(_receipt(journal), dry_run=True)
     with _operation_lock(source, op):
-        journal = _json(path) if path.exists() else _plan(source, target, operation_id=op, cycle_id=cycle_id,
-            source_campaign=source_campaign, campaign=campaign, attachments=attachments, now=now)
+        journal = _json(path) if path.exists() else None
+        if journal is None:
+            journal = _plan(source, target, operation_id=op, cycle_id=cycle_id,
+                source_campaign=source_campaign, campaign=campaign, attachments=attachments, now=now, preview=True)
+            if journal.get('campaign_creation'):
+                created = _ensure_campaign(source, target, cycle_id, source_campaign, campaign, now)
+                hint = {item['cycle_id']: item for item in journal['cycles']}
+                journal = _plan(source, target, operation_id=op, cycle_id=cycle_id,
+                    source_campaign=source_campaign, campaign=campaign, attachments=attachments, now=now,
+                    inventory_hint=hint)
+                if created is not None: journal['campaign_creation'] = created
         if journal["state"] == "committed":
             return _receipt(journal)
         _upgrade_controls(journal)
@@ -785,6 +962,7 @@ def move(source, target, *, cycle_id, source_campaign, campaign, attach_logs=(),
                     P._edit_campaign_members(target, (target / journal["target_campaign_path"]).parent, cid, joining=True)
                     item["state"] = "adopted"; _save(source, journal)
             locator.update_indexes(target, [journal["target_campaign"]])
+        _apply_groups(source, target, journal)
         _fault("metadata")
         canonical = {"artifact_root": str(target), "campaign_id": journal["target_campaign"], "operation_id": op}
         source_campaign_path = source / journal["source_campaign_path"]

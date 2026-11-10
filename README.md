@@ -166,9 +166,35 @@ in the block. The block opens with routes, questions, received peer
 messages, repo work and your last input. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
-you focus the block. Fleet can open that exact session's panel too. Peer wake works
+you focus the block. The question-first bottom shows the current question and
+choices before focus. Use **Tab** to move between questions, **1–9** to choose,
+**t** for text (including pasted text), and **Enter** after every form field is
+answered. Choices and drafts survive question navigation. A transport receipt
+is shown separately from proved consumption; expired or cancelled questions
+cannot be submitted. Focused **↑/↓** scrolls long question content, and an explicit
+count marks hidden lines. Empty question sections disappear.
+Fleet can open that exact session's panel too. Peer wake works
 without Herdr; Codex keeps its native queue. Native context remains as a fallback
 where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
+
+Wrapped Codex preserves its native shared-daemon startup. The unchanged managed
+footer can yield duplicate paint to the common area, including the exact thread ID.
+Custom, clipped or uncertain rows remain visible. Answers retain the existing
+queue and consumption receipts; an unproved native target stays pending.
+
+The optional side placement uses the same block and editor. In the existing
+`~/.config/hearting/session-shell.json`, keep `"enabled": true` and add
+`"layout": "side"` (default `"bottom"`), optionally `"side_width": 40` and
+`"side_min_columns": 132`. This applies to new wrapped terminals. A narrower
+window uses bottom and returns to side when widened. Once OpenCode's own sidebar
+is observed, that attachment keeps bottom to avoid competing panels. Enabling or
+disabling the shell preserves these placement preferences.
+
+Codex context keeps the latest server-reported usage. A separate `compaction
+imminent` label appears only when the exact session's current native diagnostic
+supports it; detail separates server usage, native estimate, limit and time.
+Unavailable or stale diagnostic data stays unknown. The 500K/700K preservation
+notices do not guarantee remaining time before native compaction.
 
 ### Key screens
 
@@ -338,7 +364,7 @@ The root's `README.md` (open `index.html` in a browser) collects the most recent
 results and campaigns with relative links, and Hearting rewrites it at every
 publish. `hearting reports` prints the same list, and `hearting open <number or
 words>` opens one result.
-Optional: run `hearting view` for a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs.
+Optional: run `hearting view` for a local viewer (Ctrl-C to stop); `hearting open` shows its URL while it runs on the default port 8765. If that port is occupied, use `hearting view --port 0` for a free port or `--port 8766` to choose one, then open the printed URL.
 
 To follow a request while it runs:
 

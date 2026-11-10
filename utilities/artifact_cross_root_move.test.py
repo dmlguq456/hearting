@@ -17,6 +17,7 @@ import artifact_producer as P
 import artifact_campaign as C
 import artifact_locator as L
 import artifact_reader as Reader
+import artifact_workflow_groups as W
 
 spec = importlib.util.spec_from_file_location("cross_move_fixture", Path(__file__).with_name("artifact_producer.test.py"))
 F = importlib.util.module_from_spec(spec)
@@ -659,6 +660,169 @@ class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
         archive = self.target / X.JOURNALS / out["operation_id"] / "historical" / rel
         self.assertEqual(archive.read_bytes(), raw)
         self.assertNotIn(rel, out["active_cycle_controls"])
+
+class WorkflowGroupMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
+    def group(self):
+        second = self.make(self.source, 'group-second', closed=True)
+        members = [self.src, second]
+        refs = [{'path': str(Path(row['cycle_dir']).relative_to(self.source) / 'artifacts/plans/cycle/plan.md')}
+                for row in members]
+        group = {'group_id': 'wgrp_' + '1' * 32, 'title': 'Original workflow',
+            'members': [{'cycle_id': row['cycle_id'], 'stage_label': 'Stage ' + str(i)} for i, row in enumerate(members)],
+            'relations': [{'from_cycle_id': members[0]['cycle_id'], 'to_cycle_id': members[1]['cycle_id'],
+                'kind': 'precedes', 'rationale': 'The second uses the first output.', 'evidence_refs': refs}]}
+        W.apply(self.source, W.prepare(self.source, self.src['campaign_id'], {'groups': [group]}))
+        path = W.declaration_path(self.source, self.src['campaign_id'])
+        return json.loads(path.read_bytes())['groups'][0], path, path.read_bytes()
+
+    def assert_group_moved(self, out, original, source_path, source_raw):
+        info = out.get('workflow_groups') or {}
+        self.assertEqual(info.get('status'), 'moved', info)
+        doc = json.loads(W.declaration_path(self.target, self.dst['campaign_id']).read_bytes())
+        actual = doc['groups'][0]
+        self.assertEqual((actual['group_id'], actual['title'], actual['members']),
+                         (original['group_id'], original['title'], original['members']))
+        paths = {row['source']: row['target'] for row in out['cycles']}
+        for old, new in zip(original['relations'][0]['evidence_refs'], actual['relations'][0]['evidence_refs']):
+            self.assertEqual({k:v for k,v in new.items() if k != 'path'}, {k:v for k,v in old.items() if k != 'path'})
+            before = next(prefix for prefix in paths if old['path'].startswith(prefix + '/'))
+            self.assertEqual(new['path'], paths[before] + old['path'][len(before):])
+        self.assertEqual(W.verify(self.target, self.dst['campaign_id'])['stale_evidence'], [])
+        self.assertEqual(json.loads(source_path.read_bytes())['groups'], [])
+        journal = json.loads((self.source / X.JOURNALS / (out['operation_id'] + '.json')).read_bytes())
+        self.assertEqual(bytes.fromhex(journal['workflow_groups']['source_before_hex']), source_raw)
+
+    def test_full_group_and_exact_evidence_follow_cross_root_copy(self):
+        group, path, raw = self.group()
+        out = self.move(); self.assert_group_moved(out, group, path, raw)
+        again = self.move()
+        self.assertEqual(again['workflow_groups'], out['workflow_groups'])
+
+    def test_full_group_also_follows_same_device_rename(self):
+        group, path, raw = self.group()
+        with mock.patch.object(X, '_same_device', return_value=True): out = self.move()
+        self.assertTrue(all(row['transfer'] == 'rename' for row in out['cycles']))
+        self.assert_group_moved(out, group, path, raw)
+
+    def test_partial_selection_reports_the_omission_and_preserves_the_original(self):
+        group, path, raw = self.group()
+        out = P.cycle_move(self.source, self.src['cycle_id'], target_artifact_root=self.target,
+                           campaign=self.dst['campaign_id'])
+        info = out.get('workflow_groups') or {}
+        self.assertEqual(info.get('status'), 'not-moved', info)
+        self.assertEqual(info['groups'][0]['reason'], 'members-outside-move')
+        self.assertFalse((Path(self.dst['cycle_dir']).parent / W.NAME).exists())
+        remaining = json.loads(path.read_bytes())['groups'][0]
+        self.assertEqual(remaining['members'], group['members'][1:])
+        self.assertEqual(remaining['relations'], [])
+        journal = json.loads((self.source / X.JOURNALS / (out['operation_id'] + '.json')).read_bytes())
+        self.assertEqual(bytes.fromhex(journal['workflow_groups']['source_before_hex']), raw)
+
+    def test_target_conflict_keeps_its_declaration_and_reports_not_moved(self):
+        group, _, _ = self.group()
+        other = {'group_id': group['group_id'], 'title': 'Existing target meaning',
+            'members': [{'cycle_id': self.dst['cycle_id'], 'stage_label': 'Existing'}], 'relations': []}
+        W.apply(self.target, W.prepare(self.target, self.dst['campaign_id'], {'groups': [other]}))
+        path = W.declaration_path(self.target, self.dst['campaign_id']); before = path.read_bytes()
+        out = self.move(); info = out.get('workflow_groups') or {}
+        self.assertEqual(info.get('status'), 'not-moved', info)
+        self.assertEqual(info['groups'][0]['reason'], 'merge-title-conflict')
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unreadable_declaration_is_unknown_instead_of_empty_success(self):
+        path = Path(self.src['cycle_dir']).parent / W.NAME
+        path.write_bytes(b'{invalid original declaration')
+        original = path.read_bytes()
+        out = self.move(); info = out['workflow_groups']
+        self.assertEqual((info['status'], info['reason']), ('unknown', 'json-invalid'))
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_concurrent_source_interpretation_is_preserved_and_reported(self):
+        group, path, _ = self.group()
+        changed = [False]
+        def edit(point):
+            if point == 'publish' and not changed[0]:
+                changed[0] = True
+                proposal = dict(group, title='Concurrent source interpretation')
+                W.apply(self.source, W.prepare(self.source, self.src['campaign_id'], {'groups': [proposal]}, replace=True))
+        with mock.patch.object(X, '_fault', side_effect=edit): out = self.move()
+        self.assertEqual(out['workflow_groups']['status'], 'unknown')
+        self.assertEqual(json.loads(path.read_bytes())['groups'][0]['title'], 'Concurrent source interpretation')
+        self.assertFalse((Path(self.dst['cycle_dir']).parent / W.NAME).exists())
+
+    def test_late_target_edit_is_not_overwritten_by_a_prepared_group_plan(self):
+        self.group()
+        other = {'group_id': 'wgrp_' + '2' * 32, 'title': 'Target meaning',
+            'members': [{'cycle_id': self.dst['cycle_id'], 'stage_label': 'Existing'}], 'relations': []}
+        W.apply(self.target, W.prepare(self.target, self.dst['campaign_id'], {'groups': [other]}))
+        path = W.declaration_path(self.target, self.dst['campaign_id']); original = W._validated_apply_locked
+        changed = [False]
+        def edit(root, plan):
+            if Path(root) == self.source and not changed[0]:
+                changed[0] = True
+                doc = json.loads(path.read_bytes()); doc['groups'][0]['title'] = 'Concurrent target interpretation'
+                path.write_text(json.dumps(doc))
+            return original(root, plan)
+        with mock.patch.object(W, '_validated_apply_locked', side_effect=edit): out = self.move()
+        self.assertEqual(out['workflow_groups']['status'], 'unknown')
+        self.assertEqual(json.loads(path.read_bytes())['groups'][0]['title'], 'Concurrent target interpretation')
+
+    def empty_target(self):
+        root = Path(self._tmp.name) / 'empty-target'; root.mkdir()
+        P.activate(root, repository_id='repo_' + 'e' * 32, artifact_root_id='root_' + 'f' * 32,
+                   w7={'campaign_id': 'camp_' + '9' * 32})
+        return root
+
+    def test_missing_target_campaign_dry_run_is_a_read_only_proposal(self):
+        target = self.empty_target(); before = [snapshot(self.source), snapshot(target)]
+        try:
+            out = P.cycle_move(self.source, source_campaign=self.src['campaign_id'], target_artifact_root=target, dry_run=True)
+        except P.ProducerError as error: self.fail('dry-run must describe automatic campaign creation: ' + str(error))
+        self.assertIsNone(out['campaign_id'])
+        self.assertEqual(out['campaign_creation']['key'], 'same-key')
+        self.assertEqual([snapshot(self.source), snapshot(target)], before)
+
+    def test_cli_creates_original_campaign_without_a_route_or_extra_output_cycle(self):
+        target = self.empty_target()
+        campaign = P.read_campaign(self.source, self.src['campaign_id'])
+        campaign['title'] = 'Original human title'
+        with P.artifact_admission.lock_roots([self.source]): P._write_campaign(self.source, campaign, exclusive=False)
+        command = [sys.executable, str(Path(P.__file__)), 'cycle-move', '--artifact-root', str(self.source),
+            '--source-campaign', self.src['campaign_id'], '--target-artifact-root', str(target)]
+        env = dict(os.environ, AGENT_ROUTE_FILE=self.src['route_file'])
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=45)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        out = json.loads(result.stdout); created = P.read_campaign(target, out['campaign_id'])
+        self.assertEqual((created['key'], created['title']), ('same-key', 'Original human title'))
+        self.assertEqual(created['cycles'], [self.src['cycle_id']])
+        self.assertEqual({p.stem for p in (P.producer_dir(target) / 'cycles').glob('*.json')}, {self.src['cycle_id']})
+        again = subprocess.run(command, env=env, capture_output=True, text=True, timeout=45)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)['campaign_id'], out['campaign_id'])
+        self.assertEqual(P.read_campaign(target, out['campaign_id'])['cycles'], [self.src['cycle_id']])
+
+    def interrupted_group(self, phase):
+        group, path, raw = self.group()
+        def fail(point):
+            if point == phase: raise RuntimeError('injected metadata interruption')
+        with mock.patch.object(X, '_fault', side_effect=fail), self.assertRaises(RuntimeError): self.move()
+        out = self.move(); self.assert_group_moved(out, group, path, raw)
+
+    def test_target_group_effect_before_completion_record_resumes(self):
+        self.interrupted_group('group-target')
+
+    def test_source_group_effect_before_completion_record_resumes(self):
+        self.interrupted_group('group-source')
+
+    def test_old_committed_operation_is_unobserved_without_retroactive_group_writes(self):
+        out = self.move(); journal_path = self.source / X.JOURNALS / (out['operation_id'] + '.json')
+        journal = json.loads(journal_path.read_bytes()); journal.pop('workflow_groups', None)
+        X._save(self.source, journal)
+        before = [snapshot(self.source), snapshot(self.target)]
+        again = self.move()
+        self.assertEqual((again.get('workflow_groups') or {}).get('status'), 'unknown')
+        self.assertEqual([snapshot(self.source), snapshot(self.target)], before)
+
 
 if __name__ == "__main__":
     unittest.main()

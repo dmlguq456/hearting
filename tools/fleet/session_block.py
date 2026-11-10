@@ -1,59 +1,87 @@
-"""Small, native-like session block over Fleet's existing display projections.
-
-Only presentation lives here. Questions and answers retain their existing owners.
-"""
-from .session_line import line_segments, status_lines, clip_segments as _clip
-from .explorer.grid import clip_cells, cell_width
+"""Question-first session block; values and authority keep their existing owners."""
+from .session_line import status_lines, clip_segments, wrap_segments as wrap_parts
+from .explorer.grid import cell_width
 from .config import ui_text
 
 
 def capacity(rows):
-    return min(10, max(4, int(rows) // 3), max(1, int(rows) - 4))
+    return min(10, max(1, int(rows) - 6))
+
+
+def question_state(item):
+    state = item.get("request_state")
+    if state in {"submitted", "received", "applied", "expired", "cancelled", "unknown"}:
+        return state
+    return "open" if item.get("answerable") is True else "unavailable"
+
+
+def question_presentations(items, columns, *, native_wait=None):
+    """Private display-only rows consumed by the local editor, not input proof."""
+    listed = [(item, question) for item in items for question in item.get("questions") or ()]
+    width = max(1, columns - 4)
+    for index, (item, question) in enumerate(listed):
+        state = question_state(item)
+        key = "lvl_g" if state == "applied" else "g_blocked" if state == "open" else "dim"
+        heading = [("" if native_wait is not None else "◑ ", key),
+                   (ui_text("fleet.session_block.questions") + " " + str(len(listed)), "dim"),
+                   (f" · {index+1}/{len(listed)} · ", "dim"),
+                   (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key),
+                   (" · " + ui_text("fleet.session_block.this_session") + " · " + str(item.get("age") or "?"), "dim")]
+        source = []
+        if columns < 64:
+            source = wrap_parts([heading.pop()], width)
+        choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"
+                   else question.get("choices") or [])
+        options = []
+        for number, choice in enumerate(choices, 1):
+            if options:
+                options.append((" · ", "dim"))
+            label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
+            options.append((str(number) + " " + str(label), "loc_repo"))
+            if question.get("recommended") == number - 1:
+                options.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
+        question["display"] = {
+            "head": heading, "source": source,
+            "body": wrap_parts([(question.get("question") or "?", "loc_repo")], width),
+            "options": wrap_parts(options or [(ui_text("fleet.session_block.text_hint"), "dim")], width)
+                       if state == "open" else [[(str(item.get("reason") or ui_text("fleet.session_block." + state)), "dim")]],
+        }
+    return items
+
+
+def block_sections(values, *, columns, route="", received=(), human="", work="", gpu=""):
+    prefix = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns - 4, wrap_long=columns < 64)
+    if route and route != values.get("native_route"):
+        prefix += wrap_parts([("⏳ ", "g_idle"), (route.removeprefix("⏳ "), "g_idle")], columns - 4)
+    tail = []
+    if received:
+        tail.append([("✉ ", "dim"), (str(received[-1]).removeprefix("✉ "), "loc_repo")])
+    if work:
+        tail.append([("◌ ", "dim"), (work, "loc_repo")])
+    if gpu:
+        tail.append([("⚙ ", "dim"), (gpu, "resource_active")])
+    if human and human != "› ·":
+        tail.append([(human, "dim")])
+    return prefix, tail
 
 
 def block_lines(values, *, columns, rows, questions=(), route="", received=(),
                 human="", work="", gpu="", detail=(), focused=False):
-    """Question space wins; absent sections never grow an empty labeled row."""
-    limit = capacity(rows)
-    # Expanded rows already carry the actionable route and question counts.
-    lines = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns)
-    # Preserve space for an actual question at small terminal heights.
-    if questions:
-        lines = lines[:max(1, limit - 2 - bool(route))]
-    # These labels deliberately follow the status-line idiom, not a Fleet frame.
-    if route and route != values.get("native_route"):
-        lines.append([("⏳ ", "g_idle"), (route.removeprefix("⏳ "), "g_idle"),
-                      ("  ↵", "dim")])
-    if questions:
-        total = sum(max(1, len(item.get("questions") or ())) for item in questions)
-        if values.get("native_wait") is None:
-            lines.append([("◑ ", "g_blocked"), (ui_text("fleet.session_block.questions") + " ", "dim"),
-                          (str(total), "g_blocked"), ("  Ctrl+]", "dim")])
-        for item in questions:
-            for question in item.get("questions") or ({"question": item.get("reason") or "?"},):
-                options = []
-                for index, choice in enumerate(question.get("choices") or (), 1):
-                    label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
-                    options.append(str(index) + " " + str(label) + (" ✓" if question.get("recommended") == index - 1 else ""))
-                text = str(question.get("question") or "?")
-                lines.append([("  " + text, "loc_repo"),
-                              ("  " + " · ".join(options) if options else "  › text", "dim")])
-                if len(lines) >= limit:
-                    break
-            if len(lines) >= limit:
-                break
-    for line in received:
-        lines.append([("✉ ", "dim"), (str(line).removeprefix("✉ "), "loc_repo"), ("  r", "dim")])
-    if work:
-        lines.append([("◌ ", "dim"), (work, "loc_repo"), ("  w", "dim")])
-    if gpu:
-        lines.append([("⚙ ", "dim"), (gpu, "resource_active")])
-    if human and human != "› ·":
-        lines.append([(human, "dim")])
-    if detail:
-        # Focused actions and editors are visible at the expense of summaries.
-        lines = lines[:max(1, limit - len(detail))] + list(detail)[-max(1, limit - 1):]
-    if focused and len(lines) < limit:
+    """Static first-question paint; the editor uses the same prepared rows."""
+    prefix, tail = block_sections(values, columns=columns, route=route, received=received,
+                                  human=human, work=work, gpu=gpu)
+    question_presentations(questions, columns, native_wait=values.get("native_wait"))
+    board = []
+    for item in questions:
+        if item.get("questions"):
+            view = item["questions"][0]["display"]
+            board = [view["head"], *view["body"], *view["options"], *view["source"]]
+            break
+    lines = prefix + (list(detail) if detail else board) + tail
+    if focused:
         lines.append([("Ctrl+] ", "dim"), (ui_text("fleet.session_block.help"), "dim")])
-    lines = lines[:limit]
-    return [_clip(line, columns) for line in lines]
+    limit = capacity(rows)
+    if len(lines) > limit:
+        omitted = len(lines) - limit + 1
+        lines = lines[:limit-1] + [[(f"+{omitted} · " + ui_text("fleet.session_block.more"), "dim")]]
+    return [clip_segments(line, columns) for line in lines]

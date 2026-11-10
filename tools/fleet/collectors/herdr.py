@@ -20,6 +20,7 @@ Misattribution is worse than absence (PRD F-26): every failure path yields None.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -432,12 +433,76 @@ def pane_pids(panes, runner=subprocess.run, bindings=None, observation=None):
                         pane_infos=getattr(evidence, "pane_infos", None))
 
 
+def _codex_display_footer(lines):
+    """Normalize known display chrome; the input-ownership parser stays strict."""
+    from pane_ownership import _ANSI_ESCAPE_RE, _codex_current_footer
+    if not isinstance(lines, (list, tuple)) or not all(isinstance(line, str) for line in lines):
+        return ""
+    rows = [_ANSI_ESCAPE_RE.sub("", line).replace("\r", "") for line in lines]
+    while rows and not rows[-1].strip():
+        rows.pop()
+    # The unbound shell's existing fallback line follows the native viewport.
+    if rows and re.fullmatch(r"📁 .+ · codex · CTX \?", rows[-1].strip()):
+        rows.pop()
+    if rows and re.fullmatch(r"(?:\^c|ctrl\+c) copy · enter copy & follow · esc clear",
+                             rows[-1].strip().lower()):
+        rows[-1] = "? for shortcuts"
+    state, sid = _codex_current_footer(rows)
+    return sid if state == "current" else ""
+
+
+def _codex_display_thread(pane, pid, birth, info, *, socket_path, server=None):
+    """Select display identity from the native footer and its existing root owner.
+
+    This read-only projection never changes the native/peer input join. A loaded
+    root's LISTEN owner and the observed foreground ancestry bind the visible
+    choice even when an older wrapper has no attachment record.
+    """
+    try:
+        import pane_ownership as ownership
+        from . import codex, procscan
+        executable = ownership._pane_reader(pane, None)
+        record = ownership._process(pid)
+        if (not executable or not socket_path or not record or str(record[5]) != str(birth)
+                or not record[3] or record[2] != record[4]
+                or ownership._runtime(pid) != ("codex", False)
+                or ownership._registered_worker(pid)):
+            return ""
+        env = procscan.read_environ(pid)
+        if (env.get("HERDR_PANE_ID") != pane or
+                not ownership._same_socket_endpoint(env.get("HERDR_SOCKET_PATH", ""), socket_path, server)):
+            return ""
+        owner_pid = int((info or {}).get("foreground_process_group_id") or 0)
+        owner = ownership._process(owner_pid)
+
+        def connected(value):
+            return bool(owner and value and value.get("pane_id") == pane
+                        and value.get("foreground_process_group_id") == owner_pid
+                        and any(row.get("pid") == owner_pid
+                                for row in value.get("foreground_processes", ()) if isinstance(row, dict))
+                        and ownership._process(owner_pid) == owner
+                        and pid_in_panes(pid, set(), {owner_pid}))
+
+        if not connected(info):
+            return ""
+        options = {"executable": executable, "socket_path": socket_path}
+        sid = _codex_display_footer(ownership._read_pane_visible_lines(pane, **options))
+        if not sid or codex.process_for_thread(sid, env) != (pid, str(birth)):
+            return ""
+        if _codex_display_footer(ownership._read_pane_visible_lines(pane, **options)) != sid:
+            return ""
+        latest = ownership._pane_process_info(pane, server=server, **options)
+        return sid if connected(latest) and ownership._process(pid) == record else ""
+    except (ImportError, OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+        return ""
+
+
 def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_current=False,
                         wait_timeout=0.0, observation=None):
-    """Process identities for Codex TUIs currently foreground in herdr panes.
+    """Current native identities for bare or wrapped Codex TUIs in Herdr panes.
 
-    Pane metadata is not thread proof. The live foreground PID's
-    ``process_identity`` is authoritative; pane process info confirms ownership.
+    Pane metadata and native environment are candidate hints. The shared pane
+    reader proves the native PID/current root, including a wrapper's inner PTY.
     """
     from . import procscan
 
@@ -447,8 +512,11 @@ def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_cu
     }
     if not targets:
         return {}
-    key = tuple(sorted((pid, str(s.proc_start), os.path.realpath(s.cwd or ""))
-                       for pid, s in targets.items()))
+    scope = (getattr(observation, "endpoint", None), getattr(observation, "socket_path", None),
+             os.environ.get("AGENT_HERDR_SESSION"), os.environ.get("HERDR_SESSION"),
+             os.environ.get("HERDR_SOCKET_PATH"))
+    key = (scope, tuple(sorted((pid, str(s.proc_start), os.path.realpath(s.cwd or ""))
+                              for pid, s in targets.items())))
     now = time.monotonic()
     if not force_current and panes is None and runner is subprocess.run \
             and key == _CODEX_PANE_CACHE["key"] \
@@ -470,28 +538,63 @@ def codex_pane_sessions(sessions, panes=None, runner=subprocess.run, *, force_cu
             else:
                 panes = list_panes(runner=runner, wait_timeout=wait_timeout)
         cwds = {os.path.realpath(s.cwd or "") for s in targets.values()}
+        # Native environment names a candidate only. The shared current-thread
+        # reader proves its inner PID through the wrapper's birth-bound join.
+        pane_hints = {pid: str(procscan.read_environ(pid).get("HERDR_PANE_ID") or "").strip()
+                      for pid in targets}
+        hinted_panes = set(pane_hints.values()) - {""}
         selected = [p for p in panes or []
                     if p.get("agent") == "codex"
-                    and os.path.realpath(p.get("cwd") or "") in cwds]
+                    and (os.path.realpath(p.get("cwd") or "") in cwds
+                         or p.get("pane_id") in hinted_panes)]
         pane_bindings = {}
         evidence = pane_evidence(selected, runner=runner, bindings=pane_bindings,
                                  observation=observation)
-        _shells, foreground, _metadata = evidence
+        _shells, _foreground, _metadata = evidence
         utilities = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "utilities"))
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         try:
             from pane_ownership import current_codex_thread
             found = {}
+            pane_infos = getattr(evidence, "pane_infos", {})
             for pid, session in targets.items():
-                if pid not in foreground or procscan.read_proc_start(pid) != session.proc_start:
+                if procscan.read_proc_start(pid) != session.proc_start:
                     continue
                 bound_panes = pane_bindings.get(pid, set())
+                hinted = not bound_panes
+                if hinted:
+                    hint = pane_hints.get(pid)
+                    # An inner native PID is not an outer foreground PID. Keep
+                    # the observed pane candidate, then reuse the same proof;
+                    # never synthesize foreground membership or a native SID.
+                    if hint and hint in pane_infos:
+                        bound_panes = {hint}
                 if len(bound_panes) != 1:
                     continue
                 pane_id = next(iter(bound_panes))
-                pane_info = getattr(evidence, "pane_infos", {}).get(str(pane_id))
-                sid = current_codex_thread(str(pane_id), pid, process_info=pane_info)
+                pane_info = pane_infos.get(str(pane_id))
+                options = {"process_info": pane_info}
+                endpoint = getattr(observation, "endpoint", None)
+                socket_path = getattr(observation, "socket_path", None)
+                if not socket_path and hinted and runner is subprocess.run:
+                    # A CLI default census has no inherited socket. Reuse the
+                    # existing server-reported endpoint resolver, not a guessed
+                    # path or the native process's unverified environment.
+                    from session_tidy import _herdr_endpoint_socket
+                    endpoint = endpoint or _observation_module().endpoint_name()
+                    socket_path = _herdr_endpoint_socket("" if endpoint == "default" else endpoint)
+                    if not socket_path:
+                        continue
+                if socket_path:
+                    options["socket_path"] = socket_path
+                    if endpoint and endpoint != "default":
+                        options["server"] = endpoint
+                sid = current_codex_thread(str(pane_id), pid, **options)
+                if not sid:
+                    sid = _codex_display_thread(str(pane_id), pid, session.proc_start, pane_info,
+                                                socket_path=socket_path,
+                                                server=options.get("server"))
                 if sid:
                     found[pid] = sid
         except Exception:
@@ -738,6 +841,26 @@ def join_deferred_pane_aliases(sessions):
         s._herdr_alias_pane = None
 
 
+def _inner_process_panes(session, pids):
+    """Display placement from this endpoint's existing foreground observation.
+
+    This does not add a native session claim to ``pane_process_claims``. A
+    wrapper's inner PTY can be placed before its optional SID metadata exists.
+    """
+    from . import procscan
+    birth = getattr(session, "proc_start", None)
+    if (not birth or not getattr(pids, "complete", False)
+            or procscan.read_proc_start(session.pid) != birth):
+        return set()
+    matches = set()
+    for pane, info in getattr(pids, "pane_infos", {}).items():
+        foreground = {row["pid"] for row in info.get("foreground_processes") or ()
+                      if isinstance(row, dict) and type(row.get("pid")) is int}
+        if pid_in_panes(session.pid, set(), foreground):
+            matches.add(pane)
+    return matches if procscan.read_proc_start(session.pid) == birth else set()
+
+
 def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bindings=None,
            wait_timeout=0.0):
     """Set ``herdr_attached`` on every eligible depth-0 session. ``agents`` = a
@@ -859,6 +982,8 @@ def enrich(sessions, agents=None, lineage=None, panes=None, pids=None, pane_bind
         # Herdr can lag a native resume/clear. Its exact foreground PID (or an
         # existing session match) identifies the pane; seat history joins its IDs.
         matching_panes = bindings.get(s.pid, set())
+        if not matching_panes:
+            matching_panes = _inner_process_panes(s, pids)
         if not matching_panes and sid and (harness, sid) in index:
             pane = index[(harness, sid)].get("pane_id")
             matching_panes = {pane} if pane else set()

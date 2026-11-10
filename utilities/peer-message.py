@@ -2677,22 +2677,26 @@ def _promote_prior_codex_rows(ref, *, timeout, start_interrupted):
     return promoted
 
 
-def deliver_pending_codex(ref, *, timeout=1.0, start_interrupted=False, _promote_prior=True):
+def deliver_pending_codex(ref, *, timeout=1.0, start_interrupted=False, _promote_prior=True,
+                          before_submit=None):
     """Deliver one pending Codex peer row, older same-sender rows first.
 
     ``start_interrupted`` is the sender-side screen evidence for an interrupted
     thread: ``True`` (empty composer, no form), a blocked reason string, or
     ``False`` (no screen evidence). Only ``True`` may start the queued item.
+    ``before_submit`` repeats a caller's existing native identity check at the
+    add/steer boundary. It does not authorize an interrupted restart.
     """
     promoted = _promote_prior_codex_rows(
         ref, timeout=timeout, start_interrupted=start_interrupted) if _promote_prior else []
-    outcome = _deliver_pending_codex_row(ref, timeout=timeout, start_interrupted=start_interrupted)
+    outcome = _deliver_pending_codex_row(ref, timeout=timeout, start_interrupted=start_interrupted,
+                                        **({"before_submit": before_submit} if before_submit else {}))
     if promoted:
         outcome["promoted"] = promoted
     return outcome
 
 
-def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
+def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit=None):
     """Claim/publish briefly; all external RPC runs outside metadata locks."""
     from codex_queue_delivery import send_at_least_once, QueueDeliveryError
     from codex_queue_dispatch import resolve_queue_socket
@@ -2741,6 +2745,11 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
             steer_turn = None
 
     def before_add():
+        from peer_obligations import message_answer_submission_current
+        if before_submit is not None:
+            before_submit()
+        if not message_answer_submission_current(row):
+            raise QueueDeliveryError("question-current-session-unverified")
         with pending_lock(ref):
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
@@ -2751,6 +2760,11 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
             _save_pending(dict(current, state="unverified", receipt="native-queue-inflight"))
 
     def before_steer(turn_id):
+        from peer_obligations import message_answer_submission_current
+        if before_submit is not None:
+            before_submit()
+        if not message_answer_submission_current(row):
+            raise QueueDeliveryError("question-current-session-unverified")
         with pending_lock(ref):
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:

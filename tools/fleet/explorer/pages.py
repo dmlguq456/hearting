@@ -272,6 +272,13 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     grid.put(x + 3, y, "now:", "label", limit=right)
     grid.put(x + 16, y, clip(str(now or "·"), right - x - 21), "now_sub" if now else "dim", limit=right)
     y += 1
+    detail = session.get("context_detail")
+    if detail is not None:
+        from ..session_line import context_detail_lines
+        for label, value in context_detail_lines(detail):
+            grid.put(x + 3, y, label + ":", "label", limit=right)
+            grid.put(x + 21, y, value, "soft", limit=right)
+            y += 1
     system = vm.system if hasattr(vm.system, "get") else {}
     task = system.get("task_summary") if hasattr(system, "get") else None
     if isinstance(task, Mapping) and task.get("session_tag") == tag and task.get("state") not in (None, "unknown", "failed"):

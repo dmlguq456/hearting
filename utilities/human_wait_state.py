@@ -47,7 +47,7 @@ _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
                                   "response", "result", "updated_at", "message_binding",
-                                  "source_terminal", "transport_settled"))
+                                  "source_terminal", "transport_settled", "answer_attachment"))
 # The one age rule for every answer-wait source (S1-S4): a wait this old folds out of
 # the current count. Age never removes a wait; only evidence does (answered, route
 # closed, replaced by a later attempt, native request ended). User decision
@@ -120,6 +120,74 @@ def _make_private_dir(path: Path) -> None:
 def _path(seat_key: str) -> Path:
     digest = hashlib.sha256(str(seat_key).encode("utf-8")).hexdigest()
     return state_root() / (digest + ".json")
+
+
+def _session_signal_path(value):
+    identity = [value.get("harness"), value.get("session_id"), value["seat_key"]]
+    return _path("S4-session:" + json.dumps(identity, ensure_ascii=False, separators=(",", ":")))
+
+
+def _seat_signal_paths(seat_key, signal_id=None):
+    """Legacy seat-only callers may resolve a single source, never pick a session."""
+    result = []
+    for path in state_root().glob("*.json"):
+        signal = _read(path)
+        if not signal or signal.get("seat_key") != seat_key:
+            continue
+        scoped = _session_signal_path(signal)
+        if path != scoped and os.path.lexists(scoped):
+            continue
+        if signal_id is None or signal.get("id") == signal_id:
+            result.append(path)
+    return result
+
+
+def _signal_path(value, *, write=False):
+    """Same private store and public address; the source slot belongs to a SID.
+
+    A new exact-session slot supersedes its legacy seat-only copy. Reads never
+    migrate files and never fall back from an unreadable new slot to old data.
+    """
+    if value.get("harness") and value.get("session_id"):
+        scoped = _session_signal_path(value)
+        if write or os.path.lexists(scoped):
+            return scoped
+        legacy = _path(value["seat_key"])
+        old = _read(legacy)
+        if old and all(old.get(key) == value.get(key)
+                       for key in ("harness", "session_id", "seat_key")):
+            return legacy
+        return scoped
+    if write:
+        return _path(value["seat_key"])
+    matches = _seat_signal_paths(value["seat_key"], value.get("id"))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _retire_legacy_signal(value):
+    legacy = _path(value["seat_key"])
+    old = _read(legacy)
+    if old and all(old.get(key) == value.get(key)
+                   for key in ("harness", "session_id", "seat_key")):
+        legacy.unlink()
+
+
+def _write_signal_source(value):
+    # Persist the exact source before retiring its own legacy copy. Interrupted
+    # migration remains readable; a later normal write/removal finishes it.
+    path = _signal_path(value, write=True)
+    _write(path, value)
+    if path != _path(value["seat_key"]):
+        try:
+            _retire_legacy_signal(value)
+        except OSError:
+            pass  # The durable new slot already masks this legacy copy.
+
+
+def _remove_signal_source(value, path):
+    if path != _path(value["seat_key"]):
+        _retire_legacy_signal(value)
+    path.unlink()
 
 
 def _cache_path() -> Path:
@@ -268,7 +336,7 @@ def signal_value(harness: str, session_id: str, seat_key: str, text: str, *,
     generation = max(0, int(sequence))
     item_id = hashlib.sha256((harness + "\0" + session_id + "\0" + seat_key +
                               "\0" + question + "\0" + str(generation)).encode()).hexdigest()
-    prior = _read(_path(seat_key))
+    prior = _read(_signal_path({"harness": harness, "session_id": session_id, "seat_key": seat_key}))
     if prior and prior.get("id") == "S4:" + item_id and prior.get("question") == question:
         moment = float(prior.get("since", moment))
     value = {"schema_version": 1, "id": "S4:" + item_id, "source": "S4",
@@ -351,7 +419,7 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     with tidy.seat_lock(seat.key):
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
-        prior = _read(_path(seat.key))
+        prior = _read(_signal_path(value))
         if prior and prior.get("id") == item_id:
             value = prior
         envelope = _message_envelope(value)
@@ -370,10 +438,12 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                 raise ValueError("selected-response-capacity-unresolved")
             # Persist source before its projection. An interrupted projection write
             # is repaired by the identical registration, with the original since.
-            _write(_path(seat.key), value)
+            _write_signal_source(value)
             for old_key, entry in overlay.items():
                 binding = entry.get("message_binding") or {}
                 if (old_key != key and binding.get("seat_key") == seat.key
+                        and (entry.get("identity") or {}).get("harness") == harness
+                        and (entry.get("identity") or {}).get("session_id") == session_id
                         and not entry.get("source_terminal")):
                     entry.update(source_terminal=True, updated_at=time.time())
                     if not entry.get("action_id"):
@@ -396,7 +466,7 @@ def _message_source(envelope):
     native = envelope.get("native_ref") or {}
     if native.get("transport") != "hearting-message-answer" or not native.get("seat_key"):
         return None
-    signal = _read(_path(native["seat_key"]))
+    signal = _read(_signal_path({**envelope, "seat_key": native["seat_key"]}))
     if (not signal or signal.get("mode") != "message"
             or _message_ref(signal) != native
             or _selected_identity(_message_envelope(signal)) != _selected_identity(envelope)):
@@ -468,7 +538,7 @@ def message_answer_body(binding, *, current=False):
             or len(text.encode("utf-8")) != binding["body_bytes"]):
         raise ValueError("message-answer-body-missing-or-changed")
     if current:
-        signal = _read(_path(binding["seat_key"]))
+        signal = _read(_signal_path(binding))
         if (not signal or signal.get("id") != binding["request_id"]
                 or signal.get("harness") != binding["harness"]
                 or signal.get("session_id") != binding["session_id"]
@@ -477,6 +547,28 @@ def message_answer_body(binding, *, current=False):
                 or not _message_incarnation_current(signal)):
             raise ValueError("message-question-no-longer-current")
     return text
+
+
+def _answer_attachment_current(attachment, envelope):
+    if attachment is None:
+        return True  # Ordinary full-SID questions/queue keep their own contract.
+    if not isinstance(attachment, dict):
+        return False
+    from session_shell import answer_attachment_current
+    return bool(attachment.get("harness") == envelope.get("harness")
+                and attachment.get("sid") == envelope.get("session_id")
+                and answer_attachment_current(attachment))
+
+
+def message_answer_submission_current(binding):
+    """First-write permission only; exact consumption/ACK does not use this."""
+    if not message_binding_valid(binding):
+        return False
+    envelope = {key: binding[key] for key in ("harness", "session_id", "request_id", "question_id")}
+    envelope["turn_id"] = None
+    entry = _selected_entry(envelope)
+    return bool(entry and entry.get("message_binding") == binding
+                and _answer_attachment_current(entry.get("answer_attachment"), envelope))
 
 
 def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
@@ -492,7 +584,7 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
     if not signal["detail"]["questions"][0].get("is_secret"):
         completion["answer"] = text
     signal.update(lifecycle="answered", completion=completion)
-    _write(_path(signal["seat_key"]), signal)
+    _write_signal_source(signal)
     envelope = _message_envelope(signal)
     entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
     entry["source_terminal"] = True
@@ -517,7 +609,7 @@ def complete_message_answer(receipt, recipient):
         raise ValueError("message-answer-recipient-changed")
     import session_tidy as tidy
     with tidy.seat_lock(binding["seat_key"]):
-        signal = _read(_path(binding["seat_key"]))
+        signal = _read(_signal_path(binding))
         exact = (signal and signal.get("id") == binding["request_id"]
                  and signal.get("harness") == binding["harness"]
                  and signal.get("session_id") == binding["session_id"]
@@ -573,10 +665,10 @@ def _queue_message_decision(signal):
         if saved:
             import session_tidy as tidy
             with tidy.seat_lock(signal["seat_key"]):
-                current = _read(_path(signal["seat_key"]))
+                current = _read(_signal_path(signal))
                 if current and current.get("id") == signal["id"] and current.get("completion"):
                     current["completion"]["decision_queued"] = True
-                    _write(_path(signal["seat_key"]), current)
+                    _write_signal_source(current)
     except Exception:
         pass  # Memory never reverses the accepted answer; normal reads can retry.
 
@@ -595,7 +687,7 @@ def flush_message_decisions():
             _queue_message_decision(signal)
 
 
-def _submit_message(envelope, portable, action_id):
+def _submit_message(envelope, portable, action_id, *, answer_attachment=None):
     import session_tidy as tidy
     import session_notice as notice
     text = _message_body(portable)
@@ -607,7 +699,8 @@ def _submit_message(envelope, portable, action_id):
         signal = _message_source(envelope)
         if not signal or signal.get("lifecycle") != "open" or not _message_incarnation_current(signal):
             return _selected_fallback(envelope, "message-question-no-longer-current")
-        claimed, entry = _claim_selected_action(envelope, action_id, portable)
+        options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+        claimed, entry = _claim_selected_action(envelope, action_id, portable, **options)
         if not claimed:
             return read_selected_request(envelope)
     # No source/selected locks across carrier/pending writes or native calls.
@@ -646,7 +739,7 @@ def write_signal(value: dict) -> bool:
     if not isinstance(value, dict) or not value.get("seat_key") or not value.get("id"):
         return False
     try:
-        prior = _read(_path(str(value["seat_key"])))
+        prior = _read(_signal_path(value))
         # An explicit question owns this prompt, including after its completion.
         # A later Stop marker is only an observation, never its replacement.
         if (prior and prior.get("mode") == "message" and value.get("mode") != "message"
@@ -655,7 +748,7 @@ def write_signal(value: dict) -> bool:
                 and (prior.get("lifecycle") == "open"
                      or prior.get("sequence", 0) >= value.get("sequence", 0))):
             return False
-        _write(_path(str(value["seat_key"])), value)
+        _write_signal_source(value)
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -665,12 +758,12 @@ def remove_signal_if_current(value: dict) -> bool:
     """Remove this exact observer's signal, preserving any replacement."""
     if not isinstance(value, dict) or not value.get("seat_key") or not value.get("id"):
         return False
-    path = _path(str(value["seat_key"]))
+    path = _signal_path(value)
     try:
         current = _read(path)
         if current is None or current.get("id") != value.get("id"):
             return False
-        path.unlink()
+        _remove_signal_source(current, path)
         return True
     except OSError:
         return False
@@ -680,7 +773,7 @@ def signal_is_current(value: dict) -> bool:
     """Return whether this exact S4 item is still open for its seat."""
     if not isinstance(value, dict) or not value.get("seat_key") or not value.get("id"):
         return False
-    current = _read(_path(str(value["seat_key"])))
+    current = _read(_signal_path(value))
     return current is not None and current.get("id") == value.get("id")
 
 
@@ -704,7 +797,10 @@ def close_signal(seat_key: str, *, sequence: int | None = None,
                  harness: str | None = None, session_id: str | None = None,
                  answer: str | None = None) -> bool:
     """Close only this exact seat, and never let an older input clear a newer wait."""
-    path = _path(seat_key)
+    value = {"seat_key": seat_key, "harness": harness, "session_id": session_id}
+    path = _signal_path(value)
+    if path is None and _seat_signal_paths(seat_key):
+        return False
     try:
         current = _read(path)
         if current is None:
@@ -720,7 +816,7 @@ def close_signal(seat_key: str, *, sequence: int | None = None,
             if harness is None or session_id is None or sequence is None:
                 return False
             return _complete_message_locked(current, answer, "direct", sequence=sequence)
-        path.unlink()
+        _remove_signal_source(current, path)
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -756,6 +852,8 @@ def read_signals(*, now: float | None = None) -> list[dict]:
             continue
         value = _read(path)
         if value is None or not isinstance(value.get("since"), (int, float)):
+            continue
+        if path != _signal_path(value):
             continue
         if value.get("mode") == "message" and value.get("lifecycle") != "open":
             continue
@@ -1067,6 +1165,13 @@ def _valid_selected_overlay(value):
         identity = _selected_identity(entry.get("identity"))
         if identity != entry.get("identity") or _selected_entry_key(identity) != key:
             return False
+        attachment = entry.get("answer_attachment")
+        if attachment is not None:
+            from session_shell import answer_attachment_shape
+            if (not answer_attachment_shape(attachment)
+                    or attachment["harness"] != identity["harness"]
+                    or attachment["sid"] != identity["session_id"]):
+                return False
         draft = entry.get("draft", "")
         if not isinstance(draft, str) or len(draft.encode("utf-8")) > _SELECTED_DRAFT_MAX:
             return False
@@ -1136,6 +1241,10 @@ def _store_selected_entry(envelope, entry):
             if previous is None and not _prune_selected(overlay):
                 return False
             if previous:
+                if previous.get("answer_attachment") is not None:
+                    if entry.get("answer_attachment") not in (None, previous["answer_attachment"]):
+                        return False
+                    entry["answer_attachment"] = previous["answer_attachment"]
                 for flag in ("source_terminal", "transport_settled"):
                     if previous.get(flag):
                         entry[flag] = True
@@ -1180,7 +1289,7 @@ def _store_selected_entry(envelope, entry):
         return False
 
 
-def _claim_selected_action(envelope, action_id, response):
+def _claim_selected_action(envelope, action_id, response, *, answer_attachment=None):
     """Atomically persist the one allowed action before its native transport call."""
     identity = _selected_identity(envelope)
     if identity is None:
@@ -1208,6 +1317,8 @@ def _claim_selected_action(envelope, action_id, response):
                             "action_id": action_id, "response": response,
                             "result": {"status": "submitted"},
                             "updated_at": time.time()})
+            if answer_attachment is not None:
+                claimed["answer_attachment"] = dict(answer_attachment)
             if isinstance(envelope.get("selected_id"), str):
                 claimed["selected_id"] = envelope["selected_id"]
             claimed.setdefault("draft", envelope.get("draft", ""))
@@ -1232,6 +1343,26 @@ def _claim_selected_action(envelope, action_id, response):
             return True, dict(claimed)
     except (OSError, ValueError, TypeError):
         return False, None
+
+
+def _release_unsubmitted_selected_action(envelope, action_id, result):
+    """A refused local guard sent nothing; leave that exact question editable."""
+    key = _selected_entry_key(_selected_identity(envelope))
+    with _cache_write_lock():
+        projection = _read_cache_file()
+        overlay = (projection or {}).get("selected_responses", {})
+        if not _valid_selected_overlay(overlay):
+            return False
+        entry = overlay.get(key)
+        if (not entry or entry.get("action_id") != action_id or entry.get("state") != "submitted"
+                or entry.get("source_terminal") or entry.get("transport_settled")):
+            return False
+        entry = dict(entry, state="open", result=result, updated_at=time.time())
+        for name in ("action_id", "answer_attachment"):
+            entry.pop(name, None)
+        overlay[key] = entry
+        projection["selected_responses"] = overlay
+        return _write_cache_value(projection)
 
 
 def _proc_start_ticks(pid):
@@ -3806,7 +3937,7 @@ def _opencode_submit(envelope, portable):
     return "received", {"transport": "received", "http_status": 204}
 
 
-def _codex_submit(envelope, portable, action_id):
+def _codex_submit(envelope, portable, action_id, *, answer_attachment=None):
     base, error = _selected_base(envelope)
     if base is None:
         return "unknown", {"reason": error}
@@ -3826,6 +3957,8 @@ def _codex_submit(envelope, portable, action_id):
             or gateway.get("path") != native_ref.get("control_path")
             or gateway.get("epoch") != native_ref.get("epoch")):
         return "unknown", {"reason": "codex-gateway-incarnation-changed"}
+    if not _answer_attachment_current(answer_attachment, envelope):
+        return "open", {"status": "not-sent", "reason": "current-session-unverified"}
     result = _codex_control_request(gateway["path"], {
         "schema_version": 1, "op": "interaction-reply",
         "ref": native_ref["request"], "response": portable, "action_id": action_id})
@@ -3841,7 +3974,7 @@ def _codex_submit(envelope, portable, action_id):
     return state, response_result
 
 
-def submit_selected_response(ref, response, *, action_id=None):
+def submit_selected_response(ref, response, *, action_id=None, answer_attachment=None):
     """Submit one explicit response to the exact live request; ambiguous delivery never retries."""
     base, reason = _selected_base(ref)
     if base is None:
@@ -3859,6 +3992,8 @@ def submit_selected_response(ref, response, *, action_id=None):
             or current_identity != identity
             or current.get("native_ref") != ref.get("native_ref")):
         return current
+    if not _answer_attachment_current(answer_attachment, current):
+        return _selected_invalid_response(current, "current-session-unverified")
     native_ref = current.get("native_ref")
     workflow_owner_request = (
         isinstance(native_ref, dict)
@@ -3908,8 +4043,10 @@ def submit_selected_response(ref, response, *, action_id=None):
     if response_error:
         return _selected_invalid_response(current, response_error)
     if message_request:
-        return _submit_message(current, portable, action_id)
-    claimed, entry = _claim_selected_action(current, action_id, portable)
+        options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+        return _submit_message(current, portable, action_id, **options)
+    options = {"answer_attachment": answer_attachment} if answer_attachment is not None else {}
+    claimed, entry = _claim_selected_action(current, action_id, portable, **options)
     if not claimed:
         return read_selected_request(current)
     if (isinstance(native_ref, dict)
@@ -3921,9 +4058,13 @@ def submit_selected_response(ref, response, *, action_id=None):
     elif current["harness"] == "opencode":
         state, result = _opencode_submit(current, portable)
     elif current["harness"] == "codex":
-        state, result = _codex_submit(current, portable, action_id)
+        state, result = _codex_submit(current, portable, action_id, **options)
     else:
         state, result = "unknown", {"reason": "claude-native-response-surface-unavailable"}
+    if answer_attachment is not None and state == "open" and result.get("status") == "not-sent":
+        if _release_unsubmitted_selected_action(current, action_id, result):
+            return _selected_invalid_response(current, result["reason"])
+        return _selected_fallback(current, "selected-response-storage-unavailable")
     entry["state"] = state
     entry["result"] = result
     if state == "applied":

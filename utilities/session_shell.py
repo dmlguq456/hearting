@@ -41,17 +41,38 @@ def _private_json(path: Path, limit: int):
     return json.loads(raw)
 
 
+def _configuration(environ=None):
+    value = _private_json(policy_path(environ), MAX_RECORD_BYTES)
+    keys = {"enabled", "layout", "side_width", "side_min_columns"}
+    if not isinstance(value, dict) or not set(value) <= keys or type(value.get("enabled")) is not bool:
+        raise ValueError("invalid shell configuration")
+    if value.get("layout", "bottom") not in {"bottom", "side"}:
+        raise ValueError("invalid shell layout")
+    for key, default, lower, upper in (("side_width", 40, 32, 80), ("side_min_columns", 132, 80, 1000)):
+        number = value.get(key, default)
+        if type(number) is not int or not lower <= number <= upper:
+            raise ValueError("invalid shell geometry")
+    return value
+
+
 def policy(environ: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Absence and invalid configuration both preserve the original CLI."""
     try:
-        value = _private_json(policy_path(environ), MAX_RECORD_BYTES)
+        value = _configuration(environ)
     except FileNotFoundError:
         return False, "disabled"
     except (OSError, ValueError, TypeError):
         return False, "config-unavailable"
-    if not isinstance(value, dict) or set(value) != {"enabled"} or type(value["enabled"]) is not bool:
-        return False, "config-invalid"
     return value["enabled"], "enabled" if value["enabled"] else "disabled"
+
+
+def display_policy(environ=None):
+    try:
+        value = _configuration(environ)
+    except (OSError, ValueError, TypeError):
+        value = {}
+    return {key: value.get(key, default) for key, default in
+            (("layout", "bottom"), ("side_width", 40), ("side_min_columns", 132))}
 
 
 def process(pid: int) -> dict | None:
@@ -266,24 +287,97 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     return result
 
 
+def _codex_current_root(pid, birth, sid):
+    """One current native root, never a displayed SID or a formerly loaded root."""
+    from fleet.collectors import codex
+    before = process(pid)
+    if before is None or before["start"] != str(birth):
+        return False
+    current = codex.session_id_of_process(pid, fresh=True)
+    after = process(pid)
+    return bool(current == sid and after and after["start"] == before["start"])
+
+
+def answer_attachment_shape(value):
+    """Static private-claim validation; historical receipts need no live process."""
+    keys = {"schema", "harness", "sid", "incarnation", "host_pid", "host_start",
+            "native_pid", "native_start", "socket"}
+    if not isinstance(value, dict) or set(value) not in (keys, keys | {"broker_pid", "broker_start"}):
+        return False
+    return bool(value.get("schema") == SCHEMA and value.get("harness") == "codex"
+        and isinstance(value.get("sid"), str) and _SID.fullmatch(value["sid"])
+        and isinstance(value.get("incarnation"), str) and re.fullmatch(r"[0-9a-f]{32,64}", value["incarnation"])
+        and isinstance(value.get("socket"), str) and os.path.isabs(value["socket"])
+        and "\0" not in value["socket"] and len(os.fsencode(value["socket"])) < 104
+        and all(type(value.get(key + "_pid")) is int and value[key + "_pid"] > 1
+                and isinstance(value.get(key + "_start"), str) and value[key + "_start"].isdigit()
+                for key in (("host", "native", "broker") if "broker_pid" in value else ("host", "native"))))
+
+
+def answer_attachment_current(value):
+    """The same attachment and current root immediately before an answer effect."""
+    try:
+        return bool(answer_attachment_shape(value) and valid_binding(value)
+            and read_binding(binding_path("codex", value["host_pid"])) == value
+            and _codex_current_root(value["native_pid"], value["native_start"], value["sid"]))
+    except Exception:
+        return False
+
+
+def _lifecycle_owner(harness: str, sid: str, env: dict):
+    """The actual native TUI, including a callback run by its shared daemon."""
+    import session_tidy
+    from pane_ownership import _caller_runtime, _registered_worker
+    owner, service = _caller_runtime(os.getpid(), harness)
+    if owner is None:
+        return None
+    if service:
+        if harness != "codex":
+            return None
+        from fleet.collectors import codex, procscan
+        selected = codex.process_for_thread(sid, environ=env,
+                                           expected_service=(owner[0], str(owner[5])))
+        if selected is None:
+            return None
+        pid, birth = selected
+        me = process(pid)
+        if me is None or me["start"] != str(birth) or _registered_worker(pid):
+            return None
+        # The daemon retains its first client's environment. Only this proved
+        # TUI's initial environment can name its own private PTY attachment.
+        env = procscan.read_environ(pid)
+        if session_tidy.is_worker(env) or not _codex_current_root(pid, birth, sid):
+            return None
+    else:
+        if session_tidy.is_worker(env):
+            return None
+        me = process(owner[0])
+        birth = str(owner[5])
+    current = process(me["pid"]) if me is not None else None
+    if current is None or current["start"] != str(birth):
+        return None
+    return current, env
+
+
 def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
     """Silent native hook report, separate from all prompt classification."""
     env = os.environ if env is None else env
-    endpoint, token = env.get("HEARTING_SHELL_SOCKET"), env.get("HEARTING_SHELL_TOKEN")
-    if not endpoint or not token or harness not in HARNESSES or not _SID.fullmatch(sid or ""):
+    if harness not in HARNESSES or not _SID.fullmatch(sid or ""):
         return
-    import session_tidy
-    from pane_ownership import _caller_runtime
-    if session_tidy.is_worker(env):
+    if harness != "codex" and not env.get("HEARTING_SHELL_SOCKET"):
         return
     # The official callback is the SID source. A native registry can appear
     # after SessionStart, so requiring its prior SID would lose that first
     # report forever. The host separately checks this owner's exact PTY.
-    owner, service = _caller_runtime(os.getpid(), harness)
-    if owner is None or service:
+    try:
+        selected = _lifecycle_owner(harness, sid, env)
+    except Exception:
+        return  # An unavailable native observation never blocks the hook.
+    if selected is None:
         return
-    me = process(owner[0])
-    if me is None or me["start"] != str(owner[5]):
+    me, env = selected
+    endpoint, token = env.get("HEARTING_SHELL_SOCKET"), env.get("HEARTING_SHELL_TOKEN")
+    if not endpoint or not token:
         return
     import time
     req = {"op": "event", "harness": harness, "sid": sid, "event": event,
@@ -325,8 +419,90 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
+def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding=""):
+    """Conceal only known native fields already represented in the common area."""
+    from fleet.collectors import procscan
+    from fleet.render_cells import _half_up
+    import codex_tui_config
+    env = procscan.read_environ(pid)
+    home = env.get("CODEX_HOME")
+    if not home and env.get("HOME"):
+        home = str(Path(env["HOME"]) / ".codex")
+    if not home:
+        return None, None
+    observed = codex_tui_config.managed_status_line_observation(home, argv=procscan._read_argv(pid))
+    path = str(Path(home) / "config.toml")
+    if not observed or not status_rows or painted_rows[:len(status_rows)] != status_rows:
+        return None, path
+    model, effort, percent = values.get("model"), values.get("effort"), values.get("ctx_pct")
+    if not model or type(percent) not in (int, float) or not 0 <= percent <= 100:
+        return None, path
+    common = "\n".join("".join(text for text, _key in row) for row in status_rows)
+    if sid not in common:
+        return None, path
+    title = _plain(values.get("title"), 512)
+    # Long names may be clipped even in expanded mode. Preserve the native row
+    # whenever it carries a full name which the common area did not paint.
+    titles = [sid, *([title] if title and title in common else [])]
+    branch = values.get("branch")
+    if branch and branch != "no-git" and branch not in common:
+        return None, path
+    fields = {
+        "thread-id": [sid], "thread-title": list(dict.fromkeys(titles)),
+        "git-branch": [branch.removesuffix("*")] if branch and branch != "no-git" else None,
+        "context-used": ["Context " + str(_half_up(percent)) + "% used"],
+        "model-with-reasoning": [_plain(model) + (" " + _plain(effort) if effort else "")],
+    }
+    quotas = {label: used for label, used, _reset in values.get("quota_windows") or ()}
+    for item, label, labels in (("five-hour-limit", "5h", ("5h",)),
+                               ("weekly-limit", "7d", ("7d", "Weekly"))):
+        used = quotas.get(label)
+        options = []
+        if type(used) in (int, float) and 0 <= used <= 100:
+            used = _half_up(used)
+            for name in labels:
+                options.extend((f"{name}: {100-used}% left", f"{name} {100-used}% left",
+                                f"{name} {100-used}% remaining", f"{name} {used}% used"))
+        fields[item] = options or None
+    return {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}, path
+
+
+def session_questions(harness, sid, *, view=None, retained=()):
+    """The exact session's canonical board; retained IDs read receipts only."""
+    import time
+    import human_wait_state
+    import questions
+    view = view if isinstance(view, dict) else human_wait_state.cached_view(request=False) or {}
+    ids = set(view.get("by_session", {}).get((harness, sid), ()))
+    result = []
+    for item in view.get("items", ()):
+        owner = item.get("owner") or {}
+        if (item.get("id") in ids and not item.get("stale")
+                and owner.get("harness") == harness and owner.get("session_id") == sid):
+            result.append(questions.describe(item, now=time.time()))
+        if len(result) >= 8:
+            break
+    known = {item["id"] for item in result}
+    for old in list(retained or ())[:8]:
+        if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
+            continue
+        if not isinstance(old.get("id"), str) or not re.fullmatch(r"S[1-4]:[A-Za-z0-9:_-]{1,256}", old["id"]):
+            continue
+        item = {"id": old["id"], "source": old["id"][:2],
+                "owner": {"harness": harness, "session_id": sid}}
+        described = questions.describe(item, now=time.time())
+        if described.get("revision") == old.get("revision"):
+            # No active input comes from a retained display reference.
+            described["answerable"] = False
+            result.append(described)
+            known.add(described["id"])
+    return result
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
-                     columns=100, rows=30, state="unknown", expanded=True, native_context=None, native_badges=None) -> dict:
+                     columns=100, rows=30, state="unknown", expanded=True, native_context=None,
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -336,14 +512,14 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
     from fleet.session_line import line_segments
-    from fleet.session_block import block_lines
+    from fleet.session_line import status_lines
+    from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
-    ids = set(view.get("by_session", {}).get((harness, sid), ()))
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
     display = session_tidy.prompt_display(seat, harness, sid)
     received = display.get("received") or []
@@ -358,16 +534,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         values["ctx_pct"] = native_context
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
-    values.update(harness=harness, tag=tag, state=state, route_label=_plain(route),
+    values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
+                  state=state, route_label=_plain(route),
                   answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
-    board = []
-    for item in view.get("items", ()):
-        if item.get("id") not in ids or item.get("stale"):
-            continue
-        # questions list owns schema, current request support and original binding.
-        board.append(questions.describe(item, now=time.time()))
-        if len(board) >= 8:
-            break
+    board = session_questions(harness, sid, view=view, retained=retained_questions)
     no_color = "NO_COLOR" in os.environ
     colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
     def styled(parts):
@@ -375,14 +545,52 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     segments = styled(line_segments(values, columns))
     work, work_paths = observe_work(values.get("cwd"))
     watched.extend(work_paths)
+    human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
-                        received=peers, human=last_input(display, time.time()),
+                        received=peers, human=human_line,
                         work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+    prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
+                                 human=human_line,
+                                 work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+    question_presentations(board, columns, native_wait=values.get("native_wait"))
+    for item in board:
+        for question in item.get("questions") or ():
+            question["display"] = {key: ([styled(line) for line in value] if key != "head" else styled(value))
+                                   for key, value in question["display"].items()}
+    labels = {key: ui_text("fleet.session_block." + key) for key in (
+        "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
+        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+    if columns < 64:
+        for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
+            labels[key] = ui_text("fleet.session_block.compact_" + key)
+    if pane_binding:
+        try:
+            from fleet import herdr_projection
+            projector = getattr(herdr_projection, "project_panel", None)
+            if projector is not None:
+                # Mirror the local single action slot for optional metadata;
+                # this restrictive display hint never grants input authority.
+                available = [dict(item, answerable=False, reason="action-pending")
+                             if answer_busy and item.get("answerable") else item for item in board]
+                projector(pane_binding, values, available)
+        except Exception:
+            pass  # Optional metadata cannot interrupt this terminal's display.
+    native_footer = None
+    if harness == "codex" and native_pid:
+        native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
+                                                       status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ")
+        if config_path:
+            watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
             "watch": watched, "lines": [styled(line) for line in lines],
-            "questions": board, "context": values.get("ctx_pct"),
+            "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
+            "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
+                      "labels": labels, "styles": {key: style_components(key, colors=colors, no_color=no_color)
+                      for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")}},
+            "native_display": {"model": values.get("model"), "effort": values.get("effort"),
+                               "context_percent": values.get("ctx_pct")},
             "help": ui_text("fleet.session_block.editor_help")}
 
 
@@ -433,6 +641,8 @@ def _block_answer(binding, request):
     import questions
     import human_wait_state
     from types import SimpleNamespace
+    if binding.get("harness") == "codex" and not answer_attachment_current(binding):
+        return {"ok": False, "reason": "current-session-unverified"}
     wanted = request.get("question_id")
     revision = request.get("revision")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
@@ -453,6 +663,8 @@ def _block_answer(binding, request):
                            decision=decision, answers_file=None, json=True,
                            expected_revision=revision,
                            expected_owner={"harness": binding["harness"], "session_id": binding["sid"]})
+    if binding["harness"] == "codex":
+        args.answer_attachment = dict(binding)
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         if answers is not None:
             # The command accepts a dict through its shared implementation below.
@@ -527,7 +739,9 @@ def _backend_operation(request: dict) -> dict:
         return {"ok": True, **panel_projection(harness, sid,
             native_pid=binding["native_pid"], native_start=binding["native_start"],
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
-            native_context=request.get("native_context"),native_badges=request.get("native_badges"))}
+            native_context=request.get("native_context"),native_badges=request.get("native_badges"),
+            retained_questions=request.get("retained_questions", ()), pane_binding=binding,
+            answer_busy=request.get("answer_busy") is True)}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":

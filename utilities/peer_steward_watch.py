@@ -221,8 +221,9 @@ def _watch_terminal_from_view(view, expected, server, transport=None):
     current_session = pane.get("agent_session") or {}
     if isinstance(current_session, dict):
         current_session = current_session.get("value")
+    # An unknown transport label is not evidence of a different native occupant.
     if (harness not in {None, "", "-"}
-            and current_harness not in {None, "", harness}):
+            and current_harness not in {None, "", "-", "unknown", harness}):
         return "session-replaced"
     if (session_id not in {None, "", "-"}
             and isinstance(current_session, str) and current_session

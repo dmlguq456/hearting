@@ -46,4 +46,18 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertIsNone(style_components("fam_sol", no_color=True)["foreground"])
 
 
+    def test_side_width_wraps_long_groups_without_losing_numeric_status_fields(self):
+        from tools.fleet.session_line import status_lines
+        from tools.fleet.explorer.grid import cell_width
+        values=dict(harness='codex',tag='52',state='idle',cwd='/work/project',title='A long session title '*4,
+                    native_sid='00000000-0000-4000-8000-000000000052',branch='topic-'*20,ctx_pct=42,
+                    model='fixture',effort='high',quota_windows=[('5h',31,None),('7d',60,None)],
+                    jobs='compile '*15,git=dict(repo=1,operation='none',ahead=3,behind=2,extra_worktrees=4,
+                    observation='fresh',observed_label='12:34:56'))
+        lines=status_lines(values,36,wrap_long=True)
+        self.assertTrue(all(cell_width(''.join(text for text,_ in line))<=36 for line in lines))
+        compact=''.join(text for line in lines for text,_ in line).replace(' ','')
+        for field in ('↑3','↓2','🚧4','12:34:56','42%','5h31%','7d60%',values['native_sid']):
+            self.assertIn(field,compact)
+
 if __name__ == "__main__": unittest.main()

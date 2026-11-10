@@ -70,7 +70,13 @@ def observe(harness, pid, proc_start, sid):
             sess.model, sess.effort = codex._rollout_model_effort(transcript)
             count = codex._tail_token_count(transcript)
             if count:
-                sess.ctx_pct = parse_codex_token_count(count, session_id=sid).context_used_pct
+                telemetry = parse_codex_token_count(count, session_id=sid)
+                sess.ctx_pct = telemetry.context_used_pct
+                sess.active_context_tokens = telemetry.active_context_tokens
+                sess.context_window_tokens = telemetry.context_window_tokens
+                from .token_budget import codex_compaction_pressure
+                sess.compaction_pressure = codex_compaction_pressure(
+                    sid, transcript, count, home=codex._rollout_home(transcript))
     else:
         db = opencode._db()
         paths.extend((db, db + "-wal"))
@@ -101,7 +107,9 @@ def observe(harness, pid, proc_start, sid):
         branch = "no-git"
     if read_proc_start(pid) != proc_start:
         return {}, []
-    values = {name: getattr(sess, name) for name in ("cwd", "model", "effort", "ctx_pct")}
+    values = {name: getattr(sess, name) for name in ("cwd", "model", "effort", "ctx_pct",
+                                                     "active_context_tokens", "context_window_tokens",
+                                                     "compaction_pressure")}
     name_path = session_handle._session_name_registry_path(harness, sid)
     if name_path:
         paths.append(name_path)

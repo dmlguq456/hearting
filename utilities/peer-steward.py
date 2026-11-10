@@ -301,6 +301,16 @@ def _prompt_process_session(pane, harness, info):
         return None, "target-observation-unavailable"
     claims = set()
     try:
+        try:
+            attachment, attachment_error = _pane_shell_binding_result(pane, harness, info=info)
+            if attachment_error:
+                return None, attachment_error
+        except ImportError:
+            # The optional attachment/Fleet reader is absent in partial
+            # runtimes. Keep independent native process proof available.
+            attachment = None
+        if attachment is not None:
+            claims.add(attachment["sid"])
         if harness == "codex":
             from pane_ownership import current_codex_thread
             executable = shutil.which("herdr")
@@ -784,7 +794,7 @@ _LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the la
 def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pane=None,
                    target_cwd=None):
     """F-100c-2 — the ONE place `source=watch` steward evidence is written: after
-    herdr answered about a real target (`wait` returned a typed state other than
+    the shared observer answered about a real target (`wait` returned a typed state other than
     agent-not-found, or `watch` armed its watcher). The `kind=watch` ledger row itself
     is only the message; `record` never marks (review round 1, #1/#2)."""
     if from_identity is not None:
@@ -802,6 +812,39 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
     return result
 
 
+def _observe_target(payload, target, *, server=None):
+    """Normalize observation identity without granting native input or activity."""
+    observed = _interpret_payload(payload, target)
+    state, ident, code, reason = observed
+    if reason or state in {"timeout", "herdr-unavailable"}:
+        return observed
+    harness = ident.get("harness")
+    sid = peer_message.usable_session_id(ident.get("session_id"))
+    pane = ident.get("pane")
+    if pane in {None, "", "-"}:
+        if (not isinstance(target, str) or any(c.isspace() for c in target)
+                or not (":" in target or terminal_surface.is_tmux_pane(target))):
+            return observed
+        pane = target
+    try:
+        binding, conflict = _pane_shell_binding_result(
+            pane, harness if harness in _PROMPT_HARNESSES else None, server=server)
+    except ImportError:
+        return observed
+    if conflict:
+        return "unknown", ident, 4, conflict
+    if binding is None:
+        return observed
+    if sid and sid != binding["sid"]:
+        return "unknown", ident, 4, "target-identity-changed"
+    current = dict(ident, harness=binding["harness"], session_id=binding["sid"], pane=pane)
+    # The attachment proves the conversation, not its activity. An absent
+    # transport agent has no idle/done evidence; retain a typed unknown.
+    native_state = (state if harness in _PROMPT_HARNESSES and sid == binding["sid"]
+                    and state != "agent-not-found" else "unknown")
+    return native_state, current, 0, None
+
+
 def cmd_wait(args):
     target = args.target = _tmux_target_address(args.target)
     # S6: one record at wait start, append-only, never updated on return. F-100c: the
@@ -816,7 +859,7 @@ def cmd_wait(args):
                             else "herdr-not-found")
 
     payload = _run_herdr_wait(target, args.until, args.timeout)
-    state, agent, code, reason = _interpret_payload(payload, target)
+    state, agent, code, reason = _observe_target(payload, target)
     if reason is not None:
         return _unavailable(reason)
     # Role evidence only now: herdr answered about a real target. A mistyped target
@@ -2084,8 +2127,46 @@ def _retire_pane_info(pane, timeout=5, *, server=None):
         return None
 
 
+def _wrapped_foreground(pane, harness, info):
+    """The native lifetime behind a proved carrier; never reinterpret the owner as native."""
+    if harness not in {"claude", "codex"} or not isinstance(info, dict):
+        return None, False
+    observed = False
+    try:
+        binding, reason = _pane_shell_binding_result(pane, harness, info=info)
+        if binding is None:
+            return None, bool(reason)
+        observed = True
+        from pane_ownership import _wrapped_native_session
+        pid = binding["native_pid"]
+        identity = _retire_process_record(pid)
+        shell_start = _proc_start_ticks(info.get("shell_pid"))
+        if (not identity or identity["start"] != binding["native_start"] or not shell_start):
+            return None, True
+        tmux = terminal_surface.pane_surface(pane) if terminal_surface.is_tmux_pane(pane) else None
+        socket_path = (herdr_observation.socket_path_for_endpoint(_HERDR_SESSION or "default")
+                       or _herdr_env_for_server(_HERDR_SESSION).get("HERDR_SOCKET_PATH", ""))
+        selected = _wrapped_native_session(pane, harness, pid, binding["sid"],
+            executable=shutil.which("tmux" if tmux else "herdr"), server=_HERDR_SESSION,
+            socket_path=socket_path, tmux=tmux.socket if tmux else None, info=info, expected=binding)
+        if selected != binding["sid"]:
+            return None, True
+        keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                "native_pid", "native_start", "broker_pid", "broker_start")
+        return {"pid": pid, **identity, "shell_pid": info["shell_pid"],
+                "shell_start": shell_start, "session_id": selected,
+                "attachment": {key: binding[key] for key in keys if key in binding}}, True
+    except ImportError:
+        return None, observed  # Optional reader absence keeps independent bare proof available.
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None, observed
+
+
 def _retire_foreground(pane, harness, *, strict=True, info=None):
     info = _retire_pane_info(pane) if info is None else info
+    wrapped, observed = _wrapped_foreground(pane, harness, info)
+    if observed:
+        return wrapped
     if info is None or (strict and len(info["foreground_processes"]) != 1):
         return None
     leaders = [item for item in info["foreground_processes"]
@@ -2147,6 +2228,10 @@ def _effective_retire_state(state, ident):
 
 
 def _retire_request_identity(ident, foreground):
+    if (foreground and foreground.get("session_id")
+            and peer_message.usable_session_id(ident.get("session_id"))
+            and foreground["session_id"] != ident["session_id"]):
+        foreground = None
     exact = {"server": _HERDR_SESSION or "default", "pane": ident["pane"],
              "harness": ident["harness"], "session_id": ident["session_id"],
              "name": ident["name"], "foreground": foreground}
@@ -2253,6 +2338,44 @@ def _retire_requester_matches(duty, requester):
         return False
     projected = _legacy_requester_projection(duty, expected_pane=requester.get("pane"))
     return projected == requester
+
+
+def _unbound_retire_requester_matches(duty, requester):
+    """Logical ownership only for a no-input settlement, never permission to retire."""
+    saved = (duty.get("intent") or {}).get("requester")
+    if (not isinstance(saved, dict) or _retire_booked_foreground(duty) is not None
+            or not requester.get("session_id") or requester.get("harness") not in _PROMPT_HARNESSES):
+        return False
+    settled = duty.get("state") == "cancelled" and duty.get("result") == "target-closed-unproven"
+    if not settled and (duty.get("observation") or {}).get("phase", "waiting") != "waiting":
+        return False
+    return (all(saved.get(key) == requester.get(key) for key in ("session_id", "harness", "server"))
+            and saved.get("pane") in (None, "", "-", requester.get("pane")))
+
+
+def _settle_closed_unbound_retire(store, duty, requester):
+    if not _unbound_retire_requester_matches(duty, requester):
+        return False
+    already = duty.get("state") == "cancelled" and duty.get("result") == "target-closed-unproven"
+    if not already:
+        identity = (duty.get("intent") or {}).get("identity") or {}
+        pane, server = identity.get("pane"), identity.get("server")
+        if not pane or terminal_surface.is_tmux_pane(pane) or server != requester.get("server"):
+            return False
+        census = herdr_observation.pane_census(session=server)
+        if not herdr_observation.confirms_absence(census, pane, endpoint=server):
+            return False
+        settled = store.update(duty["id"], state="cancelled", result="target-closed-unproven",
+            delivery="not-required", cleanup="complete", expected_phases={"waiting"},
+            observation={"phase": "cancelled", "reason": "target-closed-unproven"})
+        if settled.get("state") != "cancelled" or settled.get("result") != "target-closed-unproven":
+            return False
+        _record(to_harness=identity.get("harness"), to_name=identity.get("name"), kind="notice",
+                to_session_id=identity.get("session_id"), to_pane=pane,
+                summary_text="[retire] request settled; native exit unproven",
+                receipt="target-closed-unproven", status="failed")
+    print(f"retired=false reason=target-closed-unproven request_id={duty['id']}")
+    return True
 
 
 def reserve_handoff_retire(target, exact, requester):
@@ -2418,6 +2541,9 @@ def _resume_retire_obligation(duty, store, *, read_context=None,
         return
     if duty.get("state") == "cancelled":
         return
+    if (phase == "waiting" and _settle_closed_unbound_retire(
+            store, duty, (duty.get("intent") or {}).get("requester") or {})):
+        return
     if phase == "shell-returned":
         foreground = observation.get("foreground") or {}
         if foreground:
@@ -2570,10 +2696,26 @@ def cmd_retire(args):
         own_pane = _caller_pane()
         current_requester = {"session_id": own_sid, "harness": own_harness,
                              "pane": own_pane, "server": _HERDR_SESSION or "default"}
-        matches = [row for row in store.list(states=peer_obligations._PENDING_STATES | {"complete"},
+        matches = [row for row in store.list(states=peer_obligations._PENDING_STATES | {"complete", "cancelled"},
                                              kinds={"retire"})
                    if row["intent"].get("target") == target
-                   and _retire_requester_matches(row, current_requester)]
+                   and (row.get("state") != "cancelled" or row.get("result") == "target-closed-unproven")
+                   and (_retire_requester_matches(row, current_requester)
+                        or _unbound_retire_requester_matches(row, current_requester))]
+        if own_sid and own_pane:
+            active = [row for row in matches if row.get("state") in peer_obligations._PENDING_STATES]
+            if active:
+                matches = active  # Settled history is not another current request.
+            else:
+                previous = {(row.get("intent") or {}).get("retry_of") for row in matches
+                            if isinstance((row.get("intent") or {}).get("retry_of"), str)}
+                current = [row for row in matches if row["id"] not in previous]
+                if current:
+                    matches = current  # Existing retry edges, not timestamps, name the terminal tip.
+                if len(matches) > 1 and all(row.get("state") == "cancelled"
+                        and row.get("result") == "target-closed-unproven" for row in matches):
+                    print("retired=false reason=target-closed-unproven")
+                    return 0  # All owned requests settled; no lifetime or handover is selected.
         if own_sid and own_pane and len(matches) == 1:
             saved = matches[0]
             if saved.get("state") == "complete" and saved.get("result") in {"normal-exit", "target-already-gone"}:
@@ -2582,6 +2724,8 @@ def cmd_retire(args):
                       + (f" handover={handover}" if handover else ""))
                 return 0
             if _retire_subject_state(saved) == "gone" and _complete_gone_retire(store, saved):
+                return 0
+            if _settle_closed_unbound_retire(store, saved, current_requester):
                 return 0
         return finish(reason or "pane-unverified")
     pane, harness = ident["pane"], ident["harness"]
@@ -2851,6 +2995,13 @@ def _watch_wakeup_signal(_signum, _frame):
             os.write(fd, b"w")
 
 
+def _kept_native_wait(paths):
+    """The recorded native wait a terminal request must keep for its settlement."""
+    current = _read_json(paths.observation)
+    wait_record = current.get("native_wait") if isinstance(current, dict) else None
+    return {"native_wait": wait_record} if isinstance(wait_record, dict) else {}
+
+
 def _write_terminal_watch_receipt(watch_id, arm, reason, *, watcher=None):
     """Settle one exact watch after its observer has the watch lock."""
     paths = _watch_paths(watch_id)
@@ -2883,6 +3034,11 @@ def _write_terminal_watch_receipt(watch_id, arm, reason, *, watcher=None):
     with contextlib.suppress(OSError, ValueError):
         shared_readiness.clear_watch_transition(
             peer_obligations.ObligationStore().root, watch_id)
+    # A dead observer leaves its native wait running; once the watch is settled
+    # nothing tracks it. Stop only that exact recorded wait (pid + start ticks).
+    wait_record = _kept_native_wait(paths).get("native_wait") or {}
+    if wait_record.get("state") == "started":
+        _stop_watch_wait(None, wait_record.get("pid"), wait_record.get("pid_start"))
     try:
         paths.observation.unlink()
     except FileNotFoundError:
@@ -2957,6 +3113,7 @@ def _settle_ended_seatless_recipient(watch_id, arm, root=None, *, census=None,
     server = current.get("server") or "default"
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": "steward-exited",
         "server": server,
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -2983,6 +3140,7 @@ def settle_steward_exited_watch(watch_id, *, reason="steward-exited"):
     expected = dict(arm.get("agent") or {})
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": reason,
         "server": arm.get("server") or "default",
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -3018,6 +3176,7 @@ def _settle_closed_watch(watch_id, arm, root=None, *, evidence=None, lock_held=F
     expected = dict(current.get("agent") or {})
     _write_json_atomic(paths.observation, {
         "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+        **_kept_native_wait(paths),
         "state": "terminal_pending", "reason": reason,
         "server": current.get("server") or "default",
         "agent": {key: expected.get(key, "-") for key in ("harness", "session_id", "pane")},
@@ -3057,6 +3216,7 @@ def _request_watch_terminal(identity, reason):
         paths = _watch_paths(watch_id, root)
         _write_json_atomic(paths.observation, {
             "schema_version": _WATCH_SCHEMA, "watch_id": watch_id,
+            **_kept_native_wait(paths),
             "state": "terminal_pending", "reason": reason, "server": server,
             "agent": {key: agent.get(key, "-") for key in ("harness", "session_id", "pane")},
             "observed_ts": _utc_now(),
@@ -3124,7 +3284,7 @@ def cmd_watch(args):
     if _herdr_missing():
         return _unavailable("herdr-not-found")
     watch_payload = _run_herdr_get(target)
-    state, agent, _code, reason = _interpret_payload(watch_payload, target)
+    state, agent, _code, reason = _observe_target(watch_payload, target, server=server)
     if state == "agent-not-found":
         print(_typed_line("agent-not-found", "-", "-", target, "-"))
         return 2
@@ -3171,7 +3331,7 @@ def cmd_watch(args):
         if seat_fd is not None:
             os.close(seat_fd)
         return _unavailable("watch-endpoint-changed")
-    state, current_agent, _code, reason = _interpret_payload(_run_herdr_get(target), target)
+    state, current_agent, _code, reason = _observe_target(_run_herdr_get(target), target, server=server)
     if state == "agent-not-found":
         os.close(alias_fd)
         if seat_fd is not None:
@@ -3777,7 +3937,8 @@ def cmd_watch_run(args):
                 pass
             if not isinstance(payload, dict):
                 return None
-            result_state, result_agent, _code, result_reason = _interpret_payload(payload, args.target)
+            result_state, result_agent, _code, result_reason = _observe_target(
+                payload, args.target, server=server)
             if result_state not in {"timeout", "agent-not-found", "herdr-unavailable"}:
                 result = {"agent_state": result_state, "agent": result_agent,
                           "reason": result_reason}
@@ -4604,6 +4765,9 @@ def _prompt_foreground(pane, harness, *, info=None):
     info = info if info is not None else _retire_pane_info(pane)
     if not isinstance(info, dict):
         return None
+    wrapped, observed = _wrapped_foreground(pane, harness, info)
+    if observed:
+        return wrapped
     found = []
     for process in info.get("foreground_processes", ()):
         pid = process.get("pid") if isinstance(process, dict) else None
@@ -4619,7 +4783,13 @@ def _prompt_foreground(pane, harness, *, info=None):
 def _prompt_foreground_proof(pane, harness, expected_sid):
     info = _retire_pane_info(pane)
     foreground = _prompt_foreground(pane, harness, info=info)
-    if not foreground or _prompt_process_session(pane, harness, info) != (expected_sid, None):
+    if not foreground:
+        return None
+    attachment = foreground.get("attachment")
+    # The shared wrapped foreground already checked native selection and the
+    # final attachment. Keep that one result through the existing effect guard.
+    if (foreground.get("session_id") != expected_sid if attachment else
+            _prompt_process_session(pane, harness, info) != (expected_sid, None)):
         return None
     pid, start = foreground["pid"], foreground["start"]
     if _proc_start_ticks(pid) != start:
@@ -4628,11 +4798,14 @@ def _prompt_foreground_proof(pane, harness, expected_sid):
         namespace = os.readlink(f"/proc/{pid}/ns/pid")
         if (namespace != os.readlink("/proc/self/ns/pid")
                 or _proc_start_ticks(pid) != start
-                or _prompt_process_session(pane, harness, info) != (expected_sid, None)):
+                or not attachment and _prompt_process_session(pane, harness, info) != (expected_sid, None)):
             return None
     except OSError:
         return None
-    return {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
+    proof = {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
+    if attachment:
+        proof["attachment"] = dict(attachment)
+    return proof
 
 
 def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
@@ -4827,6 +5000,7 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
             and isinstance(pane, str) and pane and pane != "-"
             and bool(birth)
             and (native_session_id is None or foreground is not None)
+            and (not foreground or foreground.get("session_id", sid) == sid)
             and (expected_harness is None or harness == expected_harness)
             and (expected_sid is None or sid == expected_sid)
             and (expected_pane is None or pane == expected_pane)
@@ -7760,33 +7934,100 @@ def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_tra
 
 
 
-def _pane_shell_binding(pane, harness, sid, *, expected=None):
+def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
+    binding, _reason = _pane_shell_binding_result(
+        pane, harness, sid, expected=expected, info=info)
+    return binding
+
+
+def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=None, server=None):
     """Join a native attachment to this pane's exact current foreground owner."""
     import session_shell
-    binding, _reason = session_shell.exact_binding(harness, sid)
-    if binding is None:
-        return None
-    info = _retire_pane_info(pane)
-    owner = "broker" if "broker_pid" in binding else "host"
-    pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
-    if (not info or info.get("foreground_process_group_id") != pid
-            or not any(isinstance(row, dict) and row.get("pid") == pid
-                       for row in info["foreground_processes"])
-            or _proc_start_ticks(pid) != birth):
-        return None
+    if sid is None:
+        # The outer foreground is the retained PTY owner, not the native TUI
+        # on its inner PTY. Discover only attachments joined to this endpoint's
+        # observed foreground; a title, pane hint or registry age proves nothing.
+        rows = session_shell.bindings(harness=harness)
+    else:
+        binding, _reason = session_shell.exact_binding(harness, sid)
+        rows = [binding] if binding is not None else []
+    if not rows:
+        return None, None
+    if info is None:
+        info = (_retire_pane_info(pane) if server is None
+                else _retire_pane_info(pane, server=server))
+    if not info:
+        return None, None
+    joined = []
+    for binding in rows:
+        owner = "broker" if "broker_pid" in binding else "host"
+        pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
+        if (info.get("foreground_process_group_id") == pid
+                and any(isinstance(row, dict) and row.get("pid") == pid
+                        for row in info.get("foreground_processes", []))
+                and _proc_start_ticks(pid) == birth):
+            joined.append(binding)
+    if len(joined) != 1:
+        return None, None
+    binding = joined[0]
     identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
+    if sid is None:
+        current, _reason = session_shell.exact_binding(binding["harness"], binding["sid"])
+        if current is None or any(current.get(k) != binding.get(k) for k in identity):
+            return None, None
+        binding = current
     if expected is not None and any(binding.get(k) != expected.get(k) for k in identity):
-        return None
-    return binding
+        return None, None
+    try:
+        from fleet.process_identity import PROVEN, process_identity
+    except ImportError:
+        pass  # Optional reader absence preserves independent native fallback.
+    else:
+        native = process_identity(binding["native_pid"], binding["harness"])
+        if (native.confidence == PROVEN and native.session_id
+                and native.session_id != binding["sid"]):
+            return None, "target-identity-changed"
+    return binding, None
 
 
 def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
                       expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
                       pane=None):
+    return _cmd_prompt_native(args, body, binding["harness"], binding["sid"],
+        binding=binding, from_identity=from_identity, from_name=from_name,
+        expected_recipient=expected_recipient, on_prepared=on_prepared,
+        producer_binding=producer_binding, handoff=handoff, pane=pane)
+
+
+def _prompt_codex_native_owner(sid):
+    """Existing current-root proof for a full native address without an attachment."""
+    import session_shell
+    from fleet.collectors import codex, procscan
+    try:
+        owner = codex.process_for_thread(sid)
+        if not owner:
+            return None
+        pid, birth = owner
+        if (codex.session_id_of_process(pid, fresh=True) != sid
+                or procscan.read_proc_start(pid) != birth):
+            return None
+        rows = session_shell.bindings(harness="codex")
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # An independently known attachment conflict is not an absent attachment.
+    matches = [row for row in rows if row["native_pid"] == pid
+               and row["native_start"] == birth]
+    if len(matches) > 1 or any(row["sid"] != sid for row in matches):
+        return None
+    return owner
+
+
+def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
+                       expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
+                       binding=None, pane=None, native_owner=None):
     """Native-session address using the existing sealed message and carrier."""
     import session_shell
-    harness, sid = binding["harness"], binding["sid"]
     if expected_recipient is not None and (harness, sid) != expected_recipient:
         print("prompted=false reason=target-identity-changed")
         return 5
@@ -7809,7 +8050,16 @@ def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
             result = {"ok": False, "reason": "target-process-changed"}
         elif harness == "codex":
             # Same exact native queue; shell display grants no start permission.
-            result = peer_message.deliver_pending_codex(ref, start_interrupted=False)
+            delivery_options = {}
+            if native_owner is not None:
+                def before_submit():
+                    from codex_queue_delivery import QueueDeliveryError
+                    if _prompt_codex_native_owner(sid) != native_owner:
+                        raise QueueDeliveryError("target-native-process-changed")
+                # Discovery of this new address does not repair historical refs.
+                delivery_options = {"before_submit": before_submit, "_promote_prior": False}
+            result = peer_message.deliver_pending_codex(
+                ref, start_interrupted=False, **delivery_options)
         else:
             result = session_shell.deliver_pending(ref, harness, sid)
         current = peer_message._read_pending(ref) or row
@@ -7823,7 +8073,8 @@ def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
         _schedule_message_obligation(current, f"{harness}:{sid}")
     _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body),
             summary_text=text, to_session_id=sid, to_pane=None, ref=args.ref,
-            status=_PROMPT_LEDGER_STATUS[outcome], receipt="session-shell:" + reason,
+            status=_PROMPT_LEDGER_STATUS[outcome],
+            receipt=("native-process:" if native_owner is not None else "session-shell:") + reason,
             from_identity=from_identity, from_name=from_name, transfer_ref=ref,
             surface="codex-queue" if harness == "codex" else harness + "-native",
             producer_binding=producer_binding)
@@ -7879,6 +8130,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         from_name = _from_name(from_harness, from_sid)
     relay_pane = (sender or {}).get("pane") or ""
     shell_binding = None
+    _shell_reason = None
     # Full native addresses are explicit. Existing window/name resolution keeps
     # precedence otherwise, and an uncertain send never switches transports.
     if (str(args.target).split(":", 1)[0] in {"claude", "codex", "opencode"}
@@ -7889,6 +8141,14 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         return _cmd_prompt_shell(args, body, shell_binding, from_identity=from_identity,
             from_name=from_name, expected_recipient=expected_recipient, on_prepared=on_prepared,
             producer_binding=producer_binding, handoff=handoff)
+    if str(args.target).startswith("codex:") and _shell_reason == "attachment-unavailable":
+        sid = args.target.split(":", 1)[1]
+        native_owner = _prompt_codex_native_owner(sid)
+        if native_owner is not None:
+            return _cmd_prompt_native(args, body, "codex", sid, native_owner=native_owner,
+                from_identity=from_identity, from_name=from_name,
+                expected_recipient=expected_recipient, on_prepared=on_prepared,
+                producer_binding=producer_binding, handoff=handoff)
     if _surface_missing(args.target) and _tmux_inventory() is None:
         resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
     elif resolved_recipient is None:
@@ -8379,13 +8639,14 @@ def _clear_look(target, req):
         return "target-changed", agent, None
     if agent.get("harness") != req.get("harness"):
         return "target-changed", agent, None
-    if req.get("harness") == "opencode":
-        # Herdr may retain an old pane session after the TUI selects another one.
-        # The PID/birth-bound TUI record is the only authority for this seat.
-        current = _process_session(agent.get("pane") or target, "opencode")
+    if req.get("harness") in ("codex", "opencode"):
+        # Metadata can retain an old selection. Reuse the exact current native
+        # reader at both looks, including a wrapper's inner PTY and current root.
+        current = _process_session(agent.get("pane") or target, req.get("harness"))
         if current != req.get("sid"):
             return "target-changed" if current else "session-identity-unknown", agent, None
-    if req.get("harness") in ("claude", "codex") and agent.get("session_id") != req.get("sid"):
+    elif req.get("harness") == "claude" and agent.get("session_id") != req.get("sid"):
+        # Codex/OpenCode already used this look's authoritative native judgment.
         # herdr's pane record can lag a /clear; the process itself is the proof, never a guess.
         # An unnamed session (`-`, empty) is not a confirmed match: only the process can vouch for it.
         if _process_session(agent.get("pane") or target, req.get("harness")) != req.get("sid") \

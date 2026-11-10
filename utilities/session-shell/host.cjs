@@ -16,8 +16,17 @@ function bypass() { startupResult('BYPASS'); process.exit(0); }
 let pty, Terminal, Unicode11Addon;
 try {
   if (!['claude','codex','opencode'].includes(harness) || !command.length || !process.stdin.isTTY || !process.stdout.isTTY) throw Error();
-  pty = require('node-pty'); ({Terminal} = require('@xterm/headless'));
-  ({Unicode11Addon} = require('@xterm/addon-unicode11'));
+  // The running host already knows its ABI; no auxiliary Node probe is needed.
+  const key=crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname,'package-lock.json')))
+    .update('\0').update(process.versions.modules).digest('hex').slice(0,24);
+  const cache=process.env.XDG_CACHE_HOME||path.join(require('node:os').homedir(),'.cache');
+  const assets=path.resolve(cache,'hearting','session-shell',key);
+  const ready=JSON.parse(fs.readFileSync(path.join(assets,'ready.json'),'utf8'));
+  if(!ready||ready.key!==key||Object.keys(ready).length!==1||
+     !fs.statSync(path.join(assets,'node_modules','node-pty')).isDirectory())throw Error('assets unavailable');
+  const assetRequire=require('node:module').createRequire(path.join(assets,'package.json'));
+  pty=assetRequire('node-pty');({Terminal}=assetRequire('@xterm/headless'));
+  ({Unicode11Addon}=assetRequire('@xterm/addon-unicode11'));
 } catch { bypass(); }
 const dir = process.env.HEARTING_SHELL_DIRECTORY;
 try {
@@ -27,7 +36,11 @@ try {
 const socketPath = path.join(dir, 'control.sock');
 let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
-const terminal = new Terminal({cols, rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
+const nativeDisplay=require('./native-display.cjs');
+let displayConfiguration={layout:'bottom'},nativeSidebar=false;
+try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
+const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration});
+const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
 const incarnation = crypto.randomBytes(24).toString('hex'), token = process.env.HEARTING_SHELL_TOKEN;
 function processRow(pid) {
@@ -65,8 +78,9 @@ let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
 let actionWorker;
-const nativeDisplay=require('./native-display.cjs');
 let nativeContext;
+let displayValues={};
+let nativeFooter=null,paintedCommon=[],panelSections;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -75,10 +89,15 @@ function binding() {
 function identity() {
   const b = binding(); delete b.schema; delete b.socket; return b;
 }
+const publishDisplay=nativeDisplay.publisher(dir,identity);
+function publishNativeDisplay() {
+  publishDisplay({...displayValues,...(typeof nativeContext?.percent==='number'
+    ?{context_percent:nativeContext.percent}:{})});
+}
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !fleetView,alive:live(),expanded,focused:block.focused,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
-  if(op==='action')return readAction(extra);
+  if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
@@ -89,27 +108,27 @@ function source(op, extra={}) {
     backend.stdin.write(frame);
   });
 }
-function readAction(extra) {
-  // A person-requested ledger/repo read may be slow. It must not queue ahead
+function readAction(extra,operation='action') {
+  // A person-requested read or answer may be slow. It must not queue ahead
   // of event-driven values or readiness on the ordinary projection worker.
   if(actionWorker)return Promise.resolve({ok:false,reason:'action-pending'});
   return new Promise(resolve=>{
     let raw='',settled=false;
     const worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,
       [path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
-    actionWorker=worker;
+    actionWorker=worker;queueProjection();
     const finish=value=>{if(!settled){settled=true;clearTimeout(timer);resolve(value);}};
     const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
-    worker.on('close',()=>{if(actionWorker===worker)actionWorker=undefined;finish({ok:false,reason:'action-unavailable'});});
+    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();}finish({ok:false,reason:'action-unavailable'});});
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
       raw+=bytes;if(Buffer.byteLength(raw)>65536){finish({ok:false,reason:'action-unavailable'});return;}
       if(raw.includes('\n'))try{finish(JSON.parse(raw.split('\n')[0]));}catch{finish({ok:false,reason:'action-unavailable'});}
     });
-    worker.stdin.end(JSON.stringify({op:'action',binding:binding(),...extra})+'\n');
+    worker.stdin.end(JSON.stringify({op:operation,binding:binding(),...extra})+'\n');
   });
 }
 function emit(value) { process.stdout.write(value); }
@@ -130,10 +149,30 @@ function serialize(line,width) {
   }
   return s+'\x1b[0m';
 }
-function maxHeight(){return Math.min(10,Math.max(4,Math.floor(rows/3)),Math.max(1,rows-4));}
+function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,nativeSidebar});}
+function panelColumns(){return geometry().panelCols;}
+function nativeColumns(){return geometry().nativeCols;}
+function nativeRows(){return geometry().side?rows:rows-height();}
+function panelRow(){return geometry().side?2:rows-height();}
+function maxHeight(){return geometry().side?Math.max(1,rows-2):Math.min(10,Math.max(1,rows-6));}
+function panelContent(){
+  if(!panelSections)return panelLines;
+  const prefix=panelSections.prefix||[],tail=panelSections.tail||[];
+  const question=actionLines.length&&block.focused?actionLines:block.detail({budget:Math.max(2,maxHeight()-prefix.length-(tail.length?1:0)),columns:panelColumns()});
+  const room=Math.max(0,maxHeight()-prefix.length-question.length);
+  const ancillary=tail.length>room&&room>0?[...tail.slice(0,room-1),[{text:`+${tail.length-room+1} · ${panelSections.labels?.more||'more'}`,dim:true}]]:tail.slice(0,room);
+  let lines=[...prefix,...question,...ancillary];
+  if(lines.length>maxHeight()){
+    const omitted=lines.length-maxHeight()+1;
+    lines=[...lines.slice(0,maxHeight()-1),[{text:`+${omitted} · ${panelSections.labels?.more||'more'}`,dim:true}]];
+  }
+  return lines.map(line=>[{text:'  '},...line]);
+}
 function height(){
   if(fleetView)return 0;
   if(!expanded)return harness==='claude'?0:1;
+  const content=panelContent();
+  if(panelSections)return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
   const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
   return nativeDisplay.blockHeight({harness,count:Math.max(panelLines.length,currentDelivery?1:0),
     detail:detail.length,limit:maxHeight(),loaded:!!projectionKey});
@@ -145,22 +184,28 @@ function render() {
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid);
+    if(harness==='opencode'&&observed&&!nativeSidebar){
+      // A confirmed native sidebar keeps this attachment at bottom. Do not
+      // oscillate geometry across partial native redraws or compete with it.
+      const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
+    }
+    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon);
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
-      nativeContext=observed;if(harness!=='codex')queueProjection();}
+      nativeContext=observed;publishNativeDisplay();if(harness!=='codex')queueProjection();}
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      const line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      if(!fleetView&&geometry().side){const panel=y-2;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel>=0&&panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
-    if(!fleetView&&expanded)for(let y=0;y<panelRows.length;y++){
+    if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
       const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
         '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:panelRows[y];
       if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
-    else if(!fleetView&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
+    else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
     text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
@@ -173,12 +218,13 @@ function render() {
 }
 function lineLength(line){
   if(!line)return 0;
-  for(let x=cols-1;x>=0;x--){const cell=line.getCell(x);if(cell?.getChars())return x+cell.getWidth();}
+  for(let x=panelColumns()-1;x>=0;x--){const cell=line.getCell(x);if(cell?.getChars())return x+cell.getWidth();}
   return 0;
 }
 function displayLines(lines,height,done) {
   if(displayVTs.size>=4){rawRelay();return;}
-  const vt=new Terminal({cols,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});displayVTs.add(vt);
+  const width=panelColumns();
+  const vt=new Terminal({cols:width,rows:height,scrollback:0,allowProposedApi:true,logLevel:'off'});displayVTs.add(vt);
   vt.loadAddon(new Unicode11Addon());vt.unicode.activeVersion='11';
   const safe=s=>String(s).replace(/[\x00-\x1f\x7f]/g,' ');
   const paint=line=>Array.isArray(line)?line.map(part=>{
@@ -188,7 +234,7 @@ function displayLines(lines,height,done) {
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
   try{vt.write('\x1b[?7l'+lines.slice(0,height).map((s,i)=>`\x1b[${i+1};1H${paint(s)}`).join(''),()=>{
-    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),cols)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0));}
+    try{if(!relay&&!ended)done(Array.from({length:height},(_,y)=>serialize(vt.buffer.active.getLine(y),width)),Array.from({length:height},(_,y)=>block.focused?lineLength(vt.buffer.active.getLine(y)):0),Array.from({length:height},(_,y)=>vt.buffer.active.getLine(y)?.translateToString(true)||''));}
     catch{rawRelay();}
     finally{displayVTs.delete(vt);vt.dispose();}
     schedule();
@@ -197,7 +243,7 @@ function displayLines(lines,height,done) {
 let rebuilding=false,rebuildPending=false,displayQueued=false,layoutQueued=false;
 function queueDisplay(){
   if(displayQueued)return;displayQueued=true;
-  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&terminal.rows!==rows-height())applyLayout();else rebuildDisplay();}catch{rawRelay();}});
+  setImmediate(()=>{displayQueued=false;try{if(!fleetView&&(terminal.rows!==nativeRows()||terminal.cols!==nativeColumns()))applyLayout();else rebuildDisplay();}catch{rawRelay();}});
 }
 function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
@@ -209,24 +255,25 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
   if(expanded){
-    const base=panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
+    const base=panelSections?panelContent():panelLines.length?panelLines:(!projectionKey&&harness!=='claude'?
       [[{text:`📁 ${path.basename(process.cwd())} · ${harness} · CTX ?`,dim:true}]]:[]);
-    const detail=block.focused?(actionLines.length?actionLines:block.detail()):[];
+    const detail=!panelSections&&block.focused?(actionLines.length?actionLines:block.detail()):[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
       const at=visible.findIndex(line=>Array.isArray(line)&&line.some(part=>String(part.text).startsWith('› ')));
       edit=at<0?-1:prefix.length+at;lines=[...prefix,...visible];
     }else lines=base;
+    if(panelSections&&block.focused)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
   }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
-  displayLines(lines,expanded?height():1,(painted,lengths)=>{
-    blockCursor=edit>=0?{row:rows-height()+edit+1,col:Math.min(cols,lengths[edit]+1)}:null;
-    panelRows=painted;displayFooter=painted[0];footerLast='\0';rebuilding=false;
+  displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
+    blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns(),lengths[edit]+1)}:null;
+    panelRows=painted;paintedCommon=plain;displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
   });
 }
@@ -264,7 +311,7 @@ let displayFooter='';
 function applyLayout() {
   if(relay)return;
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
-  child.resize(cols,rows-height());terminal.resize(cols,rows-height());last=[];footerLast='\0';
+  child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 function queueProjection() {
@@ -300,12 +347,13 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:cols,rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext});
+    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.questions,data.help,cols,expanded,currentDelivery,heldBytes]);
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;block.update(data.questions,data.help);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,cols,expanded,currentDelivery,heldBytes]);
+    displayValues=data.native_display||{};publishNativeDisplay();
+    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 function rawRelay() {
@@ -332,7 +380,7 @@ async function releaseHeld(ref,cancel=false) {
   // No new direct writes may overtake keys the owner is still draining.
   process.stdin.pause();
   await inputOwner.release(ref,cancel);
-  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';}
+  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 function screenSnapshot() {
@@ -407,6 +455,9 @@ function userInput(data) {
     if(offset<0){observeInput(data);child.write(data);return;}
     const prefix=data.subarray(0,offset);
     if(prefix.length){observeInput(prefix);child.write(prefix);}
+    // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
+    // prefix; keeping that lone byte pending would disable focus after a modal.
+    if(keyTail==='\x1b'&&!paste)keyTail='';
     if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];block.enter();queueLayout();}
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
@@ -421,8 +472,11 @@ async function lifecycle(req) {
      ||typeof req.sid!=='string'||!/^[A-Za-z0-9._-]{1,256}$/.test(req.sid))return {ok:false,reason:'event-identity'};
   if(!Number.isSafeInteger(req.seq)||req.seq<=sequence)return {ok:false,reason:'stale-event'};
   if(req.event==='start'||req.event==='select') {
+    nativeFooter=null;paintedCommon=[];
     if(nativeContext?.sid!==req.sid)nativeContext=undefined;
+    displayValues={};
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
+    publishNativeDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
     // Display collection must never delay the native start hook or input.
@@ -432,7 +486,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;nativeSidebar=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
@@ -458,7 +512,7 @@ async function request(req) {
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;
+  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueProjection();
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter

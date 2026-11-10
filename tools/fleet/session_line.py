@@ -64,6 +64,8 @@ def line_segments(values, columns, *, complete=False):
     words("folder", project_of(values.get("cwd")) if values.get("cwd") else None, "loc_repo", 64 if complete else 24, 2,
           before=[("📁 ", "dim")])
     words("title", values.get("title"), "hb_" + str(harness), 48 if complete else 40, 0, prefix)
+    if values.get("native_sid"):
+        words("thread", values["native_sid"], "dim", 256, 0)
     git = values.get("git") or {}
     branch_after = []
     if git and git.get("repo") != 0:
@@ -95,6 +97,12 @@ def line_segments(values, columns, *, complete=False):
         gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
     words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
           cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
+    from .token_budget import compaction_imminent
+    if compaction_imminent(values.get("compaction_pressure")):
+        from .config import ui_text
+        warning = ui_text("fleet.context.compaction_imminent")
+        words("compaction", warning, "lvl_r", cell_width(warning), 99,
+              minimum=cell_width(warning))
     words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
     for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
         remaining = _remaining(reset)
@@ -146,7 +154,29 @@ def line_segments(values, columns, *, complete=False):
     return output
 
 
-def status_lines(values, columns):
+def wrap_segments(parts, columns):
+    """Wrap semantic spans at cell boundaries, retaining their Fleet colors."""
+    columns = max(1, columns)
+    result, row, width = [], [], 0
+    for text, key in parts:
+        for char in str(text):
+            if ord(char) < 32 or ord(char) == 127:
+                char = " "
+            size = cell_width(char)
+            if width + size > columns and row:
+                result.append(row); row=[]; width=0
+            if row and row[-1][1] == key:
+                row[-1] = (row[-1][0] + char, key)
+            else:
+                row.append((char, key))
+            width += size
+    if row:
+        result.append(row)
+    return result
+
+
+
+def status_lines(values, columns, *, wrap_long=False):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
     parts = line_segments(values, 10000, complete=True)
     groups = [[]]
@@ -162,6 +192,9 @@ def status_lines(values, columns):
             result.append(line);line=[];width=0
         if line:
             line.append((SEPARATOR, "dim"));width+=cell_width(SEPARATOR)
+        if size > columns and wrap_long:
+            result.extend(wrap_segments(group, columns))
+            continue
         if size > columns:
             # A single long name cannot consume rows intended for questions.
             clipped, left = [], columns
@@ -174,7 +207,8 @@ def status_lines(values, columns):
     if line:
         result.append(line)
     if values.get("jobs"):
-        result.append([(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")])
+        job = [(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")]
+        result.extend(wrap_segments(job, columns) if wrap_long else [job])
     return result
 
 
@@ -342,3 +376,21 @@ def claude_first_statusline(callback, environ, script):
         subprocess.Popen(['bash',script],env=env,stdin=source,
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
     return line
+
+
+def context_detail_lines(detail):
+    """Common detail labels retain server usage beside a separate native estimate."""
+    from .token_budget import current_compaction_pressure
+    from .config import ui_text
+    if not isinstance(detail, dict) and not hasattr(detail, "get"):
+        return []
+    def number(value):
+        return f"{value:,}" if type(value) is int and value >= 0 else "?"
+    pressure = detail.get("pressure")
+    observed = current_compaction_pressure(pressure)
+    return [
+        (ui_text("fleet.context.server"), number(detail.get("server_total_tokens")) + " / " + number(detail.get("server_window_tokens"))),
+        (ui_text("fleet.context.native_estimate"), number(pressure.get("scope_tokens")) if observed else "?"),
+        (ui_text("fleet.context.limit"), (number(pressure.get("limit_tokens")) + " · " + str(pressure.get("scope"))) if observed else "?"),
+        (ui_text("fleet.context.observed"), time.strftime("%H:%M:%S", time.localtime(pressure["observed_at"])) if observed else "?"),
+    ]

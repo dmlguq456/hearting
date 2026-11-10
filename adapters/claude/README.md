@@ -246,4 +246,6 @@ evidence, not liveness. See [Claude background Bash documentation](https://code.
 
 ## Runtime compaction tidy
 
-`PreCompact` supplies shared six-field summary instructions. `PostCompact` queues main-session memory tidy and saves a nonempty `compact_summary` as the card at the session's own verified pane/native seat. Only an explicit automatic trigger with both card files successfully saved can book the existing handover snapshot → clear → `이어서해` flow. Its helper waits up to three hours for transcript evidence that the compacted turn ended; idle alone does not clear. Before clearing, it preserves the full summary, a bounded recent tail, and the transcript path on the card. Manual/unknown compaction, empty or failed cards, project seats (no Herdr or tmux pane), and workers/sub-sessions stay queue-only; compaction is never held for tidy.
+Hearting records the exact native session's compaction boundary only. Native compact hooks add no card instructions, card or memory request, clear, or automatic continuation. Registered workers retain their separate stage-ledger flush and re-anchor behavior.
+
+Manual `정리만` / `--no-clear` saves the card and queues memory work while retaining the conversation. It does not shrink context or prevent native automatic compaction.

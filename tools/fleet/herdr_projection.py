@@ -895,6 +895,128 @@ def _metadata_command(herdr, harness, session_id, pane, *, display_relations=Fal
     return metadata
 
 
+def _panel_counts(harness, sid, values, questions):
+    """Count the same current board, without reading another question source."""
+    if questions is None or values.get("answer_wait") is None:
+        return None, None
+    total = answerable = 0
+    for row in questions:
+        if not isinstance(row, dict):
+            continue
+        owner = row.get("owner") or {}
+        if (row.get("state") != "current" or owner.get("harness") != harness
+                or owner.get("session_id") != sid):
+            continue
+        count = max(1, len(row.get("questions") or ()))
+        total += count
+        if row.get("answerable") is True and row.get("request_state", "open") == "open":
+            answerable += count
+    return total, answerable
+
+
+def panel_metadata_command(herdr, pane, harness, sid, values, questions):
+    """Render already observed shell values; no collection, question text or input."""
+    from fleet.session_line import _percent, _remaining
+    from fleet.render_cells import _clean_model, _effort_text, _LIVE_GLYPH
+    count, answerable = _panel_counts(harness, sid, values, questions)
+    count = "?" if count is None else str(count)
+    answerable = "?" if answerable is None else str(answerable)
+    state = values.get("state")
+    state = state if state in {"working", "idle", "blocked"} else "unknown"
+    model = sanitize_title(_clean_model(values.get("model"))) or "?"
+    effort = _effort_text(values.get("effort"))
+    model = model + (" " + effort if effort else "")
+    context = _percent(values.get("ctx_pct"))
+    limits = []
+    for label, used, reset in values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]:
+        remaining = _remaining(reset)
+        limits.append(sanitize_title(label) + " " + _percent(used)
+                      + (" (↻ " + remaining + ")" if remaining else ""))
+    for label, used in values.get("model_quotas") or ():
+        limits.append(sanitize_title(label) + " " + _percent(used))
+    limits = " · ".join(limits)
+    summary = " · ".join(("Q" + count + "/" + _LIVE_GLYPH["blocked"] + "A" + answerable, state,
+                          model, "context " + context, limits))
+    tag = sanitize_title(values.get("tag")).strip("[]") or "?"
+    agent, _ = compose(harness, sid, tag=tag, title="", display_relations=True)
+    # A metadata title outranks even a manually named pane in Herdr 0.9.5.
+    # The default Agent sidebar paints display_agent; keep its identity prefix.
+    command = [herdr, "pane", "report-metadata", pane, "--source", "hearting:pane",
+               "--agent", harness,
+               "--display-agent", clip_cells(agent + " " + summary, 256),
+               "--ttl-ms", "300000", "--seq", str(time.time_ns())]
+    for semantic in ("working", "idle", "blocked"):
+        command += ["--state-label", semantic + "=" + clip_cells(summary, 256)]
+    tokens = {"questions": count, "answer_needed": answerable, "state": state,
+              "model": model, "context": context, "limits": limits,
+              "route": sanitize_title(values.get("route_label")), "summary": summary}
+    for name, value in tokens.items():
+        command += ["--token", "hearting_" + name + "=" + clip_cells(value, 256)]
+    return command
+
+
+_PANEL_LAST = None  # one process-local publication, never a durable state store
+
+
+def project_panel(binding, values, questions, *, pane_id=None):
+    """Mirror one shell projection through the existing birth-bound pane join.
+
+    Called by the shell's existing projection callback with its final board.
+    It changes presentation only and is optional when Herdr is unavailable.
+    """
+    global _PANEL_LAST
+    try:
+        if is_worker() or not isinstance(binding, dict) or not isinstance(values, dict):
+            return True
+        pane = pane_id or os.environ.get("HERDR_PANE_ID")
+        if not pane or _is_tmux_pane(pane):
+            return True
+        herdr = shutil.which("herdr")
+        if not herdr:
+            return True
+        harness, sid = binding.get("harness"), binding.get("sid")
+        if harness not in HARNESSES or not sid:
+            return True
+        command = panel_metadata_command(herdr, pane, harness, sid, values, questions)
+        # Existing file/output events may request the same projection repeatedly.
+        # Reuse its successful publication, refreshing only on another event;
+        # no timer or helper is started to keep metadata alive.
+        seq = command.index("--seq")
+        endpoint = os.environ.get("HERDR_SOCKET_PATH")
+        try:
+            info = os.stat(endpoint) if endpoint else None
+            endpoint_birth = (info.st_dev, info.st_ino, info.st_ctime_ns) if info else None
+        except OSError:
+            endpoint_birth = None
+        key = (endpoint, endpoint_birth, pane,
+               tuple(sorted(binding.items())), tuple(command[:seq] + command[seq+2:]))
+        now = time.monotonic()
+        if _PANEL_LAST and _PANEL_LAST[0] == key and now - _PANEL_LAST[1] < 240:
+            return True
+        # Reuse the same join as peer discovery and effects, including independent
+        # inner-PID conflicts. Neither a displayed SID nor metadata is authority.
+        import importlib.util
+        name = "_hearting_panel_peer_steward"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(
+                name, Path(__file__).resolve().parents[2] / "utilities" / "peer-steward.py")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        current, reason = sys.modules[name]._pane_shell_binding_result(
+            pane, harness, sid, expected=binding,
+            server=os.environ.get("HERDR_SOCKET_PATH") or None)
+        if current is None or reason:
+            return True
+        observed = {}
+        _send_projection(command, observed)
+        if observed.get("metadata_report") == "exit0":
+            _PANEL_LAST = key, now
+    except Exception:
+        pass
+    return True
+
+
 def _report(harness: str, session_id: str, pane: str, report_session: bool,
             observation=None, session_seq=None, session_start_source=None, resume_argv=None,
             _proof=None, display_relations: bool = False) -> None:
