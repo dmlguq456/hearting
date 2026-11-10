@@ -10,6 +10,7 @@ Sources, all existing and read-only:
     (``selection``, ``nodes``, ``completion_gates``, ``human_gates``,
     ``tracked_gate_evidence``, ``route_plan``);
   * Fleet's own route view (``route.build_views``): node state and gate marks;
+  * the dispatch registry (``jobs.log``) owner attempt: liveness, start, decision;
   * the route outcome sidecar ``<rt>.outcome.json`` (terminal gates, close time,
     head commit and the owner's final report text).
 
@@ -20,6 +21,9 @@ Contract:
   read_outcome(record)                        -> full outcome sidecar dict | None, cached.
   summary_text(desc, current=True)            -> one short line for a route card / session row.
   detail_lines(desc)                          -> [(label, text, tone), ...] for a detail page.
+  owner_from_job(job)                         -> owner attempt progress from a registry row.
+  observe(record, jobs=None, node_evidence=None, now=None)
+                                              -> (view, owner) from the dispatch registry.
   bounded(desc)                               -> the same dict clipped for a shell projection.
 
 CLI: ``python3 route_visibility.py <rt-id|route.json> [--artifact-root DIR] [--json]``.
@@ -45,8 +49,6 @@ _RECORD = re.compile(r"(?:[\w.~/-]*/)?(?:RV|BC)-[\w.-]+\.md")
 _TEST = re.compile(r"\bchecks?\b(?=.*\b(?:pass|fail))|\b(?:tests?|suites?|pytest|unittest|assertions?|regression|"
                    r"passing|passed|\d+/\d+)\b|시험|테스트|회귀", re.I)
 _REVIEW = re.compile(r"\b(?:review(?:er|ed)?|impl-review|plan-check)\b|검토", re.I)
-_BAD = re.compile(r"\b(?:FAIL(?:ED|URE)?|failing|error|regress(?:ed|ion)? found)\b|실패", re.I)
-_GOOD = re.compile(r"\b(?:PASS(?:ED|ES|ING)?|SUCCESS|green|all \d+ .*pass)\b|통과|성공", re.I)
 _STATE_WORDS = {"unrecorded": "no marker", "done": "done", "active": "running", "reconciling": "reconciling",
                 "recovering": "recovering", "attention": "attention", "failed": "failed",
                 "degraded": "degraded", "pending": "pending"}
@@ -217,17 +219,12 @@ def _sentences(summary):
     return found
 
 
-def _tone(text):
-    if _BAD.search(text) and not re.search(r"\b0 (?:errors?|failures?)\b|0 fail", text, re.I):
-        return "bad" if not _GOOD.search(text) else "mixed"
-    return "good" if _GOOD.search(text) else "info"
-
-
 def _evidence(sentences, pattern, exclude=()):
     rows = []
     for sentence in sentences:
         if pattern.search(sentence) and not any(p.search(sentence) for p in exclude):
-            rows.append({"text": _text(sentence), "tone": _tone(sentence)})
+            # Shown as recorded: the reader does not judge a sentence pass or fail.
+            rows.append({"text": _text(sentence), "tone": "info"})
             if len(rows) >= _MAX_EVIDENCE:
                 break
     return rows
@@ -252,6 +249,10 @@ def _records(record, summary):
             path = root / match
         else:
             path = None
+        if path is None or not path.is_file():
+            # A short ``inputs/RV-….md`` names the campaign's existing inputs folder.
+            path = next((candidate for pattern in ("research/*/inputs/", "campaigns/*/inputs/")
+                         for candidate in sorted(root.glob(pattern + name)) if candidate.is_file()), None)
         kind = "RV" if name.startswith("RV-") else "BC"
         found.append({"kind": kind, "name": _text(name, 96),
                       "path": str(path) if path is not None and path.is_file() else None})
@@ -302,11 +303,82 @@ def _verification(record, stages, outcome):
     }
 
 
-def _next_action(record, stages, verification, outcome):
+_LIVE = ("working", "idle", "blocked")
+
+
+def _field(job, *names):
+    for name in names:
+        value = job.get(name) if isinstance(job, dict) else getattr(job, name, None)
+        if value not in (None, "", "-"):
+            return value
+    return None
+
+
+def owner_from_job(job):
+    """The owner attempt's progress as recorded by the dispatch registry (jobs.log), or None."""
+    if job is None:
+        return None
+    decision = _field(job, "attempt_decision")
+    decision = decision if isinstance(decision, dict) else {}
+    started = _field(job, "_context_execution_started_at", "started_at")
+    elapsed = _field(job, "elapsed_min")
+    return {
+        "attempt_id": _text(_field(job, "attempt_id"), 64) or None,
+        "liveness": _text(_field(job, "liveness"), 16) or None,
+        "status": _text(_field(job, "status"), 16) or None,
+        "harness": _text(_field(job, "harness"), 16) or None,
+        "model": _text(_field(job, "model", "resolved_model"), 48) or None,
+        "effort": _text(_field(job, "effort"), 16) or None,
+        "node": _text(_field(job, "route_node"), 64) or None,
+        "started_at": float(started) if isinstance(started, (int, float)) else None,
+        "elapsed_min": int(elapsed) if isinstance(elapsed, (int, float)) else None,
+        "action": _text(decision.get("action"), 24) or None,
+        "reason": _text(decision.get("reason") or _field(job, "note", "attention_reason"), 64) or None,
+    }
+
+
+def _clock(epoch):
+    try:
+        import time as _time
+        return _time.strftime("%m-%d %H:%M", _time.localtime(float(epoch)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _inline_state(record):
+    """A direct route runs in the main session: its pending inline finish, if recorded."""
+    try:
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            utilities = parent / "utilities"
+            if (utilities / "inline_finish.py").is_file():
+                if str(utilities) not in sys.path:
+                    sys.path.insert(0, str(utilities))
+                import inline_finish
+                pending = inline_finish.pending_state(Path(record.get("artifact_root", "")),
+                                                      record.get("route_id", ""))
+                return _text((pending or {}).get("state"), 32) or None
+    except Exception:
+        return None
+    return None
+
+
+def _sealed_at(record):
+    route_file = _route_file(record)
+    try:
+        return os.stat(route_file).st_mtime if route_file is not None else None
+    except OSError:
+        return None
+
+
+def _next_action(record, stages, verification, outcome, owner=None, inline=None):
     if verification["closed_at"] and verification["terminal_gate_proven"]:
         return {"kind": "closed", "text": "closed · nothing pending"}
     if outcome is not None and verification["closed_at"] and not verification["terminal_gate_proven"]:
         return {"kind": "attention", "text": "closed without a proven terminal gate"}
+    if owner and owner.get("liveness") in ("dead", "done", "stale") and not verification["closed_at"]:
+        return {"kind": "attention", "text": "owner %s ended (%s) · route not closed" % (
+            owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
     by_id = {s["id"]: s for s in stages}
     active = [s for s in stages if s["state"] in ("active", "reconciling", "recovering")]
     if active:
@@ -315,6 +387,13 @@ def _next_action(record, stages, verification, outcome):
     failed = [s for s in stages if s["state"] in ("failed", "attention", "degraded")]
     if failed:
         return {"kind": "resume", "text": "inspect · %s %s" % (failed[0]["id"], failed[0]["state"])}
+    if owner and owner.get("liveness") in _LIVE:
+        since = _clock(owner.get("started_at"))
+        return {"kind": "wait", "text": "wait · owner %s %s%s" % (
+            owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
+    if inline and _shape(record) == "direct":
+        return {"kind": "start" if inline != "finished" else "close",
+                "text": "inline finish %s in the main session" % inline}
     known = any(s["state"] not in ("unknown",) for s in stages)
     for stage in stages:
         if stage["state"] in ("done",) or stage["gate_passed"]:
@@ -332,15 +411,18 @@ def _next_action(record, stages, verification, outcome):
     return {"kind": "unknown", "text": "no next step recorded"}
 
 
-def describe(record, view=None, outcome=None):
-    """Read-only visibility summary of one route. Never raises; {} for unusable input."""
+def describe(record, view=None, outcome=None, owner=None):
+    """Read-only visibility summary of one route. Never raises; {} for unusable input.
+
+    ``owner`` is ``owner_from_job(job)`` for the route's owner attempt (Fleet passes its
+    own; ``observe`` reads it from the dispatch registry)."""
     try:
-        return _describe(record, view, outcome)
+        return _describe(record, view, outcome, owner)
     except Exception:  # Display-only: a malformed record never breaks a screen.
         return {}
 
 
-def _describe(record, view, outcome):
+def _describe(record, view, outcome, owner=None):
     if not isinstance(record, dict) or not isinstance(record.get("route_id"), str):
         return {}
     if outcome is None:
@@ -349,6 +431,14 @@ def _describe(record, view, outcome):
     terminal = (outcome or {}).get("terminal_gates") if isinstance((outcome or {}).get("terminal_gates"), dict) else {}
     closed = bool((outcome or {}).get("closed_at"))
     stages = _stages(record, view, terminal, closed)
+    if owner is not None and not isinstance(owner, dict):
+        owner = owner_from_job(owner)
+    if owner and owner.get("node") and owner.get("liveness") in _LIVE:
+        for stage in stages:      # the owner's own node runs while its attempt is live
+            if stage["id"] == owner["node"] and stage["state"] in ("unknown", "pending"):
+                stage["state"] = "active"
+                stage["harness"] = stage["harness"] or owner.get("harness")
+    inline = _inline_state(record) if shape == "direct" and not closed else None
     verification = _verification(record, stages, outcome)
     current = next((s for s in stages if s["state"] in ("active", "reconciling", "recovering",
                                                           "attention", "failed")), None) \
@@ -382,7 +472,10 @@ def _describe(record, view, outcome):
         "verification": verification,
         "spec": {"read": spec_read.get("satisfied") is True,
                  "drift": _text(tracked.get("drift_verdict"), 120) or None},
-        "next": _next_action(record, stages, verification, outcome),
+        "owner": owner or None,
+        "inline_finish": inline,
+        "sealed_at": _sealed_at(record),
+        "next": _next_action(record, stages, verification, outcome, owner, inline),
         "links": links,
     }
 
@@ -410,12 +503,11 @@ def _ci_mark(verification):
     if not rows:
         return None
     row = rows[0]
-    mark = {"good": "✓", "bad": "✕", "mixed": "!"}.get(row.get("tone"), "·")
-    return "CI " + mark + (" same-head" if row.get("same_head") else "")
+    return "CI recorded" + (" same-head" if row.get("same_head") else "")
 
 
 def summary_text(desc, current=True):
-    """One line: ``solo·default · quick · one-shot ● · no reviewer · CI ✓ · gate ✓``."""
+    """One line: ``solo·default · one-shot running · no reviewer · CI recorded same-head · gate ✓``."""
     if not desc:
         return ""
     verification = desc.get("verification") or {}
@@ -447,6 +539,24 @@ def detail_lines(desc):
         desc.get("capability") or "·", desc.get("intensity") or ""), "info")]
     if basis.get("notes"):
         lines.append(("why", "; ".join(basis["notes"]), "dim"))
+    owner = desc.get("owner") or {}
+    if owner:
+        since = _clock(owner.get("started_at"))
+        lines.append(("owner", " · ".join(x for x in (
+            " ".join(x for x in (owner.get("harness"), owner.get("model"), owner.get("effort")) if x) or None,
+            "%s%s" % (owner.get("liveness") or owner.get("status") or "·",
+                      " since " + since if since else ""),
+            "%dm" % owner["elapsed_min"] if owner.get("elapsed_min") is not None else None,
+            owner.get("attempt_id"),
+            "registry: %s (%s)" % (owner["action"], owner.get("reason") or "·") if owner.get("action") else None)
+            if x), "info" if owner.get("liveness") in _LIVE else "dim"))
+    elif desc.get("shape") == "direct":
+        sealed = _clock(desc.get("sealed_at"))
+        lines.append(("owner", "main session (inline)%s%s" % (
+            " · sealed " + sealed if sealed else "",
+            " · finish " + desc["inline_finish"] if desc.get("inline_finish") else ""), "dim"))
+    elif desc.get("shape") != "framed" and not (desc.get("verification") or {}).get("closed_at"):
+        lines.append(("owner", "no owner attempt in the dispatch registry", "dim"))
     stage_text = "  ".join("%s %s%s" % (
         s["id"], _STATE_WORDS.get(s["state"], s["state"]), " ✓" if s["gate_passed"] else "")
         for s in desc.get("stages") or ())
@@ -460,8 +570,8 @@ def detail_lines(desc):
     if verification.get("reviewers"):
         for reviewer in verification["reviewers"]:
             who = " ".join(x for x in (reviewer.get("harness"), reviewer.get("model")) if x) or "harness ·"
-            verdict = "PASS (gate ✓)" if reviewer.get("gate_passed") else \
-                "FAIL" if reviewer.get("state") == "failed" else _STATE_WORDS.get(reviewer.get("state"), "·")
+            verdict = "gate ✓" if reviewer.get("gate_passed") else \
+                _STATE_WORDS.get(reviewer.get("state"), reviewer.get("state") or "·")
             lines.append(("review", "%s · %s · %s" % (reviewer["id"], who, verdict),
                           "good" if reviewer.get("gate_passed") else
                           "bad" if reviewer.get("state") == "failed" else "info"))
@@ -508,8 +618,45 @@ def bounded(desc, max_lines=14):
             "shape": _text(desc.get("shape"), 16),
             "basis": _text((desc.get("basis") or {}).get("kind"), 24),
             "next": _text((desc.get("next") or {}).get("text"), 120),
+            "owner": _text(" ".join(x for x in (
+                ((desc.get("owner") or {}).get("liveness")),
+                _clock((desc.get("owner") or {}).get("started_at"))) if x), 48),
             "lines": [[_text(label, 12), _text(text, 200), _text(tone, 8)]
                       for label, text, tone in detail_lines(desc)[:max_lines]]}
+
+
+def observe(record, jobs=None, node_evidence=None, now=None):
+    """``(view, owner)`` read from the dispatch registry for callers without Fleet's snapshot.
+
+    Uses Fleet's own collector and route view (read-only). Pass ``jobs``/``node_evidence``
+    from an existing collection to avoid a second registry read."""
+    import time as _time
+    tools_dir = str(Path(__file__).resolve().parents[1])
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from fleet import route as route_mod
+    if jobs is None:
+        from fleet.collectors import dispatch
+        jobs = dispatch.collect()
+        node_evidence = dispatch.collect.last_route_nodes
+    rid = record["route_id"]
+    route_jobs = [job for job in jobs if _field(job, "route_id", "owner_route_id") == rid]
+    now = _time.time() if now is None else now
+    marks = route_mod.resolve_gate_marks({rid: record}, jobs=route_jobs, node_evidence=node_evidence)
+    views = route_mod.build_views(route_jobs, node_evidence or {}, {rid: record}, now, marks)
+    view = next((v for v in views if v.get("route_id") == rid), None)
+    expected = record.get("owner_attempt_id")
+    owners = [job for job in route_jobs if expected not in (None, "", "-") and _field(job, "attempt_id") == expected] \
+        or [job for job in route_jobs if _field(job, "worker_type") == "owner"
+            or _field(job, "dispatch_depth") == 1]
+    owner = None
+    if owners:
+        try:
+            from fleet.model import current_attempt_rank
+            owner = max(owners, key=current_attempt_rank)
+        except Exception:
+            owner = owners[-1]
+    return view, owner_from_job(owner)
 
 
 def _load_record(arg, artifact_root=None):
@@ -533,18 +680,13 @@ def main(argv=None):
     except (OSError, ValueError) as exc:
         print("route record unreadable: %s" % exc, file=sys.stderr)
         return 2
-    view = None
     try:
-        tools_dir = str(Path(__file__).resolve().parents[1])
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        from fleet import route as route_mod
-        marks = route_mod.resolve_gate_marks({record["route_id"]: record})
-        views = route_mod.build_views([], {}, {record["route_id"]: record}, __import__("time").time(), marks)
-        view = next((v for v in views if v.get("route_id") == record["route_id"]), None)
-    except Exception:
-        view = None
-    desc = describe(record, view)
+        view, owner = observe(record)
+    except Exception as exc:  # The record alone still describes shape, basis and outcome.
+        print("dispatch registry unreadable (%s); showing the record only" % type(exc).__name__,
+              file=sys.stderr)
+        view, owner = None, None
+    desc = describe(record, view, owner=owner)
     if args.json:
         print(json.dumps(desc, ensure_ascii=False, indent=2))
     else:

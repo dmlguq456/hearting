@@ -66,7 +66,7 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertEqual(desc["stages"][0]["state"], "done")
         ver = desc["verification"]
         self.assertTrue(ver["ci"][0]["same_head"])
-        self.assertEqual(ver["ci"][0]["tone"], "good")
+        self.assertEqual(ver["ci"][0]["tone"], "info")      # shown as recorded, never judged
         self.assertIn("Three focused suites pass.", [row["text"] for row in ver["tests"]])
         self.assertEqual(ver["worker_records"][0]["kind"], "RV")
         self.assertTrue(ver["worker_records"][0]["path"].endswith("RV-BC-FIXTURE.md"))
@@ -75,7 +75,7 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertIn(("result", "Three focused suites pass.", "info"), rv.detail_lines(desc))
         text = json.dumps(desc)
         self.assertNotIn("hidden-value", text)
-        self.assertEqual(rv.summary_text(desc), "direct·default · RV record · CI ✓ same-head · gate ✓")
+        self.assertEqual(rv.summary_text(desc), "direct·default · RV record · CI recorded same-head · gate ✓")
 
     def test_open_solo_route_without_reviewer_says_so_and_names_next_step(self):
         record = _record(self.root, "rt-solo", "solo", [
@@ -88,8 +88,39 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertFalse(desc["verification"]["independent_review"])
         self.assertEqual(desc["next"], {"kind": "wait", "text": "wait · one-shot (claude) running"})
         labels = [label for label, _text, _tone in rv.detail_lines(desc)]
-        self.assertEqual(labels[:3], ["route", "why", "stages"])
+        self.assertEqual(labels[:4], ["route", "why", "owner", "stages"])
         self.assertIn(("review", "no independent reviewer stage in this route", "dim"), rv.detail_lines(desc))
+
+    def test_solo_route_read_without_fleet_shows_the_registry_owner(self):
+        record = _record(self.root, "rt-solo2", "solo", [
+            {"id": "one-shot", "completion_gate": "quick-complete", "terminal": True}])
+        job = {"attempt_id": "att-1", "liveness": "working", "status": "open", "harness": "claude",
+               "model": "opus", "route_node": "one-shot", "_context_execution_started_at": 1794277391.0,
+               "elapsed_min": 52, "attempt_decision": {"action": "wait", "reason": "local-pid-live"}}
+        desc = rv.describe(record, None, owner=rv.owner_from_job(job))
+        self.assertEqual(desc["stages"][0]["state"], "active")
+        self.assertEqual(desc["owner"]["started_at"], 1794277391.0)
+        self.assertTrue(desc["next"]["text"].startswith("wait · one-shot"))
+        owner_line = next(text for label, text, _tone in rv.detail_lines(desc) if label == "owner")
+        self.assertIn("working since", owner_line)
+        self.assertIn("registry: wait (local-pid-live)", owner_line)
+        ended = rv.describe(record, None, owner=rv.owner_from_job(dict(job, liveness="dead", note="exit-1")))
+        self.assertEqual(ended["next"]["kind"], "attention")
+        self.assertIn("route not closed", ended["next"]["text"])
+        alone = rv.describe(record)
+        self.assertIn(("owner", "no owner attempt in the dispatch registry", "dim"), rv.detail_lines(alone))
+
+    def test_observe_reads_owner_and_view_from_given_registry_rows(self):
+        from tools.fleet.model import DispatchJob
+        record = _record(self.root, "rt-obs", "solo", [
+            {"id": "one-shot", "completion_gate": "quick-complete", "terminal": True, "dispatch_depth": 1}],
+            owner_attempt_id="att-obs")
+        job = DispatchJob(key="owner", slug="rt-obs", harness="codex", depth=1, route_id="rt-obs",
+                          route_node="one-shot", attempt_id="att-obs", liveness="working")
+        view, owner = rv.observe(record, jobs=[job], node_evidence={}, now=1000.0)
+        self.assertEqual(owner["attempt_id"], "att-obs")
+        self.assertEqual(owner["harness"], "codex")
+        self.assertEqual(view["nodes"][0]["state"], "active")
 
     def test_framed_route_waits_for_the_person_after_both_legs(self):
         nodes = [{"id": "frame", "unit": "plan/frame", "completion_gate": "route-frame"},
@@ -123,6 +154,8 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertEqual(desc["verification"]["reviewers"][0]["harness"], "codex")
         self.assertEqual(desc["next"]["kind"], "resume")
         self.assertIn("review 0/1 ✕", rv.summary_text(desc))
+        reviewer = next(text for label, text, _tone in rv.detail_lines(desc) if label == "review")
+        self.assertEqual(reviewer, "impl-review · codex · failed")
         record.pop("route_plan")
         self.assertEqual(rv.describe(record, view)["basis"]["kind"], "user")
 
@@ -158,6 +191,30 @@ class RouteVisibilityTests(unittest.TestCase):
         source = Path(rv.__file__).read_text(encoding="utf-8")
         for pattern in ('open(path, "w', ".write(", "os.replace(", "write_text(", ".unlink("):
             self.assertNotIn(pattern, source)
+
+
+class RouteVisibilityLiveTests(unittest.TestCase):
+    def test_fleet_route_row_carries_the_solo_owner_from_its_node_attempt(self):
+        from tools.fleet.explorer.live import build_view_model
+        from tools.fleet.model import DispatchJob, Session, WorkProjection
+        record = _record("/nonexistent-root", "rt-live", "solo", [
+            {"id": "one-shot", "completion_gate": "quick-complete", "terminal": True}],
+            owner_attempt_id="att-live")
+        view = {"nodes": [{"id": "one-shot", "state": "active", "harness": "claude"}], "liveness": "working"}
+        work = WorkProjection(source="route-exact", route_id="rt-live",
+                              _route_view={"record": record, "view": view})
+        session = Session(harness="claude", pid=os.getpid(), session_id="sid-main", session_tag="s1",
+                          cwd="/fixture", liveness="idle")
+        job = DispatchJob(key="owner", slug="rt-live", harness="claude", depth=1, route_id="rt-live",
+                          route_node="one-shot", attempt_id="att-live", parent_sid="sid-main",
+                          liveness="working", elapsed_min=5, work_projection=work)
+        vm = build_view_model({"sessions": [session], "jobs": [job], "resources": []}, now=2000.0).to_mapping()
+        route = next(r for r in vm["routes"] if r["id"] == "rt-live")
+        visibility = route["visibility"]
+        self.assertEqual(visibility["shape"], "solo")
+        owner = next(text for label, text, _tone in visibility["lines"] if label == "owner")
+        self.assertIn("att-live", owner)
+        self.assertIn("working", owner)
 
 
 class RouteVisibilityRenderTests(unittest.TestCase):

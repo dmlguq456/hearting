@@ -16,7 +16,7 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import exec_child_is_wait
+from ..model import current_attempt_rank, exec_child_is_wait
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -1098,7 +1098,13 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if record:
             # Display only: shape and its basis, stages, verification and next step, read
             # from this route's own record, Fleet's view and its outcome sidecar.
-            route["visibility"] = route_visibility.bounded(route_visibility.describe(record, view))
+            # A solo route's owner is its one-shot node's own attempt, not a separate row.
+            depth_one = [job for job in owner_jobs
+                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+            shown_owner = owner if owner is not None else (
+                max(depth_one, key=current_attempt_rank) if depth_one else None)
+            route["visibility"] = route_visibility.bounded(route_visibility.describe(
+                record, view, owner=route_visibility.owner_from_job(shown_owner)))
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
