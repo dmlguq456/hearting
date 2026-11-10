@@ -1661,6 +1661,26 @@ lease. Temporary branch deletion uses an exact-head lease too and does not
 rerun source pre-push hooks: it publishes no source change. All three
 harnesses use the same implementation.
 
+A PR's author → independent review → publish chain is linked by the sessions
+already named in the assignment, not by a supervisor relay.
+`hearting run pr-chain next [<PR>|<branch>] [--review <report>]` derives the
+chain's current step again from the PR's GitHub state (head, draft,
+mergeability, and the head's checks read the same way as `merge-line`) and the
+reviewer's report, and prints one line `pr_chain=<state> … role=<role>
+next=<action>`; it stores, sends, merges and comments nothing. The report's first
+`최종 판정:`/`Final verdict:`/`Verdict:` line is its current verdict (later
+lines are history); a verdict that does not name the current head (at least its
+7-hex prefix) is `review-stale`. A finished source route
+(`capability-route finish`) prints the same line as `next:` on stderr when its
+branch has an open PR. The author sends the review request (PR, exact head,
+author report) directly to the reviewer named in its assignment and copies the
+requester; the reviewer sends its final verdict directly to the named publisher
+and copies the requester; the publisher, on `awaiting-ci` or `ready-to-publish`,
+starts `merge-line`, which itself waits for that head's CI and refuses a failure,
+then continues its existing release/install flow without asking the requester
+again. A changed head returns to the reviewer (`review-stale`). With no reviewer
+or publisher named, the step goes to the requester as this `next=` line.
+
 Release publication uses immutable tags and the tested commit. Repeated or
 out-of-order successful checks are ordinary observations: refresh tags before
 reserving a version, reuse a tag for the same commit, and skip a commit already
@@ -3552,7 +3572,8 @@ has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
 remain receipt facts.
 For an actionable peer request that can be completed now, reply once with the
-result. For work that will wait or take sustained effort, send one short receipt and
+result; a PR result also goes straight to the next role its assignment names
+(§5.11 `pr-chain`). For work that will wait or take sustained effort, send one short receipt and
 continue through the existing registered continuation. Informational/no-reply
 notices need no reply. Put the condition, result, and any required decision or
 blocker first; keep PID, start, exit, digest, and path detail in existing

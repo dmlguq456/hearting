@@ -2410,6 +2410,18 @@ def main():
         location=_result_location_line(route)
         if location:
             print(location,file=sys.stderr)
+        # The finished branch's PR names its next chain step (review request, fix, publish)
+        # from GitHub's current state; read-only, best effort, silent without a GitHub remote.
+        try:
+            import importlib.util as _ilu
+            _spec=_ilu.spec_from_file_location("pr_chain", Path(__file__).with_name("pr-chain.py"))
+            _chain=_ilu.module_from_spec(_spec); _spec.loader.exec_module(_chain)
+            chain=("" if route.get("source_commit") in (None,"","unversioned")
+                   else _chain.finish_line(route.get("cwd")))
+        except Exception:
+            chain=""
+        if chain:
+            print(chain,file=sys.stderr)
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
