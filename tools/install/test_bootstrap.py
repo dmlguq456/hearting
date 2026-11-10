@@ -381,8 +381,9 @@ class LauncherMigrationTest(unittest.TestCase):
         for unsafe in ("('../x', 'a')", "('ok', '../a')", "('ok', '/abs')", "'bad'"):
             source.write_text(f"TOOL_LAUNCHERS = ({unsafe},)\n", encoding="utf-8")
             self.assertEqual(distribution._release_extra_tool_launchers(root), (), unsafe)
-        source.unlink()
-        self.assertEqual(distribution._release_extra_tool_launchers(root), ())
+        empty = self.root / "release-without-table"
+        empty.mkdir()
+        self.assertEqual(distribution._release_extra_tool_launchers(empty), ())
 
     def test_old_client_update_rolls_back_launchers_after_state_commit_failure(self):
         fixture = self._managed_update_fixture()
