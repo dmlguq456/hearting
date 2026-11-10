@@ -80,6 +80,17 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
                                        env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(stale.returncode, 0, stale.stderr)
                 self.assertIsNotNone(interaction.read_wait("ses-hook", "opencode"))
+                unscoped = subprocess.run([sys.executable, str(hook), "clear", "--harness", "opencode"],
+                                          input=json.dumps({"session_id": "ses-hook"}),
+                                          env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(unscoped.returncode, 0, unscoped.stderr)
+                self.assertIsNotNone(interaction.read_wait("ses-hook", "opencode"))
+                # A finished tool call or turn clears the session's wait (PG-37).
+                session = subprocess.run([sys.executable, str(hook), "clear", "--harness", "opencode"],
+                                         input=json.dumps({"session_id": "ses-hook", "scope": "session"}),
+                                         env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(session.returncode, 0, session.stderr)
+                self.assertIsNone(interaction.read_wait("ses-hook", "opencode"))
 
     def test_missing_wait_counts_stay_unknown_and_private_keys_never_enter_projection(self):
         result = self.result()

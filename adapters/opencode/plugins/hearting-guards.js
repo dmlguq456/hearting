@@ -53,6 +53,17 @@ function publishInteraction(action, sessionID, refs = {}, kind = null) {
     if (interactionWrites.get(sessionID) === pending) interactionWrites.delete(sessionID)
   })
   interactionWrites.set(sessionID, pending)
+  return pending
+}
+
+function interactionWaitPresent(sessionID) {
+  // fleet.interaction.sidecar_path: a cheap check so a session with no wait spawns nothing.
+  if (!/^[A-Za-z0-9_.-]+$/.test(sessionID || "")) return false
+  const home = process.env.HOME || ""
+  const base = process.env.FLEET_INTERACTION_STATE_DIR || path.join(process.env.XDG_STATE_HOME
+    || (home ? path.join(home, ".local", "state") : ""), "agent-fleet", "interactions")
+  if (!path.isAbsolute(base)) return false
+  try { return existsSync(path.join(base, "opencode", `${sessionID}.json`)) } catch { return false }
 }
 
 const herdrProjection = path.join(root, "tools", "fleet", "herdr_projection.py")
@@ -1265,6 +1276,12 @@ async function setupOpenCodeV2(ctx) {
       // same shape V1 hands `tool.execute.after`); keep it so the shared hook reads one shape.
       const metadata = event.status === "completed" && event.result?.metadata
         && typeof event.result.metadata === "object" ? { ...event.result.metadata } : {}
+      // The V2 shell tool reports its exit status in `result.output.exit` (2.0.32: a failed
+      // command is a completed result with exit 128), where V1 used `metadata.exit`.
+      const shellExit = event.status === "completed" ? event.result?.output?.exit : undefined
+      if (event.tool === "shell" && Number.isInteger(shellExit) && !Number.isInteger(metadata.exit)) {
+        metadata.exit = shellExit
+      }
       const output = { output: Array.isArray(content)
         ? content.map((part) => part?.text || "").filter(Boolean).join("\n") : "",
         metadata: event.status === "error" ? { exit: 1 } : metadata }
@@ -1430,7 +1447,7 @@ async function setupOpenCodeV2(ctx) {
   void (async () => {
     try {
       for await (const native of ctx.event.subscribe({ signal: controller.signal })) {
-        const data = native?.data || native?.properties || {}
+            const data = native?.data || native?.properties || {}
         const info = data.info || data.session || null
         const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
@@ -3424,6 +3441,10 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         })
       }
       if (!isWorkerSession()) {
+        // Claude's Stop clear: a finished, failed or interrupted turn waits on no one.
+        if (eventSid && interactionWaitPresent(eventSid)) {
+          publishInteraction("clear", eventSid, { scope: "session" })
+        }
         spawnIdleObserver(eventSid, baseDir(ctx))
         spawnTurnChangeRecord("end", eventSid, baseDir(ctx))
         spawnSummary(eventSid, "final")
@@ -3662,7 +3683,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const nativeExit = output?.metadata?.exit
     const instanceDir = typeof ctx.directory === "string" && path.isAbsolute(ctx.directory)
       ? ctx.directory : ""
-    if (toolName === "bash" && typeof args.command === "string" && instanceDir &&
+    if ((toolName === "bash" || toolName === "shell") && typeof args.command === "string" && instanceDir &&
         Number.isInteger(nativeExit) && nativeExit > 0 && nativeExit <= 128 &&
         typeof output?.output === "string") {
       const cwd = typeof args.workdir === "string"
@@ -3694,6 +3715,13 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       if (isDesignHtml(file)) runPreflight("design", [file])
     }
     await projectPane(input.sessionID || "", ctx, true)
+    if (!isWorkerSession() && input.sessionID && pendingPeerStatus.get(input.sessionID) !== "blocked"
+        && interactionWaitPresent(input.sessionID)) {
+      // Claude's PostToolUse/PostToolUseFailure clear: a finished tool call (a failed one
+      // too) means the session is no longer waiting on the person. An open question or
+      // permission of this session keeps its exact wait until its own reply clears it.
+      await publishInteraction("clear", input.sessionID, { scope: "session" })
+    }
     if (!isWorkerSession() && input.sessionID && typeof output?.output === "string"
         && input.peerContext !== false && pendingPeerStatus.get(input.sessionID) !== "blocked") {
       // Claude's PostToolUse peer context: a report owed to this session while it
