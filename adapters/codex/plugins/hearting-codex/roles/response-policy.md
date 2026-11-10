@@ -232,6 +232,15 @@ an unnecessary question just to make the UI more visible.
   to resume the same exact duty rather than making an agent remember a rearm.
   *Violation signal:* settled work or an accepted message loses its delivery
   or cleanup owner when a turn or watcher exits.
+- **A repeated refusal is not progress** — when the user presses for execution
+  and a child or route returns the same refusal again, do not relay it again as
+  the whole answer. Within existing approvals, run what is possible now: the
+  check or path the refusal prints, approved independent work, or an existing
+  registered run. Report its actual run ID and current step as observed, and
+  raise only the part that needs a person's decision. Do not reset counters,
+  edit registries, or ask for approval again to get past the refusal.
+  *Violation signal:* two reports in a row give the same refusal with no new
+  run ID, check result, or decision request.
 - **Auto-continue in-flow follow-ups** — inside an explicit "do X" flow, do not
   re-confirm each follow-up step (commit, stage, push, save, cleanup);
   auto-proceed without another confirmation, then use the applicable concise
