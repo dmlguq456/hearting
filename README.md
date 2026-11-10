@@ -155,8 +155,10 @@ a task. Select a session to open its page, or expand its row in OVERVIEW.
 
 ### Optional session panel
 
-`hearting session shell enable` enables a common status area and a HEARTING work panel
-for new Claude, Codex and OpenCode terminals. It is off by default;
+New installations enable a common status area and a HEARTING work panel
+for new Claude, Codex and OpenCode terminals. Updates preserve existing choices,
+including older installations without a shell policy. `hearting session shell
+enable` enables it explicitly;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
