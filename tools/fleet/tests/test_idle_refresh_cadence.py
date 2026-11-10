@@ -38,6 +38,23 @@ class IdleCadenceTest(unittest.TestCase):
         cadence.started(31.0)
         self.assertFalse(cadence.dirty)
 
+    def test_content_writes_run_at_most_once_per_content_interval(self):
+        cadence = native_events.IdleCadence(30.0, 10.0)
+        cadence.started(0.0)
+        cadence.mark_content()
+        self.assertFalse(cadence.due(5.0))
+        self.assertTrue(cadence.due(10.0))
+        cadence.started(10.0)
+        self.assertFalse(cadence.due(15.0))   # nothing new since that run
+        self.assertTrue(cadence.due(40.0))    # fallback
+        cadence.mark_content()
+        cadence.mark()                        # structural change wins at once
+        self.assertTrue(cadence.due(11.0))
+        unthrottled = native_events.IdleCadence(30.0, None)
+        unthrottled.started(0.0)
+        unthrottled.mark_content()
+        self.assertTrue(unthrottled.due(0.5))
+
     def test_no_installed_watch_keeps_the_periodic_cadence(self):
         cadence = native_events.IdleCadence(30.0)
         cadence.started(0.0)
@@ -50,6 +67,10 @@ class IdleCadenceTest(unittest.TestCase):
         self.assertEqual(resolve(2.0, env={"FLEET_IDLE_REFRESH_INTERVAL": "45"}), 45.0)
         self.assertEqual(resolve(2.0, env={"FLEET_IDLE_REFRESH_INTERVAL": "0.5"}), 2.0)
         self.assertIsNone(resolve(2.0, env={"FLEET_IDLE_REFRESH_INTERVAL": "0"}))
+        content = native_events.content_refresh_interval
+        self.assertEqual(content(2.0, env={}), native_events.DEFAULT_CONTENT_REFRESH)
+        self.assertEqual(content(2.0, env={"FLEET_CONTENT_REFRESH_INTERVAL": "5"}), 5.0)
+        self.assertIsNone(content(2.0, env={"FLEET_CONTENT_REFRESH_INTERVAL": "0"}))
         self.assertEqual(resolve(2.0, env={"FLEET_IDLE_REFRESH_INTERVAL": "x"}),
                          native_events.DEFAULT_IDLE_REFRESH)
 
@@ -97,6 +118,36 @@ class BasicEventsTest(unittest.TestCase):
         self.assertFalse(self.events.watching)
 
 
+class ProcessBirthsTest(unittest.TestCase):
+    def test_a_new_harness_like_process_marks_once(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proc = Path(tmp.name)
+        clock = [0.0]
+
+        def spawn(pid, comm):
+            (proc / str(pid)).mkdir()
+            (proc / str(pid) / "comm").write_text(comm + "\n")
+
+        spawn(10, "bash")
+        births = native_events.ProcessBirths(clock=lambda: clock[0], proc_root=str(proc))
+        births._uid = os.stat(proc).st_uid  # the fixture owner stands in for this user
+        self.assertFalse(births.changed())          # the first listing is the baseline
+        spawn(11, "python3")                        # forked, not yet exec'd
+        self.assertFalse(births.changed())
+        (proc / "11" / "comm").write_text("codex\n")  # exec within the young window
+        clock[0] = 2.0
+        self.assertTrue(births.changed())
+        self.assertFalse(births.changed())          # one mark per process
+        spawn(12, "2.1.322")                        # native Claude names itself by version
+        self.assertTrue(births.changed())
+        spawn(13, "git")
+        self.assertFalse(births.changed())
+        clock[0] = 20.0
+        (proc / "13" / "comm").write_text("claude\n")
+        self.assertFalse(births.changed())          # too old to be a new session start
+
+
 class BasicEventSourcesTest(unittest.TestCase):
     def test_live_rows_contribute_files_and_processes_finished_rows_do_not(self):
         pid = os.getpid()
@@ -109,21 +160,30 @@ class BasicEventSourcesTest(unittest.TestCase):
         snapshot = SimpleNamespace(sessions=[live], jobs=[ended], resources=[resource])
         display = (("/home/u/.claude/.statusline/s.json", "/t/rollout.jsonl"),
                    (("/state/codex", "session-shell-"),), ())
-        paths, patterns, processes = native_events.basic_event_sources(snapshot, display)
-        self.assertIn("/t/live.jsonl", paths)
-        self.assertIn("/t/run.log", paths)
+        from fleet import session_registry
+        registry = os.path.join(session_registry._dir_for("codex"), "77.json")
+        display = (display[0] + (registry,), display[1], display[2])
+        structural, content = native_events.basic_event_sources(snapshot, display)
+        paths, patterns, processes = structural
+        changed = content[0]
+        self.assertIn("/t/live.jsonl", changed)
+        self.assertIn("/t/run.log", changed)
+        self.assertIn("/t/rollout.jsonl", changed)
         self.assertIn("/t/run.json", paths)
-        self.assertIn("/t/rollout.jsonl", paths)
-        self.assertNotIn("/t/ended.log", paths)
-        self.assertNotIn("/home/u/.claude/.statusline/s.json", paths)
+        self.assertIn(registry, paths)
+        for path in ("/t/live.jsonl", "/t/run.log", "/t/rollout.jsonl"):
+            self.assertNotIn(path, paths)
+        self.assertNotIn("/t/ended.log", paths + changed)
+        self.assertNotIn("/home/u/.claude/.statusline/s.json", paths + changed)
         self.assertIn((pid, start), processes)
         self.assertIn(("/state/codex", "session-shell-"), patterns)
-        from fleet import session_registry
         self.assertIn((session_registry._dir_for("claude"), ""), patterns)
+        from fleet import route_chain
+        self.assertIn((os.path.join(route_chain.state_root(), "codex"), ""), patterns)
         from fleet.collectors import dispatch
         self.assertIn(str(dispatch._jobs_path()), paths)
         self.assertEqual(native_events.basic_event_sources(snapshot, display),
-                         (paths, patterns, processes))
+                         (structural, content))
 
 
 class UnchangedTagSnapshotTest(unittest.TestCase):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from pathlib import Path
 import selectors
 import struct
@@ -26,6 +27,7 @@ class NativeDisplayEvents:
     def __init__(self):
         self._lock = threading.Lock()
         self._dirty = threading.Event()
+        self._reset = threading.Event()
         self._stopped = threading.Event()
         self.ready = threading.Event()
         # True only while a kernel watch set is installed. A consumer that
@@ -67,6 +69,13 @@ class NativeDisplayEvents:
         if changed:
             self._dirty.clear()
         return changed
+
+    def take_reset(self):
+        """True once after a watch set was lost or rebuilt on overflow."""
+        reset = self._reset.is_set()
+        if reset:
+            self._reset.clear()
+        return reset
 
     def _wake(self):
         with self._lock:
@@ -230,6 +239,7 @@ class NativeDisplayEvents:
                         changed, reset = self._files_changed(event_fd, watched)
                         if reset:
                             self.watching = False
+                            self._reset.set()
                             self.ready.clear()
                         if changed:
                             self._dirty.set()
@@ -256,53 +266,82 @@ class NativeDisplayEvents:
 # see (NFS writes from another host, /proc births, Herdr panes, remote hosts)
 # and clock-derived fields still refresh at this cadence.
 DEFAULT_IDLE_REFRESH = 30.0
+# Content writes of sessions already on the board (transcripts, rollouts, the
+# OpenCode WAL, progress logs) restart basic collection at most this often. The
+# native display reader keeps their model/effort/context cells current at once.
+DEFAULT_CONTENT_REFRESH = 10.0
 MIN_IDLE_REFRESH = 2.0
 _SOURCE_LIMIT = 512
 
 
-def idle_refresh_interval(interval, env=None):
-    """``FLEET_IDLE_REFRESH_INTERVAL`` seconds; ``0`` keeps the periodic cadence."""
-    env = os.environ if env is None else env
-    raw = env.get("FLEET_IDLE_REFRESH_INTERVAL")
+def _seconds(env, name, default, interval):
+    raw = env.get(name)
     if raw is None or not str(raw).strip():
-        return max(float(interval), DEFAULT_IDLE_REFRESH)
+        return max(float(interval), default)
     try:
         value = float(raw)
     except ValueError:
-        return max(float(interval), DEFAULT_IDLE_REFRESH)
+        return max(float(interval), default)
     if value <= 0:
         return None
     return max(float(interval), MIN_IDLE_REFRESH, value)
 
 
+def idle_refresh_interval(interval, env=None):
+    """``FLEET_IDLE_REFRESH_INTERVAL`` seconds; ``0`` keeps the periodic cadence."""
+    return _seconds(os.environ if env is None else env, "FLEET_IDLE_REFRESH_INTERVAL",
+                    DEFAULT_IDLE_REFRESH, interval)
+
+
+def content_refresh_interval(interval, env=None):
+    """``FLEET_CONTENT_REFRESH_INTERVAL`` seconds; ``0`` treats content writes as structural."""
+    return _seconds(os.environ if env is None else env, "FLEET_CONTENT_REFRESH_INTERVAL",
+                    DEFAULT_CONTENT_REFRESH, interval)
+
+
 class IdleCadence:
     """Gate a periodic pump on input change notifications.
 
-    Any notification, watch reset, user input or explicit refresh marks the
-    inputs dirty and restores the pump's own cadence at once. While nothing is
-    dirty, one fallback run per ``idle_interval`` keeps unwatched inputs and
+    A structural change (registries, dispatch logs, route state, a watched
+    process exit, a watch reset), user input or an explicit refresh restores the
+    pump's own cadence at once. A content write of an already shown session
+    runs the pump at most once per ``content_interval``. While nothing changed,
+    one fallback run per ``idle_interval`` keeps unwatched inputs and
     clock-driven fields current. Without an installed watch set the pump keeps
     its normal cadence.
     """
 
-    def __init__(self, idle_interval):
+    def __init__(self, idle_interval, content_interval=None):
         self.idle_interval = None if idle_interval is None else float(idle_interval)
+        self.content_interval = None if content_interval is None else float(content_interval)
         self._dirty = True
+        self._content = False
         self._last_start = None
 
     def mark(self):
         self._dirty = True
+
+    def mark_content(self):
+        if self.content_interval is None:
+            self._dirty = True
+        else:
+            self._content = True
 
     @property
     def dirty(self):
         return self._dirty
 
     def due(self, now, *, watching=True):
-        return (self.idle_interval is None or not watching or self._dirty
-                or self._last_start is None or now - self._last_start >= self.idle_interval)
+        if (self.idle_interval is None or not watching or self._dirty
+                or self._last_start is None):
+            return True
+        elapsed = now - self._last_start
+        if self._content and elapsed >= self.content_interval:
+            return True
+        return elapsed >= self.idle_interval
 
     def started(self, now):
-        self._dirty = False
+        self._dirty = self._content = False
         self._last_start = float(now)
 
 
@@ -322,35 +361,57 @@ def _proc_identity(pid, birth):
     return pid, actual
 
 
-def basic_event_sources(snapshot, display_sources=None):
-    """Watchable inputs of one basic collection: ``(paths, patterns, processes)``.
+def _limited(paths, patterns, processes):
+    return (tuple(sorted(paths))[:_SOURCE_LIMIT], tuple(sorted(patterns))[:_SOURCE_LIMIT],
+            tuple(sorted(processes))[:_SOURCE_LIMIT])
 
-    Only stable, existing identities are listed so an unchanged board keeps one
-    watch set. Paths are files whose parent directory is watched; patterns are
-    ``(directory, prefix)`` with ``""`` meaning any entry of that directory.
+
+def basic_event_sources(snapshot, display_sources=None):
+    """Watchable inputs of one basic collection: ``(structural, content)``.
+
+    Each part is ``(paths, patterns, processes)``. Paths are files whose parent
+    directory is watched; patterns are ``(directory, prefix)`` with ``""``
+    meaning any entry. Structural inputs decide which rows exist and how they
+    are bound; content inputs are the activity files of rows already shown.
+    Only stable, live identities are listed so an unchanged board keeps one
+    watch set.
     """
     paths, patterns, processes = set(), set(), set()
+    content = set()
+    registry_dirs = set()
+    try:
+        from . import session_registry
+        for harness in ("claude", "codex", "opencode"):
+            directory = str(session_registry._dir_for(harness))
+            registry_dirs.add(directory)
+            patterns.add((directory, ""))
+    except Exception:
+        pass
     if display_sources:
         try:
             shown_paths, shown_patterns, shown_processes = display_sources
-            # A Claude statusline tap is rewritten about once a minute while
-            # idle; the display reader owns those values, not basic collection.
-            paths.update(str(path) for path in shown_paths
-                         if Path(str(path)).parent.name != ".statusline")
+            for path in shown_paths:
+                path = str(path)
+                parent = Path(path).parent
+                if parent.name == ".statusline":
+                    # Rewritten about once a minute while idle; the display
+                    # reader alone owns those cells.
+                    continue
+                (paths if str(parent) in registry_dirs else content).add(path)
             patterns.update(tuple(item) for item in shown_patterns)
             processes.update(tuple(item) for item in shown_processes)
         except (TypeError, ValueError):
             pass
     try:
-        from . import session_registry
-        for harness in ("claude", "codex", "opencode"):
-            patterns.add((str(session_registry._dir_for(harness)), ""))
-    except Exception:
-        pass
-    try:
         from .collectors import dispatch
         paths.add(str(dispatch._jobs_path()))
         paths.update(str(path) for path in dispatch._installed_registry_paths())
+    except Exception:
+        pass
+    try:
+        from . import route_chain
+        root = str(route_chain.state_root())
+        patterns.update((os.path.join(root, harness), "") for harness in ("claude", "codex", "opencode"))
     except Exception:
         pass
     try:
@@ -374,9 +435,68 @@ def basic_event_sources(snapshot, display_sources=None):
             # arrive through the watched registries or the fallback.
             continue
         processes.add(identity)
-        for attribute in ("_transcript_path", "log_path", "registry_path"):
+        for attribute, target in (("_transcript_path", content), ("log_path", content),
+                                  ("registry_path", paths)):
             value = getattr(row, attribute, None)
             if isinstance(value, (str, os.PathLike)) and str(value):
-                paths.add(str(value))
-    return (tuple(sorted(paths))[:_SOURCE_LIMIT], tuple(sorted(patterns))[:_SOURCE_LIMIT],
-            tuple(sorted(processes))[:_SOURCE_LIMIT])
+                target.add(str(value))
+    content -= paths
+    return _limited(paths, patterns, processes), _limited(content, (), ())
+
+
+_HARNESS_COMMS = frozenset(("claude", "codex", "opencode", "node"))
+_VERSION_COMM = re.compile(r"\d+\.\d+\.\d+")   # a native Claude binary names itself by version
+_YOUNG_SECONDS = 10.0
+
+
+class ProcessBirths:
+    """Notice a new same-user harness-like process between basic collections.
+
+    Process creation has no kernel notification Fleet can watch. One listing of
+    ``/proc`` and a ``comm`` read of new (or still young) PIDs is enough to
+    restore the normal cadence for a session or worker that has not written
+    any watched registry yet; the census itself stays in basic collection.
+    """
+
+    def __init__(self, clock=None, proc_root="/proc"):
+        import time as _time
+        self._clock = clock or _time.monotonic
+        self._root = proc_root
+        self._known = None
+        self._young = {}
+        self._uid = os.getuid()
+
+    def _comm(self, name):
+        try:
+            if os.stat(os.path.join(self._root, name)).st_uid != self._uid:
+                return None
+            with open(os.path.join(self._root, name, "comm"), "rb") as handle:
+                return handle.read().decode("utf-8", "replace").strip()
+        except OSError:
+            return None
+
+    def changed(self):
+        try:
+            current = {name for name in os.listdir(self._root) if name.isdigit()}
+        except OSError:
+            return False
+        now = self._clock()
+        if self._known is None:
+            self._known = current
+            return False
+        born = current - self._known
+        self._known = current
+        for name in born:
+            self._young[name] = now
+        found = False
+        for name, seen in list(self._young.items()):
+            if name not in current or now - seen > _YOUNG_SECONDS:
+                self._young.pop(name, None)
+                continue
+            comm = self._comm(name)
+            if comm is None:
+                self._young.pop(name, None)
+            elif comm in _HARNESS_COMMS or _VERSION_COMM.fullmatch(comm):
+                self._young.pop(name, None)  # one mark per process
+                found = True
+        return found
