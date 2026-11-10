@@ -4268,7 +4268,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
 
 
 # `context` is the OpenCode tool-output boundary, whose plugin kills the child
-# 1.5 s after spawning it; stop claiming 1.0 s after this process started.
+# 2.5 s after spawning it (then still reads what it flushed); stop claiming 1.0 s
+# after this process started.
 _CONTEXT_CLI_BUDGET_S = 1.0
 
 
