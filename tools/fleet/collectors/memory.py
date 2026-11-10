@@ -199,6 +199,58 @@ _OPEN_TYPES = ("unresolved-obligation", "backlog", "task", "todo", "obligation")
 _project_cache = {}
 
 
+# Kinds that record a finished outcome, an observation or a pointer, never open work by
+# themselves; a ``backlog`` tag on them names the topic, not a pending item.
+_FINISHED_TYPES = frozenset(("completion", "observation", "artifact-pointer", "feedback",
+                             "user-correction", "decision"))
+_FINISHED_TAGS = frozenset(("resolved", "done", "closed"))
+_OPEN_MARKER_WORDS = ("백로그", "진행", "미확인", "부분 설치", "미해결", "수리")
+_HEADLINE_MARKER = re.compile(r"^\s*\[([^\]]{1,40})\]")
+OPEN_STAGES = ("doing", "waiting", "open")
+
+
+def _refers_to_route(route_id, references):
+    if not route_id:
+        return False
+    for reference in references or ():
+        text = str(reference)
+        if text == route_id or re.search(r"(?<![A-Za-z0-9])" + re.escape(route_id) +
+                                         r"(?![A-Za-z0-9])", text):
+            return True
+    return False
+
+
+def open_stage(record, routes=()):
+    """How far a possibly-open record got: ``doing``, ``waiting``, ``open`` or None (not open work).
+
+    Only what the record and the routes already say is used: its type, tags, headline marker
+    (``[진행 중]``, ``[설치 완료·실사용 미확인]``, ``[해결 확인]`` …) and an exact route link.
+    An obligation or backlog record with neither stays open on record, never "in progress".
+    """
+    headline = record.get("headline")
+    match = _HEADLINE_MARKER.match(headline if isinstance(headline, str) else "")
+    marker = match.group(1) if match else ""
+    if "해결" in marker and "미해결" not in marker:
+        return None
+    rtype = str(record.get("type") or "").casefold()
+    tags = {str(tag).strip("[]\"' ").casefold() for tag in record.get("tags") or ()}
+    if rtype in _FINISHED_TYPES or tags & _FINISHED_TAGS:
+        return None
+    if not (rtype in _OPEN_TYPES or "backlog" in tags
+            or any(word in marker for word in _OPEN_MARKER_WORDS)):
+        return None
+    refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
+    linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
+    if "진행" in marker or any(route.get("state") in ("working", "blocked") or
+                              any(stage.get("st") == "active" for stage in route.get("stages") or ())
+                              for route in linked):
+        return "doing"
+    if "미확인" in marker or "부분 설치" in marker or any(
+            route.get("state") == "done" and route.get("outcome") == "success" for route in linked):
+        return "waiting"
+    return "open"
+
+
 def _json_strings(value, limit=80):
     if isinstance(value, (list, tuple)):
         items = value

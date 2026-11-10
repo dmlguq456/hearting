@@ -9,6 +9,9 @@ def observe(cwd):
         return [], []
     path = memory._db_path()
     repo = project_of(cwd)
-    data = memory._read_project_memory(datetime.date.today().isoformat(), decisions=0, open_limit=32, repo=repo)
+    data = memory._read_project_memory(datetime.date.today().isoformat(), decisions=0, repo=repo)
     project = data.get("by_repo", {}).get(repo, {})
-    return list(project.get("open") or ()), [str(path), str(path) + "-wal"]
+    # The same classification as the repo page: finished, observed and resolved records
+    # are not open work, so the block count matches what Explorer shows.
+    rows = [row for row in project.get("open") or () if memory.open_stage(row) is not None]
+    return rows, [str(path), str(path) + "-wal"]
