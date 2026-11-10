@@ -66,7 +66,11 @@ question, the panel always paints the rest of the statusline (folder, title,
 full thread ID, branch with dirty, ahead/behind, worktrees and Git
 observation, quota resets and running jobs), then peer news and the last
 input, each only in rows left after the question, and an item without a value
-is left out. Claude's exact statusline callback remains the source of its
+is left out. Running jobs join the last session row when they fit. While a
+question leaves too few rows for every session row, the title, running jobs
+and branch, in that order, are packed into the rows left (a side panel's spacer
+row included) and then into the panel's bottom edge, so they never leave the
+screen; the question keeps the rows it had. Claude's exact statusline callback remains the source of its
 values; the panel shows them in the same header, compact status and session
 rows as the other harnesses.
 Fields already painted in a native-owned status area are omitted from the compact duplicate.

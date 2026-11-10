@@ -119,6 +119,50 @@ assert(!r.hits.some(h=>h.action==='details'));
         self.assertNotIn("?", text(session_status({"harness": "claude", "state": "idle"}, 36)))
         self.assertEqual(session_status({"harness": "claude", "state": "idle"}, 36), [])
 
+    def test_title_and_jobs_stay_on_screen_while_a_question_takes_the_session_rows(self):
+        # Review [52] missing-field probe: a question at 80x14, its focused
+        # editor, and OpenCode's 35-column sidebar used to drop every session
+        # row, leaving the title and running jobs nowhere on screen.
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.session_panel import presentation
+        values = {"harness": "claude", "tag": "[cb]", "state": "idle", "title": "REVIEW1463_TITLE",
+                  "branch": "values-fixture*", "cwd": "/x/project", "model": "fixture", "effort": "high",
+                  "ctx_pct": 15, "jobs": "REVIEW1463_JOB",
+                  "git": {"repo": 1, "operation": "none", "ahead": 2, "behind": 1, "extra_worktrees": 3,
+                          "observation": "fresh", "observed_label": "21:56:43"}}
+        plain = lambda rows: [[{"text": text} for text, _key in row] for row in rows]
+        models = {}
+        for columns in (80, 35):
+            panel = presentation(values, {}, "claude", "sid", columns)
+            models[columns] = {**{key: plain(panel[key]) for key in ("summary", "session", "brief")},
+                               "model": plain([panel["model"]])[0]}
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
+const question=['◑ 질문 1 · 1/1 · 답변 필요','REVIEW1463: 결과를 어디에 둘까요?','1 현재 프로젝트 (추천)','2 다른 폴더','Ctrl+] · 답변 필요','more','more 2'].map(text=>[{text}]);
+const routes=[{title:'REVIEW1463_ROUTE',state:'blocked',stages:[{name:'one-shot',current:true}],visibility:{summary:'검증 ?'}}];
+const paint=(width,height,side,focused,model)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
+ model:{...model,answerable:true,routes},sections:{tail:[[{text:'› last input'}]]},questions:o=>question.slice(0,o.budget)})
+ .rows.map(r=>r.map(p=>p.text).join(''));
+const asked=rows=>rows.filter(s=>question.some(q=>s.includes(q[0].text)));
+for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
+ const model=models[width===35?35:80],rows=paint(width,height,side,focused,model);
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB'])
+  assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
+ if(width===80)assert(rows.some(s=>s.includes('values-fixture*')),'branch lost at 80');
+ // The question keeps exactly the rows it has without any session value.
+ assert.deepEqual(asked(rows),asked(paint(width,height,side,focused,{...model,session:[],brief:[]})));
+ assert(rows.length<=height);
+}
+// Running jobs join the branch row at 80, saving the row a separate job row took.
+const idle=view.render({width:80,height:14,side:false,sid:'s',configuration:{},model:{...models[80],routes:[{...routes[0],state:'working'}]},
+ questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+assert(idle.some(s=>s.includes('⎇ values-fixture*')&&s.includes('running: REVIEW1463_JOB')),idle.join('\n'));
+assert(/^└─+┘$/.test(idle.at(-1)));
+'''
+        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"), json.dumps(models)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''
 const assert=require('node:assert/strict'),d=require(process.argv[1]);

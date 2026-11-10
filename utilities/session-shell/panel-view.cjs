@@ -39,7 +39,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
-  const inner=width-4,content=[],hits=[];
+  const inner=width-4,content=[],hits=[],edge=[];
   function add(parts,action){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);}
   function wrap(parts,maximum=3,action,into){
     // `into` collects the rows for a caller that places them after measuring.
@@ -117,7 +117,10 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       for(const row of detail.slice(page*budget,(page+1)*budget))add(row);
     }else{
       add(line(t('work','Current work')+(side?'':' · '+(model.title||t('no_work','No confirmed work yet')))));
-      if(side){wrap(line(model.title||(!sid||model.routes_known?t('no_work','No confirmed work yet'):t('checking','Checking')),'loc_repo'),2);add([]);}
+      // A side panel's spacer row goes to the session items while a question
+      // is shown; the question's own budget below still counts it.
+      const reserved=side&&asking?1:0;
+      if(side){wrap(line(model.title||(!sid||model.routes_known?t('no_work','No confirmed work yet'):t('checking','Checking')),'loc_repo'),2);if(!reserved)add([]);}
       const routeTitle=first?.title||model.route_label||(model.routes_known?t('no_routes','No current route'):t('checking','Checking'));
       const flow=(first?.stages||[]).map(s=>(s.current?'› ':'')+(s.name||s.id||'')).filter(Boolean).join(' → ');
       const heading=!side&&flow?'⏳ '+t('routes','Route')+' · '+routeTitle+' · '+flow:side&&first?.title===model.title?'⏳ '+t('routes','Route'):
@@ -135,11 +138,11 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       // At a short bottom editor the answer owns the scarce rows, identically
       // for every harness. Session telemetry takes only the rows left after it.
       const summary=focused&&!side?[]:(model.summary||[]).slice(0,2);
-      const remaining=Math.max(2,height-2-content.length-summary.length);
+      const remaining=Math.max(2,height-2-content.length-reserved-summary.length);
       const q=questions({budget:Math.max(2,remaining-2),columns:inner-4});
       if(q.length){
         add(line('╭'+'─'.repeat(inner-2)+'╮',asking?'lvl_y':'dim'),'question');
-        for(const row of q.slice(0,Math.max(0,height-3-content.length))){
+        for(const row of q.slice(0,Math.max(0,height-3-reserved-content.length))){
           const fit=clip(row,inner-4);
           add([text('│ ',asking?'lvl_y':'dim'),...fit.parts,text(' '.repeat(inner-3-fit.used)),text('│',asking?'lvl_y':'dim')],'question');
         }
@@ -157,7 +160,27 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       let room=Math.max(0,height-2-content.length);
       const kept=summary.slice(0,room);room-=kept.length;
       const session=[],quiet=focused&&!side;
-      if(!quiet)for(const row of model.session||[]){const rows=[];wrap(row,4,undefined,rows);if(rows.length>room)break;session.push(...rows);room-=rows.length;}
+      let placed=0;
+      if(!quiet)for(const row of model.session||[]){const rows=[];wrap(row,4,undefined,rows);if(rows.length>room)break;session.push(...rows);room-=rows.length;placed++;}
+      // When the question leaves no rows for every session row, title, jobs
+      // and branch still stay on screen, in that order: packed into the
+      // spare rows, then into the bottom edge.
+      if(placed<(model.session||[]).length&&!settings){
+        // Partial session rows would spend the spare rows on the folder first.
+        room+=session.length;session.length=0;
+        const items=model.brief||[];
+        const slots=Array.from({length:room},()=>[]);slots.push(edge);
+        const size=parts=>measure(parts.map(p=>clean(p.text)).join(''));
+        const limit=i=>i<room?inner:width-6;
+        for(const item of items){
+          let i=slots.findIndex((slot,n)=>size(slot)+(slot.length?3:0)+size(item)<=limit(n));
+          if(i<0)i=slots.findIndex(slot=>!slot.length);
+          if(i<0)break;
+          if(slots[i].length)slots[i].push(text(' · '));
+          slots[i].push(...item);
+        }
+        for(const slot of slots.slice(0,room))if(slot.length){session.push(slot);room--;}
+      }
       const tail=[];
       if(!quiet)for(const row of sections?.tail||[]){const rows=[];wrap(row,2,undefined,rows);if(rows.length>room)break;tail.push(...rows);room-=rows.length;}
       const bottom=[...tail,...session,...kept];
@@ -173,7 +196,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const fitted=clip(content[i]||[],inner);
     rows.push([text('│',color),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),text('│',color)]);
   }
-  const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):[],width-4);
+  const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
   return {rows,hits:hits.filter(h=>h.row<count),color,routePages};
 }
