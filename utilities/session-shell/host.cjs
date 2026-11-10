@@ -110,7 +110,11 @@ function source(op, extra={}) {
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
-    const timer=setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
+    // Startup display replies are finite, asynchronous reads. A busy backend
+    // must not discard its eventual language/model result before first input.
+    // They never delay native start or keys; backend exit settles all callers.
+    const timer=['display-bootstrap','display-model'].includes(op)?null:
+      setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
     if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}

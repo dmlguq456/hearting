@@ -7,6 +7,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConsistencyTest(unittest.TestCase):
+    def test_async_startup_display_is_not_lost_behind_a_busy_backend(self):
+        script = r'''const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const src=fs.readFileSync(process.argv[1],'utf8'),a=src.indexOf('function source('),b=src.indexOf('function readAction(',a),timers=[],calls=new Map();
+const c={Buffer,calls,callID:0,sid:'',binding:()=>({}),backend:{exitCode:null,stdin:{write(){}}},setTimeout:fn=>{timers.push(fn);return timers.length},clearTimeout(){}};
+vm.createContext(c);vm.runInContext(src.slice(a,b)+'this.source=source;',c);
+(async()=>{let value;const pending=c.source('display-bootstrap').then(x=>value=x);for(const t of timers)t();assert.equal(value,undefined);assert.equal(calls.size,1);calls.get(1).resolve({ok:true,panel:{labels:{work:'지금 맡긴 일'}}});await pending;assert.equal(value.ok,true);})();
+'''
+        result=subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/host.cjs')],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_unknown_native_telemetry_is_owned_without_claiming_zero(self):
         script = r'''const assert=require('node:assert/strict'),d=require(process.argv[1]);
 const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 7d ?'],'exact');
