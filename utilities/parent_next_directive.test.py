@@ -220,6 +220,15 @@ class StewardNextTest(unittest.TestCase):
             (pnd.NEXT_END_TURN, "carrier-steward-watch", ""),
         )
 
+    def test_a_codex_queue_wake_is_a_carrier_on_the_armed_line_only(self):
+        self.assertEqual(
+            pnd.steward_next("queue", WATCH, agent_home=ROOT),
+            (pnd.NEXT_END_TURN, "carrier-steward-watch-codex-queue", ""),
+        )
+        action, reason, _command = pnd.steward_next("queue", WATCH, agent_home=ROOT,
+                                                    arms_hook=False)
+        self.assertEqual((action, reason), (pnd.NEXT_BOUNDED_WAIT, "steward-line-does-not-arm"))
+
     def test_a_watch_without_a_carrier_waits_on_its_own_surface(self):
         # `--wake none`, and `--wake auto` resolved outside a Claude session,
         # both arm a watcher that no hook will ever deliver.

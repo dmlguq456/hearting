@@ -38,9 +38,9 @@ let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
 const panelView=require('./panel-view.cjs');
-let displayConfiguration={...panelView.defaults},nativeSidebar=false;
+let displayConfiguration={...panelView.defaults};
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
-const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration,nativeSidebar:harness==='opencode'});
+const initialGeometry=nativeDisplay.layout({cols,rows,configuration:displayConfiguration});
 const terminal = new Terminal({cols:initialGeometry.nativeCols, rows:initialGeometry.side?rows:rows-1, allowProposedApi:true, scrollback:1000, logLevel:'off'});
 terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
 let widthProvider;
@@ -88,8 +88,7 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
-let panelSubscribers=new Set(),sidebarMounted=false,nativeLayoutPending=false,displaySequence=0;
-let sidebarViews=[],sidebarMouseHeld=false;
+let displaySequence=0,nativeMcp;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -195,9 +194,9 @@ function color(c,bg) {
   if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
   return bg?'49':'39';
 }
-function serialize(line,width) {
+function serialize(line,width,from=0) {
   let s='',previous='';
-  for(let x=0;x<width;x++) {
+  for(let x=from;x<width;x++) {
     const c=line?.getCell(x); if(!c||!c.getWidth())continue;
     const a=[0,color(c,false),color(c,true)];
     for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
@@ -206,7 +205,7 @@ function serialize(line,width) {
   }
   return s+'\x1b[0m';
 }
-function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration,nativeSidebar:harness==='opencode'||nativeSidebar});}
+function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
 function panelColumns(){return geometry().panelCols;}
 function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return geometry().side?rows:rows-height();}
@@ -222,8 +221,6 @@ function panelContent(){
 }
 function height(){
   if(fleetView)return 0;
-  if(harness==='opencode'&&nativeLayoutPending)return 0;
-  if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side')return 0;
   if(!expanded)return harness==='claude'?0:1;
   if(geometry().side)return rows;
   const content=panelContent();
@@ -253,12 +250,8 @@ function render() {
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
     observeSelectedModel(nativeLines);
     const selectedChanged=!!observed?.model&&(observed.model!==displayValues.model||(observed.effort||'')!==(displayValues.effort||''));
-    if(harness==='opencode'&&observed&&!nativeSidebar){
-      // A confirmed native sidebar keeps this attachment at bottom. Do not
-      // oscillate geometry across partial native redraws or compete with it.
-      const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
-    }
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const footerMask=fleetView?{rows:new Set(),cells:new Map()}:nativeDisplay.footerConcealment(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    const concealed=footerMask.rows;
     let notice=-1;
     if(harness==='claude'){
       // The first concealed row (the top of the status area) carries the notice;
@@ -276,8 +269,16 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
-      if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
+      // The rest of a Codex footer row whose ID cells are concealed keeps the
+      // row's own indent instead of starting after a blank gap.
+      const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
+        '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
+        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      if(!fleetView&&geometry().side){
+        const panel=y<panelRows.length?panelRows[y]:' '.repeat(panelColumns());
+        line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
+      }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
@@ -289,7 +290,7 @@ function render() {
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
     const b=view.buffer.active,m=view.modes;
     const cursor=block.focused&&!fleetView?blockCursor:null;
-    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)}H`;
+    text+=`\x1b[${cursor?.row||Math.min(b.cursorY+1,view.rows)};${cursor?.col||Math.min(b.cursorX+1,view.cols)+(fleetView?0:geometry().nativeColumn)}H`;
     text+=`\x1b[?2004${m.bracketedPasteMode?'h':'l'}\x1b[?1${m.applicationCursorKeysMode?'h':'l'}`;
     text+='\x1b[?1000l\x1b[?1002l\x1b[?1003l';
     if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
@@ -312,6 +313,7 @@ function displayLines(lines,height,done) {
   const paint=line=>Array.isArray(line)?line.map(part=>{
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(Number.isInteger(part.background)&&part.background>=0&&part.background<=255)attrs.push(48,5,part.background);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);if(part.reverse===true)attrs.push(7);
     return `\x1b[${attrs.join(';')}m${safe(part.text)}`;
   }).join(''):safe(line);
@@ -337,7 +339,7 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;publishPanel();schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
   let lines,edit=-1;
@@ -351,7 +353,8 @@ function rebuildDisplay() {
     }else lines=base;
     if(block.focused&&!settings)edit=lines.findIndex(line=>line.some(part=>String(part.text).startsWith('› ')&&String(part.text).length>2));
     if(extra)lines=[...lines.slice(0,height()-1),[{text:extra,dim:true}]];
-  }else lines=[footerSegments.length?[...footerSegments,{text:extra}]:footer||`${harness} · CTX ?`];
+  }else lines=footerSegments.length?panelView.appearance([[...footerSegments,{text:extra}]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true}):[footer||`${harness} · CTX ?`];
   const editParts=edit>=0?lines[edit]:[];
   const editAt=editParts.findIndex(part=>String(part.text).startsWith('› ')&&String(part.text).length>2);
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
@@ -359,7 +362,7 @@ function rebuildDisplay() {
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
     panelRows=painted;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
-    displayFooter=painted[0];footerLast='\0';rebuilding=false;publishPanel();
+    displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
   });
 }
@@ -434,7 +437,7 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:sidebarMounted?panelView.nativeSidebarColumns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
@@ -458,7 +461,10 @@ function claudePanelPainted(){
 // at the native statusline's own two-cell indent.
 function noticeRow(width){
   let used=2,text='\x1b[0m  ';
-  for(const part of panelModel.notice||[]){
+  // Claude's own status row: the panel's theme, never its shade.
+  const [notice=[]]=panelView.appearance([panelModel.notice||[]],{...displayConfiguration,shade:'none'},
+    {colors:panelModel.colors??256,noColor:panelModel.no_color===true});
+  for(const part of notice){
     const attrs=[0];
     if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
     if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
@@ -575,7 +581,6 @@ function panelAction(action){
   if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){
     const [,field,operation]=action.split(':'),index=Number(field);if(index<0||index>=panelView.fields.length)return;
-    if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[index]))return;
     settings.index=index;if(operation!=='select')settings.value=panelView.change(settings.value,panelView.fields[index],operation==='down'?-1:1);previewSettings();return;
   }
   queueDisplay();
@@ -595,10 +600,9 @@ function settingsInput(data){
     const key=/^\x1b\[[ABCDZ]/.exec(settingsTail)?.[0]||settingsTail[0];settingsTail=settingsTail.slice(key.length);
     if(key==='\x1b'||key==='\x1d'){cancelSettings();break;}
     if(key==='\r'||key==='\n'){applySettings();continue;}
-    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%(harness==='opencode'?5:panelView.fields.length);
-    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+(harness==='opencode'?5:panelView.fields.length)-1)%(harness==='opencode'?5:panelView.fields.length);
+    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%panelView.fields.length;
+    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+panelView.fields.length-1)%panelView.fields.length;
     else if(['\x1b[D','\x1b[C','-','+'].includes(key)){
-      if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[settings.index]))continue;
       settings.value=panelView.change(settings.value,panelView.fields[settings.index],['\x1b[D','-'].includes(key)?-1:1);previewSettings();
     }else if(key==='d'){settings.value={...panelView.defaults};previewSettings();}
   }
@@ -606,20 +610,15 @@ function settingsInput(data){
 }
 function panelMouse(code,x,y,release){
   if(fleetView||paste||relay)return false;
-  if(sidebarMouseHeld){if(release)sidebarMouseHeld=false;return true;}
-  if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side'&&!release&&(code&3)===0&&code<32){
-    // Native may still be painting the preceding frame after focus changed.
-    // Retain only four bounded published frames; match the actual full VT.
-    const hit=sidebarViews.map(view=>panelView.nativePanelHit(terminal,view,x-1,y-1)).find(Boolean);
-    if(hit){sidebarMouseHeld=true;if(hit.action)panelAction(hit.action);return true;}
-  }
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
-    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
+    if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
     else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
-  if(g.side&&local===0&&(code&3)===0&&!release){dragging=true;return true;}
+  // The boundary beside the native area resizes: the left edge of a right
+  // panel, the right edge of a left one.
+  if(g.side&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
   if(release||code>=32||(code&3)!==0)return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
@@ -634,32 +633,15 @@ function displayReporter(req){
   return harness==='opencode'&&req.token===token&&row&&row.start===req.start&&root&&root.start===rootNative.start
     &&row.pid===native?.pid&&row.start===native?.start&&descends(req.pid,root.pid)&&sameTerminal(req.pid,root.pid);
 }
-function publishPanel(){
-  if(!panelSubscribers.size)return;
-  const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
-    native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
-    routeDetail,routePage,focused:block.focused,harness,cellWidth,
-    questions:options=>block.detail(options)});
-  if(JSON.stringify(sidebarViews[0]?.rows)!==JSON.stringify(view.rows))sidebarViews=[view,...sidebarViews].slice(0,4);
-  routePageCount=view.routePages;
-  const nativeRows=view.rows.map(row=>{
-    const compact=[];
-    for(const part of row){
-      const last=compact.at(-1),columns=cellWidth(part.text);
-      if(last&&['foreground','bold','dim','reverse'].every(key=>last[key]===part[key])){last.text+=part.text;last.columns+=columns;}
-      else compact.push({...part,columns});
-    }
-    return compact;
-  });
-  const data=JSON.stringify({sid,visible:displayConfiguration.layout==='side'&&expanded,rows:nativeRows,hits:view.hits,focused:block.focused,settings:!!settings})+'\n';
-  for(const conn of panelSubscribers)if(!conn.destroyed&&conn.lastPanel!==data){conn.lastPanel=data;if(conn.writableLength<65536)conn.write(data);else conn.destroy();}
-}
 mouseInput=require('./panel-mouse.cjs')({
   suppressed:()=>paste||block.pasting||settingsPaste||relay||!!fleetView,
   bytes:inputBytes,
   mouse:(code,x,y,release,raw)=>{
     if(panelMouse(code,x,y,release))return;
     if(terminal.modes.mouseTrackingMode==='none')return;
+    // A left panel moves the native area right; native sees its own columns.
+    const offset=geometry().nativeColumn;
+    if(offset){if(x<=offset)return;raw=Buffer.from(`\x1b[<${code};${x-offset};${y}${release?'m':'M'}`,'latin1');}
     if(!release&&(code&3)===0){block.leave();queueDisplay();}
     if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
     observeInput(raw);child.write(raw);
@@ -745,7 +727,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;block.update([]);
+    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
   }
@@ -765,18 +747,12 @@ async function request(req) {
     // Native selected model is display-only and may precede a session ID.
     if(typeof req.model==='string'&&req.model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.model))nativeSelected.model=req.model;
     if(typeof req.effort==='string'&&req.effort.length<=64&&!/[\x00-\x1f\x7f]/.test(req.effort))nativeSelected.effort=req.effort;
+    // OpenCode's MCP server counts, shown only because its native sidebar is hidden here.
+    const counts=req.mcp;
+    if(counts&&typeof counts==='object'&&['total','connected','failed'].every(key=>Number.isInteger(counts[key])&&counts[key]>=0&&counts[key]<=999)
+       &&JSON.stringify(nativeMcp)!==JSON.stringify(counts)){nativeMcp={total:counts.total,connected:counts.connected,failed:counts.failed};queueProjection();}
     displayValues={...displayValues,...nativeSelected};
-    if(typeof req.visible==='boolean'){
-      sidebarMounted=req.visible;
-      if(req.native_columns===cols&&req.native_rows===rows)nativeLayoutPending=false;
-      queueLayout();
-    }
     publishNativeDisplay();queueDisplay();return {ok:true};
-  }
-  if(req.op==='display-action'){
-    if(!displayReporter(req)||req.sid!==sid)return {ok:false};
-    if(['settings','route','route-prev','route-next','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
-    return {ok:true};
   }
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
@@ -814,9 +790,6 @@ server=net.createServer(conn=>{
     setImmediate(async()=>{
       let result;try{
         const req=JSON.parse(raw.subarray(0,newline).toString());
-        if(req.op==='display-subscribe'&&displayReporter(req)){
-          conn.setTimeout(0);panelSubscribers.add(conn);conn.on('close',()=>{panelSubscribers.delete(conn);if(!panelSubscribers.size){sidebarMounted=false;nativeLayoutPending=false;queueLayout();}});publishPanel();return;
-        }
         result=await request(req);}
       catch{result={ok:false,reason:'control-unavailable',not_started:false};}
       conn.end(JSON.stringify({...result,...identity()})+'\n');
@@ -856,10 +829,6 @@ server.listen(socketPath,()=>{
   process.stdin.on('data',userInput);
   process.stdout.on('resize',()=>{
     cols=process.stdout.columns;rows=process.stdout.rows;
-    // Let the native sidebar choose its placement at the final new terminal
-    // size before reserving a fallback bottom. Its existing resize event
-    // reports that choice; never guess native sidebar preferences.
-    nativeLayoutPending=harness==='opencode'&&panelSubscribers.size>0;
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{

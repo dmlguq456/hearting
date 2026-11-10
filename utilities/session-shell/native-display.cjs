@@ -96,41 +96,65 @@ function claudeStatusRows(lines,sid,record) {
   return new Set();
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-function hiddenFooterRows(harness,lines,sid,plan,painted=[],details=[]) {
-  const found=[];
+// Codex's managed footer row. The shell owns its first `thread-id` field: an
+// ID-only row is blanked, and otherwise only the leading `  <id> · ` cells are,
+// while the value stays on the inner screen for identification. The whole row
+// yields only when every other field equals what the common area painted.
+function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
+  const none={rows:new Set(),cells:new Map()};
   if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
-     ||!Array.isArray(plan.lines)||!plan.lines.length)return new Set();
-  if(plan.presentation==='session-panel'){
-    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
-       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
-       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))return new Set();
-  }else if(!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))return new Set();
+     ||plan.config?.items?.[0]!=='thread-id'||JSON.stringify(plan.fields[0])!==JSON.stringify([sid]))return none;
   try {
     const s=fs.lstatSync(plan.config.path,{bigint:true});
     const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
     if(!s.isFile()||s.uid!==BigInt(process.getuid())||s.mode&0o022n
-       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return new Set();
-  }catch{return new Set();}
+       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return none;
+  }catch{return none;}
+  let shown=Array.isArray(plan.lines)&&plan.lines.length>0&&plan.common!==false;
+  if(shown&&plan.presentation==='session-panel'){
+    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
+       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
+       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))shown=false;
+  }else if(shown&&!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))shown=false;
   const expected=plan.fields.filter(field=>Array.isArray(field)&&field.length);
-  const exact=/^ +([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · .+$/;
+  const id=sid.replace(/[^0-9a-f-]/gi,'');
+  if(id!==sid||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid))return none;
+  // Codex marks a working thread with a spinner after the ID, and an untitled
+  // thread's `thread-title` field repeats its ID. Both belong to the ID cells.
+  // A narrow footer clipped right after them (`·…`) carries nothing else.
+  const cell=id+'(?: [\\u2800-\\u28ff])?';
+  const only=new RegExp('^ +'+cell+'(?: · '+cell+')?(?: ·…| …|…)?\\s*$'),leading=new RegExp('^( +'+cell+' · (?:'+cell+' · )?).+$');
+  const found=[];
   for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
-    const match=lines[y].match(exact);
+    // The help row anchors the footer; while a draft is typed Codex drops
+    // `? for shortcuts`, and the composer row just above anchors it instead.
+    const help=/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]);
+    if(!help&&!lines.slice(Math.max(0,y-3),y).some(row=>/^›/.test(row)))continue;
+    if(only.test(lines[y])){found.push({y});continue;}
+    const match=lines[y].match(leading);
+    if(!match)continue;
     const fields=lines[y].trim().split(' · ').map(text=>text.replace(/\s+/g,' '));
-    if(match&&match[1]===sid&&fields.length===expected.length
-       &&fields.every((value,i)=>expected[i].includes(value))
-       &&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
+    const whole=shown&&fields.length===expected.length&&fields.every((value,i)=>expected[i].includes(value));
+    found.push(whole?{y}:{y,cells:match[1].length});
   }
-  return new Set(found.length===1?found:[]);
+  if(found.length!==1)return none;
+  const [row]=found;
+  return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
-function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) {
+function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+function layout({cols,rows,expanded=true,configuration={}}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=configuration.side_width,minimum=configuration.side_min_columns;
-  const side=expanded&&!nativeSidebar&&configuration.layout==='side'
+  const side=expanded&&configuration.layout==='side'
     &&Number.isInteger(width)&&width>=32&&width<=80
     &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
     &&cols>=minimum&&cols-width-2>=48&&rows>=8;
-  return {side,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
-    panelColumn:side?cols-width:0,panelRow:side?0:null};
+  // The one placement rule for every harness: a side panel sits right (the
+  // default) or left of the native area, two blank cells apart. Only the
+  // shell's own panel moves; the native area keeps its own column count.
+  const left=side&&configuration.position==='left';
+  return {side,left,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+    panelColumn:side&&!left?cols-width:0,nativeColumn:left?width+2:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);
@@ -176,4 +200,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,observe,firstLine,hiddenFooterRows,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

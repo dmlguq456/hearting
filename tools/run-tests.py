@@ -57,6 +57,33 @@ if str(ROOT / "utilities") not in sys.path:
 DEFAULT_TIMEOUT = 600
 DEFAULT_JOBS = 4
 
+# --timeout bounds one suite attempt, not the run: several hung suites in one
+# worker slot add up, and a CI step killed at its own limit leaves no report
+# (2026-11-10: shard 5 held its runner for 45 minutes and uploaded nothing).
+# --deadline bounds the whole run. Past it a running suite is stopped as a
+# timeout and an unstarted one is reported without running, so the report and
+# the stuck suite's name still reach the caller. Monotonic seconds, or None.
+_RUN_DEADLINE: float | None = None
+DEADLINE_NOT_STARTED = "run-tests: not started; the --deadline run budget was spent\n"
+DEADLINE_STOPPED = "run-tests: stopped at the --deadline run budget\n"
+# A suite cut by the run budget reports kind "deadline", never "timeout": a
+# baseline or flaky-timing row that allows a suite's own timeout must not turn
+# a spent run budget (or a suite that never ran) into KNOWN-FAIL and exit 0.
+# "deadline" is not an expected_failure_kind, so no baseline row can allow it.
+RUN_DEADLINE_KIND = "deadline"
+
+
+def _deadline_remaining() -> float | None:
+    if _RUN_DEADLINE is None:
+        return None
+    return _RUN_DEADLINE - time.monotonic()
+
+
+def deadline_not_started_result(relpath: str, profile: str) -> "SuiteResult":
+    result = SuiteResult(relpath, 124, True, "", DEADLINE_NOT_STARTED, 0.0, profile)
+    result.run_deadline = "not-started"
+    return result
+
 # This suite repeatedly activates all three runtime projections in both linked
 # and packaged modes. Running it beside other install/projection suites makes
 # its strict-doctor assertions depend on host load (the same GitHub runner
@@ -681,6 +708,7 @@ class SuiteResult:
         "profile",
         "failing_test_ids",
         "child_stderr",
+        "run_deadline",
     )
 
     def __init__(self, relpath, returncode, timed_out, stdout, stderr, duration_s, profile):
@@ -693,6 +721,9 @@ class SuiteResult:
         self.profile = profile
         self.failing_test_ids = extract_failing_test_ids(stdout, stderr)
         self.child_stderr = ""
+        # "not-started" or "stopped" when the --deadline run budget, not this
+        # suite's own --timeout, ended the attempt; "" otherwise.
+        self.run_deadline = ""
 
     @property
     def passed(self) -> bool:
@@ -1010,8 +1041,14 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
     else:
         cmd = [sys.executable, str(suite)]
     started_monotonic = time.monotonic()
+    remaining = _deadline_remaining()
+    if remaining is not None and remaining <= 0:
+        _suite_progress("suite_not_started", relpath, profile, result=RUN_DEADLINE_KIND, duration_s=0.0)
+        return deadline_not_started_result(relpath, profile)
+    attempt_timeout = timeout if remaining is None else min(float(timeout), remaining)
     _suite_progress("suite_start", relpath, profile)
     timed_out = False
+    run_deadline = ""
     # start_new_session=True makes the child the leader of its own process
     # group. That ordering matters: killpg() is only ever called after this
     # guarantee, because killing the runner's own group would kill the runner.
@@ -1052,12 +1089,15 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
         sampler_thread.start()
     try:
         try:
-            out, err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(timeout=attempt_timeout)
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
             rc = 124
             out, err = reap_process_group(proc)
+            if attempt_timeout < timeout:
+                err = (err or "") + DEADLINE_STOPPED
+                run_deadline = "stopped"
     finally:
         if pgid is not None:
             with _ALL_RUN_PGIDS_LOCK:
@@ -1072,11 +1112,13 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
                 _OWNED_LIVE_PATHS_BY_SUITE.setdefault(relpath, set()).update(snapshot)
     duration = time.monotonic() - started_monotonic
     result = SuiteResult(relpath, rc, timed_out, out, err, duration, profile)
+    result.run_deadline = run_deadline
     _suite_progress(
         "suite_timeout" if timed_out else "suite_end",
         relpath,
         profile,
-        result="timeout" if timed_out else "pass" if result.passed else "fail",
+        result=(RUN_DEADLINE_KIND if run_deadline else "timeout") if timed_out
+        else "pass" if result.passed else "fail",
         duration_s=round(duration, 3),
     )
     return result
@@ -1465,6 +1507,8 @@ def last_nonempty_line(text: str) -> str:
 
 
 def classify_kind(result: SuiteResult) -> str:
+    if result.run_deadline:
+        return RUN_DEADLINE_KIND
     if result.timed_out:
         return "timeout"
     captured = "\n".join((result.stderr or "", result.stdout or ""))
@@ -1614,11 +1658,29 @@ HARD_FAIL_VERDICTS = {
 
 
 class Verdict:
-    def __init__(self, suite_path, test_id, verdict, detail=""):
+    def __init__(self, suite_path, test_id, verdict, detail="", kind=None):
         self.suite_path = suite_path
         self.test_id = test_id
         self.verdict = verdict
         self.detail = detail
+        # Report kind when it differs from the suite result's own kind (an
+        # aggregate row whose first attempt passed); None keeps the default.
+        self.kind = kind
+
+
+def retry_aggregate_deadline(relpath: str, attempts, detail: str) -> "Verdict | None":
+    """Shared rule for every retry aggregate: a run-deadline cut wins.
+
+    An attempt the run budget stopped or never started did not finish, so a
+    pass on another attempt (earlier or later) cannot turn the aggregate into
+    success. Each aggregate path calls this before its own success rule.
+    """
+    cut = [attempt.run_deadline for attempt in attempts if attempt.run_deadline]
+    if not cut:
+        return None
+    return Verdict(relpath, "-", "TIMEOUT",
+                   detail=f"{detail}; run-deadline={','.join(cut)}",
+                   kind=RUN_DEADLINE_KIND)
 
 
 def classify_result(
@@ -1639,6 +1701,13 @@ def classify_result(
     """
     suite_path = result.relpath
     verdicts: list[Verdict] = []
+
+    if result.run_deadline:
+        # The run budget ended this attempt, not the suite: no baseline row
+        # applies, and the run must not pass on a suite it did not finish.
+        return [Verdict(suite_path, "-", "TIMEOUT",
+                        detail=f"run-deadline={result.run_deadline}",
+                        kind=RUN_DEADLINE_KIND)]
 
     all_whole_file = baseline.get((suite_path, "-"))
     all_specific = {
@@ -1892,6 +1961,9 @@ def write_seed_baseline(path: Path, rows: list[dict[str, str]], fingerprint: str
     for row in rows:
         if row.get("verdict") not in SEED_VERDICTS:
             continue
+        if row.get("kind") == RUN_DEADLINE_KIND:
+            # A spent run budget is not a suite failure to propose.
+            continue
         proposed.append({
             "suite_path": row["suite_path"],
             "test_id": row.get("test_id") or "-",
@@ -2072,20 +2144,26 @@ def collapse_replicated_report_durations(rows: Iterable[dict[str, str]]) -> dict
     return durations
 
 
-def shard_weights(relpaths: list[str], durations: dict[str, float]) -> dict[str, float]:
+def shard_weights(relpaths: list[str], durations: dict[str, float], jobs: int = 1) -> dict[str, float]:
+    """Suite-seconds per suite. A SERIAL_SUITES member runs after the parallel
+    batch with every other slot idle, so it costs ``jobs`` slots for its whole
+    duration and weighs ``jobs`` times as much."""
     known = sorted(durations[r] for r in relpaths if r in durations)
     if known:
         mid = len(known) // 2
         fallback = known[mid] if len(known) % 2 else (known[mid - 1] + known[mid]) / 2
     else:
         fallback = DEFAULT_SHARD_WEIGHT_S
-    return {r: durations.get(r, fallback) for r in relpaths}
+    return {r: durations.get(r, fallback) * (max(1, jobs) if r in SERIAL_SUITES else 1)
+            for r in relpaths}
 
 
-def partition_shards(relpaths: list[str], durations: dict[str, float], count: int) -> list[list[str]]:
-    """Greedy longest-first split. The input is only the sorted suite paths and
-    the committed table, so every runner computes the same shards."""
-    weights = shard_weights(relpaths, durations)
+def partition_shards(relpaths: list[str], durations: dict[str, float], count: int,
+                     jobs: int = 1) -> list[list[str]]:
+    """Greedy longest-first split. The input is only the sorted suite paths,
+    the committed table and the job count, so every runner computes the same
+    shards."""
+    weights = shard_weights(relpaths, durations, jobs)
     shards: list[list[str]] = [[] for _ in range(count)]
     totals = [0.0] * count
     for rel in sorted(relpaths, key=lambda r: (-weights[r], r)):
@@ -2223,6 +2301,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument(
+        "--deadline", type=int, default=None,
+        help="whole-run wall-clock seconds; past it running suites stop as timeouts "
+             "and unstarted suites are reported without running (default: none)",
+    )
+    p.add_argument(
         "--retries", type=int, default=0,
         help="extra attempts for flaky-timing baseline suites; full repository runs require at least 1",
     )
@@ -2339,7 +2422,11 @@ def run_profile(
     jobs: int,
     timeout: int,
     install_prefix: Path | None,
+    durations: dict[str, float] | None = None,
 ) -> list[SuiteResult]:
+    """Run one profile's suites. With ``durations`` the parallel batch starts
+    longest-first, so a long suite cannot begin last and set the wall time;
+    the returned order is always the input order."""
     results_by_index: dict[int, SuiteResult] = {}
     tmp_by_index: dict[int, Path] = {}
     tmp_identity_by_index: dict[int, tuple[int, int, int] | None] = {}
@@ -2407,6 +2494,9 @@ def run_profile(
             for idx, suite in indexed
             if suite_relpath(root, suite) not in SERIAL_SUITES
         ]
+        if durations is not None:
+            weights = shard_weights([suite_relpath(root, suite) for _, suite in parallel], durations)
+            parallel.sort(key=lambda item: (-weights[suite_relpath(root, item[1])], item[0]))
         serial = [
             (idx, suite)
             for idx, suite in indexed
@@ -2452,6 +2542,11 @@ def run_profile(
 
 def _run_main(argv: list[str]) -> int:
     args = build_arg_parser().parse_args(argv)
+    global _RUN_DEADLINE
+    if args.deadline is not None and args.deadline <= 0:
+        print("--deadline must be a positive number of seconds", file=sys.stderr)
+        return 64
+    _RUN_DEADLINE = None if args.deadline is None else time.monotonic() + args.deadline
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, _stop_on_signal)
     import artifact_context
@@ -2533,6 +2628,7 @@ def _run_main(argv: list[str]) -> int:
     # Sharding splits what --select/--exclude left. STALE below is still judged
     # against the whole corpus, so it needs the pre-split view.
     shard_index = shard_count = 0
+    durations: dict[str, float] | None = None
     if args.shard:
         shard_index, shard_count = parse_shard(args.shard[0])
         try:
@@ -2541,7 +2637,7 @@ def _run_main(argv: list[str]) -> int:
             print(f"duration table error: {exc}", file=sys.stderr)
             return 65
         selected_rel = [suite_relpath(root, s) for s in selected]
-        mine = set(partition_shards(selected_rel, durations, shard_count)[shard_index - 1])
+        mine = set(partition_shards(selected_rel, durations, shard_count, args.jobs)[shard_index - 1])
         selected = [s for s, r in zip(selected, selected_rel) if r in mine]
 
     if args.suite_list:
@@ -2628,7 +2724,8 @@ def _run_main(argv: list[str]) -> int:
         batch = suites_by_profile[profile]
         if not batch:
             continue
-        batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix)
+        batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix,
+                                    durations)
         all_results.extend(batch_results)
         for result in batch_results:
             results_by_suite.setdefault(result.relpath, []).append(result)
@@ -2684,6 +2781,18 @@ def _run_main(argv: list[str]) -> int:
                 if remaining <= 0:
                     retry_budget_exhausted.add(rel)
                     break
+                # Past the run deadline the retry is recorded as not started
+                # instead of run: a flaky suite's unfinished retry must not
+                # leave a passing or known-fail aggregate behind.
+                run_left = _deadline_remaining()
+                if run_left is not None:
+                    if run_left <= 0:
+                        if flaky_declared:
+                            _suite_progress("suite_not_started", rel, profile,
+                                            result=RUN_DEADLINE_KIND, duration_s=0.0)
+                            extra.append(deadline_not_started_result(rel, profile))
+                        break
+                    remaining = min(remaining, run_left)
                 # Checking the budget only *before* an attempt does not bound
                 # it: with 1s left and --timeout 600 the attempt could still
                 # run 600s. Clamp this attempt's timeout to what is left,
@@ -2798,7 +2907,9 @@ def _run_main(argv: list[str]) -> int:
             outcomes = []
             mismatch = False
             for attempt in attempt_results:
-                if attempt.passed:
+                if attempt.run_deadline:
+                    outcomes.append(RUN_DEADLINE_KIND)
+                elif attempt.passed:
                     outcomes.append("pass")
                 else:
                     actual = classify_kind(attempt)
@@ -2821,30 +2932,40 @@ def _run_main(argv: list[str]) -> int:
                 detail += f"; failing={','.join(failing_ids)}"
             if result.relpath in retry_budget_exhausted:
                 detail += "; retry-budget-exhausted"
-            # A flaky-timing suite's all-pass aggregate is not a genuine
-            # unexpected pass: one run (or one budget-limited run) proves
-            # nothing about a suite explicitly declared flaky, so it gets its
-            # own non-fatal verdict distinct from a non-flaky suite's XPASS.
-            verdict = (
-                "KIND-MISMATCH" if mismatch
-                else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
-                else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
-                else "FLAKY-KNOWN-FAIL"
-            )
-            verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
-            if verdict == "FLAKY-PASS":
-                flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
+            deadline_verdict = retry_aggregate_deadline(result.relpath, attempt_results, detail)
+            if deadline_verdict is not None:
+                verdicts = [deadline_verdict]
+            else:
+                # A flaky-timing suite's all-pass aggregate is not a genuine
+                # unexpected pass: one run (or one budget-limited run) proves
+                # nothing about a suite explicitly declared flaky, so it gets its
+                # own non-fatal verdict distinct from a non-flaky suite's XPASS.
+                verdict = (
+                    "KIND-MISMATCH" if mismatch
+                    else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
+                    else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
+                    else "FLAKY-KNOWN-FAIL"
+                )
+                verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
+                if verdict == "FLAKY-PASS":
+                    flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
         elif result.relpath in unlisted_retried and len(attempt_results) > 1:
             retries = attempt_results[1:]
-            if any(attempt.passed for attempt in retries):
-                failing_ids = sorted({
-                    test_id for attempt in attempt_results
-                    if not attempt.passed for test_id in attempt.failing_test_ids
-                })
-                outcomes = ",".join("pass" if a.passed else "fail" for a in attempt_results)
-                detail = f"attempts={len(attempt_results)}; outcomes={outcomes}; policy=unlisted-serial-retry"
-                if failing_ids:
-                    detail += f"; failing={','.join(failing_ids)}"
+            failing_ids = sorted({
+                test_id for attempt in attempt_results
+                if not attempt.passed for test_id in attempt.failing_test_ids
+            })
+            outcomes = ",".join(
+                RUN_DEADLINE_KIND if a.run_deadline else "pass" if a.passed else "fail"
+                for a in attempt_results
+            )
+            detail = f"attempts={len(attempt_results)}; outcomes={outcomes}; policy=unlisted-serial-retry"
+            if failing_ids:
+                detail += f"; failing={','.join(failing_ids)}"
+            deadline_verdict = retry_aggregate_deadline(result.relpath, attempt_results, detail)
+            if deadline_verdict is not None:
+                verdicts = [deadline_verdict]
+            elif any(attempt.passed for attempt in retries):
                 verdicts = [Verdict(result.relpath, "-", "FLAKY-PASS", detail=detail)]
                 flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
             else:
@@ -2853,7 +2974,8 @@ def _run_main(argv: list[str]) -> int:
             verdicts = classify_result(result, baseline, today, run_fingerprint)
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
-            result_kind = test_failure_kind(result, v.test_id) if not result.passed else ""
+            result_kind = v.kind if v.kind is not None else (
+                test_failure_kind(result, v.test_id) if not result.passed else "")
             signature = failure_signature(result) if not result.passed else ""
             report_rows.append(
                 {

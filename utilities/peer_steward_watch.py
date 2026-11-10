@@ -169,8 +169,38 @@ def _prepare_watch_notice(watch_id, arm, receipt):
         if current.get("notice_transfer_ref") != transfer_ref:
             _write_json_atomic(_watch_paths(watch_id).arm,
                                {**current, "notice_transfer_ref": transfer_ref})
+        if (arm or {}).get("wake") == "queue":
+            _queue_watch_notice(transfer_ref, arm)
         return transfer_ref
     except Exception:  # noqa: BLE001 - status/reconnect remains the ordinary fallback
+        return None
+
+
+def _queue_watch_notice(transfer_ref, arm):
+    """Hand a `wake=queue` receipt notice to the normal message courier.
+
+    The same duty `peer-steward prompt` schedules for a peer report
+    (`_schedule_message_obligation`): the obligation runner takes the exact
+    pending row to the Codex steward's native thread queue, which starts a turn
+    on an idle thread. Without it the notice waits for the next prompt.
+    """
+    from peer_steward_native import _message_obligation_id
+    row = peer_message._read_pending(transfer_ref)
+    if not row:
+        return None
+    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+    identity = {"server": (arm or {}).get("steward_server") or (arm or {}).get("server") or "default",
+                "pane": "", "harness": recipient.get("harness") or "",
+                "session_id": recipient.get("session_id") or ""}
+    intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
+              "target": recipient.get("session_id") or "", "from": row.get("from") or {},
+              "to": recipient, "refs": list(row.get("refs") or []), "delay_notice_for": ""}
+    try:
+        duty = peer_obligations.ObligationStore().create(
+            _message_obligation_id(row["ref"]), "message", identity, intent)
+        peer_obligations.ensure_normal_runner()
+        return duty
+    except (OSError, ValueError, peer_obligations.ObligationError):
         return None
 
 

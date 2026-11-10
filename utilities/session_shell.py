@@ -42,7 +42,17 @@ def _private_json(path: Path, limit: int):
 
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
-                    "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14}
+                    "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
+                    "position": "right", "theme": "terminal", "shade": "none"}
+# Appearance choices. An unknown value falls back to its default on its own and
+# never disables the shell, so a hand-edited or newer value cannot cost the panel.
+APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
+              "shade": ("none", "light", "medium")}
+
+
+def _appearance(value):
+    return {key: value.get(key) if value.get(key) in choices else choices[0]
+            for key, choices in APPEARANCE.items()}
 
 
 def _validate_configuration(value):
@@ -80,7 +90,7 @@ def display_policy(environ=None):
         value = _configuration(environ)
     except (OSError, ValueError, TypeError):
         value = {}
-    return {key: value.get(key, default) for key, default in DISPLAY_DEFAULTS.items()}
+    return {**{key: value.get(key, default) for key, default in DISPLAY_DEFAULTS.items()}, **_appearance(value)}
 
 
 def save_display_policy(settings, environ=None):
@@ -89,6 +99,8 @@ def save_display_policy(settings, environ=None):
         raise ValueError("invalid shell settings")
     path = policy_path(environ)
     before = _private_json(path, MAX_RECORD_BYTES)
+    if _appearance(settings) != {key: settings[key] for key in APPEARANCE}:
+        raise ValueError("invalid shell appearance")
     value = _validate_configuration({**before, **settings})
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/install"))
     import safe_fs
@@ -517,7 +529,13 @@ def _plain(value, limit=256):
 
 
 def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="", panel_lines=None, detail_lines=None):
-    """Conceal only known native fields already represented in the common area."""
+    """Conceal Codex's thread-id field, and known native fields the common area painted.
+
+    The panel names a session by its number and title, so the shell owns the
+    managed footer's thread-id field outright: the value stays on the inner
+    screen, where shell-wrapped identification reads it. Every other field still
+    yields only to the same value the common area actually painted (``common``).
+    """
     from fleet.collectors import procscan
     from fleet.render_cells import _half_up
     import codex_tui_config
@@ -529,26 +547,25 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
         return None, None
     observed = codex_tui_config.managed_status_line_observation(home, argv=procscan._read_argv(pid))
     path = str(Path(home) / "config.toml")
-    if not observed or not status_rows or (panel_lines is None and painted_rows[:len(status_rows)] != status_rows):
+    if not observed or not sid:
         return None, path
     model, effort, percent = values.get("model"), values.get("effort"), values.get("ctx_pct")
-    if not model or type(percent) not in (int, float) or not 0 <= percent <= 100:
-        return None, path
-    common = "\n".join(detail_lines) if detail_lines is not None else "\n".join("".join(text for text, _key in row) for row in status_rows)
-    if sid not in common:
-        return None, path
+    common = bool(status_rows and (panel_lines is not None or painted_rows[:len(status_rows)] == status_rows)
+                  and model and type(percent) in (int, float) and 0 <= percent <= 100)
+    painted = ("\n".join(detail_lines) if detail_lines is not None
+               else "\n".join("".join(text for text, _key in row) for row in status_rows or ()))
     title = _plain(values.get("title"), 512)
     # Long names may be clipped even in expanded mode. Preserve the native row
     # whenever it carries a full name which the common area did not paint.
-    titles = [sid, *([title] if title and title in common else [])]
+    titles = [sid, *([title] if title and title in painted else [])]
     branch = values.get("branch")
-    if branch and branch != "no-git" and branch not in common:
-        return None, path
+    if branch and branch != "no-git" and branch not in painted:
+        common = False
     fields = {
         "thread-id": [sid], "thread-title": list(dict.fromkeys(titles)),
         "git-branch": [branch.removesuffix("*")] if branch and branch != "no-git" else None,
-        "context-used": ["Context " + str(_half_up(percent)) + "% used"],
-        "model-with-reasoning": [_plain(model) + (" " + _plain(effort) if effort else "")],
+        "context-used": ["Context " + str(_half_up(percent)) + "% used"] if common else None,
+        "model-with-reasoning": [_plain(model) + (" " + _plain(effort) if effort else "")] if common else None,
     }
     quotas = {label: used for label, used, _reset in values.get("quota_windows") or ()}
     for item, label, labels in (("five-hour-limit", "5h", ("5h",)),
@@ -561,8 +578,9 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
                 options.extend((f"{name}: {100-used}% left", f"{name} {100-used}% left",
                                 f"{name} {100-used}% remaining", f"{name} {used}% used"))
         fields[item] = options or None
-    plan = {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
-            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}
+    plan = {"sid": sid, "config": observed, "common": common,
+            "fields": [fields.get(item) if item == "thread-id" or common else None for item in observed["items"]],
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows or ()]}
     if panel_lines is not None and detail_lines:
         plan.update(presentation="session-panel", lines=panel_lines, detail_lines=detail_lines)
     return plan, path
@@ -633,6 +651,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # establish an effective policy, process liveness or input readiness.
     if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
         values["ctx_pct"] = native_context
+    mcp = native_badges.get("mcp") if harness == "opencode" and isinstance(native_badges, dict) else None
+    if (isinstance(mcp, dict) and set(mcp) == {"total", "connected", "failed"}
+            and all(type(mcp[key]) is int and 0 <= mcp[key] <= 999 for key in mcp)):
+        values["mcp"] = mcp
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
@@ -689,6 +711,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+    panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
@@ -862,6 +885,7 @@ def _backend_operation(request: dict) -> dict:
             panel["summary"] = []
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                                for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+            panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:
             return {"ok": True, "settings": save_display_policy(request.get("settings"))}

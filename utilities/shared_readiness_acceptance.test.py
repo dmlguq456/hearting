@@ -199,6 +199,8 @@ def _source_hashes():
         HERE / "shared_readiness_acceptance.test.py",
         HERE / "shared_readiness_lifecycle.test.py",
         HERE / "peer_steward.test.py",
+        HERE / "peer_steward_prompt.test.py",
+        HERE / "peer_steward_retire.test.py",
     )
     return {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in paths}
