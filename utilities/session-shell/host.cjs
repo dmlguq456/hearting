@@ -115,7 +115,7 @@ function nativeSelectionFrame() {
   while(lines.length&&!lines[lines.length-1].trim())lines.pop();
   const prompt=lines.findLastIndex(line=>line.trimStart().startsWith('›'));
   const tail=prompt<0?[]:['›',...lines.slice(prompt+1)];
-  return {revision:screenRevision,lines:tail.length<=8&&tail.join('').length<=16384?tail:[]};
+  return {revision:screenRevision,epoch,lines:tail.length<=8&&tail.join('').length<=16384?tail:[]};
 }
 let checkingNativeSelection=false,nativeSelectionRevision=-1;
 function observeNativeSelection() {
@@ -130,8 +130,8 @@ function observeNativeSelection() {
   checkingNativeSelection=true;nativeSelectionRevision=frame.revision;
   const selected=selection;
   source('selection').then(data=>{
-    if(!data.ok||relay||ended||selected!==selection||frame.revision!==screenRevision
-       ||data.native_revision!==screenRevision||data.selected_sid===sid)return;
+    if(!data.ok||relay||ended||selected!==selection||frame.revision!==screenRevision||frame.epoch!==epoch
+       ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
     return lifecycle({token,harness,pid:native.pid,start:native.start,
       sid:data.selected_sid,seq:sequence+1,event:'select'});
   }).finally(()=>{checkingNativeSelection=false;});

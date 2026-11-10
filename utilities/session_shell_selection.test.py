@@ -42,7 +42,7 @@ class ResumedSelectionTests(unittest.TestCase):
 
     def observe(self, binding, operation, **_fields):
         self.assertEqual(operation, 'native-selection')
-        return dict(ok=True, native_frame=dict(revision=self.revision,
+        return dict(ok=True, native_frame=dict(revision=self.revision, epoch=12,
             lines=['› Ask Codex', self.frame_sid + ' · Context 10% used',
                    '← for agents · ? for shortcuts']))
 
@@ -93,6 +93,9 @@ class ResumedSelectionTests(unittest.TestCase):
         second = dict(ok=True, native_frame={**first['native_frame'], 'revision': 10})
         with mock.patch.object(shell, 'control', side_effect=[first, second]):
             self.assertFalse(shell.answer_attachment_current(self.fx.binding))
+        second = dict(ok=True, native_frame={**first['native_frame'], 'epoch': 13})
+        with mock.patch.object(shell, 'control', side_effect=[first, second]):
+            self.assertFalse(shell.answer_attachment_current(self.fx.binding))
         with mock.patch.object(pane_ownership, '_runtime', side_effect=[('codex', False), ('codex', True)]):
             self.assertFalse(shell.answer_attachment_current(self.fx.binding))
         with mock.patch.object(codex, 'session_id_of_process', side_effect=[None, None, self.old]):
@@ -110,7 +113,7 @@ class ResumedSelectionTests(unittest.TestCase):
                       ['›', self.old + ' · ' + self.resumed, '? for shortcuts'],
                       ['›', self.resumed[:-3] + '…', '? for shortcuts']):
             with self.subTest(lines=lines), mock.patch.object(shell, 'control',
-                    return_value=dict(ok=True, native_frame=dict(revision=9, lines=lines))):
+                    return_value=dict(ok=True, native_frame=dict(revision=9, epoch=12, lines=lines))):
                 self.assertFalse(shell.answer_attachment_current(self.fx.binding))
         self.fx.selected = self.old  # Independent, current native proof conflicts.
         self.assertFalse(shell.answer_attachment_current(self.fx.binding))
@@ -133,7 +136,7 @@ const A='00000000-0000-4000-8000-000000000099',B='00000000-0000-4000-8000-000000
 function context(){
  const lines=['transcript '+B,'› PRIVATE HUMAN DRAFT','',A+' · Context 10% used','← for agents · ? for shortcuts',''];
  const actions=[];let resolve;
- const c={harness:'codex',sid:B,native:{pid:123,start:'456'},screenRevision:9,selection:1,
+ const c={harness:'codex',sid:B,native:{pid:123,start:'456'},screenRevision:9,epoch:12,selection:1,
    sequence:4,token:'owned',ended:false,relay:false,actions,
    terminal:{rows:lines.length,buffer:{active:{viewportY:0,getLine:i=>({translateToString:()=>lines[i]})}}},
    exact:r=>r.sid===c.sid,source:()=>new Promise(r=>{resolve=r;}),lifecycle:r=>{actions.push(r);},
@@ -146,11 +149,12 @@ function context(){
  a.deepEqual(Array.from(seen.native_frame.lines),['›','',A+' · Context 10% used','← for agents · ? for shortcuts']);
  a.equal(JSON.stringify(seen).includes('PRIVATE HUMAN DRAFT'),false);
  a.equal((await c.request({op:'native-selection',sid:A})).ok,false);
- for(const changed of ['none','screen','selection','unproved']){
+ for(const changed of ['none','screen','input','selection','unproved']){
   const x=context();x.observeNativeSelection();
   if(changed==='screen')x.screenRevision++;
+  if(changed==='input')x.epoch++;
   if(changed==='selection')x.selection++;
-  x.release({ok:changed!=='unproved',selected_sid:A,native_revision:9});
+  x.release({ok:changed!=='unproved',selected_sid:A,native_revision:9,native_epoch:12});
   await new Promise(setImmediate);
   a.equal(x.actions.length,changed==='none'?1:0,changed);
   if(x.actions.length)a.deepEqual(JSON.parse(JSON.stringify(x.actions[0])),

@@ -304,7 +304,8 @@ def _codex_selected_root(binding):
     first = control(binding, "native-selection")
     frame = first.get("native_frame") if first.get("ok") else None
     if (not isinstance(frame, dict) or type(frame.get("revision")) is not int
-            or frame["revision"] < 0 or not isinstance(frame.get("lines"), list)
+            or frame["revision"] < 0 or type(frame.get("epoch")) is not int or frame["epoch"] < 0
+            or not isinstance(frame.get("lines"), list)
             or len(frame["lines"]) > 8 or any(not isinstance(s, str) for s in frame["lines"])
             or sum(len(s) for s in frame["lines"]) > 16384):
         return None
@@ -333,7 +334,7 @@ def _codex_selected_root(binding):
     if (not second.get("ok") or second.get("native_frame") != frame
             or _process(pid) != record or not same_owner()):
         return {"selected_sid": None}
-    return {"selected_sid": selected, "native_revision": frame["revision"]}
+    return {"selected_sid": selected, "native_revision": frame["revision"], "native_epoch": frame["epoch"]}
 
 
 def _codex_current_root(pid, birth, sid):
