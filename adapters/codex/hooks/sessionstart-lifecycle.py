@@ -18,6 +18,40 @@ UTILITIES = ROOT / "utilities"
 if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
 
+FLAG = "CODEX_SESSION_MEMORY_INJECT"
+TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _policy_switch() -> str | None:
+    """``codex_session_memory_inject`` from the user-owned memory policy file.
+
+    A shared app-server daemon builds hook processes from the daemon's own
+    start environment, so a later client's flag never reaches the hook; this
+    file is read at every start instead. Unreadable or absent means no value.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path(os.environ.get("HOME") or Path.home()) / ".config")
+    path = Path(base) / "hearting" / "memory-sync.json"
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("codex_session_memory_inject") if isinstance(data, dict) else None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, str):
+        return value.strip()
+    return None
+
+
+def summary_enabled() -> bool:
+    """Hook environment first, then the policy file; absent in both means on."""
+    if FLAG in os.environ:
+        return os.environ[FLAG].lower() in TRUTHY
+    value = _policy_switch()
+    return value is None or value.lower() in TRUTHY
+
 
 def first_string(mapping: dict[str, Any], *keys: str) -> str:
     for key in keys:
@@ -97,10 +131,6 @@ def forget_shown_candidates(payload: dict[str, Any]) -> None:
         pass
 
 
-def env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
-
-
 def is_worker_session() -> bool:
     return (
         os.environ.get("AGENT_SESSION_ROLE", "").lower() == "worker"
@@ -108,6 +138,7 @@ def is_worker_session() -> bool:
         or bool(os.environ.get("AGENT_DISPATCH_DEPTH"))
         or bool(os.environ.get("OPENCODE_DISPATCH_SLUG"))
         or os.environ.get("FLEET_TITLE_REFRESH") == "1"
+        or os.environ.get("MEM_DISTILL") == "1"
     )
 
 
@@ -164,8 +195,13 @@ def main() -> int:
                         cwd=current_cwd, render_context=False, **display)
                 except Exception:
                     pass
-            # This independent, opt-in profile injection has no prompt duplicate.
-            if env_truthy("CODEX_SESSION_MEMORY_INJECT"):
+            # Use the same bounded summary as Claude/OpenCode on every start
+            # source. Only an absent switch opts into the default; every
+            # explicit value retains its previous meaning (including
+            # empty/false disabling injection). A resume followed at once by
+            # a compact may carry two copies in one request; that duplicate
+            # is accepted so no start ever goes without its summary.
+            if summary_enabled():
                 parts.append(run_preflight("memory", current_cwd))
         emit_context("SessionStart", parts)
     finally:
