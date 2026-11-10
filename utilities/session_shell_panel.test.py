@@ -142,6 +142,11 @@ assert(!r.hits.some(h=>h.action==='details'));
             panel = presentation(values, {}, "claude", "sid", columns)
             models[columns] = {**{key: plain(panel[key]) for key in ("summary", "session", "brief")},
                                "model": plain([panel["model"]])[0]}
+        # Review [52] R2: a long title (55 cells with its tag) plus the jobs
+        # needed 75 cells of the 74 an 80-column edge has, and the jobs left.
+        panel = presentation({**values, "title": "REVIEW1463_TITLE_" + "A" * 40}, {}, "claude", "sid", 80)
+        models["long"] = {**{key: plain(panel[key]) for key in ("summary", "session", "brief")},
+                          "model": plain([panel["model"]])[0]}
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
 const question=['◑ 질문 1 · 1/1 · 답변 필요','REVIEW1463: 결과를 어디에 둘까요?','1 현재 프로젝트 (추천)','2 다른 폴더','Ctrl+] · 답변 필요','more','more 2'].map(text=>[{text}]);
@@ -160,6 +165,14 @@ for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,tru
  const bare=paint(width,height,side,focused,{...model,session:[],brief:[]},n);
  assert.deepEqual(asked(rows),asked(bare));
  if(!rows.some(s=>s.includes('📁 project')))assert.equal(rows.length,bare.length,`${width}x${height} focused=${focused} grew`);
+}
+// A long title is shortened so the running jobs keep their place on the edge.
+for(const focused of [false,true]){
+ const model=models.long,rows=paint(80,14,false,focused,model),bare=paint(80,14,false,focused,{...model,session:[],brief:[]});
+ assert(rows.some(s=>s.includes('REVIEW1463_JOB')),'long title dropped the jobs\n'+rows.join('\n'));
+ assert(rows.some(s=>s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));
+ assert.deepEqual(asked(rows),asked(bare));assert.equal(rows.length,bare.length);
+ assert(/^└─.*─┘$/.test(rows.at(-1))&&[...rows.at(-1)].length===80,rows.at(-1));
 }
 // Running jobs join the branch row at 80, saving the row a separate job row took.
 const idle=view.render({width:80,height:14,side:false,sid:'s',configuration:{},model:{...models[80],routes:[{...routes[0],state:'working'}]},
