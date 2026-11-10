@@ -321,9 +321,11 @@ decision marker and `PermissionRequest(*)` publishes a permission marker;
 `SessionEnd` clear only the exact session. The hook stores no question,
 choices, command, arguments, reason, model output, or tool payload, emits no
 stdout, and is a no-op for registered workers and native subagents. Herdr's
-separate hook remains optional corroboration and is not edited. Claude's native
-`PostToolUseFailure` has no verified Codex counterpart, so the adaptation
-boundary records that event as an explicit non-parity exception.
+separate hook remains optional corroboration and is not edited. Codex has no
+`PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
+exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
+same wait clear and index-lock hint there, so the adaptation boundary keeps the
+event name itself as an explicit exception.
 
 Utility scripts are a whole-layer collapse (2026-07-22): `claude_setting/utilities`
 points at `adapters/claude/utilities`, which is itself ONE symlink to the shared
