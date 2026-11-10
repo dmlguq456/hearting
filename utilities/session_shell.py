@@ -517,7 +517,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work
+    from fleet.session_work import observe as observe_work, open_count
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
@@ -548,10 +548,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
                         received=peers, human=human_line,
-                        work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+                        work=(str(open_count(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
     prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
                                  human=human_line,
-                                 work=(str(len(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
+                                 work=(str(open_count(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
     question_presentations(board, columns, native_wait=values.get("native_wait"))
     for item in board:
         for question in item.get("questions") or ():

@@ -9,6 +9,7 @@ activation is delegated to the verified release after extraction.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import datetime as dt
 import functools
@@ -932,6 +933,79 @@ def _tool_launcher_is_owned(
     }
 
 
+_TOOL_LAUNCHER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _release_extra_tool_launchers(root: Path) -> tuple[tuple[str, str], ...]:
+    """Return launchers the target release declares beyond this installer's table.
+
+    The running installer may be older than the release it activates, so its
+    own ``TOOL_LAUNCHERS`` misses commands the new release added. The table is
+    read as a literal from the release source, never executed; an unreadable
+    or malformed table yields no extras.
+    """
+    try:
+        tree = ast.parse(
+            (root / "tools/install/distribution.py").read_text(encoding="utf-8")
+        )
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return ()
+    value = None
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) and node.value
+            else []
+        )
+        if any(isinstance(t, ast.Name) and t.id == "TOOL_LAUNCHERS" for t in targets):
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                return ()
+    if not isinstance(value, (tuple, list)):
+        return ()
+    known = {name for name, _relative in TOOL_LAUNCHERS}
+    extras = []
+    for entry in value:
+        if not (
+            isinstance(entry, (tuple, list))
+            and len(entry) == 2
+            and all(isinstance(item, str) for item in entry)
+        ):
+            return ()
+        name, relative = entry
+        relative_path = Path(relative)
+        if (
+            not _TOOL_LAUNCHER_NAME_RE.match(name)
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or not relative_path.parts
+        ):
+            return ()
+        if name not in known and name not in {item[0] for item in extras}:
+            extras.append((name, relative))
+    return tuple(extras)
+
+
+def _snapshot_extra_tool_launchers(
+    state: Optional[dict], launchers: Iterable[tuple[str, str]]
+) -> tuple[tuple[tuple[str, str], ...], dict[str, _LeafState]]:
+    """Snapshot release-declared extra launchers, skipping names we do not own."""
+    selected = []
+    snapshot = {}
+    for name, relative_source in launchers:
+        path = bin_dir() / name
+        if path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() and not _tool_launcher_is_owned(
+            path, relative_source, state
+        ):
+            continue
+        selected.append((name, relative_source))
+        snapshot[name] = _capture_leaf(path)
+    return tuple(selected), snapshot
+
+
 def _snapshot_tool_launchers(state: Optional[dict]) -> dict[str, _LeafState]:
     snapshot = {}
     for name, relative_source in TOOL_LAUNCHERS:
@@ -952,9 +1026,10 @@ def _install_tool_launchers(
     root: Path,
     expected_states: dict[str, _LeafState] | None = None,
     postimages: dict[str, _LeafState] | None = None,
+    launchers: Iterable[tuple[str, str]] = TOOL_LAUNCHERS,
 ) -> bool:
     changed = False
-    for name, relative_source in TOOL_LAUNCHERS:
+    for name, relative_source in launchers:
         source = root / relative_source
         if source.is_symlink() or not source.is_file():
             raise DistributionError(
@@ -982,7 +1057,7 @@ def _install_tool_launchers(
 def _restore_tool_launchers(
     snapshot: dict[str, _LeafState], postimages: dict[str, _LeafState]
 ) -> None:
-    for name, _relative_source in TOOL_LAUNCHERS:
+    for name in postimages:
         _restore_link(bin_dir() / name, snapshot[name], postimages[name])
 
 
@@ -1045,6 +1120,11 @@ def _repair_managed_pointers(state: dict) -> bool:
         _atomic_symlink(legacy, desired, expected=_capture_leaf(legacy))
         changed = True
     if _install_tool_launchers(target, tool_preimages):
+        changed = True
+    extras, extra_preimages = _snapshot_extra_tool_launchers(
+        state, _release_extra_tool_launchers(target)
+    )
+    if _install_tool_launchers(target, extra_preimages, launchers=extras):
         changed = True
     return changed
 
@@ -5173,6 +5253,20 @@ def _install_or_update(
             _install_tool_launchers(
                 target, previous_tool_launchers, post_tool_launchers
             )
+            # The running installer may predate this release: link the
+            # launchers the new release adds so they exist after the first
+            # update instead of only after a later repair.
+            extra_launchers, extra_preimages = _snapshot_extra_tool_launchers(
+                previous_state, _release_extra_tool_launchers(target)
+            )
+            previous_tool_launchers.update(extra_preimages)
+            post_tool_launchers.update(extra_preimages)
+            _install_tool_launchers(
+                target,
+                previous_tool_launchers,
+                post_tool_launchers,
+                launchers=extra_launchers,
+            )
             next_state = {
                 "schema": STATE_SCHEMA,
                 "repository": repository,
@@ -5218,7 +5312,7 @@ def _install_or_update(
                     previous_tool_launchers[name],
                     post_tool_launchers[name],
                 )
-                for name, _relative_source in TOOL_LAUNCHERS
+                for name in post_tool_launchers
             )
             try:
                 for rollback_path, preimage, postimage in rollback_paths:
