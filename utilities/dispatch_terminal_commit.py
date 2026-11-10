@@ -2082,12 +2082,18 @@ def authorize_bound_cleanup(scope, *, operation, target, owner_attempt_id, route
         claim_id=scope.claim_id, intent_id=scope.intent_id)
 
 
-def require_current_cleanup(operation, *, target=None, cycle_id=None, jobs=None):
-    """Common direct-writer guard, including post-join owners with no child."""
-    owner = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+def require_current_cleanup(operation, *, target=None, cycle_id=None, jobs=None, environ=None):
+    """Common direct-writer guard, including post-join owners with no child.
+
+    `environ` names the caller's launch environment when it is not this process's own
+    (a launcher checking on behalf of the detached child it is about to start)."""
+    environ = os.environ if environ is None else environ
+    # A detached settlement child carries its owner without the descendant tag.
+    owner = environ.get("AGENT_DISPATCH_ATTEMPT_ID", "") or environ.get(
+        dispatch_contract.CLEANUP_OWNER_ENV, "")
     if not owner:
         return
-    registry = jobs or os.environ.get("AGENT_DISPATCH_JOBS")
+    registry = jobs or environ.get("AGENT_DISPATCH_JOBS")
     state_root = Path(registry).parent if registry else dispatch_contract.resolve_dispatch_state_root(
         dispatch_contract.resolve_agent_home())
     scope = load_active_cleanup_scope(state_root, owner)
@@ -2095,7 +2101,7 @@ def require_current_cleanup(operation, *, target=None, cycle_id=None, jobs=None)
         return
     verdict = authorize_bound_cleanup(scope, operation=operation, target=target,
                                       owner_attempt_id=owner,
-                                      route_id=os.environ.get("AGENT_ROUTE_ID", ""), cycle_id=cycle_id)
+                                      route_id=environ.get("AGENT_ROUTE_ID", ""), cycle_id=cycle_id)
     if verdict.verdict != "allowed":
         raise TerminalCommitError("recovery-unavailable", "cleanup-scope-" + verdict.verdict)
     return scope
