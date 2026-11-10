@@ -6426,6 +6426,31 @@ class SharedCodexHomes(Fixture):
         self.assertEqual(result["codex"]["removed"], 1, result)
         self.assertFalse((self.root / "homes/worker-retention/views" / home.name).exists())
 
+    def test_replacement_reserved_after_observation_keeps_the_home(self):
+        # A normal recovery reservation can land between the examine pass and
+        # the final admission; the detach re-decides every claimant like a
+        # worker home does and keeps the shared home.
+        import dispatch_replacement
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.claim("att-codex-second", home)
+        self.sweep(0)
+        original = R._codex_detach
+        landed = []
+
+        def detach(*args, **kwargs):
+            if not landed:
+                landed.append(True)
+                dispatch_replacement._reserve_source(self.jobs, "att-codex-owner", "f" * 64)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(R, "_codex_detach", detach):
+            result = self.sweep(8 / 7)
+        self.assertTrue(landed, result)
+        self.assertEqual(result["codex"]["removed"], 0, result)
+        self.assertEqual(result["codex"]["kept"].get("protected:replacement-unresolved"), 1, result)
+        self.assertTrue(home.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

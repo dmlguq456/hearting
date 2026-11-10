@@ -3118,6 +3118,34 @@ def _registry_lock_until(jobs: Path, deadline: float):
         _REGISTRY_DEADLINE.reset(token)
 
 
+def _recheck_protections(ctx: _Context, key: str, attempts, watched: dict):
+    """Re-decide each attempt's protections at detach, recording what they read.
+
+    The worker-home and shared Codex detach both use it; ``_fresh(watched)``
+    under the final locks then rejects evidence that changed after this read.
+    """
+    token = _DEPENDENCIES.set(watched)
+    try:
+        activity = 0
+        for attempt in sorted(attempts):
+            _track(ctx.root / "supervisor-state" / f"{attempt}.json")
+            verdict = _protections(ctx, key, attempt, probe_processes=False)
+            if verdict.kind != "eligible":
+                return verdict
+            activity = max(activity, verdict.activity_ns)
+    finally:
+        _DEPENDENCIES.reset(token)
+    return _Verdict("eligible", activity_ns=activity, attempt=None, raw="")
+
+
+def _late_verdict_outcome(verdict) -> str:
+    if verdict.kind == "keep":
+        return "protected:" + verdict.reason
+    if verdict.kind in ("unknown", "deferred"):
+        return "defer:" + verdict.reason
+    return "activity:row-changed"
+
+
 # destructive-ok: reason=detach one expired worker home by pinned rename; boundary=one 32-hex leaf of homes/workers into homes/worker-retention/retiring
 def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw: str,
             first_ns: int, deadline: float | None = None, _rechecks: int = 0,
@@ -3173,15 +3201,11 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                 os.close(home)
             if (isinstance(rebound, _Verdict) or rebound != binding or found is None):
                 return "late-binding"
-            verdict = (_protections(current, key, attempt, probe_processes=False)
+            verdict = (_recheck_protections(current, key, (attempt,), watched)
                        if row is not None
                        else _orphan_protection(current, binding))
             if (row is not None and row.raw != raw) or verdict.kind != "eligible":
-                if verdict.kind == "keep":
-                    return "protected:" + verdict.reason
-                if verdict.kind in ("unknown", "deferred"):
-                    return "defer:" + verdict.reason
-                return "activity:row-changed"
+                return _late_verdict_outcome(verdict)
             ended = _ended_ns(row) if row is not None else None
             if ended is not None:
                 first_ns = max(first_ns, ended)
@@ -3503,7 +3527,25 @@ def _codex_detach(ctx: _Context, name: str, ident: list[int], claimants: set[str
     ctx.candidate_delivery_baseline = None
     ctx.admission_scan = _NO_SCAN
     leaf_held: list[int] = []
+    watched: dict = {}
     try:
+        # Re-decide every claimant as a worker-home detach does: evidence
+        # outside the registry (replacement, route, supervisor state, the
+        # manifest) is read again here and must stay unchanged under the locks.
+        token = _DEPENDENCIES.set(watched)
+        try:
+            _track(ctx.root / "homes" / "codex" / name / "worker-home.json")
+        finally:
+            _DEPENDENCIES.reset(token)
+        found = _codex_manifest_claims(ctx, name, ctx.codex_claims)
+        if isinstance(found, _Verdict):
+            return _late_verdict_outcome(found)
+        if found[0] != claimants or found[1][:3] != ident:
+            return "late-binding"
+        verdict = _recheck_protections(ctx, name, claimants, watched)
+        if verdict.kind != "eligible":
+            return _late_verdict_outcome(verdict)
+        idle_from = max(idle_from, found[2], verdict.activity_ns)
         late = _late_candidate_delivery_change(ctx, None, deadline)
         if late is not None:
             return _late_outcome(late, "delivery-refresh-budget")
@@ -3524,6 +3566,8 @@ def _codex_detach(ctx: _Context, name: str, ident: list[int], claimants: set[str
                         ctx.codex_claims, final_deadline, None, name_re=CODEX_NAME_RE)
                     if delta is not False:
                         return "late-evidence-changed"
+                if not _fresh(watched):
+                    return "late-evidence-changed"
                 with _flock(layout.ret_fd, "view.lock", fcntl.LOCK_EX | fcntl.LOCK_NB) as acquired:
                     if not acquired:
                         return "view-lock-busy"
@@ -3563,6 +3607,8 @@ def _codex_detach(ctx: _Context, name: str, ident: list[int], claimants: set[str
                     if (source_mount is None or source_mount != _mount_id(layout.retiring_fd)
                             or _mount_id(leaf) != source_mount):
                         return "mount-unproven"
+                    if not _fresh(watched):
+                        return "late-evidence-changed"
                     late = _late_candidate_delivery_change(ctx, None, final_deadline)
                     if late is not None:
                         return _late_outcome(late, "delivery-reread-budget")
