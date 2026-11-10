@@ -31,7 +31,17 @@ the operation. A judged key typed into a shell seat's pane (a tidy `/compact`,
 a continue) goes in only while the host's screen answer says the outer keys
 reach native; with settings, the Fleet explorer or a question editor focused,
 or no answer, there is no screen to type into. Only a raw relay reads the pane
-itself. Keyboard bytes remain ordered behind the admitted paste and its
+itself. Reading that screen (a trust reason, a dialog, a draft) needs nothing
+more. Typing into the empty box it shows also needs the host's `status`: a
+host whose `focused` covers the Fleet explorer says `focus_covers_fleet`; a
+host started earlier and still running does not, so its input-wait answer
+(`empty`, which has always left every shell editor out) must agree too. A host
+without the `screen` answer gets no typed key, the same skip, card kept, as its
+panel already caused. A refused tidy is not retried by a new wait: a manual one
+ends `skipped` with its card kept; an automatic one is judged again only while
+its card request is still pending, and a refusal after the card was accepted
+ends `unverified`/`compact-pending` for that work span (the next idle is
+`not-rearmed`, the card stays). Keyboard bytes remain ordered behind the admitted paste and its
 Enter, and are released once Enter is written even if a lifecycle callback is
 lost. That transport boundary never acknowledges peer consumption.
 The launcher retains the PTY master and original native process outside the
