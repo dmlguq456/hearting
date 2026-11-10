@@ -21,7 +21,6 @@ seen at the latest on the user's next prompt.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -34,9 +33,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import dispatch_state_roots, resolve_agent_home  # noqa: E402
 from dispatch_session_sweep import (  # noqa: E402
     ACTION_BUDGET_SECONDS,
+    CLAUDE_CONTEXT_CHARS,
     activate,
     ack_delivered,
-    delivery_context,
+    claude_hook_evidence,
+    fit_inline,
+    release_claims,
+    settle_stop_sends,
     request_obligation_reconciliation,
     sweep_deliver,
 )
@@ -105,7 +108,6 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
         cwd = payload.get("cwd")
         if isinstance(transcript_path, str) and isinstance(cwd, str):
-            runtime_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
             cached_signature = object()
             cached_evidence = None
 
@@ -118,10 +120,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
                     signature = None
                 if signature != cached_signature:
                     try:
-                        from dispatch_recipient_receipt import claude_transcript_evidence
-                        cached_evidence = claude_transcript_evidence(
-                            transcript_path=transcript_path, session_id=session_id, cwd=cwd,
-                            expected_cwd=os.getcwd(), runtime_home=runtime_home)
+                        cached_evidence = claude_hook_evidence(payload, session_id)
                     except (OSError, RuntimeError, TypeError, ValueError):
                         cached_evidence = None
                     cached_signature = signature
@@ -130,6 +129,15 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             receipt_observer = observe_receipt
     from dispatch_notice_state import NoticeReadContext
     notice_context = NoticeReadContext()
+    if _event_name(payload) == "UserPromptSubmit":
+        # The previous turn's Stop blocks: ACK what the transcript holds, owe
+        # the rest again (Claude Code may have overridden a block at its cap).
+        try:
+            settle_stop_sends(session_id, roots, RECIPIENT_KIND,
+                              receipt_observer(None, None, None) if receipt_observer else None,
+                              new_prompt=True, deadline_ns=deadline_ns)
+        except Exception:  # noqa: BLE001 -- they wait for their lease
+            pass
     for root in roots:
         if root in seen:
             continue
@@ -167,7 +175,14 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
     with registry_read_scope():
         # Rendering happens after the claims and is not an authority decision:
         # one observation covers the delivery text and every followup.
-        context = delivery_context(batches)
+        # Claude Code shows at most CLAUDE_CONTEXT_CHARS of one hook context
+        # inline (PG-47): only the leading records whose text fits whole are
+        # shown and ACKed; the rest are handed back pending for this turn's Stop
+        # (peer-message-record.py stop) or the next prompt.
+        context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
+    prompt = _event_name(payload) == "UserPromptSubmit"
+    if rest and prompt:
+        release_claims(session_id, rest, RECIPIENT_KIND, reason="claude-prompt-context-over-limit")
     if not context:
         return 0
     print(
@@ -184,7 +199,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         flush=True,
     )
     sys.stdout.flush()
-    if _event_name(payload) == "UserPromptSubmit":
+    if prompt:
         for root, records in batches:
             try:
                 ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")

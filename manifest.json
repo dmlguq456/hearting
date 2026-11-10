@@ -861,6 +861,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__peer-message-record.py__PostToolUseFailure",
+      "name": "peer-message-record.py post-tool",
+      "mono": "peer-message-record.py",
+      "event": "PostToolUseFailure",
+      "hard_block": false
+    },
+    {
       "slug": "hook__worker-state-compact.py__PreCompact",
       "name": "worker-state-compact.py compact-before",
       "mono": "worker-state-compact.py",
@@ -962,6 +969,13 @@
       "slug": "hook__open-cycle-checkpoint.py__Stop",
       "name": "open-cycle-checkpoint.py",
       "mono": "open-cycle-checkpoint.py",
+      "event": "Stop",
+      "hard_block": false
+    },
+    {
+      "slug": "hook__peer-message-record.py__Stop",
+      "name": "peer-message-record.py stop",
+      "mono": "peer-message-record.py",
       "event": "Stop",
       "hard_block": false
     },

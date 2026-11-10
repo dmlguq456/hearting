@@ -34,6 +34,11 @@ import artifact_reader as reader  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 from split_module_fixture import patch_split  # noqa: E402
 
+_REAPER_SPEC = importlib.util.spec_from_file_location(
+    "producer_fixture_processes", Path(__file__).resolve().parents[1] / "tools/fixture_processes.py")
+fixture_processes = importlib.util.module_from_spec(_REAPER_SPEC)
+_REAPER_SPEC.loader.exec_module(fixture_processes)
+
 _CORPUS_SPEC = importlib.util.spec_from_file_location(
     "shared_artifact_path_corpus", Path(__file__).with_name("artifact_manifest.test.py"))
 _CORPUS = importlib.util.module_from_spec(_CORPUS_SPEC)
@@ -169,6 +174,10 @@ class ProducerTestBase(unittest.TestCase):
         self.wait_for_entrance()
         for child in self._entrance_children:
             child.wait(timeout=5)
+        # A route command run as a subprocess (not a test process) also launches the
+        # detached `artifact_producer.py checkpoint` child, which no in-process mock
+        # sees and which writes `.runtime/artifact-producer` after the command returns.
+        fixture_processes.reap(self._tmp.name)
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
