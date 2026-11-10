@@ -67,6 +67,14 @@ const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
 // V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
 const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
+const stageDispatchReminderHook = path.join(root, "hooks", "stage-dispatch-reminder.sh")
+const capabilityGrounding = path.join(root, "utilities", "capability-grounding.sh")
+// SD-11 reminders decided before a `skill` call and delivered with its result:
+// tool.execute.before has no context channel (it can only replace input or throw).
+const stageReminderBySkillCall = new Map()
+// A registered headless worker stops instead of waiting out a long provider back-off
+// (a 429 with a one-hour retry-after held `opencode run` silent until the liveness scan).
+const workerRetryDelayCeilingMs = 60000
 const designPattern = /(designs?\/|\/design\/|spec\/design|preview\.html$|slides?\.html$|03_components|scaffolds\/)/
 const promptBySession = new Map()
 const turnBySession = new Map()
@@ -423,6 +431,86 @@ function spawnCheckpoint(sid) {
 // above; the child step applies the shared exemptions and judges the rest.
 // `--at` is the event time; a step older than this plugin (AGENT_HOME naming an older
 // release) rejects that argument with exit 2, so the same step runs once more without it.
+// The skill the `skill` tool loads: V2 names it `id` (https://opencode.ai/docs/skills/#loading),
+// V1 `name`.
+function skillToolID(toolName, args) {
+  if (toolName !== "skill" || !args || typeof args !== "object") return ""
+  const value = args.id ?? args.name ?? args.skill
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function skillReminderKey(sid, skill) {
+  return `${sid || ""}\u0000${skill}`
+}
+
+// Claude PreToolUse(Skill) SD-11: the shared hook decides (a dispatch-depth-1 conductor about to
+// run code-<stage> in-session at standard+ intensity) and only reminds, never denies.
+function stageDispatchReminder(skill) {
+  if (!skill) return ""
+  try {
+    const result = spawnSync("sh", [stageDispatchReminderHook, "--skill", skill], {
+      cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 2000 })
+    if (result.status !== 0 || !result.stdout) return ""
+    return String(JSON.parse(result.stdout).hookSpecificOutput?.additionalContext || "")
+  } catch {
+    return ""
+  }
+}
+
+// The entry capability a generated OpenCode command body starts
+// (adapters/opencode/commands/<name>.md, written by sync-native-commands.py).
+// A prompt that is still the typed `/autopilot-<name> args` names it directly.
+function commandCapabilityID(prompt) {
+  const text = typeof prompt === "string" ? prompt : ""
+  const match = /^Use the OpenCode adapter realization of portable capability `(autopilot-[a-z]+)`\./m
+    .exec(text) || /^\s*\/(autopilot-[a-z]+)(?![\w-])/.exec(text)
+  return match ? match[1] : ""
+}
+
+const groundingIntensities = ["direct", "quick", "standard", "strong", "thorough", "adversarial"]
+
+// Claude PostToolUse(Skill)/UserPromptSubmit grounding: inline entry-capability work leaves no
+// jobs.log row, so the marker gives Fleet its `capability(mode·intensity)` label. The `skill` tool
+// carries only the id; mode and intensity come from the command's own arguments line when the turn
+// started from a command (structured flags, else the fixed intensity vocabulary, as the Claude
+// marker reads Skill args), and only from structured flags in a free prompt.
+function recordCapabilityGrounding(sid, skill, cwd, prompt = "") {
+  if (!sid || !skill.startsWith("autopilot-") || isWorkerSession()) return
+  const args = ["record", "--sid", sid, "--capability", skill, "--cwd", cwd || root]
+  const full = typeof prompt === "string" ? prompt : ""
+  const commandArgs = /^User arguments from OpenCode: `([^`\n]*)`/m.exec(full)?.[1]
+    ?? /^\s*\/autopilot-[a-z]+(?![\w-])[ \t]*(.*)$/s.exec(full)?.[1]
+  const text = commandArgs ?? full
+  const mode = /--mode[=\s]+([a-z0-9/_,-]+)/.exec(text)?.[1]
+  let intensity = /--intensity[=\s]+([a-z]+)/.exec(text)?.[1]
+  if (!intensity && commandArgs !== undefined) {
+    intensity = (commandArgs.toLowerCase().match(/[a-z]+/g) || [])
+      .find((word) => groundingIntensities.includes(word))
+  }
+  if (mode) args.push("--mode", mode)
+  if (intensity && groundingIntensities.includes(intensity)) args.push("--intensity", intensity)
+  try {
+    const child = spawn("sh", [capabilityGrounding, ...args], {
+      cwd: root, env: { ...process.env, AGENT_HOME: root }, detached: true, stdio: "ignore" })
+    child.on("error", () => {})
+    child.unref()
+  } catch {
+    // Display evidence only; a skill load never depends on it.
+  }
+}
+
+// One shared after-step for the `skill` tool, used by the main and worker branches alike.
+function afterSkillTool(input, output, cwd, prompt) {
+  const toolName = typeof input.tool === "string" ? input.tool : input.tool?.name || ""
+  const skill = skillToolID(toolName, input.args || output?.args || {})
+  if (!skill) return
+  const key = skillReminderKey(input.sessionID, skill)
+  const reminder = stageReminderBySkillCall.get(key)
+  stageReminderBySkillCall.delete(key)
+  if (reminder && typeof output?.output === "string") output.output += "\n" + reminder
+  if (input.completed !== false) recordCapabilityGrounding(input.sessionID || "", skill, cwd, prompt)
+}
+
 function spawnTurnChangeRecord(phase, sid, cwd, at = (Date.now() / 1000).toFixed(6)) {
   if (!sid || isWorkerSession()) return
   if (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID) return
@@ -1186,11 +1274,14 @@ async function setupOpenCodeV2(ctx) {
           if (readFile) collectPreflight("read", [readFile, event.sessionID || "opencode-plugin"])
         }
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
+        afterSkillTool({ tool: event.tool, sessionID: event.sessionID, args: event.input || {},
+          completed: event.status === "completed" }, output, baseDir(ctx))
       } else {
         // Only a completed result with native content carries appended text back
         // to the model (an error result keeps its own error); tell the shared hook.
         await hooks["tool.execute.after"]?.(
           { tool: event.tool, sessionID: event.sessionID, args: event.input || {},
+            completed: event.status === "completed",
             peerContext: event.status === "completed" && Array.isArray(content) }, output)
       }
       if (event.status === "completed" && Array.isArray(content) &&
@@ -1286,6 +1377,24 @@ async function setupOpenCodeV2(ctx) {
     await hooks["experimental.session.compacting"]?.(
       { sessionID: event.sessionID }, { ...event })
   }))
+  // A registered headless worker has no person to wait for a provider back-off: a long proposed
+  // retry (a 429 with a one-hour retry-after) is vetoed, so `opencode run` reports the provider
+  // error and exits and the launch watch and terminal row see it. Short retries keep OpenCode's
+  // own policy and attempt ceiling; interactive sessions are unchanged.
+  // https://opencode.ai/docs/build/plugins/server (Retry policy).
+  try {
+    await ctx.session.hook("retry", async (event) => {
+      const decision = event?.decision
+      if (!decision?.retry || !(Number(decision.delay) > workerRetryDelayCeilingMs)) return
+      await markSession(event.sessionID, event.agent)
+      if (!v2WorkerSessions.has(event.sessionID)) return
+      event.decision = { retry: false }
+      v2DiagnosticLog({ body: { service: "hearting", level: "warn",
+        message: "worker-provider-retry-vetoed", extra: { sessionID: event.sessionID,
+          status: event.error?.status ?? null, type: event.error?.type || "",
+          delay_ms: Number(decision.delay), attempt: event.attempt } } })
+    })
+  } catch { /* A runtime without the retry hook keeps the liveness scan as the bound. */ }
   await ctx.session.hook("http.response", async (event) => {
     const model = event.model
     const status = event.response?.status
@@ -3275,6 +3384,12 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       }
     }
     if (turn) turnBySession.set(sid, turn)
+    // `/autopilot-*` is a native command (no `skill` tool call): its generated body names the
+    // capability, so the person's start is grounded here, as Claude's UserPromptSubmit does.
+    const commandCapability = commandCapabilityID(prompt)
+    if (commandCapability && eventSid) {
+      recordCapabilityGrounding(eventSid, commandCapability, baseDir(ctx), prompt)
+    }
     const alertTurn = turn || prompt
     if (eventSid && contextAlertBySession.get(sid)?.turn !== alertTurn) {
       const text = await contextAlert(ctx, eventSid, output)
@@ -3403,6 +3518,14 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       })
       if (result.status === 1) throw new Error((result.stdout || "").trim())
     }
+    // SD-11 stage-dispatch reminder (Claude PreToolUse[Skill]); delivered with the skill's result.
+    const skill = skillToolID(toolName, output.args || {})
+    if (skill) {
+      const key = skillReminderKey(input.sessionID, skill)
+      const reminder = stageDispatchReminder(skill)
+      if (reminder) stageReminderBySkillCall.set(key, reminder)
+      else stageReminderBySkillCall.delete(key)
+    }
   },
   "tool.execute.after": async (input, output) => {
     const workerSession = isWorkerSession()
@@ -3477,6 +3600,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         encoding: "utf8",
       })
     }
+    afterSkillTool({ ...input, args }, output, baseDir(ctx),
+      promptBySession.get(input.sessionID || "opencode-plugin") || "")
     if (specSyncNudge && typeof output?.output === "string") {
       const text = await specSyncNudge
       if (text) output.output += "\n" + text

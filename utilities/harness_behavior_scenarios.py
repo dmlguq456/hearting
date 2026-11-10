@@ -94,14 +94,25 @@ def native_binary(harness: str) -> str | None:
 # --------------------------------------------------------------------------
 
 class Reply:
-    """One scripted model answer: plain text, or a single shell tool call."""
+    """One scripted model answer: plain text, a single shell tool call, or one
+    named tool call (``tool=(name, arguments)``) such as a skill load."""
 
-    def __init__(self, text: str = "", shell: str | None = None):
+    def __init__(self, text: str = "", shell: str | None = None, tool=None):
         self.text = text
         self.shell = shell
+        self.tool = tool
+
+    def call(self, protocol: str, names):
+        """The (name, arguments) of this reply's tool call, or None."""
+        if self.shell:
+            return _shell_call(protocol, names, self.shell)
+        return self.tool
 
     def as_dict(self):
-        return {"text": self.text, "shell": self.shell}
+        value = {"text": self.text, "shell": self.shell}
+        if self.tool:
+            value["tool"] = list(self.tool)
+        return value
 
 
 def _flatten_text(value) -> str:
@@ -311,13 +322,14 @@ class ModelFixture:
         blocks = []
         if reply.text:
             blocks.append({"type": "text", "text": reply.text})
-        if reply.shell:
-            name, args = _shell_call("anthropic", names, reply.shell)
+        call = reply.call("anthropic", names)
+        if call:
+            name, args = call
             blocks.append({"type": "tool_use", "id": "toolu_fx_" + uuid.uuid4().hex[:20],
                            "name": name, "input": args})
         if not blocks:
             blocks.append({"type": "text", "text": "OK"})
-        stop = "tool_use" if reply.shell else "end_turn"
+        stop = "tool_use" if call else "end_turn"
         usage = {"input_tokens": 1, "output_tokens": 1,
                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
         if not streaming:
@@ -355,8 +367,9 @@ class ModelFixture:
                            "role": "assistant", "status": "completed",
                            "content": [{"type": "output_text", "text": reply.text,
                                         "annotations": []}]})
-        if reply.shell:
-            name, args = _shell_call("responses", names, reply.shell)
+        call = reply.call("responses", names)
+        if call:
+            name, args = call
             output.append({"id": "fc_fx_" + uuid.uuid4().hex, "type": "function_call",
                            "status": "completed", "call_id": "call_fx_" + uuid.uuid4().hex[:16],
                            "name": name, "arguments": json.dumps(args)})
@@ -388,8 +401,9 @@ class ModelFixture:
         cid = "chatcmpl-fx" + uuid.uuid4().hex[:16]
         created = int(_now())
         tool_calls = []
-        if reply.shell:
-            name, args = _shell_call("chat", names, reply.shell)
+        call = reply.call("chat", names)
+        if call:
+            name, args = call
             tool_calls.append({"index": 0, "id": "call_fx_" + uuid.uuid4().hex[:16],
                                "type": "function",
                                "function": {"name": name, "arguments": json.dumps(args)}})
@@ -994,9 +1008,25 @@ class Scenario:
         raise NotImplementedError
 
 
+# The local-evidence probe's own header: every harness injects it on the first
+# prompt through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the
+# plugin's system-context hook), and no static instruction file contains it.
+HOOK_CONTEXT_MARKER = "# Local evidence present"
+
+
 class BootScenario(Scenario):
     name = "boot"
-    summary = "Installed TUI starts on the loopback model and answers one prompt."
+    summary = ("Installed TUI starts on the loopback model, answers one prompt, and its "
+               "first model request carries Hearting's hook-injected context.")
+
+    def prepare(self, run):
+        # One artifact makes the local-evidence probe emit its block, so the check
+        # reads hook output rather than the bootstrap instructions every harness loads.
+        root = Path(run.home.env.get("AGENT_ARTIFACT_ROOT")
+                    or run.home.workspace / ".agent_reports")
+        seeded = root / "research" / "2026-01-01_boot-hook-context" / "report.md"
+        seeded.parent.mkdir(parents=True, exist_ok=True)
+        seeded.write_text("boot scenario hook-context probe\n", encoding="utf-8")
 
     def drive(self, run):
         run.prompt("SCENARIO-BOOT hello")
@@ -1004,8 +1034,12 @@ class BootScenario(Scenario):
             run.note("no model request after the prompt")
             return "fail"
         first = run.main_requests()[0]
-        run.evidence["hook_context_in_first_request"] = bool(
-            re.search(r"hearting|harness|session card|memory", first["text"], re.I))
+        carried = HOOK_CONTEXT_MARKER in first["text"]
+        run.evidence["hook_context_in_first_request"] = carried
+        if not carried:
+            # A runtime update that drops the lifecycle hook ends here, not silently.
+            run.note("hook context missing from the first model request")
+            return "fail"
         return "pass"
 
 
