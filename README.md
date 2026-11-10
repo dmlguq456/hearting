@@ -155,15 +155,17 @@ a task. Select a session to open its page, or expand its row in OVERVIEW.
 
 ### Optional session panel
 
-`hearting session shell enable` enables a common status area and a bottom block
+`hearting session shell enable` enables a common status area and a HEARTING work panel
 for new Claude, Codex and OpenCode terminals. It is off by default;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
 Claude draws the shared status fields in its own native statusline rows; its
-block starts with routes and questions. Codex and OpenCode keep the status area
-in the block. The block opens with routes, questions, received peer
-messages, repo work and your last input. Press **Ctrl+]** to focus it: answer
+panel keeps that native area and shows the selected model beside its header.
+The panel's four colored edges separate Hearting's current work, actual route
+flow and questions from the native conversation. Its background stays neutral.
+Click a route for its stages and result; the bottom edge opens session details,
+including usage, branch, messages and your last input. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
 you focus the block. The question-first bottom shows the current question and
@@ -182,13 +184,18 @@ footer can yield duplicate paint to the common area, including the exact thread 
 Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
-The optional side placement uses the same block and editor. In the existing
-`~/.config/hearting/session-shell.json`, keep `"enabled": true` and add
-`"layout": "side"` (default `"bottom"`), optionally `"side_width": 40` and
-`"side_min_columns": 132`. This applies to new wrapped terminals. A narrower
-window uses bottom and returns to side when widened. Once OpenCode's own sidebar
-is observed, that attachment keeps bottom to avoid competing panels. Enabling or
-disabling the shell preserves these placement preferences.
+**⚙ Settings** previews placement, width, narrow-window behavior and auxiliary
+detail. Use the value arrows or keyboard arrows, then Apply; Cancel restores
+the previous view, and Defaults previews the defaults. Drag the side boundary
+to resize and save it. Only the existing Hearting `session-shell.json` is saved,
+with a byte-for-byte backup; native model and permission settings are untouched.
+The default is side at sufficient width (40 columns, minimum terminal width 100),
+with a bounded 14-row bottom at narrow widths, including 80 columns. These values
+are configurable. Existing explicit layout choices are retained. OpenCode adds
+Hearting inside its existing fixed-width sidebar, preserving native sections;
+when that sidebar is hidden, Hearting uses bottom. Its native sidebar width is
+not changed by shell settings. Installation affects new wrapped terminals;
+existing running hosts are not replaced.
 
 Codex context keeps the latest server-reported usage. A separate `compaction
 imminent` label appears only when the exact session's current native diagnostic

@@ -182,6 +182,7 @@ utility-deferred	codex_managed_dispatch.py
 utility-deferred	codex_parent_completion_replay.py
 utility-deferred	codex_queue_delivery.py
 utility-deferred	codex_queue_dispatch.py
+utility-deferred	codex_turn_carrier.py
 utility-deferred	commit_policy.py
 utility-deferred	compose-route.py
 utility-deferred	compose_route.test.py

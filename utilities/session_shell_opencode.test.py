@@ -19,8 +19,11 @@ const socket=()=>{const callbacks={};return {on(event,callback){callbacks[event]
   write(raw){events.push(JSON.parse(raw));callbacks.data?.('{}\n');},destroy(){}};};
 const netModule=new vm.SyntheticModule(['default'],function(){this.setExport('default',{connect:socket});},{context});
 const fsModule=new vm.SyntheticModule(['readFileSync'],function(){this.setExport('readFileSync',fs.readFileSync);},{context});
+// This probe covers lifecycle selection; native slot rendering has separate
+// private OpenCode captures and never changes this event sequence.
+const panelModule=new vm.SyntheticModule(['sessionPanel'],function(){this.setExport('sessionPanel',()=>({observe(){},dispose(){}}));},{context});
 (async()=>{
- await module.link(name=>name==='node:net'?netModule:name==='node:fs'?fsModule:Promise.reject(Error('unexpected import '+name)));
+ await module.link(name=>name==='node:net'?netModule:name==='node:fs'?fsModule:name==='./panel.tsx'?panelModule:Promise.reject(Error('unexpected import '+name)));
  await module.evaluate();
  const dispose=module.namespace.default.setup({ui:{router:{current:()=>route},slot:options=>{slots.push(options);return ()=>{};}},
    data:{session:{status:()=> 'idle'},listen:fn=>{listener=fn;return ()=>{};}}});

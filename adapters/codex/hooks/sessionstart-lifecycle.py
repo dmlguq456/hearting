@@ -156,10 +156,12 @@ def main() -> int:
             if sid:
                 try:
                     import session_tidy
+                    native_model = nested_string(payload, "model")
+                    display = {"env": {**os.environ, "HEARTING_SHELL_NATIVE_MODEL": native_model}} if native_model else {}
                     session_tidy.run_hook("codex", "start", sid,
                         source=nested_string(payload, "source"),
                         transcript=nested_string(payload, "transcript_path", "transcriptPath"),
-                        cwd=current_cwd, render_context=False)
+                        cwd=current_cwd, render_context=False, **display)
                 except Exception:
                     pass
             # This independent, opt-in profile injection has no prompt duplicate.
