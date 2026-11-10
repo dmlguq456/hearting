@@ -1573,6 +1573,94 @@ def release_claims(session_id: str, batches, recipient_kind: str, *, reason: str
                 continue
 
 
+# The send source a Claude Stop `block` reason leaves on each record it showed.
+CLAUDE_STOP_SEND_SOURCE = "claude-stop-block"
+# The courier retry base delay `release_claim` applies (its 0.05 s minimum).
+STOP_RELEASE_SETTLE_SECONDS = 0.06
+
+
+def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
+    """Keep what a flushed Stop `block` reason showed open until it is taken.
+
+    Claude Code may override a block and end the turn (its consecutive-Stop
+    cap), so printing the reason is not the model reading it. Each shown record
+    stays this process's open claim as ``sent-ambiguous`` with the Stop as its
+    send source; :func:`settle_stop_sends` ACKs it at the next hook call that
+    proves the continuation ran, or hands it back. A record that cannot be held
+    is handed back pending now (shown twice rather than marked unseen received).
+    """
+    owner_prefix = f"session-sweep:{recipient_kind}:{os.getpid()}:"
+    for root, records in batches:
+        for record in records:
+            delivery_id = record.get("delivery_id")
+            storage = record.get(STORAGE_KEY) or session_id
+            if not isinstance(delivery_id, str) or not delivery_id:
+                continue
+            try:
+                fresh = pending_delivery.read(root, storage, delivery_id)
+                owner = (fresh or {}).get("claim_owner")
+                if (fresh is None or fresh.get("state") != "claimed"
+                        or not isinstance(owner, str) or not owner.startswith(owner_prefix)):
+                    continue
+                identity = pending_delivery.received_ack_identity(fresh, storage, delivery_id)
+                event_id = hashlib.sha256((delivery_id + "\0" + owner).encode("utf-8")).hexdigest()
+                pending_delivery.record_send(root, storage, delivery_id, source=CLAUDE_STOP_SEND_SOURCE,
+                                             event_id=event_id, expected_identity=identity)
+                pending_delivery.mark_sent_ambiguous(root, storage, delivery_id, claim_owner=owner,
+                                                     expected_identity=identity)
+            except Exception:  # noqa: BLE001 - not held: hand it back pending
+                release_claims(session_id, [(root, [record])], recipient_kind,
+                               reason="claude-stop-hold-failed")
+
+
+def settle_stop_sends(session_id: str, roots, recipient_kind: str, *, taken: bool,
+                      deadline_ns: int | None = None) -> int:
+    """Settle the records an earlier Stop `block` showed; returns how many.
+
+    ``taken`` is true at a hook call that only runs when that continuation ran
+    (the next Stop with ``stop_hook_active``, a tool boundary of the same
+    session): the records are ACKed. Otherwise (a new prompt) they are handed
+    back pending so this boundary shows them again.
+    """
+    settled = 0
+    for root in dict.fromkeys(roots):
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            break
+        if not Path(root).is_dir():
+            continue
+        try:
+            records, _count = addressed_records(Path(root), recipient_kind, session_id,
+                                                deadline_ns=deadline_ns)
+        except Exception:  # noqa: BLE001 - left for the lease
+            continue
+        for record in records:
+            timeline = record.get(pending_delivery.TIMESTAMP_PROVENANCE_FIELD) or {}
+            if (record.get("state") != "sent-ambiguous"
+                    or timeline.get("last_send_source") != CLAUDE_STOP_SEND_SOURCE):
+                continue
+            storage = record.get(STORAGE_KEY) or session_id
+            delivery_id = record["delivery_id"]
+            try:
+                if taken:
+                    pending_delivery.ack(root, storage, delivery_id,
+                                         acked_by=f"session-sweep:{session_id}",
+                                         expected_states=("sent-ambiguous",))
+                else:
+                    pending_delivery.release_claim(
+                        root, storage, delivery_id, claim_owner=record.get("claim_owner"),
+                        failure_reason=f"claude-stop-not-taken:{time.time_ns()}",
+                        expected_identity=pending_delivery.received_ack_identity(
+                            record, storage, delivery_id))
+                settled += 1
+            except (pending_delivery.PendingDeliveryError, KeyError, OSError):
+                continue
+    if settled and not taken:
+        # A released claim waits the courier's base retry delay before it can be
+        # claimed again; wait it out once so this same boundary shows them.
+        time.sleep(STOP_RELEASE_SETTLE_SECONDS)
+    return settled
+
+
 def _opencode_expected_message(text: str, identities: list[tuple[str, dict]]) -> dict:
     """Bind an exact rendered OpenCode body to its handed-off identities."""
     from dispatch_recipient_receipt import identity_binding, receipt_marker_for_identity

@@ -214,9 +214,57 @@ class ClaudePromptSweepTest(FixtureHome):
                             for _tail, did in tails))
 
 
-    def stop(self) -> str:
+    def test_a_stop_block_the_native_cap_overrode_is_not_acked_and_the_next_prompt_shows_it(self):
+        # RV-PR1477-R2 P2: Claude Code overrides the block past its consecutive-Stop cap
+        # and ends the turn, so no further hook call comes. Printed is not read.
+        import dispatch_pending_delivery as pending
+        tails = self.notify(20)
+        first = self.prompt()
+        reason = self.stop(active=False)       # the turn's first Stop: block 1
+        shown = [(tail, did) for tail, did in tails if tail in reason and tail not in first]
+        self.assertTrue(shown)
+        for _tail, did in shown:              # no next call: held, never received
+            record = pending.read(self.root, self.SID, did)
+            self.assertEqual(record["state"], "sent-ambiguous")
+            self.assertFalse(record.get("received_at_utc"))
+        again = self.prompt()                  # the person's next prompt
+        for tail, did in shown:
+            self.assertIn(tail, again)         # shown again, not lost
+            self.assertEqual(pending.read(self.root, self.SID, did)["state"], "acked")
+
+    def test_a_stop_block_is_acked_when_claude_continues_with_it(self):
+        import dispatch_pending_delivery as pending
+        tails = self.notify(20)
+        first = self.prompt()
+        reason = self.stop(active=False)
+        shown = [did for tail, did in tails if tail in reason and tail not in first]
+        self.assertTrue(shown)
+        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "sent-ambiguous"
+                            for did in shown))
+        follow = self.stop(active=True)        # this call is the continuation's evidence
+        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "acked"
+                            for did in shown))
+        self.assertFalse(any(tail in follow for tail, did in tails if did in shown))
+
+    def test_a_tool_call_after_a_stop_block_acks_it(self):
+        import dispatch_pending_delivery as pending
+        tails = self.notify(20)
+        self.prompt()
+        reason = self.stop(active=False)
+        shown = [did for tail, did in tails if tail in reason]
+        self.assertTrue(shown)
+        payload = json.dumps({"session_id": self.SID, "hook_event_name": "PostToolUse",
+                              "tool_name": "Bash", "tool_input": {"command": "true"}})
+        done = subprocess.run([sys.executable, str(ROOT / "hooks" / "peer-message-record.py"),
+                               "post-tool"], input=payload, capture_output=True, text=True,
+                              timeout=60, env={**os.environ, **self.env})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(all(pending.read(self.root, self.SID, did)["state"] == "acked"
+                            for did in shown))
+
+    def stop(self, active: bool = True) -> str:
         payload = json.dumps({"session_id": self.SID, "hook_event_name": "Stop",
-                              "stop_hook_active": True})
+                              "stop_hook_active": active})
         done = subprocess.run([sys.executable, str(ROOT / "hooks" / "peer-message-record.py"),
                                "stop"], input=payload, capture_output=True, text=True,
                               timeout=60, env={**os.environ, **self.env})

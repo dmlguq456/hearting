@@ -15,8 +15,12 @@ Two subcommands, dispatched by argv[1]:
                 continue the same turn through Claude's documented
                 ``{"decision": "block", "reason": ...}``, as Codex's in-turn
                 carrier does at its Stop. Only what the reason shows whole is
-                ACKed, so each continuation removes what it showed and the
-                turn ends once nothing more is owed.
+                held, so each continuation removes what it showed and the
+                turn ends once nothing more is owed. Claude Code can override
+                a block and end the turn (its consecutive-Stop cap), so a
+                shown record is ACKed only at the next call that proves the
+                continuation ran (Stop with ``stop_hook_active``, or a tool
+                boundary); a new prompt hands it back pending instead.
   prompt     -- UserPromptSubmit hook. Records one `notice` peer_message_v1
                 when the injected prompt carries a cross-session message, and
                 sweeps up to five un-acked detached-watch receipts into
@@ -287,7 +291,11 @@ def handle_stop(payload, out):
         return
     if str(_UTILITIES_DIR) not in sys.path:
         sys.path.insert(0, str(_UTILITIES_DIR))
-    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS
+    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, hold_stop_sends
+    # This call is itself the evidence for an earlier block: `stop_hook_active`
+    # means Claude continued with its reason. Otherwise that block was not
+    # taken (overridden at the native cap) and its records are owed again.
+    settle_stop_records(session_id, taken=payload.get("stop_hook_active") is True)
     text, batches = tool_boundary_records(
         session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2)
     try:
@@ -297,7 +305,27 @@ def handle_stop(payload, out):
             out.flush()
     finally:
         if batches:
-            settle_tool_boundary_records(session_id, batches, out.flushed)
+            if out.flushed:
+                # Printed is not read: Claude Code may override this block and
+                # end the turn. Settled at the next call (above, or a tool boundary).
+                hold_stop_sends(session_id, batches, _CLAUDE_RECIPIENT_KIND)
+            else:
+                settle_tool_boundary_records(session_id, batches, False)
+
+
+def settle_stop_records(session_id, *, taken):
+    """ACK (taken) or hand back the records an earlier Stop block showed."""
+    with contextlib.suppress(Exception):
+        if str(_UTILITIES_DIR) not in sys.path:
+            sys.path.insert(0, str(_UTILITIES_DIR))
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        from dispatch_session_sweep import settle_stop_sends
+        remaining = _deadline() - time.monotonic()
+        if remaining <= 0:
+            return
+        settle_stop_sends(session_id, dispatch_state_roots(resolve_agent_home()),
+                          _CLAUDE_RECIPIENT_KIND, taken=taken,
+                          deadline_ns=time.monotonic_ns() + int(remaining * 1e9))
 
 
 def settle_tool_boundary_records(session_id, batches, shown):
@@ -549,6 +577,8 @@ def main(exit_guard=False):
             if mod and not str(payload.get("agent_id") or "").strip():
                 session_id = payload.get("session_id")
                 owed = []
+                # A tool call after a Stop block means Claude continued with it.
+                settle_stop_records(session_id, taken=True)
 
                 def owed_context():
                     # After the exact peer-body claims, within what they left.

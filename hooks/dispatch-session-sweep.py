@@ -39,6 +39,7 @@ from dispatch_session_sweep import (  # noqa: E402
     ack_delivered,
     fit_inline,
     release_claims,
+    settle_stop_sends,
     request_obligation_reconciliation,
     sweep_deliver,
 )
@@ -132,6 +133,14 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             receipt_observer = observe_receipt
     from dispatch_notice_state import NoticeReadContext
     notice_context = NoticeReadContext()
+    if _event_name(payload) == "UserPromptSubmit":
+        # A new prompt is no proof that the last Stop block of the previous turn
+        # was taken (Claude Code may have overridden it): owe its records again.
+        try:
+            settle_stop_sends(session_id, roots, RECIPIENT_KIND, taken=False,
+                              deadline_ns=deadline_ns)
+        except Exception:  # noqa: BLE001 -- they wait for their lease
+            pass
     for root in roots:
         if root in seen:
             continue
