@@ -1009,7 +1009,8 @@ class CodexStatusOnlyFooterTest(unittest.TestCase):
     def test_status_line_alone_under_the_composer_names_the_thread(self):
         for row in (f"  {self.T} · {self.T} · master · Context 0% used · gpt default",
                     f"  {self.T} · proj · Context 12% used",
-                    f"  {self.T} · {self.T[:-3]}…"):
+                    f"  {self.T} · {self.T[:-3]}…",
+                    f"  {self.T} · {self.T[:8]}…  ⚠ 1 warning · f2 to view"):
             with self.subTest(row=row):
                 self.assertEqual(po._codex_current_footer(["› Ask Codex to do anything", row]),
                                  ("current", self.T))

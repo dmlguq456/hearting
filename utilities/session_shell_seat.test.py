@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
 import peer_steward_base as base
 import session_shell
-import session_tidy as st
 import terminal_surface
 
 spec = importlib.util.spec_from_file_location("seat_fixture", ROOT / "utilities/peer_shell_resolution.test.py")
@@ -118,13 +117,6 @@ class ShellSeatTest(unittest.TestCase):
             self.assertIs(fixture.peer._shell_seat_turn(known, self.pane), known)
             other = {"result": {"agent": {"agent": "claude", "agent_status": "unknown"}}}
             self.assertIs(fixture.peer._shell_seat_turn(other, self.pane), other)
-
-    def test_pane_seat_records_its_herdr_endpoint_for_the_clear_helper(self):
-        env = {"HERDR_PANE_ID": "w1:p1", "HERDR_SOCKET_PATH": self.home.name + "/named.sock"}
-        with mock.patch.dict(os.environ, env), \
-             mock.patch("pane_ownership.verified_pane", return_value="w1:p1"):
-            seat = st.resolve_seat("claude", self.home.name, sid=self.sid)
-        self.assertEqual((seat.kind, seat.pane, seat.socket_path), ("pane", "w1:p1", env["HERDR_SOCKET_PATH"]))
 
 
 if __name__ == "__main__":

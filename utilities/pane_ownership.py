@@ -61,8 +61,11 @@ def _codex_status_only(row):
         return False
     if _CODEX_STATUS_ONLY_RE.match(row):
         return True
-    clipped = fields[-1]
-    return bool(_CLIPPED_THREAD_ID_RE.fullmatch(clipped) and fields[0].startswith(clipped[:-1]))
+    # Hearting's thread-first order repeats the id as the unnamed thread's title;
+    # a warning or key hint may follow it on the same row.
+    repeated = (fields[1].split() or [""])[0]
+    return bool(repeated == fields[0] or repeated.endswith("…") and len(repeated) > 8
+                and fields[0].startswith(repeated[:-1]))
 
 
 def _codex_current_footer(lines):
