@@ -189,7 +189,11 @@ class DispatchV44ProjectionTest(unittest.TestCase):
                 _strings(path, "validate_route_record")
                 | _strings(shared, "validate_route_record")
             )
-            main_strings = _strings(path, "main")
+            # The launch fence is built in the launch the three wrappers share.
+            main_strings = (
+                _strings(path, "main")
+                | _strings(ROOT / "utilities" / "dispatch_headless_main.py", "launch_claimed_attempt")
+            )
             zero_fields = (
                 _keyword_names(path, "validate_route_record")
                 | _keyword_names(shared, "validate_route_record")

@@ -230,7 +230,9 @@ Additional code-entry gates:
   negation, and quoted history are not a second permission test. Use an ordinary
   non-force push. Write the PR body to
   `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md` and pass it with
-  `--body-file` after inspecting any existing PR for that branch. CI fixes stay
+  `--body-file` after inspecting any existing PR for that branch. Put the
+  `hearting run pr-chain next` line for that PR in the final report so the
+  review request reaches the named reviewer (`core/OPERATIONS.md §5.11`). CI fixes stay
   within the approved scope and return through the existing review/test/commit path.
   Stage and review workers do not publish; integration push, main merge,
   release, installation, and cleanup stay with the supervisor.
