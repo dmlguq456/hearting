@@ -33,14 +33,18 @@ class NativeDefaultTests(unittest.TestCase):
 
     def test_codex_plan_carries_the_default_only_where_the_home_lists_it(self):
         renderer = ROOT / "adapters/codex/bin/sync-native-agents.py"
-        cache = json.dumps({"models": [{"slug": "gpt-6-luna"}]})
+        cache = json.dumps({"models": [{"slug": "gpt-6-luna", "supported_in_api": True,
+                                        "supported_reasoning_levels": [{"effort": "medium"}]}]})
         with tempfile.TemporaryDirectory(prefix="subagent-default-") as raw:
             home = Path(raw)
-            for text, listed, expected in (('model = "gpt-6.1"\n', cache, "gpt-6-luna"),
-                                           ('model = "gpt-6.1"\n', None, None),
-                                           ('model_provider = "ollama"\n', cache, None)):
+            catalog = 'model_catalog_json = "catalog.json"\n'
+            for text, listed, expected in ((catalog, cache, "gpt-6-luna"),
+                                           (catalog, None, None),
+                                           ('model = "gpt-6.1"\n', cache, None),
+                                           ('model_provider = "ollama"\n' + catalog, cache, None)):
                 (home / "config.toml").write_text(text, encoding="utf-8")
-                cache_path = home / "models_cache.json"
+                (home / "models_cache.json").write_text(cache, encoding="utf-8")
+                cache_path = home / "catalog.json"
                 cache_path.unlink(missing_ok=True)
                 if listed:
                     cache_path.write_text(listed, encoding="utf-8")

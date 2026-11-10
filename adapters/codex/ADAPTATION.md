@@ -292,16 +292,18 @@ spawns; an explicit spawn `model` and an agent file's own `model` still win
 that default against the session's model list and refuses every such spawn
 when it is not there (`Unknown model ... for spawn_agent`), so activation sets
 both to the portable `light` profile of the selected `models.conf` (the tier
-Claude's `hooks/subagent-model-default.sh` injects) only when the user has not
-set `default_subagent_model`, every configuration of the home (`config.toml`,
-profile files, `[profiles.*]`) selects Codex's own `openai` provider, and every
-model list those configurations use is read and lists the model (and its effort
-where the list names efforts). That list is the file `model_catalog_json` names,
-or else the home's `models_cache.json`, which Codex writes from what its
-provider serves. A provider name is no evidence: an absent or unreadable list,
-or one without the model, gets no default and the session model stays, so a home
-whose Codex has not yet written `models_cache.json` (for example an API-key home
-on a custom base URL) and the list built into the binary are not counted.
+Claude's `hooks/subagent-model-default.sh` injects) only where that list is
+confirmed: the user has not set `default_subagent_model`, every configuration
+of the home (`config.toml`, profile files, `[profiles.*]`) selects Codex's own
+`openai` provider and names a readable `model_catalog_json`, and every such
+catalog lists the model with `supported_in_api: true` (an API-key session drops
+any other model from its spawn list; ChatGPT auth keeps it), a
+`multi_agent_version` other than `disabled`, and the effort among its
+`supported_reasoning_levels`. Every other home keeps the session model. That
+includes the usual home with no catalog: Codex takes its `models_cache.json`
+only within a 300-second TTL and for the running client version and the
+provider/auth identity, which nothing read at activation can confirm, so the
+cache is not evidence; the list built into the binary is not read either.
 Activation owns each of the two keys separately: a key the user changes is left
 as theirs, and a line still holding Hearting's value is removed when the default
 no longer applies and on deactivation. Measured with

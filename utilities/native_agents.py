@@ -233,33 +233,58 @@ def _codex_tables(home: Path) -> list[dict]:
 def codex_model_lists(home: Path) -> list[Optional[Path]]:
     """The model list each session configuration of a Codex home uses, deduplicated.
 
-    `model_catalog_json` names a file that replaces Codex's list; without it the list is
-    the home's own `models_cache.json`, which Codex writes from what its provider serves.
-    ``None`` marks a configuration this reader cannot follow.
+    Only a `model_catalog_json` file is followed: it replaces Codex's list for that
+    session and is used as it is. ``None`` marks a configuration whose list this reader
+    cannot confirm: an unreadable file, an invalid value, or no catalog at all. Without a
+    catalog Codex uses `models_cache.json` only while its `fetched_at` is within a 300 s
+    TTL and its `client_version` and opaque provider/auth `identity` match the running
+    client (codex-rs `models-manager`), which no file read at activation can establish,
+    so that cache is never taken as the list a session selects from (PG-13).
     """
     home = Path(home)
     lists: list[Optional[Path]] = []
     for table in _codex_tables(home):
-        if table is None:
-            path = None
+        catalog = table.get("model_catalog_json") if table is not None else None
+        if isinstance(catalog, str) and catalog:
+            path = Path(catalog).expanduser()
+            path = path if path.is_absolute() else home / path
         else:
-            catalog = table.get("model_catalog_json")
-            if catalog is None:
-                path = home / "models_cache.json"
-            elif isinstance(catalog, str) and catalog:
-                path = Path(catalog).expanduser()
-                path = path if path.is_absolute() else home / path
-            else:
-                path = None
+            path = None
         if path not in lists:
             lists.append(path)
     return lists
 
 
-def codex_listed_models(home: Path) -> Optional[dict]:
-    """``{slug: entry}`` listed by every model list a session of `home` uses, or None.
+def _codex_selectable(models: list) -> dict[str, set]:
+    """``{slug: efforts}`` of a model list that a Codex spawn accepts whatever the auth.
 
-    None when any of them is absent or unreadable: an unconfirmed list is not a list that
+    Codex 0.163.0 drops a model whose `supported_in_api` is not true from the spawn list
+    of an API-key session (`ModelPreset::filter_by_auth`), refuses a model whose
+    `multi_agent_version` is `disabled` under multi-agent v2, and refuses a requested
+    effort that the model's `supported_reasoning_levels` do not name. Only a model that
+    passes all three in every case is kept; a slug listed twice keeps the efforts both
+    entries name.
+    """
+    selectable: dict[str, set] = {}
+    for entry in models:
+        if not isinstance(entry, dict) or not isinstance(entry.get("slug"), str):
+            continue
+        levels = entry.get("supported_reasoning_levels")
+        efforts = {level.get("effort") for level in (levels if isinstance(levels, list) else ())
+                   if isinstance(level, dict) and isinstance(level.get("effort"), str)}
+        if entry.get("supported_in_api") is not True or entry.get("multi_agent_version") == "disabled":
+            efforts = set()
+        slug = entry["slug"]
+        selectable[slug] = efforts if slug not in selectable else selectable[slug] & efforts
+    return {slug: efforts for slug, efforts in selectable.items() if efforts}
+
+
+def codex_listed_models(home: Path) -> Optional[dict]:
+    """``{slug: [efforts]}`` every session of `home` can spawn with, or None.
+
+    A model and effort count only when each model list a session uses is confirmed
+    (`codex_model_lists`) and accepts them there (`_codex_selectable`). None when any
+    list is unconfirmed, absent or unreadable: an unconfirmed list is not a list that
     serves the model (PG-13). Codex's bundled list inside the binary is not read here.
     """
     import json
@@ -277,11 +302,11 @@ def codex_listed_models(home: Path) -> Optional[dict]:
         models = document.get("models") if isinstance(document, dict) else None
         if not isinstance(models, list):
             return None
-        entries = {entry["slug"]: entry for entry in models
-                   if isinstance(entry, dict) and isinstance(entry.get("slug"), str)}
+        entries = _codex_selectable(models)
         listed = entries if listed is None else {
-            slug: entry for slug, entry in listed.items() if slug in entries}
-    return listed
+            slug: listed[slug] & entries[slug] for slug in listed if slug in entries}
+        listed = {slug: efforts for slug, efforts in listed.items() if efforts}
+    return None if listed is None else {slug: sorted(efforts) for slug, efforts in listed.items()}
 
 
 def runtime_plan(fmt: Format, runtime_home: Path) -> dict:

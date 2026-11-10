@@ -133,9 +133,10 @@ class ManagedKeysTests(unittest.TestCase):
                          "gpt-6-luna-2")
 
 
-def _catalog(home: Path, slugs, name="catalog.json", efforts=("low", "medium", "high")):
+def _catalog(home: Path, slugs, name="catalog.json", efforts=("low", "medium", "high"), **fields):
+    entry = {"supported_in_api": True, "multi_agent_version": "v1", **fields}
     (home / name).write_text(json.dumps({"models": [
-        {"slug": slug, "supported_reasoning_levels": [{"effort": e} for e in efforts]}
+        {"slug": slug, "supported_reasoning_levels": [{"effort": e} for e in efforts], **entry}
         for slug in slugs]}), encoding="utf-8")
 
 
@@ -163,36 +164,59 @@ class SubagentDefaultListTests(unittest.TestCase):
             setup(home)
             return ra._native_agent_default("codex", ROOT, home)
 
-    def test_cache_listing_the_light_model_confirms(self):
-        self.assertEqual(self.default('model = "gpt-6.1"\n',
-                                      lambda h: _catalog(h, ["gpt-6.1", "gpt-6-luna"], "models_cache.json")),
+    CATALOG = 'model = "gpt-6.1"\nmodel_catalog_json = "catalog.json"\n'
+
+    def test_catalog_accepting_the_light_model_confirms(self):
+        self.assertEqual(self.default(self.CATALOG, lambda h: _catalog(h, ["gpt-6.1", "gpt-6-luna"])),
                          DEFAULT)
 
+    def test_api_unsupported_model_writes_nothing(self):
+        # R2 counterexample: an API-key session drops it from the spawn list.
+        for value in (False, None, "true"):
+            self.assertIsNone(self.default(self.CATALOG, lambda h: _catalog(
+                h, ["gpt-6-luna"], supported_in_api=value)), value)
+
+    def test_models_cache_is_never_the_evidence(self):
+        # Codex adopts the cache only within its TTL and for its own version/identity.
+        fresh = {"fetched_at": "2999-01-01T00:00:00Z", "client_version": "0.163.0", "identity": "x"}
+        for extra in ({}, {"fetched_at": "2000-01-01T00:00:00Z"}, {"client_version": "0.0.1"}, fresh):
+            def setup(h, extra=extra):
+                _catalog(h, ["gpt-6-luna"], "models_cache.json")
+                document = json.loads((h / "models_cache.json").read_text())
+                (h / "models_cache.json").write_text(json.dumps({**document, **extra}))
+            self.assertIsNone(self.default('model = "gpt-6.1"\n', setup), extra)
+
     def test_no_readable_list_writes_nothing(self):
-        self.assertIsNone(self.default('model = "gpt-6.1"\n'))
-        self.assertIsNone(self.default('model = "gpt-6.1"\n',
-                                       lambda h: (h / "models_cache.json").write_text("{", encoding="utf-8")))
+        self.assertIsNone(self.default(self.CATALOG))
+        self.assertIsNone(self.default(self.CATALOG, lambda h: (h / "catalog.json").write_text("{")))
 
     def test_custom_catalog_without_light_writes_nothing(self):
-        # The reviewer's counterexample: an OpenAI provider with `model_catalog_json`.
-        config = 'model = "gpt-6.1"\nmodel_catalog_json = "catalog.json"\n'
-        self.assertIsNone(self.default(config, lambda h: (
+        self.assertIsNone(self.default(self.CATALOG, lambda h: (
             _catalog(h, ["catalog-only-model"]),
             _catalog(h, ["gpt-6-luna"], "models_cache.json"))))
-        self.assertEqual(self.default(config, lambda h: _catalog(h, ["gpt-6-luna"])), DEFAULT)
 
-    def test_every_session_list_must_carry_it(self):
-        config = ('model = "gpt-6.1"\n[profiles.other]\nmodel_catalog_json = "other.json"\n')
-        self.assertIsNone(self.default(config, lambda h: (
-            _catalog(h, ["gpt-6-luna"], "models_cache.json"), _catalog(h, ["x"], "other.json"))))
+    def test_every_session_list_must_accept_model_and_effort(self):
+        config = self.CATALOG + '[profiles.other]\nmodel_catalog_json = "other.json"\n'
+        for other in ({}, {"efforts": ("low",)}, {"multi_agent_version": "disabled"},
+                      {"supported_in_api": False}):
+            self.assertIsNone(self.default(config, lambda h, other=other: (
+                _catalog(h, ["gpt-6-luna"]), _catalog(h, ["gpt-6-luna"] if other else ["x"],
+                                                      "other.json", **other))), other)
+        self.assertEqual(self.default(config, lambda h: (
+            _catalog(h, ["gpt-6-luna"]), _catalog(h, ["gpt-6-luna"], "other.json"))), DEFAULT)
+        # The top-level session has no catalog and so uses the unconfirmable cache.
+        self.assertIsNone(self.default('model = "gpt-6.1"\n[profiles.other]\nmodel_catalog_json = "catalog.json"\n',
+                                       lambda h: (_catalog(h, ["gpt-6-luna"]),
+                                                  _catalog(h, ["gpt-6-luna"], "models_cache.json"))))
 
     def test_listed_model_without_the_effort_writes_nothing(self):
-        self.assertIsNone(self.default('model = "gpt-6.1"\n', lambda h: _catalog(
-            h, ["gpt-6-luna"], "models_cache.json", efforts=("low",))))
+        for efforts in (("low",), ()):
+            self.assertIsNone(self.default(self.CATALOG, lambda h, efforts=efforts: _catalog(
+                h, ["gpt-6-luna"], efforts=efforts)), efforts)
 
     def test_other_provider_still_writes_nothing(self):
-        self.assertIsNone(self.default('model_provider = "other"\n',
-                                       lambda h: _catalog(h, ["gpt-6-luna"], "models_cache.json")))
+        self.assertIsNone(self.default('model_provider = "other"\nmodel_catalog_json = "catalog.json"\n',
+                                       lambda h: _catalog(h, ["gpt-6-luna"])))
 
 
 class DesignRunArgumentTests(unittest.TestCase):
