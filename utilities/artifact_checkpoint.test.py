@@ -1133,6 +1133,33 @@ class TriggerTest(unittest.TestCase):
                                     "--artifact-root", self.r, "--route", "rt-abc"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
+    def test_checkpoint_child_is_not_the_workers_tagged_descendant(self):
+        # A finished worker's turn-end checkpoint is Hearting's settlement, not work it
+        # left running: the child must not inherit the attempt tag the supervisor counts.
+        import dispatch_terminal_commit as TC
+        cycle = "cyc_" + "c" * 32
+        env = {**self.env, "AGENT_ARTIFACT_ROOT": self.r, "AGENT_ARTIFACT_CYCLE_ID": cycle,
+               "AGENT_DISPATCH_ATTEMPT_ID": "att-" + "d" * 32, "AGENT_ROUTE_ID": "rt-x"}
+        with mock.patch.object(T, "in_test_process", return_value=False), \
+                mock.patch.object(T.subprocess, "Popen") as popen, \
+                mock.patch.object(TC, "load_active_cleanup_scope", return_value=None) as scope:
+            self.assertTrue(T.launch_for_session("claude", "sid-1", env=env))
+        child = popen.call_args.kwargs["env"]
+        self.assertNotIn("AGENT_DISPATCH_ATTEMPT_ID", child)
+        self.assertEqual(child["AGENT_ARTIFACT_CYCLE_ID"], cycle)
+        self.assertEqual(scope.call_args.args[1], "att-" + "d" * 32)
+
+    def test_checkpoint_keeps_the_cleanup_scope_refusal_its_child_applied(self):
+        import dispatch_terminal_commit as TC
+        env = {**self.env, "AGENT_DISPATCH_ATTEMPT_ID": "att-" + "e" * 32}
+        refused = TC.TerminalCommitError("recovery-unavailable", "cleanup-scope-denied")
+        with mock.patch.object(T, "in_test_process", return_value=False), \
+                mock.patch.object(T.subprocess, "Popen") as popen, \
+                mock.patch.object(TC, "require_current_cleanup", side_effect=refused):
+            self.assertFalse(T.launch(trigger="turn-end", key="k-refused", artifact_root=self.r,
+                                      cycle_id="cyc_" + "e" * 32, env=env))
+        popen.assert_not_called()
+
     def test_turn_end_prefers_the_worker_cycle_then_the_route_chain(self):
         cycle = "cyc_" + "b" * 32
         with mock.patch.object(T, "in_test_process", return_value=False), \

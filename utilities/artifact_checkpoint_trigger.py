@@ -42,6 +42,7 @@ PRODUCER = UTILITIES / "artifact_producer.py"
 CUTOVER_REL = Path(".runtime/artifact-producer/v1/cutover.json")
 DISABLE_ENV = "AGENT_ARTIFACT_CHECKPOINT"
 INTERVAL_ENV = "AGENT_ARTIFACT_CHECKPOINT_MIN_INTERVAL"
+ATTEMPT_TAG_ENV = "AGENT_DISPATCH_ATTEMPT_ID"  # dispatch_contract_base.ATTEMPT_DESCENDANT_ENV
 DEFAULT_INTERVAL_SECONDS = 900.0
 AUTOMATIC_TRIGGERS = ("stage-complete", "supervisor-poll", "turn-end", "begin")
 HARNESSES = ("claude", "codex", "opencode")
@@ -105,6 +106,27 @@ def _prune_stamps(directory: Path, now: float) -> None:
         pass
 
 
+def _settlement_environment(env: Mapping[str, str]) -> Optional[dict]:
+    """The child's environment without the dispatched attempt's descendant tag.
+
+    The checkpoint is Hearting's own settlement, not work the worker started: carrying
+    the tag made a finished worker's turn-end checkpoint read as its live descendant,
+    so its supervisor exit woke the parent with a "still running" notice for every
+    PASS owner. Without the tag the route's completion notice is the only one, and a
+    slow or hung checkpoint can no longer hold that completion back.  The cleanup-scope
+    refusal the child applied under the tag (`require_current_cleanup`) is applied here
+    instead; None means the caller's cleanup scope refuses it, as the child would have.
+    """
+    if env.get(ATTEMPT_TAG_ENV):
+        try:
+            from dispatch_terminal_commit import require_current_cleanup
+            require_current_cleanup("producer-checkpoint", environ=env)
+        except Exception:  # noqa: BLE001 -- refused or unreadable: no checkpoint, as before
+            return None
+    # Same removal as `dispatch_contract_base.governance_environment`, without its imports.
+    return {key: value for key, value in env.items() if key != ATTEMPT_TAG_ENV}
+
+
 def launch(
     *,
     trigger: str,
@@ -125,6 +147,9 @@ def launch(
     if artifact_root and not (Path(artifact_root) / CUTOVER_REL).is_file():
         return False
     if not _claim(key, child_env, time.time() if now is None else now):
+        return False
+    child_env = _settlement_environment(child_env)
+    if child_env is None:
         return False
     argv = [sys.executable, str(PRODUCER), "checkpoint", "--trigger", trigger]
     if artifact_root:
