@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_behavior_scenarios as hb  # noqa: E402
 import harness_behavior_cases_a as ca  # noqa: E402
 import harness_behavior_cases_b as cb  # noqa: E402
-import harness_behavior_cases_d as cd  # noqa: E402
+import harness_behavior_cases_e as ce  # noqa: E402
 
 
 def _post(base, path, payload):
@@ -30,7 +30,7 @@ def _post(base, path, payload):
 
 class NativeCallTest(unittest.TestCase):
     def test_spawn_call_uses_each_harness_sub_agent_tool(self):
-        call = cd.spawn_call("memory-scout", "do it")
+        call = ce.spawn_call("memory-scout", "do it")
         self.assertEqual(call.build("anthropic", [])[0], "Agent")
         self.assertEqual(call.build("anthropic", [])[1]["subagent_type"], "memory-scout")
         name, args = call.build("responses", [])
@@ -39,28 +39,28 @@ class NativeCallTest(unittest.TestCase):
         name, args = call.build("chat", [])
         self.assertEqual((name, args["agent"]), ("subagent", "memory-scout"))
         self.assertTrue(str(call).startswith("spawn:"))
-        self.assertEqual(cd.wait_call("a1").build("responses", [])[1]["targets"], ["a1"])
+        self.assertEqual(ce.wait_call("a1").build("responses", [])[1]["targets"], ["a1"])
 
     def test_error_tool_reads_a_missing_workspace_file(self):
         workspace = Path("/tmp/ws")
-        call = cd.error_tool(workspace)
+        call = ce.error_tool(workspace)
         self.assertEqual(call.build("anthropic", []),
-                         ("Read", {"file_path": str(workspace / cd.MISSING_FILE)}))
+                         ("Read", {"file_path": str(workspace / ce.MISSING_FILE)}))
         self.assertEqual(call.build("chat", [])[0], "read")
         name, args = call.build("responses", ["exec_command"])
         self.assertEqual(name, "exec_command")
-        self.assertIn(cd.MISSING_FILE, args["cmd"])
+        self.assertIn(ce.MISSING_FILE, args["cmd"])
 
     def test_namespaced_call_is_split_on_the_wire(self):
         body = b'{"type":"function_call","name":"multi_agent_v1::spawn_agent","arguments":"{}"}'
-        fixed = cd.split_namespaced(body)
+        fixed = ce.split_namespaced(body)
         self.assertIn(b'"name":"spawn_agent","namespace":"multi_agent_v1"', fixed)
-        self.assertEqual(cd.split_namespaced(b'"name":"exec_command"'), b'"name":"exec_command"')
+        self.assertEqual(ce.split_namespaced(b'"name":"exec_command"'), b'"name":"exec_command"')
 
     def test_fixture_emits_namespace_for_codex_spawn(self):
         def script(record, earlier):
-            return hb.Reply(shell=cd.spawn_call("default", "sub task"))
-        cd._patch_namespaces(hb)
+            return hb.Reply(shell=ce.spawn_call("default", "sub task"))
+        ce._patch_namespaces(hb)
         fixture = hb.ModelFixture(script)
         try:
             body = _post(fixture.base, "/v1/responses", {
@@ -78,17 +78,17 @@ class CountingTest(unittest.TestCase):
 
     def test_new_arrivals_ignores_history_repeats(self):
         requests = self.requests("a", "a M", "a M b", "a M b M")
-        self.assertEqual(cd.new_arrivals(requests, "M"), [1, 3])
-        self.assertEqual(cd.new_arrivals(self.requests("x", "y"), "M"), [])
+        self.assertEqual(ce.new_arrivals(requests, "M"), [1, 3])
+        self.assertEqual(ce.new_arrivals(self.requests("x", "y"), "M"), [])
 
     def test_seen_markers_starts_at_the_given_request(self):
         requests = self.requests("T1", "T2 T3")
-        self.assertEqual(cd.seen_markers(requests, ["T1", "T2", "T9"]), {"T1", "T2"})
-        self.assertEqual(cd.seen_markers(requests, ["T1", "T2"], start=1), {"T2"})
+        self.assertEqual(ce.seen_markers(requests, ["T1", "T2", "T9"]), {"T1", "T2"})
+        self.assertEqual(ce.seen_markers(requests, ["T1", "T2"], start=1), {"T2"})
 
     def test_sub_session_requests_carry_only_the_sub_marker(self):
-        self.assertTrue(cd._is_sub({"text": "SUB task"}, "MAIN", "SUB"))
-        self.assertFalse(cd._is_sub({"text": "MAIN spawn SUB"}, "MAIN", "SUB"))
+        self.assertTrue(ce._is_sub({"text": "SUB task"}, "MAIN", "SUB"))
+        self.assertFalse(ce._is_sub({"text": "MAIN spawn SUB"}, "MAIN", "SUB"))
 
 
 class OwnerRouteTest(unittest.TestCase):
@@ -97,14 +97,14 @@ class OwnerRouteTest(unittest.TestCase):
         import route_identity
         with tempfile.TemporaryDirectory() as tmp:
             for shape, allowed in (("unscoped", True), ("complete", True), ("report", False)):
-                route = cd.synthetic_route(Path(tmp) / "ws", Path(tmp) / "art", shape)
+                route = ce.synthetic_route(Path(tmp) / "ws", Path(tmp) / "art", shape)
                 digest = route_identity.route_hash(route)
                 self.assertEqual(route["route_hash"], digest)
                 self.assertEqual(route["route_id"], route_identity.route_id_from_hash(digest))
                 self.assertIs(commit_policy._entry_scope_allows_publication(route), allowed)
 
     def test_probe_command_does_not_echo_its_own_verdict_tokens(self):
-        scenario = cd.OwnerPublishScenario()
+        scenario = ce.OwnerPublishScenario()
         scenario.port = 9
         command = scenario.probe("unscoped")
         self.assertNotIn("HB-NET-unscoped-REACHED", command)
@@ -131,7 +131,7 @@ class DelinkTest(unittest.TestCase):
             original = hb.SOURCE
             hb.SOURCE = source
             try:
-                changed = cd.delink_config(env)
+                changed = ce.delink_config(env)
             finally:
                 hb.SOURCE = original
             self.assertFalse((codex / "hooks.json").is_symlink())
@@ -177,7 +177,7 @@ class OracleTest(unittest.TestCase):
     """Deliberately broken inputs must not pass (PR #1458 review, oracle-probe)."""
 
     def burst(self, kind):
-        scenario, run, items = cd.ReportBurstScenario(), _Run(), []
+        scenario, run, items = ce.ReportBurstScenario(), _Run(), []
 
         def notify(_run, _sid, values):
             items.extend(values)
@@ -193,9 +193,9 @@ class OracleTest(unittest.TestCase):
             run.rows.append(_record(1, text))
             return {"before": 1, "woken_without_prompt": 0, "typed_rounds": [20]}
         with patch.object(cb, "session_id", return_value="root"), \
-                patch.object(cd, "notify", side_effect=notify), \
-                patch.object(cd, "notice_states", return_value=["acked"] * 20), \
-                patch.object(cd, "prompt_until", side_effect=flow):
+                patch.object(ce, "notify", side_effect=notify), \
+                patch.object(ce, "notice_states", return_value=["acked"] * 20), \
+                patch.object(ce, "prompt_until", side_effect=flow):
             return scenario.drive(run), run.evidence
 
     def test_burst_counts_whole_bodies_not_tail_markers(self):
@@ -208,10 +208,10 @@ class OracleTest(unittest.TestCase):
 
     def test_body_match_ignores_whitespace_reflow(self):
         requests = [{"main_index": 0, "text": "- burst 0: A  b\n c TAIL (x)"}]
-        self.assertEqual(cd.seen_bodies(requests, ["A b c TAIL", "A b TAIL"]), {0})
+        self.assertEqual(ce.seen_bodies(requests, ["A b c TAIL", "A b TAIL"]), {0})
 
     def subsession(self, kind):
-        scenario, run = cd.SubsessionCompletionScenario(), _Run()
+        scenario, run = ce.SubsessionCompletionScenario(), _Run()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run.home = SimpleNamespace(root=root)
@@ -232,8 +232,8 @@ class OracleTest(unittest.TestCase):
                 return {"command": command}
             with patch.object(cb, "session_id", return_value="root"), \
                     patch.object(ca, "_helper", side_effect=helper), \
-                    patch.object(cd.time, "sleep"), \
-                    patch.object(cd, "wait_for", side_effect=lambda fn, *a, **kw: fn()):
+                    patch.object(ce.time, "sleep"), \
+                    patch.object(ce, "wait_for", side_effect=lambda fn, *a, **kw: fn()):
                 return scenario.drive(run), run.evidence
 
     def test_subsession_passes_only_when_the_root_receives_and_acts(self):
@@ -247,7 +247,7 @@ class OracleTest(unittest.TestCase):
         self.assertTrue(ev["root_next_action_ran"])
 
     def herdr(self, agent):
-        scenario, run = cd.HerdrPeerPromptScenario(), _Run()
+        scenario, run = ce.HerdrPeerPromptScenario(), _Run()
         run.harness = "opencode"
         run.fixture = SimpleNamespace(requests=[])
         run.home = SimpleNamespace(env={}, workspace=Path("/tmp"))
@@ -263,10 +263,10 @@ class OracleTest(unittest.TestCase):
             returncode=0, stdout="prompted=queued", stderr=""))
         with patch.object(cb, "session_id", return_value="root"), \
                 patch.object(cb, "first_with", return_value=1), \
-                patch.object(cd.time, "sleep"), \
-                patch.object(cd, "wait_for", side_effect=lambda fn, *a, **kw: fn()), \
+                patch.object(ce.time, "sleep"), \
+                patch.object(ce, "wait_for", side_effect=lambda fn, *a, **kw: fn()), \
                 patch.object(scenario, "source_changed", return_value=False), \
-                patch.object(cd, "subprocess", fake):
+                patch.object(ce, "subprocess", fake):
             return scenario.drive(run), run.evidence
 
     def test_herdr_detection_needs_the_launched_harness(self):
@@ -307,7 +307,7 @@ class SourceGuardTest(unittest.TestCase):
                 env={**env, "CLAUDE_CONFIG_DIR": str(claude), "CODEX_HOME": str(codex),
                      "XDG_CONFIG_HOME": str(config)},
                 workspace=root, configure_model=lambda: None))
-            scenario = cd.HerdrPeerPromptScenario()
+            scenario = ce.HerdrPeerPromptScenario()
 
             def harmless(argv, **kw):
                 if argv and argv[0] == "git":
@@ -319,9 +319,9 @@ class SourceGuardTest(unittest.TestCase):
                                                                           poll=lambda: 0))
             try:
                 with patch.object(hb, "SOURCE", source), \
-                        patch.object(cd, "real_herdr", return_value="/bin/true"), \
-                        patch.object(cd, "subprocess", fake), \
-                        patch.object(cd, "wait_for", return_value=True):
+                        patch.object(ce, "real_herdr", return_value="/bin/true"), \
+                        patch.object(ce, "subprocess", fake), \
+                        patch.object(ce, "wait_for", return_value=True):
                     scenario.prepare(run)
                     changed = scenario.source_changed(run)
                     self.assertEqual(target.read_bytes(), initial)
@@ -331,9 +331,9 @@ class SourceGuardTest(unittest.TestCase):
                                     ["promptSuggestionEnabled"])
                     # A second edit to an already-dirty file is still a change.
                     target.write_text("{\"a\": 1}\n")
-                    dirty = cd.source_status()
+                    dirty = ce.source_status()
                     target.write_text("{\"a\": 2}\n")
-                    self.assertNotEqual(cd.source_status(), dirty)
+                    self.assertNotEqual(ce.source_status(), dirty)
             finally:
                 if scenario.scratch:
                     shutil.rmtree(scenario.scratch, ignore_errors=True)
@@ -342,14 +342,14 @@ class SourceGuardTest(unittest.TestCase):
 class RegistrationTest(unittest.TestCase):
     def test_every_scenario_is_loaded_and_names_its_register_row(self):
         hb._load_extra()
-        for cls in cd.SCENARIOS:
+        for cls in ce.SCENARIOS:
             self.assertIn(cls.name, hb.SCENARIOS)
-            self.assertRegex(cd.PG[cls.name], r"^PG-\d+(,PG-\d+)*$")
-        self.assertEqual(set(cd.PG), {cls.name for cls in cd.SCENARIOS})
+            self.assertRegex(ce.PG[cls.name], r"^PG-\d+(,PG-\d+)*$")
+        self.assertEqual(set(ce.PG), {cls.name for cls in ce.SCENARIOS})
 
     def test_headless_scenario_skips_the_terminal(self):
-        self.assertFalse(cd.OwnerPublishScenario.needs_tui)
-        self.assertTrue(cd.QuotedPeerFromScenario.needs_tui)
+        self.assertFalse(ce.OwnerPublishScenario.needs_tui)
+        self.assertTrue(ce.QuotedPeerFromScenario.needs_tui)
         tui = hb.Scenario().make_tui(
             type("R", (), {"home": type("H", (), {"env": {}, "workspace": Path("/tmp")})()})(),
             Path("/tmp"), ["true"])
@@ -363,7 +363,7 @@ class RegistrationTest(unittest.TestCase):
             "harness_behavior_scenarios.py")), "--list"], text=True, capture_output=True,
             timeout=60, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         self.assertEqual(done.returncode, 0, done.stderr)
-        for cls in cd.SCENARIOS:
+        for cls in ce.SCENARIOS:
             self.assertIn(cls.name + "\t", done.stdout)
 
 
