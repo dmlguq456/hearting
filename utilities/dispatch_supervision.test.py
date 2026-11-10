@@ -66,14 +66,43 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
 
     def test_a_pass_owner_still_settling_is_not_called_a_blockage_in_any_harness(self):
         for harness in ("claude", "codex", "opencode"):
-            for process in ("live", "quiescent"):   # helper still draining / completion not delivered yet
-                with self.subTest(harness=harness, process=process):
-                    text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, process)
-                    self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
-                    self.assertIn("att-owner finished with PASS", text)
-                    self.assertIn("Do not report this to the user as blocked", text)
-                    self.assertIn("dispatch-registry.py reconcile --jobs", text)
-                    self.assertNotIn("Explain the blockage", text)
+            with self.subTest(harness=harness):   # completion not delivered yet, nothing running
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "quiescent")
+                self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
+                self.assertIn("att-owner finished with PASS", text)
+                self.assertIn("Do not report this to the user as blocked", text)
+                self.assertIn("dispatch-registry.py reconcile --jobs", text)
+                self.assertNotIn("Explain the blockage", text)
+
+    def test_a_pass_owner_with_a_running_process_is_neither_blocked_nor_called_settlement(self):
+        """RV-PR1444-1110 F1: a live tagged descendant may be work the worker started, not a helper."""
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "live")
+                self.assertIn("not a blockage, and not finished either", text)
+                self.assertIn("Do not report the work as finished while it runs", text)
+                for claim in ("only Hearting's own settlement", "do not restart, retry, cancel",
+                              "Explain the blockage"):
+                    self.assertNotIn(claim, text)
+
+    def test_a_real_running_descendant_is_named_by_pid_before_any_residue_seal(self):
+        """No liveness mock: a real process tagged with the attempt keeps the notice from settling."""
+        self.jobs.write_text(row("att-owner", status="done", **{k: v for k, v in self.owner("claude").items()}))
+        receipt = self.receipt("att-owner")
+        work = subprocess.Popen(["sleep", "60"], env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-owner"},
+                                start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while supervision.settling_after_pass(receipt) != [("att-owner", "wait")] and time.monotonic() < deadline:
+                time.sleep(0.05)
+            text = supervision.render_text(receipt)
+            self.assertIn("not a blockage, and not finished either", text)
+            self.assertIn(f"pid {work.pid}", text)
+            self.assertNotIn("only Hearting's own settlement", text)
+            self.assertNotIn("Explain the blockage", text)
+        finally:
+            work.kill()
+            work.wait()
 
     def test_a_real_stop_or_unknown_evidence_keeps_the_attention_notice(self):
         cases = {
