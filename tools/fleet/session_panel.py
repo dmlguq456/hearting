@@ -42,6 +42,10 @@ def route_evidence(visibility):
         summary.append(text("short_ci_same_head"))
     else:
         summary.append("CI ?")
+    # The route's completion gate, as Fleet's route card marks it (``gate ✓``): a one-shot
+    # route has no test or review stage, so this is its one recorded verification.
+    if verification.get("gate") in {"proven", "failed", "unproven"}:
+        summary.append(text("short_gate_" + verification["gate"]))
     lines = [[text("evidence_route"), text("shape_" + shape), "info"]]
     basis = codes.get("basis") or {}
     kind = basis.get("kind")
@@ -81,6 +85,11 @@ def compact_status(values, columns, native_owned=()):
     if "quota" not in native_owned:
         for label, used, _reset in values.get("quota_windows") or [("5h", None, None), ("7d", values.get("weekly_pct"), None)]:
             groups.append([(str(label) + " ", "dim"), (_percent(used), _level(used) if used is not None else "dim")])
+    mcp = values.get("mcp")
+    if isinstance(mcp, dict) and mcp.get("total"):
+        # OpenCode's hidden native sidebar listed these servers; keep the count.
+        groups.append([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
+                                         "lvl_r" if mcp.get("failed") else "lvl_g")])
     parts = []
     for group in groups:
         if parts:parts.append((" · ", "dim"))
@@ -209,12 +218,18 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                 stages.append({"name": clean(node.get("name")), "state": state_label(node.get("st")), "current": node.get("st") in {"active", "running", "working"}})
         worker = row.get("worker") or []
         reason = "".join(str(part[0]) for part in worker if isinstance(part, (list, tuple)) and part)
+        # The route's depth-1 owner, as Fleet's route row reads it. A one-shot owner runs its
+        # node itself, so its body line already says ``owner …`` and no second line repeats it.
+        owner = clean(row.get("owner"))
+        owner_text = "owner · " + owner if owner else ""
+        runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
         routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
+                       "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
@@ -224,7 +239,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
         "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
-        "detail", "working", "answer", "ready", "unknown", "fixed_width", "saved", "save_failed")}
+        "detail", "working", "answer", "ready", "unknown", "saved", "save_failed")}
     return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
