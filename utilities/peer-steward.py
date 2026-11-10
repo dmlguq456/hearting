@@ -8671,14 +8671,15 @@ def _codex_interrupt_start_gate(target):
 def _process_session(pane, harness):
     """The session the pane's foreground runtime process is on now, or None.
 
-    Claude uses `sessions/<pid>.json`, rewritten on `/clear`; Codex uses
-    process_identity for the foreground TUI, with a visible footer as an optional
-    mismatch check; OpenCode uses its TUI selection record. Herdr's own `agent_session`
-    follows a `/clear` only when its integration reports it, and has been seen to keep
-    the previous session for good (live panes 2026-10-01), so a second tidy in the same
-    window would otherwise never clear it. Shared Codex callers use CODEX_THREAD_ID;
-    pane_ownership resolves that thread to its foreground TUI. A shell seat's
-    session is its attachment's (the host follows the native start/select hooks)."""
+    Claude uses `sessions/<pid>.json`; Codex uses process_identity for the
+    foreground TUI, with a visible footer as an optional mismatch check; OpenCode uses
+    its TUI selection record. Tidy itself types only `/compact`, which keeps the
+    session, so this is read before the send to confirm the booked session and never
+    awaited afterwards. A person may still type `/clear` or `/new`: Herdr's own
+    `agent_session` follows that only when its integration reports it (live panes
+    2026-10-01), so the process record stays the proof. Shared Codex callers use
+    CODEX_THREAD_ID; pane_ownership resolves that thread to its foreground TUI. A shell
+    seat's session is its attachment's (the host follows the native start/select hooks)."""
     try:
         seat, conflict = _pane_shell_binding_result(pane, harness)
     except Exception:  # noqa: BLE001 - optional reader absence keeps the bare path
@@ -8688,7 +8689,8 @@ def _process_session(pane, harness):
     if seat is not None:
         if seat["harness"] == "codex":
             import session_shell
-            # After /new the attachment keeps the old SID until the next start hook.
+            # After a person's /new the attachment keeps the old SID until the next
+            # start hook; tidy's /compact keeps the thread, so this matches then.
             if not session_shell._codex_current_root(
                     seat["native_pid"], seat["native_start"], seat["sid"]):
                 return None
@@ -8768,7 +8770,7 @@ def _clear_look(target, req):
             return "target-changed" if current else "session-identity-unknown", agent, None
     elif req.get("harness") == "claude" and agent.get("session_id") != req.get("sid"):
         # Codex/OpenCode already used this look's authoritative native judgment.
-        # herdr's pane record can lag a /clear; the process itself is the proof, never a guess.
+        # herdr's pane record can lag a person's /clear; the process itself is the proof, never a guess.
         # An unnamed session (`-`, empty) is not a confirmed match: only the process can vouch for it.
         if _process_session(agent.get("pane") or target, req.get("harness")) != req.get("sid") \
                 and not _herdr_lags(req, agent.get("session_id")):
