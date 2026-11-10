@@ -5567,9 +5567,13 @@ class QuickOwnerBindingIntegrationTest(ProducerTestBase):
         for harness in ("claude", "codex", "opencode"):
             source = (root / "adapters" / harness / "bin" / "dispatch-headless.py").read_text()
             self.assertIn("bind_owner_launch,", source)
-            call = source.index("bind_owner_launch(args, jobs)")
-            self.assertLess(source.index("Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text"), call)
-            self.assertLess(call, source.index("spawn_claimed_attempt(", call))
+            claim = source.index("DISPATCH_MAIN.claim_registered_attempt(")
+            self.assertLess(claim, source.index("DISPATCH_MAIN.launch_claimed_attempt(", claim))
+        # The wrappers share the claim and the launch (utilities/dispatch_headless_main.py).
+        shared = (root / "utilities" / "dispatch_headless_main.py").read_text()
+        call = shared.index("h.bind_owner_launch(args, jobs)")
+        self.assertLess(shared.index("Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text"), call)
+        self.assertLess(call, shared.index("h.spawn_claimed_attempt(", call))
 
 
 class TerminalTransactionIntegrationTest(ProducerTestBase):

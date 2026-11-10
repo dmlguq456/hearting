@@ -87,6 +87,7 @@ from dispatch_contract import (
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
+import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
 # Identical in every wrapper; the old names stay so callers and mock targets do not move.
 _is_report_bundle_publish_stage = WRAPPER_COMMON.is_report_bundle_publish_stage
@@ -1340,6 +1341,10 @@ def validate_route_record(args: argparse.Namespace) -> int:
     )
 
 
+# Shared main() phases read this wrapper's names at call time (see dispatch_headless_main).
+_ADAPTER = DISPATCH_MAIN.AdapterNamespace(globals())
+
+
 @frame_repository.process_entry
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv[1:])
@@ -1713,73 +1718,19 @@ def main(argv: list[str]) -> int:
             "standalone-per-command" if v2_execution else "shared-service")
     command = shell_command(args, prompt_path, log_path)
 
-    governor = ROOT / "utilities" / "model-worker-governor.py"
-    try:
-        governor_root = resolve_model_governor_root(args.artifact_root)
-    except DispatchContractError as exc:
-        return fail(exc.reason, 73, detail=exc.detail, child_spawned="0")
-    reservation_token = ""
-    args.replica_batch_reservation = {}
     # How this attempt's completion is delivered, before its row records it.
     args.resolved_completion_delivery = "session-resume-supervised" if _supervised_owner(args) else "one-shot"
     args.completion_delivery_reason = "ok" if _supervised_owner(args) else "not-applicable"
-    if action in ("register", "start"):
+
+    def before_claim():
         Path(frame_repository.execution_path(prompt_path.parent)).mkdir(parents=True, exist_ok=True)
         Path(frame_repository.execution_path(log_path.parent)).mkdir(parents=True, exist_ok=True)
-        if action == "start":
-            try:
-                reservation_token, args.replica_batch_reservation = reserve_governor_token(
-                    governor,
-                    governor_root,
-                    "dispatch",
-                    provided_token=os.environ.get(GOVERNOR_RESERVATION_ENV, ""),
-                    expected_reservation=args.replica_batch_expectation,
-                )
-            except DispatchContractError as exc:
-                return fail(exc.reason, 75, detail=exc.detail, child_spawned="0",
-                            **governor_refusal_fields(exc))
-        try:
-            args.attempt_claimed = append_job(jobs, args)
-            if action == "start" and not args.attempt_claimed:
-                args.attempt_claimed = attempt_launch_is_available(
-                    jobs, args.attempt_id
-                )
-            parent_completion.validate_registered_delivery(args, jobs, read=registered_parent_delivery)
-        except DispatchContractError as e:
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            return fail(e.reason, 73, detail=e.detail, child_spawned="0")
-        except ManagedDispatchError as e:
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            return fail(str(e), 73, child_spawned="0")
-        if args.attempt_claimed:
-            initialize_supervised_owner_input(args, jobs)
-            try:
-                Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")
-            except OSError as exc:
-                annotate_attempt_row(
-                    jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-                )
-                cancel_governor_reservation(governor, governor_root, reservation_token)
-                close_job_row(
-                    jobs, args.slug, args.worktree,
-                    "prompt-materialization-failed", "", args.attempt_id,
-                )
-                return fail(
-                    "prompt-materialization-failed", 73,
-                    detail=str(exc), child_spawned="0",
-                )
-            if action == "start":
-                try:
-                    bind_owner_launch(args, jobs)
-                except ProducerError as exc:
-                    annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": "never-launched"})
-                    cancel_governor_reservation(governor, governor_root, reservation_token)
-                    close_job_row(jobs, args.slug, args.worktree, "producer-binding-failed", "", args.attempt_id)
-                    return fail(exc.code, 73, detail=exc.detail, child_spawned="0")
-    else:
-        args.attempt_claimed = False
-    if action == "start" and not args.attempt_claimed:
-        cancel_governor_reservation(governor, governor_root, reservation_token)
+        return None
+    claim = DISPATCH_MAIN.claim_registered_attempt(
+        _ADAPTER, args, action, jobs=jobs, prompt_path=prompt_path, prompt_text=prompt_text, before_claim=before_claim)
+    if claim.rc is not None:
+        return claim.rc
+    governor, governor_root, reservation_token = claim.governor, claim.governor_root, claim.reservation_token
     if action == "start" and args.attempt_claimed:
         dispatch_env = {
             **{key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")},
@@ -2008,439 +1959,51 @@ def main(argv: list[str]) -> int:
             dispatch_env["AGENT_DISPATCH_UNIT"] = args.unit
         else:
             dispatch_env.pop("AGENT_DISPATCH_UNIT", None)
-        launch_parent_completion_sidecar(args, jobs)
-        if args.managed_sidecar_state == "launch-failed":
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
-            cancel_governor_reservation(
-                governor, governor_root, reservation_token
-            )
-            close_job_row(
-                jobs,
-                args.slug,
-                args.worktree,
-                "managed-sidecar-launch-failed",
-                "",
-                args.attempt_id,
-            )
-            return fail(
-                "managed-sidecar-launch-failed",
-                75,
-                detail=args.managed_sidecar_reason,
-                attempt_id=args.attempt_id,
-                child_spawned="0",
-            )
-        fence_failure_read_fd, fence_failure_write_fd = os.pipe()
-        args.watchdog_budget = begin_finite_watchdog(args.foreground_timeout)
-        def spawn_worker(gate_fd: int) -> subprocess.Popen:
-            fence_command = [
-                sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
-                "--parent-pid", str(os.getpid()),
-                "--gate-fd", str(gate_fd),
-                "--failure-fd", str(fence_failure_write_fd),
-                "--jobs", str(jobs), "--attempt-id", args.attempt_id,
-            ]
-            if args.route_file:
-                fence_command.extend(
-                    [
-                        "--route-file", args.route_file,
-                        "--launch-phase", args.action,
-                    ]
-                )
-            fence_command.extend(
-                [
-                    "--post-release-parent-death-signal",
-                    "kill" if args.launch_lifecycle == FOREGROUND_SCOPED else "none",
-                    "--",
-                    sys.executable, str(governor), "--root", str(governor_root),
-                    "run", "--class", "dispatch", "--", "sh", "-c", command,
-                ]
-            )
-            if args.review_output and args.launch_lifecycle == DETACHED:
-                try:
-                    args.review_watchdog_handle = launch_review_watchdog(
-                        fence_command, gate_fd=gate_fd, budget=args.watchdog_budget,
-                        attempt_id=args.attempt_id,
-                        nonce=args.review_governed_lease_nonce,
-                        failure_fd=fence_failure_write_fd, env=dispatch_env,
-                        lease_release_spec={
-                            "root": args.artifact_root,
-                            "cycle_id": args.review_output_binding["cycle_id"],
-                            "attempt_id": args.attempt_id,
-                        }, jobs=jobs,
-                    )
-                finally:
-                    try:
-                        os.close(fence_failure_write_fd)
-                    except OSError:
-                        pass
-                return args.review_watchdog_handle.process
-            try:
-                return subprocess.Popen(
-                    fence_command,
-                    start_new_session=True,
-                    env=frame_repository.child_environment(dispatch_env),
-                    **frame_repository.child_process_options(pass_fds=(gate_fd, fence_failure_write_fd)),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            finally:
-                try:
-                    os.close(fence_failure_write_fd)
-                except OSError:
-                    pass
-        launch_metadata = {
-            **args.launch_lifecycle_resolution.metadata(),
-            "runtime_sandbox": "adapter-default",
-        }
-        from dispatch_capacity_evidence import launch_scope
-        launch_metadata.update(launch_scope("opencode", dispatch_env))
-        launch_metadata["opencode_context_window_request"] = str(
-            args.resolved_model_settings.get("context_window", ""))
-        for key in (
-                "context_window_native_model", "context_window_native_variant",
-                "context_window_native_application", "context_window_execution_mode",
-                "context_window_runtime_target", "context_window_server_identity",
-                "context_window_location_identity", "context_window_config_identity",
-                "context_window_applied_limit_context", "context_window_applied_limit_input",
-                "context_window_applied_limit_output", "context_window_final_limit_context",
-                "context_window_final_limit_input",
-                "context_window_final_limit_output", "context_policy_state",
-                "context_policy_runtime_version",
-                "context_policy_enabled", "context_policy_trigger",
-                "context_policy_output_allowance", "context_policy_configured_reserve",
-                "context_policy_effective_reserve", "context_policy_reason"):
-            value = args.resolved_model_settings.get(key)
-            if value is not None:
-                launch_metadata["opencode_" + key] = str(value)
-        grant_route_id, grant_route_hash = args.route_id, args.route_hash
-        if not grant_route_id and not grant_route_hash and args.owner_route_binding:
-            grant_route_id = args.owner_route_binding.route_id
-            grant_route_hash = args.owner_route_binding.route_hash
-        if grant_route_id and grant_route_hash:
-            from verification_runtime import effective_scope
-            local_verification = effective_scope(args, [*default_roots,
-                *(args.execution_access_grant.writable_roots if args.execution_access_grant else ())],
-                "opencode", dispatch_env)
-            effective_path, effective_sha256 = publish_effective_grant(
-                jobs=jobs, attempt_id=args.attempt_id, route_id=grant_route_id,
-                route_hash=grant_route_hash, runtime="opencode", sandbox="adapter-default",
-                grant=args.execution_access_grant, default_writable_roots=default_roots,
-                verification_scope=local_verification,
-                network_allowed=bool(getattr(args, "task_publish_scope", None)),
-            )
-            launch_metadata["execution_access_effective_file"] = str(effective_path)
-            launch_metadata["execution_access_effective_sha256"] = effective_sha256
-        # Only an attempt-private runtime (V1 worker home or nested isolation) has
-        # its own data home; a V2 worker uses the shared one, and readers fall back.
-        if (args.worker_runtime_env.get("XDG_DATA_HOME")
-                or args.worker_runtime_env.get("XDG_DATA_HOME")):
-            launch_metadata["opencode_runtime_dir"] = str(
-                Path(dispatch_env["XDG_DATA_HOME"]).parent)
-        launch_metadata["runtime_home"] = dispatch_env.get("OPENCODE_CONFIG_DIR") or "shared-service"
-        if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
-            launch_metadata["pid_scope"] = "namespace-local"
-        # Nested runtime and worker-home overlays are already applied above.
-        dispatch_env.update(git_optional_locks_env())
-        try:
-            proc, launch_metadata = spawn_claimed_attempt(
-                jobs,
-                args.attempt_id,
-                parent_binding=args.parent_binding,
-                spawn=spawn_worker,
-                launch_metadata=launch_metadata,
-                preclaim=getattr(args, "launch_preclaim", None),
-                pre_release=lambda identity: attach_summary_owner(
-                    args, log_path, prompt_path, identity
-                ),
-                post_claim=lambda identity: acquire_review_lease_after_claim(args, jobs, identity),
-            )
-        except DispatchContractError as exc:
-            for fd in (fence_failure_read_fd, fence_failure_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if exc.reason == "attempt-launch-already-claimed":
-                cancel_governor_reservation(
-                    governor, governor_root, reservation_token
-                )
-                print("check=ok")
-                print("status=start")
-                print(f"attempt_id={args.attempt_id}")
-                print("duplicate_attempt=1")
-                # The claimed row says nothing about whether its process still
-                # runs; the shared core reads that from the process itself.
-                existing_state, existing_reason = existing_attempt_launch_state(
-                    jobs, args.attempt_id
-                )
-                print(f"launch_state={existing_state}")
-                print("registered=0")
-                print("started=0")
-                print("child_spawned=0")
-                print(f"reason={existing_reason}")
-                if existing_state in EXISTING_ATTEMPT_NOTES:
-                    print(f"note={EXISTING_ATTEMPT_NOTES[existing_state]}")
-                return 0
-            outcome = adapter_launch_failure_outcome(jobs, args.attempt_id, exc.reason)
-            annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": outcome})
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            reason = (
-                "summary-owner-launch-failed"
-                if exc.reason.startswith("attempt-pre-release-")
-                else "launch-error"
-            )
-            close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
-            return fail(exc.reason, 73, detail=exc.detail, attempt_id=args.attempt_id)
-        except OSError as exc:
-            for fd in (fence_failure_read_fd, fence_failure_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, "launch-error", "", args.attempt_id)
-            return fail("child-launch-failed", 70, detail=str(exc), attempt_id=args.attempt_id)
-        start_ticks = launch_metadata.get("pid_start", "")
-        try:
-            args.governor_reservation = wait_governor_reservation_claim(
-                governor, governor_root, reservation_token, proc,
-                expected_reservation=args.replica_batch_expectation,
-                watchdog_receipt=(args.review_watchdog_handle.receipt
-                                  if getattr(args, "review_watchdog_handle", None) else None),
-            )
-        except DispatchContractError as exc:
-            fence_failure, fence_released = read_launch_fence_failure(
-                fence_failure_read_fd
-            )
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    pass
-            cancel_governor_reservation(governor, governor_root, reservation_token)
-            if fence_failure is not None:
-                reason = str(fence_failure["reason"])
-                # The fence knows exactly which sealed root disagreed with the
-                # live one. This is a diagnostic on a path that is ALREADY
-                # failing, so it can never be allowed to prevent the row from
-                # closing: a raise here would leak the attempt open with a sealed
-                # launch_home, which then pins its release against pruning.
-                annotation = {"launch_outcome": "never-launched"}
-                try:
-                    annotation.update(
-                        launch_mismatch_annotation(str(fence_failure["detail"]))
-                    )
-                    annotate_attempt_row(jobs, args.attempt_id, annotation)
-                except DispatchContractError:
-                    annotate_attempt_row(
-                        jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-                    )
-                close_job_row(
-                    jobs, args.slug, args.worktree, reason, "", args.attempt_id,
-                )
-                return fail(
-                    reason, 73, detail=str(fence_failure["detail"]),
-                    attempt_id=args.attempt_id, registered="0", started="0",
-                    child_spawned="0",
-                )
-            post_exit = deterministic_post_exit_outcome(
-                proc, fence_released=fence_released,
-            )
-            if post_exit.launch_outcome:
-                annotate_attempt_row(
-                    jobs,
-                    args.attempt_id,
-                    {
-                        key: value
-                        for key, value in {
-                            "launch_outcome": post_exit.launch_outcome,
-                            "group_reap_proof": post_exit.group_reap_proof,
-                            "group_reap_pgid": post_exit.group_reap_pgid,
-                        }.items()
-                        if value
-                    },
-                )
-            close_job_row(
-                jobs, args.slug, args.worktree,
-                "governor-reservation-transfer", "", args.attempt_id,
-            )
-            return fail(
-                exc.reason, 75, detail=exc.detail,
-                attempt_id=args.attempt_id, child_spawned="1",
-            )
-        read_launch_fence_failure(fence_failure_read_fd)
-        foreground_review_handoff = (
-            getattr(args, "launch_lifecycle", DETACHED) == FOREGROUND_SCOPED
-            and getattr(args, "dispatch_depth", None) == 1
-            and getattr(args, "worker_type", None) == "review"
-            and getattr(args, "execution_surface", None) == "registered-headless"
-            and bool(getattr(args, "registered_worker", False))
-            and not any(foreground_review_launch_identity(args).values())
-        )
-        if (args.dispatch_depth == 1 and args.worker_type == "owner"
-                and args.launch_lifecycle == DETACHED):
-            try:
-                watcher_pid = launch_orphan_watch(
-                    jobs, agent_home, args.attempt_id, proc.pid, start_ticks or "")
-            except (DispatchContractError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "orphan-watch-launch-error",
-                    getattr(exc, "reason", "orphan-watch-launch-failed"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_job_row(
-                jobs, args.slug, args.worktree,
-                f"orphan_watch=post-exit,orphan_watch_pid={watcher_pid}",
-                args.attempt_id,
-            )
-        if args.launch_lifecycle == DETACHED:
-            try:
-                reap_watch_pid = launch_reap_watch(
-                    jobs,
-                    args.attempt_id,
-                    proc.pid,
-                    start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                )
-            except (DispatchContractError, ValueError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "reap-watch-launch-error",
-                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
-                            else "reap-watch-identity-invalid"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
-            )
-        args.child_pid = proc.pid
-        args.child_pid_start = start_ticks
-        args.launch_heartbeat = seed_launch_heartbeat(args, jobs, proc.pid, start_ticks)
-        activity_context = None
-        if args.launch_lifecycle == FOREGROUND_SCOPED and args.worker_type != "owner":
-            try:
-                from foreground_activity import build_activity_context
-                activity_context = build_activity_context(
-                    worker_type=args.worker_type, harness="opencode", log_path=log_path,
-                    jobs=jobs, launch_metadata=launch_metadata, attempt_id=args.attempt_id,
-                    route_id=args.route_id, route_node=args.route_node,
-                    environment=dispatch_env, worktree=args.worktree,
-                )
-            except Exception as exc:
-                print(f"warning=foreground activity context unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
-        if args.launch_lifecycle == FOREGROUND_SCOPED and foreground_review_handoff:
-            binding = args.parent_binding
-            try:
-                outcome = wait_foreground(
-                    proc, args.foreground_timeout,
-                    watchdog_budget=args.watchdog_budget,
-                    activity_context=activity_context,
-                    parent_pid=binding.observed_pid if binding else None,
-                    parent_pid_start=binding.observed_pid_start if binding else None,
-                    parent_is_live=(
-                        (lambda: parent_attempt_binding_is_live(jobs, binding))
-                        if binding else None
-                    ),
-                )
-                foreground_seal = seal_foreground_result(
-                    jobs, args.attempt_id, proc.pid, start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                    exit_code=outcome.exit_code, failure=outcome.failure,
-                    group_empty=outcome.group_empty,
-                )
-            except (DispatchContractError, ValueError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    getattr(exc, "reason", "foreground-outcome-seal-error"),
-                    getattr(exc, "reason", "foreground-outcome-seal-error"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            try:
-                reap_watch_pid = launch_reap_watch(
-                    jobs, args.attempt_id, proc.pid, start_ticks or "",
-                    int(launch_metadata.get("pgid", "0")),
-                    foreground_seal=foreground_seal,
-                )
-            except (DispatchContractError, ValueError, OSError) as exc:
-                return WRAPPER_COMMON.watcher_launch_failure(
-                    jobs, args.attempt_id, proc, launch_metadata,
-                    "reap-watch-launch-error",
-                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
-                            else "foreground-outcome-seal-error"),
-                    getattr(exc, "detail", str(exc)),
-                    materialize=materialize_after_terminal_close, fail=fail,
-                )
-            annotate_attempt_row(
-                jobs, args.attempt_id,
-                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
-            )
-            args.worker_exit = outcome.exit_code
-            args.worker_failure = outcome.failure
-        elif args.launch_lifecycle == FOREGROUND_SCOPED:
-            binding = args.parent_binding
-            outcome = wait_foreground(
-                proc,
-                args.foreground_timeout,
-                parent_pid=binding.observed_pid if binding else None,
-                parent_pid_start=binding.observed_pid_start if binding else None,
-                parent_is_live=(
-                    (lambda: parent_attempt_binding_is_live(jobs, binding))
-                    if binding
-                    else None
-                ),
-                watchdog_budget=args.watchdog_budget,
-                activity_context=activity_context,
-            )
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                (
-                    {
-                        "launch_outcome": "governed-process-reaped",
-                        "group_reap_proof": GROUP_REAP_PROOF,
-                        "group_reap_pgid": str(proc.pid),
-                    }
-                    if outcome.group_empty
-                    else {"launch_outcome": "governed-process-reap-unverified"}
-                ),
-            )
-            args.worker_exit = outcome.exit_code
-            settled = settle_foreground_exit(
-                jobs, args.attempt_id, log_path, outcome, worktree=args.worktree,
-                artifact_root=args.artifact_root, worker_type=args.worker_type,
-                legacy_close=lambda failure: close_job_row(
-                    jobs, args.slug, args.worktree, failure, "", args.attempt_id),
-            )
-            terminal = settled["inspection"]
-            args.terminal_inspection = terminal
-            args.terminal_verdict = settled["verdict"]
-            args.worker_failure = settled["worker_failure"]
+        def context_metadata(launch_metadata, env):
+            launch_metadata["opencode_context_window_request"] = str(
+                args.resolved_model_settings.get("context_window", ""))
+            for key in (
+                    "context_window_native_model", "context_window_native_variant",
+                    "context_window_native_application", "context_window_execution_mode",
+                    "context_window_runtime_target", "context_window_server_identity",
+                    "context_window_location_identity", "context_window_config_identity",
+                    "context_window_applied_limit_context", "context_window_applied_limit_input",
+                    "context_window_applied_limit_output", "context_window_final_limit_context",
+                    "context_window_final_limit_input",
+                    "context_window_final_limit_output", "context_policy_state",
+                    "context_policy_runtime_version",
+                    "context_policy_enabled", "context_policy_trigger",
+                    "context_policy_output_allowance", "context_policy_configured_reserve",
+                    "context_policy_effective_reserve", "context_policy_reason"):
+                value = args.resolved_model_settings.get(key)
+                if value is not None:
+                    launch_metadata["opencode_" + key] = str(value)
 
-        else:
-            # SD-15: detached launches retain the short early-death watch.
-            death = watch_early_death(proc, log_path, args.early_exit_watch)
-            if death:
-                reason, reset = death
-                close_job_row(jobs, args.slug, args.worktree, reason, reset, args.attempt_id)
-                if reason != "capacity":
-                    write_reset_cache(agent_home, "opencode", reason, reset, jobs)
-                args.early_death = (reason, reset)
+        def runtime_metadata(launch_metadata, env):
+            # Only an attempt-private runtime (V1 worker home or nested isolation) has
+            # its own data home; a V2 worker uses the shared one, and readers fall back.
+            if args.worker_runtime_env.get("XDG_DATA_HOME"):
+                launch_metadata["opencode_runtime_dir"] = str(
+                    Path(env["XDG_DATA_HOME"]).parent)
+            launch_metadata["runtime_home"] = env.get("OPENCODE_CONFIG_DIR") or "shared-service"
+
+        launch_spec = DISPATCH_MAIN.LaunchSpec(
+            harness="opencode",
+            runtime_sandbox=lambda: "adapter-default",
+            metadata_after_scope=context_metadata,
+            grant_runtime=lambda: "opencode",
+            grant_kwargs=lambda: {"network_allowed": bool(getattr(args, "task_publish_scope", None))},
+            metadata_after_grant=runtime_metadata,
+            parent_exit_launch_reason=False,
+            launch_failure_child_spawned=False,
+        )
+        rc = DISPATCH_MAIN.launch_claimed_attempt(
+            _ADAPTER, launch_spec, args, jobs=jobs, env=dispatch_env, command=command, claim=claim,
+            log_path=log_path, prompt_path=prompt_path, agent_home=agent_home,
+            default_roots=default_roots,
+        )
+        if rc is not None:
+            return rc
 
     print("check=ok")
     print("adapter=opencode")

@@ -1003,7 +1003,8 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'resolve_worker_type' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq -- '--worker-type' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'ending = worker_ending_prompt(' adapters/codex/bin/dispatch-headless.py \
-    || ! grep -Fq 'Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' adapters/codex/bin/dispatch-headless.py \
+    || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/codex/bin/dispatch-headless.py \
+    || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py \
     || ! grep -Fq 'fcntl.flock' utilities/dispatch_wrapper_common.py \
     || ! grep -Fq 'jobs_lock = WRAPPER_COMMON.jobs_lock' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'registry_lock={jobs}.lock' utilities/launch_receipt.py \
@@ -2303,7 +2304,8 @@ check_opencode_bin_wrappers() {
     || ! grep -Fq 'render_worker_bootstrap' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq 'resolve_worker_type' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq -- '--worker-type' adapters/opencode/bin/dispatch-headless.py \
-    || ! grep -Fq 'Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' adapters/opencode/bin/dispatch-headless.py; then
+    || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/opencode/bin/dispatch-headless.py \
+    || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py; then
     fail_msg "adapters/opencode/bin/dispatch-headless.py must validate inputs and materialize typed worker prompts"
   fi
 
