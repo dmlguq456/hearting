@@ -3548,9 +3548,13 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, c
     if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         return {"state": "unknown", "reason": "compute-run-id-invalid"}
     run_dir = Path(config["run_root"]) / run_id
+    # A route-direct receipt has no outputs.json: its output rows were hashed
+    # from the route-declared paths at adoption and are rechecked here.
+    direct = _route_direct_contract(expected)
     try:
         names = ("meta.json", "launch-receipt.json") if cancelled else (
-            "meta.json", "exit_code", "launch-receipt.json", "outputs.json")
+            ("meta.json", "exit_code", "launch-receipt.json") if direct else
+            ("meta.json", "exit_code", "launch-receipt.json", "outputs.json"))
         paths = {name: run_dir / name for name in names}
         for path in paths.values():
             info = path.lstat()
@@ -3561,13 +3565,15 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, c
         receipt = json.loads(raw["launch-receipt.json"])
         exit_code = None
         if not cancelled:
-            output_receipt = json.loads(raw["outputs.json"])
+            output_receipt = None if direct else json.loads(raw["outputs.json"])
             exit_code = int(raw["exit_code"].decode("ascii").strip())
     except (OSError, UnicodeError, ValueError, TypeError):
         return {"state": "unknown", "reason": "compute-run-evidence-unavailable"}
     hash_files = {"meta_sha256": "meta.json", "receipt_sha256": "launch-receipt.json"}
     if not cancelled:
-        hash_files.update(exit_sha256="exit_code", outputs_sha256="outputs.json")
+        hash_files.update(exit_sha256="exit_code")
+        if not direct:
+            hash_files.update(outputs_sha256="outputs.json")
     hashes = {key: hashlib.sha256(raw[name]).hexdigest() for key, name in hash_files.items()}
     if expected and any(expected.get(key) != value for key, value in hashes.items()):
         return {"state": "unknown", "reason": "compute-run-evidence-changed", **hashes}
@@ -3577,7 +3583,38 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, c
     contract = meta.get("execution_contract")
     resource_parent = (meta.get("provenance") or {}).get("resource")
     parent_contract = resource_parent.get("contract") if isinstance(resource_parent, dict) else None
-    if (meta.get("run_id") != run_id or not isinstance(receipt.get("host"), str)
+    if direct:
+        terminal_incomplete = (
+            meta.get("run_id") != run_id or not isinstance(receipt.get("host"), str)
+            or not receipt.get("host")
+            or _route_direct_meta_differences(meta, direct)
+            or receipt.get("schema_version") != 1
+            or receipt.get("run_id") != run_id or receipt.get("state") != "finished"
+            or (not cancelled and (receipt.get("exit_code") != exit_code or exit_code != 0))
+            or not isinstance(identity, dict)
+            or not all(identity.get(key) not in (None, "") for key in
+                       ("pid", "starttime", "process_group", "pid_namespace", "boot_id")))
+        if terminal_incomplete:
+            return {"state": "not-quiescent", "reason": "compute-run-terminal-evidence-incomplete",
+                    **hashes}
+        if not cancelled:
+            if _read_stop_reason(run_dir):
+                return {"state": "not-quiescent", "reason": "compute-run-stopped", **hashes}
+            output_rows = expected.get("outputs")
+            if expected.get("outputs_sha256") != _canonical_sha256(output_rows):
+                return {"state": "not-quiescent", "reason": "compute-run-output-receipt-invalid",
+                        "differences": [{"field": "outputs.receipt",
+                                         "expected": expected.get("outputs_sha256"),
+                                         "actual": _canonical_sha256(output_rows)}],
+                        "retryable": False,
+                        "next_action": "preserve the adopted row and verify its output rows", **hashes}
+            changed = _route_direct_output_differences(direct.get("artifact_base"), output_rows)
+            if changed:
+                return {"state": "not-quiescent", "reason": "compute-run-output-changed",
+                        "differences": changed, "retryable": False,
+                        "next_action": "restore the original completed compute output before replaying",
+                        **hashes}
+    elif (meta.get("run_id") != run_id or not isinstance(receipt.get("host"), str)
             or not receipt.get("host")
             or not isinstance(contract, dict)
             or contract != (expected or {}).get("contract")
@@ -3594,7 +3631,7 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, c
             or not all(identity.get(key) not in (None, "") for key in
                        ("pid", "starttime", "process_group", "pid_namespace", "boot_id"))):
         return {"state": "not-quiescent", "reason": "compute-run-terminal-evidence-incomplete", **hashes}
-    if not cancelled:
+    if not cancelled and not direct:
         if _read_stop_reason(run_dir):
             return {"state": "not-quiescent", "reason": "compute-run-stopped", **hashes}
         parent_contract = ((meta.get("execution_contract") or {}).get("resource_parent") or {})
@@ -3667,6 +3704,152 @@ except (OSError, ValueError, IndexError, KeyError, TypeError):
             "identity": identity, "exit_code": exit_code, **hashes}
 
 
+ROUTE_DIRECT_CONTRACT_KIND = "route-direct-v1"
+
+
+def _canonical_sha256(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _route_direct_contract(expected):
+    """The adoption contract of a run launched directly under route provenance."""
+    contract = (expected or {}).get("contract") if isinstance(expected, dict) else None
+    if isinstance(contract, dict) and contract.get("kind") == ROUTE_DIRECT_CONTRACT_KIND:
+        return contract
+    return None
+
+
+def _route_direct_meta_differences(meta, contract):
+    """A route-direct run carries route provenance and no resource contract at all."""
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    expected = (contract or {}).get("route") or {}
+    differences = []
+    if provenance.get("resource") is not None or meta.get("execution_contract") \
+            or meta.get("contract_sha256") is not None:
+        differences.append({"field": "meta.execution_contract", "expected": None,
+                            "actual": "resource contract present"})
+    for key in ("route_id", "route_file"):
+        if route.get(key) != expected.get(key):
+            differences.append({"field": "meta.provenance.route." + key,
+                                "expected": expected.get(key), "actual": route.get(key)})
+    if provenance.get("attempt_id") != (contract or {}).get("attempt_id"):
+        differences.append({"field": "meta.provenance.attempt_id",
+                            "expected": (contract or {}).get("attempt_id"),
+                            "actual": provenance.get("attempt_id")})
+    for key in ("command", "cwd", "host"):
+        if meta.get(key) != (contract or {}).get(key):
+            differences.append({"field": "meta." + key, "expected": (contract or {}).get(key),
+                                "actual": meta.get(key)})
+    return differences
+
+
+def _route_direct_output_differences(base, rows):
+    """Recheck the output bytes a route-direct receipt recorded as present."""
+    differences = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("state") != "present":
+            continue
+        try:
+            actual = dict(zip(("sha256", "size"), _hash_compute_output(base, row["path"])))
+        except ComputeOutputError as error:
+            actual = {"error": error.reason}
+        if actual != {"sha256": row.get("sha256"), "size": row.get("size")}:
+            differences.append({"field": "outputs." + str(row.get("path")),
+                                "expected": {"sha256": row.get("sha256"), "size": row.get("size")},
+                                "actual": actual})
+    return differences
+
+
+def route_direct_execution_record(config, run_id, binding):
+    """Build adoption evidence for a finished run launched directly under route provenance.
+
+    Such a run (`compute-hosts run` inside a route owner, outside the route
+    resource-runner) has no resource contract and no outputs.json. The caller
+    has already bound it to one route node; this reads the run's own receipt,
+    hashes the node's declared outputs now, and requires the same fresh empty
+    process-group observation as every other adoption.
+    """
+    run_dir = Path(config["run_root"]) / run_id
+    try:
+        raw = {}
+        for name in ("meta.json", "exit_code", "launch-receipt.json"):
+            path = run_dir / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+                return {"state": "unknown", "reason": "compute-run-file-unsafe"}
+            raw[name] = path.read_bytes()
+        meta = json.loads(raw["meta.json"])
+        receipt = json.loads(raw["launch-receipt.json"])
+        exit_code = int(raw["exit_code"].decode("ascii").strip())
+    except FileNotFoundError:
+        return {"state": "not-quiescent", "reason": "compute-run-terminal-evidence-incomplete",
+                "next_action": "wait for the run to finish and write its exit receipt"}
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {"state": "unknown", "reason": "compute-run-evidence-unavailable"}
+    if not isinstance(meta, dict) or not isinstance(receipt, dict):
+        return {"state": "unknown", "reason": "compute-run-evidence-malformed"}
+    if _read_stop_reason(run_dir):
+        return {"state": "not-quiescent", "reason": "compute-run-stopped"}
+    if exit_code != 0 or receipt.get("exit_code") != 0:
+        return {"state": "unavailable", "reason": "compute-run-exit-not-zero",
+                "differences": [{"field": "compute-run.exit_code", "expected": 0,
+                                 "actual": {"exit_code": exit_code,
+                                            "receipt_exit_code": receipt.get("exit_code")}}],
+                "next_action": "a failed run is not full-run evidence; run it through the route resource-runner"}
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    contract = {
+        "kind": ROUTE_DIRECT_CONTRACT_KIND,
+        "route": {key: binding["route"][key] for key in ("route_id", "route_file", "route_hash")},
+        "node": binding["node"], "attempt_id": provenance.get("attempt_id"),
+        "artifact_base": str(binding["artifact_base"]),
+        "declared_outputs": list(binding["declared_outputs"]),
+        "inputs": binding.get("inputs") or [],
+        "command": meta.get("command"), "cwd": meta.get("cwd"), "host": meta.get("host"),
+        "gpus": meta.get("gpus"), "share": meta.get("share"),
+        "record": binding.get("record") or {},
+    }
+    # Declared outputs that exist now are hashed into the receipt; a missing
+    # or undeclared output is recorded as such, not refused.
+    try:
+        expanded = _expand_compute_outputs(contract["artifact_base"], contract["declared_outputs"])
+        rows = []
+        for relative in expanded["receipt_paths"]:
+            if relative in expanded["missing_patterns"]:
+                rows.append({"path": relative, "state": "missing"})
+                continue
+            digest, size = _hash_compute_output(contract["artifact_base"], relative)
+            rows.append({"path": relative, "sha256": digest, "size": size, "state": "present"})
+    except ComputeOutputError as error:
+        rows = [{"state": "unavailable", "reason": error.reason}]
+    execution = {
+        "kind": "compute-hosts", "run_id": run_id,
+        "run_root": str(Path(config["run_root"]).resolve(strict=True)),
+        "host": meta.get("host"), "remote_host": receipt.get("host"),
+        "meta_sha256": hashlib.sha256(raw["meta.json"]).hexdigest(),
+        "exit_sha256": hashlib.sha256(raw["exit_code"]).hexdigest(),
+        "receipt_sha256": hashlib.sha256(raw["launch-receipt.json"]).hexdigest(),
+        "outputs_sha256": _canonical_sha256(rows), "outputs": rows,
+        "contract_sha256": _canonical_sha256(contract), "contract": contract,
+        "receipt_state": receipt.get("state"), "identity": receipt.get("identity"),
+        "provenance": {**contract["route"], "node": binding["node"],
+                       "registry": str(binding["registry"]), "attempt_id": contract["attempt_id"],
+                       "source": ROUTE_DIRECT_CONTRACT_KIND, "meta_provenance": provenance},
+        "started_at": receipt.get("started_at"), "ended_at": receipt.get("ended_at"),
+    }
+    observation = observe_run_quiescence(config, run_id, expected=execution)
+    if observation.get("state") != "quiescent":
+        return {"state": observation.get("state", "unknown"),
+                "reason": observation.get("reason", "compute-run-not-quiescent"),
+                "differences": observation.get("differences"),
+                "next_action": observation.get("next_action"),
+                "retryable": observation.get("retryable", False),
+                "execution": execution}
+    return {"state": "quiescent", "execution": execution,
+            "observation": observation, "run_dir": str(run_dir)}
+
+
 def execution_record(config, run_id):
     """Build adoption evidence only from a complete, freshly quiescent run."""
     state = _run_state(config, run_id)
@@ -3730,8 +3913,11 @@ def execution_record(config, run_id):
 def run_snapshot_differences(config, run_id, execution):
     """Explain a local receipt/output drift at the short publication boundary."""
     run_dir = Path(config["run_root"]) / run_id
+    direct = _route_direct_contract(execution)
     names = {"meta_sha256": "meta.json", "exit_sha256": "exit_code",
              "receipt_sha256": "launch-receipt.json", "outputs_sha256": "outputs.json"}
+    if direct:
+        names.pop("outputs_sha256")
     differences = []
     raw_files = {}
     try:
@@ -3750,6 +3936,24 @@ def run_snapshot_differences(config, run_id, execution):
             if actual != execution.get(field):
                 differences.append({"field": "compute_run." + field,
                                     "expected": execution.get(field), "actual": actual})
+        if direct:
+            try:
+                differences.extend(_route_direct_meta_differences(
+                    json.loads(raw_files["meta.json"]), direct))
+            except (KeyError, TypeError, ValueError):
+                differences.append({"field": "execution.contract", "expected": direct,
+                                    "actual": "unreadable-or-malformed"})
+            if execution.get("outputs_sha256") != _canonical_sha256(execution.get("outputs")):
+                differences.append({"field": "compute_run.outputs_sha256",
+                                    "expected": execution.get("outputs_sha256"),
+                                    "actual": _canonical_sha256(execution.get("outputs"))})
+            differences.extend(_route_direct_output_differences(
+                direct.get("artifact_base"), execution.get("outputs")))
+            stop_reason = _read_stop_reason(run_dir)
+            if stop_reason is not None:
+                differences.append({"field": "compute_run.stop_reason", "expected": None,
+                                    "actual": stop_reason})
+            return differences
         try:
             current_meta = json.loads(raw_files["meta.json"])
             expected_contract = execution.get("contract") or {}
