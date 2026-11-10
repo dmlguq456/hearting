@@ -624,6 +624,7 @@ class ReviewAdapterWiringParityTest(unittest.TestCase):
                 self.assertIs(kwargs["lease_acquire"], wrapper.review_lease_acquire)
 
     def test_each_adapter_has_watchdog_spawn_and_absolute_foreground_budget(self):
+        # Each wrapper's main() hands its claimed attempt to the shared launch.
         for harness in self.HARNESSES:
             path = PROJECT_ROOT / f"adapters/{harness}/bin/dispatch-headless.py"
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -633,31 +634,41 @@ class ReviewAdapterWiringParityTest(unittest.TestCase):
                 and node.name == "main"
             ]
             self.assertEqual(len(main_nodes), 1, harness)
-            spawn_nodes = [
+            launch_calls = [
                 node for node in ast.walk(main_nodes[0])
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "spawn_worker"
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "launch_claimed_attempt"
             ]
-            self.assertEqual(len(spawn_nodes), 1, harness)
-            spawn_names = {
-                node.func.id for node in ast.walk(spawn_nodes[0])
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            }
-            self.assertIn("launch_review_watchdog", spawn_names, harness)
-            all_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-            names = {
-                node.func.id for node in all_calls if isinstance(node.func, ast.Name)
-            }
-            self.assertIn("begin_finite_watchdog", names, harness)
-            wait_calls = [
-                node for node in all_calls
-                if isinstance(node.func, ast.Name) and node.func.id == "wait_foreground"
-            ]
-            self.assertTrue(
-                any(any(keyword.arg == "watchdog_budget" for keyword in call.keywords)
-                    for call in wait_calls),
-                harness,
-            )
+            self.assertEqual(len(launch_calls), 1, harness)
+        path = PROJECT_ROOT / "utilities/dispatch_headless_main.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        launch_nodes = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_claimed_attempt"
+        ]
+        self.assertEqual(len(launch_nodes), 1)
+        spawn_nodes = [
+            node for node in ast.walk(launch_nodes[0])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "spawn_worker"
+        ]
+        self.assertEqual(len(spawn_nodes), 1)
+
+        def called(node):
+            func = node.func
+            return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+
+        spawn_names = {
+            called(node) for node in ast.walk(spawn_nodes[0]) if isinstance(node, ast.Call)
+        }
+        self.assertIn("launch_review_watchdog", spawn_names)
+        all_calls = [node for node in ast.walk(launch_nodes[0]) if isinstance(node, ast.Call)]
+        self.assertIn("begin_finite_watchdog", {called(node) for node in all_calls})
+        wait_calls = [node for node in all_calls if called(node) == "wait_foreground"]
+        self.assertTrue(
+            any(any(keyword.arg == "watchdog_budget" for keyword in call.keywords)
+                for call in wait_calls)
+        )
 
     def test_foreground_admission_proves_direct_group_and_external_cleanup(self):
         with tempfile.TemporaryDirectory() as td:
