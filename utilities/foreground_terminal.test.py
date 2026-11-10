@@ -86,8 +86,11 @@ class EveryWrapperUsesItTest(unittest.TestCase):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 source = (ROOT / "adapters" / harness / "bin" / "dispatch-headless.py").read_text()
-                self.assertEqual(source.count("settle_foreground_exit("), 1)
+                self.assertEqual(source.count("DISPATCH_MAIN.launch_claimed_attempt("), 1)
+                self.assertNotIn("settle_foreground_exit(", source)
                 self.assertNotIn("terminal_note = f\"dead-{outcome.failure}\"", source)
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text()
+        self.assertEqual(shared.count("settle_foreground_exit("), 1)
 
 
 

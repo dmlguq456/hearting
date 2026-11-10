@@ -1094,15 +1094,19 @@ class ClaudeFrameCapacityDowngrade(unittest.TestCase):
 
 class ForegroundActivityWiring(unittest.TestCase):
     def test_both_foreground_branches_receive_shared_activity_context(self):
-        source = Path(__file__).with_name("dispatch-headless.py").read_text(encoding="utf-8")
+        # The foreground branches live in the launch the three wrappers share.
+        wrapper = Path(__file__).with_name("dispatch-headless.py").read_text(encoding="utf-8")
+        self.assertEqual(wrapper.count("DISPATCH_MAIN.launch_claimed_attempt("), 1)
+        self.assertIn('launch_spec = DISPATCH_MAIN.LaunchSpec(\n            harness="claude"', wrapper)
+        source = (Path(__file__).resolve().parents[3] / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Name) and node.func.id == "wait_foreground"]
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "wait_foreground"]
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(any(k.arg == "activity_context" for k in call.keywords) for call in calls))
-        self.assertIn('if args.launch_lifecycle == FOREGROUND_SCOPED and args.worker_type != "owner":\n            try:\n                from foreground_activity import build_activity_context', source)
+        self.assertIn('if args.launch_lifecycle == h.FOREGROUND_SCOPED and args.worker_type != "owner":\n        try:\n            from foreground_activity import build_activity_context', source)
         self.assertEqual(source.count('build_activity_context('), 1)
-        self.assertIn('worker_type=args.worker_type, harness="claude"', source)
+        self.assertIn('worker_type=args.worker_type, harness=spec.harness', source)
 
 
 if __name__=="__main__": unittest.main()

@@ -2304,9 +2304,12 @@ if [ -f "$ROOT/adapters/claude/settings.json" ] \
 else
   bad "Claude settings.json should not reference a distill/turn-nudge worker"
 fi
-if grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/claude/bin/dispatch-headless.py" \
-  && grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/codex/bin/dispatch-headless.py" \
-  && grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/opencode/bin/dispatch-headless.py" \
+# The three dispatch wrappers build their worker environment through the shared
+# utilities/dispatch_headless_main.py worker_environment.
+if grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/utilities/dispatch_headless_main.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/claude/bin/dispatch-headless.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/codex/bin/dispatch-headless.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/opencode/bin/dispatch-headless.py" \
   && grep -Fq 'AGENT_SESSION_ROLE=worker' "$ROOT/loops/lib.sh" \
   && grep -Fq 'AGENT_SESSION_ROLE=worker' "$ROOT/loops/lib-runner.sh" \
   && grep -Fq 'env["AGENT_SESSION_ROLE"] = "worker"' "$ROOT/tools/fleet/refresh_title.py"; then

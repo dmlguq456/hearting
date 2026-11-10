@@ -25,14 +25,28 @@ def foreground_cell(harness):
     spec.loader.exec_module(module)
     # Execute the production consumer, not a mirrored classifier. Only the
     # preceding model/auth launch and subsequent delivery transport are omitted.
-    cells = [node for node in ast.walk(ast.parse(path.read_text()))
+    # The consumer is the launch the three wrappers share; it reads each
+    # wrapper's names through `h`.
+    shared = ROOT / "utilities" / "dispatch_headless_main.py"
+    cells = [node for node in ast.walk(ast.parse(shared.read_text()))
              if isinstance(node, ast.If)
-             and ast.unparse(node.test) == "args.launch_lifecycle == FOREGROUND_SCOPED"
-             and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                     and call.func.id == "wait_foreground" for call in ast.walk(node))]
+             and ast.unparse(node.test) == "args.launch_lifecycle == h.FOREGROUND_SCOPED"
+             and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                     and call.func.attr == "wait_foreground" for call in ast.walk(node))]
     if len(cells) != 1:
+        raise AssertionError(f"foreground consumer changed: {shared}")
+    if "DISPATCH_MAIN.launch_claimed_attempt(" not in path.read_text():
         raise AssertionError(f"foreground consumer changed: {path}")
-    return module, compile(ast.Module(body=cells[0].body, type_ignores=[]), str(path), "exec")
+    return module, compile(ast.Module(body=cells[0].body, type_ignores=[]), str(shared), "exec")
+
+
+def foreground_spec(harness, module, args, jobs):
+    """The settlement hook each wrapper's LaunchSpec passes."""
+    settle = None
+    if harness == "codex":
+        def settle(outcome, terminal, terminal_closed):
+            module.complete_foreground_wrapper_pass(args, jobs, outcome, terminal, terminal_closed)
+    return SimpleNamespace(harness=harness, after_foreground_settle=settle)
 
 
 class ForegroundOutcomeTest(unittest.TestCase):
@@ -114,8 +128,10 @@ class ForegroundOutcomeTest(unittest.TestCase):
                         return result
 
                     args.watchdog_budget = module.begin_finite_watchdog(args.foreground_timeout)
-                    namespace = dict(vars(module), args=args, proc=proc, jobs=jobs,
-                                     log_path=log_path, wait_foreground=wait,
+                    adapter = dict(vars(module), wait_foreground=wait)
+                    namespace = dict(h=module.DISPATCH_MAIN.AdapterNamespace(adapter), args=args,
+                                     proc=proc, jobs=jobs, log_path=log_path,
+                                     spec=foreground_spec(harness, module, args, jobs),
                                      activity_context=None)
                     if ending == "no-progress":
                         from foreground_activity import ForegroundActivityContext
@@ -123,7 +139,7 @@ class ForegroundOutcomeTest(unittest.TestCase):
                             0.12, harness, log_path, {}, runtime_executable="/bin/false"
                         )
                     with mock.patch.object(module, "materialize_after_terminal_close") as delivery:
-                        namespace["materialize_after_terminal_close"] = delivery
+                        adapter["materialize_after_terminal_close"] = delivery
                         if timer:
                             timer.start()
                         exec(cell, namespace)
