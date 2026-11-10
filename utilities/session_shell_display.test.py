@@ -12,9 +12,10 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class WrappedDisplayTest(unittest.TestCase):
-    def statusline(self,wrapped,percentage):
+    def statusline(self,wrapped,percentage,panel=None,record=None):
         with tempfile.TemporaryDirectory(prefix='shell-native-line-') as directory:
             root=Path(directory);home=root/'claude';home.mkdir()
+            if panel is not None:(root/'claude-panel.json').write_text(json.dumps(panel))
             env=dict(os.environ,HOME=str(root),CLAUDE_CONFIG_DIR=str(home),AGENT_HOME=str(root/'no-code'),
                      FLEET_TITLE_DISABLE='1',HARNESS_CAPACITY_REFRESH_DISABLE='1')
             env.pop('HEARTING_SHELL_SOCKET',None)
@@ -24,15 +25,32 @@ class WrappedDisplayTest(unittest.TestCase):
             result=subprocess.run(['bash',str(ROOT/'adapters/claude/statusline.sh')],input=json.dumps(payload),
                                   env=env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
+            if record is not None and (root/'claude-status.json').exists():
+                record.update(json.loads((root/'claude-status.json').read_text()))
             return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
 
     def test_wrapped_claude_paints_the_common_native_row_even_with_unknown_context(self):
         for percentage,reading in ((37,'37%'),(0,'0%'),(None,'?')):
             with self.subTest(percentage=percentage):
-                line=self.statusline(True,percentage)
+                record={}
+                line=self.statusline(True,percentage,record=record)
                 self.assertIn('context ',line);self.assertIn(reading,line)
-                self.assertNotIn('Opus',line);self.assertIn('7d 42%',line)  # model is in the shared panel header
+                # Every field stays here whenever the panel is not painting it.
+                self.assertIn('Opus',line);self.assertIn('7d 42%',line)
                 self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
+                # Exactly the painted plain text, for the shell's exact-match blanking.
+                self.assertEqual(record['session_id'],'synthetic-native-session')
+                self.assertEqual('\n'.join(record['lines']),line)
+
+    def test_the_native_row_stays_complete_even_beside_a_stale_panel_report(self):
+        # A panel report left by an earlier host (painted=true) must not shrink
+        # the callback: if the panel is gone, every value is already here.
+        full=self.statusline(True,37)
+        for field in ('37%','Opus','7d 42%','◑'):self.assertIn(field,full)
+        record={}
+        line=self.statusline(True,37,panel={'session_id':'synthetic-native-session','painted':True},record=record)
+        self.assertEqual(line,full)
+        self.assertEqual('\n'.join(record['lines']),line)
 
 
     def test_first_claude_paint_reuses_metadata_without_waiting_for_refresh(self):

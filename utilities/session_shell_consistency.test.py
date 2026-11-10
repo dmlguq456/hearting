@@ -17,30 +17,61 @@ vm.createContext(c);vm.runInContext(src.slice(a,b)+'this.source=source;',c);
         result=subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/host.cjs')],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)
 
-    def test_unknown_native_telemetry_is_owned_without_claiming_zero(self):
+    def test_claude_native_row_owns_no_panel_field(self):
         script = r'''const assert=require('node:assert/strict'),d=require(process.argv[1]);
 const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 7d ?'],'exact');
-assert.deepEqual(seen.owned,['context','quota']);assert.equal(seen.percent,undefined);assert.equal(seen.model,undefined);
+assert.equal(seen,null,'an unknown native reading claims nothing');
 const numeric=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · 5h ? · 7d ?'],'exact');
-assert.equal(numeric.percent,42);assert.equal(numeric.model,undefined,'quota must not replace the observed model');
+assert.deepEqual(numeric,{sid:'exact',percent:42},'quota must not replace the observed model');
+const full=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · Opus high · 5h ? · 7d ? · ⏳ route 1 · plan · ◑ 1'],'exact');
+assert.deepEqual(full,{sid:'exact',percent:42,model:'Opus',effort:'high'},'route, wait and quota stay with the panel');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)
 
-    def test_reserved_claude_and_panel_together_keep_fields_once(self):
+    def test_claude_status_rows_blank_only_the_exact_recorded_output(self):
+        script = r'''const assert=require('node:assert/strict'),d=require(process.argv[1]);
+const rule='─'.repeat(40),box=[rule,'❯  ',rule];
+const screen=['conversation','  📁 project · ⎇ main · context 42%',...box,'  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+const record={session_id:'exact',lines:['📁 project · ⎇ main · context 42%'],previous:[]};
+assert.deepEqual([...d.claudeStatusRows(screen,'exact',record)],[5],'status area only, never the same text in the conversation');
+assert.equal(d.claudeStatusRows(screen,'other',record).size,0,'another session');
+assert.equal(d.claudeStatusRows(screen,'',record).size,0,'before binding');
+assert.equal(d.claudeStatusRows(screen,'exact',{...record,lines:['📁 project · ⎇ main · context 43%']}).size,0,'changed text stays visible');
+assert.deepEqual([...d.claudeStatusRows(screen,'exact',{...record,lines:['📁 project · ⎇ main · context 43%'],previous:record.lines})],[5],'paint in flight');
+const two=['x',...box,'  📁 a · ⎇ b','  >_ running: job','  footer'];
+assert.deepEqual([...d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: job']})],[4,5]);
+assert.equal(d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: other']}).size,0,'partial block');
+const emoji=[...box,'  📁 a · ⎇ b ⚠ ? 🚧 ?   '];
+assert.deepEqual([...d.claudeStatusRows(emoji,'exact',{session_id:'exact',lines:['📁 a · ⎇ b ⚠️? 🚧 ?']})],[3],'wide-glyph cell spacing');
+const clipped=[...box,'  📁 project · ⎇ main · cont…'];
+assert.deepEqual([...d.claudeStatusRows(clipped,'exact',record)],[3],'native ellipsis clip');
+// Ctrl+O transcript: the callback's text quoted in the conversation, no input box.
+const transcript=['● VERBATIM_STATUS_START','  📁 project · ⎇ main · context 42%','  VERBATIM_STATUS_END','',rule,'  Showing detailed transcript · ctrl+o to toggle'];
+assert.equal(d.claudeStatusRows(transcript,'exact',record).size,0,'transcript body stays visible');
+const below=['  📁 project · ⎇ main · context 42%',...box,'  ⏵⏵ auto mode on'];
+assert.equal(d.claudeStatusRows(below,'exact',record).size,0,'text above the box is conversation');
+const quoted=[...box,'● reply','  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows directly under the box');
+'''
+        result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_claude_native_row_and_panel_both_keep_every_field(self):
         import sys
         sys.path.insert(0, str(ROOT))
         from tools.fleet.session_line import line_segments
         from tools.fleet.session_panel import presentation
-        values = {'_panel_owned': True, 'model': 'Native-selected', 'effort': 'high',
+        values = {'model': 'Native-selected', 'effort': 'high',
                   'ctx_pct': 42, 'weekly_pct': 60, 'route_label': 'route raw review', 'answer_wait': 1}
         native = ''.join(text for text, _ in line_segments(values, 240))
-        self.assertNotIn('Native-selected', native)
-        self.assertNotIn('route raw', native)
-        self.assertIn('42%', native)
-        panel = presentation(values, {}, 'claude', '', 40, native_owned=('context','quota'))
+        for field in ('Native-selected', 'route raw', '42%', '60%', '◑'):
+            self.assertIn(field, native)
+        panel = presentation(values, {}, 'claude', '', 40)
         self.assertIn('Native-selected', ''.join(text for text, _ in panel['model']))
-        self.assertEqual(panel['summary'], [])
+        summary = ''.join(text for row in panel['summary'] for text, _ in row)
+        self.assertIn('42%', summary)
+        self.assertIn('60%', summary)
 
     def test_additive_click_matches_cells_before_consuming_native_mouse(self):
         script = r'''const assert=require('node:assert/strict'),v=require(process.argv[1]);
