@@ -287,13 +287,72 @@ def deliver_pending(ref: str, harness: str, sid: str) -> dict:
     return result
 
 
+def _codex_selected_root(binding):
+    """Join stable raw native footer selection to this TUI's fresh root ownership."""
+    from pane_ownership import _codex_current_footer, _process, _registered_worker, _runtime
+    from fleet.collectors import codex, procscan
+
+    def same_owner():
+        return (valid_binding(binding)
+            and read_binding(binding_path("codex", binding["host_pid"])) == binding
+            and _runtime(binding["native_pid"]) == ("codex", False)
+            and not _registered_worker(binding["native_pid"]))
+
+    if (binding.get("harness") != "codex" or not valid_binding(binding)
+            or read_binding(binding_path("codex", binding["host_pid"])) != binding):
+        return {"selected_sid": None}
+    first = control(binding, "native-selection")
+    frame = first.get("native_frame") if first.get("ok") else None
+    if (not isinstance(frame, dict) or type(frame.get("revision")) is not int
+            or frame["revision"] < 0 or not isinstance(frame.get("lines"), list)
+            or len(frame["lines"]) > 8 or any(not isinstance(s, str) for s in frame["lines"])
+            or sum(len(s) for s in frame["lines"]) > 16384):
+        return None
+    if not same_owner():
+        return {"selected_sid": None}
+    record = _process(binding["native_pid"])
+    if (not record or str(record[5]) != binding["native_start"]
+            or not record[3] or record[2] != record[4]):
+        return {"selected_sid": None}
+    state, selected = _codex_current_footer(frame["lines"])
+    if state != "current":
+        return {"selected_sid": None} if state == "invalid" else None
+    pid, birth = binding["native_pid"], binding["native_start"]
+    native_sid = codex.session_id_of_process(pid, fresh=True)
+    if native_sid and native_sid != selected:
+        return {"selected_sid": None}
+    # Membership corroborates the native viewport; alone it never selects one
+    # of several roots retained by a shared daemon after /resume.
+    member = codex.process_for_thread(selected, environ=procscan.read_environ(pid), fresh=True)
+    if member != (pid, birth):
+        return {"selected_sid": None}
+    latest_native = codex.session_id_of_process(pid, fresh=True)
+    if latest_native and latest_native != selected:
+        return {"selected_sid": None}
+    second = control(binding, "native-selection")
+    if (not second.get("ok") or second.get("native_frame") != frame
+            or _process(pid) != record or not same_owner()):
+        return {"selected_sid": None}
+    return {"selected_sid": selected, "native_revision": frame["revision"]}
+
+
 def _codex_current_root(pid, birth, sid):
-    """One current native root, never a displayed SID or a formerly loaded root."""
+    """Current native proof, or the same attachment's stable native selection."""
     from fleet.collectors import codex
     before = process(pid)
     if before is None or before["start"] != str(birth):
         return False
     current = codex.session_id_of_process(pid, fresh=True)
+    if current and current != sid:
+        return False
+    attached = [row for row in bindings(harness="codex")
+                if row["native_pid"] == pid and row["native_start"] == str(birth)]
+    if len(attached) > 1:
+        return False
+    if attached:
+        selected = _codex_selected_root(attached[0])
+        if selected is not None:
+            current = selected.get("selected_sid")
     after = process(pid)
     return bool(current == sid and after and after["start"] == before["start"])
 
@@ -729,6 +788,9 @@ def _backend_operation(request: dict) -> dict:
     harness, sid = binding["harness"], binding["sid"]
     if op == "register":
         return {"ok": publish_binding(binding)}
+    if op == "selection":
+        selected = _codex_selected_root(binding)
+        return {"ok": bool(selected and selected.get("selected_sid")), **(selected or {})}
     if op == "projection":
         columns = request.get("columns", 100)
         if type(columns) is not int or not 20 <= columns <= 10000:
