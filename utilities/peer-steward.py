@@ -9149,24 +9149,38 @@ def cmd_continue(args):
             verify = existing.get("receipt") or "exact-native-history"
             return finish("true", native_ref=transfer_ref)
 
+    def held(reason):
+        # A busy receiver keeps its pending continue for its own idle callback, and a booking
+        # without its new session waits for that session's first hook. A known new session the
+        # pane does not prove has no later sender: it ends with the visible notice line.
+        if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
+                transfer_ref or str(req.get("new_session") or "-") == "-"):
+            return "queued"
+        return _look_outcome(reason)
+
     reason = None
     for round_no in range(_CONTINUE_LOOK_ROUNDS):
         reason = _continue_look(target, req)
-        if reason is None or not reason.startswith("not-idle-"):
+        if reason is None or not reason.startswith(("not-idle-", "new-session-unknown")):
             break
         if round_no + 1 < _CONTINUE_LOOK_ROUNDS:
-            _run_herdr_wait(target, ["idle", "done"], _CONTINUE_SETTLE_MS)
+            if reason.startswith("not-idle-"):
+                _run_herdr_wait(target, ["idle", "done"], _CONTINUE_SETTLE_MS)
+            else:
+                # Each look re-reads the pane and the native record, which may lag the clear;
+                # the booking is re-read too, still inside its own window.
+                req, why = clear.validate_continue(args.request, args.nonce)
+                if req is None:
+                    return finish("skipped", why)
     if reason:
-        return finish("queued" if reason.startswith(("not-idle-", "new-session-unknown"))
-                      else _look_outcome(reason), reason)
+        return finish(held(reason), reason)
 
     req, why = clear.validate_continue(args.request, args.nonce)
     if req is None:
         return finish("skipped", why)
     reason = _continue_look(target, req)
     if reason:
-        return finish("queued" if reason.startswith(("not-idle-", "new-session-unknown"))
-                      else _look_outcome(reason), reason)
+        return finish(held(reason), reason)
     req, why = clear.claim_continue(args.request, args.nonce)
     if req is None:
         return finish("skipped", why)
@@ -9174,8 +9188,7 @@ def cmd_continue(args):
     reason = _continue_look(target, req)
     if reason:
         clear.release_unsent_continue(req)
-        return finish("queued" if reason.startswith(("not-idle-", "new-session-unknown"))
-                      else _look_outcome(reason), reason)
+        return finish(held(reason), reason)
 
     seat = _booked_seat(req)[1]
     seq_before = int(req.get("prompt_seq", 0) or 0)
