@@ -7757,7 +7757,9 @@ def cmd_obligation_runner(args):
                 # rows so every owner gate in the pass sees the same full view.
                 readiness_context = PeerReadContext(registry_append_only=True)
                 from dispatch_registry_cache import registry_read_scope
-                with registry_read_scope():
+                # One lineage observation serves every pane of this publish
+                # pass (each pane otherwise re-stats every seat ledger).
+                with registry_read_scope(), readiness_context.pinned_lineage():
                     _publish_watch_readiness(
                         store, external_snapshot, read_context=readiness_context,
                         incarnation=runner_incarnation)

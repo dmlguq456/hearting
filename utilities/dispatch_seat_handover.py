@@ -207,6 +207,15 @@ def _readable_lineage_signature(directory: Path):
     return (location, tuple(observed), generation), contents
 
 
+def _replace_pass_graph(read_context, signature, graph):
+    replace = getattr(read_context, "replace_lineage_graph", None)
+    if replace is not None:
+        replace(signature, graph)
+    else:
+        read_context.invalidate_lineage_graph()
+        read_context.lineage_graph(signature, lambda: graph)
+
+
 def _build_lineage_graph(read_context=None) -> LineageGraph:
     directory = _st().state_root() / "sessions"
     try:
@@ -237,8 +246,7 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
         if read_context is not None:
             # A normal observation replaces the pass, even if only readable
             # bytes changed. Metadata never substitutes for this observation.
-            read_context.invalidate_lineage_graph()
-            read_context.lineage_graph(metadata, lambda: graph)
+            _replace_pass_graph(read_context, metadata, graph)
         return graph
     except (OSError, ValueError, TypeError):
         _LINEAGE_GRAPH_CACHE.clear()
@@ -295,8 +303,7 @@ def _build_compact_lineage_graph(directory: Path, read_context=None):
     graph = _build_lineage_graph_uncached((location, files, generation), contents,
                                           compact_rows=compact_rows)
     if read_context is not None:
-        read_context.invalidate_lineage_graph()
-        read_context.lineage_graph((location, files, generation), lambda: graph)
+        _replace_pass_graph(read_context, (location, files, generation), graph)
     return graph
 
 

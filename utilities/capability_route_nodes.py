@@ -374,9 +374,29 @@ def _capture_unit_frontmatter(units_root=None):
     captured={}
     for path in sorted(units_root.glob("*/*.md")):
         if path.name.startswith("_"): continue
-        match=re.match(r"\A---\n.*?\n---\n", path.read_text(encoding="utf-8"), re.DOTALL)
-        captured[path.relative_to(units_root).as_posix()] = match.group(0) if match else None
+        captured[path.relative_to(units_root).as_posix()] = _unit_frontmatter_block(path)
     return captured
+
+
+# Each route verification digests every unit's frontmatter; the readiness
+# thread verifies routes every second. An unchanged unit file (same inode,
+# size, mtime and ctime) is not read and matched again.
+_UNIT_BLOCKS = {}
+
+
+def _unit_frontmatter_block(path):
+    info=path.stat()
+    generation=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    key=str(path)
+    held=_UNIT_BLOCKS.get(key)
+    if held is not None and held[0]==generation:
+        return held[1]
+    match=re.match(r"\A---\n.*?\n---\n", path.read_text(encoding="utf-8"), re.DOTALL)
+    block=match.group(0) if match else None
+    if len(_UNIT_BLOCKS) > 4096:
+        _UNIT_BLOCKS.clear()
+    _UNIT_BLOCKS[key]=(generation,block)
+    return block
 
 
 def _unit_blocks_digest(captured):
