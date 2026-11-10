@@ -216,5 +216,32 @@ class FreedMemoryRelease(unittest.TestCase):
             peer_obligations.release_freed_memory(min_interval=0.0)
 
 
+class ReadinessProjectionRewrite(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec_ = importlib.util.spec_from_file_location(
+            "peer_steward_idle_reads", Path(__file__).with_name("peer-steward.py"))
+        self.steward = importlib.util.module_from_spec(spec_)
+        spec_.loader.exec_module(self.steward)
+
+    def projection(self, at, state="pending"):
+        return {"schema_version": 1, "identity": {"jobs": "j"}, "producer": {"pid": 1},
+                "observed_at": at, "generation": [1], "result": {"state": state, "reason": "",
+                                                                 "children": []}}
+
+    def test_unchanged_young_projection_is_not_rewritten(self):
+        fresh = self.steward._readiness_projection_still_fresh
+        stored = {"shared_readiness": self.projection(100.0), "readiness_state": "pending",
+                  "reason": ""}
+        result = {"state": "pending", "reason": ""}
+        self.assertTrue(fresh(stored, self.projection(101.0), result))
+        limit = self.steward.shared_readiness.MAX_AGE_SECONDS / 3
+        self.assertFalse(fresh(stored, self.projection(100.0 + limit), result),
+                         "an aging projection is refreshed well inside the readers' max age")
+        self.assertFalse(fresh(stored, self.projection(101.0, state="ready"),
+                               {"state": "ready", "reason": ""}))
+        self.assertFalse(fresh({}, self.projection(101.0), result))
+
+
 if __name__ == "__main__":
     unittest.main()

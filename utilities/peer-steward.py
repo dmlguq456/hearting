@@ -6363,6 +6363,28 @@ def _dispatch_ready_api():
     return _DISPATCH_READY_API
 
 
+def _readiness_projection_still_fresh(observation, projection, result):
+    """Whether the stored projection already says the same thing and is young.
+
+    Readers accept a projection up to ``MAX_AGE_SECONDS`` old; refreshing
+    an unchanged one at a third of that keeps every reader's view current
+    while the readiness thread stops rewriting the record every second.
+    """
+    previous = observation.get("shared_readiness")
+    if (not isinstance(previous, dict)
+            or observation.get("readiness_state") != result.get("state", "unknown")
+            or observation.get("reason") != result.get("reason", "")):
+        return False
+    try:
+        age = float(projection["observed_at"]) - float(previous.get("observed_at"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not 0 <= age < shared_readiness.MAX_AGE_SECONDS / 3:
+        return False
+    same = {key: value for key, value in previous.items() if key != "observed_at"}
+    return same == {key: value for key, value in projection.items() if key != "observed_at"}
+
+
 def _reconcile_readiness_observations(store, duties, *, read_context,
                                       observation_context, incarnation):
     """Publish one bounded classification per exact selection for live consumers."""
@@ -6422,6 +6444,10 @@ def _reconcile_readiness_observations(store, duties, *, read_context,
                 identity, result, producer_pid=os.getpid(), producer_start=producer_start,
                 incarnation=incarnation, generation=generation)
             observation = dict(duty.get("observation") or {})
+            if _readiness_projection_still_fresh(observation, projection, result):
+                # Same result, same producer, recent enough for every reader's
+                # max age: skip rewriting the record only to move observed_at.
+                continue
             observation.update(shared_readiness=projection,
                                readiness_state=result.get("state", "unknown"),
                                reason=result.get("reason", ""))
