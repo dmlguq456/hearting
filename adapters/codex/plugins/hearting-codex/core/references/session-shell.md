@@ -76,7 +76,7 @@ values; the panel shows them in the same header, compact status and session
 rows as the other harnesses.
 Fields already painted in a native-owned status area are omitted from the compact duplicate.
 Physical exceptions are explicit: Claude's reserved native status row and
-OpenCode's fixed sidebar, native Context/footer and native scroll gutter.
+OpenCode's native Context/footer and native scroll gutter.
 Native-owned spaces are not recolored or resized to imitate another harness.
 Question interiors have one blank cell on both sides. Route state and shared
 verification codes use the operator language; missing records remain absent or
@@ -121,12 +121,17 @@ retain the normal input-occupied behavior. Native identity, idle/composer and
 effect-time checks still apply without a manual Escape step to wake the CLI.
 Respect a minimum native area; use configurable bounded bottom height at 80
 columns and preserve the same child through resize. No new global hotkey.
-OpenCode uses only an additive HEARTING section inside its existing sidebar;
-preserve native title, Context, MCP, footer, background and fixed container width.
-When that slot is unavailable or hidden, use the common bottom panel without a
-second rail. A disconnected display stream clears its last sidebar paint and
-visibility notification so only the host's current bottom fallback remains.
-Native sidebar integration never changes question authority.
+OpenCode uses the same right and bottom HEARTING panel as Claude and Codex,
+with the same renderer, `layout`/`side_width` settings and content order. The
+shell window hides OpenCode's own sidebar through its official CLI-config
+merge (`OPENCODE_CLI_CONFIG_CONTENT` with `session.sidebar: "hide"`, given only
+to the started shell's native child), so two right rails never appear; an
+explicit `session.sidebar` in that variable wins, and OpenCode's own toggle
+still opens its sidebar on demand. Context stays in OpenCode's footer, and the
+plugin reports the MCP server counts its sidebar listed as a display-only
+observation, painted in the compact status row as `MCP connected/total`
+(red while one has failed or needs authentication). No Hearting section is
+drawn inside OpenCode's sidebar. Panel placement never changes question authority.
 
 The current question,
 choices or free-text affordance and exact request state are readable before
@@ -221,7 +226,7 @@ process birth; it contains no prompt, question or answer body. Updating context
 or model text does not admit a new session, refresh action authority, complete a
 collection generation or schedule another detail pass. Basic collection and its
 CPU protection keep their existing cadence.
-OpenCode's visible context percentage owns its common-line percentage too.
+OpenCode's visible footer context percentage owns its common-line percentage too.
 Wrapped Codex keeps its original native arguments, settings and permission flags.
 OpenCode's Hearting route footer yields to the shell. The wrapped Codex viewport
 reads its native footer unchanged. Concealment requires the unchanged managed
@@ -267,10 +272,5 @@ publishes an attachment, subscribes/resumes a thread or authorizes input. An
 unloaded/foreign/changed/unavailable response stays unknown. The native-output
 event triggers this read; it creates no polling loop or additional collector.
 
-An OpenCode additive-slot click is a Hearting UI action when the host can match
-the entire currently painted owned frame in the native cell buffer. The host
-consumes that mouse press/release as it does its own bottom/side controls, so it
-does not masquerade as unsubmitted native draft bytes. A mismatch stays with
-native mouse handling. This display hit test never supplies input authority.
 At a short bottom answer editor all harnesses prioritize the same question/
 choices/draft/control rows; session rows take only the rows left after them.

@@ -13,13 +13,6 @@ import session_shell as shell
 
 
 class PanelTest(unittest.TestCase):
-    def test_native_sidebar_disconnect_clears_stale_rows_and_notifies_fallback(self):
-        for mode in ("error-close", "close-only"):
-            with self.subTest(mode=mode):
-                result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-sidebar-disconnect.cjs"), str(ROOT), mode],
-                                        capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
     def test_mouse_opened_editor_owns_keys_during_peer_delivery(self):
         result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-delivery-focus.cjs"), str(ROOT)],
                                 capture_output=True, text=True, timeout=10)
@@ -199,7 +192,7 @@ paste=false;d.feed(Buffer.from('\x1b'));d.flush();assert(output.endsWith('\x1b')
 '''
         self.node(script, "panel-mouse.cjs")
 
-    def test_settings_controls_render_and_keep_the_native_sidebar_width_readonly(self):
+    def test_settings_controls_render_and_edit_the_same_width_in_every_harness(self):
         script = r'''
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 for(const harness of ['claude','codex','opencode']){
@@ -207,12 +200,12 @@ for(const harness of ['claude','codex','opencode']){
  const r=v.render({width:40,height:24,side:true,harness,settings,questions:()=>[]});
  assert(r.rows.flat().map(s=>s.text).join('').includes('Hearting shell settings'));
  assert(r.hits.some(h=>h.action==='apply'));assert(r.hits.some(h=>h.action==='cancel'));assert(r.hits.some(h=>h.action==='defaults'));
- assert.equal(r.hits.some(h=>h.action==='setting:1:up'),harness!=='opencode');
+ assert(r.hits.some(h=>h.action==='setting:1:up'));
 }
 '''
         self.node(script, "panel-view.cjs")
 
-    def test_editing_budget_keeps_the_draft_visible_in_native_sidebar_and_80_columns(self):
+    def test_editing_budget_keeps_the_draft_visible_in_a_narrow_side_panel_and_80_columns(self):
         script = r'''
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(process.argv[1]);
 const c=require(path.join(path.dirname(process.argv[1]),'block-input.cjs'))({changed(){},answer(){throw Error('no submit');},action(){}});

@@ -870,10 +870,6 @@
    "en": "Basis",
    "ko": "선택 근거"
   },
-  "fleet.session_panel.fixed_width": {
-   "en": "OpenCode · fixed 42 columns",
-   "ko": "OpenCode · 42열 고정"
-  },
   "fleet.session_panel.gate_failed": {
    "en": "Completion failed",
    "ko": "마감 미통과"
