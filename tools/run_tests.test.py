@@ -2858,6 +2858,40 @@ class ShardPartitionTest(unittest.TestCase):
         self.assertEqual(weights["new"], 5.0)
         self.assertEqual(self.mod.shard_weights(["new"], {})["new"], 1.0)
 
+    def test_serial_suite_weighs_every_job_slot_it_keeps_idle(self):
+        serial = "utilities/hook_perf_budget.test.py"
+        self.assertIn(serial, self.mod.SERIAL_SUITES)
+        weights = self.mod.shard_weights([serial, "a.test.py"], {serial: 10.0, "a.test.py": 10.0}, 4)
+        self.assertEqual(weights, {serial: 40.0, "a.test.py": 10.0})
+        self.assertEqual(self.mod.shard_weights([serial], {serial: 10.0})[serial], 10.0)
+        # With four slots the serial suite fills a shard alone; 1 job would pair them.
+        self.assertEqual(self.mod.partition_shards([serial, "a.test.py", "b.test.py"],
+                                                   {serial: 10.0, "a.test.py": 6.0, "b.test.py": 6.0}, 2, 4),
+                         [[serial], ["a.test.py", "b.test.py"]])
+
+    def test_known_durations_start_the_longest_suite_first(self):
+        mod = self.mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            suites = [root / f"{name}.test.py" for name in ("a", "b", "c")]
+            for suite in suites:
+                suite.touch()
+            started = []
+
+            def fake_run_suite(suite, _root, _env, _profile, _timeout):
+                rel = suite.relative_to(root).as_posix()
+                started.append(rel)
+                return rel
+
+            with mock.patch.object(mod, "run_suite", side_effect=fake_run_suite):
+                ordered = mod.run_profile(suites, root, "isolated", 1, 5, None,
+                                          {"a.test.py": 1.0, "c.test.py": 9.0})
+                self.assertEqual(started, ["c.test.py", "b.test.py", "a.test.py"])
+                self.assertEqual(ordered, ["a.test.py", "b.test.py", "c.test.py"])
+                started.clear()
+                mod.run_profile(suites, root, "isolated", 1, 5, None)
+                self.assertEqual(started, ["a.test.py", "b.test.py", "c.test.py"])
+
     def test_more_shards_than_suites_leaves_empty_shards(self):
         shards = self.mod.partition_shards(["a.test.py"], {}, 3)
         self.assertEqual(shards, [["a.test.py"], [], []])
