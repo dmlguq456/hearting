@@ -1187,8 +1187,11 @@ async function setupOpenCodeV2(ctx) {
         }
         await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
       } else {
+        // Only a completed result with native content carries appended text back
+        // to the model (an error result keeps its own error); tell the shared hook.
         await hooks["tool.execute.after"]?.(
-          { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output)
+          { tool: event.tool, sessionID: event.sessionID, args: event.input || {},
+            peerContext: event.status === "completed" && Array.isArray(content) }, output)
       }
       if (event.status === "completed" && Array.isArray(content) &&
           output.output.startsWith(originalText) && output.output.length > originalText.length) {
@@ -1768,6 +1771,14 @@ const CARRIER_NEGATIVE_CACHE_MS = 1200
 const sweepRel = path.join("utilities", "dispatch_session_sweep.py")
 const OWED_STATES = new Set(["pending", "claimed", "sent-ambiguous"])
 
+// Sessions this plugin instance has seen are another directory's or a child
+// (task) session: neither changes, so its carriers stop spawning helpers for it.
+const v2ForeignSessions = new WeakMap()
+function v2ForeignSession(ctx, sid) { return !!v2ForeignSessions.get(ctx)?.has(sid) }
+function knownChildSession(sid) {
+  return !!(sid && (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID))
+}
+
 // One bounded sweep step; any failure is null. Ordinary steps are asynchronous;
 // the last effect check uses the same operation synchronously before the write.
 function carrierCommand(action, sid, handed, observe = () => {}, synchronous = false) {
@@ -1828,6 +1839,7 @@ function createCompletionCarrier(ctx) {
   let roots = null
   let rootsAt = 0
   let timer = null
+  let peerSweep = null
   const prompter = () => ctx.client?.session
   const available = () => !isWorkerSession() && typeof prompter()?.promptAsync === "function"
   const skips = new Map()
@@ -2060,9 +2072,15 @@ function createCompletionCarrier(ctx) {
       const received = new Set(observed?.received_ids || [])
       const releaseRecords = (beforeSend.records || []).filter(
         record => !received.has(record.delivery_id))
-      const released = releaseRecords.length
+      // A prompt the native API accepted (or that timed out unanswered) may still
+      // persist: it is sent, not unsent. Keep the claim, as the V2 peer courier
+      // keeps an unverified row: the next idle pass settles it from history, and
+      // only the existing claim lease, once expired, makes it deliverable again.
+      const held = taken || promptReason === "timeout"
+      const released = releaseRecords.length && !held
         ? await command("release", sid, { records: releaseRecords }) : { count: 0 }
-      log("settle", sid, received.size ? "native-receipt" : "release-fallback", {
+      log("settle", sid, received.size ? "native-receipt"
+        : held ? "sent-unobserved-held" : "release-fallback", {
         received: received.size, acked: observed?.settled_count ?? null,
         released: released?.count ?? null, prompt_accepted: taken,
       })
@@ -2088,13 +2106,33 @@ function createCompletionCarrier(ctx) {
     // The env a tool command of `sid` carries: only a runtime that will carry the receipt says so.
     env(sid) {
       if (!sid || !available()) return null
+      // A child (task) session's turn belongs to its parent; deliver() admits root
+      // sessions only, so a launch from it must not be told this carrier will wake it.
+      if (knownChildSession(sid)) return null
       sessions.add(sid)
       if (!timer) {
         timer = setInterval(() => {
+          const v2 = ctx.nativeHost === "v2"
+          const idlePeers = []
           for (const id of sessions) {
+            // OpenCode 2: every plugin instance of the shared service sees every
+            // session; one known to be another directory's or a child spawns nothing.
+            if (v2 && v2ForeignSession(ctx, id)) continue
             deliver(id).catch(() => {})
-            if (status.get(id) === "idle") pendingPeerDelivery(ctx, id).catch(() => {})
+            if (status.get(id) === "idle") idlePeers.push(id)
           }
+          if (!v2) {
+            for (const id of idlePeers) pendingPeerDelivery(ctx, id).catch(() => {})
+            return
+          }
+          // One idle-peer pass at a time, one session after another: the helper
+          // children never pile up on the shared service, however many are idle.
+          if (peerSweep) return
+          peerSweep = (async () => {
+            for (const id of idlePeers) {
+              if (sessions.has(id) && status.get(id) === "idle") await pendingPeerDelivery(ctx, id).catch(() => {})
+            }
+          })().finally(() => { peerSweep = null })
         }, CARRIER_INTERVAL_MS)
         timer.unref?.()
       }
@@ -2209,6 +2247,75 @@ function pendingPeerTransition(sid, options) {
     cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1500,
   })
   return result.status === 0
+}
+
+// The same `pending` command without holding the service's event loop. OpenCode 2
+// hosts every attached TUI's sessions in one service process, so a synchronous
+// child there stalls every window (measured 2.0.32: nine idle sessions polled
+// every 5 s put service p95 at 1.06 s). Listing and receipt transitions use this;
+// the reserve/begin-write pair right before a send stays synchronous.
+function pendingPeerSpawn(sid, options, timeoutMs) {
+  return new Promise((resolve) => {
+    let out = ""
+    let child
+    let finished = false
+    const finish = (code) => { if (finished) return; finished = true; clearTimeout(timer); resolve({ code, out }) }
+    const timer = setTimeout(() => { try { child?.kill("SIGKILL") } catch {} finish(null) }, timeoutMs)
+    try {
+      child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
+        "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
+        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+      })
+    } catch { finish(null); return }
+    child.on("error", () => finish(null))
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("close", (code) => finish(code))
+  })
+}
+
+async function pendingPeerCommandAsync(sid, options = [], timeoutMs = 1500) {
+  if (!sid) return null
+  const { code, out } = await pendingPeerSpawn(sid, options, timeoutMs)
+  if (code !== 0) return null
+  try { return JSON.parse(out || "null") } catch { return null }
+}
+
+async function pendingPeerTransitionAsync(sid, options, timeoutMs = 1500) {
+  if (!sid) return false
+  return (await pendingPeerSpawn(sid, options, timeoutMs)).code === 0
+}
+
+// `peer-message.py context` for one finished tool, without blocking the service.
+// The helper records a receipt only after it has flushed one complete JSON line,
+// so a complete line is delivered text even if the child is killed afterwards; a
+// partial line means no flush, and the rows stay with their recovery owner.
+function peerToolContextAsync(sid, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    let out = ""
+    let child
+    let finished = false
+    const parse = () => {
+      const line = out.split("\n").find((value) => value.trim())
+      if (!line) return ""
+      try {
+        const printed = JSON.parse(line)
+        const text = printed?.hookSpecificOutput?.additionalContext ?? printed?.context
+        return typeof text === "string" ? text : ""
+      } catch { return "" }
+    }
+    const finish = () => { if (finished) return; finished = true; clearTimeout(timer); resolve(parse()) }
+    const timer = setTimeout(() => { try { child?.kill("SIGKILL") } catch {} finish() }, timeoutMs)
+    try {
+      child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
+        "context", "--to-harness", "opencode", "--to-session-id", sid,
+        "--event", "PostToolUse", "--native-delivery"], {
+        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+      })
+    } catch { finish(); return }
+    child.on("error", () => finish())
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("close", () => finish())
+  })
 }
 
 function pendingPeerProcessIdentity() {
@@ -2706,16 +2813,22 @@ async function pendingPeerDeliveryV2(ctx, sid) {
     && (!row.no_trailer || (nativeMessageTime(m.info) > 0
       && nativeMessageTime(m.info) >= Number(row.created) * 1000 - 2000)))
   try {
-    const rows = pendingPeerCommand(sid)
-    if (!Array.isArray(rows)) { pendingPeerTrace(ctx, sid, "pending", "pending-read-unavailable"); return "pending-read-unavailable" }
-    if (!rows.length) return "no-pending-rows"
-    pendingPeerTrace(ctx, sid, "pending", "rows-found", { row_count: rows.length, host: "v2" })
+    // The in-process native read comes first: only this directory's root session
+    // reaches the helper. A definite other-directory or child answer is kept.
     let info = null
     try { info = pendingPeerSdkData(await bounded(client.get({ path: { id: sid } }))) } catch {}
     if (!pendingPeerIsNativeRoot(info, sid, origin)) {
+      if (info && typeof info === "object" && info.id === sid) {
+        if (!v2ForeignSessions.has(ctx)) v2ForeignSessions.set(ctx, new Set())
+        v2ForeignSessions.get(ctx).add(sid)
+      }
       pendingPeerTrace(ctx, sid, "native-root", "rejected", { host: "v2" })
       return "not-root-session"
     }
+    const rows = await pendingPeerCommandAsync(sid)
+    if (!Array.isArray(rows)) { pendingPeerTrace(ctx, sid, "pending", "pending-read-unavailable"); return "pending-read-unavailable" }
+    if (!rows.length) return "no-pending-rows"
+    pendingPeerTrace(ctx, sid, "pending", "rows-found", { row_count: rows.length, host: "v2" })
     try { await bounded(client.wait({ sessionID: sid }), 1500) } catch {
       pendingPeerTrace(ctx, sid, "native-status", "not-idle", { host: "v2" })
       return "not-idle:busy"
@@ -2731,9 +2844,9 @@ async function pendingPeerDeliveryV2(ctx, sid) {
         const mid = matches[0].info.id
         if (typeof mid !== "string" || !mid || (row.actual_message_id && row.actual_message_id !== mid)) continue
         if (row.state === "queued") {
-          const received = pendingPeerTransition(sid, ["--received", row.ref, "--message-id", mid])
+          const received = await pendingPeerTransitionAsync(sid, ["--received", row.ref, "--message-id", mid])
           pendingPeerTrace(ctx, sid, "receipt", received ? "received" : "receipt-refused", { refs: [row.ref], host: "v2" })
-        } else if (pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])) {
+        } else if (await pendingPeerTransitionAsync(sid, ["--queued", row.ref, "--message-id", mid])) {
           // A persisted send whose queue step was lost: queued now, received next pass.
           pendingPeerTrace(ctx, sid, "receipt", "queued-from-history", { refs: [row.ref], host: "v2" })
         }
@@ -2776,7 +2889,7 @@ async function pendingPeerDeliveryV2(ctx, sid) {
       }
       const mid = saved.length === 1 ? saved[0].info.id : ""
       const queued = typeof mid === "string" && !!mid
-        && pendingPeerTransition(sid, ["--queued", row.ref, "--message-id", mid])
+        && await pendingPeerTransitionAsync(sid, ["--queued", row.ref, "--message-id", mid])
       if (queued) pendingPeerStatus.set(sid, "submitted")
       pendingPeerTrace(ctx, sid, "prompt", queued ? "persisted-queued" : "persisted-unverified", {
         refs: [row.ref], prompt_accepted: accepted, match_count: saved.length, host: "v2",
@@ -3336,23 +3449,18 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     await projectPane(input.sessionID || "", ctx, true)
     if (!isWorkerSession() && input.sessionID && typeof output?.output === "string"
-        && pendingPeerStatus.get(input.sessionID) !== "blocked") {
+        && input.peerContext !== false && pendingPeerStatus.get(input.sessionID) !== "blocked") {
       // Claude's PostToolUse peer context: a report owed to this session while it
       // works is appended to the finished tool result (the shared sweep claims it
       // and records the receipt after this flush), together with the shared
       // sender notice. Between turns the idle courier keeps delivering bodies; an
       // open question or permission keeps every body pending until it is answered.
-      const notice = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
-        "context", "--to-harness", "opencode", "--to-session-id", input.sessionID,
-        "--event", "PostToolUse", "--native-delivery"], {
-        cwd: root, env: { ...process.env, AGENT_HOME: root },
-        encoding: "utf8", timeout: 2500,
-      })
-      try {
-        const printed = JSON.parse(notice.stdout || "{}")
-        const text = printed.hookSpecificOutput?.additionalContext ?? printed.context
-        if (notice.status === 0 && typeof text === "string" && text) output.output += "\n" + text
-      } catch { /* No new turn, prompt input, or callback retry. */ }
+      // A tool whose result cannot carry the text (OpenCode 2 error status) says
+      // so with `peerContext: false`, and the helper is not asked: nothing is
+      // recorded received that the model never saw. The child runs asynchronously
+      // so the shared service keeps serving every other window meanwhile.
+      const text = await peerToolContextAsync(input.sessionID)
+      if (text && typeof output.output === "string") output.output += "\n" + text
     }
     // Record actual spec reads for workflow and display evidence.
     // Non-blocking: a marker failure must never abort a successful read.

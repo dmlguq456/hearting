@@ -306,7 +306,7 @@ same meanings with no extra process or input:
 | completion receipt, human-gate and supervision notice wake (`asyncRewake` exit 2) | `opencode-turn` completion carrier: at `session.idle` and every 5 s while idle it asks the shared sweep (`dispatch_session_sweep.py recipients/deliver/settle`) for records owed to the exact session, starts the next turn with the shared `delivery_context` text, and acks once that exact text is in the native user history |
 | steward periodic check and other `session_notice` records | the same carrier (a notice is an SD-111 record of kind `opencode-turn`) |
 | idle peer report | idle courier: reserve, begin-write, one native prompt, then queued against the one persisted user message and received at the next idle pass |
-| report during work (`PostToolUse` `additionalContext`) | `tool.execute.after` appends `peer-message.py context --event PostToolUse --native-delivery` to the finished tool result; the shared writer records the receipt after the flush; an open question or permission keeps bodies pending |
+| report during work (`PostToolUse` `additionalContext`) | `tool.execute.after` appends `peer-message.py context --event PostToolUse --native-delivery` (an asynchronous child) to a completed tool result; the shared writer records the receipt after the flush; an error-status tool does not run it, and an open question or permission keeps bodies pending |
 | booked session-tidy continue (no-trailer row) | idle courier, with the existing no-trailer time bound |
 
 **OpenCode 2 hosting.** OpenCode 2.0.32 runs server plugins inside its shared
@@ -331,6 +331,39 @@ private service port, synthetic records only):
 | booked continue (no trailer) | pending after 85 s | answered, `received` in 7 s |
 | periodic check notice | pending after 63 s | new turn, acked in 4 s |
 | completion receipt through the session shell | — | acked in 4–7 s |
+
+**Shared-service cost** (PR #1436 review, fixed the same day). One OpenCode 2 service
+hosts every attached TUI's sessions, so a synchronous helper in a plugin callback stalls
+every window. The idle peer courier now reads its rows through an asynchronous child,
+one idle session after another per 5 s pass, after the in-process native root check; a
+session known to belong to another directory, or a child session, spawns nothing more.
+The post-tool context helper is asynchronous too. Service `/global/health` latency over
+40 s, isolated service with idle root sessions:
+
+| idle sessions | before the fix | after the fix | base (carriers withheld) |
+|---|---|---|---|
+| 9 | p95 1060 ms, max 1188 ms | p95 1.1 ms, max 28.7 ms, 0 over 200 ms | p95 1.2 ms |
+| 21 | p50 2333 ms, 25 samples in 40 s | p50 0.9 ms, p95 1.1 ms, 511 samples | — |
+
+A completion prompt that OpenCode accepted but whose exact text did not appear in the
+native history keeps its claim (log `sent-unobserved-held`): a later idle pass settles it
+from history, and only the existing 120 s claim lease, once expired, makes it deliverable
+again. Measured with the history read forced empty: one turn in 120 s (before: 11).
+
+**Open differences from Claude** (not closed by this measurement):
+
+- A record owed to a task (child) session is delivered to nobody: the carriers admit root
+  sessions only, while a Claude subagent's work rides its parent's hooks. A known child
+  session's tool commands carry no `AGENT_PARENT_COMPLETION_CARRIER`, so a launch there
+  keeps `poll-fallback` instead of yielding for a wake that never comes.
+- A report that arrives while the session works rides the next completed tool; Claude's
+  `PostToolUse` also carries it on a failed tool.
+- The herdr pane status projection (`recordNativeTurnStatus`, the pane publisher) still
+  assumes the V1 TUI-process origin; under the OpenCode 2 service its pane state is not
+  re-measured here.
+- Each 5 s pass still starts one asynchronous helper per idle root session (no service
+  stall, but CPU on the host); every plugin instance of the service evaluates its own
+  directory's sessions.
 
 ## Explicit Non-Support
 

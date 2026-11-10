@@ -2553,9 +2553,16 @@ try {
   await hooks.get("tool.execute.before")({ tool: "shell", sessionID, input: { command: "launch" } });
   const env = {};
   await hooks.get("shell.create.before")({ command: "launch", env });
-  assert.equal(env.AGENT_PARENT_COMPLETION_CARRIER, "opencode-turn:" + sessionID);
+  // A child (task) session's turn is its parent's: deliver() admits root sessions
+  // only, so its launch is not told that this carrier will wake it.
+  assert.equal(env.AGENT_PARENT_COMPLETION_CARRIER,
+    scenario === "child" ? "" : "opencode-turn:" + sessionID);
   releaseIdle();
-  if (scenario !== "success") {
+  if (scenario === "child") {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    assert.equal(prompts.length, 0, "a child session is never prompted");
+    console.log(JSON.stringify({ prompts, logs }));
+  } else if (scenario !== "success") {
     const reason = scenario === "history-error" ? "native-history-unavailable"
       : scenario === "busy-at-second-wait" ? "final-admission-withheld-released"
       : "native-admission-withheld";
@@ -2848,7 +2855,7 @@ if (prompts.length) {
   for (let i = 0; i < 200; i++) {
     if (logs.some(row => row.service === "hearting-completion-carrier"
         && row.extra?.stage === "settle"
-        && ["native-receipt", "release-fallback"].includes(row.extra?.reason))) break;
+        && ["native-receipt", "release-fallback", "sent-unobserved-held"].includes(row.extra?.reason))) break;
     await new Promise(r => setTimeout(r, 50));
   }
 }
@@ -3627,14 +3634,17 @@ for (let i = 0; i < 200; i++) {{
         self.assertIn(("prompt", "timeout"), [(item["stage"], item["reason"]) for item in carrier])
         self.assertIn(("settle", "native-receipt"), [(item["stage"], item["reason"]) for item in carrier])
 
-    def test_timeout_without_native_user_message_releases_for_fallback(self):
+    def test_timeout_without_native_user_message_holds_the_sent_claim(self):
+        # A prompt that timed out unanswered may still persist: it is held, not
+        # released, so the next idle pass settles it from history instead of
+        # opening another turn (PR #1436 review P2-1: 11 turns in 120 s before).
         self.seed_turn()
         result = self.run_plugin(self.IDLE_THEN_WAIT, prompt_async="timeout-absent")
         self.assertEqual(len(result["prompts"]), 1)
-        self.assertEqual(self.state(), "pending")
+        self.assertEqual(self.state(), "claimed")
         carrier = [item["extra"] for item in result["logs"]
                    if item["service"] == "hearting-completion-carrier"]
-        self.assertIn(("settle", "release-fallback"),
+        self.assertIn(("settle", "sent-unobserved-held"),
                       [(item["stage"], item["reason"]) for item in carrier])
 
     def test_a_pruned_import_root_keeps_the_exact_registry_and_wakes_the_parent(self):

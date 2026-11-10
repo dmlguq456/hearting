@@ -2478,6 +2478,64 @@ try {
         self.assertEqual(row["state"], "received", row)
         self.assertEqual(row["actual_message_id"], "msg_v2_1")
 
+    def test_opencode_v2_error_tool_keeps_report_pending_until_a_result_carries_it(self):
+        # PR #1436 review P1-2: an OpenCode 2 tool that ends in error status keeps
+        # its own error, so text appended to the legacy output never reaches the
+        # model. The helper must not run (and record the receipt) for it; the next
+        # completed tool carries the body and only then is it received.
+        recipient = {"harness": "opencode", "session_id": "ses_err"}
+        _text, ref = pm.prepare_peer_message("error-boundary OpenCode body", self.sender, recipient, defer=True)
+        script = r"""
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(PLUGIN))).default;
+const sessionID = "ses_err", hooks = new Map();
+const ctx = {
+  location: { directory: process.cwd(), project: { id: "fixture" } },
+  app: { name: "opencode", version: "2.0.32", channel: "latest" },
+  session: {
+    get: async ({ sessionID: sid }) => ({ id: sid, projectID: "fixture", title: "Main",
+      time: { created: 1, updated: 1 }, location: { directory: process.cwd() } }),
+    wait: async () => {}, prompt: async () => {}, context: async () => [],
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+  } },
+};
+const cleanup = await plugin.setup(ctx);
+try {
+  const failed = { tool: "read", sessionID, input: { filePath: "/nonexistent/a" }, status: "error",
+    error: new Error("File not found") };
+  await hooks.get("tool.execute.after")(failed);
+  const step = (await import("node:child_process")).spawnSync("python3", [STATE_PROBE], { encoding: "utf8" });
+  const done = { tool: "glob", sessionID, input: { pattern: "*.none" }, status: "completed",
+    result: { content: [{ type: "text", text: "No files found" }] } };
+  await hooks.get("tool.execute.after")(done);
+  console.log(JSON.stringify({ afterError: step.stdout.trim(), errorMessage: failed.error.message,
+    completed: done.result.content.map(part => part.text) }));
+} finally { await cleanup() }
+"""
+        probe = self.state / "state_probe.py"
+        probe.write_text("import json, os, sys\nsys.path.insert(0, %r)\n" % str(ROOT / "utilities")
+                         + "import importlib.util\n"
+                         + "spec = importlib.util.spec_from_file_location('pm', %r)\n" % str(ROOT / "utilities/peer-message.py")
+                         + "pm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pm)\n"
+                         + "print(pm._read_pending(%r)['state'])\n" % ref)
+        script = script.replace("PLUGIN", json.dumps(str(ROOT / "adapters/opencode/plugins/hearting-guards.js"))
+                                ).replace("STATE_PROBE", json.dumps(str(probe)))
+        result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", script],
+                                cwd=str(self.state), env=dict(os.environ, AGENT_HOME=str(ROOT)),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        observed = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(observed["afterError"], "pending", observed)
+        self.assertEqual(observed["errorMessage"], "File not found")
+        self.assertTrue(any("error-boundary OpenCode body" in text for text in observed["completed"]), observed)
+        self.assertEqual(pm._read_pending(ref)["state"], "received")
+
     def test_claude_actual_prompt_observes_ref_once_without_output_ack(self):
         recipient = {"harness": "claude", "session_id": "recipient-a"}
         text, ref = pm.prepare_peer_message("original peer body", self.sender, recipient, defer=True)
