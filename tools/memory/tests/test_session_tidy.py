@@ -4267,6 +4267,59 @@ class OpenCodeV2ReadTest(TidyCase):
                 self.assertEqual((rows, cursor, choices), (whole.rows, whole.cursor_to, whole.choices))
                 self.assertEqual("\n".join(t for t in texts if t), whole.text)
 
+    def test_a_generation_change_between_pages_is_read_again_in_the_new_generation(self):
+        # Review [e7] R2 P2: a page read after the session moved generation (an empty page
+        # included) let the old unit's cursor stand as a normal result and NEW rows go missing.
+        import conversation_reader
+        import opencode_runtime
+        self.load(upgraded=True)
+        sid = "ses_fixtureswitch0000000001"
+
+        def put(con, generation, cursors, tag):
+            for t in ("part", "message", "session_message"):     # one session's rows only
+                con.execute("DELETE FROM %s" % t)
+            for i in cursors:
+                if generation == "v1":
+                    con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                                ("msg_sw%03d" % i, sid, json.dumps({"role": "user"})))
+                    con.execute("INSERT INTO part(rowid, id, message_id, session_id, time_created, time_updated,"
+                                " data) VALUES (?, ?, ?, ?, 1, 1, ?)",
+                                (i, "prt_sw%03d" % i, "msg_sw%03d" % i, sid,
+                                 json.dumps({"type": "text", "text": "%s-%03d" % (tag, i)})))
+                else:
+                    con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                                ("msg_v2sw%03d" % i, sid, i, json.dumps({"text": "%s-%03d" % (tag, i)})))
+
+        original = opencode_runtime.read_session_parts
+        for old, new in (("v1", "v2"), ("v2", "v1")):
+            for cursors in ((4, 5), (4, 5, 25, 30)):
+                for public in (False, True):
+                    with self.subTest(old=old, new=new, cursors=cursors, public=public):
+                        with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as con, con:
+                            put(con, old, range(1, 41), "OLD")
+                        calls = []
+
+                        def reader(*args, **kwargs):
+                            snapshot = original(*args, **kwargs)
+                            calls.append(kwargs.get("after_cursor"))
+                            if len(calls) == 1:       # the session moves after the first page
+                                with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as writer, writer:
+                                    put(writer, new, cursors, "NEW")
+                            return snapshot
+
+                        expected = "\n".join("[user] NEW-%03d" % i for i in cursors)
+                        with self.library(), mock.patch.object(tt.time, "sleep"), \
+                                mock.patch.object(opencode_runtime, "read_session_parts", side_effect=reader):
+                            if public:
+                                view = conversation_reader.read_conversation(
+                                    {"harness": "opencode", "sid": sid,
+                                     "transcript": {"path": str(self.iso.opencode_db), "status": "available"}})
+                                self.assertEqual((view.status, view.text), ("available", expected))
+                            else:
+                                chunk = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, 1 << 20)
+                                self.assertEqual((chunk.error, chunk.eof, chunk.unit, chunk.text),
+                                                 ("", True, "seq" if new == "v2" else "rowid", expected))
+
 
 class OpenCodeReadRetryTest(unittest.TestCase):
     """A snapshot of the shared OpenCode database is refused now and then; the read is tried again."""

@@ -1012,12 +1012,13 @@ def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> C
     used, last, taken, exhausted, unit, page = 0, int(cursor), [], True, None, OPENCODE_CHUNK_PAGE
     while True:
         page_unit, rows, error = _opencode_session(db_path, session_id, last, page)
+        if unit is not None and page_unit != unit:
+            # The generation changed between pages (an empty page included): the cursor no
+            # longer names this session, so the read fails and is retried like an ambiguous one.
+            error = "unreadable: session-generation-ambiguous"
         if error:
             chunk.error = error
             return chunk
-        if unit is not None and rows and page_unit != unit:
-            exhausted = False                   # the generation changed between pages: stop here
-            break
         unit = unit or page_unit
         stopped = False
         for row in rows:
