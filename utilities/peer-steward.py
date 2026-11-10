@@ -2249,6 +2249,13 @@ def _complete_gone_retire(store, duty):
                            observation={"phase": "complete", "reason": "target-already-gone"})
     if settled.get("state") == "complete":
         ident = (duty.get("intent") or {}).get("identity") or {}
+        if settled.get("result") == "normal-exit":
+            # Another observer (the retained runner) finished the same requested
+            # exit first and closed the pane; report what the duty records.
+            print(f"retired=true reason=normal-exit agent={ident.get('harness', '-')} "
+                  f"name={ident.get('name', '-')} pane={ident.get('pane', '-')}"
+                  + (f" handover={handover}" if handover else ""))
+            return True
         _mark_completed_retire_followup(store, settled, ident,
                                         "target-already-gone", handover,
                                         defer_if_missing=True)
