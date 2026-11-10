@@ -17,6 +17,7 @@ from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
 from ..model import exec_child_is_wait
+from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -1094,6 +1095,10 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        if record:
+            # Display only: shape and its basis, stages, verification and next step, read
+            # from this route's own record, Fleet's view and its outcome sidecar.
+            route["visibility"] = route_visibility.bounded(route_visibility.describe(record, view))
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
