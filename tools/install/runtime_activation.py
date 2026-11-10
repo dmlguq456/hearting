@@ -1020,8 +1020,6 @@ def _linked_entries(
             marker=_OPENCODE_V2_TUI_IMPORT))
         shell_tui = source_root / "adapters/opencode/tui/hearting-session-shell.js"
         entries.append(_entry(shell_tui, home / "plugins/hearting-session-shell/tui.js", "hook_config", kind="copy"))
-        entries.append(_entry(source_root / "adapters/opencode/tui/hearting-session-panel.tsx",
-                              home / "plugins/hearting-session-shell/panel.tsx", "hook_config", kind="copy"))
         herdr_tui = source_root / "adapters/opencode/tui/herdr-tui-session.js"
         entries.append(_entry(herdr_tui, home / "herdr-tui-session.js", "hook_config", kind="copy"))
         herdr_tui_v2 = source_root / "adapters/opencode/tui/herdr-opencode/tui.js"

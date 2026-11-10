@@ -320,6 +320,26 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 `$XDG_STATE_HOME/hearting/opencode-plugin-log/<pid>.jsonl`. The hearting session shell
 (`utilities/session-shell/entry.py`) wraps only the TUI, so the same carriers apply.
 
+**Session shell panel.** In a shell window OpenCode gets the same right (left
+by choice, or bottom at narrow widths) HEARTING panel as Claude and Codex: same
+renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
+hidden there through its documented CLI settings: `session.sidebar` is `auto`
+("Shows the sidebar when space permits") or `hide` ("always hides it"), and
+"OpenCode merges the inline settings over the global `cli.json`" from
+`OPENCODE_CLI_CONFIG_CONTENT`, which stays authoritative while set
+([CLI config](https://opencode.ai/v2/docs/cli/config)). `entry.py` adds
+`{"session":{"sidebar":"hide"}}` to that variable, keeping any other inline
+settings and leaving an explicit `session.sidebar` or unreadable value alone;
+`pty_owner.py` gives it only to the started shell's native child, so a fallback
+start keeps the user's sidebar. OpenCode's palette command (Ctrl+P, *Show
+sidebar*) still opens the sidebar on demand. Context remains in OpenCode's
+footer; `tui/hearting-session-shell.js` reports the MCP server counts from
+`ctx.data.location.mcp.server.list` with the selected model as display-only
+observations, painted as `MCP connected/total` in the compact status row. No
+`sidebar.content` slot is used. OpenCode 1.x has no such variable; its sidebar
+still auto-hides below 121 native columns, which the side panel leaves at
+terminal widths up to 162.
+
 **Measured** (real OpenCode 2.0.32 TUI in an isolated HOME, private tmux socket and
 private service port, synthetic records only):
 

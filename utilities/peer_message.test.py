@@ -3248,6 +3248,11 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         import session_tidy
         from types import SimpleNamespace
         self.runner = runner
+        # These cases exercise acceptance after the card arrived; delivery itself
+        # has its own receipt tests, and HandoffDeliveryFactTest covers the refusal.
+        self.real_delivered = runner._handoff_delivered
+        delivered = mock.patch.object(runner, "_handoff_delivered", return_value=True)
+        delivered.start(); self.addCleanup(delivered.stop)
         self.steward = runner._handoff_steward()
         self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
         set_split(self.steward, "peer_message", peer_message)
@@ -3511,6 +3516,31 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         self.assertNotIn("handoff accept", guidance)
         self.assertEqual(peer_message._read_pending(self.ref)["acceptance"],
                          {"read_and_accepted": True, "settled": False})
+
+    def test_undelivered_card_is_not_recorded_as_accepted(self):
+        # M7: the accept command on a card that never reached the successor
+        # records nothing; once the card is received, the same command accepts.
+        with mock.patch.object(self.runner, "_handoff_delivered", self.real_delivered):
+            line, code = self.runner.accept_handoff(self.ref, self.caller)
+            self.assertEqual((line, code), ("accepted=false reason=handoff-not-delivered", 5))
+            self.assertNotIn("acceptance", peer_message._read_pending(self.ref))
+            self.assertEqual(self.store.list(), [])
+            peer_message.receive_peer_message(self.text, self.recipient)
+            self.assertEqual(peer_message._read_pending(self.ref)["state"], "received")
+            line, code = self.runner.accept_handoff(self.ref, self.caller)
+            self.assertEqual(code, 0, line)
+            self.assertIn("accepted=true", line)
+            self.assertTrue(peer_message._read_pending(self.ref)["acceptance"]["read_and_accepted"])
+
+    def test_only_a_card_never_handed_over_counts_as_undelivered(self):
+        # Queued, steered or in-flight cards can already be in the successor's input
+        # before their receipt is confirmed (OpenCode confirms from native history).
+        for row in ({"state": "queued", "receipt": "native-steer-accepted"},
+                    {"state": "queued", "receipt": "context-api-accepted"},
+                    {"state": "unverified", "receipt": "opencode-prompt-inflight"},
+                    {"state": "received", "receipt": "exact-peer-ref"}):
+            self.assertTrue(self.real_delivered(row), row)
+        self.assertFalse(self.real_delivered({"state": "pending", "receipt": "native-pending"}))
 
     def test_receipt_never_accepts_and_explicit_acceptance_is_once_only(self):
         peer_message.receive_peer_message(self.text, self.recipient)
@@ -4170,6 +4200,8 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
         import session_tidy_runner as runner
         import dispatch_seat_handover as handover
         self.tidy, self.runner, self.handover = tidy, runner, handover
+        delivered = mock.patch.object(runner, "_handoff_delivered", return_value=True)
+        delivered.start(); self.addCleanup(delivered.stop)
         self.steward = runner._handoff_steward()
         self.addCleanup(set_split, self.steward, "peer_message", self.steward.peer_message)
         set_split(self.steward, "peer_message", peer_message)

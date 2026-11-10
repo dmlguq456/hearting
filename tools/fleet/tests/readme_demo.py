@@ -9,9 +9,11 @@ real session. README captures built from it say so ("demo data").
 ``snapshot()`` is what ``explorer_capture.py --readme-demo`` and ``readme_captures.py`` draw.
 ``VERSION`` is the one string to bump when the README is re-captured for a new release.
 """
+import atexit
 import dataclasses
 import json
 import os
+import shutil
 import tempfile
 import time
 
@@ -60,7 +62,10 @@ def snapshot(now=None, workdir=None):
     from tools.fleet.projection import attach_projections
     from tools.fleet.refresh import LiveSnapshot, fleet_answer_wait_view
     now = NOW if now is None else now
-    workdir = workdir or tempfile.mkdtemp(prefix="fleet-readme-demo-")
+    if not workdir:
+        # The route files live as long as this process may draw the snapshot.
+        workdir = tempfile.mkdtemp(prefix="fleet-readme-demo-")
+        atexit.register(shutil.rmtree, workdir, True)
     api, ml = f"{HOME}/web-api", f"{HOME}/ml-train"
 
     code = _route("autopilot-code", "dev", api, "Rate limiting",
