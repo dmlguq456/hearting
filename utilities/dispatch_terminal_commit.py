@@ -2088,7 +2088,9 @@ def require_current_cleanup(operation, *, target=None, cycle_id=None, jobs=None,
     `environ` names the caller's launch environment when it is not this process's own
     (a launcher checking on behalf of the detached child it is about to start)."""
     environ = os.environ if environ is None else environ
-    owner = environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+    # A detached settlement child carries its owner without the descendant tag.
+    owner = environ.get("AGENT_DISPATCH_ATTEMPT_ID", "") or environ.get(
+        dispatch_contract.CLEANUP_OWNER_ENV, "")
     if not owner:
         return
     registry = jobs or environ.get("AGENT_DISPATCH_JOBS")

@@ -43,6 +43,7 @@ CUTOVER_REL = Path(".runtime/artifact-producer/v1/cutover.json")
 DISABLE_ENV = "AGENT_ARTIFACT_CHECKPOINT"
 INTERVAL_ENV = "AGENT_ARTIFACT_CHECKPOINT_MIN_INTERVAL"
 ATTEMPT_TAG_ENV = "AGENT_DISPATCH_ATTEMPT_ID"  # dispatch_contract_base.ATTEMPT_DESCENDANT_ENV
+CLEANUP_OWNER_ENV = "AGENT_CLEANUP_OWNER_ATTEMPT_ID"  # dispatch_contract_base.CLEANUP_OWNER_ENV
 DEFAULT_INTERVAL_SECONDS = 900.0
 AUTOMATIC_TRIGGERS = ("stage-complete", "supervisor-poll", "turn-end", "begin")
 HARNESSES = ("claude", "codex", "opencode")
@@ -114,8 +115,10 @@ def _settlement_environment(env: Mapping[str, str]) -> Optional[dict]:
     so its supervisor exit woke the parent with a "still running" notice for every
     PASS owner. Without the tag the route's completion notice is the only one, and a
     slow or hung checkpoint can no longer hold that completion back.  The cleanup-scope
-    refusal the child applied under the tag (`require_current_cleanup`) is applied here
-    instead; None means the caller's cleanup scope refuses it, as the child would have.
+    refusal the child applied under the tag (`require_current_cleanup`) is applied here,
+    and the child keeps its owner under `CLEANUP_OWNER_ENV` so the same guard still runs
+    at its entry (a scope published between this check and the child's start); None
+    means the caller's cleanup scope refuses it, as the child would have.
     """
     if env.get(ATTEMPT_TAG_ENV):
         try:
@@ -124,7 +127,10 @@ def _settlement_environment(env: Mapping[str, str]) -> Optional[dict]:
         except Exception:  # noqa: BLE001 -- refused or unreadable: no checkpoint, as before
             return None
     # Same removal as `dispatch_contract_base.governance_environment`, without its imports.
-    return {key: value for key, value in env.items() if key != ATTEMPT_TAG_ENV}
+    child = {key: value for key, value in env.items() if key != ATTEMPT_TAG_ENV}
+    if env.get(ATTEMPT_TAG_ENV):
+        child[CLEANUP_OWNER_ENV] = env[ATTEMPT_TAG_ENV]
+    return child
 
 
 def launch(
