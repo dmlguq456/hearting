@@ -48,6 +48,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # another checkout (read-only) to measure that tree's uncommitted carriers.
 SOURCE = ROOT
 FIXTURE_MODEL = "hearting-fixture"
+# Further model ids the fixture lists (a scenario adds the ids its agents name).
+EXTRA_MODELS: list[str] = []
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 HARNESSES = ("claude", "codex", "opencode")
 NATIVE_ENV = {
@@ -220,9 +222,9 @@ class ModelFixture:
                 path = self.path.split("?")[0].rstrip("/")
                 if path.endswith("/models"):
                     body = json.dumps({"object": "list", "data": [{
-                        "id": FIXTURE_MODEL, "object": "model", "created": 0,
+                        "id": name, "object": "model", "created": 0,
                         "owned_by": "hearting-fixture", "type": "model",
-                        "display_name": FIXTURE_MODEL}]}).encode()
+                        "display_name": name} for name in (FIXTURE_MODEL, *EXTRA_MODELS)]}).encode()
                     self._send(200, body)
                     return
                 self._send(404, b"{}")
@@ -515,6 +517,30 @@ class InstalledHome:
         return {"exit": done.returncode, "seconds": round(_now() - started, 1),
                 "log": str(self.install_log)}
 
+    def install_herdr_integration(self) -> dict:
+        """Install again with the private ``herdr`` on PATH.
+
+        Hearting projects its pinned Herdr integration itself when it finds
+        ``herdr`` at install time (``tools/install/herdr_integration.py``); the
+        first install ran with Herdr hidden. Upstream ``herdr integration
+        install`` is not used: it follows the projection symlinks back into the
+        source tree.
+        """
+        if not REAL_HERDR:
+            return {"status": "herdr-missing"}
+        bin_dir = self.root / "herdr-bin"
+        bin_dir.mkdir(exist_ok=True)
+        link = bin_dir / "herdr"
+        if not link.exists():
+            link.symlink_to(REAL_HERDR)
+        saved = self.env.get("PATH", "")
+        self.env["PATH"] = str(bin_dir) + os.pathsep + saved
+        try:
+            again = self.install()
+        finally:
+            self.env["PATH"] = saved
+        return {"reinstall_exit": again["exit"]}
+
     # -- per harness model wiring -------------------------------------------
     def configure_model(self):
         getattr(self, f"_configure_{self.harness}")()
@@ -708,6 +734,175 @@ class PrivateTui:
         shutil.rmtree(self.socket_dir, ignore_errors=True)
 
 
+# The operator's herdr binary, resolved before any fixture PATH shadowing. The
+# ``--surface herdr`` runs start their own server with it; nothing here ever
+# connects to the operator's server (HOME, XDG and the socket path are private).
+REAL_HERDR = shutil.which("herdr")
+SURFACE = "tmux"
+
+
+def _ids(node, key):
+    found = []
+    if isinstance(node, dict):
+        for name, value in node.items():
+            if name == key and isinstance(value, str):
+                found.append(value)
+            else:
+                found.extend(_ids(value, key))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_ids(value, key))
+    return found
+
+
+class PrivateHerdrTui:
+    """A real TUI as a Herdr agent inside a Herdr server only this fixture owns.
+
+    Same interface as ``PrivateTui``. The server runs with the fixture's private
+    HOME/XDG, its own session name and socket, and a PATH entry holding only the
+    ``herdr`` binary, so hooks and ``peer-steward`` reach this server alone.
+    """
+
+    def __init__(self, root: Path, env: dict, argv: list[str], cwd: Path, harness: str):
+        self.root = root
+        self.harness = harness
+        self.argv = argv
+        self.cwd = cwd
+        self.session = "hb" + uuid.uuid4().hex[:8]
+        self.name = "hbsteward"
+        self.panes: dict[str, str] = {}
+        self.server = None
+        self.started = False
+        self.calls: list[dict] = []
+        config = Path(env["XDG_CONFIG_HOME"]) / "herdr"
+        config.mkdir(parents=True, exist_ok=True, mode=0o700)
+        bin_dir = root / "herdr-bin"
+        bin_dir.mkdir(exist_ok=True)
+        link = bin_dir / "herdr"
+        if REAL_HERDR and not link.exists():
+            link.symlink_to(REAL_HERDR)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env.update({"HERDR_SESSION": self.session, "AGENT_HERDR_SESSION": self.session,
+                    "HERDR_CONFIG_PATH": str(config / "config.toml")})
+        self.socket = config / "sessions" / self.session / "herdr.sock"
+        self.env = env
+
+    def herdr(self, *args, timeout=30):
+        done = subprocess.run([str(self.root / "herdr-bin" / "herdr"), "--session", self.session,
+                               *args], env=self.env, cwd=str(self.cwd), text=True,
+                              capture_output=True, timeout=timeout)
+        self.calls.append({"args": list(args)[:4], "rc": done.returncode,
+                           "stderr": done.stderr[-300:]})
+        return done
+
+    @staticmethod
+    def _json(text):
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
+    def _new_pane(self, label):
+        done = self.herdr("workspace", "create", "--cwd", str(self.cwd), "--label", label,
+                          "--no-focus")
+        panes = _ids(self._json(done.stdout), "pane_id")
+        return panes[0] if done.returncode == 0 and panes else None
+
+    def _agent_start(self, name, pane):
+        native = self.argv[1:]
+        self.panes[name] = pane
+        done = self.herdr("agent", "start", name, "--kind", self.harness, "--pane", pane,
+                          "--timeout", "120000", *(["--", *native] if native else []), timeout=130)
+        if done.returncode != 0 and "timeout" in done.stderr:
+            # A first start in a fresh HOME can outlast the start wait; the agent
+            # usually is up by now, which `agent get` confirms.
+            if self.herdr("agent", "get", name, timeout=10).returncode == 0:
+                return {"ok": True, "rc": 0, "pane": pane, "late_start": True,
+                        "stderr": done.stderr[-300:]}
+        return {"ok": done.returncode == 0, "rc": done.returncode, "pane": pane,
+                "stderr": done.stderr[-300:]}
+
+    def start(self):
+        if not REAL_HERDR:
+            raise RuntimeError("herdr binary not found")
+        errors = (self.root / "herdr-server.stderr").open("wb")
+        self.server = subprocess.Popen(
+            [str(self.root / "herdr-bin" / "herdr"), "--session", self.session, "server"],
+            cwd=str(self.cwd), env=self.env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True, close_fds=True)
+        ready = wait_for(lambda: self.server.poll() is None
+                         and self.herdr("pane", "list", timeout=5).returncode == 0, 30, 0.3)
+        if not ready or not self.socket.is_socket():
+            raise RuntimeError("private herdr server did not start")
+        self.env["HERDR_SOCKET_PATH"] = str(self.socket)
+        self.started = True
+        pane = self._new_pane("steward")
+        if not pane:
+            raise RuntimeError("private herdr pane not created")
+        self.start_result = self._agent_start(self.name, pane)
+
+    def start_target(self, name):
+        pane = self._new_pane("target")
+        if not pane:
+            return {"ok": False, "reason": "pane-not-created"}
+        result = self._agent_start(name, pane)
+        if result["ok"]:
+            wait_for(lambda: len(self.read(name).strip()) > 40, 60)
+        return result
+
+    def _send(self, name, text):
+        """Type into the agent's pane, confirm it is visible, then submit."""
+        pane = self.panes.get(name, name)
+        probe = text[:24]
+        for _ in range(4):
+            sent = self.herdr("pane", "send-text", pane, text, timeout=15)
+            if sent.returncode == 0 and wait_for(lambda: probe in self.read(name), 6):
+                time.sleep(0.6)
+                self.herdr("pane", "send-keys", pane, "Enter", timeout=10)
+                return True
+            self.herdr("pane", "send-keys", pane, "Escape", timeout=10)
+            time.sleep(1.5)
+        return False
+
+    def prompt_target(self, name, text):
+        return {"typed": self._send(name, text)}
+
+    def read(self, name):
+        done = self.herdr("agent", "read", name, "--source", "visible", timeout=10)
+        payload = self._json(done.stdout)
+        if isinstance(payload, dict):
+            texts = _ids(payload, "text") or _ids(payload, "content")
+            return ANSI_RE.sub("", "\n".join(texts))
+        return ANSI_RE.sub("", done.stdout or "")
+
+    def screen(self) -> str:
+        return self.read(self.name) if self.started else ""
+
+    def alive(self) -> bool:
+        return bool(self.started and self.server and self.server.poll() is None
+                    and self.herdr("agent", "get", self.name, timeout=10).returncode == 0)
+
+    def type_text(self, text: str, attempts: int = 2):
+        return self._send(self.name, text)
+
+    def settle(self, quiet: float = 3, timeout: float = 45):
+        return PrivateTui.settle(self, quiet, timeout)
+
+    def key(self, *keys: str):
+        self.herdr("pane", "send-keys", self.panes.get(self.name, self.name), *keys, timeout=10)
+
+    def stop(self):
+        if self.started:
+            with contextlib.suppress(Exception):
+                self.herdr("server", "stop", timeout=15)
+            self.started = False
+        if self.server is not None and self.server.poll() is None:
+            with contextlib.suppress(OSError):
+                self.server.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.server.wait(timeout=10)
+
+
 def fixture_processes(root: Path) -> list[int]:
     """PIDs whose environment or argv belongs to this fixture root only."""
     marker = f"HEARTING_FIXTURE_ROOT={root}".encode()
@@ -868,8 +1063,11 @@ class Run:
             return row
         runtime = Path(os.environ.get("HEARTING_SCENARIO_TMP") or tempfile.gettempdir())
         runtime.mkdir(parents=True, exist_ok=True)
-        root = Path(tempfile.mkdtemp(prefix=f"hb-{self.harness}-{self.scenario.name}-",
-                                     dir=str(runtime)))
+        # Herdr puts its sockets under XDG_CONFIG_HOME inside this root: a short
+        # name keeps them within the ~107-byte UNIX socket path limit.
+        prefix = (f"hb-{self.harness[:2]}-" if SURFACE == "herdr"
+                  else f"hb-{self.harness}-{self.scenario.name}-")
+        root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(runtime)))
         row["fixture_root"] = str(root)
         fixture = ModelFixture(self.scenario.script(self))
         tui = None
@@ -877,20 +1075,26 @@ class Run:
             self.home = InstalledHome(root, self.harness, fixture)
             install = self.home.install()
             self.evidence["install"] = install
+            if SURFACE == "herdr":
+                self.evidence["herdr_integration"] = self.home.install_herdr_integration()
             self.home.configure_model()
             if self.harness == "codex":
                 self.evidence["hook_trust"] = self.home.trust_codex_hooks(binary)
             if SESSION_SHELL:
                 self.evidence["session_shell"] = enable_session_shell(self.home)
-            self.scenario.prepare(self)
-            tui = PrivateTui(root, self.home.env, harness_argv(self.harness, binary),
-                             self.home.workspace)
-            self.tui = tui
+            self.binary = binary
             self.fixture = fixture
-            tui.start()
-            ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
-            self.evidence["ready"] = bool(ready)
-            self._dismiss_startup(tui)
+            self.scenario.prepare(self)
+            row["surface"] = SURFACE
+            if getattr(self.scenario, "needs_tui", True):
+                argv = harness_argv(self.harness, binary) + list(
+                    getattr(self.scenario, "extra_argv", lambda _harness: [])(self.harness))
+                tui = self.scenario.make_tui(self, root, argv)
+                self.tui = tui
+                tui.start()
+                ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
+                self.evidence["ready"] = bool(ready)
+                self._dismiss_startup(tui)
             verdict = self.scenario.drive(self)
             declared = declared_carrier(self.harness, self.scenario)
             if verdict == "gap" and declared:
@@ -904,7 +1108,12 @@ class Run:
             if tui is not None:
                 with contextlib.suppress(Exception):
                     (root / "screen.txt").write_text(tui.screen(), encoding="utf-8")
+                if isinstance(tui, PrivateHerdrTui):
+                    self.evidence["herdr_calls"] = tui.calls[-40:]
+                    self.evidence["herdr_start"] = getattr(tui, "start_result", None)
                 tui.stop()
+            with contextlib.suppress(Exception):
+                self.scenario.cleanup(self)
             self.evidence["retired_fixture_pids"] = len(retire_fixture_processes(root))
             fixture.close()
             requests = fixture.requests
@@ -988,6 +1197,22 @@ class Scenario:
         return answer
 
     def prepare(self, run: Run):
+        return None
+
+    # A headless scenario (``needs_tui = False``) drives the native CLI itself.
+    needs_tui = True
+
+    def make_tui(self, run: Run, root: Path, argv: list[str]):
+        """The terminal the TUI runs in: the selected ``--surface`` (a private
+        tmux server, or a private Herdr server for ``--surface herdr``)."""
+        if SURFACE == "herdr":
+            tui = PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
+            run.surface = tui
+            return tui
+        return PrivateTui(root, run.home.env, argv, run.home.workspace)
+
+    def cleanup(self, run: Run):
+        """Stop scenario-owned servers before the fixture processes are retired."""
         return None
 
     def drive(self, run: Run) -> str:
@@ -1078,6 +1303,9 @@ def main(argv=None) -> int:
     parser.add_argument("--source", help="Hearting checkout to install (default: this tree)")
     parser.add_argument("--session-shell", action="store_true",
                         help="launch each TUI through Hearting's session shell")
+    parser.add_argument("--surface", choices=("tmux", "herdr"), default="tmux",
+                        help="run each TUI in a private tmux server (default) or as an agent "
+                             "of a private Herdr server")
     parser.add_argument("--keep", action="store_true",
                         help="keep each fixture HOME for inspection")
     args = parser.parse_args(argv)
@@ -1087,10 +1315,11 @@ def main(argv=None) -> int:
         return 0
     if not args.output_dir:
         parser.error("--output-dir is required")
-    global SOURCE, SESSION_SHELL
+    global SOURCE, SESSION_SHELL, SURFACE
     if args.source:
         SOURCE = Path(args.source).resolve()
     SESSION_SHELL = bool(args.session_shell)
+    SURFACE = args.surface
     names = list(SCENARIOS) if args.scenario == "all" else args.scenario.split(",")
     harnesses = [h for h in args.harness.split(",") if h]
     output = Path(args.output_dir)
