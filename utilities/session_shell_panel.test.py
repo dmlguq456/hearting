@@ -13,13 +13,6 @@ import session_shell as shell
 
 
 class PanelTest(unittest.TestCase):
-    def test_native_sidebar_disconnect_clears_stale_rows_and_notifies_fallback(self):
-        for mode in ("error-close", "close-only"):
-            with self.subTest(mode=mode):
-                result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-sidebar-disconnect.cjs"), str(ROOT), mode],
-                                        capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
     def test_mouse_opened_editor_owns_keys_during_peer_delivery(self):
         result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-delivery-focus.cjs"), str(ROOT)],
                                 capture_output=True, text=True, timeout=10)
@@ -218,7 +211,7 @@ paste=false;d.feed(Buffer.from('\x1b'));d.flush();assert(output.endsWith('\x1b')
 '''
         self.node(script, "panel-mouse.cjs")
 
-    def test_settings_controls_render_and_keep_the_native_sidebar_width_readonly(self):
+    def test_settings_controls_render_and_edit_the_same_width_in_every_harness(self):
         script = r'''
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 for(const harness of ['claude','codex','opencode']){
@@ -227,14 +220,14 @@ for(const harness of ['claude','codex','opencode']){
  assert(r.rows.flat().map(s=>s.text).join('').includes('Hearting shell settings'));
  assert(r.hits.some(h=>h.action==='apply'));assert(r.hits.some(h=>h.action==='cancel'));assert(r.hits.some(h=>h.action==='defaults'));
  const width=v.fields.indexOf('side_width');
- assert.equal(r.hits.some(h=>h.action==='setting:'+width+':up'),harness!=='opencode');
+ assert(r.hits.some(h=>h.action==='setting:'+width+':up'));
  for(const key of ['position','theme','shade'])assert(r.hits.some(h=>h.action==='setting:'+v.fields.indexOf(key)+':up'),key);
  assert.equal(v.fields.at(-1),'side_min_columns');
 }
 '''
         self.node(script, "panel-view.cjs")
 
-    def test_editing_budget_keeps_the_draft_visible_in_native_sidebar_and_80_columns(self):
+    def test_editing_budget_keeps_the_draft_visible_in_a_narrow_side_panel_and_80_columns(self):
         script = r'''
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(process.argv[1]);
 const c=require(path.join(path.dirname(process.argv[1]),'block-input.cjs'))({changed(){},answer(){throw Error('no submit');},action(){}});
@@ -316,9 +309,9 @@ for(const extra of [{colors:8},{no_color:true}]){
  assert(r.rows.flat().every(p=>p.background===undefined));
 }
 assert.deepEqual(v.render({width:40,height:12,side:true,model,configuration:{theme:'neon'},questions:()=>[]}).rows,base.rows);
-// OpenCode's native sidebar is native space.
-assert.deepEqual(v.render({width:35,height:12,side:true,fill:false,paint:false,model,configuration:{theme:'mono',shade:'medium'},questions:()=>[]}).rows,
-                 v.render({width:35,height:12,side:true,fill:false,model,questions:()=>[]}).rows);
+// Every harness, OpenCode included, gets the chosen paint on the common panel.
+for(const harness of ['claude','codex','opencode'])
+ assert(v.render({width:40,height:12,side:true,model,harness,configuration:{theme:'mono',shade:'medium'},questions:()=>[]}).rows.flat().every(p=>p.background===237),harness);
 '''
         self.node(script, "panel-view.cjs")
 
@@ -331,9 +324,8 @@ assert.deepEqual([right.side,right.left,right.panelColumn,right.nativeColumn,rig
 const left=d.layout({cols:133,rows:30,configuration:{...cfg,position:'left'}});
 assert.deepEqual([left.side,left.left,left.panelColumn,left.nativeColumn,left.nativeCols],[true,true,0,42,91]);
 for(const position of ['top',undefined,'right'])assert.equal(d.layout({cols:133,rows:30,configuration:{...cfg,position}}).left,false);
-// Narrow windows and a native sidebar keep the bottom panel; position does not apply.
+// Narrow windows keep the bottom panel; position does not apply.
 assert.equal(d.layout({cols:80,rows:24,configuration:{...cfg,position:'left'}}).left,false);
-assert.equal(d.layout({cols:133,rows:30,nativeSidebar:true,configuration:{...cfg,position:'left'}}).left,false);
 '''
         self.node(script, "native-display.cjs")
 

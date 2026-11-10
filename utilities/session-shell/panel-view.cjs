@@ -26,29 +26,6 @@ function appearance(rows,configuration={},{colors=256,noColor=false}={}){
     return next;
   }));
 }
-// OpenCode owns the 42-cell container and its native scrollbar. Keep a cell
-// of owned gutter inside the additive slot, without painting that scrollbar.
-const nativeSidebarColumns=35;
-function nativePanelHit(terminal,view,x,y){
-  // Match our entire currently painted additive frame, in cells. This only
-  // routes a display click; it supplies no session identity or input proof.
-  if(!view?.rows?.length||view.rows.length>terminal.rows)return null;
-  const expected=view.rows.map(row=>row.map(part=>part.text).join(''));
-  const buffer=terminal.buffer.active,candidates=[];
-  for(let top=0;top+expected.length<=terminal.rows;top++){
-    if(y<top||y>=top+expected.length)continue;
-    const row=buffer.getLine(buffer.viewportY+top);
-    for(let left=Math.max(0,terminal.cols-42);left+nativeSidebarColumns<=terminal.cols;left++){
-      if(x<left||x>=left+nativeSidebarColumns||row?.getCell(left)?.getChars()!=='┌')continue;
-      if(expected.every((text,i)=>buffer.getLine(buffer.viewportY+top+i)?.translateToString(true,left,left+nativeSidebarColumns)===text))
-        candidates.push({left,top});
-    }
-  }
-  if(candidates.length!==1)return null;
-  const {left,top}=candidates[0];
-  return {action:view.hits.find(h=>h.row===y-top&&x-left>=h.left&&x-left<=h.right)?.action};
-}
-// `side_min_columns` stays last: OpenCode's fixed native sidebar hides it.
 const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','side_min_columns'];
 const names=['layout','position','width','narrow','auxiliary','height','theme','shade','threshold'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
@@ -60,7 +37,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({width,height,side,fill=side,paint=true,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,focused=false,cwd='',harness='',cellWidth}){
+function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,focused=false,cwd='',harness='',cellWidth}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -98,8 +75,6 @@ function render({width,height,side,fill=side,paint=true,model={},native={},state
     const start=Math.max(0,settings.index-Math.max(0,height-7));
     for(let i=start;i<fields.length&&content.length<height-4;i++){
       const key=fields[i],value=settings.value[key],v=typeof value==='string'?t((APPEARANCE_KEYS.includes(key)?key+'_':'')+value,value):value;
-      if(harness==='opencode'&&key==='side_min_columns')continue;
-      if(harness==='opencode'&&key==='side_width'){add(line((i===settings.index?'› ':'  ')+t('fixed_width','OpenCode · fixed 42 columns'),i===settings.index?'loc_repo':'dim'));continue;}
       const prefix=`${i===settings.index?'›':' '} ${t(names[i],names[i])}  `,left=2+measure(prefix);
       hits.push({row:content.length+1,left,right:left+1,action:'setting:'+i+':down'});
       hits.push({row:content.length+1,left:left+measure('‹ '+v+' '),right:left+measure('‹ '+v+' ›'),action:'setting:'+i+':up'});
@@ -241,7 +216,7 @@ function render({width,height,side,fill=side,paint=true,model={},native={},state
   }
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
-  const painted=paint?appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true}):rows;
+  const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,nativeSidebarColumns,nativePanelHit};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS};

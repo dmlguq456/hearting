@@ -142,10 +142,10 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
 function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
-function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) {
+function layout({cols,rows,expanded=true,configuration={}}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=configuration.side_width,minimum=configuration.side_min_columns;
-  const side=expanded&&!nativeSidebar&&configuration.layout==='side'
+  const side=expanded&&configuration.layout==='side'
     &&Number.isInteger(width)&&width>=32&&width<=80
     &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
     &&cols>=minimum&&cols-width-2>=48&&rows>=8;

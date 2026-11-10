@@ -85,6 +85,11 @@ def compact_status(values, columns, native_owned=()):
     if "quota" not in native_owned:
         for label, used, _reset in values.get("quota_windows") or [("5h", None, None), ("7d", values.get("weekly_pct"), None)]:
             groups.append([(str(label) + " ", "dim"), (_percent(used), _level(used) if used is not None else "dim")])
+    mcp = values.get("mcp")
+    if isinstance(mcp, dict) and mcp.get("total"):
+        # OpenCode's hidden native sidebar listed these servers; keep the count.
+        groups.append([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
+                                         "lvl_r" if mcp.get("failed") else "lvl_g")])
     parts = []
     for group in groups:
         if parts:parts.append((" · ", "dim"))
@@ -236,7 +241,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
         "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
-        "detail", "working", "answer", "ready", "unknown", "fixed_width", "saved", "save_failed",
+        "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),

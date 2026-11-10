@@ -651,6 +651,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # establish an effective policy, process liveness or input readiness.
     if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
         values["ctx_pct"] = native_context
+    mcp = native_badges.get("mcp") if harness == "opencode" and isinstance(native_badges, dict) else None
+    if (isinstance(mcp, dict) and set(mcp) == {"total", "connected", "failed"}
+            and all(type(mcp[key]) is int and 0 <= mcp[key] <= 999 for key in mcp)):
+        values["mcp"] = mcp
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
