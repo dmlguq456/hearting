@@ -848,12 +848,18 @@ def _shell_seat_pane(pane, harness, sid, pid, *, executable, server=None, socket
         native = binding["native_pid"]
         if _runtime(native) != (harness, False) or _registered_worker(native):
             return ""  # a service or registered worker behind the shell is no user seat
-        # Protection, not re-proof: Codex input belongs only to the thread the TUI
-        # selects now (a shared daemon retains roots; /new keeps the old SID until
-        # the next start hook), and a proven different native session wins.
-        if harness == "codex" and not session_shell._codex_current_root(
+        # Protection, not re-proof: a shared Codex daemon retains several roots, so
+        # its caller's thread must be the one the TUI selects now. The TUI itself
+        # (a new thread before its rollout exists) is refused only by a proven
+        # different native thread.
+        if harness == "codex" and service and not session_shell._codex_current_root(
                 native, binding["native_start"], binding["sid"]):
             return ""
+        if harness == "codex" and not service:
+            from fleet.collectors import codex as codex_collector
+            current = codex_collector.session_id_of_process(native, fresh=True)
+            if current and current != binding["sid"]:
+                return ""
         if harness == "claude" and _native_session(native, harness) != binding["sid"]:
             return ""  # Claude's own record: a parked or reselected TUI no longer owns it
         if own[0] == native and not service:
