@@ -1558,10 +1558,14 @@ class WrapperAdmissionTest(unittest.TestCase):
                 wrapper = _load(f"route_authority_{harness}_wrapper", f"adapters/{harness}/bin/dispatch-headless.py")
                 self.assertIs(wrapper.completion_gate_fail_fields, RA.completion_gate_fail_fields)
                 source = (ROOT / f"adapters/{harness}/bin/dispatch-headless.py").read_text(encoding="utf-8")
-                self.assertEqual(source.count("route_authority.completion_gate("), 1)
+                # main()'s completion gate runs in the registry gates the wrappers share.
+                self.assertEqual(source.count("DISPATCH_MAIN.registry_gates("), 1)
+                self.assertNotIn("route_authority.completion_gate(", source)
                 self.assertEqual(source.count("route_authority.bind_launch_access("), 1)
                 self.assertNotIn("load_parent_effective_grant(", source)
                 self.assertNotIn("recover_preview_gate_after_refusal(", source)
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+        self.assertEqual(shared.count("h.route_authority.completion_gate("), 1)
 
     def test_a_refused_gate_comes_back_with_its_preview_recovery_and_fields(self):
         args = SimpleNamespace(route_file="/r/route.json", route_node="test", attempt_id="att-x",

@@ -192,6 +192,67 @@ def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause:
     )
 
 
+def registry_gates(h, args, action: str, *, agent_home: Path, jobs: Path) -> int | None:
+    """Prepare the review output request, bind the stage session and check the completion gate."""
+    try:
+        h.prepare_review_output_request(args)
+    except h.ProducerError as exc:
+        return h.fail(
+            exc.code, 65, detail=exc.detail, registry_mutation="0",
+            child_spawned="0",
+        )
+    try:
+        h.bind_stage_session(args, artifact_root=args.artifact_root, action=action)
+    except h.DispatchContractError as e:
+        return h.fail(e.reason, 65, detail=e.detail, child_spawned="0")
+    refusal = h.route_authority.completion_gate(
+        args, action, agent_home, jobs, gate=h.completion_marker_gate,
+        before=(lambda: h.owner_frame_launch_gate(args.owner_route_binding, action, agent_home, jobs),))
+    if refusal:
+        reason, code, fields = refusal
+        return h.fail(reason, code, **fields)
+    return None
+
+
+def bind_live_parent(h, args, action: str, *, jobs: Path,
+                     parent_not_found_reason: str | None = None) -> int | None:
+    """Bind a depth-2 launch to its exact live parent attempt (SD-48~50).
+
+    OpenCode names a missing parent `live-parent-not-found`
+    (`parent_not_found_reason`); the other wrappers keep the contract reason.
+    """
+    args.parent_binding = None
+    if args.dispatch_depth == 2 and action in ("register", "start"):
+        try:
+            repo = args.repository_identity
+            args.parent_binding = h.resolve_live_parent_attempt(
+                jobs,
+                parent_slug=args.parent_slug or "",
+                repo=repo,
+                worktree=(
+                    h.parent_lookup_worktree(
+                        args.worktree, args.route_file, subsession=True,
+                        parent_attempt_id=args.parent_attempt_id,
+                    )
+                    if getattr(args, "subsession_id", None) else args.worktree
+                ),
+                expected_attempt_id=args.parent_attempt_id,
+                expected_harness=args.parent_harness,
+                expected_transport=args.parent_transport,
+                expected_sandbox=args.parent_sandbox,
+            )
+            args.parent_attempt_id = args.parent_binding.attempt_id
+        except (h.DispatchContractError, subprocess.SubprocessError) as e:
+            contract = isinstance(e, h.DispatchContractError)
+            if parent_not_found_reason and contract and e.reason == "parent-attempt-not-found":
+                reason = parent_not_found_reason
+            else:
+                reason = e.reason if contract else "parent-repo-unreadable"
+            detail = e.detail if contract else str(e)
+            return h.fail(reason, 73, detail=detail, child_spawned="0")
+    return None
+
+
 def bind_entry(h, args, argv: list[str]) -> int | None:
     """Reconcile the launch lifecycle and validate the retry evidence and worktree path."""
     args.replacement_input_argv = h.frame_repository.durable_argv(argv[1:])

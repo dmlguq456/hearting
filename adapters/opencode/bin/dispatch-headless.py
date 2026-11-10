@@ -1218,51 +1218,12 @@ def main(argv: list[str]) -> int:
             ensure_global_registry_writable(jobs)
     except DispatchContractError as e:
         return fail(e.reason, 73, detail=e.detail, child_spawned="0")
-    try:
-        prepare_review_output_request(args)
-    except ProducerError as exc:
-        return fail(
-            exc.code, 65, detail=exc.detail, registry_mutation="0",
-            child_spawned="0",
-        )
-    try:
-        bind_stage_session(args, artifact_root=args.artifact_root, action=action)
-    except DispatchContractError as e:
-        return fail(e.reason, 65, detail=e.detail, child_spawned="0")
-    refusal = route_authority.completion_gate(
-        args, action, agent_home, jobs, gate=completion_marker_gate,
-        before=(lambda: owner_frame_launch_gate(args.owner_route_binding, action, agent_home, jobs),))
-    if refusal:
-        reason, code, fields = refusal
-        return fail(reason, code, **fields)
-    # Item 5-1 (SD-48~50 exact parent binding), ported from the Claude wrapper.
-    args.parent_binding = None
-    if args.dispatch_depth == 2 and action in ("register", "start"):
-        try:
-            repo = args.repository_identity
-            args.parent_binding = resolve_live_parent_attempt(
-                jobs,
-                parent_slug=args.parent_slug or "",
-                repo=repo,
-                worktree=(
-                    parent_lookup_worktree(
-                        args.worktree, args.route_file, subsession=True,
-                        parent_attempt_id=args.parent_attempt_id,
-                    )
-                    if getattr(args, "subsession_id", None) else args.worktree
-                ),
-                expected_attempt_id=args.parent_attempt_id,
-                expected_harness=args.parent_harness,
-                expected_transport=args.parent_transport,
-                expected_sandbox=args.parent_sandbox,
-            )
-            args.parent_attempt_id = args.parent_binding.attempt_id
-        except (DispatchContractError, subprocess.SubprocessError) as e:
-            reason = ("live-parent-not-found" if isinstance(e, DispatchContractError)
-                      and e.reason == "parent-attempt-not-found" else
-                      e.reason if isinstance(e, DispatchContractError) else "parent-repo-unreadable")
-            detail = e.detail if isinstance(e, DispatchContractError) else str(e)
-            return fail(reason, 73, detail=detail, child_spawned="0")
+    rc = DISPATCH_MAIN.registry_gates(_ADAPTER, args, action, agent_home=agent_home, jobs=jobs)
+    if rc is not None:
+        return rc
+    rc = DISPATCH_MAIN.bind_live_parent(_ADAPTER, args, action, jobs=jobs, parent_not_found_reason="live-parent-not-found")
+    if rc is not None:
+        return rc
     rc = DISPATCH_MAIN.rebind_replica_batch(_ADAPTER, args, action, "opencode")
     if rc is not None:
         return rc
