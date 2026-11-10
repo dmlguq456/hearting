@@ -27,7 +27,11 @@ attachment changes cannot retarget a retained message. The shell publishes its
 current native selection and process birth through the existing session record.
 An idle wake requires the same live identity, an empty composer, no open form,
 and an unchanged input generation. Human drafts and concurrent typing survive
-the operation. Keyboard bytes remain ordered behind the admitted paste and its
+the operation. A judged key typed into a shell seat's pane (a tidy `/compact`,
+a continue) goes in only while the host's screen answer says the outer keys
+reach native; with settings, the Fleet explorer or a question editor focused,
+or no answer, there is no screen to type into. Only a raw relay reads the pane
+itself. Keyboard bytes remain ordered behind the admitted paste and its
 Enter, and are released once Enter is written even if a lifecycle callback is
 lost. That transport boundary never acknowledges peer consumption.
 The launcher retains the PTY master and original native process outside the
