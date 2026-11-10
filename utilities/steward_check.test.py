@@ -270,7 +270,7 @@ class StewardCheckIdleTest(CheckBase):
         self.step(T0 + INTERVAL)
         sent = self.notice()
         self.assertEqual(sent["required_action"], "assign-next")
-        self.assertIn("2 peer request(s) to you → do that work now", sent["text"])
+        self.assertIn("2 peer request(s) queued for you → handle them as they arrive", sent["text"])
         self.assertNotIn("steward off", sent["text"])
 
     def test_all_finished_targets_send_one_tidy_reminder(self):
@@ -360,14 +360,16 @@ class StewardCheckRemainingWorkTest(CheckBase):
         self.assertNotIn("[b]", sent["text"])  # an ended session gets no assignment
         self.assert_no_stop_advice(sent["text"])
 
-    def test_a_target_owing_a_peer_request_is_followed_up(self):
+    def test_a_target_with_a_queued_peer_request_is_not_told_to_resend(self):
         owed = dict(target("e7", state="idle"), owed=1)
         self.seen = {"targets": [owed], "pending_messages": 0}
         self.register()
         self.step(T0 + INTERVAL)
         sent = self.notice()
         self.assertEqual(sent["required_action"], "assign-next")
-        self.assertIn("[e7] 1 peer request(s) unanswered → follow up now", sent["text"])
+        self.assertIn("[e7] 1 peer request(s) queued, not yet delivered → do not resend",
+                      sent["text"])
+        self.assertNotIn("follow up", sent["text"])
 
     def test_remaining_work_is_sent_again_every_interval(self):
         self.seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,
@@ -429,10 +431,11 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
             _projection_sessions=lambda: rows,
             _session_keys=lambda row: {(row.harness, row.session_id)})
         from fleet import session_work
-        observed = mock.Mock(return_value=([{"headline": "  #1425   review "}, {"headline": ""}], []))
+        observed = mock.Mock(return_value=([{"type": "backlog", "headline": "  #1425   review "},
+                                            {"type": "backlog", "headline": ""}], []))
         with mock.patch.object(SC, "_collector", return_value=collector), \
                 mock.patch.object(session_work, "observe", observed):
-            self.assertEqual(SC._open_work("claude", SID), ["#1425 review"])
+            self.assertEqual(SC._open_work("claude", SID), (["#1425 review"], []))
         observed.assert_called_once_with("/repo/wt")
 
     def test_unknown_or_ambiguous_cwd_reads_no_backlog(self):
@@ -443,7 +446,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         from fleet import session_work
         with mock.patch.object(SC, "_collector", return_value=collector), \
                 mock.patch.object(session_work, "observe") as observed:
-            self.assertEqual(SC._open_work("claude", SID), [])
+            self.assertEqual(SC._open_work("claude", SID), ([], []))
         observed.assert_not_called()
 
     def test_observe_role_counts_peer_requests_owed_by_each_target(self):
@@ -456,7 +459,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
                 mock.patch.object(SC, "_agents", return_value=[]), \
                 mock.patch.object(SC, "_end_observation", return_value=None), \
                 mock.patch.object(SC, "_session_liveness", return_value="live"), \
-                mock.patch.object(SC, "_open_work", return_value=["w"]):
+                mock.patch.object(SC, "_open_work", return_value=(["w"], [])):
             seen = SC._observe_role("claude", SID)
         self.assertEqual(seen["targets"][0]["owed"], 1)
         self.assertEqual(seen["pending_messages"], 0)
@@ -1149,6 +1152,88 @@ class StewardCheckRunnerWiringTest(CheckBase):
         self.assertEqual(peer_obligations.ensure_normal_runner.call_count, 1)
         self.peer_steward._ensure_steward_runner({"status": "limited", "written": False})
         self.assertEqual(peer_obligations.ensure_normal_runner.call_count, 1)
+
+
+class StewardCheckReviewCounterexampleTest(CheckBase):
+    """PR #1428 review counterexamples: real memory row shapes and undelivered requests."""
+
+    ROWS = (("r1", "completion", '["backlog"]', "W7 백로그 판정 — 17건 닫음"),
+            ("r2", "artifact-pointer", "[]", "[해결 확인] 소비한 frame 알림 중복 해결"),
+            ("r3", "feedback", '["backlog"]', "백로그는 기억에 항목별로 쓰고 정본 문서를 만들지 않는다"),
+            ("r4", "unresolved-obligation", "[]", "사용자 결정 대기 묶음: D-5"))
+
+    def real_open_work(self):
+        """``_open_work`` through the real ``session_work.observe`` on a synthetic store."""
+        import datetime
+        import sqlite3
+        from fleet.collectors import memory
+        store, repo = self.tmp / "mem", self.tmp / "proj"
+        store.mkdir()
+        (repo / ".git").mkdir(parents=True)
+        con = sqlite3.connect(store / "memory.db")
+        con.execute("CREATE TABLE records(id TEXT, canonical_id TEXT, scope TEXT, cwd_origin TEXT,"
+                    " type TEXT, tags TEXT, links TEXT, artifact_refs TEXT, headline TEXT,"
+                    " updated TEXT, created TEXT, status TEXT)")
+        today = datetime.date.today().isoformat()
+        for rid, rtype, tags, headline in self.ROWS:
+            con.execute("INSERT INTO records VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (rid, rid, "project", str(repo), rtype, tags, "[]", "[]", headline,
+                         today, today, "active"))
+        con.commit()
+        con.close()
+        collector = SimpleNamespace(
+            _projection_sessions=lambda: [SimpleNamespace(cwd=str(repo))],
+            _session_keys=lambda row: {(HARNESS, SID)})
+        memory._project_cache.clear()
+        self.addCleanup(memory._project_cache.clear)
+        with mock.patch.dict(os.environ, {"MEM_STORE": str(store)}), \
+                mock.patch.object(SC, "_collector", return_value=collector):
+            return SC._open_work(HARNESS, SID)
+
+    def test_finished_memory_records_are_not_open_work(self):
+        self.assertEqual(self.real_open_work(), ([], ["사용자 결정 대기 묶음: D-5"]))
+
+    def test_user_decision_and_finished_records_are_never_assigned(self):
+        work, decisions = self.real_open_work()
+        self.seen = {"targets": [target("e7", state="done")], "pending_messages": 0,
+                     "open_work": work, "user_decisions": decisions}
+        self.register()
+        self.step(T0 + INTERVAL)
+        text = self.notice()["text"]
+        self.assertNotIn("→ assign", text)
+        self.assertIn("awaiting user decision: 사용자 결정 대기 묶음: D-5 → raise it to the user", text)
+        for finished in ("해결 확인", "W7 백로그", "정본 문서"):
+            self.assertNotIn(finished, text)
+
+    def test_unchanged_open_records_send_no_further_turn(self):
+        self.seen = {"targets": [target("e7", state="done")], "pending_messages": 0,
+                     "open_work": ["next slice"]}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertEqual(self.notice()["required_action"], "assign-next")
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        self.step(T0 + 2 * INTERVAL + 100)
+        self.step(T0 + 3 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertEqual(self.obs()["reason"], "quiet-no-change")
+        self.seen["open_work"] = ["next slice", "new item"]
+        self.step(T0 + 4 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 2)  # a changed record set is sent again
+
+    def test_ended_target_with_an_undeliverable_request_still_tidies(self):
+        ended = dict(target("e7", state="done", liveness="ended"), owed=1)
+        seen = {"targets": [ended], "pending_messages": 0, "open_work": []}
+        self.assertEqual(SC.next_actions(seen, {}, T0), [])
+        self.assertEqual(SC._classify(seen), "tidy-and-release")
+
+    def test_undelivered_requests_are_not_called_unanswered(self):
+        seen = {"targets": [dict(target("e7", state="working"), owed=1)], "pending_messages": 2,
+                "open_work": []}
+        text = " ".join(SC.next_actions(seen, {}, T0))
+        for wrong in ("unanswered", "follow up", "do that work now"):
+            self.assertNotIn(wrong, text)
+        self.assertIn("queued", text)
 
 
 if __name__ == "__main__":

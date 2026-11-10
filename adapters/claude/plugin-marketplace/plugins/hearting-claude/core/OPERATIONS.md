@@ -2705,13 +2705,17 @@ unconfirmed stays unconfirmed. `steward check` shows only the caller's own
 state, liveness, undelivered messages and notices): a live PID alone is not health and
 an unobserved session is not declared dead. It also matches waiting targets against
 remaining work from existing sources only — the holder repository's open records
-(`fleet.session_work.observe`, the repo page's work source), peer requests still pending
-for the holder or a target — and prints each as a `next=` action (for example
+(`fleet.session_work.observe`, the repo page's work source, kept only when the shared
+`memory.open_stage` classification calls them open; a record awaiting a user decision is
+shown as one to raise with the user, not one to assign), peer requests still queued for
+delivery to the holder or a live target (an ended target's undeliverable rows are left
+out) — and prints each as a `next=` action (for example
 `next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
 duty's own earlier observations. `changes=none` does not mean nothing remains: while
-any next action exists the request names those actions (`assign-next`), repeats each
-interval, and leaves release or stop advice out. Only when the role has no targets, every
-target is finished or the sessions are ready to tidy, and no open work or pending peer
+any next action exists the request names those actions (`assign-next`) and leaves release
+or stop advice out; it repeats each interval while a target is live and unfinished and is
+otherwise sent once per changed state. Only when the role has no targets, every
+target is finished or the sessions are ready to tidy, and no open work or queued peer
 request remains, one short request recommends closing ended sessions and releasing the
 flag through the ordinary `steward off` path; while that state is unchanged the next due
 point produces no model turn. A session that closed through an ordinary path lets go of
