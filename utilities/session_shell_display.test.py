@@ -30,11 +30,14 @@ class WrappedDisplayTest(unittest.TestCase):
             return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',result.stdout).strip()
 
     def test_wrapped_claude_paints_the_common_native_row_even_with_unknown_context(self):
-        for percentage,reading in ((37,'37%'),(0,'0%'),(None,'?')):
+        for percentage,reading in ((37,'37%'),(0,'0%'),(None,None)):
             with self.subTest(percentage=percentage):
                 record={}
                 line=self.statusline(True,percentage,record=record)
-                self.assertIn('context ',line);self.assertIn(reading,line)
+                if reading:self.assertIn('context ',line);self.assertIn(reading,line)
+                # Before Claude's first response it reports no context; like the
+                # native statusline, the row leaves the reading out, not '?'.
+                else:self.assertNotIn('context',line)
                 # Every field stays here whenever the panel is not painting it.
                 self.assertIn('Opus',line);self.assertIn('7d 42%',line)
                 self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
@@ -49,7 +52,9 @@ class WrappedDisplayTest(unittest.TestCase):
         for field in ('37%','Opus','7d 42%','◑'):self.assertIn(field,full)
         record={}
         line=self.statusline(True,37,panel={'session_id':'synthetic-native-session','painted':True},record=record)
-        self.assertEqual(line,full)
+        # Each call has its own temporary folder; only its name may differ.
+        folder=lambda text:re.sub(r'shell-native-line-[^ ]+','shell-native-line-*',text)
+        self.assertEqual(folder(line),folder(full))
         self.assertEqual('\n'.join(record['lines']),line)
 
 
@@ -75,6 +80,31 @@ class WrappedDisplayTest(unittest.TestCase):
                 self.assertEqual(refreshes()[0].kwargs['env']['HEARTING_SHELL_INITIAL_REFRESH'],'1')
                 self.assertIsNone(claude_first_statusline(callback,env,'unused'))
                 self.assertEqual(len(refreshes()),1)
+
+    def test_first_claude_paint_of_a_new_session_reads_the_shared_git_observation(self):
+        import sys,time
+        from unittest import mock
+        sys.path.insert(0,str(ROOT/'tools'))
+        sys.path.insert(0,str(ROOT/'utilities'))
+        from fleet import gitinfo
+        from fleet.session_line import claude_first_statusline
+        import claude_process_identity
+        with tempfile.TemporaryDirectory(prefix='shell-first-git-') as directory:
+            env=dict(os.environ,CLAUDE_CONFIG_DIR=directory,HEARTING_SHELL_DIRECTORY=directory,COLUMNS='180')
+            fields=dict.fromkeys(gitinfo._DISPLAY_FIELDS)
+            fields.update(repo=1,branch='feature-x',operation='none',extra_worktrees=0,dirty=0,merged=0,branch_done=0)
+            observed={'git':fields,'observed_at':time.time(),'completed_at':time.time(),'jobs':''}
+            # Before the first response Claude reports no context or quota.
+            callback={'session_id':'fresh','cwd':directory,'workspace':{'project_dir':directory},'model':{'display_name':'Native'}}
+            with mock.patch.object(claude_process_identity,'statusline_bindings',return_value=(None,None,'unobserved')),\
+                 mock.patch.object(gitinfo,'cached_display',return_value=observed) as cached,mock.patch('subprocess.Popen'):
+                line=claude_first_statusline(callback,env,str(ROOT/'adapters/claude/statusline.sh'))
+            self.assertEqual(cached.call_args.kwargs,{'request':False,'project_dir':directory})
+            plain=re.sub(r'\x1b\[[0-9;]*m','',line)
+            self.assertIn('feature-x',plain);self.assertIn('fresh',plain);self.assertNotIn('⎇ ?',plain)
+            self.assertIn('Native',plain)
+            # Labels only: the random folder name may itself contain '5h' or '7d'.
+            self.assertNotRegex(plain,r'(^| )(context|5h|7d) ')
 
     def test_an_older_initial_refresh_cannot_replace_new_native_telemetry(self):
         import sys
