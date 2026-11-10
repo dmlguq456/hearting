@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import model_profile  # noqa: E402
 import native_agents  # noqa: E402
-import opencode_context_window as ocw  # noqa: E402
 
 
 def shipped(adapter):
@@ -52,30 +51,35 @@ class NativeDefaultTests(unittest.TestCase):
 
 
 class OpenCodeDefaultTests(unittest.TestCase):
-    def test_same_provider_only(self):
-        values = dict(shipped("opencode"))
-        provider = native_agents.native_subagent_default("opencode", values)["model"].split("/", 1)[0]
-        self.assertEqual(ocw.subagent_default(values, {"model": f"{provider}/main"})["agents"],
-                         ["general", "explore"])
-        self.assertIsNone(ocw.subagent_default(values, {"model": "anthropic/main"}))
-        self.assertIsNone(ocw.subagent_default(values, {}))
+    """PG-13 limit: OpenCode built-ins keep the parent session's model (F3).
 
-    def test_session_model_from_global_and_project_files(self):
+    The plugin's only places to set a built-in's model are process-wide and do not
+    see the parent's actual model, so the `config` hook helper returns the user's
+    built-in entries as they are, whatever provider the file's `model` names.
+    """
+
+    def test_config_hook_leaves_builtin_subagents_inheriting(self):
         with tempfile.TemporaryDirectory(prefix="subagent-oc-") as raw:
-            root = Path(raw)
-            home, project = root / "home", root / "home" / "work" / "repo"
-            config = home / ".config" / "opencode"
-            config.mkdir(parents=True)
-            project.mkdir(parents=True)
-            (config / "opencode.jsonc").write_text('{\n  // the global one\n  "model": "a/one", /* x */\n}\n')
-            env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")}
-            self.assertEqual(ocw.configured_session_model(env, str(project)), "a/one")
-            (project / "opencode.json").write_text(json.dumps({"model": "b/two"}))
-            self.assertEqual(ocw.configured_session_model(env, str(project)), "b/two")
-            done = subprocess.run([sys.executable, "-B", str(ROOT / "utilities/opencode_context_window.py"),
-                                   "--subagent-default"], cwd=project, text=True, capture_output=True,
-                                  env={"PATH": os.environ.get("PATH", ""), **env}, timeout=60)
-            self.assertEqual(json.loads(done.stdout), {"subagent_default": None})
+            home = Path(raw)
+            env = {"PATH": os.environ.get("PATH", ""), "HOME": str(home),
+                   "XDG_CONFIG_HOME": str(home / ".config")}
+            values = dict(shipped("opencode"))
+            provider = native_agents.native_subagent_default("opencode", values)["model"].split("/", 1)[0]
+            for config in ({"model": f"{provider}/main"},
+                           {"model": f"{provider}/main", "agent": {"general": {"prompt": "x"}}}):
+                done = subprocess.run([sys.executable, "-B", str(ROOT / "utilities/opencode_context_window.py")],
+                                      input=json.dumps({"config": config}) + "\n", text=True,
+                                      capture_output=True, env=env, timeout=60)
+                out = json.loads(done.stdout)
+                self.assertNotIn("subagent_default", out)
+                for key in ("agent", "agents"):
+                    for agent in ("general", "explore"):
+                        self.assertNotIn("model", (out["config"].get(key) or {}).get(agent) or {})
+
+    def test_plugin_sets_no_builtin_model(self):
+        plugin = (ROOT / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
+        self.assertNotIn("agent.transform", plugin)
+        self.assertNotIn("subagent_default", plugin)
 
 
 if __name__ == "__main__":
