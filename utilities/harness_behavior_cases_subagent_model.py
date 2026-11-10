@@ -45,9 +45,18 @@ import harness_behavior_cases_e as ce  # noqa: E402
 
 PG = {"subagent-model": "PG-13"}
 
-# Codex: a model id in Codex's own catalog for the session (gpt-6.1 is not a
-# Hearting tier), so a sub-agent on the session model is told apart.
-CODEX_SESSION = "gpt-6.1"
+
+
+def _codex_models() -> dict:
+    """The tier models of the shipped Codex config (the loopback model lists them)."""
+    text = (_source() / "adapters/codex/config/models.conf").read_text(encoding="utf-8")
+    return dict(re.findall(r'(?m)^CFG_TIER_([A-Z_]+)_MODEL="?([^"\s#]+)', text))
+
+
+def _codex_session() -> str:
+    # The loopback model id: no sub-agent profile names it, so a sub-agent on the
+    # session model is told apart (Codex runs it on fallback metadata).
+    return base.FIXTURE_MODEL
 OPENCODE_LIGHT, OPENCODE_DEEP = "hearting-light", "hearting-deep"
 # (built-in agent with no model, catalog agent with a pin) per harness.
 AGENTS = {"claude": ("Explore", "deep"), "codex": ("default", "deep"),
@@ -122,13 +131,13 @@ class SubagentModelScenario(Scenario):
         getattr(self, f"_prepare_{run.harness}", lambda _run: None)(run)
 
     def _prepare_codex(self, run):
-        _extra_models(["gpt-6.1", "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"])
+        _extra_models(sorted(set(_codex_models().values())))
         home = Path(run.home.env["CODEX_HOME"])
         config = home / "config.toml"
         text = config.read_text(encoding="utf-8")
         text = re.sub(r'(?m)^(model|model_provider)\s*=.*\n', "", text)
         text = re.sub(r'(?ms)^\[model_providers\.hearting_fixture\].*?(?=^\[|\Z)', "", text)
-        text = (f'model = "{CODEX_SESSION}"\nopenai_base_url = "{run.fixture.base}/v1"\n' + text)
+        text = (f'model = "{_codex_session()}"\nopenai_base_url = "{run.fixture.base}/v1"\n' + text)
         config.write_text(text, encoding="utf-8")
         run.home.env["OPENAI_API_KEY"] = run.home.env["CODEX_API_KEY"] = "sk-fixture-" + "0" * 20
         run.evidence["activation"] = _render_agents(run, "codex", home / "agents", home)
@@ -180,7 +189,7 @@ class SubagentModelScenario(Scenario):
         return answer
 
     def session_model(self, harness: str) -> str:
-        return CODEX_SESSION if harness == "codex" else base.FIXTURE_MODEL
+        return _codex_session() if harness == "codex" else base.FIXTURE_MODEL
 
     def spawn(self, run, agent: str) -> dict:
         main, sub = self.markers(agent)
