@@ -108,6 +108,17 @@ class ShellSeatTest(unittest.TestCase):
              mock.patch.object(fixture.peer, "_herdr_argv", return_value=["false"]):
             self.assertIsNone(fixture.peer._read_screen(self.pane))  # falls back to the pane
 
+    def test_herdr_unknown_turn_takes_the_shell_lifecycle_state_only_for_the_seat(self):
+        self.publish("codex")
+        payload = {"result": {"type": "agent_info", "agent": {"agent": "codex", "agent_status": "unknown"}}}
+        with mock.patch.object(session_shell, "control", return_value={"ok": True, "state": "idle"}):
+            turned = fixture.peer._shell_seat_turn(payload, self.pane)
+            self.assertEqual(turned["result"]["agent"]["agent_status"], "idle")
+            known = {"result": {"agent": {"agent": "codex", "agent_status": "working"}}}
+            self.assertIs(fixture.peer._shell_seat_turn(known, self.pane), known)
+            other = {"result": {"agent": {"agent": "claude", "agent_status": "unknown"}}}
+            self.assertIs(fixture.peer._shell_seat_turn(other, self.pane), other)
+
     def test_pane_seat_records_its_herdr_endpoint_for_the_clear_helper(self):
         env = {"HERDR_PANE_ID": "w1:p1", "HERDR_SOCKET_PATH": self.home.name + "/named.sock"}
         with mock.patch.dict(os.environ, env), \

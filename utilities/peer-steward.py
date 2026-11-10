@@ -2859,6 +2859,12 @@ def cmd_retire(args):
             duty_id, {"exit-requested"}, "shell-returned", state="cleanup-pending",
             extra={"foreground": identity, "reason": "shell-returned"})
         if transitioned is None:
+            current = store.get(duty_id) or {}
+            if current.get("state") == "complete" and current.get("result") == "normal-exit":
+                # The retained runner finished this same requested exit first.
+                print(f"retired=true reason=normal-exit agent={harness} "
+                      f"name={ident['name']} pane={pane}")
+                return 0
             return finish("shell-return-unverified", pending=True)
         duty = transitioned
         cleanup_rc = _finish_retire_cleanup(store, duty, ident, identity)
@@ -3284,8 +3290,24 @@ def _run_herdr_get(target, *, server=None):
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(payload, dict):
-            return payload
+            return _shell_seat_turn(payload, target) if server is None else payload
     return None
+
+
+def _shell_seat_turn(payload, target):
+    """Where Herdr cannot read a wrapped runtime's turn, the shell host's lifecycle
+    state for that same seat stands in (as tmux does); a known state is kept."""
+    agent = ((payload.get("result") or {}).get("agent")
+             if isinstance(payload.get("result"), dict) else None)
+    if not isinstance(agent, dict) or agent.get("agent_status") not in (None, "", "unknown"):
+        return payload
+    seat = _shell_seat(target, agent.get("agent"))
+    if seat is None:
+        return payload
+    state = terminal_surface.shell_turn(seat)
+    if state == "unknown":
+        return payload
+    return {**payload, "result": {**payload["result"], "agent": {**agent, "agent_status": state}}}
 
 
 def cmd_watch(args):
