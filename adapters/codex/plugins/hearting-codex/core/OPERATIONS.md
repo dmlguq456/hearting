@@ -1662,6 +1662,33 @@ lease. Temporary branch deletion uses an exact-head lease too and does not
 rerun source pre-push hooks: it publishes no source change. All three
 harnesses use the same implementation.
 
+A PR's author → independent review → publish chain is linked by the sessions
+already named in the assignment, not by a supervisor relay.
+`hearting run pr-chain next [<PR>|<branch>] [--review <report>]` derives the
+chain's current step again from the PR's GitHub state (head, draft,
+mergeability, and the head's checks read the same way as `merge-line`) and the
+reviewer's report, and prints one line `pr_chain=<state> … role=<role>
+next=<action>`; it stores, sends, merges and comments nothing. A verdict is read only
+from the report's first line: the first line that is neither blank nor a heading (`#`).
+With `**`/`__` emphasis, surrounding spaces and a trailing period removed, that line is
+exactly `최종 판정: 병합 가능 — head <hex>` or `Final verdict: mergeable — head <hex>`
+(merge), or `최종 판정: 수정 후 병합 — head <hex>` or `Final verdict: changes requested — head <hex>`
+(fix), with 7–40 hex digits. Any other word on that line is not interpreted, and the rest
+of the document (code examples, quotes, history, later re-reviews) is not read. A first
+line whose hex is a prefix of the current head is the current verdict; one naming another
+head is `review-stale`; otherwise the step is `awaiting-review`: a person reads the report
+and takes the next step, its `next=` quoting the first line. Reviewers are not required to
+use the form; it only lets the chain continue
+without a person. A finished `autopilot-code` route (`capability-route finish`)
+prints the same line as `next:` on stderr when its branch has an open PR. The author sends the review request (PR, exact head,
+author report) directly to the reviewer named in its assignment and copies the
+requester; the reviewer sends its final verdict directly to the named publisher
+and copies the requester; the publisher, on `awaiting-ci` or `ready-to-publish`,
+starts `merge-line`, which itself waits for that head's CI and refuses a failure,
+then continues its existing release/install flow without asking the requester
+again. A changed head returns to the reviewer (`review-stale`). With no reviewer
+or publisher named, the step goes to the requester as this `next=` line.
+
 Release publication uses immutable tags and the tested commit. Repeated or
 out-of-order successful checks are ordinary observations: refresh tags before
 reserving a version, reuse a tag for the same commit, and skip a commit already
@@ -3413,7 +3440,9 @@ one carrier.
 - Guarded PTY input: Claude and OpenCode with the exact session ID use the same guard
   (exact SID, pane, foreground PID birth and namespace, native idle state,
   registered-work readiness, an empty visible composer, and no open form or
-  question). A dim prompt suggestion counts as an empty composer.
+  question). A dim prompt suggestion counts as an empty composer. Terminal focus
+  reports invalidate the current observation without marking a draft; pasted
+  bytes, edits and uncertain input retain the existing input guard.
 - Blocked: busy, blocked, unknown, form-open, nonempty draft, unreadable screen,
   unproven identity, or a submission that provably did not start keeps the row
   `pending` under exactly one scheduled `message-<ref>` obligation. That runner
@@ -3574,9 +3603,10 @@ has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
 remain receipt facts.
 For an actionable peer request, do the requested work now; an acknowledgement
-alone is not completion. Reply once with the result. When part has to wait or take
-sustained effort, say so in one line and keep working on it in this turn or the
-existing registered continuation. Informational/no-reply
+alone is not completion. Reply once with the result; a PR result also goes
+straight to the next role its assignment names (§5.11 `pr-chain`). When part has
+to wait or take sustained effort, say so in one line and keep working on it in
+this turn or the existing registered continuation. Informational/no-reply
 notices need no reply. Put the condition, result, and any required decision or
 blocker first; keep PID, start, exit, digest, and path detail in existing
 evidence. Completion reception requires actual approved result
