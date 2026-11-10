@@ -238,6 +238,8 @@ def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs
         verdicts = [(status, meta) for status, meta in rows
                     if source_digest is None or meta.get("_review_subject_digest") == source_digest
                     if classify_round_row(status, meta, worker_type="review") == "verdict"]
+        if source_digest is not None and verdicts and verdicts[-1][1].get("note") in SUCCESS_NOTES:
+            return _repeated_pass_fields(fields, rows, verdicts)
         if not verdicts or verdicts[-1][1].get("note") != REVIEW_BLOCKING_NOTE:
             return fields
         latest = verdicts[-1][1]
@@ -310,6 +312,33 @@ def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs
     except (OSError, ValueError, KeyError, TypeError):
         # Recovery hints carry no authority and cannot weaken the original refusal.
         return fields
+    return fields
+
+
+def _repeated_pass_fields(fields, rows, subject_verdicts):
+    """Next step when the unchanged content already holds its PASS verdicts.
+
+    Only repeating the same content with the same result is refused; the
+    refusal names what to do instead of an unresolved-verification dead end.
+    Changed content is a new subject with its own budget and is admitted.
+    """
+    latest = subject_verdicts[-1][1]
+    passes = [meta.get("attempt_id") for _status, meta in subject_verdicts
+              if meta.get("note") in SUCCESS_NOTES and meta.get("attempt_id")]
+    lineage = [meta for status, meta in rows
+               if classify_round_row(status, meta, worker_type="review") == "verdict"]
+    current = bool(lineage) and lineage[-1].get("attempt_id") == latest.get("attempt_id")
+    fields = {**fields, "subject_pass_attempt_ids": "|".join(passes)}
+    if current:
+        fields.update(next_action="successor-start", required_action="use-current-pass",
+            recovery_hint="This exact content already passed (" + (latest.get("attempt_id") or "-")
+                + "); continue with the next node's printed start. Changing the reviewed content "
+                "admits a fresh verification automatically.")
+    else:
+        fields.update(required_action="report-unresolved-verification",
+            recovery_hint="This content returned to an earlier revision that already passed ("
+                + "|".join(passes) + "); change the content to verify it again, or report those "
+                "PASS attempts as evidence without claiming a current PASS.")
     return fields
 
 

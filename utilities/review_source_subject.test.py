@@ -391,6 +391,96 @@ class SourceSubjectTest(unittest.TestCase):
         resource_route = {"route_id": "rt-resource", "nodes": [resource]}
         self.assertFalse(SUBJECT.has_review_subject(resource_route, resource))
 
+    def test_corrected_lab_smoke_is_a_new_subject_and_same_content_repeat_names_next_step(self):
+        """rt-3ec5731859156379: two PASS rounds on the pre-correction scaffold
+        must not refuse the corrected scaffold's smoke, and only a repeat of the
+        same content with the same result is refused, with the next step named."""
+        import artifact_producer
+        import review_round_cap as CAP
+        import route_authority as AUTH
+        from dispatch_contract import parse_registry_metadata
+        scaffold = {"id": "scaffold", "kind": "pipeline-stage", "unit": "dev/new-lib",
+                    "inputs": ["setup-contract", "reference-model"],
+                    "outputs": ["experiment-scaffold", "config"], "depends_on": [],
+                    "write_scope": ["experiment-scaffold/**", "config/**"]}
+        smoke = {"id": "smoke", "kind": "review-worker", "unit": "qa/ml-debug",
+                 "inputs": ["experiment-scaffold", "config"], "depends_on": ["scaffold"],
+                 "outputs": ["reviews/smoke-attestation.json"],
+                 "write_scope": ["reviews/smoke/**", "reviews/smoke-attestation.json"]}
+        root = Path(self.temp.name) / "lab"
+        artifact_root = root / "reports"
+        artifact_root.mkdir(parents=True)
+        route = {"route_id": "rt-lab-smoke", "route_hash": "sha256:" + "5" * 64,
+                 "effective_intensity": "standard", "capability": "autopilot-lab",
+                 "continuation_budget": {"review_round_cap": 2},
+                 "artifact_root": str(artifact_root), "cwd": str(self.repo),
+                 "nodes": [scaffold, smoke]}
+        cycle_dir = root / "cycle"
+        output = cycle_dir / "artifacts"
+        dataset = output / "experiment-scaffold/ami/weak_negative_dataset.py"
+        dataset.parent.mkdir(parents=True)
+        dataset.write_text("MIN_SECONDS = 0.96\n", encoding="utf-8")
+        config = output / "config/runtime/short-retain.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("threshold: 0.96\n", encoding="utf-8")
+        jobs = root / "state" / "jobs.log"
+        jobs.parent.mkdir()
+        jobs.write_text("", encoding="utf-8")
+        cycle = {"campaign_id": "camp_lab", "cycle_id": "cyc_lab", "route_id": route["route_id"]}
+
+        def record(attempt_id, *, bound):
+            metadata = {"route_id": route["route_id"], "route_hash": route["route_hash"],
+                        "route_node": "smoke", "attempt_id": attempt_id, "worker_type": "review",
+                        "note": "completed-marker", "failure_class": "pass"}
+            if bound:
+                metadata.update(SUBJECT.seal_attempt(jobs, route, smoke, attempt_id))
+            with jobs.open("a", encoding="utf-8") as stream:
+                stream.write("now\tdone\twt\troot\ttask\t" + ",".join(
+                    f"{key}={value}" for key, value in metadata.items()) + "\n")
+
+        def rows():
+            result = []
+            for line in jobs.read_text(encoding="utf-8").splitlines():
+                fields = line.split("\t")
+                result.append((fields[1], parse_registry_metadata(fields[5])))
+            return result
+
+        def admission():
+            return AUTH.decide_continuation(route, action="round", node=smoke,
+                                            rows=rows(), jobs=jobs)
+
+        with patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+             patch_split(artifact_producer, "cycle_dir", return_value=cycle_dir), \
+             mock.patch("route_lineage.verified_route_lineage", return_value=[route]):
+            # Two PASS rounds recorded before logical inputs had a content subject.
+            record("att-smoke-old-1", bound=False)
+            record("att-smoke-old-2", bound=False)
+            self.assertTrue(SUBJECT.has_review_subject(route, smoke, jobs))
+            dataset.write_text("MIN_SECONDS = 0.30\n", encoding="utf-8")
+            corrected = admission()
+            self.assertEqual((corrected.allowed, corrected.budget.state,
+                              corrected.budget.verdict_rounds), (True, "admit", 0))
+
+            # The corrected content passes twice; a third identical run is the
+            # same content with the same result and is refused with a next step.
+            record("att-smoke-new-1", bound=True)
+            self.assertEqual(admission().budget.state, "admit")
+            record("att-smoke-new-2", bound=True)
+            repeat = admission()
+            self.assertEqual((repeat.allowed, repeat.reason), (False, "review-round-budget-exhausted"))
+            fields = CAP.recovery_fields("review-worker", repeat.state, route=route, node=smoke,
+                                         jobs=jobs, route_file=root / "route.json")
+            self.assertEqual((fields["next_action"], fields["required_action"]),
+                             ("successor-start", "use-current-pass"))
+            self.assertIn("att-smoke-new-2", fields["recovery_hint"])
+            self.assertEqual(fields["subject_pass_attempt_ids"], "att-smoke-new-1|att-smoke-new-2")
+
+            # Another code change is a new revision with its own budget, with no
+            # manual registry or marker edit.
+            config.write_text("threshold: 0.20\n", encoding="utf-8")
+            again = admission()
+            self.assertEqual((again.allowed, again.budget.verdict_rounds), (True, 0))
+
     def test_missing_optional_artifact_bytes_do_not_create_a_new_input_gate(self):
         import artifact_producer
         producer = {"id": "report", "kind": "pipeline-stage", "depends_on": [],
@@ -431,7 +521,9 @@ class SourceSubjectTest(unittest.TestCase):
              [("root:user_profile/profile.md", b"profile")], True),
             ("smoke", ["experiment-scaffold", "config"],
              ["experiment-scaffold/**", "config/**"],
-             [("experiment-scaffold/scaffold.json", b"{}"), ("config/config.json", b"{}")], False),
+             [("experiment-scaffold/scaffold.json", b"{}"), ("config/config.json", b"{}")], True),
+            ("diagnose", ["setup-contract"], ["setup-contract.md"], [], False),
+            ("eval-smoke", ["logs"], ["logs/**"], [("logs/run.log", b"log")], False),
             ("inspect", ["target-artifact"], ["target-artifact"], [], False),
             ("qa", ["analysis_project/<mode>/**"], ["analysis_project/<mode>/**"], [], False),
         )
