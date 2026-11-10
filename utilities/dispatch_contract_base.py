@@ -318,18 +318,46 @@ _FOREGROUND_FIXED_FAILURES = FOREGROUND_FAILURES - {"none"}
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 
 
+def codex_owner_network_posture(
+    *, dispatch_depth: int, worker_type: str, sandbox: str,
+    gpu_resource_owner: bool = False, observation_only: bool = False,
+) -> bool:
+    """The one rule for a Codex launch's general (non-loopback) network grant.
+
+    On: a dispatch-depth-1 owner in the `workspace-write` sandbox (or a GPU
+    resource owner in `danger-full-access`), whatever its capability (audit
+    included), intensity or entry scope, the posture a Claude or OpenCode
+    depth-1 owner process has (PG-51). A `report` scope is kept by the owner
+    instruction on all three harnesses.
+    Off: every dispatch-depth-2 (or other non-owner) worker, a `read-only`
+    sandbox, and the observation-only fence while the worktree is mid-merge,
+    rebase or cherry-pick or its Git state is unknown.
+    Nothing else widens it: a task publication scope adds no network of its own.
+    Approved-test localhost is decided by
+    `verification_runtime.local_network_projection`.
+    """
+    return (
+        dispatch_depth == 1
+        and worker_type == "owner"
+        and (sandbox == "workspace-write"
+             or (gpu_resource_owner and sandbox == "danger-full-access"))
+        and not observation_only
+    )
+
+
 def codex_standard_owner_network_enabled(
     *, dispatch_depth: int, worker_type: str, intensity: str, sandbox: str,
     gpu_resource_owner: bool = False,
 ) -> bool:
-    """General (non-loopback) network grant; approved-test localhost is decided by `verification_runtime.local_network_projection`."""
+    """The route's stable network capacity, before the Git-state fence.
 
-    return (
-        dispatch_depth == 1
-        and worker_type == "owner"
-        and intensity in STANDARD_PLUS_INTENSITIES
-        and (sandbox == "workspace-write"
-             or (gpu_resource_owner and sandbox == "danger-full-access"))
+    Kept under this name for its existing callers; ``intensity`` no longer
+    narrows it (`codex_owner_network_posture`).
+    """
+    del intensity
+    return codex_owner_network_posture(
+        dispatch_depth=dispatch_depth, worker_type=worker_type, sandbox=sandbox,
+        gpu_resource_owner=gpu_resource_owner,
     )
 
 

@@ -60,6 +60,7 @@ shared-utility-deferred	harness_behavior_cases_c.py
 shared-utility-deferred	harness_behavior_cases_codex_hooks.py
 shared-utility-deferred	harness_behavior_cases_d.py
 shared-utility-deferred	harness_behavior_cases_e.py
+shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
 shared-utility-deferred	harness_behavior_scenarios.py
@@ -424,7 +425,6 @@ tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv
-tool-deferred	integrations
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
@@ -473,3 +473,4 @@ utility-deferred	artifact_journal.py
 utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
+tool-deferred	check_utility_census.test.py

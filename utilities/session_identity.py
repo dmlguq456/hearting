@@ -21,12 +21,24 @@ and reports how sure the answer is; callers keep only their own policy on top
 - `ambiguous`: no harness was named and two or more harnesses' ids are set.
 - `invalid`: the named harness is not one of the three.
 - `none`: nothing is set.
+
+A command run by a native sub-session (a subagent its session spawned) is
+answered with the root session it belongs to, as a Claude subagent already is:
+Claude exports the root's id to its subagents, Codex records the spawn in its
+state DB (`thread_spawn_edges`), and the OpenCode plugin exports the root id
+beside the native one (`harness-capabilities.json`
+`session_identity.sub_session_root`). The sub-session's own id stays in
+`native_session_id`. A dispatch it starts, a report it sends and a duty it
+records then name the session the user talks to, which is the one woken (PG-49).
+An unreadable spawn record leaves the native id.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import functools
 import os
+import re
+import sqlite3
 
 
 @functools.lru_cache(maxsize=1)
@@ -55,6 +67,7 @@ class SessionIdentity:
     session_id: str = ""
     source: str = ""  # the variable the answer came from; several, comma-joined, when ambiguous
     confidence: str = "none"
+    native_session_id: str = ""  # the sub-session's own id when `session_id` is its root
 
     @property
     def known(self) -> bool:
@@ -74,8 +87,86 @@ def session_ids(environ=None) -> dict[str, tuple[str, str]]:
     return found
 
 
+# A sub-session spawns sub-sessions only a few levels deep; the bound keeps a
+# corrupt record that loops from walking forever.
+ROOT_WALK_LIMIT = 16
+_ROOTS: dict[tuple[str, str], str] = {}
+
+
+def _codex_state_db(home: str) -> str | None:
+    """The newest versioned Codex state DB in ``home`` (as the Fleet collector reads it)."""
+    try:
+        names = os.listdir(home)
+    except OSError:
+        return None
+    found = [(int(match.group(1)), name) for name in names
+             if (match := re.fullmatch(r"state_(\d+)\.sqlite", name))]
+    return os.path.join(home, max(found)[1]) if found else None
+
+
+def _codex_root(session_id: str, env) -> str:
+    """The root thread of a Codex `spawn_agent` thread, else ``session_id``."""
+    home = env.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    key = (home, session_id)
+    if key in _ROOTS:
+        return _ROOTS[key]
+    db = _codex_state_db(home)
+    if not db:
+        return session_id
+    current = session_id
+    try:
+        connection = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=0.5)
+        try:
+            for _ in range(ROOT_WALK_LIMIT):
+                parents = {row[0] for row in connection.execute(
+                    "SELECT parent_thread_id FROM thread_spawn_edges WHERE child_thread_id = ?",
+                    (current,)) if isinstance(row[0], str) and row[0]}
+                if len(parents) != 1:
+                    break  # a root, or an ambiguous record: stop at what is known
+                parent = parents.pop()
+                if parent in (current, session_id):
+                    break
+                current = parent
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return session_id
+    if current != session_id:
+        _ROOTS[key] = current  # a thread's root never changes; a root may still gain an edge
+    return current
+
+
+def sub_session_root(harness: str, session_id: str, environ=None) -> str:
+    """The root session of ``session_id`` under ``harness``; ``session_id`` itself for a root."""
+    env = os.environ if environ is None else environ
+    if not session_id:
+        return session_id
+    try:
+        from harness_capabilities import sub_session_roots
+        how = sub_session_roots().get(harness, "shared-id")
+    except Exception:
+        return session_id
+    if how == "spawn-edges":
+        return _codex_root(session_id, env)
+    if how.startswith("env:"):
+        return env.get(how[4:]) or session_id
+    return session_id
+
+
+def _rooted(found: SessionIdentity, env) -> SessionIdentity:
+    root = sub_session_root(found.harness, found.session_id, env)
+    if not root or root == found.session_id:
+        return found
+    return SessionIdentity(found.harness, root, found.source, found.confidence,
+                           native_session_id=found.session_id)
+
+
 def identity(environ=None) -> SessionIdentity:
     env = os.environ if environ is None else environ
+    return _rooted(_native_identity(env), env)
+
+
+def _native_identity(env) -> SessionIdentity:
     sessions = session_ids(env)
     for name in HARNESS_ENV:
         named = env.get(name)

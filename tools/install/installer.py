@@ -195,7 +195,7 @@ def build_parser():
         "session", help="Set the hearting-owned display name for the current session")
     session_sub = p_session.add_subparsers(
         dest="session_command", required=True, parser_class=_UsageExitParser)
-    p_shell = session_sub.add_parser("shell", help="Manage the optional native session shell (default off)")
+    p_shell = session_sub.add_parser("shell", help="Manage the native session shell (new installs default on)")
     p_shell.add_argument("action", choices=("enable", "disable", "status"))
     p_shell.add_argument("--dry-run", action="store_true")
     p_shell.add_argument("--json", action="store_true")
@@ -416,7 +416,25 @@ def cmd_model(args):
     return result
 
 
+def _new_global_install(scope):
+    # A missing policy on an older install meant native CLI. Preserve it on
+    # update, reinstall, or when adding another adapter to that installation.
+    state = distribution.state_path()
+    return (scope == "global" and not installed_runtimes("global")
+            and not state.exists() and not state.is_symlink())
+
+
+def _ensure_session_shell(lines, *, dry_run=False, default_enabled=False):
+    try:
+        result = session_shell_install.ensure(dry_run=dry_run, default_enabled=default_enabled)
+        lines.append("session shell: " + result["status"])
+    except (OSError, ValueError, subprocess.SubprocessError, safe_fs.SafetyError,
+            codex_launcher.CodexLauncherError) as exc:
+        lines.append("session shell: native fallback (" + str(exc) + ")")
+
+
 def cmd_install(args):
+    first_install = _new_global_install(args.scope)
     runtimes = resolve_runtimes(args)
     lines = [f"install: runtime={r} scope={args.scope} plugin={args.plugin} dry_run={args.dry_run}" for r in runtimes]
     checks = []
@@ -538,11 +556,8 @@ def cmd_install(args):
                 lr["status"] == "skipped-collision" for lr in launcher_results
             )
 
-    try:
-        shell_report = session_shell_install.ensure(dry_run=args.dry_run)
-        lines.append("session shell: " + shell_report["status"])
-    except (OSError, ValueError, subprocess.SubprocessError, safe_fs.SafetyError) as exc:
-        lines.append("session shell: native fallback (" + str(exc) + ")")
+    # A blocked install never seeds the new-install default; existing choices refresh as before.
+    _ensure_session_shell(lines, dry_run=args.dry_run, default_enabled=first_install and not any_blocked)
     environment = [node_runtime.ensure_node(dry_run=args.dry_run)]
     environment.extend(host_probes.run())
     for probe in environment:
@@ -1318,6 +1333,7 @@ def _runtime_emit_shape(command, reports, exit_code, lines):
 
 
 def cmd_runtime(args):
+    first_install = args.runtime_command == "activate" and _new_global_install(args.scope)
     targets = _runtime_targets(args.runtime, args.runtime_command, args.scope)
     reports = []
     lines = []
@@ -1570,6 +1586,7 @@ def cmd_runtime(args):
         except Exception as exc:
             mem_result = {"action": "failed", "detail": str(exc)}
         lines.append(f"bootstrap: mem-store -> {mem_result['action']} ({mem_result['detail']})")
+        _ensure_session_shell(lines, default_enabled=first_install)
 
     return _runtime_emit_shape(args.runtime_command, reports, exit_code, lines)
 

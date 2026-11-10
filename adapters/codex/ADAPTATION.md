@@ -271,7 +271,14 @@ OpenCode Agent files into Codex.
 Activation renders these agents with the shared `utilities/native_agents.py` from the
 `models.conf` the Codex home selects: a render equal to the shipped TOML stays a
 symlink, a differing one is written as an activation-owned regular file, and an
-agent whose model is main-session-only in that config gets no file. Keep your own
+agent whose model is main-session-only in that config gets no file. A home whose
+`config.toml`, a profile file `<name>.config.toml` that `codex --profile <name>` reads,
+or a `[profiles.*]` table selects a `model_provider` other than Codex's own `openai`
+gets every agent without its `model` line (one set of agent files serves every
+profile of the home; a provider given only by `-c` on the command line is not seen): the pinned
+models are account models that provider does not serve, and Codex refuses such a
+spawn as `agent type is currently not available`. The agent keeps its reasoning
+effort and sandbox and follows the session model (PG-52). Keep your own
 agents under other names.
 
 parity caveat: Codex custom agents can carry model/reasoning/sandbox settings,
@@ -421,7 +428,7 @@ fallback; the client owns question styling.
 | MCP mapping | Run `adapters/codex/bin/preflight.sh mcp --check` to inspect Codex's native MCP CLI/config surface; do not copy Claude `settings.json` MCP registrations or project `tools/design-mcp` wholesale |
 | dispatch-owner selection | An ordinary dispatch-depth-1 owner uses `dispatch-owner [--adapter <harness>] --dry-run|--register|--start`, a separate mapping row from `headless dispatch` below. It delegates to portable `utilities/dispatch-owner.py`, which prefers the user-local routing policy and runs explicit target → hard eligibility → sealed affinity → profile quality band → fresh headroom → recent-attempt tie-break. Capacity reorders peers or crosses a declared relief threshold but never silently makes OpenCode a deep quality peer. The selector execs only the chosen `adapters/<selected>/bin/dispatch-headless.py`, preserves actual caller runtime separately from selected owner adapter, and forbids completion-policy or unmanaged-poll flags |
 | headless dispatch | Run `preflight.sh headless --check <worktree>` before launch; it verifies native Skills, native Agents, and native Modes. Use `dispatch --dry-run|--register|--start` for registered work. Standard+ dispatch-depth-1 owners use `--completion-delivery auto`: a checked App Server probe selects an ephemeral same-thread supervisor, forced `supervised` fails before registration when unavailable, and explicit/unavailable fallback is reported as `poll-fallback`. A registered quick/solo dispatch-depth-1 owner uses the same App Server supervisor when the probe reports support; otherwise it keeps one-shot `codex exec` without refusal and without input state (`owner-input-unsupported`). Owner corrections are accepted from registration and steer the active turn; one sent after the owner ended BLOCKED continues the route through a replacement owner (shared `dispatch_replacement`); dispatch-depth-2 and non-owner workers stay one-shot `codex exec`. A direct registered dispatch-depth-1 start binds `parent_completion_delivery` to the actual parent runtime, not the child: native Codex → `codex-native-queue`, Claude → `claude-parent-runtime`; a gateway-free Codex parent is admitted with its calling CODEX_THREAD_ID. A low-level operator may explicitly authorize finite recovery with `--allow-unmanaged-parent-poll`, but `dispatch-owner` and model routes cannot select it. The path never creates new Stop state or requires hook trust. The wrapper validates the scalar `capability_mode`, optional non-owner `worker_mode`, behavioral `model_role`, and execution `model_profile` as separate axes; `_kernel/owner` rejects a worker mode. Profiles resolve through `config/models.conf`, caller model/reasoning replacement and substantive registered `mini` are denied, and rows expose resolved tier/granularity for Fleet. Registration materializes the portable kernel, one worker type, route metadata, and assigned Skill/unit. Registry serialization, approval, harvest, and cleanup contracts remain unchanged |
-| completion delivery | Native Codex queue delivery uses the caller CODEX_THREAD_ID, at-least-once submission and exact pending/history checks. The interactive launcher and gateway are retired. Registered headless owners keep their separate App Server supervisor. Native question timing is preserved; empty answers are not user decisions. |
+| completion delivery | Native Codex queue delivery uses the caller CODEX_THREAD_ID (a `spawn_agent` thread's root thread, read from `thread_spawn_edges` in the Codex state DB, so a dispatch a sub-agent starts wakes the session that spawned it, PG-49), at-least-once submission and exact pending/history checks. The interactive launcher and gateway are retired. Registered headless owners keep their separate App Server supervisor. Native question timing is preserved; empty answers are not user decisions. |
 | role modes | Read `roles/MODES.md`, then run `adapters/codex/bin/preflight.sh mode-info <family/mode>`; read the reported `native_mode_path`, obey `fallback=reference-only` only for unsupported modes, and satisfy any named `tool_contract` / `tool_contract_check` before claiming tool-contract modes |
 | mode guides | Use `adapters/codex/modes/<family>/<mode>.md` as the Codex-native realization guide reported by `mode-info`; satisfy named tool contracts or report unavailable before claiming support |
 | design modes | Use `adapters/codex/modes/design/<mode>.md` as the Codex-native realization guide; satisfy `visual-harness` or report unavailable before claiming rendered visual verification |
@@ -641,9 +648,14 @@ PID/start/namespace/leader-PGID identity and the only claim transition under
 the canonical jobs lock. The fence records `launch_started=1` immediately
 before payload exec. A duplicate or already-started claim starts zero children,
 and a dead unstarted fence is retryable only after exact group quiescence.
-Standard+ dispatch-depth-1 Codex owners run with
+Dispatch-depth-1 Codex owners run with
 `sandbox_workspace_write.network_access=true` and
-`AGENT_NESTED_HEADLESS_NETWORK=1`. Their writable `CODEX_HOME` lives at
+`AGENT_NESTED_HEADLESS_NETWORK=1` whatever their capability (audit included),
+intensity or entry scope, the posture a Claude or OpenCode owner process has; a
+depth-2 worker, a `read-only` sandbox and the mid-merge observation fence get no
+network, and nothing else widens it (`codex_owner_network_posture`); a `report` scope is kept by the
+owner instruction on all three, and a report or quick owner can read what it
+reviews (`gh pr view`) (PG-51). Their writable `CODEX_HOME` lives at
 `homes/codex/<worktree-key>.<release-key>` beneath the canonical dispatch state root,
 outside the source worktree. These homes
 link existing auth/config without copying or mutating credentials and keep
@@ -740,7 +752,7 @@ added or held back to compensate for this asymmetry.
 `AGENT_DISPATCH_EXECUTION_ACCESS_FILE`) adds only validated exact roots. The
 one-shot `codex exec` builder emits them as repeated `--add-dir`; the App Server
 supervisor builder emits repeated `--writable-root`. Existing grants and the
-standard+ owner network predicate are unchanged when the option is absent.
+owner network predicate are unchanged when the option is absent.
 Codex network access is a boolean OS-sandbox grant, not host allowlist
 enforcement, so an `enforcement_required=any` request with `network.hosts` is
 recorded as `granted-unenforced`; `os-sandbox` host enforcement is refused.

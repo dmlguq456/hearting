@@ -330,6 +330,27 @@ def pane_runtime(info):
     return outer[0] if len(outer) == 1 else None
 
 
+def shell_seat(info):
+    """The session-shell attachment that owns this pane's foreground, else None."""
+    try:
+        import session_shell
+        return session_shell.pane_seat(info)
+    except Exception:  # noqa: BLE001 - an optional reader never blocks the bare path
+        return None
+
+
+def shell_turn(seat):
+    """The turn state the shell host follows from the native lifecycle hooks."""
+    try:
+        import session_shell
+        result = session_shell.control(seat, "status")
+    except Exception:  # noqa: BLE001 - an optional reader never blocks the bare path
+        return "unknown"
+    state = result.get("state") if isinstance(result, dict) and result.get("ok") else None
+    return {"idle": "idle", "working": "working", "submitting": "working",
+            "blocked": "blocked"}.get(state, "unknown")
+
+
 def _process_session(harness, pid, pane, surface):
     """The session this exact runtime process proves, else ""."""
     try:
@@ -924,12 +945,23 @@ class TmuxSurface:
         if info is None:
             return {"error": {"code": "agent_not_found"}} if self.answers() else None
         found = pane_runtime(info)
-        if found is None:
+        seat = shell_seat(info) if found is None else None
+        if found is None and seat is None:
             return {"error": {"code": "agent_not_found"}}
-        harness, pid = found
-        session_id = _process_session(harness, pid, pane, self)
+        if seat is not None:
+            # The foreground is the shell's PTY owner; its attachment names the
+            # native runtime and session behind it (the pane's seat).
+            harness, pid = seat["harness"], seat["native_pid"]
+            session_id = "" if seat["sid"] == "-" else seat["sid"]  # "-": no session selected
+        else:
+            harness, pid = found
+            session_id = _process_session(harness, pid, pane, self)
+        status = native_turn(harness, pid, session_id) if session_id else "unknown"
+        if seat is not None and status == "unknown":
+            # The shell host follows the native lifecycle hooks for every harness.
+            status = shell_turn(seat)
         agent = {"pane_id": pane, "agent": harness, "pid": pid,
-                 "agent_status": native_turn(harness, pid, session_id) if session_id else "unknown",
+                 "agent_status": status,
                  "name": self._started_name(pane, pid), "cwd": _cwd(pid)}
         if session_id:
             agent["agent_session"] = {"kind": "id", "value": session_id}

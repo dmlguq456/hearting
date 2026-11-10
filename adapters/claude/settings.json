@@ -374,6 +374,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" sh capability-grounding-marker.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash session-card-inject.sh",
             "timeout": 5
           }

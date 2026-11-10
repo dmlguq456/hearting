@@ -84,7 +84,7 @@ from peer_steward_base import (  # noqa: F401
     _ensure_steward_runner, _fallback, _from_name, _handoff_lifetime_valid,
     _headless_session_bindings, _herdr_env_for_server, _HERDR_GET_TIMEOUT_SECONDS,
     _herdr_missing, _interpret_payload, _MANAGED_ENTRY_MARK, _MANAGED_ENV_MARK,
-    _MANAGED_INGRESS, _managed_ingress_dir, _OPENCODE_RETIRE_SECONDS,
+    _MANAGED_INGRESS, _managed_ingress_dir, _OPENCODE_RETIRE_SECONDS, _SHELL_RETIRE_GRACE_SECONDS,
     _opencode_tui_scoped_config, _PATHS_SPEC, _payload_cwd, _PERMISSION_FLAGS, _plain,
     _PM_SPEC, _print_steward_limited, _proc_cwd, _proc_start_ticks, _project_of,
     _PROMPT_BARE_TAG_ADDRESS, _prompt_collapse_rows, _prompt_fleet_tag, _PROMPT_HARNESSES,
@@ -2127,8 +2127,14 @@ def _retire_pane_info(pane, timeout=5, *, server=None):
 
 
 def _wrapped_foreground(pane, harness, info):
-    """The native lifetime behind a proved carrier; never reinterpret the owner as native."""
-    if harness not in {"claude", "codex"} or not isinstance(info, dict):
+    """The native lifetime behind a proved carrier; never reinterpret the owner as native.
+
+    The pane's shell seat (``session_shell.pane_seat``) already proves that this
+    pane's foreground owns the attachment and that the native TUI descends from
+    it with its recorded birth. That one fact names the seat's native process and
+    session; later steps compare against this identity instead of re-proving it.
+    """
+    if harness not in {"claude", "codex", "opencode"} or not isinstance(info, dict):
         return None, False
     observed = False
     try:
@@ -2136,24 +2142,30 @@ def _wrapped_foreground(pane, harness, info):
         if binding is None:
             return None, bool(reason)
         observed = True
-        from pane_ownership import _wrapped_native_session
         pid = binding["native_pid"]
         identity = _retire_process_record(pid)
         shell_start = _proc_start_ticks(info.get("shell_pid"))
         if (not identity or identity["start"] != binding["native_start"] or not shell_start):
             return None, True
-        tmux = terminal_surface.pane_surface(pane) if terminal_surface.is_tmux_pane(pane) else None
-        socket_path = (herdr_observation.socket_path_for_endpoint(_HERDR_SESSION or "default")
-                       or _herdr_env_for_server(_HERDR_SESSION).get("HERDR_SOCKET_PATH", ""))
-        selected = _wrapped_native_session(pane, harness, pid, binding["sid"],
-            executable=shutil.which("tmux" if tmux else "herdr"), server=_HERDR_SESSION,
-            socket_path=socket_path, tmux=tmux.socket if tmux else None, info=info, expected=binding)
-        if selected != binding["sid"]:
+        # Protection: the join proves birth and foreground, not role. Only the
+        # requested harness's own TUI (no service, no registered worker) is a target.
+        from pane_ownership import _native_session, _native_user_tui
+        if not _native_user_tui(pid, harness):
+            return None, True
+        # Protection, not re-proof: a shared Codex daemon can retain several roots,
+        # so input goes only to the thread the TUI currently selects.
+        import session_shell
+        if harness == "codex" and not session_shell._codex_current_root(
+                pid, binding["native_start"], binding["sid"]):
+            return None, True
+        # Protection: Claude's own record must still show the attachment's session
+        # (a /resume to another session in the same TUI is not the booked target).
+        if harness == "claude" and _native_session(pid, harness) != binding["sid"]:
             return None, True
         keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
         return {"pid": pid, **identity, "shell_pid": info["shell_pid"],
-                "shell_start": shell_start, "session_id": selected,
+                "shell_start": shell_start, "session_id": binding["sid"],
                 "attachment": {key: binding[key] for key in keys if key in binding}}, True
     except ImportError:
         return None, observed  # Optional reader absence keeps independent bare proof available.
@@ -2245,6 +2257,13 @@ def _complete_gone_retire(store, duty):
                            observation={"phase": "complete", "reason": "target-already-gone"})
     if settled.get("state") == "complete":
         ident = (duty.get("intent") or {}).get("identity") or {}
+        if settled.get("result") == "normal-exit":
+            # Another observer (the retained runner) finished the same requested
+            # exit first and closed the pane; report what the duty records.
+            print(f"retired=true reason=normal-exit agent={ident.get('harness', '-')} "
+                  f"name={ident.get('name', '-')} pane={ident.get('pane', '-')}"
+                  + (f" handover={handover}" if handover else ""))
+            return True
         _mark_completed_retire_followup(store, settled, ident,
                                         "target-already-gone", handover,
                                         defer_if_missing=True)
@@ -2576,6 +2595,15 @@ def _resume_retire_obligation(duty, store, *, read_context=None,
         _HERDR_SESSION = None if server == "default" else server
         try:
             info = _retire_pane_info(ident.get("pane", ""))
+            settle_by = time.monotonic() + 1.0
+            while time.monotonic() < settle_by:
+                # Between the exited foreground and the shell retaking its terminal
+                # the pane reads empty for a moment; a requested exit is read again
+                # before it is called gone (a gone path does not close the pane).
+                if info is not None or _retire_subject_state(duty) != "gone":
+                    break
+                time.sleep(0.2)
+                info = _retire_pane_info(ident.get("pane", ""))
             if info is not None and foreground and _retire_shell_returned(info, foreground):
                 claimed = store.claim_phase(
                     duty["id"], {"exit-requested"}, "shell-returned",
@@ -2845,6 +2873,10 @@ def cmd_retire(args):
     except (OSError, subprocess.SubprocessError):
         return finish("exit-send-unknown", pending=True)
     wait_seconds = _OPENCODE_RETIRE_SECONDS if harness == "opencode" else _RETIRE_SECONDS
+    if identity.get("attachment"):
+        # The shell's PTY owner returns to the pane shell only after its display
+        # settles (pty_owner.py gives the display host 2 s after the native exit).
+        wait_seconds += _SHELL_RETIRE_GRACE_SECONDS
     deadline = time.monotonic() + wait_seconds
     event_transport = None
 
@@ -2856,6 +2888,12 @@ def cmd_retire(args):
             duty_id, {"exit-requested"}, "shell-returned", state="cleanup-pending",
             extra={"foreground": identity, "reason": "shell-returned"})
         if transitioned is None:
+            current = store.get(duty_id) or {}
+            if current.get("state") == "complete" and current.get("result") == "normal-exit":
+                # The retained runner finished this same requested exit first.
+                print(f"retired=true reason=normal-exit agent={harness} "
+                      f"name={ident['name']} pane={pane}")
+                return 0
             return finish("shell-return-unverified", pending=True)
         duty = transitioned
         cleanup_rc = _finish_retire_cleanup(store, duty, ident, identity)
@@ -2919,6 +2957,14 @@ def cmd_retire(args):
     settled = settle_shell_returned(final_info)
     if settled is not None:
         return settled
+    while time.monotonic() < deadline:
+        # tmux sends no exit event and the agent wait can return as soon as the
+        # runtime leaves; the shell's return is read again until the same deadline.
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        final_info = _retire_pane_info(pane, timeout=2.0)
+        settled = settle_shell_returned(final_info)
+        if settled is not None:
+            return settled
     if _retire_subject_state(duty) == "gone" and _complete_gone_retire(store, duty):
         return 0
     if final_info is None:
@@ -3273,8 +3319,24 @@ def _run_herdr_get(target, *, server=None):
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(payload, dict):
-            return payload
+            return _shell_seat_turn(payload, target) if server is None else payload
     return None
+
+
+def _shell_seat_turn(payload, target):
+    """Where Herdr cannot read a wrapped runtime's turn, the shell host's lifecycle
+    state for that same seat stands in (as tmux does); a known state is kept."""
+    agent = ((payload.get("result") or {}).get("agent")
+             if isinstance(payload.get("result"), dict) else None)
+    if not isinstance(agent, dict) or agent.get("agent_status") not in (None, "", "unknown"):
+        return payload
+    seat = _shell_seat(target, agent.get("agent"))
+    if seat is None:
+        return payload
+    state = terminal_surface.shell_turn(seat)
+    if state == "unknown":
+        return payload
+    return {**payload, "result": {**payload["result"], "agent": {**agent, "agent_status": state}}}
 
 
 def _codex_queue_present():
@@ -7973,10 +8035,10 @@ def _pane_shell_binding(pane, harness, sid=None, *, expected=None, info=None):
 def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=None, server=None):
     """Join a native attachment to this pane's exact current foreground owner."""
     import session_shell
+    # The outer foreground is the retained PTY owner, not the native TUI on its
+    # inner PTY. The seat is the one attachment joined to this endpoint's observed
+    # foreground; a title, pane hint or registry age proves nothing.
     if sid is None:
-        # The outer foreground is the retained PTY owner, not the native TUI
-        # on its inner PTY. Discover only attachments joined to this endpoint's
-        # observed foreground; a title, pane hint or registry age proves nothing.
         rows = session_shell.bindings(harness=harness)
     else:
         binding, _reason = session_shell.exact_binding(harness, sid)
@@ -7988,25 +8050,18 @@ def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=N
                 else _retire_pane_info(pane, server=server))
     if not info:
         return None, None
-    joined = []
-    for binding in rows:
-        owner = "broker" if "broker_pid" in binding else "host"
-        pid, birth = binding[owner + "_pid"], binding[owner + "_start"]
-        if (info.get("foreground_process_group_id") == pid
-                and any(isinstance(row, dict) and row.get("pid") == pid
-                        for row in info.get("foreground_processes", []))
-                and _proc_start_ticks(pid) == birth):
-            joined.append(binding)
-    if len(joined) != 1:
+    binding = session_shell.pane_seat(info, harness, rows=rows, birth=_proc_start_ticks)
+    if binding is None:
         return None, None
-    binding = joined[0]
-    identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
-                "native_pid", "native_start", "broker_pid", "broker_start")
     if sid is None:
         current, _reason = session_shell.exact_binding(binding["harness"], binding["sid"])
-        if current is None or any(current.get(k) != binding.get(k) for k in identity):
+        if current is None or any(current.get(k) != binding.get(k) for k in (
+                "harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                "native_pid", "native_start", "broker_pid", "broker_start")):
             return None, None
         binding = current
+    identity = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                "native_pid", "native_start", "broker_pid", "broker_start")
     if expected is not None and any(binding.get(k) != expected.get(k) for k in identity):
         return None, None
     try:
@@ -8443,8 +8498,29 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     return _PROMPT_EXIT[outcome]
 
 
+def _shell_seat(target, harness=None, info=None):
+    """The session-shell attachment that is this pane's seat, else None."""
+    try:
+        import session_shell
+        if not session_shell.bindings(harness=harness):
+            return None
+        info = _retire_pane_info(target) if info is None else info
+        return session_shell.pane_seat(info, harness) if info else None
+    except Exception:  # noqa: BLE001 - an optional reader never blocks the bare path
+        return None
+
+
 def _read_screen(target):
-    """The visible pane (ANSI) as screen lines, or None when it could not be read."""
+    """The visible pane (ANSI) as screen lines, or None when it could not be read.
+
+    A shell seat's pane also shows the shell's frame and panel; its draft, form
+    and footer judgments read the native cells instead (one shared source)."""
+    seat = _shell_seat(target)
+    if seat is not None:
+        import session_shell
+        lines = session_shell.native_screen(seat)
+        if lines is not None:
+            return lines
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)
         text = tmux.read_visible(target, ansi=True) if tmux else None
@@ -8601,7 +8677,22 @@ def _process_session(pane, harness):
     follows a `/clear` only when its integration reports it, and has been seen to keep
     the previous session for good (live panes 2026-10-01), so a second tidy in the same
     window would otherwise never clear it. Shared Codex callers use CODEX_THREAD_ID;
-    pane_ownership resolves that thread to its foreground TUI."""
+    pane_ownership resolves that thread to its foreground TUI. A shell seat's
+    session is its attachment's (the host follows the native start/select hooks)."""
+    try:
+        seat, conflict = _pane_shell_binding_result(pane, harness)
+    except Exception:  # noqa: BLE001 - optional reader absence keeps the bare path
+        seat, conflict = None, None
+    if conflict:
+        return None
+    if seat is not None:
+        if seat["harness"] == "codex":
+            import session_shell
+            # After /new the attachment keeps the old SID until the next start hook.
+            if not session_shell._codex_current_root(
+                    seat["native_pid"], seat["native_start"], seat["sid"]):
+                return None
+        return seat["sid"]
     try:
         if terminal_surface.is_tmux_pane(pane):
             processes = (_retire_pane_info(pane) or {}).get("foreground_processes") or []

@@ -693,6 +693,8 @@ _RETIRE_ACTIONS = {"codex": (("send-keys", "ctrl+d"),),
 _RETIRE_SECONDS = 5
 # OpenCode can remain foreground while it finishes its normal exit summary.
 _OPENCODE_RETIRE_SECONDS = 60
+# A session-shell seat returns to the pane shell after its display host settles.
+_SHELL_RETIRE_GRACE_SECONDS = 3
 
 
 def _retire_process_record(pid):
@@ -744,10 +746,22 @@ def _retire_booked_foreground(duty):
 
 
 def _retire_subject_state(duty):
-    """The booked agent's kernel lifetime, never the pane's current occupant."""
+    """The booked agent's kernel lifetime, never the pane's current occupant.
+
+    A session-shell seat is occupied by its PTY owner (broker) around the native
+    TUI; the owner leaves the pane shortly after the native exit. Until that same
+    owner birth is gone the seat is still exiting, not gone.
+    """
     original = _retire_booked_foreground(duty)
     if not isinstance(original, dict) or not original.get("pid") or not original.get("start"):
         return "unknown"
+    attachment = original.get("attachment") if isinstance(original.get("attachment"), dict) else {}
+    owner = attachment.get("broker_pid", attachment.get("host_pid"))
+    owner_start = attachment.get("broker_start", attachment.get("host_start"))
+    if (type(owner) is int and owner > 1 and isinstance(owner_start, str)
+            and _proc_start_ticks(owner) == owner_start
+            and not _retire_zombie_matches(owner, owner_start)):
+        return "same"
     current = _retire_process_record(original["pid"])
     if current is None and _retire_zombie_matches(original["pid"], original["start"]):
         return "gone"
