@@ -87,7 +87,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -177,6 +177,15 @@ function existing(file){return new Promise((resolve,reject)=>{
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const line=sideTerm.buffer.active.getLine(2);
    if(line.getCell(140).getChars()!=='│'||[138,139].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
+ }
+ if(cfg.scenario==='side-left'){
+   // The same panel at the left: native keeps its column count and moves right.
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
+   await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
+   const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
+   if(!row(0).startsWith('┌')||!row(0).includes('HEARTING')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
+   if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
+   if(/HEARTING/.test(row(0).slice(42)))throw Error('panel painted twice');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
@@ -321,7 +330,7 @@ class SessionShellPTYTest(unittest.TestCase):
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
-        if scenario in {'side-layout','side-columns'}:
+        if scenario in {'side-layout','side-columns','side-left'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
@@ -336,7 +345,8 @@ class SessionShellPTYTest(unittest.TestCase):
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
-        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132}) if scenario in {'side-layout','side-columns'} else '{"enabled":true}')
+        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -362,6 +372,9 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_side_layout_resizes_the_same_native_pty_and_falls_back_when_narrow(self):
         self.run_loop('side-layout')
+
+    def test_a_left_panel_keeps_the_native_columns_and_moves_native_right(self):
+        self.run_loop('side-left')
 
     def test_foreground_exec_hint_and_native_title_survive_the_real_pty_loop(self):
         self.assertTrue(self.run_loop('herdr')['status']['ok'])
