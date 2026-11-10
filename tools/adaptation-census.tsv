@@ -423,7 +423,6 @@ tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv
-tool-deferred	integrations
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
@@ -472,3 +471,4 @@ utility-deferred	artifact_journal.py
 utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
+tool-deferred	check_utility_census.test.py
