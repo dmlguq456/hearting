@@ -1,6 +1,7 @@
 """A resumed root needs native viewport selection, not retained membership alone."""
 import importlib.util
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import unittest
@@ -11,6 +12,9 @@ sys.path[:0] = [str(ROOT / 'utilities'), str(ROOT / 'tools')]
 import session_shell as shell
 import pane_ownership
 from fleet.collectors import codex
+
+# Resolved once: a fixture may narrow PATH while a test runs.
+NODE = shutil.which('node') or 'node'
 
 
 class ResumedSelectionTests(unittest.TestCase):
@@ -81,6 +85,18 @@ class ResumedSelectionTests(unittest.TestCase):
         self.fx.ask()
         self.assertFalse(self.fx.answer()['ok'])
         self.assertIsNone(self.fx.fx.record(self.fx.signal))
+
+    def test_a_conflicting_status_row_through_the_host_never_answers_the_old_root(self):
+        # Both roots in this TUI, no process-native current, the screen shows the
+        # resumed root after a UUID-shaped field: the old root's question stays shut.
+        screen = ['› Ask Codex', self.old + ' · Context 10% used · ' + self.resumed]
+        frame = FooterReaderParityTests.host_frames(self, [screen])[0]
+        with mock.patch.object(shell, 'control', return_value=dict(ok=True, native_frame=frame)):
+            self.assertIsNone(shell._codex_selected_root(self.fx.binding))
+            self.fx.ask('Question in previously retained root')
+            self.assertFalse(self.fx.answer()['ok'])
+        self.assertEqual(self.fx.rpcs.count('thread/queue/add'), 0)
+        self.assertIn(self.resumed, frame['lines'][1])
 
     def test_selection_needs_stable_frames_and_the_same_native_lifetime(self):
         self.select_resumed()
@@ -179,7 +195,7 @@ function context(extra=[]){
 (async()=>{
  const c=context(),seen=await c.request({op:'native-selection',sid:B});
  a.equal(seen.ok,true);a.equal(seen.native_frame.revision,9);
- a.deepEqual(Array.from(seen.native_frame.lines),['›',A+' · ?','? for shortcuts']);
+ a.deepEqual(Array.from(seen.native_frame.lines),['›',A+' · Context 10% used','? for shortcuts']);
  a.equal(JSON.stringify(seen).includes('PRIVATE HUMAN DRAFT'),false);
  for(const body of ['PRIVATE_CONTINUATION_SENTINEL','Where should the new conversation run?']){
   const hidden=await context([body]).request({op:'native-selection',sid:B});
@@ -238,7 +254,9 @@ class FooterReaderParityTests(unittest.TestCase):
     """The host frame and the Python footer reader name the same current thread."""
     FIXTURES = ROOT / 'utilities/fixtures/codex-0.163-shared-footer'
     REAL = {'side-133x30-native91.txt': '01a1c650-6f32-7880-bb70-815b30d8bd06',
-            'bottom-80x24.txt': '01a1c655-bacb-75a2-b8d1-2997f18b9fcd'}
+            'bottom-80x24.txt': '01a1c655-bacb-75a2-b8d1-2997f18b9fcd',
+            # A UUID-shaped git branch drawn before the real thread-id: a conflict.
+            'branch-first-133x30.txt': None, 'branch-first-80x24.txt': None}
     T = '01a1c520-2193-71f0-a79c-b1fb86bd1a21'
     OTHER = '99a1c520-2193-71f0-a79c-b1fb86bd1a21'
 
@@ -248,15 +266,16 @@ const fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync(process.argv[1],'utf8'),screens=JSON.parse(fs.readFileSync(0,'utf8'));
 const begin=source.indexOf('function nativeSelectionFrame()');
 const fn=source.slice(begin,source.indexOf('let checkingNativeSelection=',begin));
+const c={screenRevision:3,epoch:1};vm.createContext(c);vm.runInContext(fn+'\nthis.frame=nativeSelectionFrame;',c);
 console.log(JSON.stringify(screens.map(lines=>{
- const c={screenRevision:3,epoch:1,terminal:{rows:lines.length,
-   buffer:{active:{viewportY:0,getLine:i=>({translateToString:()=>lines[i]})}}}};
- vm.createContext(c);vm.runInContext(fn+'\nthis.out=nativeSelectionFrame();',c);return c.out;
+ c.terminal={rows:lines.length,
+   buffer:{active:{viewportY:0,getLine:i=>({translateToString:()=>lines[i]})}}};
+ return c.frame();
 })));
 """
-        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
+        result = subprocess.run([NODE, '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
                                 input=__import__('json').dumps(screens), text=True,
-                                capture_output=True, timeout=15)
+                                capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return __import__('json').loads(result.stdout)
 
@@ -277,6 +296,9 @@ console.log(JSON.stringify(screens.map(lines=>{
             # Not a status line: no identity.
             f'  text mentioning {self.T}', f'  {self.T} · master',
             f'  {self.T} · {self.OTHER[:20]}…', f'  title · {self.T} · Context 1% used',
+            # Conflicting ids on an accepted row: every id reaches the Python reader.
+            f'  {self.T} · Context 0% used · {self.OTHER}', f'  {self.T} · {self.T} · {self.OTHER}',
+            f'  {self.T} · Context 10% used · {self.OTHER[:20]}…',
         ]
         layouts = {name: lines for name, lines in real.items()}
         layouts.update({f'row-{i}': prompt + [row] for i, row in enumerate(rows)})
@@ -298,10 +320,43 @@ console.log(JSON.stringify(screens.map(lines=>{
                 self.assertEqual(via_host, direct)
                 if name in self.REAL:
                     self.assertEqual(direct, self.REAL[name])
+                if name in {'row-8', 'row-9', 'row-10'}:
+                    self.assertIsNone(direct)
                 # Only identity evidence leaves the native viewport.
                 for line in frame['lines']:
                     self.assertNotIn('master', line)
                     self.assertNotIn('warning', line)
+
+    def test_every_composed_status_row_reads_the_same_through_the_host(self):
+        # Rows are composed, not listed: every ordered choice of 2-4 fields from
+        # the materials, with or without a trailing warning, key hint or help row.
+        # A new material is covered in every position by adding it here.
+        import itertools
+        materials = (self.T, self.OTHER, self.T[:20] + '…', self.OTHER[:20] + '…',
+                     'Context 10% used', 'master', 'Fix login flow')
+        endings = ('', '  ⚠ 1 warning', ' · f2 to view', '  ⚠ 1 warning · f2 to view')
+        prompt = ['', '› Ask Codex to do anything', '']
+        screens = []
+        for size in (2, 3, 4):
+            for fields in itertools.product(materials, repeat=size):
+                for ending in endings:
+                    row = '  ' + ' · '.join(fields) + ending
+                    screens.append(prompt + [row])
+                    screens.append(prompt + [row, '  ← for agents · ? for shortcuts'])
+        frames = self.host_frames(screens)
+        mismatched, accepted = [], 0
+        for lines, frame in zip(screens, frames):
+            direct = pane_ownership._codex_current_footer(lines)
+            via_host = (('invalid', '') if frame.get('invalid')
+                        else pane_ownership._codex_current_footer(frame['lines']))
+            if self.current(via_host) != self.current(direct):
+                mismatched.append((lines[-1], direct, via_host))
+            accepted += bool(frame['lines'])
+            for line in frame['lines']:
+                self.assertFalse({'master', 'Fix', 'login', 'warning', 'f2'} & set(line.split()), line)
+        self.assertEqual(len(screens), 2 * 4 * (7 ** 2 + 7 ** 3 + 7 ** 4))
+        self.assertGreater(accepted, len(screens) // 4)
+        self.assertEqual(mismatched, [])
 
 
 if __name__ == '__main__':
