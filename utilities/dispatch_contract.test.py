@@ -687,13 +687,18 @@ class DispatchContractTest(unittest.TestCase):
    dispatch_depth=1, worker_type="owner", intensity="standard",
    sandbox="workspace-write"))
   for changed in (
-   {"dispatch_depth":2}, {"worker_type":"stage"}, {"intensity":"quick"},
+   {"dispatch_depth":2}, {"worker_type":"stage"},
    {"sandbox":"danger-full-access"},
   ):
    values={"dispatch_depth":1, "worker_type":"owner", "intensity":"standard",
            "sandbox":"workspace-write"}
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
+  # PG-44: a quick (and so also a report-scope) owner has the same network posture.
+  for intensity in ("direct", "quick", "standard", "thorough"):
+   self.assertTrue(D.codex_standard_owner_network_enabled(
+    dispatch_depth=1, worker_type="owner", intensity=intensity,
+    sandbox="workspace-write"), intensity)
 
  def test_recovery_metadata_round_trips_through_annotate_and_close(self):
   with tempfile.TemporaryDirectory() as td:

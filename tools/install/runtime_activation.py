@@ -815,6 +815,8 @@ def _native_agent_entries(
         runtime, str(active_root), str(home),
         _bytes_sha256(home / "agent-config" / "models.conf"),
         _bytes_sha256(active_root / "adapters" / runtime / "config" / "models.conf"),
+        # The Codex renderer fits its model pins to the provider this file selects.
+        _bytes_sha256(home / "config.toml"),
     )
     if key not in _NATIVE_AGENT_PLANS:
         if len(_NATIVE_AGENT_PLANS) > 32:

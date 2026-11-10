@@ -41,6 +41,44 @@ class IdentityTest(unittest.TestCase):
                                           "AGENT_DISPATCH_CALLER_HARNESS": "codex"}), "x1")
 
 
+class SubSessionRootTest(unittest.TestCase):
+    """A native sub-session answers with its root session, as a Claude subagent does (PG-42)."""
+
+    def test_codex_thread_walks_the_spawn_edges_to_its_root(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            db = sqlite3.connect(str(Path(home) / "state_5.sqlite"))
+            db.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT)")
+            db.executemany("INSERT INTO thread_spawn_edges VALUES (?, ?, 'open')",
+                           (("root-1", "child-1"), ("child-1", "grandchild-1"),
+                            ("p-a", "twice"), ("p-b", "twice")))
+            db.commit()
+            db.close()
+            S._ROOTS.clear()
+            for sid, root in (("grandchild-1", "root-1"), ("child-1", "root-1"), ("root-1", "root-1"),
+                              ("twice", "twice"), ("unknown", "unknown")):
+                with self.subTest(sid=sid):
+                    found = S.identity({"CODEX_THREAD_ID": sid, "CODEX_HOME": home})
+                    self.assertEqual((found.harness, found.session_id, found.confidence),
+                                     ("codex", root, "sole"))
+                    self.assertEqual(found.native_session_id, sid if root != sid else "")
+            self.assertEqual(S.session_label({"CODEX_THREAD_ID": "child-1", "CODEX_HOME": home}), "root-1")
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertEqual(S.identity({"CODEX_THREAD_ID": "x1", "CODEX_HOME": empty}).session_id, "x1")
+            (Path(empty) / "state_5.sqlite").write_text("not a database")
+            self.assertEqual(S.identity({"CODEX_THREAD_ID": "x1", "CODEX_HOME": empty}).session_id, "x1")
+
+    def test_opencode_child_reads_the_plugin_root(self):
+        found = S.identity({"OPENCODE_SESSION_ID": "ses_child", "OPENCODE_ROOT_SESSION_ID": "ses_root"})
+        self.assertEqual((found.session_id, found.native_session_id), ("ses_root", "ses_child"))
+        self.assertEqual(S.identity({"OPENCODE_SESSION_ID": "ses_1", "OPENCODE_ROOT_SESSION_ID": ""}).session_id,
+                         "ses_1")
+        # Another harness never reads OpenCode's root variable.
+        self.assertEqual(S.identity({"CLAUDE_CODE_SESSION_ID": "c1",
+                                     "OPENCODE_ROOT_SESSION_ID": "ses_root"}).session_id, "c1")
+
+
 class CallersAgreeTest(unittest.TestCase):
     """The callers that used to keep their own copy now give the module's answer."""
 

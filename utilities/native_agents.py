@@ -56,6 +56,9 @@ class Format:
     # (name, profile or None for a kernel helper, config) -> (body, model or None)
     render: Callable[[str, Optional[str], Mapping[str, str]], tuple[str, Optional[str]]]
     collect_glob: Optional[str] = None        # stale-file sweep on write; None keeps strays
+    # (selected config, runtime home) -> the config to render for that home; None keeps it.
+    # Lets an adapter fit its pins to what that home's runtime can serve (Codex, PG-45).
+    runtime_config: Optional[Callable[[Mapping[str, str], Path], Mapping[str, str]]] = None
 
     @property
     def label(self) -> str:
@@ -166,6 +169,8 @@ def runtime_plan(fmt: Format, runtime_home: Path) -> dict:
                 cfg["CFG_NATIVE_AGENT_CATALOG"] = " ".join(
                     [*cfg.get("CFG_NATIVE_AGENT_CATALOG", "").split(), balanced]
                 )
+    if fmt.runtime_config is not None:
+        cfg = fmt.runtime_config(cfg, runtime_home)
     rows = []
     for agent in plan_agents(fmt, cfg):
         row = {

@@ -12,7 +12,8 @@
       "OPENCODE_SESSION_ID"
     ],
     "process_proof": "tui-selection",
-    "herdr_session_id": "claim"
+    "herdr_session_id": "claim",
+    "sub_session_root": "env:OPENCODE_ROOT_SESSION_ID"
   },
   "access": {
     "enforcement": "tool-permission",

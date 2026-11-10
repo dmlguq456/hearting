@@ -111,6 +111,40 @@ Prefer one airtight answer over broad partial coverage.
 }
 
 
+# A pin is written only where the runtime home's provider serves it. The shipped
+# models are account models of Codex's own provider; on another provider Codex
+# cannot resolve the pinned model's metadata, refuses the spawn ("agent type is
+# currently not available") and the parent sees only that tool error (PG-45).
+# There the agent keeps its effort and sandbox and follows the session model.
+UNPINNED_KEY = "_CODEX_AGENT_MODEL_UNPINNED"
+ACCOUNT_PROVIDERS = frozenset({"openai"})
+
+
+def selected_provider(runtime_home: Path) -> str:
+    """The `model_provider` the home's `config.toml` selects ("openai" when unset)."""
+    import tomllib
+    try:
+        config = tomllib.loads((Path(runtime_home) / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return "openai"
+    provider = config.get("model_provider")
+    profile = config.get("profile")
+    profiles = config.get("profiles")
+    if isinstance(profile, str) and isinstance(profiles, dict) and isinstance(profiles.get(profile), dict):
+        provider = profiles[profile].get("model_provider", provider)
+    return provider if isinstance(provider, str) and provider else "openai"
+
+
+def runtime_config(cfg: Mapping[str, str], runtime_home: Path) -> Mapping[str, str]:
+    if selected_provider(runtime_home) in ACCOUNT_PROVIDERS:
+        return cfg
+    return {**cfg, UNPINNED_KEY: "1"}
+
+
+def model_line(model: str, cfg: Mapping[str, str]) -> str:
+    return "" if cfg.get(UNPINNED_KEY) else f'model = "{toml_string(model)}"\n'
+
+
 def toml_string(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -129,14 +163,14 @@ def codex_config(profile: str, cfg: Optional[Mapping[str, str]] = None) -> tuple
 
 def render_kernel_agent(name: str, spec: dict[str, str], cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str]:
     model, reasoning, sandbox = codex_config(name, cfg)
+    pinned = None if (cfg or {}).get(UNPINNED_KEY) else model
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
-model = "{toml_string(model)}"
-model_reasoning_effort = "{toml_string(reasoning)}"
+{model_line(model, cfg or {})}model_reasoning_effort = "{toml_string(reasoning)}"
 sandbox_mode = "{toml_string(sandbox)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-''', model
+''', pinned
 
 
 def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tuple[str, str]:
@@ -144,14 +178,14 @@ def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tup
     if spec is None:
         raise native_agents.RenderError(f"catalog names an agent with no Codex spec: {name}")
     resolved = resolve_profile_values("codex", cfg, profile)
+    pinned = None if cfg.get(UNPINNED_KEY) else resolved["model"]
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
-model = "{toml_string(resolved["model"])}"
-model_reasoning_effort = "{toml_string(resolved["budget"])}"
+{model_line(resolved["model"], cfg)}model_reasoning_effort = "{toml_string(resolved["budget"])}"
 sandbox_mode = "{toml_string(CATALOG_SANDBOX)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-''', resolved["model"]
+''', pinned
 
 
 def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
@@ -171,6 +205,7 @@ FORMAT = native_agents.Format(
     dest_name=lambda name: f"{name}.toml",
     render=render,
     collect_glob="*.toml",
+    runtime_config=runtime_config,
 )
 
 

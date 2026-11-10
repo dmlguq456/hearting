@@ -109,6 +109,32 @@ class SharedRendererTest(unittest.TestCase):
                 self.assertEqual(plan["config"]["source"], "user")
                 self.assertEqual({row["status"] for row in plan["agents"]}, {"shipped"})
 
+    def test_codex_pins_only_for_the_provider_that_serves_them(self):
+        # PG-45: on another provider Codex refuses a pinned agent it cannot resolve;
+        # there the agent keeps its effort and follows the session model.
+        cases = (("", "shipped"), ('model_provider = "openai"\n', "shipped"),
+                 ('model_provider = "local_fixture"\n', "rendered"),
+                 ('profile = "lab"\n[profiles.lab]\nmodel_provider = "local_fixture"\n', "rendered"),
+                 ("not = [valid toml", "shipped"))
+        for config, status in cases:
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
+                if config:
+                    (Path(tmp) / "config.toml").write_text(config, encoding="utf-8")
+                plan = run_plan("codex", Path(tmp))
+                self.assertEqual({row["status"] for row in plan["agents"]}, {status})
+                for row in plan["agents"]:
+                    if status == "rendered":
+                        self.assertIsNone(row["model"])
+                        self.assertNotRegex(row["content"], r"(?m)^model\s*=")
+                        self.assertRegex(row["content"], r"(?m)^model_reasoning_effort = ")
+                    else:
+                        self.assertTrue(row["model"])
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "config.toml").write_text('model_provider = "local_fixture"\n', encoding="utf-8")
+            for adapter in ("claude", "opencode"):
+                plan = run_plan(adapter, Path(tmp))
+                self.assertEqual({row["status"] for row in plan["agents"]}, {"shipped"}, adapter)
+
     def test_legacy_user_copy_keeps_balanced_with_the_derived_model(self):
         for adapter in ADAPTERS:
             with self.subTest(adapter), tempfile.TemporaryDirectory() as tmp:

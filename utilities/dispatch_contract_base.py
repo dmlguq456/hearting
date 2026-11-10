@@ -322,12 +322,19 @@ def codex_standard_owner_network_enabled(
     *, dispatch_depth: int, worker_type: str, intensity: str, sandbox: str,
     gpu_resource_owner: bool = False,
 ) -> bool:
-    """General (non-loopback) network grant; approved-test localhost is decided by `verification_runtime.local_network_projection`."""
+    """General (non-loopback) network grant; approved-test localhost is decided by `verification_runtime.local_network_projection`.
 
+    Every dispatch-depth-1 owner has it, whatever its intensity or entry scope,
+    as a Claude or OpenCode owner process does (PG-44): a `report` scope is kept
+    by the owner instruction on all three harnesses, and a quick or report owner
+    can still read what it reviews (`gh pr view`). ``intensity`` is accepted for
+    the existing callers and does not narrow the grant.
+    """
+
+    del intensity
     return (
         dispatch_depth == 1
         and worker_type == "owner"
-        and intensity in STANDARD_PLUS_INTENSITIES
         and (sandbox == "workspace-write"
              or (gpu_resource_owner and sandbox == "danger-full-access"))
     )

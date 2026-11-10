@@ -3273,6 +3273,27 @@ else
   bad "opencode plugin shell.env should blank the inherited caller name and foreign session IDs, and set OPENCODE_SESSION_ID only for a nonempty sessionID"
 fi
 
+if node --input-type=module >"$TMP/opencode_plugin_shell_env_root.out" 2>"$TMP/opencode_plugin_shell_env_root.err" <<EOF
+import { AgentHarnessGuards } from "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js"
+const sessions = { "ses-grandchild": { id: "ses-grandchild", parentID: "ses-child" },
+                   "ses-child": { id: "ses-child", parentID: "ses-root" },
+                   "ses-root": { id: "ses-root" } }
+const client = { session: { get: async ({ path }) => ({ data: sessions[path.id] }) } }
+const plugin = await AgentHarnessGuards({ directory: "$TMP/repo", worktree: "$TMP/repo", client })
+const child = { env: {} }
+await plugin["shell.env"]({ cwd: "$TMP/repo", sessionID: "ses-grandchild" }, child)
+const root = { env: { OPENCODE_ROOT_SESSION_ID: "stale" } }
+await plugin["shell.env"]({ cwd: "$TMP/repo", sessionID: "ses-root" }, root)
+if (child.env.OPENCODE_SESSION_ID !== "ses-grandchild") process.exit(1)
+if (child.env.OPENCODE_ROOT_SESSION_ID !== "ses-root") process.exit(2)
+if (root.env.OPENCODE_ROOT_SESSION_ID !== "") process.exit(3)
+EOF
+then
+  ok "opencode plugin shell.env names a subagent child's root session (PG-42)"
+else
+  bad "opencode plugin shell.env should name a subagent child's root session (PG-42)"
+fi
+
 echo "== opencode capability mapping =="
 if "$OPENCODE" capability-info autopilot-code >"$TMP/opencode_cap.out" 2>"$TMP/opencode_cap.err" \
   && grep -q '^capability=autopilot-code$' "$TMP/opencode_cap.out" \
