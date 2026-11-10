@@ -114,8 +114,24 @@ function nativeSelectionFrame() {
     terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
   while(lines.length&&!lines[lines.length-1].trim())lines.pop();
   const prompt=lines.findLastIndex(line=>line.trimStart().startsWith('›'));
-  const tail=prompt<0?[]:['›',...lines.slice(prompt+1)];
-  return {revision:screenRevision,epoch,lines:tail.length<=8&&tail.join('').length<=16384?tail:[]};
+  const tail=prompt<0?[]:lines.slice(prompt+1).map(line=>line.trim()).filter(Boolean);
+  const frame={revision:screenRevision,epoch,lines:[]};
+  // Refuse interstitial body without returning it. Keep the strict parser's
+  // location-menu veto even when a menu happens to occupy only two rows.
+  const flat=tail.join('').replace(/\s/g,'').toLowerCase();
+  const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
+    'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
+  if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  const hint=tail[tail.length-1]||'';
+  const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
+  const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
+  if(!help)return frame;
+  if(tail.length!==2)return {...frame,invalid:true};
+  // Only identity-shaped tokens leave the native viewport. Titles, telemetry
+  // and even footer-shaped draft text never travel in this read-only response.
+  const fields=tail[0].split('·'),safe=value=>/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f-]{0,27}…)$/.test(value.trim())?value.trim():'?';
+  const status=fields.length===1?safe(fields[0]):safe(fields[0])+' · '+safe(fields[fields.length-1]);
+  return {...frame,lines:['›',status,help]};
 }
 let checkingNativeSelection=false,nativeSelectionRevision=-1;
 function observeNativeSelection() {

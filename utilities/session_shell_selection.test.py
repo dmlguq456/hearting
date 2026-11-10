@@ -115,6 +115,10 @@ class ResumedSelectionTests(unittest.TestCase):
             with self.subTest(lines=lines), mock.patch.object(shell, 'control',
                     return_value=dict(ok=True, native_frame=dict(revision=9, epoch=12, lines=lines))):
                 self.assertFalse(shell.answer_attachment_current(self.fx.binding))
+        self.fx.selected = self.resumed
+        with mock.patch.object(shell, 'control', return_value=dict(ok=True,
+                native_frame=dict(revision=9, epoch=12, lines=[], invalid=True))):
+            self.assertFalse(shell.answer_attachment_current(self.fx.binding))
         self.fx.selected = self.old  # Independent, current native proof conflicts.
         self.assertFalse(shell.answer_attachment_current(self.fx.binding))
 
@@ -133,8 +137,8 @@ const begin=source.indexOf('function nativeSelectionFrame()');
 const helpers=begin<0?'':source.slice(begin,source.indexOf('function readAction(',begin));
 const request=source.slice(source.indexOf('async function request('),source.indexOf('terminal.parser.registerCsiHandler',source.indexOf('async function request(')));
 const A='00000000-0000-4000-8000-000000000099',B='00000000-0000-4000-8000-000000000052';
-function context(){
- const lines=['transcript '+B,'› PRIVATE HUMAN DRAFT','',A+' · Context 10% used','← for agents · ? for shortcuts',''];
+function context(extra=[]){
+ const lines=['transcript '+B,'› PRIVATE HUMAN DRAFT',...extra,'',A+' · Context 10% used','← for agents · ? for shortcuts',''];
  const actions=[];let resolve;
  const c={harness:'codex',sid:B,native:{pid:123,start:'456'},screenRevision:9,epoch:12,selection:1,
    sequence:4,token:'owned',ended:false,relay:false,actions,
@@ -146,8 +150,13 @@ function context(){
 (async()=>{
  const c=context(),seen=await c.request({op:'native-selection',sid:B});
  a.equal(seen.ok,true);a.equal(seen.native_frame.revision,9);
- a.deepEqual(Array.from(seen.native_frame.lines),['›','',A+' · Context 10% used','← for agents · ? for shortcuts']);
+ a.deepEqual(Array.from(seen.native_frame.lines),['›',A+' · ?','? for shortcuts']);
  a.equal(JSON.stringify(seen).includes('PRIVATE HUMAN DRAFT'),false);
+ for(const body of ['PRIVATE_CONTINUATION_SENTINEL','Where should the new conversation run?']){
+  const hidden=await context([body]).request({op:'native-selection',sid:B});
+  a.equal(hidden.native_frame.invalid,true);a.equal(hidden.native_frame.lines.length,0);
+  a.equal(JSON.stringify(hidden).includes(body),false);
+ }
  a.equal((await c.request({op:'native-selection',sid:A})).ok,false);
  for(const changed of ['none','screen','input','selection','unproved']){
   const x=context();x.observeNativeSelection();

@@ -311,6 +311,8 @@ def _codex_selected_root(binding):
         return None
     if not same_owner():
         return {"selected_sid": None}
+    if frame.get("invalid") is True:
+        return {"selected_sid": None}
     record = _process(binding["native_pid"])
     if (not record or str(record[5]) != binding["native_start"]
             or not record[3] or record[2] != record[4]):
