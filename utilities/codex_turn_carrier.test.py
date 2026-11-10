@@ -246,10 +246,16 @@ class FitTest(unittest.TestCase):
         records = [{"delivery_id": f"d{n}", "claim_owner": "group-a" if n < 3 else f"own-{n}"}
                    for n in range(6)]
         render = lambda batches: "x" * (100 * sum(len(r) for _root, r in batches))  # noqa: E731
-        text, chosen, rest = carrier.fit([(root, records)], render, 250)
-        self.assertEqual([r["delivery_id"] for _root, rs in chosen for r in rs], ["d0", "d1", "d2"])
-        self.assertEqual(len(text), 300)  # the first unit moves whole even past the budget
-        self.assertEqual([r["delivery_id"] for _root, rs in rest for r in rs], ["d3", "d4", "d5"])
+        import dispatch_session_sweep
+        with mock.patch.object(dispatch_session_sweep, "overflow_pointer",
+                               side_effect=lambda text, *_a, **_k: text):
+            text, chosen, rest = carrier.fit([(root, records)], render, 250)
+        # The first unit alone is over the budget and no whole copy of it can
+        # be saved: it stays pending whole, and the units after it move.
+        self.assertEqual([r["delivery_id"] for _root, rs in chosen for r in rs], ["d3", "d4"])
+        self.assertEqual(len(text), 200)
+        self.assertEqual([r["delivery_id"] for _root, rs in rest for r in rs],
+                         ["d0", "d1", "d2", "d5"])
         text, chosen, rest = carrier.fit([(root, records)], render, 450)
         self.assertEqual(len(text), 400)
         self.assertEqual(len([r for _root, rs in chosen for r in rs]), 4)

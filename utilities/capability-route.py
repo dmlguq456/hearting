@@ -2523,6 +2523,9 @@ def main():
                 outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True)
             else:
                 created=True
+                if outcome.get("state")=="cancelled" and outcome.get("owner_attempt_id"):
+                    # The close stopped this route's running owner; its worktree is left as it was.
+                    print("stopped_owner="+outcome["owner_attempt_id"],file=sys.stderr)
                 from work_start import pin_handoff_continuation
                 outcome=pin_handoff_continuation(route, a.route, route_parent_close.jobs_path(),
                                                 {**outcome,"summary":a.summary or outcome.get("summary")})

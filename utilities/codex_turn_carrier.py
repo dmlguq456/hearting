@@ -387,9 +387,13 @@ def _is_completion(record: dict) -> bool:
 
 
 def fit(batches, render, max_chars: int):
-    """The shared whole-record budget selection (``dispatch_session_sweep.fit_whole``)."""
-    from dispatch_session_sweep import fit_whole
-    return fit_whole(batches, render, max_chars)
+    """The shared leading-units fit for a hard limit (``dispatch_session_sweep.fit_inline``).
+
+    By characters. One record over ``max_chars`` alone is shown as the head
+    plus the path of its whole copy, or, without that copy, stays pending.
+    """
+    from dispatch_session_sweep import fit_inline
+    return fit_inline(batches, max_chars, render=render)
 
 
 def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = frozenset(),
@@ -489,8 +493,8 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
 
 def release(sid: str, batches) -> None:
     """Return this process's own sweep claims on records it did not ACK."""
-    from dispatch_session_sweep import release_own_claims
-    release_own_claims(RECIPIENT_KIND, sid, batches, reason="codex-turn-carrier-unacked")
+    from dispatch_session_sweep import release_claims
+    release_claims(sid, batches, RECIPIENT_KIND, reason="codex-turn-carrier-unacked")
 
 
 def acknowledge(sid: str, batches) -> list[str]:

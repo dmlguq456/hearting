@@ -2710,7 +2710,8 @@ try {
         self.assertEqual(SWEEP.delivery_context([]), "")
         for hook in (ROOT / "hooks" / "dispatch-session-sweep.py",
                      ROOT / "adapters" / "codex" / "hooks" / "userprompt-lifecycle.py"):
-            self.assertIn("delivery_context", hook.read_text(encoding="utf-8"))
+            # Both render through the shared text, fitted to the native inline limit.
+            self.assertIn("fit_inline", hook.read_text(encoding="utf-8"))
 
     def native_node(self):
         native_bin = self.root / "native-node"

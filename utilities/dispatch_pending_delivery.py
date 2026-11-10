@@ -149,6 +149,8 @@ SUBMISSION_FENCE_FIELDS = frozenset({
 SUBMISSION_FENCE_SCHEMA = 1
 SUBMISSION_FENCE_STATES = frozenset({"prepared", "accepted", "not-accepted"})
 COURIER_RETRY_MAX_SECONDS = 15.0
+# The courier retry base delay, also its minimum.
+COURIER_RETRY_BASE_SECONDS = 0.05
 COURIER_RETRY_SUFFIX = ".courier-retry"
 COURIER_TIMELINE_SCHEMA = 1
 COURIER_TIMELINE_SUFFIX = ".courier-timeline"
@@ -858,7 +860,8 @@ def _retry_context_digest(context: str | None) -> str | None:
     return hashlib.sha256(context.encode("utf-8")).hexdigest()
 
 
-def _new_courier_retry(context_digest: str = "", base_delay_ns: int = 50_000_000) -> dict:
+def _new_courier_retry(context_digest: str = "",
+                       base_delay_ns: int = int(COURIER_RETRY_BASE_SECONDS * 1e9)) -> dict:
     return {
         "schema_version": COURIER_RETRY_SCHEMA,
         "context_digest": context_digest,
@@ -876,7 +879,7 @@ def _delay_ns(seconds: float) -> int:
         value = float(seconds)
     except (TypeError, ValueError) as exc:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "retry-delay-invalid") from exc
-    if not 0.05 <= value <= COURIER_RETRY_MAX_SECONDS:
+    if not COURIER_RETRY_BASE_SECONDS <= value <= COURIER_RETRY_MAX_SECONDS:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "retry-delay-invalid")
     return int(value * 1_000_000_000)
 
@@ -1369,7 +1372,7 @@ def claim(
     expected_identity: dict | None = None,
     jobs: Path | str | None = None,
     retry_context: str | None = None,
-    retry_base_delay_seconds: float = 0.05,
+    retry_base_delay_seconds: float = COURIER_RETRY_BASE_SECONDS,
     batch_owner: str | None = None,
     _batch_snapshot: dict | None = None,
     _batch_snapshot_resolved: bool = False,
