@@ -185,7 +185,7 @@ class LauncherMigrationTest(unittest.TestCase):
         self.assertEqual(self._target("fleet-monitor").resolve(), foreign.resolve())
         self.assertEqual(self._target("fleet2").read_text(encoding="utf-8"), "user command\n")
 
-    def _managed_update_fixture(self):
+    def _managed_update_fixture(self, *, release_extra_launchers=()):
         data_home = self.root / "xdg-data"
         state_home = self.root / "xdg-state"
         data_root = data_home / "hearting"
@@ -234,6 +234,17 @@ class LauncherMigrationTest(unittest.TestCase):
                 else f"new release: {relative}\n"
             )
             path.write_text(content, encoding="utf-8")
+        if release_extra_launchers:
+            # The new release declares a command this (older) installer's own
+            # TOOL_LAUNCHERS table does not know about.
+            table = (*distribution.TOOL_LAUNCHERS, *release_extra_launchers)
+            (package / "tools/install/distribution.py").write_text(
+                f"TOOL_LAUNCHERS = {table!r}\n", encoding="utf-8"
+            )
+            for _name, relative in release_extra_launchers:
+                source = package / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("#!/bin/sh\n", encoding="utf-8")
         archive = self.root / "hearting-v2.0.0.tar.gz"
         with tarfile.open(archive, "w:gz") as bundle:
             bundle.add(package, arcname="hearting")
@@ -321,6 +332,58 @@ class LauncherMigrationTest(unittest.TestCase):
             fixture["foreign"].read_text(encoding="utf-8"),
             "user-owned command\n",
         )
+
+    def test_first_update_links_launchers_only_the_new_release_declares(self):
+        extra = (
+            ("hearting-new-tool", "tools/new/new-tool.sh"),
+            ("hearting-foreign-new", "tools/new/foreign.sh"),
+        )
+        fixture = self._managed_update_fixture(release_extra_launchers=extra)
+        foreign = fixture["bin_dir"] / "hearting-foreign-new"
+        foreign.write_text("user-owned command\n", encoding="utf-8")
+
+        result = self._run_managed_update(fixture)
+
+        self.assertEqual(result["status"], "updated")
+        new_root = Path(result["release_root"])
+        target = fixture["bin_dir"] / "hearting-new-tool"
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(
+            target.readlink(),
+            fixture["data_home"] / "hearting/current/tools/new/new-tool.sh",
+        )
+        self.assertEqual(target.resolve(), new_root / "tools/new/new-tool.sh")
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "user-owned command\n")
+
+    def test_failed_update_rolls_back_release_declared_launchers(self):
+        extra = (("hearting-new-tool", "tools/new/new-tool.sh"),)
+        fixture = self._managed_update_fixture(release_extra_launchers=extra)
+        with self.assertRaisesRegex(distribution.DistributionError, "injected state-write failure"):
+            self._run_managed_update(fixture, fail_state_commit=True)
+        target = fixture["bin_dir"] / "hearting-new-tool"
+        self.assertFalse(target.exists() or target.is_symlink())
+
+    def test_release_launcher_table_is_read_without_execution(self):
+        root = self.root / "release"
+        (root / "tools/install").mkdir(parents=True)
+        source = root / "tools/install/distribution.py"
+        marker = self.root / "executed"
+        source.write_text(
+            f"open({str(marker)!r}, 'w').close()\n"
+            "TOOL_LAUNCHERS = (('mem', 'tools/memory/mem.py'), ('extra', 'x/extra.sh'))\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            distribution._release_extra_tool_launchers(root),
+            (("extra", "x/extra.sh"),),
+        )
+        self.assertFalse(marker.exists())
+        for unsafe in ("('../x', 'a')", "('ok', '../a')", "('ok', '/abs')", "'bad'"):
+            source.write_text(f"TOOL_LAUNCHERS = ({unsafe},)\n", encoding="utf-8")
+            self.assertEqual(distribution._release_extra_tool_launchers(root), (), unsafe)
+        empty = self.root / "release-without-table"
+        empty.mkdir()
+        self.assertEqual(distribution._release_extra_tool_launchers(empty), ())
 
     def test_old_client_update_rolls_back_launchers_after_state_commit_failure(self):
         fixture = self._managed_update_fixture()
