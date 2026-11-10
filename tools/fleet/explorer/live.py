@@ -3126,6 +3126,8 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                               "st": str(stage.get("st") or "")[:24]}
                              for stage in (route.get("stages") or ())[:16]]
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+            if type(route.get("result_at")) in (int, float):
+                row["result_at"] = route["result_at"]
             row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
                              if isinstance(part, (tuple, list)) and part]
             visibility = route.get("visibility")

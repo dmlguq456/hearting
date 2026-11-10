@@ -178,7 +178,14 @@ paints every former Hearting field with that formatter. Only while the panel
 actually paints its model and compact status for the callback's exact session
 does the shell blank the rows whose text equals the callback's latest recorded
 output, and the callback then prints one compact line. Claude has no supported
-way to remove that row, so one blank row remains. A hidden, collapsed, focused
+way to remove that row, so one row remains; it is a notice row, empty unless the
+person must know something now. One function picks a single item by priority
+from existing values: an answer this session owes, then an already computed
+warning (compaction imminent, a context or usage reading at Fleet's red level,
+a failed or attention-needing route), then news that arrived since the last
+human input within ten minutes (a received peer report or a completed route
+result). It reuses Fleet's glyphs and colors and adds no collection, setting
+or judgment. A hidden, collapsed, focused
 or not-yet-bound panel, a lost display host and unwrapped sessions show the
 native row unchanged. Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known

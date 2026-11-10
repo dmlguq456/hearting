@@ -65,6 +65,29 @@ assert.deepEqual([...d.claudeStatusRows(clipped,'exact',record)],[0],'native ell
         self.assertIn('42%', summary)
         self.assertIn('60%', summary)
 
+    def test_claude_notice_line_shows_one_item_by_priority(self):
+        import sys
+        sys.path.insert(0, str(ROOT))
+        from tools.fleet.session_panel import notice_line
+        text = lambda parts: ''.join(t for t, _ in parts)
+        now = 10_000.0
+        calm = {'ctx_pct': 40, 'quota_windows': [('5h', 30, None), ('7d', 50, None)]}
+        display = {'human': {'at': now - 300, 'text': 'x'},
+                   'received': [{'at': now - 60, 'sender': '[e7]', 'text': '#1445 병합 가능'}]}
+        ask = [{'answerable': True, 'request_state': 'open'}, {'answerable': False}]
+        blocked = [{'state': 'attention', 'state_label': 'Needs attention', 'title': 'shell'}]
+        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': now - 10}]
+        self.assertEqual(notice_line(calm, [], [], {}, now), [], 'nothing means an empty line')
+        self.assertIn('1 · Ctrl+]', text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
+        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [], display, now)))
+        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [], display, now)))
+        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [], display, now)))
+        self.assertIn('PASS', text(notice_line(calm, done, [], display, now)), 'newest news first')
+        self.assertIn('[e7] · #1445', text(notice_line(calm, [], [], display, now)))
+        later = {**display, 'human': {'at': now - 5, 'text': 'next'}}
+        self.assertEqual(notice_line(calm, done, [], later, now), [], 'the next input retires news')
+        self.assertEqual(notice_line(calm, done, [], display, now + 3600), [], 'and so does time')
+
     def test_additive_click_matches_cells_before_consuming_native_mouse(self):
         script = r'''const assert=require('node:assert/strict'),v=require(process.argv[1]);
 assert.equal(typeof v.nativePanelHit,'function');
