@@ -913,11 +913,17 @@ def publish_cache(result: dict) -> bool:
     counts = wait_counts(items)
     current_total, stale_total = counts["total"], counts["older"]
     observed_at = float(result.get("observed_at") or time.time())
+    panels = result.get("route_panels", {})
+    # Optional display detail must never crowd question truth out of this cache.
+    # Missing detail is unknown; do not manufacture an empty-route observation.
+    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
+        panels = {}
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,
              "older": stale_total, "stale_total": stale_total, "ownerless": counts["ownerless"],
              "items": items, "by_session": by_session,
              "route_status": result.get("route_status", {}),
+             "route_panels": panels,
              "route_sessions": result.get("route_sessions", []),
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
@@ -1096,6 +1102,7 @@ def cached_view(*, now=None, request=True):
     return {"items": value["items"], "by_session": indexed, "total": value.get("total", 0),
             "stale_total": value.get("stale_total", 0), "unattributed": value.get("unattributed", []),
             "health": value.get("health", []), "complete": bool(value.get("complete")),
+            "route_panels": value.get("route_panels", {}),
             "observed_at": value["observed_at"]}
 
 
@@ -4343,6 +4350,7 @@ def _refresh_cache() -> bool:
         demands = _route_demands()
         result["route_sessions"] = demands
         result["route_status"] = {}
+        result["route_panels"] = {}
         if demands:
             try:
                 # Share registry generations with the answer-wait pass, and interpret
@@ -4353,8 +4361,9 @@ def _refresh_cache() -> bool:
                 snapshot = collect_all(harness_filter={h for h, _ in requested},
                                        route_sessions=requested, include_report_verification=False)
                 if snapshot.observations.get("basic", {}).get("all_new") is True:
-                    result["route_status"] = {key: label for key, label in session_route_status(snapshot).items()
-                                              if key in demands}
+                    labels, panels = session_route_status(snapshot, include_details=True)
+                    result["route_status"] = {key: label for key, label in labels.items() if key in demands}
+                    result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):

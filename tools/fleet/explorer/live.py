@@ -16,7 +16,8 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import exec_child_is_wait
+from ..model import current_attempt_rank, exec_child_is_wait
+from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -1094,6 +1095,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        if record:
+            # Display only: shape and its basis, stages, verification and next step, read
+            # from this route's own record, Fleet's view and its outcome sidecar.
+            # A solo route's owner is its one-shot node's own attempt, not a separate row.
+            depth_one = [job for job in owner_jobs
+                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+            shown_owner = owner if owner is not None else (
+                max(depth_one, key=current_attempt_rank) if depth_one else None)
+            route["visibility"] = route_visibility.bounded(route_visibility.describe(
+                record, view, owner=route_visibility.owner_from_job(shown_owner)))
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -3067,7 +3078,7 @@ def current_route_counts(routes):
     return counts, opened
 
 
-def session_route_status(snapshot, now=None):
+def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
@@ -3096,7 +3107,43 @@ def session_route_status(snapshot, now=None):
         harness = _get(session, "harness")
         for sid in index[tag]["ids"]:
             result[str(harness) + "\0" + sid] = label
-    return result
+    if not include_details:
+        return result
+    # Reuse this very interpretation for the shell. No second collection or
+    # authority store: bounded display fields in the existing projection.
+    details = {}
+    for tag, info in index.items():
+        selected = [r for r in routes if r.get("session_tag") == tag and r.get("current") is True]
+        recent = sorted((r for r in routes if r.get("session_tag") == tag and not r.get("current")
+                         and r.get("state") == "done" and r.get("outcome") and r.get("result_at") is not None),
+                        key=lambda r: r["result_at"], reverse=True)
+        selected += recent[:2]
+        records = []
+        for route in selected[:8]:
+            row = {key: str(route.get(key) or "")[:320] for key in
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
+                              "st": str(stage.get("st") or "")[:24]}
+                             for stage in (route.get("stages") or ())[:16]]
+            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+            row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
+                             if isinstance(part, (tuple, list)) and part]
+            visibility = route.get("visibility")
+            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                                     "next": str(visibility.get("next") or "")[:120],
+                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                               for line in (visibility.get("lines") or ())[:14]
+                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
+                # Already bounded by the shared reader. Keep its codes intact;
+                # presentation translates them, never reinterprets report prose.
+                codes = visibility.get("codes")
+                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+                    row["visibility"]["codes"] = codes
+            records.append(row)
+        for sid in info["ids"]:
+            details[str(_get(info["session"], "harness")) + "\0" + sid] = records
+    return result, details
 
 
 def session_index(snapshot, now=None):

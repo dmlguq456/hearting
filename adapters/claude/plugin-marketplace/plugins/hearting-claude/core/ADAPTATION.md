@@ -311,9 +311,15 @@ receipts in the same `hooks/peer-message-record.py` (fail-soft, ≤5 lines of
 `additionalContext`, bounded by the hook's shared prompt budget). The carrier reaches
 watch state only through the utility (its shared undelivered-receipt reader and `ack`
 subcommand, loaded in the hook process), never through the state files, so a runtime
-without a wake carrier keeps the same schema. Codex — `herdr agent wait` watching is measured; the portable
-`watch/join/status/rearm/ack` subcommands work, but there is no wake carrier and next-turn
-receipt recovery is unmeasured (P-7); carrier parity is a separate decision. The managed
+without a wake carrier keeps the same schema. Codex — `herdr agent wait` watching is measured;
+the portable `watch/join/status/rearm/ack` subcommands work. A terminal watch receipt is
+queued as one exact self-addressed notice (`peer-watch:<id>`), which the peer courier hands
+to the thread's native queue like any other Codex delivery, so an idle Codex steward is woken
+by the native queue rather than by a hook. The Codex in-turn carrier
+(`adapters/codex/hooks/turn-carrier.py`, §7.4) additionally sweeps un-acked watch receipts at
+`Stop` and continues the turn with them (the Claude prompt sweep's rows and `ack`), measured
+2026-11-10. `wake=auto` still resolves to `none` outside Claude, so a Codex watch line keeps
+its `bounded-wait`/`join` directive; the receipt is not lost either way. The managed
 gateway's `steer`/`watch-idle` ops are **not implemented** (closed-by-decision, P-1 through
 P-5 retired, not pending). OpenCode — `unknown`, pending probe P-6.
 
@@ -489,7 +495,9 @@ or application.
   A new turn or a completion message alone does not answer an async question.
 - Child runtime does not select the parent carrier: Codex parents use the native
   queue for every child harness, while Claude parents keep their existing
-  runtime carrier. Stop continuation and model-owned parking remain retired.
+  runtime carrier. Model-owned parking (a Stop that waits for a child) remains
+  retired. The in-turn carrier of §7.4 only hands in records that already exist
+  and continues a turn at most once for a received, unmet next action.
   Native queue behavior is checked against installed Codex; undocumented runtime
   failures retain the durable pending record and an exact operator recovery path.
 
@@ -785,9 +793,52 @@ conflict before returning a PASS artifact, so stage advance cannot close the
 gate or start a successor from the preserved marker alone. Unreadable or
 mismatched terminal evidence adds no conflict.
 
-A registered headless owner yields after registering a batch; its runtime supervisor joins the exact `parent_attempt_id` batch outside the model and resumes the same owned session once with a bounded typed receipt. A registered Claude owner keeps one realtime stream-input process for the route and submits the next receipt immediately after each non-terminal join; when a freshly verified terminal marker closes every declared terminal gate, the supervisor skips the redundant final owner turn and closes the stream before terminal row reconciliation. An explicit custom-command fallback retains per-turn `--resume`. A Claude interactive parent may instead arm one native `asyncRewake` PostToolUse hook from a successful exact owner-start receipt, or from a successful exact steward watch armed in the same session (`utilities/peer-steward.py watch`, SD-122 §13.37.2-(10)); either way the hook owns exactly one arming event, verifies it against the session that produced it, and never widens to another attempt or watch. It re-reads the exact current row and sealed completion evidence before rendering: every terminal receipt — success or attention — exits two, because Claude Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and delivers exit-0 output no earlier than the next user interaction (corrected 2026-08-29; success additionally carries its structured notification on stdout). A launcher-managed interactive Codex session places one owner-only gateway between remote TUI and App Server. The harness installer may make this checked entry transparent for interactive commands, but plugin or hook loading after process entry is not equivalent. That gateway atomically serializes manual input with an exact completion receipt, uses `turn/start` only while idle and `turn/steer` only for a steerable active turn, and durably suppresses duplicate sealed-batch delivery. The sidecar is prelaunched before the child spawn claim, connects only to the private control socket, never subscribes upstream, never sees or answers approvals, and submits no raw child output. A send followed by an unclassified disconnect is `sent-ambiguous` and is not retried. Outside those checked entries, hooks must not simulate wake by blocking Stop, parking every tool, or injecting a synthetic user turn; the parent remains conversational and uses a disclosed finite fallback. Legacy receipts may be consumed only by exact terminal typed harvest. Runtime-native subagents are a separate surface.
+A registered headless owner yields after registering a batch; its runtime supervisor joins the exact `parent_attempt_id` batch outside the model and resumes the same owned session once with a bounded typed receipt. A registered Claude owner keeps one realtime stream-input process for the route and submits the next receipt immediately after each non-terminal join; when a freshly verified terminal marker closes every declared terminal gate, the supervisor skips the redundant final owner turn and closes the stream before terminal row reconciliation. An explicit custom-command fallback retains per-turn `--resume`. A Claude interactive parent may instead arm one native `asyncRewake` PostToolUse hook from a successful exact owner-start receipt, or from a successful exact steward watch armed in the same session (`utilities/peer-steward.py watch`, SD-122 §13.37.2-(10)); either way the hook owns exactly one arming event, verifies it against the session that produced it, and never widens to another attempt or watch. It re-reads the exact current row and sealed completion evidence before rendering: every terminal receipt — success or attention — exits two, because Claude Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and delivers exit-0 output no earlier than the next user interaction (corrected 2026-08-29; success additionally carries its structured notification on stdout). A launcher-managed interactive Codex session places one owner-only gateway between remote TUI and App Server. The harness installer may make this checked entry transparent for interactive commands, but plugin or hook loading after process entry is not equivalent. That gateway atomically serializes manual input with an exact completion receipt, uses `turn/start` only while idle and `turn/steer` only for a steerable active turn, and durably suppresses duplicate sealed-batch delivery. The sidecar is prelaunched before the child spawn claim, connects only to the private control socket, never subscribes upstream, never sees or answers approvals, and submits no raw child output. A send followed by an unclassified disconnect is `sent-ambiguous` and is not retried. Outside those checked entries, hooks must not simulate wake by waiting in Stop, parking every tool, or injecting a synthetic user turn; the parent remains conversational and uses a disclosed finite fallback. A runtime's documented same-turn continuation is not such a simulation when it carries only records that already exist: see the in-turn carrier below. Legacy receipts may be consumed only by exact terminal typed harvest. Runtime-native subagents are a separate surface.
 
 Shared parent-delivery selection, immutable registration checks, and pre-spawn sidecar arming belong to `utilities/dispatch_parent_completion.py` across all three adapters. A child adapter never infers the parent runtime from its own name. What a parent runtime carries is data its adapter declares in `adapters/<harness>/config/harness-capabilities.json` (`parent_completion`: the carrier, what proves it reaches the parent, and the fallback when it cannot); the shared selection reads that declaration instead of branching on a harness name. Select delivery by parent runtime: Codex managed parent → Codex gateway; Claude interactive parent → exact owner or exact steward-watch `asyncRewake` with an exit-2 wake for every terminal receipt, plus the SessionStart/UserPromptSubmit sweep that re-delivers any SD-111 pending record or un-acked watch receipt at the next prompt; OpenCode interactive parent → its plugin's turn carrier (`opencode-turn`), which, while the session is idle, hands the records owed to it to the session's next turn through `promptAsync` and acks them once OpenCode takes the turn — its tool commands name that carrier in `AGENT_PARENT_COMPLETION_CARRIER`, so a server that predates the carrier keeps `poll-fallback`; all three render the delivered records with the one shared `dispatch_session_sweep.delivery_context`; registered Claude owner → persistent realtime stream with a sealed-terminal fast path (checked per-turn `--resume` fallback); registered Codex headless owner → its private App Server supervisor. Keep TUI client A as the only approval owner and sidecar client B control-only. Require private socket/state paths, exact terminal+quiescent membership, durable idempotency, bounded typed context, and fail-closed ambiguity. A transparent launcher must preserve and validate the real CLI, route only interactive surfaces, repair on update, and restore exactly on uninstall. If those checks are unavailable, report fallback and the missing atomic `continueIfIdle(threadId, idempotencyKey, typedContext)`/native async-rewake primitive rather than widening Stop or PreToolUse.
+
+**In-turn carrier (Codex, measured 2026-11-10 on Codex CLI 0.163).** Claude keeps
+delivered work in front of the session through `asyncRewake` exit-2 wakes and synchronous
+`additionalContext` at prompt and tool boundaries. Codex realizes the same meaning with its
+documented hook outputs, through `adapters/codex/hooks/turn-carrier.py` and the shared
+`utilities/codex_turn_carrier.py`:
+
+| Claude carrier | Codex realization |
+|---|---|
+| exit-2 wake of an idle session with the completion receipt or notice | native thread queue (`codex-native-queue`, §7.2), unchanged |
+| receipt or notice that arrives while the session works (`PostToolUse`/`UserPromptSubmit` `additionalContext`) | `PostToolUse` `hookSpecificOutput.additionalContext` with the owed records for this exact thread, rendered by the shared `delivery_context` and ACKed like the prompt path (`codex-native-prompt:<thread>`) |
+| a turn that ends while records are owed is woken again by the still-armed async hook | `Stop` `decision: block` continues the same turn with the owed records and un-acked steward watch receipts; Codex then runs `Stop` again with `stop_hook_active=true` |
+| — (Claude relies on the model) | once per turn, when the turn received a record whose required action is more than reading (or a peer report whose sealed transfer the shared `prompt_origin` verifies for this thread arrived as its prompt; a quoted `(peer-from: …)` is not one) and no tool ran afterwards, `Stop` continues the turn with that required action; the model may end with a one-line reason |
+
+The carrier renders only records the bridge may ACK and each at most once per turn, so a
+continuation always ends. Its output is never cut: it chooses the leading records (a sealed
+batch as one unit) whose rendering fits the 8000-character budget whole, ACKs only those,
+and hands the rest back pending for the next boundary. A completion without an exact running
+native turn is not claimed and stays with the native queue and the next prompt exactly as
+before; a notice in the same state root, which needs no turn binding, is still carried. It
+never waits, never parks, never blocks a tool, asks nothing, and adds no input; worker
+sessions are skipped. Per-turn state
+(tool count, records received, the one follow-through) lives under the dispatch state root in
+`codex-turn-carrier/`. OpenCode keeps its plugin turn carrier (`opencode-turn`).
+
+This carrier is not yet the same behavior as Claude end to end. Open differences, measured
+by the independent review of 2026-11-10 and not closed by this carrier:
+
+- **Codex watch line.** A Codex steward watch line still says `parent_next=bounded-wait/join`;
+  that Codex ends the turn and the runtime carries the receipt on, as with Claude's armed
+  watch, is not measured end to end (Herdr included).
+- **Completion without the App Server socket.** Without the exact running turn a completion
+  is still held to the native queue and the next prompt, so work that finishes mid-turn does
+  not reach that turn in such an environment. Notices beside it are no longer held back.
+- **Follow-through judgment.** The one pass checks only that no tool ran after the record;
+  it does not judge that the owed action was done, so an unrelated tool call clears it. A
+  quoted trailer no longer starts a pass; a verified peer report still gets one, because
+  peer messages carry no typed read-only marker.
+- **When ordinary notices land.** Codex hands a notice to the running turn at its next tool
+  boundary; Claude's `PostToolUse` path carries peer bodies, not ordinary session
+  notices, which wait for the next prompt or the owner's async rewake. The two do
+  not yet surface the same notice at the same point.
+- **OpenCode and installed trust.** Not measured by that review.
 
 A Claude owner's async-rewake carrier retries a timed-out readiness probe within
 its existing absolute deadline. A transient probe timeout does not end the wait
@@ -938,7 +989,10 @@ item; the retry recomputes that gate, otherwise the receipt is
 The guarded PTY input (Claude, and OpenCode with the exact session ID) requires
 the exact native SID, pane, foreground PID birth and namespace, native `idle`
 state, ready registered-work state, no open form or question, and an empty
-visible composer. A dim prompt suggestion is empty. Busy, blocked, unknown,
+visible composer. A dim prompt suggestion is empty. Terminal focus reports
+invalidate an in-flight observation but do not leave an unsubmitted draft;
+the following observation still checks the native composer and identity.
+Focus-looking bytes inside a paste remain input. Busy, blocked, unknown,
 form-open, nonempty-draft, or unreadable targets remain `pending` under the one
 `message-<ref>` carrier and receive no PTY input; a write that provably never
 started returns to `pending`, while an ambiguous write is never retyped. Prompt

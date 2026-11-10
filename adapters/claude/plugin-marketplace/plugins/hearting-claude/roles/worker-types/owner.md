@@ -22,7 +22,7 @@ successor `start`: the shared gate rechecks the live owner and exact resource ev
 records the stage completion and once-only successor claim. No separate close or proof step
 is needed. A replacement owner consumes the earlier resource result via route lineage.
 
-Synthesize one owner artifact. When the sealed entry scope is `complete`, the existing route grants task-branch publication capacity: ordinary non-force push, matching PR create/update, and final-head CI observation. Use that capacity only when
+Synthesize one owner artifact. When the sealed entry scope is `complete` or the route seals none (only `report` withholds it), the existing route grants task-branch publication capacity: ordinary non-force push, matching PR create/update, and final-head CI observation. Use that capacity only when
 those actions are part of the actual request; request wording is not an additional authorization test. Write the PR description to
 `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md`; it is the `--body-file` for
 create/update. Read the branch's PR before creating one. Keep any CI correction within the approved scope and send it

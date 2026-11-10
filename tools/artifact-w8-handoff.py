@@ -142,6 +142,19 @@ class LocatorSnapshot:
         concurrent writes after the final observation or a root-wide lock.
         """
         path = self.path(locator)
+        from artifact_spec_storage import resolve_path, revision_address
+        resolved = resolve_path(self.root, locator)
+        if resolved is not None:
+            if resolved.get('absolute') is None:
+                raise ValueError(f'population-target-invalid: {locator}')
+            address = revision_address(self.root, path)
+            ref, revision, _ = address
+            base = self.root / 'shared/spec' / ref
+            # Mapping facts are part of the same handoff snapshot as bytes.
+            for record in (base / 'reference.json', base / 'revisions' / revision / 'revision.json',
+                    base / 'revisions' / resolved['source_revision_id'] / 'revision.json'):
+                self.read(record)
+            path = self.path(resolved['target'])
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
@@ -158,7 +171,7 @@ class LocatorSnapshot:
             if (stamp(before) != stamp(after) or after.st_size != size
                     or "sha256:" + h.hexdigest() != digest):
                 raise ValueError(f"population-target-drift: {locator}")
-            current = self.path(locator).lstat()
+            current = path.lstat()
             if not stat.S_ISREG(current.st_mode) or stamp(current) != stamp(after):
                 raise ValueError(f"population-target-replaced: {locator}")
             return after.st_dev, after.st_ino
@@ -288,6 +301,15 @@ class Bundle:
                 reference = read_json(ref / "reference.json") if (ref / "reference.json").is_file() else {}
                 for rev in sorted((ref / "revisions").iterdir()):
                     meta = read_json(rev / "revision.json") if (rev / "revision.json").is_file() else {}
+                    if kind == 'spec' and meta.get('files'):
+                        from artifact_spec_storage import read_files
+                        logical, _ = read_files(self.root, ref.name, rev.name)
+                        physical = [file for file in logical.values() if file.source_revision_id == rev.name]
+                        storage = {'physical_file_count': len(physical),
+                            'physical_byte_size': sum(file.byte_size for file in physical),
+                            'stored_in': meta.get('stored_in', {})}
+                    else:
+                        storage = {}
                     if not meta.get("files"):
                         # W7-adopted revision without revision.json: enumerate the immutable tree.
                         files = []
@@ -306,7 +328,7 @@ class Bundle:
                                 "content_digest": meta.get("content_digest"), "file_count": meta.get("file_count"),
                                 "byte_size": meta.get("byte_size"), "enumerated": meta.get("enumerated", False),
                                 "path": os.path.relpath(rev, self.root),
-                                "files": meta.get("files", [])})
+                                "files": meta.get("files", []), **storage})
         return out
 
     def write(self, name: str, payload, jsonl=False):

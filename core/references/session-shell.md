@@ -51,23 +51,75 @@ prepared assets, without an auxiliary Node version probe. Native execution
 retains the existing display-ready boundary, exact binding and same-child
 input/relay ownership.
 
-The block opens by default, using its actual content height up to ten rows.
-Questions take space first; absent sections disappear. Its light, dim labels
-and short glyphs follow native status lines, with Fleet's semantic value colors.
-The status area retains every former Hearting-native field: folder and explicit
-session subject; branch/flags/worktrees and Git observation/time; the contiguous
-ten-cell colored context gauge; model/effort; 5h/7d percentages and reset times,
-model-specific quota buckets, answer waits, routes and any running-jobs line.
-Long status fields wrap in expanded mode; question space wins on small screens.
-The key guidance appears only while the person focuses the block.
-The existing optional session-shell configuration selects `layout: bottom`
-(default) or `side`, with `side_width: 40` and `side_min_columns: 132` defaults.
-Side changes geometry only: the same status, question editor and receipt source
-remain in use. Narrow windows fall back to bottom and return when widened.
-An observed OpenCode native sidebar keeps that attachment at bottom, avoiding
-competing rails. Preserve the same native process and input/relay boundaries
-through layout changes; the full-window Fleet modal remains full-window.
-The default bottom uses the question-first B layout. The current question,
+The approved v3.3 shell opens as a right HEARTING work panel when space permits,
+with bottom placement at narrow widths. All four edges belong to Hearting and
+share its representative state color; never frame the native terminal itself.
+Use the terminal's neutral background, without tinted fills. Text and glyphs
+accompany state colors. Native permission UI remains native; idle alone means
+neither work complete nor failed. Unknown evidence stays unknown.
+The same facts and available panel dimensions use the same content order and
+editing controls in all three harnesses, including startup and restoration.
+Keep the observed model/effort at the top (an unavailable effort is `?`) and
+compact session information at the bottom, never opportunistically in the
+middle. Full session IDs and long diagnostics belong to details. The wrapped Claude native row yields model/effort and route/wait badges to
+the common header and work/question sections. Its exact callback remains the
+source. Fields already painted in a native-owned status area are omitted from the compact duplicate.
+Physical exceptions are explicit: Claude's reserved native status rows and
+OpenCode's fixed sidebar, native Context/footer and native scroll gutter.
+Native-owned spaces are not recolored or resized to imitate another harness.
+Question interiors have one blank cell on both sides. Route state and shared
+verification codes use the operator language; missing records remain absent or
+unknown. Shorten displayed heads to seven characters and wrap route evidence at
+token boundaries, omitting empty fragments rather than repeating separators.
+
+The header keeps settings and observed model/effort in view even before session
+binding completes. Native-selected display evidence is independent of question
+or route binding; configured defaults never masquerade as observed selection.
+An official startup callback's active-model field may travel with its existing
+birth-checked lifecycle event, without another observation pass or event. This
+display field never selects a session or authorizes input.
+Show confirmed current work, its actual route name/flow/state and next action,
+then the person's question and results. A direct route has only its own stages.
+Clicking a route opens its existing read-only detail. Put each answer choice on
+its own line, wrapping within that choice; do not reserve a standalone
+session/age row. Hide an empty result section. Use the
+existing operator language setting and catalog. No last prompt is guessed
+into a goal. Full IDs, old peers and repo backlog belong to accessible details.
+Route details reuse the common route-visibility projection for shape, basis,
+tests, review, CI and completion evidence. Missing evidence is not a passing
+check. Bounded detail pages remain readable at narrow widths; opening them
+does not collect again or authorize an action.
+Retain every former status field there, and preserve Claude's native reserved
+status area. For the work panel, the managed Codex footer may yield duplicate
+paint to its visible model/compact status and the same session's complete
+details. This keeps the full ID in details instead of putting it in front of
+the person merely to hide a duplicate footer. Exact native SID, unchanged
+managed configuration and matching native values are still required. Display
+availability does not establish selection or input authority.
+
+The header's settings change only Hearting's existing session-shell policy:
+side/bottom layout, side width, narrow-window behavior and auxiliary detail.
+The same side width changes by dragging its boundary or by value controls.
+Apply saves after backing up the existing file; Cancel discards the preview;
+Defaults previews the defaults. Never edit native model or permission config.
+During an admitted peer paste, keys for a visible shell editor remain with that
+editor. Only native-directed human bytes join the retained delivery queue;
+leaving shell focus preserves their order behind the paste's delayed Enter.
+An accepted answer's read-only receipt view is not an editable draft. It may
+remain focused while the existing guarded native transport delivers that answer;
+pending API calls, editable questions, changed questions and unknown receipts
+retain the normal input-occupied behavior. Native identity, idle/composer and
+effect-time checks still apply without a manual Escape step to wake the CLI.
+Respect a minimum native area; use configurable bounded bottom height at 80
+columns and preserve the same child through resize. No new global hotkey.
+OpenCode uses only an additive HEARTING section inside its existing sidebar;
+preserve native title, Context, MCP, footer, background and fixed container width.
+When that slot is unavailable or hidden, use the common bottom panel without a
+second rail. A disconnected display stream clears its last sidebar paint and
+visibility notification so only the host's current bottom fallback remains.
+Native sidebar integration never changes question authority.
+
+The current question,
 choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
@@ -78,7 +130,7 @@ Secret answers remain masked while selected, submitted, unfocused or consumed;
 only the unchanged canonical response carries their actual value.
 Pending transport and proved consumption are distinct, and unavailable, expired
 or cancelled questions offer no active choices. Long questions remain readable
-with focused scrolling and an explicit overflow count. Use at most ten rows,
+with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields and Claude's native-owned status area. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.
@@ -145,8 +197,9 @@ contents without repeating those badges.
 Wrapped Codex keeps its original native arguments, settings and permission flags.
 OpenCode's Hearting route footer yields to the shell. The wrapped Codex viewport
 reads its native footer unchanged. Concealment requires the unchanged managed
-default preference, exact native SID, and all equivalent common fields actually
-painted, including all seven managed items and the exact thread ID. Custom,
+default preference, exact native SID and matching values for all seven managed
+items. The work panel must actually paint its model and compact status, with
+the remaining fields available in that same selected session's details. Custom,
 clipped, stale or ambiguous content stays visible. This affects
 painting, not the native VT, its coordinates or its input/identity observations.
 Person-requested answers use the existing separate action worker so a slow
@@ -177,3 +230,19 @@ inside a title as another terminal command.
 A pane address may use that same native attachment only when its birth-bound
 owner is the pane's current foreground group. Recheck that join immediately
 before delivery; keep the existing composer/lifecycle and Codex queue guards.
+
+Before the first lifecycle callback, a clipped Codex footer may supply only a
+read address to the existing loaded `thread/read` display observation. The live
+inner process/birth and its existing control socket are checked before and after
+the bounded read. The reply supplies model/effort only; it never selects a SID,
+publishes an attachment, subscribes/resumes a thread or authorizes input. An
+unloaded/foreign/changed/unavailable response stays unknown. The native-output
+event triggers this read; it creates no polling loop or additional collector.
+
+An OpenCode additive-slot click is a Hearting UI action when the host can match
+the entire currently painted owned frame in the native cell buffer. The host
+consumes that mouse press/release as it does its own bottom/side controls, so it
+does not masquerade as unsubmitted native draft bytes. A mismatch stays with
+native mouse handling. This display hit test never supplies input authority.
+At a short bottom answer editor all harnesses prioritize the same question/
+choices/draft/control rows; auxiliary telemetry stays in session details.
