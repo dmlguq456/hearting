@@ -57,6 +57,7 @@ shared-utility-deferred	governor_identity.py
 shared-utility-deferred	harness_behavior_cases_a.py
 shared-utility-deferred	harness_behavior_cases_b.py
 shared-utility-deferred	harness_behavior_cases_c.py
+shared-utility-deferred	harness_behavior_cases_codex_hooks.py
 shared-utility-deferred	harness_behavior_cases_d.py
 shared-utility-deferred	harness_behavior_cases_e.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
@@ -99,6 +100,7 @@ shared-utility-deferred	route_presence_gate.py
 shared-utility-deferred	turn_change_record.py
 shared-utility-deferred	frame_native_answer.py
 shared-utility-deferred	git_index_lock.py
+shared-utility-deferred	codex_tui_exit.py
 shared-utility-deferred	spec_merge.py
 shared-utility-deferred	ship-parent-deploy.py
 shared-utility-deferred	ship_parent_deploy.py
