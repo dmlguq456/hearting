@@ -2702,6 +2702,20 @@ def cmd_retire(args):
                    and (row.get("state") != "cancelled" or row.get("result") == "target-closed-unproven")
                    and (_retire_requester_matches(row, current_requester)
                         or _unbound_retire_requester_matches(row, current_requester))]
+        if own_sid and own_pane:
+            active = [row for row in matches if row.get("state") in peer_obligations._PENDING_STATES]
+            if active:
+                matches = active  # Settled history is not another current request.
+            else:
+                previous = {(row.get("intent") or {}).get("retry_of") for row in matches
+                            if isinstance((row.get("intent") or {}).get("retry_of"), str)}
+                current = [row for row in matches if row["id"] not in previous]
+                if current:
+                    matches = current  # Existing retry edges, not timestamps, name the terminal tip.
+                if len(matches) > 1 and all(row.get("state") == "cancelled"
+                        and row.get("result") == "target-closed-unproven" for row in matches):
+                    print("retired=false reason=target-closed-unproven")
+                    return 0  # All owned requests settled; no lifetime or handover is selected.
         if own_sid and own_pane and len(matches) == 1:
             saved = matches[0]
             if saved.get("state") == "complete" and saved.get("result") in {"normal-exit", "target-already-gone"}:

@@ -242,6 +242,31 @@ class WrappedForegroundTest(unittest.TestCase):
         self.assertEqual(settled["intent"], duty["intent"])
         self.assertEqual(self.actions, [])
 
+    def test_settled_history_does_not_shadow_a_normal_retry_or_the_all_settled_result(self):
+        old = self.unbound_request()
+        census = peer.herdr_observation.PaneCensus("default", (), 1.0)
+        with self.missing_target(), mock.patch.object(peer.herdr_observation, "pane_census", return_value=census):
+            self.assertEqual(self.retire()[0], 0)
+        old = self.store.get(old["id"])
+        self.retire()  # A visible but still unbound target creates the existing normal retry.
+        current = self.store.list()[0]
+        self.assertEqual(current["intent"]["retry_of"], old["id"])
+        with self.missing_target(), mock.patch.object(peer.herdr_observation, "pane_census", return_value=census):
+            code, _out = self.retire()
+            with self.subTest(stage="current-unsent"):
+                self.assertEqual(code, 0)
+                self.assertEqual(self.store.get(current["id"])["state"], "cancelled")
+            with contextlib.redirect_stdout(io.StringIO()):
+                peer._resume_retire_obligation(self.store.get(current["id"]), self.store)
+            self.assertEqual(self.store.get(current["id"])["state"], "cancelled")
+            with self.subTest(stage="all-settled"):
+                code, out = self.retire()
+                self.assertEqual(code, 0)
+                self.assertIn("retired=false reason=target-closed-unproven", out)
+        self.assertEqual(self.store.get(old["id"]), old)
+        self.assertEqual(self.store.get(current["id"])["intent"], current["intent"])
+        self.assertEqual(self.actions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
