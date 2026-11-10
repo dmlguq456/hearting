@@ -501,6 +501,12 @@ def main() -> int:
         except Exception:
             pass
         return 0
+    try:
+        # This request carries the start summary; a later compact needs it again.
+        from codex_start_summary import note_prompt
+        note_prompt(session_id(payload))
+    except Exception:
+        pass
     context_notice = ""
     try:
         from context_alert import codex_notice

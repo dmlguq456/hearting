@@ -20,6 +20,7 @@ import fixture_env
 spec = importlib.util.spec_from_file_location("codex_start_memory", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
+import codex_start_summary  # the bridge put its hooks directory on sys.path
 
 
 class SessionStartMemoryTest(unittest.TestCase):
@@ -41,8 +42,8 @@ class SessionStartMemoryTest(unittest.TestCase):
         self.expected = bridge.run_preflight("memory", str(self.cwd)).strip()
         self.assertIn("SYNTHETIC_START_MEMORY", self.expected)
 
-    def start(self, source="startup"):
-        payload = {"session_id": "synthetic-start", "cwd": str(self.cwd), "source": source}
+    def start(self, source="startup", sid="synthetic-start"):
+        payload = {"session_id": sid, "cwd": str(self.cwd), "source": source}
         output = io.StringIO()
         # Only the unrelated live pane/recovery collaborators are stubbed. The
         # installed preflight and memory summary generator run for real.
@@ -55,10 +56,21 @@ class SessionStartMemoryTest(unittest.TestCase):
             self.assertEqual(bridge.main(), 0)
         return output.getvalue()
 
+    def context(self, source, sid="synthetic-start"):
+        raw = self.start(source, sid)
+        return json.loads(raw)["hookSpecificOutput"]["additionalContext"] if raw else ""
+
+    def prompt(self, sid="synthetic-start"):
+        """Run the real Codex prompt bridge as the native UserPromptSubmit would."""
+        payload = {"session_id": sid, "cwd": str(self.cwd), "prompt": "hello", "hook_event_name": "UserPromptSubmit"}
+        subprocess.run([sys.executable, str(ROOT / "adapters/codex/hooks/userprompt-lifecycle.py")],
+                       input=json.dumps(payload), env=dict(os.environ), cwd=self.cwd,
+                       capture_output=True, text=True, timeout=60, check=False)
+
     def test_unset_flag_injects_shared_summary_for_native_start_sources(self):
         for source in ("startup", "resume", "clear", "compact"):
             with self.subTest(source=source):
-                out = json.loads(self.start(source))["hookSpecificOutput"]
+                out = json.loads(self.start(source, sid=f"synthetic-{source}"))["hookSpecificOutput"]
                 self.assertEqual(out["hookEventName"], "SessionStart")
                 self.assertEqual(out["additionalContext"], self.expected)
                 self.assertLessEqual(len(out["additionalContext"]), 2000)
@@ -86,6 +98,72 @@ class SessionStartMemoryTest(unittest.TestCase):
             actual = json.loads(self.start())["hookSpecificOutput"]["additionalContext"]
             self.assertEqual(actual, bridge.run_preflight("memory", str(self.cwd)).strip())
             self.assertLessEqual(len(actual), 400)
+
+    def test_resume_then_compact_before_first_request_carries_one_summary(self):
+        # Codex 0.163 drains queued start sources back to back before the
+        # prompt hook and keeps both contexts in that request
+        # (core/tests/suite/hooks.rs resumed_thread_runs_resume_then_compact_session_start_hooks).
+        for first in ("resume", "startup", "clear"):
+            with self.subTest(first=first):
+                sid = f"synthetic-pair-{first}"
+                request = [self.context(first, sid), self.context("compact", sid)]
+                self.assertEqual(sum(part.count(self.expected) for part in request), 1)
+                self.assertEqual(request[0], self.expected)
+
+    def test_compact_after_a_prompt_restores_the_summary(self):
+        sid = "synthetic-later-compact"
+        self.assertEqual(self.context("resume", sid), self.expected)
+        self.assertEqual(self.context("compact", sid), "")
+        self.prompt(sid)
+        self.assertEqual(self.context("compact", sid), self.expected)
+        # A second compact in the same turn follows a compact summary, which
+        # that compaction has replaced: it needs the summary again.
+        self.assertEqual(self.context("compact", sid), self.expected)
+
+    def test_stale_or_unemitted_start_does_not_suppress_compact(self):
+        sid = "synthetic-stale"
+        self.assertEqual(self.context("resume", sid), self.expected)
+        mark = codex_start_summary._mark_path(sid, os.environ)
+        data = json.loads(mark.read_text())
+        data["at"] -= codex_start_summary.PAIR_WINDOW_SECONDS + 1
+        mark.write_text(json.dumps(data))
+        self.assertEqual(self.context("compact", sid), self.expected)
+        sid = "synthetic-unemitted"
+        with patch.dict(os.environ, CODEX_SESSION_MEMORY_INJECT="0"):
+            self.assertEqual(self.start("resume", sid), "")
+        self.assertEqual(self.context("compact", sid), self.expected)
+
+    def policy(self, value):
+        path = Path(os.environ["XDG_CONFIG_HOME"]) / "hearting" / "memory-sync.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"codex_session_memory_inject": value}) if value is not None else "{broken")
+        self.addCleanup(path.unlink, missing_ok=True)
+
+    def test_shared_policy_file_switch_reaches_a_daemon_environment_without_the_flag(self):
+        # A shared app-server daemon hook inherits the daemon's environment, not
+        # the client's; the memory policy file is read at every start instead.
+        for value in (False, "0", "off"):
+            with self.subTest(value=value):
+                self.policy(value)
+                self.assertEqual(self.start(sid=f"synthetic-policy-{value}"), "")
+        self.policy(True)
+        self.assertEqual(self.context("startup", "synthetic-policy-on"), self.expected)
+        self.policy(None)  # unreadable policy keeps the default
+        self.assertEqual(self.context("startup", "synthetic-policy-broken"), self.expected)
+
+    def test_process_flag_still_wins_over_the_policy_file(self):
+        self.policy(False)
+        with patch.dict(os.environ, CODEX_SESSION_MEMORY_INJECT="1"):
+            self.assertEqual(self.context("startup", "synthetic-flag-on"), self.expected)
+        self.policy(True)
+        with patch.dict(os.environ, CODEX_SESSION_MEMORY_INJECT="0"):
+            self.assertEqual(self.start(sid="synthetic-flag-off"), "")
+
+    def test_workers_skip_memory_even_with_policy_enable(self):
+        self.policy(True)
+        with patch.dict(os.environ, AGENT_DISPATCH_CHILD="1"), \
+             patch.object(bridge, "run_preflight", side_effect=AssertionError("worker read memory")):
+            self.assertEqual(self.start(sid="synthetic-worker-policy"), "")
 
     def test_absent_store_emits_no_context(self):
         with patch.dict(os.environ, MEM_STORE=str(Path(self.tmp.name) / "absent-store")):

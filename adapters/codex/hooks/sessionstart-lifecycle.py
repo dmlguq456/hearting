@@ -17,6 +17,21 @@ MEM_PY = ROOT / "tools" / "memory" / "mem.py"
 UTILITIES = ROOT / "utilities"
 if str(UTILITIES) not in sys.path:
     sys.path.insert(0, str(UTILITIES))
+HOOKS = Path(__file__).resolve().parent
+if str(HOOKS) not in sys.path:
+    sys.path.insert(0, str(HOOKS))
+
+try:
+    import codex_start_summary as start_summary  # noqa: E402
+except ImportError:  # a partial tree without the helper keeps the plain flag
+    start_summary = None
+
+
+def summary_enabled() -> bool:
+    if start_summary is not None:
+        return start_summary.inject_enabled()
+    flag = os.environ.get("CODEX_SESSION_MEMORY_INJECT")
+    return flag is None or flag.lower() in {"1", "true", "yes", "on"}
 
 
 def first_string(mapping: dict[str, Any], *keys: str) -> str:
@@ -97,10 +112,6 @@ def forget_shown_candidates(payload: dict[str, Any]) -> None:
         pass
 
 
-def env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
-
-
 def is_worker_session() -> bool:
     return (
         os.environ.get("AGENT_SESSION_ROLE", "").lower() == "worker"
@@ -167,9 +178,18 @@ def main() -> int:
                     pass
             # Use the same bounded summary as Claude/OpenCode. Only an absent
             # flag opts into the new default; every explicit value retains its
-            # previous meaning (including empty/false disabling injection).
-            if "CODEX_SESSION_MEMORY_INJECT" not in os.environ or env_truthy("CODEX_SESSION_MEMORY_INJECT"):
-                parts.append(run_preflight("memory", current_cwd))
+            # previous meaning (including empty/false disabling injection). A
+            # shared daemon hook sees the daemon's environment, so the memory
+            # policy file carries the same switch (codex_start_summary).
+            source = nested_string(payload, "source").lower()
+            emitted = False
+            if summary_enabled() and (start_summary is None
+                                      or start_summary.summary_due(sid, source)):
+                summary = run_preflight("memory", current_cwd)
+                emitted = bool(summary.strip())
+                parts.append(summary)
+            if start_summary is not None:
+                start_summary.note_start(sid, source, emitted)
         emit_context("SessionStart", parts)
     finally:
         if not worker:
