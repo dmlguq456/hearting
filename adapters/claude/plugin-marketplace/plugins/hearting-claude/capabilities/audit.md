@@ -36,11 +36,12 @@ native turn, the legacy `FAIL` assessment means completed-with-findings only
 when its report has one unambiguous closed negative verdict:
 `최종 판정: 수정 후 병합 — head <7-40 hex>` or
 `Final verdict: changes requested — head <7-40 hex>`.
-These use the same whole-line forms as the PR review/publish reader; emphasis,
-spaces and a final period are normalized, but extra wording is not a verdict.
-Fenced examples, empty reports, conflicting declarations and other wording
-retain FAIL. Free prose, including a loose `reviewed` or `PASS`, never supplies
-completion authority. Existing PASS handoffs are unchanged.
+Read only the first nonblank line that does not start with `#`, using the same
+rule as the PR review/publish reader. Normalize emphasis, surrounding spaces
+and one final period, then require the whole line to match. A different opening
+line retains FAIL; never search the rest of the report for a verdict in examples,
+quotes or history. Free prose and fence interpretation have no authority.
+Existing PASS handoffs are unchanged.
 The handoff may describe subject findings in its blocker text; preserve them
 as assessment detail. `BLOCKED`, runtime errors, missing artifacts and
 unfinished children remain unresolved.

@@ -128,8 +128,6 @@ class CompletionMeaningTest(unittest.TestCase):
             'negation-en': 'Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch has not been reviewed.\n',
             'contraction-en': "Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch wasn't reviewed.\n",
             'negation-ko': '최종 판정: 수정 후 병합\nP1 — 대상 파일에 접근할 수 없음.\n검토를 할 수 없었습니다.\n검증: PASS 없음.\n',
-            'indented': '    ' + closed,
-            'tab-indented': '\t' + closed,
             'fenced': '```text\n' + closed + '\n```\n',
             'quoted': '> ' + closed,
             'condition': closed + ' (검토할 수 있을 때)',
@@ -138,9 +136,9 @@ class CompletionMeaningTest(unittest.TestCase):
             'long-head': 'Final verdict: changes requested — head ' + 'a' * 41,
             'not-hex': closed.replace('abcdef0', 'ghijklm'),
             'positive-disposition': '최종 판정: 병합 가능 — head abcdef0',
-            'conflicting': closed + '\nFinal verdict: mergeable — head abcdef0',
-            'different-heads': closed + '\nFinal verdict: changes requested — head 1234567',
-            'partial-read': closed + '\n' + 'x' * (64 * 1024),
+            'body-only': '검토를 수행하지 못했습니다.\n' + closed,
+            'history-only': 'Report history\n' + closed,
+            'oversized-opening': 'x' * (64 * 1024) + '\n' + closed,
         }
         for harness in ('claude', 'codex', 'opencode'):
             for case, report in reports.items():
@@ -158,7 +156,7 @@ class CompletionMeaningTest(unittest.TestCase):
                         jobs=self.jobs, attempt_id=self.aid)
                     self.assertEqual(recovered.failure_class, 'fail')
 
-    def test_fence_character_length_and_closing_boundary_keep_examples_non_authoritative(self):
+    def test_examples_never_skip_the_first_non_heading_line(self):
         closed = 'Final verdict: changes requested — head abcdef0'
         examples = (
             '````markdown\n```\n' + closed + '\n```\n````\n',
@@ -180,7 +178,7 @@ class CompletionMeaningTest(unittest.TestCase):
                     self.assertEqual(carrier['verdict'], 'FAIL')
         for opening, closing in (('```text', '```'), ('~~~~text', '~~~~~  '), ('   ````', '  ````')):
             self.report.write_text(opening + '\nexample\n' + closing + '\n' + closed)
-            self.seed(); self.assertEqual(self.live().failure_class, 'pass')
+            self.seed(); self.assertEqual(self.live().failure_class, 'fail')
 
     def test_closed_verdict_normalization_and_prose_is_not_an_authority_source(self):
         for report in (
@@ -193,10 +191,31 @@ class CompletionMeaningTest(unittest.TestCase):
             with self.subTest(report=report):
                 self.report.write_text(report); self.seed()
                 self.assertEqual(self.live().failure_class, 'pass')
-                # Body prose has no verdict authority under the supervisor's
-                # closed-line contract; only declarations can conflict.
+                # Only the opening declaration is authoritative.
                 self.report.write_text(report + '\nPASS 0; reviewed? unknown.\n')
                 self.assertEqual(self.live().failure_class, 'pass')
+
+    def test_first_non_heading_line_stops_before_any_body_or_later_verdict(self):
+        closed = 'Final verdict: changes requested — head abcdef0'
+        for harness in ('claude', 'codex', 'opencode'):
+            for suffix in ('\nFinal verdict: mergeable — head abcdef0',
+                           '\nFinal verdict: changes requested — head 1234567',
+                           '\n' + 'x' * (64 * 1024), '\n```\nnot performed'):
+                with self.subTest(harness=harness, suffix=suffix[:70]):
+                    self.report.write_text('\n # Audit report\n\n  **' + closed + '**.\n' + suffix)
+                    self.seed(harness); self.assertEqual(self.live(harness).failure_class, 'pass')
+        self.report.write_bytes((closed + '\n').encode() + b'\xff\xfe')
+        self.seed(); self.assertEqual(self.live().failure_class, 'pass')
+        for prefix in ('Context first\n', '> quote\n', '```text\n'):
+            self.report.write_text(prefix + closed)
+            self.seed(); self.assertEqual(self.live().failure_class, 'fail')
+        for separator in ('\r', '\v', '\u2028'):
+            self.report.write_text('Final verdict: changes requested' + separator + '— head abcdef0')
+            self.seed(); self.assertEqual(self.live().failure_class, 'fail')
+            self.report.write_text('# report' + separator + closed)
+            self.seed(); self.assertEqual(self.live().failure_class, 'pass')
+        self.report.write_text('# report\n\n')
+        self.seed(); self.assertEqual(self.live().failure_class, 'fail')
 
     def test_unreadable_report_content_and_directory_do_not_establish_a_completed_review(self):
         self.seed()
