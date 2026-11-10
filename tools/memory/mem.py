@@ -4576,11 +4576,15 @@ def curate_artifacts():
         if rows:
             out.append("PLANS (dev_logs indicate started or completed cycles):")
             out.extend(rows)
-    spec = reader.spec_dir(ar) if reader is not None else None
-    ps = (spec[0] if spec else ar / "spec") / "pipeline_state.yaml"
-    if ps.is_file():
+    try:
+        observed = reader.read_spec_file(ar, 'pipeline_state.yaml') if reader is not None else None
+        txt = observed.data.decode('utf-8') if observed is not None else None
+        if reader is None and (ar / 'spec/pipeline_state.yaml').is_file():
+            txt = (ar / 'spec/pipeline_state.yaml').read_text(encoding='utf-8')
+    except (OSError, ValueError):
+        txt = None
+    if txt is not None:
         try:
-            txt = ps.read_text(encoding="utf-8")
             keys = ("phases:", "spec:", "scaffolding:", "dev:", "design:",
                     "ship_setup:", "last_updated")
             pl = [l for l in txt.splitlines() if l.strip().startswith(keys)]

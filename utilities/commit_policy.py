@@ -307,13 +307,29 @@ def may_commit(args) -> bool:
     return authorized and known and operation is None
 
 
+def _entry_scope_allows_publication(route) -> bool:
+    """A sealed `complete` scope, or a route that seals no entry scope at all.
+
+    An unscoped route (a direct compose without a start choice) has no declared
+    stop point, so its approved request runs to its end as on every harness;
+    only a sealed `report` scope, or an invalid marker, withholds publication.
+    """
+    version = route.get("entry_scope_contract_version")
+    scope = route.get("entry_execution_scope")
+    if version is None and scope is None:
+        return True
+    return type(version) is int and version == 1 and scope == "complete"
+
+
 def task_publish_scope(args) -> dict[str, str] | None:
     """Resolve the existing approval for a code owner to publish this task PR.
 
-    The source of authority is the sealed complete entry scope. The approved
+    The source of authority is the sealed route: a `complete` entry scope, or
+    no entry scope (nothing declared a stop before publication). The approved
     task itself determines whether the owner performs a publication command;
-    request wording is not a second authorization check. Stage/review workers,
-    other capabilities, and protected/default refs receive no scope.
+    request wording is not a second authorization check. A `report` scope,
+    stage/review workers, other capabilities, and protected/default refs
+    receive no scope.
     """
     if (getattr(args, "worker_type", None) != "owner"
             or getattr(args, "dispatch_depth", None) != 1):
@@ -344,8 +360,7 @@ def task_publish_scope(args) -> dict[str, str] | None:
             or (route_id and route.get("route_id") != route_id)
             or (route_hash and route.get("route_hash") != route_hash)
             or Path(str(route.get("cwd") or "")).resolve(strict=False) != worktree
-            or route.get("entry_scope_contract_version") != 1
-            or route.get("entry_execution_scope") != "complete"):
+            or not _entry_scope_allows_publication(route)):
         return None
     output_value = (getattr(args, "artifact_output_dir", None)
                     or os.environ.get("AGENT_ARTIFACT_OUTPUT_DIR"))

@@ -84,6 +84,29 @@ def select_seed_reference(artifact: Path, receipt: dict | None, *, reference_id:
     return None
 
 
+def revision_history(artifact, revision, *, excluded=(), components=None):
+    """Only missing history bytes; never reread obsolete current PRDs."""
+    from artifact_spec_storage import revision_address, read_inventory, read_files, StorageError
+    def wanted(name):
+        parts = Path(name).parts
+        return (name not in excluded and len(parts) >= 4 and parts[-4] == '_internal'
+            and parts[-3] == 'versions' and re.fullmatch(r'v[0-9]+', parts[-2])
+            and parts[-1] == 'prd.md' and (components is None or parts[0] in components))
+    address = revision_address(artifact, revision)
+    if address is not None:
+        try:
+            record = read_inventory(artifact, address[0], address[1])
+            paths = [row['path'] for row in record['files'] if wanted(row['path'])]
+            if not paths: return {}
+            files, _ = read_files(artifact, address[0], address[1], paths=paths)
+            return {name: file.data for name, file in files.items()}
+        except StorageError as error:
+            raise PRODUCER.ProducerError(error.code, str(error)) from error
+    return {src.relative_to(revision).as_posix(): src.read_bytes()
+            for src in sorted(revision.rglob('prd.md'))
+            if wanted(src.relative_to(revision).as_posix()) and src.is_file() and not src.is_symlink()}
+
+
 def seed_component_spec(spec_base, artifact, reference, receipt, components):
     """Prepare only the selected components, continuing the original base on retry."""
     receipt_path = spec_base/PRODUCER.SPEC_BASE_RECEIPT
@@ -120,14 +143,14 @@ def seed_component_spec(spec_base, artifact, reference, receipt, components):
         for other in sorted(revisions.iterdir()):
             if not other.is_dir() or other.name == base:
                 continue
-            for src in sorted(other.rglob("prd.md")):
-                rel = src.relative_to(other)
+            for name, data in revision_history(artifact, other, excluded=seed_tree, components=pending).items():
+                rel = Path(name)
                 parts = rel.parts
                 if (len(parts) < 4 or parts[0] not in pending or parts[-4] != "_internal"
                         or parts[-3] != "versions" or not re.fullmatch(r"v[0-9]+", parts[-2])):
                     continue
-                if src.is_file() and not src.is_symlink() and rel.as_posix() not in seed_tree:
-                    seed_tree[rel.as_posix()] = src.read_bytes()
+                if parts[-1] == 'prd.md' and name not in seed_tree:
+                    seed_tree[name] = data
                     history_paths.add(rel.as_posix())
     for path in spec_base.rglob("*"):
         rel = path.relative_to(spec_base).as_posix()
@@ -210,6 +233,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
     latest=(reference or {}).get("latest_revision_id")
     ref_id=(reference or {}).get("shared_reference_id")
     revision=artifact/"shared"/"spec"/ref_id/"revisions"/latest if ref_id and latest else None
+    original_tree = {}
     if receipt is not None:
         base=PRODUCER._spec_admission_base(artifact,spec_base,ref_id,None)
         # The receipt is the original input, not a pin to today's pointer.
@@ -248,6 +272,8 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
                 continue
             raise PRODUCER.ProducerError("shared-seed-state-unproven",rel)
     else:
+        if revision is not None:
+            original_tree = PRODUCER._verified_shared_spec(artifact, ref_id, latest)[0]
         # Only known unchanged seed files and explicit worker research can
         # predate the receipt. Unknown/deleted old files must not be resurrected.
         for path in spec_base.rglob("*"):
@@ -256,15 +282,14 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
                 raise PRODUCER.ProducerError("shared-base-unproven",str(rel))
             if not path.is_file() or "_internal/research/" in rel.as_posix():
                 continue
-            original=revision/rel if revision is not None else artifact/"spec"/rel
-            if original is None or not original.is_file() or path.read_bytes()!=original.read_bytes():
+            original=(original_tree.get(rel.as_posix()) if revision is not None else
+                      (artifact/"spec"/rel).read_bytes() if (artifact/"spec"/rel).is_file() else None)
+            if original is None or path.read_bytes()!=original:
                 raise PRODUCER.ProducerError("shared-base-unproven",str(rel))
         metadata=PRODUCER._read_json(revision/PRODUCER.REVISION_RECORD_NAME) if revision else None
         if revision is not None and (metadata is None or metadata.get("shared_reference_revision_id")!=latest
                                      or metadata.get("shared_reference_id")!=ref_id):
             raise PRODUCER.ProducerError("shared-base-invalid",str(revision))
-        if revision is not None:
-            PRODUCER._verified_shared_spec(artifact,ref_id,latest)
         receipt={"schema_version":1,"reference_id":ref_id,"revision_id":latest,
                  "content_digest":metadata["content_digest"] if metadata else None,"seed_complete":False}
         receipt_path.parent.mkdir(parents=True,exist_ok=True)
@@ -274,10 +299,8 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
         PRODUCER._write_atomic(receipt_path,PRODUCER._json_bytes(receipt))
         return {"status":"seed-skipped","reason":"prd-present" if has_prd else "no-shared-revision","prd_present":has_prd,"preexisting_files":preexisting,"spec_base":str(spec_base)}
     copied=0; kept=0; kept_paths=[]
-    for src in sorted(revision.rglob("*")):
-        if not src.is_file() or src.is_symlink():
-            continue
-        rel=src.relative_to(revision)
+    for name, data in sorted(original_tree.items()):
+        rel=Path(name)
         if rel.as_posix() in {"revision.json",PRODUCER.SPEC_BASE_RECEIPT}:
             continue
         dst=spec_base/rel
@@ -289,23 +312,25 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
             if len(kept_paths)<20: kept_paths.append(rel.as_posix())
             continue
         dst.parent.mkdir(parents=True,exist_ok=True)
-        PRODUCER._write_atomic(dst, src.read_bytes()); copied+=1
+        PRODUCER._write_atomic(dst, data); copied+=1
     history=0
+    history_present = {path.relative_to(spec_base).as_posix() for path in spec_base.rglob('*') if path.is_file()}
     revisions_dir=revision.parent
     if revisions_dir.name=="revisions":
         for other in sorted(revisions_dir.iterdir()):
             if other==revision or not other.is_dir():
                 continue
-            for src in sorted(other.rglob("prd.md")):
-                rel=src.relative_to(other)
+            for name, data in revision_history(artifact, other, excluded=history_present).items():
+                rel=Path(name)
                 parts=rel.parts
                 # <component?>/_internal/versions/vN/prd.md -- immutable history rows only
                 if len(parts)<4 or parts[-4]!="_internal" or parts[-3]!="versions" or not re.fullmatch(r"v[0-9]+",parts[-2]):
                     continue
                 dst=spec_base/rel
-                if dst.exists() or src.is_symlink() or not src.is_file():
+                if dst.exists() or parts[-1] != 'prd.md':
                     continue
-                dst.parent.mkdir(parents=True,exist_ok=True); PRODUCER._write_atomic(dst, src.read_bytes()); history+=1
+                dst.parent.mkdir(parents=True,exist_ok=True); PRODUCER._write_atomic(dst, data); history+=1
+                history_present.add(name)
     receipt["seed_complete"]=True
     PRODUCER._write_atomic(receipt_path,PRODUCER._json_bytes(receipt))
     if has_prd and copied==0 and history==0:
@@ -420,6 +445,20 @@ class VersionChainError(Exception):
 
 def versions_max(tree: Path) -> int:
     """Highest `_internal/versions/v{N}` directory under one spec tree (0 when none)."""
+    # Physical payloads are sparse in a logical revision. Keep the counter on
+    # the recorded history slots, not on its provider's directory names.
+    from artifact_spec_storage import revision_address, read_inventory, StorageError
+    for root in tree.parents:
+        address = revision_address(root, tree)
+        if address is not None:
+            try:
+                inventory = read_inventory(root, address[0], address[1])
+            except StorageError as error:
+                raise VersionChainError('version-chain-unenumerable', str(error)) from error
+            prefix = (address[2] + '/' if address[2] else '') + '_internal/versions/'
+            numbers = [int(match.group(1)) for name in (row['path'] for row in inventory['files']) if name.startswith(prefix)
+                for match in [re.match(r'v([0-9]+)/', name[len(prefix):])] if match]
+            return max(numbers, default=0)
     versions=tree/"_internal"/"versions"
     found=[]
     if versions.is_dir():

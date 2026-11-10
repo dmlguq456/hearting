@@ -25,25 +25,23 @@ def question_presentations(items, columns, *, native_wait=None):
         heading = [("" if native_wait is not None else "◑ ", key),
                    (ui_text("fleet.session_block.questions") + " " + str(len(listed)), "dim"),
                    (f" · {index+1}/{len(listed)} · ", "dim"),
-                   (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key),
-                   (" · " + ui_text("fleet.session_block.this_session") + " · " + str(item.get("age") or "?"), "dim")]
+                   (ui_text("fleet.session_block." + ("compact_" if columns < 64 else "") + state), key)]
         source = []
-        if columns < 64:
-            source = wrap_parts([heading.pop()], width)
         choices = (["approve", "reject", "defer"] if item.get("answer_kind") == "decision"
                    else question.get("choices") or [])
         options = []
         for number, choice in enumerate(choices, 1):
-            if options:
-                options.append((" · ", "dim"))
             label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
-            options.append((str(number) + " " + str(label), "loc_repo"))
+            prefix = str(number) + " "
+            parts = [(str(label), "loc_repo")]
             if question.get("recommended") == number - 1:
-                options.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
+                parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
+            for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix)))):
+                options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
         question["display"] = {
             "head": heading, "source": source,
             "body": wrap_parts([(question.get("question") or "?", "loc_repo")], width),
-            "options": wrap_parts(options or [(ui_text("fleet.session_block.text_hint"), "dim")], width)
+            "options": (options or [[(ui_text("fleet.session_block.text_hint"), "dim")]])
                        if state == "open" else [[(str(item.get("reason") or ui_text("fleet.session_block." + state)), "dim")]],
         }
     return items

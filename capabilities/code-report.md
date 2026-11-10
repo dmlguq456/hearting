@@ -34,7 +34,7 @@ the report half of the stage ownership contract in `core/OPERATIONS.md` §5.10.
 
 The report stage does not publish a task branch or PR. The capability owner
 receives task-publication capacity from the route's sealed complete entry scope
-and performs publication only when those actions are part of the actual request.
+(or a route that seals no entry scope; `report` withholds it) and performs publication only when those actions are part of the actual request.
 Integration and merge stay with the supervisor.
 
 The stage returns the canonical `final_report.md` source path to the

@@ -371,10 +371,33 @@ def _route_page(grid, vm, ident, x, right, bottom, state):
             grid.put(x + 16, y, clip(", ".join(values[:4]) or "·", right - x - 19),
                      "soft" if values else "dim", limit=right)
             y += 1
+    y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom)
     y = _draw_route_subset(grid, vm, (route,), x, y, bottom, opened=ident, no_repo_group=True,
                            view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
                       bottom=min(bottom, grid.rows - 6))
+
+
+_VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}
+
+
+def _route_visibility_lines(grid, visibility, x, right, y, bottom):
+    """How the route was chosen, what was verified and what comes next (display only)."""
+    lines = tuple((visibility or {}).get("lines") or ()) if isinstance(visibility, Mapping) else ()
+    room = max(0, bottom - y - 16)      # leave the route row and its stage frame their rows
+    if not lines or room < 2:
+        return y
+    shown = lines[:room]
+    for label, text, tone in shown:
+        grid.put(x + 3, y, clip(str(label) + ":", 12), "dim", limit=right)
+        grid.put(x + 16, y, clip(str(text), max(0, right - x - 19)),
+                 _VISIBILITY_TONE.get(str(tone), "soft"), limit=right)
+        y += 1
+    if len(lines) > len(shown):
+        grid.put(x + 16, y, clip("+%d more" % (len(lines) - len(shown)), max(0, right - x - 19)),
+                 "dim", limit=right)
+        y += 1
+    return y
 
 
 class _SubsetState:
