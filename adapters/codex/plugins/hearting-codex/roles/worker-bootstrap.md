@@ -50,7 +50,7 @@ You are a bounded worker, not the user-facing main session.
   HOME, existing experiments, parent or sibling roots, or shared runtime state.
 - Stage, review, support, and frame workers do not publish task branches or PRs.
   The owner fragment defines task-branch publication capacity from the existing
-  sealed complete scope; the owner performs publication only within the actual
+  sealed complete scope, or a route sealing no scope; the owner performs publication only within the actual
   requested task. Integration pushes, main merges, releases,
   installations, and worktree cleanup remain supervisor responsibilities.
 
