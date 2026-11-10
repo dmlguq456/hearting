@@ -100,9 +100,10 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   assert(!text.includes('[object Object]')&&!text.includes('NATIVE ROW'),id+' '+s);
   // An open question comes first: its rows stay and the line waits.
   if(asking){assert.equal(text,none,id+' '+s);continue;}
-  const lines=rows.filter(l=>l.includes('[정리]')||l.includes('이유와'));
-  assert(text.includes('⚠ [정리]')&&text.includes('이어서해'),id+' '+s);
-  assert(width===80?lines.length===1&&lines[0].includes('…'):lines.length<=3,id+' '+s+' '+lines.length);
+  const first=rows.findIndex(l=>l.includes('⚠ [정리]')),lines=rows.slice(first,rows.findIndex(l=>l.includes('Current work')));
+  assert(first>=0&&text.includes('이어서해'),id+' '+s);
+  // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
+  assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length);
   assert.equal(rows.length,width===80?none.split('\n').length+1:rows.length,id);
  }
 }

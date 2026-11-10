@@ -73,9 +73,11 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
     if(tidy&&!asking){
       const parts=line('⚠ '+tidy,'lvl_y');
-      if(side)wrap(parts,3);
-      else if(measure(clean(parts[0].text))<=inner)add(parts);
-      else add([...clip(parts,inner-1).parts,text('…','lvl_y')]);
+      // A cut line ends in an ellipsis in either layout.
+      const rows=[];wrap(parts,side?4:2,undefined,rows);
+      const kept=rows.slice(0,side?3:1);
+      if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…','lvl_y')];}
+      for(const row of kept)add(row);
     }
     if(status&&side)add(line(status,color));
     if(routeDetail){
