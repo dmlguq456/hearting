@@ -105,7 +105,7 @@ function publishNativeDisplay() {
     ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});

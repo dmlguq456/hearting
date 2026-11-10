@@ -8514,12 +8514,15 @@ def _read_screen(target):
     """The visible pane (ANSI) as screen lines, or None when it could not be read.
 
     A shell seat's pane also shows the shell's frame and panel; its draft, form
-    and footer judgments read the native cells instead (one shared source)."""
+    and footer judgments read the native cells instead (one shared source). Every
+    judged key into a shell seat's pane reads here first: while the host says a
+    shell editor holds the outer keys, or gives no answer, there is no screen to
+    type into (None), never the framed pane read again as an empty box."""
     seat = _shell_seat(target)
     if seat is not None:
         import session_shell
         lines = session_shell.native_screen(seat)
-        if lines is not None:
+        if lines != session_shell.PASSTHROUGH:
             return lines
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)

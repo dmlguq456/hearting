@@ -244,14 +244,25 @@ def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dic
     return joined[0] if len(joined) == 1 else None
 
 
+PASSTHROUGH = "passthrough"
+
+
 def native_screen(binding: dict):
-    """The native TUI's own screen as ``(char, faint)`` cell lines, or None.
+    """The screen a key typed into this seat's pane reaches, as ``(char, faint)`` cell lines.
 
     A wrapped pane shows the shell's panel and frame around the native screen;
     draft, form and footer judgments read the native cells the host parses.
+    While a shell editor (settings, the Fleet explorer, a question) holds the
+    outer keys the host says so (``focused``); typed input would land there, not
+    in the native box these cells show, so that is None like no answer.
+    ``PASSTHROUGH`` only when the host relays the pane raw: the pane is then the
+    native screen and its keys go straight to native.
     """
     result = control(binding, "screen")
-    screen = result.get("screen") if isinstance(result, dict) and result.get("ok") else None
+    if isinstance(result, dict) and result.get("ok") is False and result.get("reason") == "display-unavailable":
+        return PASSTHROUGH
+    screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
+              and result.get("focused") is False else None)
     if not isinstance(screen, list) or len(screen) > 512:
         return None
     lines = []
