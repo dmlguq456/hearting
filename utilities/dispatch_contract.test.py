@@ -3484,7 +3484,9 @@ class DispatchContractTest(unittest.TestCase):
   root=P.parent.parent
   for harness in D.WRAPPER_PARENT_HARNESSES:
    source=(root/"adapters"/harness/"bin"/"dispatch-headless.py").read_text(encoding="utf-8")
-   export=re.search(r'"AGENT_DISPATCH_CURRENT_SANDBOX":\s*([^,\n]+)',source)
+   # The wrapper passes its value to the shared worker environment
+   # (dispatch_headless_main.worker_environment), which exports it.
+   export=re.search(r'\bcurrent_sandbox=([^,\n]+)',source)
    self.assertIsNotNone(export,harness)
    value=export.group(1).strip()
    with self.subTest(harness=harness):

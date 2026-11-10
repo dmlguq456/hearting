@@ -190,7 +190,10 @@ class OwnerRouteBindingTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             with self.subTest(adapter=adapter):
                 self.assertIn("WRAPPER_COMMON.append_job", text)
-                self.assertIn('"AGENT_ROUTE_NODE": args.route_node or ""', text)
+                self.assertIn("DISPATCH_MAIN.worker_environment(", text)
+        # The worker environment is built once for the three wrappers.
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+        self.assertIn('"AGENT_ROUTE_NODE": args.route_node or ""', shared)
 
 
 class OwnerRouteAdvanceTest(unittest.TestCase):

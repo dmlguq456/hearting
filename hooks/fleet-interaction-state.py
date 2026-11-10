@@ -66,6 +66,11 @@ def main():
         if kind_index + 1 >= len(sys.argv):
             return 0
         kind = sys.argv[kind_index + 1]
+        if (harness == "claude" and kind == "permission"
+                and payload.get("tool_name") == "AskUserQuestion"):
+            # Claude also raises PermissionRequest for its question tool; the
+            # PreToolUse decision wait already describes it, so keep that.
+            return 0
         source = {
             "decision": "claude-asktool",
             "permission": "claude-permission",

@@ -291,6 +291,7 @@ const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'read
    const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
    let paneOwningContext = ctx;
    const pendingPeerStatus = new Map();
+   const sessionInfoById = new Map(), v2SessionInfo = new Map();
    ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
    ${extract('function sdkResponseData(result)', 'function runCompactHook')}
    ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
@@ -335,7 +336,14 @@ try {
             final = [pending.read(root, storage, row["delivery_id"]) for row in notices]
             self.assertEqual([pending.received_ack_identity(row, storage, row["delivery_id"])
                               for row in final], identities)
-            self.assertTrue(all(row["state"] == case.get("state", "pending") for row in final), final)
+            # A prompt the native API accepted without an observed receipt stays
+            # claimed (sent, not unsent): the next idle pass settles it from history
+            # and only the expired claim lease makes it deliverable again.
+            held = case.get("writes", 0) >= 1 and case.get("acceptance") != "ambiguous"
+            expected_state = case.get("state", "claimed" if held else "pending")
+            self.assertTrue(all(row["state"] == expected_state for row in final), final)
+            if held and expected_state == "claimed":
+                self.assertNotIn("release", observed["actions"])
             self.assertTrue(all(pending.read(root, "B" if storage == "A" else "A", row["delivery_id"])
                                 is None for row in notices))
             return observed, final
@@ -402,6 +410,288 @@ try {
         self.assertIn("CARRIER_NEGATIVE_CACHE_MS", source)
         self.assertIn("cached.negativeUntil = now + CARRIER_NEGATIVE_CACHE_MS", source)
         self.assertIn("for (const digest of cached.digests)", source)
+
+    def test_completion_resend_limit_defers_to_the_next_natural_turn(self):
+        # A prompt accepted again and again whose exact text never appears in the
+        # native history (the review's history-read fault) opens at most
+        # CARRIER_UNOBSERVED_SEND_LIMIT turns. The record is not dropped: it stays
+        # owed, opens no idle turn, and the next user prompt or completed tool of a
+        # running turn carries and acks it once.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            script = root / "limit.mjs"
+            script.write_text(r"""
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {createHash} from 'node:crypto'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const extract = (start, end) => {
+  const a = source.indexOf(start), b = source.indexOf(end, a)
+  assert(a >= 0 && b > a, `missing actual source: ${start}`)
+  return source.slice(a, b)
+}
+const limit = Number(/const CARRIER_UNOBSERVED_SEND_LIMIT = (\d+)/.exec(source)[1])
+assert(limit >= 1)
+let tick, writes = 0, owedState = 'claimed'
+const actions = [], logs = []
+const record = {root: '/fixture', storage_key: 'B', delivery_id: 'delivery-fixture',
+  claim_owner: 'sweep-carrier', immutable_identity: {delivery_id: 'delivery-fixture'}}
+const body = 'Hearting runtime delivery\nHEARTING_RECEIPT_V1 delivery-fixture ' + '0'.repeat(64)
+const command = async (action, sid, data) => {
+  actions.push(action)
+  if (action === 'roots') return ['/fixture']
+  if (action === 'recipients')
+    return {generation: 'g', digests: [], delivery_ids: owedState === 'acked' ? [] : [record.delivery_id]}
+  if (action === 'deliver') return owedState === 'acked' ? {text: '', records: []} : {text: body, records: [record]}
+  if (action === 'settle') return {received_ids: [], settled_count: 0, unknown_ids: [],
+    text: data.text, records: data.records}
+  if (action === 'release') return {count: 1}
+  if (action === 'ack') { owedState = 'acked'; return {count: 1} }
+  throw Error('unexpected ' + action)
+}
+const nativeResponse = data => ({data, response: {ok: true, status: 200}})
+const session = {
+  get: async () => nativeResponse({id: 'B', projectID: 'fixture', directory: process.cwd(),
+    slug: 'fixture', title: 'fixture', version: '1', time: {created: 1, updated: 1}}),
+  status: async () => nativeResponse({B: {type: 'idle'}}),
+  messages: async () => nativeResponse([]),
+  promptAsync: async () => { writes++; return {response: {ok: true, status: 204}} },
+}
+const ctx = {directory: process.cwd(), client: {session, app: {log: async row => logs.push(row.body.extra)}}}
+const sync = (action, sid, data) => {
+  actions.push(action)
+  return {received_ids: [], settled_count: 0, unknown_ids: [], text: data.text, records: data.records}
+}
+const carrierCommand = (action, sid, data, observe, synchronous = false) =>
+  synchronous ? sync(action, sid, data) : command(action, sid, data)
+const realTimeout = setTimeout
+const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'readFileSync',
+  'realpathSync', 'createHash', 'setInterval', 'setTimeout', 'baseDir', 'isWorkerSession', 'pendingPeerDelivery',
+  `let paneNativeOrigin = {sid: 'B', directory: ctx.directory, state: 'pending'};
+   const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
+   let paneOwningContext = ctx;
+   const pendingPeerStatus = new Map();
+   const sessionInfoById = new Map(), v2SessionInfo = new Map();
+   ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
+   ${extract('function sdkResponseData(result)', 'function runCompactHook')}
+   ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
+   ${extract('const CARRIER_ENV =', '// One bounded sweep step')}
+   ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
+   return createCompletionCarrier(ctx);`)
+// The post-send history look-again waits are collapsed; nothing else is timed.
+const fastTimeout = (fn, ms) => realTimeout(fn, ms === 500 ? 0 : ms)
+const carrier = setup(ctx, carrierCommand, path, fs.readdirSync, fs.readFileSync, fs.realpathSync,
+  createHash, fn => {tick = fn; return {unref(){}}}, fastTimeout, x => x.directory, () => false, async () => {})
+carrier.env('B')
+carrier.status('B', 'idle')
+const drain = async () => {for (let i = 0; i < 200; i++) await new Promise(resolve => realTimeout(resolve, 0))}
+try {
+  // Each tick stands for one expired claim lease: the record is claimable again.
+  for (let pass = 0; pass < limit + 3; pass++) { tick(); await drain() }
+  assert.equal(writes, limit, JSON.stringify({writes, actions, logs}))
+  assert(logs.some(row => row.reason === 'sent-unobserved-held' && row.resend_limit_reached))
+  // The idle callback after a natural turn looks past the inbox; it still opens no turn.
+  await carrier.idle('B'); await drain()
+  assert.equal(writes, limit)
+  assert(logs.some(row => row.reason === 'resend-limit-deferred'))
+  assert(!actions.includes('ack'))
+  // The next natural turn carries the deferred record and acks it.
+  const text = await carrier.inTurn('B')
+  assert.equal(text, body)
+  assert.equal(owedState, 'acked')
+  assert.equal(await carrier.inTurn('B'), '')
+  tick(); await drain()
+  assert.equal(writes, limit)
+  console.log(JSON.stringify({writes, limit}))
+} finally { carrier.dispose(true) }
+""")
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_natural_turn_takes_over_the_live_claim_right_after_the_resend_limit(self):
+        # The review's gap (RV-PR1454): the limited second send still holds its
+        # 120-second claim lease, and a fresh claim is refused while it lives. A
+        # completed tool result or the user's next prompt arriving in that window
+        # must carry the body on that very turn by taking the exact claim over
+        # (settle revalidates owner, lease and recipient), then ack it once.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            script = root / "takeover.mjs"
+            script.write_text(r"""
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {createHash} from 'node:crypto'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const extract = (start, end) => {
+  const a = source.indexOf(start), b = source.indexOf(end, a)
+  assert(a >= 0 && b > a, `missing actual source: ${start}`)
+  return source.slice(a, b)
+}
+const limit = Number(/const CARRIER_UNOBSERVED_SEND_LIMIT = (\d+)/.exec(source)[1])
+const LEASE = 120
+const body = 'Hearting runtime delivery\nHEARTING_RECEIPT_V1 delivery-fixture ' + '0'.repeat(64)
+async function run(boundary, {expireFirst = false} = {}) {
+  // A shared-sweep stand-in that keeps the real lease rule: a live claim is not
+  // claimable again, and only its exact owner may settle, release or hand it on.
+  let now = 0, owners = 0, writes = 0, tick
+  const store = {state: 'pending', owner: null, deadline: 0, acked_by: null}
+  const actions = [], logs = []
+  const live = () => store.state === 'claimed' && now < store.deadline
+  const view = () => ({root: '/fixture', storage_key: 'B', delivery_id: 'delivery-fixture',
+    claim_owner: store.owner, immutable_identity: {delivery_id: 'delivery-fixture'}})
+  const command = async (action, sid, data) => {
+    actions.push(action)
+    if (action === 'roots') return ['/fixture']
+    if (action === 'recipients')
+      return {generation: 'g', digests: [], delivery_ids: sid === 'B' && store.state !== 'acked' ? ['delivery-fixture'] : []}
+    if (action === 'deliver') {
+      if (sid !== 'B' || store.state === 'acked' || live()) return {text: '', records: []}
+      store.state = 'claimed'; store.owner = 'owner-' + (++owners); store.deadline = now + LEASE
+      return {text: body, records: [view()]}
+    }
+    if (action === 'settle') {
+      const records = (data.records || []).filter(r => sid === 'B' && live() && r.claim_owner === store.owner)
+      const unknown = (data.records || []).filter(r => !records.includes(r)).map(r => r.delivery_id)
+      if (unknown.length) {
+        for (const r of data.records || []) if (store.state === 'claimed' && r.claim_owner === store.owner) store.state = 'pending'
+        return {received_ids: [], settled_count: 0, unknown_ids: unknown, text: '', records: []}
+      }
+      return {received_ids: [], settled_count: 0, unknown_ids: [], text: records.length ? body : '', records}
+    }
+    if (action === 'release') {
+      for (const r of data.records || []) if (store.state === 'claimed' && r.claim_owner === store.owner) store.state = 'pending'
+      return {count: 1}
+    }
+    if (action === 'ack') { store.state = 'acked'; store.acked_by = sid; return {count: data.records.length} }
+    throw Error('unexpected ' + action)
+  }
+  const nativeResponse = data => ({data, response: {ok: true, status: 200}})
+  const session = {
+    get: async () => nativeResponse({id: 'B', projectID: 'fixture', directory: process.cwd(),
+      slug: 'fixture', title: 'fixture', version: '1', time: {created: 1, updated: 1}}),
+    status: async () => nativeResponse({B: {type: 'idle'}}),
+    messages: async () => nativeResponse([]),
+    promptAsync: async () => { writes++; return {response: {ok: true, status: 204}} },
+  }
+  const ctx = {directory: process.cwd(), client: {session, app: {log: async row => logs.push(row.body.extra)}}}
+  const sync = (action, sid, data) => {
+    actions.push(action)
+    return {received_ids: [], settled_count: 0, unknown_ids: [], text: data.text, records: data.records}
+  }
+  const carrierCommand = (action, sid, data, observe, synchronous = false) =>
+    synchronous ? sync(action, sid, data) : command(action, sid, data)
+  const realTimeout = setTimeout
+  const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'readFileSync',
+    'realpathSync', 'createHash', 'setInterval', 'setTimeout', 'baseDir', 'isWorkerSession', 'pendingPeerDelivery',
+    `let paneNativeOrigin = {sid: 'B', directory: ctx.directory, state: 'pending'};
+     const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
+     let paneOwningContext = ctx;
+     const pendingPeerStatus = new Map();
+     const sessionInfoById = new Map(), v2SessionInfo = new Map();
+     ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
+     ${extract('function sdkResponseData(result)', 'function runCompactHook')}
+     ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
+     ${extract('const CARRIER_ENV =', '// One bounded sweep step')}
+     ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
+     return createCompletionCarrier(ctx);`)
+  const fastTimeout = (fn, ms) => realTimeout(fn, ms === 500 ? 0 : ms)
+  const carrier = setup(ctx, carrierCommand, path, fs.readdirSync, fs.readFileSync, fs.realpathSync,
+    createHash, fn => {tick = fn; return {unref(){}}}, fastTimeout, x => x.directory, () => false, async () => {})
+  carrier.env('B')
+  carrier.status('B', 'idle')
+  const drain = async () => {for (let i = 0; i < 200; i++) await new Promise(resolve => realTimeout(resolve, 0))}
+  try {
+    // Real ordering: one send per expired lease, 5-second ticks in between refuse a re-claim.
+    for (let pass = 0; pass < limit; pass++) {
+      tick(); await drain()
+      assert.equal(writes, pass + 1, JSON.stringify({pass, writes, actions, logs}))
+      now += 5; tick(); await drain()
+      assert.equal(writes, pass + 1)
+      if (pass + 1 < limit) now += LEASE
+    }
+    assert(logs.some(row => row.reason === 'sent-unobserved-held' && row.resend_limit_reached))
+    assert.equal(store.state, 'claimed')
+    assert(live(), 'the limited claim is still live')
+    if (expireFirst) {
+      // Control: the claim lease ends first; idle ticks still open no turn of their own.
+      now += LEASE + 5; tick(); await drain(); tick(); await drain()
+      assert.equal(writes, limit)
+    }
+    // The foreign session never gets the body or an ACK.
+    assert.equal(await carrier.inTurn('C'), '')
+    assert.notEqual(store.state, 'acked')
+    now += 1
+    // The natural turn arrives while the limited claim lives (boundary: a completed
+    // tool of the running turn, or the user's next prompt).
+    if (boundary === 'tool') carrier.status('B', 'busy')
+    const text = await carrier.inTurn('B')
+    assert.equal(text, body, JSON.stringify({boundary, actions, logs, store}))
+    assert.equal(store.state, 'acked')
+    assert.equal(store.acked_by, 'B')
+    assert.equal(await carrier.inTurn('B'), '')
+    carrier.status('B', 'idle'); tick(); await drain()
+    assert.equal(writes, limit)
+    return {boundary, expireFirst, writes, owners}
+  } finally { carrier.dispose(true) }
+}
+const out = []
+for (const boundary of ['tool', 'user']) out.push(await run(boundary))
+out.push(await run('user', {expireFirst: true}))
+console.log(JSON.stringify(out))
+""")
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_post_tool_context_reads_a_flushed_line_after_the_timeout_kill(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            (root / "utilities").mkdir()
+            # Flushes one complete line, then outlives the plugin's timeout.
+            (root / "utilities" / "peer-message.py").write_text(
+                "import json, sys, time\n"
+                "import pathlib\n"
+                "print(json.dumps({'context': 'FLUSHED-BEFORE-KILL'}), flush=True)\n"
+                "pathlib.Path(__file__).parents[1].joinpath('flushed').touch()\n"
+                "time.sleep(30)\n")
+            script = root / "drain.mjs"
+            script.write_text(r"""
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {spawn} from 'node:child_process'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const a = source.indexOf('function peerToolContextAsync('), b = source.indexOf('function pendingPeerProcessIdentity', a)
+assert(a >= 0 && b > a)
+const peerToolContextAsync = new Function('spawn', 'path', 'root', 'process',
+  source.slice(a, b) + '; return peerToolContextAsync')(spawn, path, process.env.FIXTURE_ROOT, process)
+// Hold the event loop past the timeout while the child flushes its line: the
+// timer phase then runs before the pipe is read, the race the drain closes.
+const started = Date.now()
+const pending = peerToolContextAsync('B', 300)
+const flushed = path.join(process.env.FIXTURE_ROOT, 'flushed')
+while (!fs.existsSync(flushed) && Date.now() - started < 20000) {}
+const holdUntil = Date.now() + 300
+while (Date.now() < holdUntil) {}
+assert.equal(await pending, 'FLUSHED-BEFORE-KILL')
+assert(Date.now() - started < 25000)
+""")
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
+                FIXTURE_ROOT=str(root),
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_pending_peer_delivery_releases_only_prewrite_reservations(self):
         node = shutil.which("node")

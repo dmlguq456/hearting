@@ -87,7 +87,7 @@ let displayValues={};
 let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
-let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,sessionDetails=false,dragging=false;
+let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
 let panelSubscribers=new Set(),sidebarMounted=false,nativeLayoutPending=false,displaySequence=0;
 let sidebarViews=[],sidebarMouseHeld=false;
 function binding() {
@@ -217,7 +217,7 @@ function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max
 function panelContent(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,details:sessionDetails,focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   panelHits=view.hits;routePageCount=view.routePages;return view.rows;
@@ -261,6 +261,12 @@ function render() {
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    let notice=-1;
+    if(harness==='claude'){
+      // The first concealed row (the top of the status area) carries the notice;
+      // any further concealed row stays blank.
+      if(claudePanelPainted())for(const y of nativeDisplay.claudeStatusRows(nativeLines,sid,claudeStatusRecord())){concealed.add(y);if(notice<0||y<notice)notice=y;}
+    }
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;
       if(observed?.model){bootstrapModel=false;nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
@@ -272,7 +278,7 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      let line=concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(!fleetView&&geometry().side){const panel=y;line+=`\x1b[${view.cols+1}G\x1b[0m  `+(panel<panelRows.length?panelRows[panel]:' '.repeat(panelColumns()));}
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
     }
@@ -441,6 +447,39 @@ async function projection() {
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
+// Claude's statusline row may be blanked only while this visible panel paints
+// the same session's model, compact status and session rows (folder, title,
+// branch, Git, jobs). Any other state, including a panel too short for all of
+// them, shows it.
+function claudePanelPainted(){
+  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
+  const rows=[...(panelModel.summary||[]),...(panelModel.session||[])].map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
+  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
+}
+// The blanked Claude row carries the panel's one-line notice (empty by default),
+// at the native statusline's own two-cell indent.
+function noticeRow(width){
+  let used=2,text='\x1b[0m  ';
+  for(const part of panelModel.notice||[]){
+    const attrs=[0];
+    if(Number.isInteger(part.foreground)&&part.foreground>=0&&part.foreground<=255)attrs.push(38,5,part.foreground);
+    if(part.bold===true)attrs.push(1);if(part.dim===true)attrs.push(2);
+    let chunk='';
+    for(const c of String(part.text).replace(/[\x00-\x1f\x7f]/g,' ')){const w=cellWidth(c);if(used+w>width-1)break;chunk+=c;used+=w;}
+    text+=`\x1b[${attrs.join(';')}m${chunk}`;if(used>=width-1)break;
+  }
+  return text+'\x1b[0m'+' '.repeat(Math.max(0,width-used));
+}
+let claudeStatus={key:'',value:null};
+function claudeStatusRecord(){
+  try{
+    const s=fs.lstatSync(path.join(dir,'claude-status.json'));
+    if(!s.isFile()||s.uid!==process.getuid()||s.size>65536)return null;
+    const key=[s.ino,s.size,s.mtimeMs].join(':');
+    if(key!==claudeStatus.key)claudeStatus={key,value:JSON.parse(fs.readFileSync(path.join(dir,'claude-status.json'),'utf8'))};
+    return claudeStatus.value;
+  }catch{return null;}
+}
 function rawRelay() {
   if(relay||ended)return;
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
@@ -533,10 +572,9 @@ function panelAction(action){
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
-  if(action==='route'){routeDetail=!routeDetail;routePage=0;sessionDetails=false;block.leave();}
+  if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
-  if(action==='details'){sessionDetails=!sessionDetails;routeDetail=false;block.leave();}
-  if(action==='question'){routeDetail=false;sessionDetails=false;block.enter();}
+  if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){
     const [,field,operation]=action.split(':'),index=Number(field);if(index<0||index>=panelView.fields.length)return;
     if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[index]))return;
@@ -602,7 +640,7 @@ function publishPanel(){
   if(!panelSubscribers.size)return;
   const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
     native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
-    routeDetail,routePage,details:sessionDetails,focused:block.focused,harness,cellWidth,
+    routeDetail,routePage,focused:block.focused,harness,cellWidth,
     questions:options=>block.detail(options)});
   if(JSON.stringify(sidebarViews[0]?.rows)!==JSON.stringify(view.rows))sidebarViews=[view,...sidebarViews].slice(0,4);
   routePageCount=view.routePages;
@@ -637,7 +675,7 @@ function inputBytes(data) {
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
     if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
-    if(!relay&&(routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
+    if(!relay&&routeDetail&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
@@ -697,7 +735,7 @@ async function lifecycle(req) {
     }
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;sessionDetails=false;
+    projectionKey='';footer='';footerSegments=[];routeDetail=false;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
@@ -709,7 +747,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;sessionDetails=false;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;nativeSidebar=false;routeDetail=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
@@ -739,7 +777,7 @@ async function request(req) {
   }
   if(req.op==='display-action'){
     if(!displayReporter(req)||req.sid!==sid)return {ok:false};
-    if(['settings','route','route-prev','route-next','details','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
+    if(['settings','route','route-prev','route-next','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
     return {ok:true};
   }
   if(req.op==='event')return lifecycle(req);

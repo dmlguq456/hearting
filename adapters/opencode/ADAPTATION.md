@@ -241,7 +241,7 @@ native `read` tool; a successful marker command is not evidence of its contents.
 
 | Claude `settings.json` hook | OpenCode realization | Parity |
 |---|---|---|
-| `PreToolUse[Skill]` spec-skill gate (deny) | plugin `command.execute.before` → `preflight capability` (throws) | full — auto enforced (command path) |
+| `PreToolUse[Skill]` SD-11 stage-dispatch reminder (Claude has no Skill spec gate any more) | none — the plugin has no `command.execute.before` or `skill`-tool handler | gap — parity register PG-11 |
 | `PostToolUse[Read]` spec-read marker | plugin `tool.execute.after` on `read` → `preflight read` | full — auto enforced |
 | `PostToolUse[Edit|apply_patch]` spec sync nudge | plugin `tool.execute.after` passes native input to shared `hooks/spec-sync-nudge.sh --format text`; V1 appends to tool output and V2 appends a native `event.result.content` text part for main and worker sessions, preserving existing parts and metadata | full — automatic, fail-open; fixture-verified, live V2 model delivery unobserved |
 | `PostToolUse` design post-write | plugin `tool.execute.after` → `preflight design` | full — auto enforced |
@@ -291,6 +291,93 @@ caps or the process count per turn. Regression evidence: the original
 `mm`-access failure — the model concluded "no mmctl, no MCP server, no API
 token" while the matching capsule candidate existed — reproduces before the fix
 and disappears after it (`mem show` → `mm me/teams/channels/read`).
+
+## Behavior carriers (Claude parity, measured 2026-11-10)
+
+Claude keeps the next action in the runtime through hook carriers: the `Stop` and
+`PostToolUse(Bash)` `asyncRewake` hooks (`dispatch-owner-rewake.py`,
+`peer-steward-rewake.py`) wake an idle session when a registered child finishes,
+`PostToolUse` `peer-message-record.py` puts a report into the working turn, and the
+`UserPromptSubmit` sweeps re-deliver whatever is still owed. The plugin realizes the
+same meanings with no extra process or input:
+
+| Claude carrier | OpenCode realization |
+|---|---|
+| completion receipt, human-gate and supervision notice wake (`asyncRewake` exit 2) | `opencode-turn` completion carrier: at `session.idle` and every 5 s while idle it asks the shared sweep (`dispatch_session_sweep.py recipients/deliver/settle`) for records owed to the exact session, starts the next turn with the shared `delivery_context` text, and acks once that exact text is in the native user history |
+| steward periodic check and other `session_notice` records | the same carrier (a notice is an SD-111 record of kind `opencode-turn`) |
+| idle peer report | idle courier: reserve, begin-write, one native prompt, then queued against the one persisted user message and received at the next idle pass |
+| report during work (`PostToolUse` `additionalContext`) | `tool.execute.after` appends `peer-message.py context --event PostToolUse --native-delivery` (an asynchronous child) to a completed tool result; the shared writer records the receipt after the flush; an error-status tool does not run it, and an open question or permission keeps bodies pending |
+| booked session-tidy continue (no-trailer row) | idle courier, with the existing no-trailer time bound |
+
+**OpenCode 2 hosting.** OpenCode 2.0.32 runs server plugins inside its shared
+background service (`opencode serve --service`, started by the first TUI with the
+service's own argv, pid and cwd), not inside the TUI process, and gives plugins no
+host logger. The TUI-process origin proof (argv selector, TUI selection record keyed
+by pid) therefore never matched, and every wake above was withheld. A V2 context now
+admits the exact session the record names when the native session is a root session
+located in that plugin instance's directory and is natively idle (`session.wait`).
+Diagnostics that V1 sent to `app.log` go to a capped per-service file,
+`$XDG_STATE_HOME/hearting/opencode-plugin-log/<pid>.jsonl`. The hearting session shell
+(`utilities/session-shell/entry.py`) wraps only the TUI, so the same carriers apply.
+
+**Measured** (real OpenCode 2.0.32 TUI in an isolated HOME, private tmux socket and
+private service port, synthetic records only):
+
+| scenario | before | after |
+|---|---|---|
+| completion receipt to an idle session | pending after 63 s, no turn | new turn, record acked in 4 s |
+| peer report to an idle session | pending after 84 s | answered, `received` (exact native history) in 7 s |
+| peer report while a 20 s tool runs | pending after 97 s, model saw nothing | appended to the tool result, model reported it, `received` in 16 s |
+| booked continue (no trailer) | pending after 85 s | answered, `received` in 7 s |
+| periodic check notice | pending after 63 s | new turn, acked in 4 s |
+| completion receipt through the session shell | — | acked in 4–7 s |
+
+**Shared-service cost** (PR #1436 review, fixed the same day). One OpenCode 2 service
+hosts every attached TUI's sessions, so a synchronous helper in a plugin callback stalls
+every window. The idle peer courier now reads its rows through an asynchronous child,
+one idle session after another per 5 s pass, after the in-process native root check; a
+session known to belong to another directory, or a child session, spawns nothing more.
+The post-tool context helper is asynchronous too. Service `/global/health` latency over
+40 s, isolated service with idle root sessions:
+
+| idle sessions | before the fix | after the fix | base (carriers withheld) |
+|---|---|---|---|
+| 9 | p95 1060 ms, max 1188 ms | p95 1.1 ms, max 28.7 ms, 0 over 200 ms | p95 1.2 ms |
+| 21 | p50 2333 ms, 25 samples in 40 s | p50 0.9 ms, p95 1.1 ms, 511 samples | — |
+
+A completion prompt that OpenCode accepted but whose exact text did not appear in the
+native history keeps its claim (log `sent-unobserved-held`): a later idle pass settles it
+from history, and only the existing 120 s claim lease, once expired, makes it deliverable
+again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
+carrier opens no further turn for it (log `resend_limit_reached`, then
+`resend-limit-deferred`): the record stays owed, and the session's next natural turn
+carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
+it in that turn's context, a completed tool of a running turn appends it to the result,
+and either acks it there. A natural turn that comes while the limited send's claim is
+still live takes that exact claim over (the shared `settle` revalidates owner, lease and
+recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
+limit again; nothing is dropped. Measured with the history read forced empty: before the
+limit, one turn per expired lease without end (300 s: 3, 450 s: 4); after it, 2 turns and
+then none (450 s: 2), the next user prompt carried and acked it. A receipt that is only
+late (history hidden for 8 s) still settles at the next pass with one turn.
+
+**Open differences from Claude** (not closed by this measurement):
+
+- A record owed to a task (child) session is delivered to nobody: the carriers admit root
+  sessions only, while a Claude subagent's work rides its parent's hooks. A known child
+  session's tool commands carry no `AGENT_PARENT_COMPLETION_CARRIER`, so a launch there
+  keeps `poll-fallback` instead of yielding for a wake that never comes.
+- A report that arrives while the session works rides the next completed tool; Claude's
+  `PostToolUse` also carries it on a failed tool.
+- The herdr pane status projection (`recordNativeTurnStatus`, the pane publisher) still
+  assumes the V1 TUI-process origin; under the OpenCode 2 service its pane state is not
+  re-measured here.
+- Each 5 s pass still starts two asynchronous helpers per idle root session (the idle
+  peer courier's `pending` read and the completion carrier's `recipients` look, which the
+  base already had): no service stall, but CPU on the host, linear in idle root sessions;
+  every plugin instance of the service evaluates its own directory's sessions. Measured at
+  40 idle root sessions: about 960 helpers a minute, about 1.9 cores of helper CPU (base
+  before the carriers: about 2.2).
 
 ## Explicit Non-Support
 

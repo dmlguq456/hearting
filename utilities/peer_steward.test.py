@@ -11705,16 +11705,16 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.st, self.clear = st, clear
 
     def cleared(self, harness="claude", sid="sid-A", new="sid-B", pane="w1:pX",
-                seq=0, receipt=True, window=120):
+                seq=0, receipt=False, window=120):
         st, clear = self.st, self.clear
         shutil.rmtree(st.state_root(), ignore_errors=True)
         seat = st.Seat("pane", st._digest("pane", pane), pane, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
             card = st.write_card(seat, harness, sid, "card body", prompt_seq=seq)
-            if receipt and harness == "claude":
+            if receipt:  # some prompt already took this card generation
                 st._write_consumed(st.session_seat(seat, harness, sid),
-                                   generation=card["generation"], receipts=[f"claude:{new}:0"])
+                                   generation=card["generation"], receipts=[f"{harness}:{new}:0"])
             clear._write_reservation({
                 "schema": 1, "nonce": "n0nce", "status": "cleared", "created": now - 30,
                 "deadline": now + 570,
@@ -11856,6 +11856,15 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self.booking()["continued"]["transfer_ref"], "2" * 32)
         self.assertEqual(self.booking()["continued"]["state"], "pending")
 
+    def test_continue_needs_no_start_receipt_and_stops_only_for_a_taken_card(self):
+        # Claude's SessionStart renders no card (2026-11-10: a tidy clear waited for a start
+        # receipt that never comes and the person had to type).
+        for harness in ("claude", "codex", "opencode"):
+            for receipt, expected in ((False, None), (True, "card-taken")):
+                with self.subTest(harness=harness, receipt=receipt):
+                    self.cleared(harness=harness, receipt=receipt)
+                    self.assertEqual(peer_steward._continue_card_reason(self.booking()), expected)
+
     def test_continue_requires_exact_new_sid_and_idle_without_screen_reads(self):
         self.cleared()
         req = self.booking()
@@ -11923,6 +11932,77 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(rc, 3, line)
                 self.assertIn("reason=" + reason, line)
                 self.assertFalse(self.booking().get("continued", {}).get("transfer_ref"))
+
+    def test_unproven_new_session_is_relooked_then_ends_with_a_notice(self):
+        """2026-11-10 wB:pBA: a session-shell window whose helper could not prove the new
+        session left a silent pending continue (``queued`` without a sender) until it expired."""
+        looks = []
+
+        def look(_target, req):
+            looks.append(req.get("new_session"))
+            return "new-session-unknown"
+        self.cleared()
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", side_effect=look), \
+             mock.patch.object(peer_steward, "_herdr_prompt",
+                               side_effect=AssertionError("typed into an unproven session")), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            rc = peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                                    "--nonce", "n0nce"])
+        self.assertEqual(len(looks), peer_steward._CONTINUE_LOOK_ROUNDS)
+        self.assertEqual(rc, 3, printed)
+        self.assertIn("continued=skipped", printed[-1])
+        self.assertIn("reason=new-session-unknown", printed[-1])
+
+    def test_failed_continue_shows_its_line_on_the_booked_herdr_without_input(self):
+        """2026-11-10: the skipped line reached the person only with their next input (~55 min)."""
+        self.cleared()
+        data = self.booking()
+        data["herdr_transport"] = {"socket_path": "/run/herdr/booked.sock"}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.assertTrue(self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped",
+                                                        "new-session-unknown"))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["/usr/bin/herdr", "notification", "show", "Hearting"])
+        self.assertIn(self.clear.CONTINUE_TEXT, argv[-1])
+        self.assertEqual(run.call_args.kwargs["env"]["HERDR_SOCKET_PATH"], "/run/herdr/booked.sock")
+        self.assertEqual(self.booking()["continued"]["state"], "skipped")
+        # A booking without its Herdr endpoint (tmux, native) keeps only the seat notice.
+        self.cleared()
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped", "new-session-unknown")
+        run.assert_not_called()
+
+    def test_unproven_new_session_proven_on_a_later_look_continues(self):
+        answers = iter(["new-session-unknown", "new-session-unknown", None, None, None])
+        self.cleared()
+        guard = mock.Mock(return_value=(None, {"pid": 202}))
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", side_effect=lambda *_a: next(answers)), \
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", guard), \
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send, \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            rc = peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                                    "--nonce", "n0nce"])
+        self.assertEqual(rc, 0, printed)
+        self.assertIn("continued=true", printed[-1])
+        send.assert_called_once()
+
+    def test_booking_without_its_new_session_stays_pending_for_the_first_hook(self):
+        self.cleared(harness="codex", new="-")
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", return_value="new-session-unknown"), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                               "--nonce", "n0nce"])
+        self.assertIn("continued=queued", printed[-1])
+        self.assertEqual(self.booking()["continued"]["state"], "pending")
 
     def test_herdr_missing_remains_a_typed_failure(self):
         self.cleared()

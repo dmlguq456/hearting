@@ -82,7 +82,7 @@ unset AGENT_DISPATCH_ATTEMPT_ID AGENT_DISPATCH_PARENT_ATTEMPT_ID \
   AGENT_ARTIFACT_ROOT AGENT_ARTIFACT_CYCLE_DIR AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
   AGENT_OWNER_ROUTE_FILE AGENT_OWNER_ROUTE_ID AGENT_OWNER_ROUTE_HASH \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
-  MEM_DISTILL CODEX_DISPATCH_SANDBOX_FORCE
+  MEM_DISTILL CODEX_DISPATCH_SANDBOX_FORCE CODEX_SESSION_MEMORY_INJECT
 DISPATCH_RESOLVER_HOME="$TMP/dispatch-resolver-home"
 DISPATCH_RESOLVER_XDG="$TMP/dispatch-resolver-xdg"
 DISPATCH_RESOLVER_STATE="$(readlink -f "$DISPATCH_RESOLVER_HOME")/.local/state/hearting/dispatch"
@@ -1855,17 +1855,23 @@ if grep -q '## Levels' "$ROOT/codex_setting/codex-modes/qa/test.md" \
 else
   bad "codex native mode projection should embed sanitized portable mode contracts"
 fi
+if python3 "$ROOT/tools/install/test_codex_sessionstart_memory.py" >"$TMP/codex_start_memory_regression.out" 2>&1; then
+  ok "codex session start summary covers defaults, explicit flags, workers and shared caps"
+else
+  cat "$TMP/codex_start_memory_regression.out" >&2
+  bad "codex session start summary regression"
+fi
 mkdir -p "$TMP/codex_hook_home/.codex"
 ln -s "$ROOT" "$TMP/codex_hook_home/.codex/hearting"
 ln -s "$ROOT/codex_setting/codex-hooks/hooks.json" "$TMP/codex_hook_home/.codex/hooks.json"
 if (cd "$TMP/repo" && HOME="$TMP/codex_hook_home" MEM_STORE="$TMP/codex_hook_mem" python3 "$ROOT/tools/memory/mem.py" add durable thread "세션 시작 기억 주입 확인: Codex SessionStart bridge는 mem inject 결과를 hookSpecificOutput additionalContext로 전달해야 한다" >"$TMP/codex_session_seed.out" 2>"$TMP/codex_session_seed.err") \
   && printf '{"session_id":"testsid","cwd":"%s"}\n' "$TMP/repo" \
   | MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/sessionstart-lifecycle.py" >"$TMP/codex_session_hook_default.out" 2>"$TMP/codex_session_hook_default.err" \
-  && [ ! -s "$TMP/codex_session_hook_default.out" ] \
+  && python3 -c 'import json,sys; out=json.load(open(sys.argv[1]))["hookSpecificOutput"]; assert "세션 시작 기억 주입 확인" in out["additionalContext"]' "$TMP/codex_session_hook_default.out" \
   && ! grep -q 'adapters/claude\|claude_setting\|statusline.sh' "$TMP/codex_session_hook_default.out" "$TMP/codex_session_hook_default.err"; then
-  ok "codex native hook projection keeps session start context silent by default"
+  ok "codex native hook projection injects session start memory context by default"
 else
-  bad "codex native hook projection should keep session start context silent by default"
+  bad "codex native hook projection should inject session start memory context by default"
 fi
 if printf '{"session_id":"testsid","cwd":"%s"}\n' "$TMP/repo" \
   | CODEX_SESSION_MEMORY_INJECT=1 MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/sessionstart-lifecycle.py" >"$TMP/codex_session_hook.out" 2>"$TMP/codex_session_hook.err" \
@@ -1875,6 +1881,16 @@ if printf '{"session_id":"testsid","cwd":"%s"}\n' "$TMP/repo" \
 else
   bad "codex native hook projection should opt into session start memory context"
 fi
+for memory_flag in 0 false no off ''; do
+  if printf '{"session_id":"testsid","cwd":"%s"}\n' "$TMP/repo" \
+    | CODEX_SESSION_MEMORY_INJECT="$memory_flag" MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" \
+      python3 "$ROOT/adapters/codex/hooks/sessionstart-lifecycle.py" >"$TMP/codex_session_disabled.out" 2>"$TMP/codex_session_disabled.err" \
+    && [ ! -s "$TMP/codex_session_disabled.out" ]; then
+    ok "codex explicit memory disable remains silent: $memory_flag"
+  else
+    bad "codex explicit memory disable should remain silent: $memory_flag"
+  fi
+done
 if printf '{"session_id":"testsid","cwd":"%s"}\n' "$TMP/repo" \
   | MEM_STORE="$TMP/codex_hook_mem" HOME="$TMP/codex_hook_home" python3 "$TMP/codex_hook_home/.codex/hearting/adapters/codex/hooks/sessionend-lifecycle.py" >"$TMP/codex_session_end_hook.out" 2>"$TMP/codex_session_end_hook.err" \
   && [ ! -s "$TMP/codex_session_end_hook.out" ] \
@@ -2304,9 +2320,12 @@ if [ -f "$ROOT/adapters/claude/settings.json" ] \
 else
   bad "Claude settings.json should not reference a distill/turn-nudge worker"
 fi
-if grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/claude/bin/dispatch-headless.py" \
-  && grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/codex/bin/dispatch-headless.py" \
-  && grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/adapters/opencode/bin/dispatch-headless.py" \
+# The three dispatch wrappers build their worker environment through the shared
+# utilities/dispatch_headless_main.py worker_environment.
+if grep -Fq '"AGENT_SESSION_ROLE": "worker"' "$ROOT/utilities/dispatch_headless_main.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/claude/bin/dispatch-headless.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/codex/bin/dispatch-headless.py" \
+  && grep -Fq 'DISPATCH_MAIN.worker_environment(' "$ROOT/adapters/opencode/bin/dispatch-headless.py" \
   && grep -Fq 'AGENT_SESSION_ROLE=worker' "$ROOT/loops/lib.sh" \
   && grep -Fq 'AGENT_SESSION_ROLE=worker' "$ROOT/loops/lib-runner.sh" \
   && grep -Fq 'env["AGENT_SESSION_ROLE"] = "worker"' "$ROOT/tools/fleet/refresh_title.py"; then

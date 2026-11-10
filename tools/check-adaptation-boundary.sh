@@ -52,6 +52,20 @@ fail_msg() {
   fail=1
 }
 
+# The three dispatch wrappers share their parser, worker environment and launch
+# phases (utilities/dispatch_headless_main.py); a literal there counts for a
+# wrapper that builds through it.
+wrapper_worker_env_has() {
+  grep -Fq -- "$1" "$2" \
+    || { grep -Fq 'DISPATCH_MAIN.worker_environment(' "$2" \
+      && grep -Fq -- "$1" utilities/dispatch_headless_main.py; }
+}
+wrapper_parser_has() {
+  grep -Fq -- "$1" "$2" \
+    || { grep -Fq 'DISPATCH_MAIN.base_parser(' "$2" \
+      && grep -Fq -- "$1" utilities/dispatch_headless_main.py; }
+}
+
 TAB=$(printf '\t')
 NL='
 '
@@ -952,7 +966,7 @@ check_codex_bin_wrappers() {
     fi
   done
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
-    if ! grep -Fq 'AGENT_DISPATCH_JOBS' "adapters/codex/bin/$p"; then
+    if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' "adapters/codex/bin/$p"; then
       fail_msg "adapters/codex/bin/$p must honor the shared dispatch registry override"
     fi
   done
@@ -1001,9 +1015,10 @@ check_codex_bin_wrappers() {
     || ! grep -Fq '"quick", "light", "standard", "thorough", "adversarial"' utilities/dispatch_mode_contract.py \
     || ! grep -Fq 'render_worker_bootstrap' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'resolve_worker_type' adapters/codex/bin/dispatch-headless.py \
-    || ! grep -Fq -- '--worker-type' adapters/codex/bin/dispatch-headless.py \
+    || ! wrapper_parser_has '--worker-type' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'ending = worker_ending_prompt(' adapters/codex/bin/dispatch-headless.py \
-    || ! grep -Fq 'Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' adapters/codex/bin/dispatch-headless.py \
+    || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/codex/bin/dispatch-headless.py \
+    || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py \
     || ! grep -Fq 'fcntl.flock' utilities/dispatch_wrapper_common.py \
     || ! grep -Fq 'jobs_lock = WRAPPER_COMMON.jobs_lock' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'registry_lock={jobs}.lock' utilities/launch_receipt.py \
@@ -1172,7 +1187,8 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'hookSpecificOutput' adapters/codex/hooks/userprompt-lifecycle.py; then
     fail_msg "Codex lifecycle hook bridges must route through preflight.sh lifecycle commands"
   fi
-  if ! grep -Fq 'keeps session start context silent by default' hooks/portable-guards.test.sh \
+  if ! grep -Fq 'injects session start memory context by default' hooks/portable-guards.test.sh \
+    || ! grep -Fq 'explicit memory disable remains silent' hooks/portable-guards.test.sh \
     || ! grep -Fq 'can opt into session start memory context' hooks/portable-guards.test.sh \
     || ! grep -Fq 'CODEX_SESSION_MEMORY_INJECT=1' hooks/portable-guards.test.sh \
     || ! grep -Fq 'out["hookEventName"]=="SessionStart"' hooks/portable-guards.test.sh \
@@ -1189,7 +1205,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'CODEX_SESSION_MEMORY_INJECT' adapters/codex/hooks/sessionstart-lifecycle.py \
     || ! grep -Fq 'hookSpecificOutput.additionalContext' adapters/codex/README.md \
     || ! grep -Fq 'hookSpecificOutput.additionalContext' adapters/codex/ADAPTATION.md; then
-    fail_msg "Codex lifecycle hooks must prove silent defaults plus opt-in/non-default additionalContext paths in portable guards"
+    fail_msg "Codex lifecycle hooks must prove default memory injection, explicit disable and other additionalContext paths in portable guards"
   fi
   if ! grep -Fq 'def candidate_context' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'RECALL_HOOK' adapters/codex/hooks/userprompt-lifecycle.py \
@@ -2227,7 +2243,7 @@ check_claude_bin_wrappers() {
     fail_msg "claude_setting/bin points to $target; expected ../adapters/claude/bin"
   fi
 
-  if ! grep -Fq 'AGENT_DISPATCH_JOBS' adapters/claude/bin/dispatch-headless.py; then
+  if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' adapters/claude/bin/dispatch-headless.py; then
     fail_msg "adapters/claude/bin/dispatch-headless.py must honor the shared dispatch registry override"
   fi
 }
@@ -2258,7 +2274,7 @@ check_opencode_bin_wrappers() {
     fi
   done
   for p in dispatch-headless.py dispatch-liveness.py dispatch-harvest.py; do
-    if ! grep -Fq 'AGENT_DISPATCH_JOBS' "adapters/opencode/bin/$p"; then
+    if ! wrapper_worker_env_has 'AGENT_DISPATCH_JOBS' "adapters/opencode/bin/$p"; then
       fail_msg "adapters/opencode/bin/$p must honor the shared dispatch registry override"
     fi
   done
@@ -2302,8 +2318,9 @@ check_opencode_bin_wrappers() {
     || ! grep -Fq '"quick", "light", "standard", "thorough", "adversarial"' utilities/dispatch_mode_contract.py \
     || ! grep -Fq 'render_worker_bootstrap' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq 'resolve_worker_type' adapters/opencode/bin/dispatch-headless.py \
-    || ! grep -Fq -- '--worker-type' adapters/opencode/bin/dispatch-headless.py \
-    || ! grep -Fq 'Path(frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' adapters/opencode/bin/dispatch-headless.py; then
+    || ! wrapper_parser_has '--worker-type' adapters/opencode/bin/dispatch-headless.py \
+    || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/opencode/bin/dispatch-headless.py \
+    || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py; then
     fail_msg "adapters/opencode/bin/dispatch-headless.py must validate inputs and materialize typed worker prompts"
   fi
 
@@ -3899,8 +3916,8 @@ check_worker_bootstrap_contract() {
     dispatcher="adapters/$adapter/bin/dispatch-headless.py"
     if ! grep -Fq 'render_worker_bootstrap' "$dispatcher" \
       || ! grep -Fq 'resolve_worker_type' "$dispatcher" \
-      || ! grep -Fq -- '--worker-type' "$dispatcher" \
-      || ! grep -Fq 'AGENT_DISPATCH_WORKER_TYPE' "$dispatcher"; then
+      || ! wrapper_parser_has '--worker-type' "$dispatcher" \
+      || ! wrapper_worker_env_has 'AGENT_DISPATCH_WORKER_TYPE' "$dispatcher"; then
       fail_msg "$dispatcher must render and register one portable worker type"
     fi
     if grep -Fq 'Return a concise report with changed files' "$dispatcher"; then
