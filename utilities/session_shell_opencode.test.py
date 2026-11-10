@@ -19,14 +19,13 @@ const socket=()=>{const callbacks={};return {on(event,callback){callbacks[event]
   write(raw){events.push(JSON.parse(raw));callbacks.data?.('{}\n');},destroy(){}};};
 const netModule=new vm.SyntheticModule(['default'],function(){this.setExport('default',{connect:socket});},{context});
 const fsModule=new vm.SyntheticModule(['readFileSync'],function(){this.setExport('readFileSync',fs.readFileSync);},{context});
-// This probe covers lifecycle selection; native slot rendering has separate
-// private OpenCode captures and never changes this event sequence.
-const panelModule=new vm.SyntheticModule(['sessionPanel'],function(){this.setExport('sessionPanel',()=>({observe(){},dispose(){}}));},{context});
 (async()=>{
- await module.link(name=>name==='node:net'?netModule:name==='node:fs'?fsModule:name==='./panel.tsx'?panelModule:Promise.reject(Error('unexpected import '+name)));
+ await module.link(name=>name==='node:net'?netModule:name==='node:fs'?fsModule:Promise.reject(Error('unexpected import '+name)));
  await module.evaluate();
- const dispose=module.namespace.default.setup({ui:{router:{current:()=>route},slot:options=>{slots.push(options);return ()=>{};}},
-   data:{session:{status:()=> 'idle'},listen:fn=>{listener=fn;return ()=>{};}}});
+ const servers=[{status:{status:'connected'}},{status:{status:'failed'}},{status:{status:'disabled'}}];
+ const dispose=module.namespace.default.setup({ui:{router:{current:()=>route},model:{current:()=>({modelID:'fixture-model',variant:'high'})},
+   slot:options=>{slots.push(options);return ()=>{};}},
+   data:{session:{status:()=> 'idle',get:id=>({location:'loc-'+id})},location:{mcp:{server:{list:()=>servers}}},listen:fn=>{listener=fn;return ()=>{};}}});
  const drain=()=>new Promise(resolve=>setImmediate(resolve));
  if(process.argv[3]==='rapid'){
    route={type:'session',sessionID:'ses_third'};for(const slot of slots)slot.render({});
@@ -56,13 +55,21 @@ class OpenCodeShellSelectionTest(unittest.TestCase):
     def test_native_route_mounts_change_the_selected_session_without_timer_or_bus_traffic(self):
         data=self.probe()
         self.assertEqual(data['timers'],[])
-        selections=[row['sid'] for row in data['events'] if row['event'] in ('start','select')]
+        selections=[row['sid'] for row in data['events'] if row.get('event') in ('start','select')]
         self.assertEqual(selections,['ses_first','ses_second'])
-        self.assertTrue(any(row['event']=='deselect' and row['sid']=='ses_second' for row in data['events']))
+        self.assertTrue(any(row.get('event')=='deselect' and row['sid']=='ses_second' for row in data['events']))
+
+    def test_model_and_mcp_counts_are_display_observations_without_a_sidebar_slot(self):
+        data=self.probe()
+        shown=[row for row in data['events'] if row.get('op')=='display-observation']
+        self.assertTrue(any(row.get('model')=='fixture-model' and row.get('effort')=='high' for row in shown))
+        self.assertTrue(any(row.get('mcp')=={'total':3,'connected':1,'failed':1} for row in shown))
+        self.assertFalse(any(row.get('op')=='display-subscribe' for row in data['events']))
+        self.assertEqual(data['slots'],1,'only the app lifecycle slot; no sidebar.content section')
 
     def test_a_queued_old_selection_cannot_be_reported_after_the_native_route_moves(self):
         data=self.probe('rapid')
-        selections=[row['sid'] for row in data['events'] if row['event'] in ('start','select')]
+        selections=[row['sid'] for row in data['events'] if row.get('event') in ('start','select')]
         self.assertEqual(selections,['ses_third'])
 
 

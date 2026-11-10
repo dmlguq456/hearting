@@ -195,10 +195,10 @@ to resize and save it. Only the existing Hearting `session-shell.json` is saved,
 with a byte-for-byte backup; native model and permission settings are untouched.
 The default is side at sufficient width (40 columns, minimum terminal width 100),
 with a bounded 14-row bottom at narrow widths, including 80 columns. These values
-are configurable. Existing explicit layout choices are retained. OpenCode adds
-Hearting inside its existing fixed-width sidebar, preserving native sections;
-when that sidebar is hidden, Hearting uses bottom. Its native sidebar width is
-not changed by shell settings. Installation affects new wrapped terminals;
+are configurable. Existing explicit layout choices are retained. OpenCode uses
+the same panel and settings; its own sidebar is hidden in the shell window
+(OpenCode's toggle still opens it), with Context in its footer and its MCP
+server count in the panel. Installation affects new wrapped terminals;
 existing running hosts are not replaced.
 
 Codex context keeps the latest server-reported usage. A separate `compaction
