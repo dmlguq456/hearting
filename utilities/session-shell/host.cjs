@@ -180,7 +180,11 @@ function observeNativeSelection() {
        ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
     return lifecycle({token,harness,pid:native.pid,start:native.start,
       sid:data.selected_sid,seq:sequence+1,event:'select'});
-  }).finally(()=>{checkingNativeSelection=false;});
+  }).finally(()=>{
+    checkingNativeSelection=false;
+    // A screen painted while this check ran was skipped; look at it once now.
+    if(nativeSelectionRevision!==screenRevision)observeNativeSelection();
+  });
 }
 function readAction(extra,operation='action') {
   // A person-requested read or answer may be slow. It must not queue ahead

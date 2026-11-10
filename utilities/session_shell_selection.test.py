@@ -193,6 +193,35 @@ function context(extra=[]){
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+    def test_a_screen_painted_during_a_check_is_looked_at_once_it_ends(self):
+        script = r"""
+const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const begin=source.indexOf('function nativeSelectionFrame()');
+const helpers=source.slice(begin,source.indexOf('function readAction(',begin));
+const A='00000000-0000-4000-8000-000000000099',B='00000000-0000-4000-8000-000000000052';
+const lines=['› Ask Codex to do anything','',A+' · '+A];
+const calls=[],actions=[];
+const c={harness:'codex',sid:B,native:{pid:123,start:'456'},screenRevision:9,epoch:12,selection:1,
+  sequence:4,token:'owned',ended:false,relay:false,
+  terminal:{rows:lines.length,buffer:{active:{viewportY:0,getLine:i=>({translateToString:()=>lines[i]})}}},
+  source:()=>new Promise(r=>calls.push(r)),lifecycle:r=>{actions.push(r);}};
+vm.createContext(c);vm.runInContext(helpers,c);
+(async()=>{
+ c.observeNativeSelection();a.equal(calls.length,1);
+ c.screenRevision=10;c.observeNativeSelection();a.equal(calls.length,1);  // skipped while checking
+ calls[0]({ok:true,selected_sid:A,native_revision:9,native_epoch:12});
+ await new Promise(setImmediate);
+ a.equal(actions.length,0);a.equal(calls.length,2);                     // the skipped screen, once
+ calls[1]({ok:true,selected_sid:A,native_revision:10,native_epoch:12});
+ await new Promise(setImmediate);
+ a.equal(actions.length,1);a.equal(actions[0].sid,A);a.equal(calls.length,2);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 class FooterReaderParityTests(unittest.TestCase):
     """The host frame and the Python footer reader name the same current thread."""
     FIXTURES = ROOT / 'utilities/fixtures/codex-0.163-shared-footer'
