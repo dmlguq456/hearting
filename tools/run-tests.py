@@ -57,6 +57,22 @@ if str(ROOT / "utilities") not in sys.path:
 DEFAULT_TIMEOUT = 600
 DEFAULT_JOBS = 4
 
+# --timeout bounds one suite attempt, not the run: several hung suites in one
+# worker slot add up, and a CI step killed at its own limit leaves no report
+# (2026-11-10: shard 5 held its runner for 45 minutes and uploaded nothing).
+# --deadline bounds the whole run. Past it a running suite is stopped as a
+# timeout and an unstarted one is reported without running, so the report and
+# the stuck suite's name still reach the caller. Monotonic seconds, or None.
+_RUN_DEADLINE: float | None = None
+DEADLINE_NOT_STARTED = "run-tests: not started; the --deadline run budget was spent\n"
+DEADLINE_STOPPED = "run-tests: stopped at the --deadline run budget\n"
+
+
+def _deadline_remaining() -> float | None:
+    if _RUN_DEADLINE is None:
+        return None
+    return _RUN_DEADLINE - time.monotonic()
+
 # This suite repeatedly activates all three runtime projections in both linked
 # and packaged modes. Running it beside other install/projection suites makes
 # its strict-doctor assertions depend on host load (the same GitHub runner
@@ -1010,6 +1026,11 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
     else:
         cmd = [sys.executable, str(suite)]
     started_monotonic = time.monotonic()
+    remaining = _deadline_remaining()
+    if remaining is not None and remaining <= 0:
+        _suite_progress("suite_not_started", relpath, profile, result="timeout", duration_s=0.0)
+        return SuiteResult(relpath, 124, True, "", DEADLINE_NOT_STARTED, 0.0, profile)
+    attempt_timeout = timeout if remaining is None else min(float(timeout), remaining)
     _suite_progress("suite_start", relpath, profile)
     timed_out = False
     # start_new_session=True makes the child the leader of its own process
@@ -1052,12 +1073,14 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
         sampler_thread.start()
     try:
         try:
-            out, err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(timeout=attempt_timeout)
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
             rc = 124
             out, err = reap_process_group(proc)
+            if attempt_timeout < timeout:
+                err = (err or "") + DEADLINE_STOPPED
     finally:
         if pgid is not None:
             with _ALL_RUN_PGIDS_LOCK:
@@ -2223,6 +2246,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument(
+        "--deadline", type=int, default=None,
+        help="whole-run wall-clock seconds; past it running suites stop as timeouts "
+             "and unstarted suites are reported without running (default: none)",
+    )
+    p.add_argument(
         "--retries", type=int, default=0,
         help="extra attempts for flaky-timing baseline suites; full repository runs require at least 1",
     )
@@ -2452,6 +2480,11 @@ def run_profile(
 
 def _run_main(argv: list[str]) -> int:
     args = build_arg_parser().parse_args(argv)
+    global _RUN_DEADLINE
+    if args.deadline is not None and args.deadline <= 0:
+        print("--deadline must be a positive number of seconds", file=sys.stderr)
+        return 64
+    _RUN_DEADLINE = None if args.deadline is None else time.monotonic() + args.deadline
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, _stop_on_signal)
     import artifact_context
@@ -2684,6 +2717,13 @@ def _run_main(argv: list[str]) -> int:
                 if remaining <= 0:
                     retry_budget_exhausted.add(rel)
                     break
+                # Past the run deadline the first failure stands; a retry
+                # attempt would only be reported as not started.
+                run_left = _deadline_remaining()
+                if run_left is not None:
+                    if run_left <= 0:
+                        break
+                    remaining = min(remaining, run_left)
                 # Checking the budget only *before* an attempt does not bound
                 # it: with 1s left and --timeout 600 the attempt could still
                 # run 600s. Clamp this attempt's timeout to what is left,

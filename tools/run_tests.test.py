@@ -1757,6 +1757,38 @@ class ExecutionPolicyFixture(unittest.TestCase):
         self.assertIn("--retries must be non-negative", errors)
 
 
+class RunDeadlineFixture(RunTestsFixtureBase):
+    """--timeout bounds one attempt; --deadline bounds the run. A hung suite
+    stops at the deadline, a suite not yet started is reported without
+    running, and the report is still written (2026-11-10: CI shard 5 held its
+    runner past the step limit and uploaded no report)."""
+
+    def test_deadline_stops_the_hung_suite_and_reports_the_unstarted_one(self):
+        write_suite(self.root, "a_hang.test.py", "import time\ntime.sleep(60)\n")
+        write_suite(self.root, "b_quick.test.py", """
+            from pathlib import Path
+            Path('b-ran').write_text('1')
+        """)
+        started = time.monotonic()
+        result, rows = self.run_fixture(
+            [], extra_args=["--jobs", "1", "--timeout", "30", "--deadline", "2", "--retries", "1"],
+        )
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(elapsed, 25, result.stdout)
+        by_suite = {row["suite_path"]: row for row in rows}
+        self.assertEqual(set(by_suite), {"a_hang.test.py", "b_quick.test.py"})
+        self.assertEqual({row["kind"] for row in rows}, {"timeout"})
+        self.assertFalse((self.root / "b-ran").exists())
+        self.assertIn('"event":"suite_not_started"', result.stdout)
+        self.assertRegex(result.stdout, r"hard-fail: b_quick\.test\.py::- verdict=\S+ kind=timeout")
+
+    def test_a_non_positive_deadline_is_a_usage_error(self):
+        result = run_runner(["--root", str(self.root), "--deadline", "0"])
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("--deadline must be a positive", result.stderr)
+
+
 class RetryBudgetFixture(RunTestsFixtureBase):
     """P3: the serial retry pass is bounded in total, and the per-suite
     timeout still applies to every individual attempt."""

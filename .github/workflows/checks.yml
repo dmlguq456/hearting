@@ -213,6 +213,8 @@ jobs:
         # The shard is split from tools/test-durations.tsv, so every runner
         # computes the same partition; --suite-list is written before any
         # suite runs and lets the aggregate job prove nothing was dropped.
+        # --deadline ends the run 5 minutes before this step's limit: a step
+        # killed at its limit uploads no report and names no stuck suite.
         run: |
           set -o pipefail
           mkdir -p "${{ runner.temp }}/shard-out"
@@ -269,7 +271,7 @@ jobs:
           PY
           }
           observe_claude full-suite-before | tee "${{ runner.temp }}/shard-out/progress.log"
-          python3 tools/run-tests.py --retries 1 \
+          python3 tools/run-tests.py --retries 1 --deadline 1800 \
             --shard ${{ matrix.shard }}/8 \
             --suite-list ${{ runner.temp }}/shard-out/suite-list.tsv \
             --xpass-nonfatal \
