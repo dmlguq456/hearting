@@ -40,6 +40,7 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 
 from __future__ import annotations
 from collections import OrderedDict
+import contextvars
 import threading
 
 import contextlib
@@ -166,6 +167,19 @@ def _snapshot_signature():
     return tuple(observed)
 
 
+# Long-lived readers that pass over the same ledgers continuously (the
+# obligation runner) may trust an unchanged stat generation instead of
+# re-reading bytes. Every other reader keeps the documented fresh read, which
+# also surfaces a transient read failure on an unchanged ledger.
+_TRUST_LEDGER_GENERATIONS = contextvars.ContextVar(
+    "dispatch_seat_handover_trust_ledger_generations", default=False)
+
+
+def trust_unchanged_ledgers() -> None:
+    """Let this thread reuse ledger reads whose stat generation is unchanged."""
+    _TRUST_LEDGER_GENERATIONS.set(True)
+
+
 # Readable ledger bytes per lineage directory, keyed by each file's full stat
 # generation (inode, ctime, mtime, size, mode). Ledgers are append-only or
 # replaced whole, so an unchanged generation means unchanged bytes.
@@ -182,8 +196,9 @@ def _readable_lineage_signature(directory: Path):
     """
     location, files, generation = _lineage_signature(directory)
     observed, contents = [], {}
+    trusted = _TRUST_LEDGER_GENERATIONS.get()
     with _READABLE_LEDGERS_LOCK:
-        held = dict(_READABLE_LEDGERS.get(location, {}))
+        held = dict(_READABLE_LEDGERS.get(location, {})) if trusted else {}
     current = {}
     for filename, *file_generation in files:
         file_generation = tuple(file_generation)
@@ -200,6 +215,8 @@ def _readable_lineage_signature(directory: Path):
         contents[filename] = raw
     if generation is not None and _lineage_generation(directory.stat()) != generation:
         raise OSError("lineage-directory-changed")
+    if not trusted:
+        return (location, tuple(observed), generation), contents
     with _READABLE_LEDGERS_LOCK:
         _READABLE_LEDGERS[location] = current
         while len(_READABLE_LEDGERS) > 4:
@@ -939,7 +956,7 @@ def _seat_transition_rows(st, path: str, key: str):
     link, before = _ledger_generation(path)
     if link:
         return None
-    if st._LEDGER_READ_SCOPE.get() is not None:
+    if st._LEDGER_READ_SCOPE.get() is not None or not _TRUST_LEDGER_GENERATIONS.get():
         return read()  # an open read pass keeps its own pinned rows
     with _TRANSITION_ROWS_LOCK:
         held = _TRANSITION_ROWS.get(path)
@@ -1142,7 +1159,7 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                 directory = _st().state_root() / "sessions"
                 keys.update(path.stem for path in directory.glob("*.jsonl")
                             if path.is_file() and not path.is_symlink())
-            rows = _seat_keys_transition_rows(sorted(keys))
+            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
         marker_relations = []
         marker_reader = getattr(pm, "steward_evidence_targets", None)
         for (marker_harness, marker_sid), marker in markers.items():

@@ -6641,15 +6641,19 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                 from peer_read_context import PeerReadContext
                 transition_read_context = PeerReadContext(registry_append_only=True)
                 transition_authority = {"rows": [], "handover_keys": []}
-                readiness = _pane_readiness(
-                    target, native_state,
-                    expected_harness=identity["harness"],
-                    expected_sid=identity["session_id"] or "-",
-                    expected_pane=identity["pane"],
-                    target_observation=(observed_state, observed_ident),
-                    pane_info=pane_info, registry_append_only=True,
-                    read_context=transition_read_context, server=server,
-                    authority_out=transition_authority)
+                # The transition proof keeps its own fresh context; one lineage
+                # observation serves all of this pane's recipient resolutions
+                # instead of re-stating every seat ledger per registry row.
+                with transition_read_context.pinned_lineage():
+                    readiness = _pane_readiness(
+                        target, native_state,
+                        expected_harness=identity["harness"],
+                        expected_sid=identity["session_id"] or "-",
+                        expected_pane=identity["pane"],
+                        target_observation=(observed_state, observed_ident),
+                        pane_info=pane_info, registry_append_only=True,
+                        read_context=transition_read_context, server=server,
+                        authority_out=transition_authority)
                 readiness_identity = dict(readiness.identity)
                 expected_readiness_identity = {
                     "server": identity["server"], "pane": identity["pane"],
@@ -7608,6 +7612,7 @@ def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
     from peer_read_context import PeerReadContext
     from runtime_observation import ObservationContext
 
+    _trust_unchanged_ledgers()
     store = peer_obligations.ObligationStore(
         state_root, allow_state_root_creation=False)
     while not stop_event.is_set():
@@ -7633,8 +7638,18 @@ def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
         stop_event.wait(1.0 if duties else 2.0)
 
 
+def _trust_unchanged_ledgers():
+    """The runner re-reads the same seat ledgers every pass; reuse unchanged ones."""
+    try:
+        import dispatch_seat_handover
+        dispatch_seat_handover.trust_unchanged_ledgers()
+    except Exception:  # noqa: BLE001 - without it every read is fresh, as before
+        pass
+
+
 def cmd_obligation_runner(args):
     """Existing peer steward, scoped to accepted duties and stopped when they settle."""
+    _trust_unchanged_ledgers()
     store = peer_obligations.ObligationStore(
         args.state_root, allow_state_root_creation=False)
     try:

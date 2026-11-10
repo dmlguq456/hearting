@@ -134,6 +134,8 @@ class SeatLedgerReads(unittest.TestCase):
         self.addCleanup(patcher.stop)
         handover._TRANSITION_ROWS.clear()
         self.addCleanup(handover._TRANSITION_ROWS.clear)
+        token = handover._TRUST_LEDGER_GENERATIONS.set(True)
+        self.addCleanup(handover._TRUST_LEDGER_GENERATIONS.reset, token)
         self.sessions = Path(self.tmp.name) / "hearting" / "session-tidy" / "sessions"
         self.sessions.mkdir(parents=True)
         self.ledger = self.sessions / "seat1.jsonl"
@@ -177,6 +179,23 @@ class SeatLedgerReads(unittest.TestCase):
             with session_tidy.seat_ledger_read_scope():
                 handover._transition_rows("seat1")
         self.assertEqual(reads, ["seat1"])
+
+
+class UntrustedReadersStayFresh(unittest.TestCase):
+    def test_reader_outside_the_runner_reads_every_time(self):
+        import session_tidy
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp}):
+            sessions = Path(tmp) / "hearting" / "session-tidy" / "sessions"
+            sessions.mkdir(parents=True)
+            (sessions / "seat1.jsonl").write_text(json.dumps(
+                {"ts": 1, "harness": "claude", "sid": "s1", "event": "steward-release",
+                 "seat_key": "seat1", "generation": "g1"}) + "\n")
+            with mock.patch.object(session_tidy, "_read_ledger_lines",
+                                   wraps=session_tidy._read_ledger_lines) as reads:
+                handover._transition_rows("seat1")
+                handover._transition_rows("seat1")
+            self.assertEqual(reads.call_count, 2)
 
 
 class ActiveIndexReads(unittest.TestCase):
