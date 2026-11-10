@@ -260,8 +260,7 @@ function render() {
     }
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
     if(harness==='claude'){
-      const painted=claudePanelPainted();reportClaudePanel(painted);
-      if(painted)for(const y of nativeDisplay.claudeStatusRows(nativeLines,sid,claudeStatusRecord()))concealed.add(y);
+      if(claudePanelPainted())for(const y of nativeDisplay.claudeStatusRows(nativeLines,sid,claudeStatusRecord()))concealed.add(y);
     }
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;
@@ -450,13 +449,6 @@ function claudePanelPainted(){
   const rows=(panelModel.summary||[]).map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
   return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
 }
-let claudePanelReported='';
-function reportClaudePanel(painted){
-  const value=JSON.stringify({session_id:sid,painted});
-  if(value===claudePanelReported)return;
-  const target=path.join(dir,'claude-panel.json'),temp=target+'.'+process.pid;
-  try{fs.writeFileSync(temp,value,{mode:0o600});fs.renameSync(temp,target);claudePanelReported=value;}catch{}
-}
 let claudeStatus={key:'',value:null};
 function claudeStatusRecord(){
   try{
@@ -469,7 +461,6 @@ function claudeStatusRecord(){
 }
 function rawRelay() {
   if(relay||ended)return;
-  if(harness==='claude')reportClaudePanel(false);
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);frameTimer=projectionTimer=undefined;
@@ -854,7 +845,6 @@ server.listen(socketPath,()=>{
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{
-    if(harness==='claude')reportClaudePanel(false);
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     server.close();await source('unregister');backend?.stdin.end();

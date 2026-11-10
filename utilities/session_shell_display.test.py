@@ -42,17 +42,15 @@ class WrappedDisplayTest(unittest.TestCase):
                 self.assertEqual(record['session_id'],'synthetic-native-session')
                 self.assertEqual('\n'.join(record['lines']),line)
 
-    def test_a_painting_panel_shrinks_the_native_row_to_one_complete_line(self):
+    def test_the_native_row_stays_complete_even_beside_a_stale_panel_report(self):
+        # A panel report left by an earlier host (painted=true) must not shrink
+        # the callback: if the panel is gone, every value is already here.
+        full=self.statusline(True,37)
+        for field in ('37%','Opus','7d 42%','◑'):self.assertIn(field,full)
         record={}
         line=self.statusline(True,37,panel={'session_id':'synthetic-native-session','painted':True},record=record)
-        self.assertEqual(len(line.splitlines()),1)
-        for field in ('37%','Opus','7d 42%'):self.assertIn(field,line)
-        self.assertEqual(record['lines'],[line])
-        for panel in ({'session_id':'another-session','painted':True},{'session_id':'synthetic-native-session','painted':False}):
-            with self.subTest(panel=panel):
-                # The complete multi-row form, as without any panel report.
-                self.assertGreater(len(self.statusline(True,37,panel=panel).splitlines()),1)
-        self.assertGreater(len(self.statusline(True,37).splitlines()),1)
+        self.assertEqual(line,full)
+        self.assertEqual('\n'.join(record['lines']),line)
 
 
     def test_first_claude_paint_reuses_metadata_without_waiting_for_refresh(self):

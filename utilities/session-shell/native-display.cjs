@@ -66,10 +66,20 @@ function observe(harness, lines, sid) {
   return null;
 }
 // Rows whose text equals the statusline output Claude's callback recorded for
-// this exact session. Only the bottom rows are searched, and only a complete
-// contiguous match counts; the previous record covers the paint in flight.
+// this exact session. Only Claude's statusline area counts: the rows directly
+// under the lowest input box (a rule, a `❯` prompt row, a rule). A screen
+// without that box, such as the Ctrl+O transcript, conceals nothing, and only a
+// complete contiguous match counts; the previous record covers the paint in flight.
 function claudeStatusRows(lines,sid,record) {
   if(!sid||!record||record.session_id!==sid)return new Set();
+  const rule=s=>/^─{8,}$/.test(String(s).trim());
+  let bottom=-1;
+  for(let y=lines.length-2;y>=1&&bottom<0;y--)if(rule(lines[y])){
+    let top=y-1;while(top>=0&&!rule(lines[top]))top--;
+    if(top>=0&&top<y-1&&/^❯/.test(String(lines[top+1])))bottom=y;
+    else return new Set();
+  }
+  if(bottom<0)return new Set();
   // Cell spacing after wide glyphs and emoji presentation selectors are
   // terminal rendering, not text; every visible character must still match.
   const norm=s=>String(s).replace(/[\s\uFE0F]+/g,'');
@@ -78,11 +88,10 @@ function claudeStatusRows(lines,sid,record) {
     // Claude clips a line wider than its row with an ellipsis.
     return a.length>=12&&/…$/.test(a)&&b.startsWith(a.slice(0,-1).trimEnd());
   };
-  const bottom=Math.max(0,lines.length-10);
+  const y=bottom+1;
   for(const want of [record.lines,record.previous]){
     if(!Array.isArray(want)||!want.length||want.length>6||!want.every(s=>typeof s==='string'&&norm(s)))continue;
-    for(let y=lines.length-want.length;y>=bottom;y--)
-      if(want.every((line,i)=>same(lines[y+i],line)))return new Set(want.map((_l,i)=>y+i));
+    if(y+want.length<=lines.length&&want.every((line,i)=>same(lines[y+i],line)))return new Set(want.map((_l,i)=>y+i));
   }
   return new Set();
 }

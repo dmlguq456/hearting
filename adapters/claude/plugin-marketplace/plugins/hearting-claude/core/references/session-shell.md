@@ -174,13 +174,17 @@ A value that cannot meet this is compared with retaining that native field.
 While wrapped, Claude's panel shows the common status area in the same place
 and with the same formatter as Codex and OpenCode. Claude keeps its reserved
 statusline row and keeps running its callback, which stays the value source and
-paints every former Hearting field with that formatter. Only while the panel
-actually paints its model and compact status for the callback's exact session
-does the shell blank the rows whose text equals the callback's latest recorded
-output, and the callback then prints one compact line. Claude has no supported
-way to remove that row, so one blank row remains. A hidden, collapsed, focused
-or not-yet-bound panel, a lost display host and unwrapped sessions show the
-native row unchanged. Unwrapped displays remain intact.
+paints every former Hearting field with that formatter on every callback; the
+panel never shortens it. Only while the panel actually paints its model and
+compact status for the callback's exact session does the shell blank Claude's
+statusline area, the rows directly under the input box, when their text equals
+the callback's latest recorded output. A screen without that input box, such
+as the Ctrl+O transcript, keeps every row. Claude has no supported way to
+remove those rows, so one or two blank rows remain (two when the complete
+status wraps or lists jobs); keeping every value visible comes first. A
+hidden, collapsed, focused or not-yet-bound panel, a lost display host and
+unwrapped sessions show the complete native rows unchanged. Unwrapped
+displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.
