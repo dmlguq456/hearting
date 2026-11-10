@@ -2950,11 +2950,14 @@ class HarvestVocabularyTest(unittest.TestCase):
     def test_command_projection_preserves_exact_arguments_without_prose_punctuation(self):
         surface = "/fixture root/owner's preflight.sh"
         jobs = "/fixture root/exact jobs.log"
-        for action, suffix in (("complete-open", ["--status", "open", "--mark-done"]),
-                               ("inspect-done-failure", ["--status", "done"])):
-            command = JOIN.completion_harvest_command("att-exact", action, jobs=jobs, surface=surface)
-            self.assertEqual(shlex.split(command), [surface, "harvest", "--jobs", jobs,
-                             "--attempt-id", "att-exact", *suffix])
+        command = JOIN.completion_harvest_command("att-exact", "complete-open", jobs=jobs, surface=surface)
+        self.assertEqual(shlex.split(command), [surface, "harvest", "--jobs", jobs,
+                         "--attempt-id", "att-exact", "--status", "open", "--mark-done"])
+        command = JOIN.completion_harvest_command("att-exact", "inspect-done-failure", jobs=jobs, surface=surface)
+        tokens = shlex.split(command)
+        self.assertEqual(tokens[0], "python3")
+        self.assertTrue(tokens[1].endswith("/utilities/dispatch-registry.py"))
+        self.assertEqual(tokens[2:], ["observed-status", "--jobs", jobs, "--attempt", "att-exact"])
         self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs, surface=surface), "")
 
     def test_incident_command_with_jobs_now_classifies(self):
@@ -5970,14 +5973,14 @@ class WorkContinuationReceiptTest(unittest.TestCase):
     def test_depth_two_and_corrupt_context_keep_exact_inspection_fallback(self):
         self.jobs.write_text(self.record("stage",kind="stage",depth="2"))
         text = self.render([("stage","inspect-done-failure")])
-        self.assertIn("--attempt-id stage --status done",text)
+        self.assertIn("--attempt stage",text)
         self.assertNotIn("capability-route.py start",text)
         self.jobs.write_text(self.record("first"))
         for mutation in ({"route_hash":"sha256:changed"},{"route_id":"rt-other"},{"work_request":None}):
             self.path.write_text(json.dumps({**self.route,**mutation}))
             text = self.render([("first","inspect-done-failure")])
             self.assertNotIn("capability-route.py start",text)
-            self.assertIn("--attempt-id first --status done",text)
+            self.assertIn("--attempt first",text)
 
 
 class NextReadyReceiptTest(unittest.TestCase):
@@ -6104,7 +6107,7 @@ class NextReadyReceiptTest(unittest.TestCase):
         self.jobs.write_text(self.stage_row("stage-1", "plan"))
         receipt = {"children": [{"attempt_id": "stage-1", "required_action": "inspect-done-failure"}]}
         text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs), surface="/fixture/preflight.sh")
-        self.assertIn("--attempt-id stage-1 --status done", text)
+        self.assertIn("--attempt stage-1", text)
         self.assertNotIn("Next ready", text)
 
 

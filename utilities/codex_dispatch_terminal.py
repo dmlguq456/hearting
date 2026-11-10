@@ -863,7 +863,14 @@ def inspect_terminal_attempt(
     type keep the compatibility note.
     """
 
-    parsed = _read_terminal(path)
+    return inspect_terminal_value(_read_terminal(path), worktree=worktree,
+        artifact_root_metadata=artifact_root_metadata, include_failure_detail=include_failure_detail,
+        worker_type=worker_type, artifact_binding=artifact_binding)
+
+
+def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
+                           include_failure_detail=False, worker_type=None, artifact_binding=None):
+    """The same root/placement checks for a live final result and its later log."""
     if parsed["state"] != "valid":
         return parsed
 
@@ -1012,6 +1019,11 @@ def inspect_terminal_attempt(
     if review_blocking_handoff(parsed, worker_type):
         parsed["failure_note"] = REVIEW_BLOCKING_NOTE
 
+    if completed_audit_assessment(parsed, worker_type, artifact_binding):
+        parsed.update(verdict="PASS", assessment_verdict="FAIL", assessment_blocker=parsed.get("blocker"),
+                      blocker="none", blocker_reason="none", failure_class="pass", failure_note="",
+                      envelope_normalized=",".join(filter(None, (parsed.get("envelope_normalized"), "completed-audit-with-findings"))))
+
     if (
         worker_type == REVIEW_WORKER_TYPE
         and parsed.get("artifact_state") == "readable"
@@ -1034,11 +1046,41 @@ def inspect_terminal_attempt(
             excerpt, truncated = _escape_and_bound(diagnostic)
             parsed["failure_diagnostic_excerpt"] = excerpt
             parsed["failure_diagnostic_truncated"] = truncated
+    if include_failure_detail and parsed.get("assessment_blocker") not in {None, "none"}:
+        excerpt, truncated = _escape_and_bound(str(parsed["assessment_blocker"]))
+        parsed["assessment_detail_excerpt"] = excerpt
+        parsed["assessment_detail_truncated"] = truncated
 
     # Raw values stay internal and are removed from the normalized public view.
-    for key in ("artifact", "blocker", "diagnostic"):
+    for key in ("artifact", "blocker", "diagnostic", "assessment_blocker"):
         parsed.pop(key, None)
     return parsed
+
+
+def completed_audit_assessment(parsed, worker_type, binding):
+    """A negative subject judgment is not a failed audit execution.
+
+    Only an exact registered audit owner with a readable bound artifact qualifies,
+    like a finished review worker. Stage reviews and ordinary code work do not.
+    """
+    if (worker_type != "owner" or not isinstance(binding, Mapping)
+            or binding.get("worker_type") != "owner" or binding.get("dispatch_depth") != "1"
+            or binding.get("workflow_completion") != "runtime-v1"
+            or str(binding.get("note", "")).startswith("dead-")
+            or parsed.get("state") != "valid" or parsed.get("verdict") != "FAIL"
+            or parsed.get("artifact_state") != "readable"):
+        return False
+    try:
+        import route_identity
+        path = binding.get("owner_route_file") or binding.get("route_file")
+        route = json.loads(Path(path).read_text())
+        digest = binding.get("owner_route_hash") or binding.get("route_hash")
+        rid = binding.get("owner_route_id") or binding.get("route_id")
+        return (route.get("capability") == "audit" and route.get("route_id") == rid
+                and bool(digest) and route.get("route_hash") == digest
+                and route_identity.route_hash(route) == digest)
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
@@ -1140,6 +1182,14 @@ def carrier_terminal_note(
     if not compat:
         return None, {}
     extra: dict[str, str] = {}
+    if compat.get("failure_note") == "dead-worker-fail" and worker_type == "owner":
+        view = inspect_terminal_attempt(path, worktree=worktree,
+            artifact_root_metadata=artifact_root_metadata, worker_type=worker_type,
+            artifact_binding=artifact_binding)
+        if view.get("assessment_verdict") == "FAIL" and view.get("verdict") == "PASS":
+            compat = {**compat, "verdict": "PASS", "blocker": "none", "failure_note": "",
+                      "failure_class": "pass"}
+            extra["reconcile_reason"] = "completed-audit-with-findings"
     if compat.get("failure_note") == "dead-worker-fail" and worker_type == REVIEW_WORKER_TYPE:
         view = inspect_terminal_attempt(
             path,

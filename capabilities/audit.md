@@ -27,6 +27,18 @@ artifact characteristics by default; an explicit user scope overrides it.
 Report only—never modify the artifact. This complements autopilot-refine:
 refine edits, while audit inspects.
 
+A completed audit can find blocking defects. Its task completion and its
+judgment about the inspected subject are separate: "changes required" or
+"do not merge" belongs in the report and does not make the audit execution a
+failure. The existing final handoff reports completion of the assigned audit;
+no new report field or format is required. For a bound audit owner, a readable
+report plus a successful native turn and a `FAIL` assessment is the compatible
+completed-with-findings result, matching the existing review-worker meaning.
+The handoff may describe subject findings in its blocker text; preserve them
+as assessment detail. `BLOCKED`, runtime errors, missing artifacts and
+unfinished children remain unresolved.
+This does not turn a negative implementation-review gate into a passing gate.
+
 Use this capability for independent inspection of completed work, including
 code and experiment provenance. Code review within an implementation/debug
 cycle stays `autopilot-code --mode audit`. Measuring new data quality or

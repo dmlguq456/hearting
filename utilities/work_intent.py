@@ -10,10 +10,9 @@ values now travel with every route, neither of them part of its identity:
   `안 할 것:` / `완료:` lines (or `Intent:` / `Scope:` / `Not doing:` / `Done:`)
   of the prompt file, read again from the sealed `work_request.text` whenever
   needed. With no intent line the request's first sentence is a marked draft.
-- `original`: a short excerpt of the person's own prompt, read by the runtime
-  from the shared hook's exact human prompt boundary when a route is first
-  written (not a peer/runtime transfer or a bare approval), with credentials
-  masked -- and stored once in
+- `original`: the person's words explicitly quoted in this route's task, with
+  credentials masked. A recent session utterance alone cannot establish that
+  it belongs to this task. The optional quotation is stored once in
   `.runtime/intent/<work key>.json` beside the route. Every leg of a framed route
   shares the frame route's record and never reads the session itself.
 
@@ -289,6 +288,48 @@ def frame_corrections_text(route):
         f"- [{item['id']}] {item['text']}" for item in view["requests"]) + "\n")
 
 
+def task_quotation(text) -> str:
+    """Only attributed quotations already present in the assignment.
+
+    No semantic guessing from the latest conversation and no required format:
+    unfamiliar attribution simply has no optional quote.
+    """
+    if not isinstance(text, str):
+        return ""
+    attribution = re.compile(
+        r'^\s*(?:#{1,6}\s+)?(?:[-*]\s+)?(?:사용자(?:\s*원문)?|원문|user(?:\s+(?:said|quote))?|original)'
+        r'(?:\s*[（(][^\n)）]{0,40}[)）])?\s*[:：]\s*(.*)$', re.I)
+    quoted = re.compile(r'"([^"\n]+)"|“([^”\n]+)”|「([^」\n]+)」')
+    for raw in text.splitlines():
+        match = attribution.match(raw.replace('**', ''))
+        if not match:
+            continue
+        values = [next(value for value in item if value) for item in quoted.findall(match[1])]
+        if values:
+            return _line(redact_secrets(" · ".join(values)), MAX_ORIGINAL_CHARS)
+    return ""
+
+
+def _task_quotation(route) -> str:
+    if not isinstance(route, dict):
+        return ""
+    if route.get("route_plan"):
+        reference = frame_reference(route)
+        if reference is None:
+            return ""
+        root, rid, digest = reference
+        try:
+            frame = json.loads((root / ".runtime/routes" / (rid + ".json")).read_text())
+            from route_identity import route_hash
+            if frame.get("route_id") != rid or frame.get("route_hash") != digest or route_hash(frame) != digest:
+                return ""
+            route = frame
+        except (OSError, ValueError, TypeError):
+            return ""
+    request = route.get("work_request")
+    return task_quotation(request.get("text")) if isinstance(request, dict) else ""
+
+
 def seal_original(route, cwd=None, environ=None) -> str:
     """Write the excerpt once for a route the person started; a leg or a repeat keeps the first."""
     if not isinstance(route, dict) or not isinstance(route.get("work_request"), dict) or route.get("route_plan"):
@@ -296,7 +337,7 @@ def seal_original(route, cwd=None, environ=None) -> str:
     path = record_path(route)
     if path is None or path.exists():
         return ""
-    original = original_excerpt(cwd or route.get("cwd"), environ)
+    original = _task_quotation(route)
     if not original:
         return ""
     body = json.dumps({"schema": RECORD_SCHEMA, "route_id": route["route_id"], "original": original,
@@ -321,7 +362,8 @@ def read_original(route) -> str:
     except (OSError, ValueError):
         return ""
     text = value.get("original") if isinstance(value, dict) and value.get("schema") == RECORD_SCHEMA else ""
-    return text if isinstance(text, str) and len(text) <= MAX_ORIGINAL_CHARS else ""
+    # Keep old records untouched, but do not display their unbound session quote.
+    return text if isinstance(text, str) and text == _task_quotation(route) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +374,8 @@ def route_intent(route, *, original=None) -> dict:
     """What the route says the person wants: the prompt file's lines and the person's words."""
     request = route.get("work_request") if isinstance(route, dict) else None
     value = draft(request.get("text") or "") if isinstance(request, dict) else {}
-    words = read_original(route) if original is None else original
+    # `original` remains a compatible call parameter, never independent proof.
+    words = _task_quotation(route)
     return {"original": words, **value} if words else value
 
 
@@ -401,7 +444,7 @@ def prompt_block(route) -> str:
 SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
-_SECTION = re.compile(r"^#{2,3}\s+(?P<title>.+?)\s*$")
+_SECTION = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
 _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # (field, sections of the code-report template by number, words of any other heading). The numbers
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
@@ -410,12 +453,15 @@ _SECTION_FIELDS = (
     ("remaining", ("5", "6"), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "후속", "한계", "unverified", "failed",
                                "skipped", "follow-up", "follow up", "follow-ups", "remaining", "limitation", "limits",
                                "open risk")),
-    ("verified", ("4",), ("검증", "시험", "qa", "verification", "tests", "testing")),
-    ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "바뀐 것", "고친 것", "고친 행동", "사용자용",
+    ("verified", ("4",), ("검증", "시험", "검사", "qa", "verification", "validation", "checks", "tests", "testing")),
+    ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
+_UNRUN_CHECK = re.compile(
+    r"(?:\b(?:test|tests|suite|CI|live)\b|시험|검사|검증|실기).{0,160}"
+    r"(?:not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안)", re.I)
 
 
 def _ui_text():
@@ -439,28 +485,39 @@ def summary_heads() -> tuple[str, ...]:
 
 
 def _has_word(title: str, word: str) -> bool:
-    if word.isascii():
-        return re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", title) is not None
-    return word in title
+    return re.search(r"(?<![a-z0-9가-힣])" + re.escape(word)
+                     + r"(?=$|[^a-z0-9가-힣]|[과와](?:\s|$))", title) is not None
 
 
 def _section_field(title: str, *, numbered: bool) -> str | None:
     number = _NUMBER.match(title)
-    if number and numbered:
-        return next((field for field, numbers, _words in _SECTION_FIELDS if number["num"] in numbers), None)
     lowered = (title[number.end():] if number else title).lower()
-    return next((field for field, _numbers, words in _SECTION_FIELDS
-                 if any(_has_word(lowered, word) for word in words)), None)
+    # A finding or historical narrative can mention checks without being the
+    # report's checks section. Only a heading that names the field qualifies.
+    leading = re.sub(r"^(?:(?:주요|직접|실행한|수행한|관련|최종|추가|알려진|known|executed|performed|focused|relevant)\s+)+", "", lowered)
+    if not any(leading.startswith(word) and _has_word(leading, word)
+               for _field, _numbers, words in _SECTION_FIELDS for word in words):
+        return None
+    matches = [field for field, _numbers, words in _SECTION_FIELDS
+               if any(_has_word(lowered, word) for word in words)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]]:
     """The report's own lines under its overview, verification and remaining-work headings.
 
-    `numbered` reads `1`/`4`/`5`/`6` as the code-report template's sections; any other heading
-    is matched by its words."""
+    `numbered` is accepted for older callers, but ordinals never decide meaning.
+    Mixed/unknown headings and code fences cannot populate a guessed field."""
     sections: dict[str, list[str]] = {}
     current = None
+    fence = None
     for raw in (text or "").splitlines():
+        if raw.lstrip().startswith(('```', '~~~')):
+            marker = raw.lstrip()[:3]
+            fence = None if fence == marker else marker if fence is None else fence
+            continue
+        if fence:
+            continue
         match = _SECTION.match(raw)
         if match:
             current = _section_field(match["title"].strip(), numbered=numbered)
@@ -468,7 +525,10 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
                 and not any(marker in line for marker in _CARRIER_MARKERS)):
-            sections.setdefault(current, []).append(line.strip("|").strip())
+            # A verification section can explicitly say a check was not run.
+            # Preserve that declaration as unverified; never call it a pass.
+            field = "remaining" if current == "verified" and _UNRUN_CHECK.search(line) else current
+            sections.setdefault(field, []).append(line.strip("|").strip())
     return sections
 
 
@@ -561,7 +621,7 @@ def _entrance_line(route, primary, t):
     return t("completion.entrance", path=str(Path(root) / "README.md"))
 
 
-def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None) -> str:
+def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -582,7 +642,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         original = (t("completion.intent_original", original=_line(intent["original"], 100))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
-    lines.append(t("completion.result", result=_result_line(route, t)))
+    result = (t("completion.result_audit_findings") if route.get("capability") == "audit" and assessment == "FAIL"
+              else _result_line(route, t))
+    lines.append(t("completion.result", result=result))
     for state in ("undelivered", "unknown"):
         if (corrections or {}).get(state):
             lines.append(t("completion.corrections_" + state, count=corrections[state]))

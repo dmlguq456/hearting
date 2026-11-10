@@ -163,8 +163,11 @@ class RecordTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.frame = {"route_id": "rt-aaaaaaaaaaaaaaaa", "artifact_root": str(self.root), "cwd": str(self.root),
-                      "work_request": {"text": HEADER, "owner_harness": None}}
+                      "work_request": {"text": HEADER + '사용자: "처음 요청"\n', "owner_harness": None}}
         self.frame["route_hash"] = route_identity.route_hash(self.frame)
+        parent = self.root / ".runtime/routes" / (self.frame["route_id"] + ".json")
+        parent.parent.mkdir(parents=True)
+        parent.write_text(json.dumps(self.frame))
         decision = self.root / "campaigns/c/cyc/artifacts/shards/frame/route-decision.json"
         decision.parent.mkdir(parents=True)
         decision.write_text(json.dumps({"decision": {"frame_route": {"route_id": self.frame["route_id"]}}}))
@@ -186,7 +189,8 @@ class RecordTest(unittest.TestCase):
     def test_a_leg_shares_the_frame_record_and_never_reads_the_session(self):
         with mock.patch.object(WI, "original_excerpt", return_value="처음 요청"):
             WI.seal_original(self.frame)
-        with mock.patch.object(WI, "original_excerpt", side_effect=AssertionError("a leg read the session")):
+        with mock.patch.object(WI, "original_excerpt", side_effect=AssertionError("a leg read the session")), \
+             mock.patch.object(WI, "frame_reference", return_value=(self.root, self.frame["route_id"], self.frame["route_hash"])):
             self.assertEqual(WI.seal_original(self.leg), "")
             self.assertEqual(WI.read_original(self.leg), "처음 요청")
             self.assertEqual(WI.route_intent(self.leg)["original"], "처음 요청")
@@ -200,7 +204,7 @@ class ReadersTest(unittest.TestCase):
                 "artifact_root": "/nonexistent"}
 
     def test_card_and_prompt_show_only_what_the_route_says(self):
-        full = self.route(HEADER)
+        full = self.route(HEADER + '사용자: "체크해 줘"\n')
         self.assertEqual(WI.card_lines(full, original="체크해 줘"), [
             "  [의도] 시작 때 의도를 한 번 고정한다.",
             "    범위 /data/out에 결과 쓰기 · 안 할 것 새 게이트; 필수 입력 · 완료 owner와 워커 지시문에 의도가 실린다.",
@@ -269,7 +273,7 @@ class CompletionSummaryTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": "의도: 의도를 고정한다\n\nBody.", "owner_harness": None}}
+                      "work_request": {"text": '의도: 의도를 고정한다\n\nBody.\n사용자: "의도가 맞는지 체크하는 건 중요해"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
@@ -278,6 +282,46 @@ class CompletionSummaryTest(unittest.TestCase):
         self.report.write_text(REPORT)
         self.route_file = self.root / "rt-5555555555555555.json"
         self.route_file.write_text(json.dumps(self.route))
+
+    def test_unrelated_old_quote_and_preview_override_cannot_become_this_task_intent(self):
+        route = {**self.route, 'work_request': {'text': 'Fix the completion summary'}}
+        before = WI.record_path(route).read_bytes()
+        text = WI.completion_summary(route, self.report)
+        self.assertNotIn('원문', text)
+        self.assertNotIn('unrelated recent utterance', str(WI.card_lines(route, original='unrelated recent utterance')))
+        self.assertEqual(WI.record_path(route).read_bytes(), before)
+
+    def test_numbers_never_turn_causes_files_or_passed_tests_into_other_fields(self):
+        self.report.write_text('## 1. 원인\nroot cause only\n## 4. 주요 수정 사항\nchanged file\n'
+                               '## 5. 실행한 시험\ntest PASS\n## 6. 알려진 한계\nClaude live not rerun\n')
+        sections = WI.report_sections(self.report.read_text(), numbered=True)
+        self.assertNotIn('root cause only', sections.get('changed', []))
+        self.assertNotIn('changed file', sections.get('verified', []))
+        self.assertIn('test PASS', sections.get('verified', []))
+        self.assertNotIn('test PASS', sections.get('remaining', []))
+        self.assertIn('Claude live not rerun', sections['remaining'])
+
+    def test_mixed_or_unknown_sections_never_claim_there_was_nothing_left(self):
+        self.report.write_text('## 변경 개요\nknown change\n## 검증 및 한계\nPASS and unrun\n'
+                               '## 다른 형식\nCI not observed\n')
+        text = WI.completion_summary(self.route, self.report)
+        self.assertNotIn('보고서에 따로 적힌 것 없음', text)
+        self.assertIn('미검증·남은 일을 확실히 추출하지 못함', text)
+        self.assertIn('검증 내역을 확실히 추출하지 못함', text)
+
+    def test_findings_and_past_failure_headings_are_not_current_verification_or_remaining_work(self):
+        text = '## 결함\n### F2 — 로컬 프로세스 생존 미검사\nsource explanation only\n## 초기 원격 반영 실패와 인계 기록 (인수 완료)\nold failed push\n## 실행한 검사\nobserved PASS\n'
+        self.assertEqual(WI.report_sections(text, numbered=True), {'verified': ['observed PASS']})
+
+    def test_explicit_unrun_checks_inside_verification_keep_their_own_field(self):
+        sections = WI.report_sections('## 검증\nfocused checks PASS\n전체 시험은 180초 제한에서 중단, CI 미확인\n')
+        self.assertEqual(sections['verified'], ['focused checks PASS'])
+        self.assertEqual(sections['remaining'], ['전체 시험은 180초 제한에서 중단, CI 미확인'])
+
+    def test_fenced_headings_and_unrecognized_subsections_do_not_leak_into_checks(self):
+        text = '## 시험\nobserved PASS\n```md\n## 미검증\nnot a report section\n```\n#### File inventory\na.py\n'
+        sections = WI.report_sections(text, numbered=True)
+        self.assertEqual(sections, {'verified': ['observed PASS']})
 
     def test_numbered_report_gives_changes_checks_and_the_rest(self):
         (self.root / "rt-5555555555555555.outcome.json").write_text(json.dumps({"review_independence_degraded": ["review"]}))
@@ -329,12 +373,11 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertNotIn("순서", text)
         self.assertNotIn("10/19", text)
         self.assertIn("미검증·남은 것: 휴리스틱이다", text)
-        self.assertIn("검증: 보고서에 검증 절이 없음", text)
+        self.assertIn("검증: 검증 내역을 확실히 추출하지 못함 · 보고서 확인", text)
         strategy = "## 4. Key Arguments & Evidence\n- claim\n\n## 5. Related Work Strategy\n- cite\n"
         self.report.write_text(strategy)
         self.assertIn("기계 요약 안 함", WI.completion_summary(research, self.report))
-        self.assertEqual(WI.report_sections(strategy, numbered=True),
-                         {"verified": ["claim"], "remaining": ["cite"]})   # the code-report reading
+        self.assertEqual(WI.report_sections(strategy, numbered=True), {})  # ordinal numbers carry no field meaning
         self.assertEqual(WI.report_sections(strategy), {})
 
     def test_completion_retains_unapplied_and_unknown_corrections_as_distinct_counts(self):
@@ -395,7 +438,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": "Intent: Seal the intent\n\nBody.", "owner_harness": None}}
+                      "work_request": {"text": 'Intent: Seal the intent\n\nBody.\nUser: "check the intent"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
@@ -439,9 +482,9 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.assertIn("결과: 이 leg(1/2) 완료 — 다음 leg가 남음", korean)
         self.assertIn("검증·남은 것: 보고서 형식이 달라 기계 요약 안 함", korean)
         self.report.write_text("## Changes\n- one\n")
-        self.assertIn("Checks: the report has no verification section", self.summary(None, route=research))
-        self.assertIn("Unverified / remaining: nothing else is listed in the report", self.summary(None, route=research))
-        self.assertIn("검증: 보고서에 검증 절이 없음", self.summary("ko", route=research))
+        self.assertIn("Checks: Checks could not be extracted reliably; see the report", self.summary(None, route=research))
+        self.assertIn("Unverified / remaining: Unverified or remaining work could not be extracted reliably; see the report", self.summary(None, route=research))
+        self.assertIn("검증: 검증 내역을 확실히 추출하지 못함 · 보고서 확인", self.summary("ko", route=research))
         self.assertIn("Artifact: none", self.summary(None, route=research, report=None))
         self.assertIn("산출물: 없음", self.summary("ko", route=research, report=None))
         self.assertIn("Result: Done — the runtime confirmed", self.summary(None, route=research))
