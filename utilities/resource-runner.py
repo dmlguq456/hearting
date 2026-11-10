@@ -1370,51 +1370,34 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     eligible = []
     differences = []
     refusal_reason = "resource-compute-contract-unavailable"
-    for armed in armed_rows:
-        node_id = armed["node"]
-        if (armed.get("predecessor_kind") != "resource"
-                or armed.get("resource_registry") != str(registry)
-                or armed.get("jobs") != str(jobs)):
-            continue
-        node = WS.route_node(route, node_id)
-        if not isinstance(node, dict) or node.get("kind") != "resource-runner":
-            continue
-        original = json.loads(registry.read_text(encoding="utf-8")).get("runs", {}).get(
-            armed.get("predecessor_id"))
-        original_holder = OWNER_RESOURCE.resource_holder(original or {})
-        if not original_holder.get("observed", True):
-            fail_compute("resource-compute-observation-unavailable", differences=[
-                {"field": "resource.holder", "expected": "readable route lineage",
-                 "actual": original_holder.get("unobserved_reason")}],
-                next_action="restore access to the route lineage, then retry the same compute run",
-                retryable=True)
-        if (original_holder.get("route_id"), original_holder.get("route_hash")) != (
-                route.get("route_id"), route.get("route_hash")):
-            continue
-        if not original_holder.get("inherited") and (
-                armed.get("route_id") != route.get("route_id")
-                or armed.get("route_hash") != route.get("route_hash")):
-            continue
+    direct_run_id = provenance.get("run_id")
+
+    def seat_binding_differences(seat_node_id, seat_node, seat_row, origin, seat_artifact_base):
+        """Shared exact-binding checks for one receipt-bound registry row seat.
+
+        The provenance contract of the completed run names one resource row
+        (route, node, run id, owner attempt, sealed command/baseline/inputs);
+        every adoptable seat passes the same checks before any status rule.
+        """
         parent = provenance.get("contract") or {}
-        # A run no handoff moved is bound to this route's own file and hash; only
-        # an inherited run is bound to the address that first recorded it.
-        origin = (original_holder.get("origin") or {} if original_holder.get("inherited") else
-                  {"route_file": str(Path(route_file).resolve(strict=True)),
-                   "route_hash": route.get("route_hash")})
         candidate_bindings = [
             ("resource_policy", "supervised-owner",
-             original.get("resource_policy") if isinstance(original, dict) else None),
+             seat_row.get("resource_policy") if isinstance(seat_row, dict) else None),
             ("resource.route", origin.get("route_file"),
-             original.get("route") if isinstance(original, dict) else None),
-            ("resource.node", node_id, original.get("node") if isinstance(original, dict) else None),
-            ("resource.jobs", str(jobs), original.get("jobs") if isinstance(original, dict) else None),
-            ("provenance.run_id", original.get("run_id") if isinstance(original, dict) else None,
+             seat_row.get("route") if isinstance(seat_row, dict) else None),
+            ("resource.node", seat_node_id,
+             seat_row.get("node") if isinstance(seat_row, dict) else None),
+            ("resource.jobs", str(jobs),
+             seat_row.get("jobs") if isinstance(seat_row, dict) else None),
+            ("provenance.run_id",
+             seat_row.get("run_id") if isinstance(seat_row, dict) else None,
              provenance.get("run_id")),
-            ("provenance.node", node_id, provenance.get("node")),
+            ("provenance.node", seat_node_id, provenance.get("node")),
             ("provenance.parent_attempt_id",
-             original.get("parent_attempt_id") if isinstance(original, dict) else None,
+             seat_row.get("parent_attempt_id") if isinstance(seat_row, dict) else None,
              provenance.get("parent_attempt_id")),
-            ("contract.run_id", original.get("run_id") if isinstance(original, dict) else None,
+            ("contract.run_id",
+             seat_row.get("run_id") if isinstance(seat_row, dict) else None,
              parent.get("run_id")),
             ("contract.route_hash", origin.get("route_hash"), parent.get("route_hash")),
         ]
@@ -1422,28 +1405,24 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                                  for field, expected, actual in candidate_bindings
                                  if expected != actual]
         if candidate_differences:
-            differences.extend(candidate_differences)
-            refusal_reason = "resource-compute-binding-conflict"
-            continue
-        if (parent.get("artifact_base") != armed.get("artifact_base")
-                or parent.get("declared_outputs") != list(node.get("outputs") or [])):
-            differences.append({"field": "declared_outputs", "expected": {
-                                    "artifact_base": armed.get("artifact_base"),
-                                    "outputs": list(node.get("outputs") or [])},
-                                "actual": {"artifact_base": parent.get("artifact_base"),
-                                           "outputs": parent.get("declared_outputs")}})
-            continue
+            return candidate_differences, True
+        if (parent.get("artifact_base") != seat_artifact_base
+                or parent.get("declared_outputs") != list(seat_node.get("outputs") or [])):
+            return [{"field": "declared_outputs", "expected": {
+                        "artifact_base": seat_artifact_base,
+                        "outputs": list(seat_node.get("outputs") or [])},
+                    "actual": {"artifact_base": parent.get("artifact_base"),
+                               "outputs": parent.get("declared_outputs")}}], False
         sealed = parent.get("sealed") or {}
         baseline_differences = []
         for key in ("command", "cwd", "config_ref", "config_sha256", "source_commit",
                     "source_dirty", "source_git_state", "config_layout", "launch_request"):
-            if sealed.get(key) != original.get(key):
+            if sealed.get(key) != seat_row.get(key):
                 baseline_differences.append({"field": "resource." + key,
-                                             "expected": original.get(key), "actual": sealed.get(key)})
+                                             "expected": seat_row.get(key), "actual": sealed.get(key)})
         if baseline_differences:
-            differences.extend(baseline_differences)
-            continue
-        launch_request = original.get("launch_request") or {}
+            return baseline_differences, False
+        launch_request = seat_row.get("launch_request") or {}
         input_rows = parent.get("inputs")
         expected_inputs = {name: (launch_request.get(name), launch_request.get(name + "_sha256"))
                            for name in ("smoke_attestation", "config_manifest")
@@ -1476,21 +1455,53 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                 input_diff.append({"field": "inputs." + name + ".sha256",
                                    "expected": expected_sha, "actual": actual_sha})
         if input_diff:
-            differences.extend(input_diff)
-            continue
+            return input_diff, False
         contract = execution.get("contract") or {}
-        launch = original.get("command")
-        expected_contract = sealed_compute_command(launch)
+        expected_contract = sealed_compute_command(seat_row.get("command"))
         if expected_contract is None:
-            differences.append({"field": "compute-hosts.command", "expected": "explicit --cwd, --env and -- command",
-                                "actual": launch})
+            return [{"field": "compute-hosts.command",
+                     "expected": "explicit --cwd, --env and -- command",
+                     "actual": seat_row.get("command")}], False
+        return [{"field": "compute-hosts." + key, "expected": value, "actual": contract.get(key)}
+                for key, value in expected_contract.items()
+                if contract.get(key) != value], False
+
+    for armed in armed_rows:
+        node_id = armed["node"]
+        if (armed.get("predecessor_kind") != "resource"
+                or armed.get("resource_registry") != str(registry)
+                or armed.get("jobs") != str(jobs)):
             continue
-        current_differences = [{"field": "compute-hosts." + key, "expected": value,
-                                "actual": contract.get(key)}
-                               for key, value in expected_contract.items()
-                               if contract.get(key) != value]
-        if current_differences:
-            differences.extend(current_differences)
+        node = WS.route_node(route, node_id)
+        if not isinstance(node, dict) or node.get("kind") != "resource-runner":
+            continue
+        original = json.loads(registry.read_text(encoding="utf-8")).get("runs", {}).get(
+            armed.get("predecessor_id"))
+        original_holder = OWNER_RESOURCE.resource_holder(original or {})
+        if not original_holder.get("observed", True):
+            fail_compute("resource-compute-observation-unavailable", differences=[
+                {"field": "resource.holder", "expected": "readable route lineage",
+                 "actual": original_holder.get("unobserved_reason")}],
+                next_action="restore access to the route lineage, then retry the same compute run",
+                retryable=True)
+        if (original_holder.get("route_id"), original_holder.get("route_hash")) != (
+                route.get("route_id"), route.get("route_hash")):
+            continue
+        if not original_holder.get("inherited") and (
+                armed.get("route_id") != route.get("route_id")
+                or armed.get("route_hash") != route.get("route_hash")):
+            continue
+        # A run no handoff moved is bound to this route's own file and hash; only
+        # an inherited run is bound to the address that first recorded it.
+        origin = (original_holder.get("origin") or {} if original_holder.get("inherited") else
+                  {"route_file": str(Path(route_file).resolve(strict=True)),
+                   "route_hash": route.get("route_hash")})
+        seat_differences, binding_conflict = seat_binding_differences(
+            node_id, node, original, origin, armed.get("artifact_base"))
+        if seat_differences:
+            differences.extend(seat_differences)
+            if binding_conflict:
+                refusal_reason = "resource-compute-binding-conflict"
             continue
         try:
             if not OWNER_RESOURCE.resource_binding_matches(armed, original):
@@ -1545,6 +1556,63 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                     replay_bound.append((replay_node_id, replay_armed, replay_node, replay_row))
         if len(replay_bound) == 1:
             eligible.append(replay_bound[0])
+        if not eligible and not any(
+                isinstance(row, dict) and row.get("predecessor_kind") == "resource"
+                and row.get("predecessor_id") == direct_run_id
+                and row.get("resource_registry") == str(registry)
+                for row in armed_rows):
+            # A prior owner attempt of this same route can have launched a
+            # finished run directly through compute-hosts and ended before any
+            # settlement: the receipt's contract then names a leftover
+            # `running` row with no watch left to own it. Adopt exactly that
+            # receipt as the route's full-run evidence and settle the row —
+            # never an inherited lineage, another route, or a live watch.
+            leftover = (json.loads(registry.read_text(encoding="utf-8"))
+                        .get("runs", {}).get(direct_run_id))
+            if (isinstance(leftover, dict) and leftover.get("status") == "running"
+                    and leftover.get("resource_policy") == "supervised-owner"):
+                direct_holder = OWNER_RESOURCE.resource_holder(leftover)
+                if not direct_holder.get("observed", True):
+                    fail_compute("resource-compute-observation-unavailable", differences=[
+                        {"field": "resource.holder", "expected": "readable route lineage",
+                         "actual": direct_holder.get("unobserved_reason")}],
+                        next_action="restore access to the route lineage, then retry the same compute run",
+                        retryable=True)
+                direct_differences = []
+                origin = {"route_file": str(Path(route_file).resolve(strict=True)),
+                          "route_hash": route.get("route_hash")}
+                if (direct_holder.get("route_id"), direct_holder.get("route_hash")) != (
+                        route.get("route_id"), route.get("route_hash")):
+                    direct_differences.append({"field": "provenance.route_id",
+                                               "expected": {"route_id": route.get("route_id"),
+                                                            "route_hash": route.get("route_hash")},
+                                               "actual": {"route_id": direct_holder.get("route_id"),
+                                                          "route_hash": direct_holder.get("route_hash")}})
+                elif direct_holder.get("inherited"):
+                    direct_differences.append({"field": "resource.route",
+                                               "expected": "this route's own directly launched row",
+                                               "actual": origin})
+                else:
+                    direct_node = WS.route_node(route, provenance.get("node"))
+                    if isinstance(direct_node, dict) and direct_node.get("kind") == "resource-runner":
+                        direct_differences, _conflict = seat_binding_differences(
+                            provenance.get("node"), direct_node, leftover, origin,
+                            (provenance.get("contract") or {}).get("artifact_base"))
+                    else:
+                        direct_differences = [{"field": "resource.node",
+                                               "expected": "route resource-runner node",
+                                               "actual": provenance.get("node")}]
+                if direct_differences:
+                    differences.extend(direct_differences)
+                else:
+                    direct_node = WS.route_node(route, provenance.get("node"))
+                    armed = {"predecessor_id": direct_run_id,
+                             "artifact_base": (provenance.get("contract") or {}).get("artifact_base"),
+                             "direct_baseline": True}
+                    original = leftover
+                    node_id = provenance.get("node")
+                    node = direct_node
+                    eligible.append((node_id, armed, node, original))
     if len(eligible) != 1:
         if eligible:
             fail_compute("resource-compute-baseline-ambiguous")
@@ -1553,7 +1621,9 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                          else "resource-compute-contract-mismatch", differences=differences,
                          next_action="run the existing smoke/config flow for the changed contract")
         fail_compute(refusal_reason, differences=[{"field": "resource-candidate",
-                    "expected": "one exactly bound failed resource row", "actual": "no eligible row"}],
+                    "expected": ("one exactly bound failed resource row, or a route-bound "
+                                 "exit-0 receipt over a leftover running row"),
+                    "actual": "no eligible row"}],
                      next_action="repair the existing route/resource binding before retrying")
     node_id, armed, node, original = eligible[0]
 
@@ -1689,7 +1759,15 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                 next_action="continue only after the route owner opens a new authorized route")
         current_armed = supervisor_resource_watch_for_run(
             sup, ledger, node_id, registry, armed.get("predecessor_id"))
-        if current_armed != armed:
+        if armed.get("direct_baseline"):
+            # A direct-baseline adoption keeps its own settlement ownership:
+            # any watch that materialized for the same run now races it.
+            if current_armed is not None:
+                fail_compute("resource-compute-binding-conflict", differences=[
+                    {"field": "resource.watch", "expected": None,
+                     "actual": current_armed.get("predecessor_id")}],
+                    next_action="re-read the current owner route state before retrying the same compute run")
+        elif current_armed != armed:
             fail_compute("resource-compute-binding-conflict", differences=[
                 {"field": "armed_row", "expected": hashlib.sha256(json.dumps(
                     armed, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -1782,6 +1860,13 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                                 separators=(",", ":")).encode()).hexdigest()
                                 if adopted_id in document["runs"] else None}}))
                 document["runs"][adopted_id] = adopted
+                if armed.get("direct_baseline"):
+                    # The leftover running row ends with the run it named: one
+                    # settle, in the same transaction as the published receipt.
+                    document["runs"][original["run_id"]] = {**original,
+                        "status": "succeeded", "workflow_state": "STAGE_SUCCEEDED",
+                        "exit_code": 0, "ended_at": execution.get("ended_at"),
+                        "failure_class": None, "liveness_reason": "compute-run-receipt"}
             try:
                 locked_update(registry, publish)
             except ValueError as error:

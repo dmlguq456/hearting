@@ -2638,7 +2638,9 @@ def main():
                         if node.get("kind") == "resource-runner":
                             result["next_action"] = (
                                 "use the resource node's existing start path; a completed compute-hosts "
-                                "candidate may be supplied with --compute-run <run-id>")
+                                "candidate may be supplied with --compute-run <run-id>; a route-bound "
+                                "exit-0 run whose receipt names only a leftover `running` row is adopted "
+                                "and that row is settled")
                         print(json.dumps(result, sort_keys=True))
                         return
                     if not jobs or not attempt_id:

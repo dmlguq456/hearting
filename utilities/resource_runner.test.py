@@ -169,7 +169,8 @@ class ComputeRunAdoptionTest(unittest.TestCase):
                       route_closed=False, binding_conflict=False, replay=False,
                       interrupt_before_arm=False, late_conflict=None,
                       real_compute=False, mutate_outputs_before_replay=False,
-                      missing_outputs_hash=False, lineage=False, route_free=False):
+                      missing_outputs_hash=False, lineage=False, route_free=False,
+                      baseline_running=False, other_route=False):
         import contextlib
         import resource_run_registry as RR
         import dispatch_resource_wait as OWNER_RESOURCE
@@ -179,6 +180,22 @@ class ComputeRunAdoptionTest(unittest.TestCase):
         source_file = self.root / "source-route.json"
         source = {"route_id": "rt-source", "route_hash": "sha256:source",
                   "artifact_root": str(self.root), "cwd": str(self.root), "nodes": []}
+        if baseline_running:
+            # BC event, 2026-11-10: a prior owner attempt of this route launched
+            # the run directly through compute-hosts; only its registry row
+            # remains, status running, with no watch and no failed baseline.
+            self.original = {key: value for key, value in self.original.items()
+                             if key != "exit_code"}
+            self.original["status"] = "running"
+            self.registry.write_text(json.dumps({"schema_version": 1,
+                                                 "runs": {"full-run": self.original}}))
+        other_file = self.root / "other-route.json"
+        if other_route:
+            other = dict(self.route, route_id="rt-other")
+            other_file.write_text(json.dumps(other))
+            for document in (self.provenance, self.parent_contract):
+                document.update(route_id="rt-other", route_hash="sha256:other",
+                                route_file=str(other_file))
         if lineage or route_free:
             if lineage:
                 source_file.write_text(json.dumps(source))
@@ -206,10 +223,16 @@ class ComputeRunAdoptionTest(unittest.TestCase):
         def read_armed(_ledger):
             nonlocal armed_reads
             armed_reads += 1
+            if baseline_running:
+                # No watch was ever armed for the directly launched run: its
+                # settlement owner is the receipt, not a live supervisor.
+                return {}
             if late_conflict == "armed-row" and armed_reads > 1:
                 return {"full-run": {**self.armed, "route_hash": "changed-route-hash"}}
             return {"full-run": self.armed}
         def resource_predecessors(*_args):
+            if baseline_running:
+                return []
             if not real_compute:
                 return [(self.armed, self.original)]
             row = json.loads(self.registry.read_text())["runs"].get(self.armed["predecessor_id"])
@@ -333,9 +356,9 @@ class ComputeRunAdoptionTest(unittest.TestCase):
                                          **({"COMPUTE_HOSTS_CONFIG": str(self.compute_config)}
                                             if real_compute else {})}, clear=False),
             mock.patch.object(OWNER_RESOURCE, "compute_holder", side_effect=self._holder(
-                lineage, route_free, source)),
+                lineage, route_free, source, other_route)),
             mock.patch.object(OWNER_RESOURCE, "resource_holder", side_effect=self._holder(
-                lineage, route_free, source)),
+                lineage, route_free, source, other_route)),
         ]
         entered = [patcher.start() for patcher in patches]
         self.addCleanup(lambda: [patcher.stop() for patcher in reversed(patches)])
@@ -352,15 +375,16 @@ class ComputeRunAdoptionTest(unittest.TestCase):
             return subprocess.CompletedProcess(args[0], 0)
         arm_runner.side_effect = run_arm
         args = SimpleNamespace(jobs=str(self.jobs), parent_attempt_id="att-owner")
+        def refuse_with_token(expected):
+            with self.assertRaises(SystemExit) as refused:
+                R.adopt_compute_run(self.registry, args, self.route,
+                                    self.route_file, "compute-1")
+            self.assertEqual(refused.exception.code, 65)
+            self.assertIn(expected, refused.exception.resource_message)
+            return json.loads(self.registry.read_text())["runs"]
         with mock.patch("sys.stdout", new_callable=__import__("io").StringIO):
-            if route_free:
-                with self.assertRaises(SystemExit) as refused:
-                    R.adopt_compute_run(self.registry, args, self.route,
-                                        self.route_file, "compute-1")
-                self.assertEqual(refused.exception.code, 65)
-                self.assertIn("resource-compute-route-mismatch",
-                              refused.exception.resource_message)
-                return json.loads(self.registry.read_text())["runs"]
+            if route_free or other_route:
+                return refuse_with_token("resource-compute-route-mismatch")
             if interrupt_before_arm:
                 with self.assertRaises(SystemExit) as interrupted:
                     R.adopt_compute_run(self.registry, args, self.route, self.route_file, "compute-1")
@@ -389,12 +413,21 @@ class ComputeRunAdoptionTest(unittest.TestCase):
             self.assertGreaterEqual(self.remote_call.call_count, 1)
         return json.loads(self.registry.read_text())["runs"]
 
-    def _holder(self, lineage, route_free, source):
+    def _holder(self, lineage, route_free, source, other_route=False):
         def holder(document=None, **_kwargs):
             if route_free:
                 return {"route_id": None, "route_hash": None, "route_file": None,
                         "inherited": False,
                         "origin": {"route_id": None, "route_hash": None, "route_file": None},
+                        "chain": []}
+            if other_route:
+                # The real holder resolves a run that another route recorded to
+                # that route's own address; nothing bridges it here.
+                return {"route_id": "rt-other", "route_hash": "sha256:other",
+                        "route_file": str(self.root / "other-route.json"),
+                        "inherited": False,
+                        "origin": {"route_id": "rt-other", "route_hash": "sha256:other",
+                                   "route_file": str(self.root / "other-route.json")},
                         "chain": []}
             if lineage:
                 return {"route_id": self.route["route_id"],
@@ -443,6 +476,36 @@ class ComputeRunAdoptionTest(unittest.TestCase):
         runs = self._run_adoption(route_free=True)
         self.assertEqual(list(runs), ["full-run"], "route-free provenance is never adopted")
         self.assertEqual(runs["full-run"], self.original)
+
+    def test_adopt_compute_run_settles_leftover_running_row(self):
+        # BC event, 2026-11-10: the prior owner attempt of this same route
+        # launched the full run directly through compute-hosts and ended before
+        # any settlement, so only a leftover status=running row remained and the
+        # replacement owner had nothing but a repeated GPU run. The completed
+        # receipt is now adopted as the full-run evidence and the leftover row
+        # settles in the same publication transaction.
+        runs = self._run_adoption(baseline_running=True)
+        settled = runs["full-run"]
+        self.assertEqual(settled["status"], "succeeded")
+        self.assertEqual(settled["workflow_state"], "STAGE_SUCCEEDED")
+        self.assertEqual(settled["exit_code"], 0)
+        self.assertEqual(settled["liveness_reason"], "compute-run-receipt")
+        adopted = runs["full-run__a1"]
+        self.assertEqual(adopted["status"], "succeeded")
+        self.assertEqual(adopted["execution"]["kind"], "compute-hosts")
+        self.assertEqual(adopted["execution"]["run_id"], "compute-1")
+        self.assertEqual(adopted["route"], str(self.route_file.resolve()))
+        self.assertEqual(adopted["parent_attempt_id"], "att-owner")
+        self.assertEqual(adopted["compute_run_id"], "compute-1")
+
+    def test_adopt_compute_run_refuses_another_route_running_lineage(self):
+        # A completed receipt is adopted only for this exact route: a run whose
+        # provenance names another route stays refused even when only a
+        # leftover running row exists, and that row is never settled.
+        runs = self._run_adoption(baseline_running=True, other_route=True)
+        self.assertEqual(list(runs), ["full-run"])
+        self.assertEqual(runs["full-run"]["status"], "running")
+        self.assertNotIn("compute-run-receipt", json.dumps(runs))
 
     def test_same_contract_adopts_one_retry_without_payload_spawn(self):
         runs = self._run_adoption()
