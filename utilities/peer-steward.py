@@ -7880,9 +7880,40 @@ def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=N
 def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
                       expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
                       pane=None):
+    return _cmd_prompt_native(args, body, binding["harness"], binding["sid"],
+        binding=binding, from_identity=from_identity, from_name=from_name,
+        expected_recipient=expected_recipient, on_prepared=on_prepared,
+        producer_binding=producer_binding, handoff=handoff, pane=pane)
+
+
+def _prompt_codex_native_owner(sid):
+    """Existing current-root proof for a full native address without an attachment."""
+    import session_shell
+    from fleet.collectors import codex, procscan
+    try:
+        owner = codex.process_for_thread(sid)
+        if not owner:
+            return None
+        pid, birth = owner
+        if (codex.session_id_of_process(pid, fresh=True) != sid
+                or procscan.read_proc_start(pid) != birth):
+            return None
+        rows = session_shell.bindings(harness="codex")
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # An independently known attachment conflict is not an absent attachment.
+    matches = [row for row in rows if row["native_pid"] == pid
+               and row["native_start"] == birth]
+    if len(matches) > 1 or any(row["sid"] != sid for row in matches):
+        return None
+    return owner
+
+
+def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
+                       expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
+                       binding=None, pane=None, native_owner=None):
     """Native-session address using the existing sealed message and carrier."""
     import session_shell
-    harness, sid = binding["harness"], binding["sid"]
     if expected_recipient is not None and (harness, sid) != expected_recipient:
         print("prompted=false reason=target-identity-changed")
         return 5
@@ -7905,7 +7936,16 @@ def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
             result = {"ok": False, "reason": "target-process-changed"}
         elif harness == "codex":
             # Same exact native queue; shell display grants no start permission.
-            result = peer_message.deliver_pending_codex(ref, start_interrupted=False)
+            delivery_options = {}
+            if native_owner is not None:
+                def before_submit():
+                    from codex_queue_delivery import QueueDeliveryError
+                    if _prompt_codex_native_owner(sid) != native_owner:
+                        raise QueueDeliveryError("target-native-process-changed")
+                # Discovery of this new address does not repair historical refs.
+                delivery_options = {"before_submit": before_submit, "_promote_prior": False}
+            result = peer_message.deliver_pending_codex(
+                ref, start_interrupted=False, **delivery_options)
         else:
             result = session_shell.deliver_pending(ref, harness, sid)
         current = peer_message._read_pending(ref) or row
@@ -7919,7 +7959,8 @@ def _cmd_prompt_shell(args, body, binding, *, from_identity, from_name,
         _schedule_message_obligation(current, f"{harness}:{sid}")
     _record(to_harness=harness, to_name=args.target, kind=_prompt_message_kind(body),
             summary_text=text, to_session_id=sid, to_pane=None, ref=args.ref,
-            status=_PROMPT_LEDGER_STATUS[outcome], receipt="session-shell:" + reason,
+            status=_PROMPT_LEDGER_STATUS[outcome],
+            receipt=("native-process:" if native_owner is not None else "session-shell:") + reason,
             from_identity=from_identity, from_name=from_name, transfer_ref=ref,
             surface="codex-queue" if harness == "codex" else harness + "-native",
             producer_binding=producer_binding)
@@ -7975,6 +8016,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         from_name = _from_name(from_harness, from_sid)
     relay_pane = (sender or {}).get("pane") or ""
     shell_binding = None
+    _shell_reason = None
     # Full native addresses are explicit. Existing window/name resolution keeps
     # precedence otherwise, and an uncertain send never switches transports.
     if (str(args.target).split(":", 1)[0] in {"claude", "codex", "opencode"}
@@ -7985,6 +8027,14 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         return _cmd_prompt_shell(args, body, shell_binding, from_identity=from_identity,
             from_name=from_name, expected_recipient=expected_recipient, on_prepared=on_prepared,
             producer_binding=producer_binding, handoff=handoff)
+    if str(args.target).startswith("codex:") and _shell_reason == "attachment-unavailable":
+        sid = args.target.split(":", 1)[1]
+        native_owner = _prompt_codex_native_owner(sid)
+        if native_owner is not None:
+            return _cmd_prompt_native(args, body, "codex", sid, native_owner=native_owner,
+                from_identity=from_identity, from_name=from_name,
+                expected_recipient=expected_recipient, on_prepared=on_prepared,
+                producer_binding=producer_binding, handoff=handoff)
     if _surface_missing(args.target) and _tmux_inventory() is None:
         resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
     elif resolved_recipient is None:

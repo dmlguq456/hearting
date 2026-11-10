@@ -3450,6 +3450,13 @@ Unknown native evidence retains the existing policy, without requiring a new
 proof for every attachment.
 An unavailable optional attachment reader leaves the existing native process
 identity checks in charge.
+An explicit `codex:<full SID>` address also uses that proof before an attachment
+is published. The existing exact-thread carrier rechecks the same current root
+and process birth at submission; a conflicting attachment, multiple roots or
+unknown selection stays unverified, without physical input or interrupted restart.
+Fleet may locate an inner native process from its observed foreground ancestry
+on the selected endpoint before vendor session metadata appears. That location
+is display evidence only and does not supply a session ID or input authority.
 Retained SID-less messages still need their original process proof; discovery
 does not grant retroactive authority to a message that lacks it.
 A name or tag is a search key, including when it comes from a historical seat or
