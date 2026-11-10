@@ -80,6 +80,121 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
                                        env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(stale.returncode, 0, stale.stderr)
                 self.assertIsNotNone(interaction.read_wait("ses-hook", "opencode"))
+                unscoped = subprocess.run([sys.executable, str(hook), "clear", "--harness", "opencode"],
+                                          input=json.dumps({"session_id": "ses-hook"}),
+                                          env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(unscoped.returncode, 0, unscoped.stderr)
+                self.assertIsNotNone(interaction.read_wait("ses-hook", "opencode"))
+                # A finished tool call or turn clears the session's wait (PG-37).
+                session = subprocess.run([sys.executable, str(hook), "clear", "--harness", "opencode"],
+                                         input=json.dumps({"session_id": "ses-hook", "scope": "session"}),
+                                         env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(session.returncode, 0, session.stderr)
+                self.assertIsNone(interaction.read_wait("ses-hook", "opencode"))
+
+    def test_opencode_tool_and_turn_end_clear_only_settled_waits(self):
+        # PR #1498 review: a finished tool call or turn clears a wait with no request id
+        # or one whose own reply/cancel the plugin saw; an open or unknown request stays.
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        script = r"""
+import assert from "node:assert/strict"
+import fs from "node:fs"
+import path from "node:path"
+import childProcess from "node:child_process"
+import { EventEmitter } from "node:events"
+import { syncBuiltinESMExports } from "node:module"
+import { pathToFileURL } from "node:url"
+const realSpawn = childProcess.spawn
+const keepAlive = setInterval(() => {}, 1000)
+const children = new Set()
+childProcess.spawn = (command, args, options) => {
+  if (args?.some(arg => String(arg).endsWith("/hooks/fleet-interaction-state.py"))) {
+    const child = realSpawn(command, args, options)
+    children.add(child); child.on("close", () => children.delete(child)); return child
+  }
+  const child = new EventEmitter()
+  child.unref = () => {}; child.kill = () => {}; child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter(); child.stdin = { on() {}, end() {} }
+  setImmediate(() => child.emit("close", 0)); return child
+}
+childProcess.spawnSync = () => ({ status: 0, stdout: "{}", stderr: "" })
+syncBuiltinESMExports()
+const { AgentHarnessGuards } = await import(pathToFileURL(process.env.PLUGIN_PATH))
+const hooks = await AgentHarnessGuards({ directory: process.cwd(), client: {} }, { initialize: false })
+const root = path.join(process.env.FLEET_INTERACTION_STATE_DIR, "opencode")
+const read = sid => { try { return JSON.parse(fs.readFileSync(path.join(root, sid + ".json"), "utf8")) } catch { return null } }
+const seed = (sid, requestID) => {
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+  const wait = { schema_version: 1, harness: "opencode", session_id: sid, kind: "decision",
+    source: "opencode-form", waiting_since: Date.now() / 1000 }
+  if (requestID) wait.request_id = requestID
+  fs.writeFileSync(path.join(root, sid + ".json"), JSON.stringify(wait), { mode: 0o600 })
+}
+async function settled() {
+  for (let n = 0; n < 200; n++) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    if (!children.size) { await new Promise(resolve => setTimeout(resolve, 25)); if (!children.size) return }
+  }
+  throw Error("wait writer did not finish")
+}
+const event = async (type, sid, id) => {
+  await hooks.event({ event: { type, properties: { sessionID: sid, id, requestID: id, source: "opencode-form" } } })
+  await settled()
+}
+const after = async sid => {
+  await hooks["tool.execute.after"]({ tool: "read", sessionID: sid, args: {}, peerContext: false },
+    { output: "tool complete", metadata: {} })
+  await settled()
+}
+try {
+  await event("question.asked", "ses-foreign", "q-foreign")
+  // Questions A then B, only A answered: B stays at tool end and at turn end.
+  await event("question.asked", "ses-pair", "q-a"); await event("question.asked", "ses-pair", "q-b")
+  await event("question.replied", "ses-pair", "q-a")
+  await after("ses-pair"); assert.equal(read("ses-pair")?.request_id, "q-b")
+  await event("session.idle", "ses-pair"); assert.equal(read("ses-pair")?.request_id, "q-b")
+  // Permissions in the same order.
+  await event("permission.asked", "ses-perm", "p-a"); await event("permission.asked", "ses-perm", "p-b")
+  await event("permission.replied", "ses-perm", "p-a")
+  await after("ses-perm"); assert.equal(read("ses-perm")?.request_id, "p-b")
+  // A turn ending with an unanswered question.
+  await event("question.asked", "ses-idle", "q-idle"); await event("session.idle", "ses-idle")
+  assert.equal(read("ses-idle")?.request_id, "q-idle")
+  // An id this process never saw (a restart) is unknown, not closed.
+  seed("ses-unknown", "q-unknown")
+  await after("ses-unknown"); await event("session.idle", "ses-unknown")
+  assert.equal(read("ses-unknown")?.request_id, "q-unknown")
+  // Controls: an answered question clears by its id; a wait with no request id and
+  // one whose id was seen closed clear at tool end and at turn end.
+  await event("question.asked", "ses-one", "q-one"); await event("question.replied", "ses-one", "q-one")
+  assert.equal(read("ses-one"), null)
+  seed("ses-bare-tool"); await after("ses-bare-tool"); assert.equal(read("ses-bare-tool"), null)
+  seed("ses-bare-idle"); await event("session.idle", "ses-bare-idle"); assert.equal(read("ses-bare-idle"), null)
+  await event("question.rejected", "ses-closed", "q-closed"); seed("ses-closed", "q-closed")
+  await after("ses-closed"); assert.equal(read("ses-closed"), null)
+  await event("question.asked", "ses-closed", "q-again"); await event("question.rejected", "ses-closed", "q-gone")
+  await event("session.idle", "ses-closed"); assert.equal(read("ses-closed")?.request_id, "q-again")
+  assert.equal(read("ses-foreign")?.request_id, "q-foreign")
+} finally { hooks.dispose?.({ silent: true }); await settled(); clearInterval(keepAlive) }
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            # A minimal environment: no worker markers, and this checkout's hooks.
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"}
+            env.update(HOME=tmp, AGENT_HOME=str(ROOT), XDG_STATE_HOME=str(Path(tmp) / "state"),
+                       XDG_CONFIG_HOME=str(Path(tmp) / "config"),
+                       FLEET_INTERACTION_STATE_DIR=str(Path(tmp) / "interactions"),
+                       FLEET_SESSION_REGISTRY_DIR=str(Path(tmp) / "sessions"),
+                       AGENT_ARTIFACT_CHECKPOINT="off", AGENT_PEER_LEDGER_ROOT=str(Path(tmp) / "peer"),
+                       HERDR_SOCKET_PATH=str(Path(tmp) / "absent.sock"), AGENT_DISPATCH_ATTEMPT_ID="",
+                       PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                       PYTHONDONTWRITEBYTECODE="1")
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=tmp, env=env,
+                                    text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_wait_counts_stay_unknown_and_private_keys_never_enter_projection(self):
         result = self.result()

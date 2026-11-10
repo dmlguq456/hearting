@@ -251,7 +251,9 @@ native `read` tool; a successful marker command is not evidence of its contents.
 | `SessionEnd` memory sync | none — `session.idle` keeps summary, pane, heartbeat and the cycle checkpoint observation only (D-82); `mem.py` exchanges after writes and reads | n/a — no session-end memory step on any adapter |
 | `Stop` cycle checkpoint (`open-cycle-checkpoint.py`) | plugin `session.idle` → detached `utilities/artifact_checkpoint_trigger.py turn-end --harness opencode` with `{sessionID}` on stdin and the session's own environment (a worker's `AGENT_ARTIFACT_ROOT`/`AGENT_ARTIFACT_CYCLE_ID` included); main and worker both run it; `AGENT_ARTIFACT_CHECKPOINT=off` starts nothing | full — same launcher, interval and checkpoint child as Claude and Codex Stop (§45 D-124); no hook trust or user config is changed |
 | `PreToolUse[Edit|Write|MultiEdit|NotebookEdit|Bash]` route presence gate (deny) | plugin `tool.execute.before` on `write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash` (V2: `shell`) → `utilities/route_presence_gate.py --opencode` with `{tool, args, sessionID, cwd}`; exit 1 throws the one-line compose instruction. The session id is the plugin's `input.sessionID`, the same id `shell.env` exports as `OPENCODE_SESSION_ID`, which the route-chain writer records. For a subagent (task tool) child `shell.env` also exports its root session, walking `parentID`, as `OPENCODE_ROOT_SESSION_ID`, so a dispatch or report the child starts names and wakes the root, as a Claude subagent's does (PG-49) | full — auto enforced |
-| `UserPromptSubmit`/`Stop` automatic change record | plugin `chat.message` → detached `utilities/turn_change_record.py start --harness opencode --session <id> --cwd <dir>`; `session.idle` → the same with `end`; main sessions only: a child session (`parentID`, the task tool's subagent) is skipped because its work falls inside the parent's turn, as a Claude subagent's does; the step applies the shared exemptions itself | full — the same shared step as Claude and Codex |
+| `UserPromptSubmit`/`Stop` automatic change record | plugin `chat.message` → detached `utilities/turn_change_record.py start --harness opencode --session <id> --cwd <dir>`; `session.idle` → the same with `end`; main sessions only: a child session (`parentID`, the task tool's subagent) is skipped because its work falls inside the parent's turn, as a Claude subagent's does; the step applies the shared exemptions itself. V2 delivers `session.execution.succeeded`, `.failed` and `.interrupted` as `session.idle`, so a turn the person interrupts (Esc twice in the 2.0 TUI) also closes its record | full — the same shared step as Claude and Codex; an interrupted turn: OpenCode and Codex record it (`interrupt-change-record` pass), Claude runs no hook on a user interrupt (PG-36) |
+| `PostToolUse`/`PostToolUseFailure`/`Stop` Fleet wait clear (`fleet-interaction-state.py clear`) | plugin `tool.execute.after` (any tool, a failed shell included) and `session.idle` clear this session's wait sidecar only when it has no request id or its request id was seen closed (`*.replied`/`*.rejected`, V2 `form.replied`/`form.cancelled`); a request still open, or one the plugin never saw, keeps its wait until its own reply clears it by request id | full — `failed-shell-hint` pass on OpenCode 2.0.32 (fail before, PG-37) |
+| `PostToolUse`/`PostToolUseFailure[Bash]` Git index-lock hint (`git-index-lock-context.py`) | plugin `tool.execute.after` on `bash` (V1) or `shell` (V2) with a non-zero exit (V1 `metadata.exit`, V2 `result.output.exit`; a failed command is a completed result) → `utilities/git_index_lock.py --harness opencode`; the diagnosis is appended to the tool result | full — `failed-shell-hint` pass on OpenCode 2.0.32 (fail before, PG-37) |
 | `PreToolUse[Bash]` worktree-path guard (deny) | retired with the write gates; `preflight worktree-path` remains a no-op alias that prints a retired notice | none — the portable `git worktree add` path check is no longer enforced (`core/HOOKS.md:45`) |
 
 Two items remain that cannot reach byte-for-byte Claude parity; they are
@@ -628,11 +630,11 @@ OpenCode consumes the v3 direct `dispatch-chain` contract for its supported
 dispatch-depth-1 target surface. A conductor invokes the checked target adapter itself,
 while the canonical registry first records the stable attempt as registered-only;
 the shared launch fence publishes complete process identity with the claim and
-records payload start before exec. This does not establish standard+
-dispatch-depth-2 parity.
+records payload start before exec. Standard+ dispatch-depth-2 stages under an
+OpenCode owner follow SD-48~50 above (same eligibility probe, live-parent binding
+and registry as Claude and Codex).
 The launch broker is retired and removed; v1/v2 broker routes remain
-inspectable but cannot register or start new workers. Registered
-standard+ dispatch-depth-2 requests remain explicitly unsupported as described above.
+inspectable but cannot register or start new workers.
 
 ## Worklog Boundary
 
@@ -651,16 +653,16 @@ DBs, caches, `.env*`, build output, dispatch logs, or worktrees into this repo.
   digest, ledger, chain identity, and `stage_authority=0` axes as Claude/Codex.
   Plugin compact events flush/re-read the ledger and structured writes transit
   the enforcing preflight.
-- **Parity gap/fallback:** OpenCode native agents do not yet provide the local
-  route-owned dispatch-depth-2 evidence required by this contract, so no native
-  gate or helper parity is claimed. Use the checked registered-headless surface
-  where eligible, otherwise the recorded inline fallback; the one stage gate is
-  unchanged.
+- **Stage surface:** a standard+ stage runs as a registered dispatch-depth-2
+  headless child (SD-48~50), as on Claude and Codex; where the shared eligibility
+  probe refuses, the recorded inline fallback applies. OpenCode native agents are
+  not a stage surface and carry no gate authority. The one stage gate is unchanged.
 
-## SD-110 runtime-owned deterministic stage advance — not an advance target
+## SD-110 stage advance — same controller as Claude
 
-Registered standard+ owners use the shared CLI completion controller
-(`utilities/claude-session-supervisor.py`, retained compatibility filename).
+Registered owners use the shared CLI completion controller
+(`utilities/claude-session-supervisor.py --runtime-harness opencode`, retained
+compatibility filename), the same process and code path as a Claude owner.
 The native driver runs `opencode run --format json`, binds the observed
 `sessionID` to the exact attempt, and resumes with `--session`. The controller
 owns the live lease, exact child join, completion commit, receipt consumption,
@@ -675,13 +677,19 @@ owner ended BLOCKED continues the route through a replacement owner (shared
 `dispatch_replacement`). The first
 turn runs under a placeholder session that binds to the observed `sessionID`.
 
-Ordinary same-session continuation does not enable SD-110 deterministic
-advance or SD-119 serial-chain owner support. The adapter exposes neither
-`--enable-stage-advance` nor stage-advance receipt negotiation. Those surfaces
-retain their checked single-session/registered-headless fallback. Interactive
-OpenCode depth-0 stage advance also remains an explicit bounded wait; parent
-completion instead follows the `opencode-turn` carrier (bounded wait only for
-a parent running the pre-carrier plugin).
+What moves an owner to its next stage is the same on all three harnesses: the
+controller joins the finished stage child and resumes the owner's own native
+session with the receipt, and the owner runs the next printed start. Measured
+2026-11-11 on OpenCode 2.0.32 and Claude Code with the real binaries on the
+loopback model: the receipt reached the same session (its first prompt still in
+the request) and the next start ran, on both (PG-19). The runtime-owned advance
+of SD-110 (`attempt_stage_advance`) sits at the same call site for an OpenCode
+owner; its `--enable-stage-advance` flag is off by default and no wrapper of any
+harness passes it, so no harness advances without the owner's turn. The SD-119
+serial sub-session chain advance is in the same controller with no harness
+condition, so it applies to an OpenCode owner too (not measured here). Interactive OpenCode
+depth-0 parent completion follows the `opencode-turn` carrier (bounded wait only
+for a parent running the pre-carrier plugin).
 
 ## Execution access request
 
