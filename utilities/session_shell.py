@@ -682,6 +682,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
     panel["summary"] = [styled(line) for line in panel["summary"]]
+    if harness == "claude":
+        from fleet.session_panel import notice_line
+        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
     if harness == "codex" and native_pid:
