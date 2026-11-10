@@ -5694,6 +5694,29 @@ class SeatHandoverTest(TidyCase):
         self.assertGreater(len(listed), 2)
         self.assertTrue(line.endswith(f" 외 {40 - len(listed)}개"), line)
 
+    def long_registry_line(self, count):
+        self.jobs = self.iso.root / ("j" * 140) / ("k" * 140) / ("l" * 140) / "jobs.log"
+        self.jobs.parent.mkdir(parents=True)
+        routes = self.canonical_routes(count)
+        self.snapshot(now=st.now_epoch() - 5)
+        self.start("sid-B")
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            line = self.handover.resume_line(self.seat(), "claude", "sid-B")
+        self.assertLessEqual(len(line.encode("utf-8")), self.handover.LINE_MAX_BYTES)
+        self.assertNotIn("k" * 140, line)  # no command cut mid-path
+        return [route for route, _meta in routes if route in line], line
+
+    def test_a_command_too_long_for_the_line_is_left_out_and_the_count_kept(self):
+        # PR #1492 review: a long registry path cut the only command and the " 외 39개" after it.
+        listed, line = self.long_registry_line(40)
+        self.assertGreater(len(listed), 2, line)
+        self.assertIn(f" 외 {40 - len(listed)}개", line)
+
+    def test_one_route_whose_command_cannot_fit_is_still_named(self):
+        listed, line = self.long_registry_line(1)
+        self.assertEqual(len(listed), 1, line)
+        self.assertNotIn(" 외 ", line)
+
     def test_the_card_drops_a_finished_attempt_once_its_route_is_closed(self):
         import dispatch_pending_delivery as pending
         path = Path(self.open_route("rt-1", "sha256:aa"))

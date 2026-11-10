@@ -2794,6 +2794,15 @@ def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source:
 # The card line: the verified route and the existing resume command
 # ---------------------------------------------------------------------------
 
+def _ids_only(references, total: int) -> str:
+    """The handover line without a resume command: the routes it can name and the rest's count."""
+    omitted = total - len(references)
+    if not references:
+        return f"[이어받은 진행 작업] route {total}개 (재개 명령이 한 줄에 들어가지 않음)"
+    return (f"[이어받은 진행 작업] route={', '.join(references)}"
+            + (f" 외 {omitted}개" if omitted else "") + " (재개 명령이 한 줄에 들어가지 않음)")
+
+
 def resume_line(seat, harness: str, sid: str) -> str:
     """One line for the successor's card: the routes it took over and the existing resume command.
     Only attempts the ledger shows handed to ``sid`` and the registry still shows open count."""
@@ -2855,6 +2864,11 @@ def resume_line(seat, harness: str, sid: str) -> str:
             return ("[이어받은 진행 작업] " + " | ".join(parts)
                     + (f" 외 {omitted}개" if omitted else ""))
 
+        def fits(text):
+            return len(text.encode("utf-8")) <= LINE_MAX_BYTES
+
+        # The count of what is left out is measured with every trial, so it is never cut;
+        # listed routes give way first, and a command that cannot fit whole is not shown.
         selected: list = []
         full = False
         for template, items in groups.items():
@@ -2864,12 +2878,18 @@ def resume_line(seat, harness: str, sid: str) -> str:
                     trial[-1][1].append(item)
                 else:
                     trial.append((template, [item]))
-                if selected and len(render(trial).encode("utf-8")) > LINE_MAX_BYTES:
+                if not fits(render(trial)):
                     full = True
                     break
                 selected = trial
             if full:
                 break
-        return _st()._cut_bytes(render(selected), LINE_MAX_BYTES)[0]
+        if selected:
+            return render(selected)
+        references = [item[1] for items in groups.values() for item in items]
+        listed = 0
+        while listed < total and fits(_ids_only(references[:listed + 1], total)):
+            listed += 1
+        return _ids_only(references[:listed], total)
     except Exception:  # noqa: BLE001
         return ""

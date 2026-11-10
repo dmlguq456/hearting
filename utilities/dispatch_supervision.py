@@ -538,9 +538,32 @@ def _running_tool_text(metadata):
     if not running:
         return ""
     started, command = running
-    command = command if len(command) <= 80 else command[:79] + "…"
+    program = _program_name(command)
+    if not program:
+        return ""
     return (f"; a tool command started {time.strftime('%H:%M', time.localtime(started))} "
-            f"is still running: {command}")
+            f"is still running: {program}")
+
+
+_PROGRAM_NAME = re.compile(r"[A-Za-z0-9._+-]{1,40}")
+
+
+def _program_name(command):
+    """Only the first command's program name: never its arguments, environment, or path.
+
+    The notice reaches the parent model, so it names what runs and nothing it was given.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        for token in lexer:
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token, re.S):
+                continue  # a leading NAME=value assignment
+            name = Path(token).name
+            return name if _PROGRAM_NAME.fullmatch(name) else None
+    except ValueError:
+        return None
+    return None
 
 
 def _runtime_tool_active(event):

@@ -1415,7 +1415,7 @@ class StallNoticeRunningToolTest(unittest.TestCase):
         return {**CURRENT, "attempt_id": aid, "harness": harness, "worker_type": "owner",
                 **contract.process_launch_identity(process.pid)}
 
-    def notice(self, metadata):
+    def notice(self, metadata, wire=False):
         receipt = {"schema_version": 1, "kind": supervision.KIND, "state": "attention",
             "owner_attempt_id": metadata["attempt_id"], "monitored_attempt_ids": [metadata["attempt_id"]],
             "recipient_thread_id": "parent", "sealed_batch_id": "", "job_registry": "/dev/null",
@@ -1429,17 +1429,36 @@ class StallNoticeRunningToolTest(unittest.TestCase):
              mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
              mock.patch("dispatch_replacement._plain_retry_successor", return_value=False), \
              mock.patch("route_parent_close.row_requested", return_value=False):
+            if wire:
+                return supervision.context(receipt, "delivery-stall")["additionalContext"][
+                    "hearting-supervision"]["value"]
             return supervision.render_text(receipt)
 
     def test_live_tool_command_is_named_with_its_start_time_on_every_harness(self):
-        for harness, script, shown in (("claude", self.CLAUDE, "sleep 60; grep ITER 'log'"),
-                                       ("codex", "sleep 60; grep ITER log", "sleep 60; grep ITER log"),
-                                       ("opencode", "sleep 60; grep ITER log", "sleep 60; grep ITER log")):
+        for harness, script in (("claude", self.CLAUDE), ("codex", "sleep 60; grep ITER log"),
+                                ("opencode", "sleep 60; grep ITER log")):
             with self.subTest(harness=harness):
                 text = self.notice(self.runtime(harness, script))
                 self.assertIn("no comparable progress for 5 watchdog windows", text)
-                self.assertRegex(text, r"; a tool command started \d\d:\d\d is still running: "
-                                 + shown + r"\.")
+                self.assertRegex(text, r"; a tool command started \d\d:\d\d is still running: sleep\.")
+                self.assertNotIn("ITER", text)
+
+    def test_only_the_program_name_reaches_the_parent_never_arguments(self):
+        secret = "RV1492_FAKE_API_TOKEN_7b"
+        for script, program in (("sleep 60; : --api-key " + secret, "sleep"),
+                                ("API_TOKEN=" + secret + " sleep 60", "sleep"),
+                                ("sleep 60 && : " + secret + "; : " + secret, "sleep")):
+            with self.subTest(script=script):
+                metadata = self.runtime("codex", script)
+                for text in (self.notice(metadata), self.notice(metadata, wire=True)):
+                    self.assertNotIn(secret, text)
+                    self.assertRegex(text, r"is still running: " + program + r"\.")
+        for script, program in (("python3 script --token " + secret, "python3"),
+                                ("TOKEN=" + secret + " /usr/bin/python3 s.py", "python3"),
+                                ("pytest -q && echo " + secret + "; ls", "pytest")):
+            self.assertEqual(supervision._program_name(script), program)
+        for unsafe in ("(sleep 60)", "'unterminated", "a" * 41 + " x", "$(cat) " + secret):
+            self.assertIsNone(supervision._program_name(unsafe))
 
     def test_no_running_tool_or_no_runtime_keeps_the_existing_text(self):
         text = self.notice(self.runtime("claude", None))

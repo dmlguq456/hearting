@@ -2069,6 +2069,71 @@ class ParentCloseTest(unittest.TestCase):
             self.assertIsNone(self.close())
         self.assertIsNone(owner.poll())
 
+    def advanced_route_bound_owner(self, name_owner):
+        # PR #1492 review: an owner launched on A, attached, then advanced to B by a started stage.
+        import copy
+        import owner_route_binding as OWNER
+        import route_identity as RI
+        owner = self.process("att-owner")
+        self.route.update(advance_generation=0, route_family_key="fixture-family")
+        if name_owner:
+            self.route["owner_attempt_id"] = self.aid("att-owner")
+        self.route["route_hash"] = RI.route_hash(self.route)
+        self.route["route_id"] = RI.route_id_from_hash(self.route["route_hash"])
+        self.path = self.path.with_name(self.route["route_id"] + ".json")
+        self.path.write_text(json.dumps(self.route))
+        self.route_bound_owner("att-owner", owner, "codex")
+        env = {"AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-owner"), "AGENT_DISPATCH_WORKER_TYPE": "owner",
+               "AGENT_DISPATCH_DEPTH": "1", "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION": "2",
+               "AGENT_DISPATCH_EXECUTION_SURFACE": "registered-headless",
+               "AGENT_DISPATCH_REGISTERED_WORKER": "1", "AGENT_DISPATCH_OWNER_HARNESS": "codex",
+               "AGENT_DISPATCH_PARENT_SESSION_ID": "fixture-parent", "AGENT_DISPATCH_JOBS": str(self.jobs)}
+        ROUTE.verify_route(json.loads(self.path.read_text()))
+        OWNER.publish_owner_route_attachment_from_environment(
+            self.jobs, target_route={**self.route, "route_file": str(self.path)}, environ=env)
+        old = copy.deepcopy(self.route)
+        advanced = {**old, "advance_generation": 1, "source_route_id": old["route_id"],
+                    "source_route_hash": old["route_hash"],
+                    "source_route_supersession": {"from_route_id": old["route_id"],
+                                                  "from_route_hash": old["route_hash"]}}
+        advanced["route_hash"] = RI.route_hash(advanced)
+        advanced["route_id"] = RI.route_id_from_hash(advanced["route_hash"])
+        next_path = self.path.with_name(advanced["route_id"] + ".json")
+        next_path.write_text(json.dumps(advanced))
+        ROUTE.verify_route(advanced)
+        OWNER.publish_owner_route_advance_from_environment(
+            self.jobs, source_route={**old, "route_file": str(self.path)},
+            target_route={**advanced, "route_file": str(next_path)}, environ=env)
+        old_path = self.path
+        self.route, self.path = advanced, next_path  # the stage row carries B's keys
+        stage = self.process("att-new-stage")
+        self.row("att-new-stage", parent="att-owner", process=stage, route_file=str(next_path),
+                 route_node=advanced["nodes"][0]["id"], unit="dev/backend", capability="autopilot-code",
+                 capability_mode="dev", artifact_root=str(self.artifacts), intensity="standard")
+        self.route, self.path = old, old_path
+        current, _reason = OWNER.resolve_owner_route_lifecycle(self.jobs, owner_attempt_id=self.aid("att-owner"))
+        self.assertEqual(current.route_id, advanced["route_id"])
+        return owner, stage, (old, self.path), (advanced, next_path)
+
+    def test_closing_the_old_route_leaves_an_owner_advanced_to_another_route_running(self):
+        for name_owner in (True, False):
+            with self.subTest(route_names_owner=name_owner):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, (old, old_path), (advanced, next_path) = \
+                        child.advanced_route_bound_owner(name_owner)
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                    self.assertIn(CLOSE._rows(child.jobs)[child.aid("att-owner")][0][1], CLOSE.OPEN)
+                    if name_owner:  # the current route's close stops its owner as before
+                        child.route, child.path = advanced, next_path
+                        child.close()
+                        self.assertEqual(owner.wait(timeout=5), -signal.SIGTERM)
+                finally:
+                    child.doCleanups()
+
     def test_never_started_chain_and_post_nodes_fold_no_start_advice(self):
         owner = self.process("att-owner")
         self.row("att-owner", process=owner)
