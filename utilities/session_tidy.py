@@ -1347,6 +1347,21 @@ def _confirmed_clear_predecessor(seat: Seat, harness: str, sid: str) -> Optional
     return predecessor
 
 
+def _continue_seat_number(seat: Seat, harness: str, sid: str) -> None:
+    """The session this seat provably continues hands its display number on.
+
+    Only the confirmed clear predecessor counts; without it the shared
+    allocator gives a new number as before."""
+    predecessor = _confirmed_clear_predecessor(seat, harness, sid)
+    if not predecessor or predecessor.get("harness") != harness:
+        return
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.session_tags import inherit
+    inherit(harness, predecessor["sid"], sid, pane_id=seat.pane or None)
+
+
 def prompt_state(seat: Seat) -> Optional[dict]:
     data = read_json(_prompt_seq_path(seat))
     return data if isinstance(data, dict) else None
@@ -3655,6 +3670,10 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     # Keep the shared writer's confirmed edge in this exact native ledger
                     # as well as its physical seat ledger for current seat-scoped readers.
                     _append_ledger_entry(physical_seat(seat), handed)
+        if (seat.kind in ("pane", "native")
+                and ((event == "start" and source == "clear") or handed or appended)):
+            with contextlib.suppress(BaseException):    # a hook never fails for the seat number
+                _continue_seat_number(seat, harness, sid)
         if (_closed is not None and seat.kind in ("pane", "native")
                 and ((event == "start" and source == "clear")
                      or (harness == "opencode" and event == "prompt" and (handed or appended)))):
