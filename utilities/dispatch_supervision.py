@@ -1571,6 +1571,51 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
         return None
 
 
+# Settlement verdicts left after a committed PASS: the process tree is still draining
+# (Hearting's own summary/checkpoint helpers included) or the completion controller has
+# not delivered yet. Unverifiable, reconcile and conflict verdicts are not settlement.
+SETTLING_ACTIONS = frozenset({"wait", "advance", "complete"})
+
+
+def settling_after_pass(receipt: dict) -> list[str]:
+    """The attempts of a `supervisor-exited` notice when every one ended with a committed PASS
+    and only its settlement remains; [] whenever anything else is true or unreadable.
+
+    The supervisor's exit then is the ordinary end of a finished worker: the route's own
+    completion notice follows from the completion controller, which keeps its own deadline
+    notices. Display only -- the record, its delivery and the controller's duty are unchanged."""
+    from dispatch_attempt_policy import terminal_conflict_pending, verdict_pass
+    if receipt.get("reason") != "supervisor-exited":
+        return []
+    try:
+        attempts = list(receipt["monitored_attempt_ids"])
+        rows = _rows(Path(receipt["job_registry"]), set(attempts) | {receipt["owner_attempt_id"]})
+        for aid in attempts:
+            status, meta = rows[aid]
+            if status != "done" or not verdict_pass(meta) or terminal_conflict_pending(meta):
+                return []
+            if _settlement_decision(status, meta)[1].action not in SETTLING_ACTIONS:
+                return []
+    except Exception:  # noqa: BLE001 -- unknown evidence keeps the ordinary attention text
+        return []
+    return attempts
+
+
+def _settling_text(receipt: dict, attempts: list[str]) -> str:
+    utility = _printed("dispatch-registry.py")
+    commands = " ; ".join(f"python3 {shlex.quote(str(utility))} reconcile --jobs "
+                          f"{shlex.quote(receipt['job_registry'])} --attempt {shlex.quote(aid)}"
+                          for aid in attempts)
+    return ("Hearting settlement in progress -- not a blockage. "
+            f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
+            f"{', '.join(attempts)} finished with PASS; only Hearting's own settlement remains "
+            "(process cleanup, completion summary or completion delivery). The route's completion notice "
+            "follows from the existing completion controller. Do not report this to the user as blocked, "
+            "and do not restart, retry, cancel, or erase anything. If that completion never arrives, the "
+            "controller keeps the duty and its own deadline notice follows. Read-only diagnosis: "
+            + commands + _residue_text(receipt))
+
+
 def render_text(receipt: dict, *, continued: dict | None = None, notice_context=None) -> str:
     receipt = validate(receipt)
     completed = _cleanup_only_result(receipt)
@@ -1715,6 +1760,9 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                 "The same observation duty stays retained: the existing controller, orphan recovery, or session "
                 "sweep resumes it automatically without a manual retry command; this notice alone does not. "
                 "Existing transaction recovery: " + command)
+    settling = settling_after_pass(receipt)
+    if settling:
+        return _settling_text(receipt, settling)
     utility = _printed("dispatch-registry.py")
     operation = "resolve-terminal-conflict" if receipt["reason"] == "terminal-evidence-conflict" else "reconcile"
     commands = [f"python3 {shlex.quote(str(utility))} {operation} --jobs "
