@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sys
 import tempfile
 
@@ -80,6 +81,10 @@ def herdr_environment(harness, environment):
     return dict(environment, HERDR_AGENT=harness)
 
 
+def _exit_on_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 2 or args[0] not in session_shell.HARNESSES:
@@ -106,6 +111,10 @@ def main(argv=None):
         # PID before starting any native child; the explicit hint prevents a loop.
         os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve()), *args], hinted)
     with tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/tmp") as directory:
+        # A closed window (SIGHUP) or a stop request (SIGTERM) ends this owner
+        # through the normal unwind, so the per-session directory is removed.
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            signal.signal(sig, _exit_on_signal)
         env = dict(native_environment(harness, os.environ), HEARTING_SHELL_DIRECTORY=directory,
                    HEARTING_SHELL_SOCKET=str(Path(directory) / "control.sock"),
                    HEARTING_SHELL_TOKEN=os.urandom(32).hex(),
