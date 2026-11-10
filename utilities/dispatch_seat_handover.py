@@ -879,21 +879,82 @@ def _peer_message():
     return module
 
 
+# Steward transition rows of each seat ledger, keyed by the ledger's stat
+# generation. Role resolution reads every seat ledger (~800 files / 14 MB on the
+# live store) several times per steward duty; an unchanged ledger is not read
+# again. Ledgers are append-only or replaced whole, so any change moves the
+# size, mtime/ctime or inode. Rows are shared read-only, as under
+# ``seat_ledger_readonly_scope``.
+_TRANSITION_ROWS: dict[str, tuple[tuple, tuple]] = {}
+_TRANSITION_ROWS_LOCK = threading.Lock()
+
+
+def _ledger_generation(path: str):
+    """``(is_symlink, generation)`` of one ledger path; generation ``None`` when absent."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False, None
+    return stat.S_ISLNK(info.st_mode), (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                                        info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _seat_transition_rows(st, path: str, key: str):
+    """This seat ledger's steward rows, or ``None`` for a symlinked ledger."""
+    def read():
+        with st.seat_ledger_readonly_scope():
+            return tuple(row for row in st._read_ledger_lines(st.Seat("pane", key))
+                         if row.get("event") in {ROW_EVENT, "steward-release"})
+    link, before = _ledger_generation(path)
+    if link:
+        return None
+    if st._LEDGER_READ_SCOPE.get() is not None:
+        return read()  # an open read pass keeps its own pinned rows
+    with _TRANSITION_ROWS_LOCK:
+        held = _TRANSITION_ROWS.get(path)
+    if held is not None and before is not None and held[0] == before:
+        return held[1]
+    rows = read()
+    with _TRANSITION_ROWS_LOCK:
+        if before is not None and before == _ledger_generation(path)[1]:
+            _TRANSITION_ROWS[path] = (before, rows)
+        else:
+            _TRANSITION_ROWS.pop(path, None)
+    return rows
+
+
 def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
     """Read only confirmed steward transitions and releases from the existing seat ledgers."""
+    if seat_key:
+        return _seat_keys_transition_rows((seat_key,))
     st = _st()
     directory = st.state_root() / "sessions"
-    paths = ([directory / f"{seat_key}.jsonl"] if seat_key else
-             sorted(path for path in directory.glob("*.jsonl") if path.is_file() and not path.is_symlink()))
+    paths = sorted(path for path in directory.glob("*.jsonl")
+                   if path.is_file() and not path.is_symlink())
     out = []
     for path in paths:
-        if path.is_symlink():
-            continue
-        key = path.stem
-        with st.seat_ledger_readonly_scope():
-            for row in st._read_ledger_lines(st.Seat("pane", key)):
-                if row.get("event") in {ROW_EVENT, "steward-release"}:
-                    out.append((key, row))
+        rows = _seat_transition_rows(st, str(path), path.stem)
+        if rows is not None:
+            out.extend((path.stem, row) for row in rows)
+    # A ledger that left the directory leaves the cache with it.
+    present = {str(path) for path in paths}
+    prefix = str(directory) + os.sep
+    with _TRANSITION_ROWS_LOCK:
+        for stale in [name for name in _TRANSITION_ROWS
+                      if name.startswith(prefix) and name not in present]:
+            _TRANSITION_ROWS.pop(stale, None)
+    return out
+
+
+def _seat_keys_transition_rows(keys) -> list[tuple[str, dict]]:
+    """`_transition_rows` of each seat key in order, resolving the ledger directory once."""
+    st = _st()
+    prefix = os.path.join(str(st.state_root() / "sessions"), "")
+    out = []
+    for key in keys:
+        rows = _seat_transition_rows(st, prefix + f"{key}.jsonl", key)
+        if rows is not None:
+            out.extend((key, row) for row in rows)
     return out
 
 
@@ -1050,7 +1111,7 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                 directory = _st().state_root() / "sessions"
                 keys.update(path.stem for path in directory.glob("*.jsonl")
                             if path.is_file() and not path.is_symlink())
-            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
+            rows = _seat_keys_transition_rows(sorted(keys))
         marker_relations = []
         marker_reader = getattr(pm, "steward_evidence_targets", None)
         for (marker_harness, marker_sid), marker in markers.items():

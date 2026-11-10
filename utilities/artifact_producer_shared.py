@@ -46,7 +46,9 @@ from artifact_producer_refresh import (
 from artifact_producer_spec import (
     _check_shared_base, _commit_shared, _legacy_adopted_spec_base, _merge_spec_publication,
     _sealed_source_files, _spec_admission_base, _spec_bytes, _spec_inventory,
-    _spec_seed_components, _verified_shared_spec, _verify_exact_spec_publication,
+    _spec_seed_components, _verified_shared_spec, _verified_shared_spec_lazy,
+    shared_revision_read_scope,
+    _verify_exact_spec_publication,
     _verify_spec_publication, component_set, SPEC_BASE_RECEIPT,
 )
 
@@ -677,7 +679,8 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
             _verify_spec_publication(root, reference, revision, completed=True)
         else:
             _verify_exact_spec_publication(root, reference, revision, completed=True)
-        published, _ = _verified_shared_spec(root, reference["shared_reference_id"], revision_id)
+        # Coverage reads only the files the source changed from its base.
+        published, _ = _verified_shared_spec_lazy(root, reference["shared_reference_id"], revision_id)
         if spec_merge.changes_covered(base, source, published):
             return reference, revision_id, revision, publishing_cycle
     return None
@@ -686,6 +689,20 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
 def completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = False,
                                references: Optional[Sequence[Mapping[str, Any]]] = None,
                                known_publications: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Finish publication after the work is complete, without changing its outcome.
+
+    One call proves each immutable shared revision it reads once (see
+    `shared_revision_read_scope`); a caller's enclosing read pass extends that.
+    """
+    with shared_revision_read_scope():
+        return _completed_spec_publication(
+            root, cycle_id=cycle_id, settle=settle, references=references,
+            known_publications=known_publications)
+
+
+def _completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = False,
+                                references: Optional[Sequence[Mapping[str, Any]]] = None,
+                                known_publications: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Finish publication after the work is complete, without changing its outcome.
 
     Spec routes keep their established primary-artifact contract. Code routes

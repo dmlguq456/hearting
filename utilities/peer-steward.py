@@ -6854,6 +6854,7 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                              observer_error="observer-unavailable:" + type(exc).__name__)
             except Exception:
                 pass
+        _release_freed_memory()
         if retryable:
             try:
                 latest = store.get(duty_id)
@@ -7563,6 +7564,19 @@ def _runner_maintenance_pass(store):
     return result
 
 
+def _release_freed_memory(*, min_interval=5.0):
+    peer_obligations.release_freed_memory(min_interval=min_interval)
+
+
+def _shared_revision_pass():
+    """One runner pass proves each immutable shared spec revision it reads once."""
+    try:
+        from artifact_producer_spec import shared_revision_read_scope
+    except Exception:  # noqa: BLE001 - without it each read verifies as before
+        return contextlib.nullcontext()
+    return shared_revision_read_scope()
+
+
 def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
     """Keep attempt projections independent of slow obligation reconciliation."""
     from peer_read_context import PeerReadContext
@@ -7709,11 +7723,12 @@ def cmd_obligation_runner(args):
                 duties.append(duty)
         duties = _runner_duties(store, duties)
         observation_context = ObservationContext()
-        _reconcile_obligations(store, duties, read_context=read_context,
-                               retry_state=duty_retry_state,
-                               notice_selection=notice_selection,
-                               runner_incarnation=runner_incarnation,
-                               settlement_context=settlement_context)
+        with _shared_revision_pass():
+            _reconcile_obligations(store, duties, read_context=read_context,
+                                   retry_state=duty_retry_state,
+                                   notice_selection=notice_selection,
+                                   runner_incarnation=runner_incarnation,
+                                   settlement_context=settlement_context)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
@@ -7726,9 +7741,11 @@ def cmd_obligation_runner(args):
                 settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
                 start_readiness_worker()
         external_snapshot = _external_obligation_snapshot()
-        _reconcile_external_obligations(
-            store, service_current=service_current, snapshot=external_snapshot,
-            settlement_context=settlement_context)
+        with _shared_revision_pass():
+            _reconcile_external_obligations(
+                store, service_current=service_current, snapshot=external_snapshot,
+                settlement_context=settlement_context)
+        _release_freed_memory(min_interval=0.0)
         try:
             store.prune_terminal_obligations(time_budget=0.1)
         except (OSError, ValueError, RuntimeError, peer_obligations.ObligationError):
@@ -7810,6 +7827,7 @@ def cmd_obligation_runner(args):
             if active_readiness:
                 delay = min(5.0, delay)
         previous_signature = signature
+        _release_freed_memory(min_interval=0.0)
         readiness_fds = _runner_readiness_fds()
         wait_fds = ([wake_fd] if wake_fd is not None else []) + readiness_fds
         if wait_fds:

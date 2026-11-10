@@ -1233,6 +1233,59 @@ def _valid_cycle_state(value: Any) -> bool:
     return isinstance(value, str) and value in _SEALED_CYCLE_STATES
 
 
+# One read pass of a long-lived reader (a runner pass, one completed-publication
+# check) shares observations that the pass treats as pinned: immutable shared
+# revisions it already proved unchanged, and the campaign-id index of a
+# campaigns directory. Nested scopes reuse the outer one; nothing outlives it.
+_READ_PASS: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar(
+    "artifact_producer_read_pass", default=None)
+
+
+@contextlib.contextmanager
+def shared_revision_read_scope():
+    """Pin immutable-revision proofs and campaign lookups for one read pass."""
+    if _READ_PASS.get() is not None:
+        yield
+        return
+    token = _READ_PASS.set({})
+    try:
+        yield
+    finally:
+        _READ_PASS.reset(token)
+
+
+def _read_pass_entry(name: str, factory):
+    """This read pass's value for ``name`` (created on first use), or ``None``."""
+    scope = _READ_PASS.get()
+    if scope is None:
+        return None
+    if name not in scope:
+        scope[name] = factory()
+    return scope[name]
+
+
+def _campaign_directories(campaigns: Path, campaign_id: str) -> List[Path]:
+    """Campaign directories whose ``campaign.json`` names ``campaign_id``."""
+    index = _read_pass_entry("campaign-index", dict)
+    if index is not None and str(campaigns) in index:
+        return list(index[str(campaigns)].get(campaign_id, ()))
+    by_id: Dict[str, List[Path]] = {}
+    matches = []
+    if campaigns.is_dir() and not campaigns.is_symlink():
+        for candidate in campaigns.iterdir():
+            if candidate.is_symlink() or not candidate.is_dir():
+                continue
+            campaign = _read_json(candidate / "campaign.json")
+            value = campaign.get("campaign_id") if campaign is not None else None
+            if isinstance(value, str):
+                by_id.setdefault(value, []).append(candidate)
+            if campaign is not None and value == campaign_id:
+                matches.append(candidate)
+    if index is not None:
+        index[str(campaigns)] = by_id
+    return matches
+
+
 def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
     """Resolve this record's manifest without scanning other cycle bindings."""
     root = Path(root).resolve()
@@ -1249,14 +1302,7 @@ def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
         campaigns = artifact_locator.safe_child(root, root, "campaigns")
     except artifact_locator.LocatorError as exc:
         raise ProducerError("sealed-cycle-state-unknown", exc.detail or exc.code) from exc
-    matches = []
-    if campaigns.is_dir() and not campaigns.is_symlink():
-        for candidate in campaigns.iterdir():
-            if candidate.is_symlink() or not candidate.is_dir():
-                continue
-            campaign = _read_json(candidate / "campaign.json")
-            if campaign is not None and campaign.get("campaign_id") == campaign_id:
-                matches.append(candidate)
+    matches = _campaign_directories(campaigns, campaign_id)
     if len(matches) != 1:
         raise ProducerError(
             "sealed-cycle-state-unknown",

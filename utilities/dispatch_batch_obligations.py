@@ -1592,8 +1592,13 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
     )
     from dispatch_terminal_commit import owner_completion_state
 
+    import peer_obligations
+
     pending = []
     for candidate in candidates:
+        # Each historical proof reads and drops large inputs; return the freed
+        # heap while the long candidate walk continues (rate limited).
+        peer_obligations.release_freed_memory()
         order, raw, fields = candidate.order, candidate.raw, candidate.fields
         if fields[1] not in {"open", "running", "done"}:
             if context is not None and candidate.completion_metadata().get("attempt_id"):

@@ -4330,12 +4330,49 @@ def _reconnect_locked_cache_producer(root, lock, binding, code_root, observers):
     return _ensure_producer()
 
 
+# A producer whose recorded inputs did not change re-publishes its last pass
+# instead of repeating it. A pass also reads sockets, subprocess output and the
+# clock, which no stat generation covers, so a quiet producer still runs a full
+# pass at least this often.
+_QUIET_REFRESH = 300.0
+_track_inputs = False   # set only by the detached producer (``--refresh-cache``)
+_last_pass = None       # producer-only: the last complete pass and its input generations
+
+
+def _project_path():
+    project_root = str(Path(__file__).resolve().parents[1])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
+    global _last_pass
+    if not _track_inputs:
+        return _refresh_pass()[0]
+    if _reuse_last_pass():
+        return True
+    import pass_inputs
+    pass_inputs.install()
+    census = _process_census()
     try:
-        project_root = str(Path(__file__).resolve().parents[1])
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
+        with pass_inputs.record(ignore=_volatile_inputs(), describe=_describe_input) as inputs:
+            ok, result, routes_ok = _refresh_pass()
+    finally:
+        _release_memory()
+    complete = (ok and routes_ok and inputs.complete and census is not None
+                and isinstance(result, dict) and result.get("complete") is True)
+    _last_pass = ({"result": result, "inputs": inputs, "census": census,
+                   "signals": _signal_names(), "at": time.time(),
+                   "demand_keys": frozenset(result.get("route_sessions") or ())}
+                  if complete else None)
+    return ok
+
+
+def _refresh_pass():
+    """One full observation: (published, result, route labels observed in full)."""
+    try:
+        _project_path()
         from tools.fleet.collectors import dispatch
         import human_gate_observation
         result = human_gate_observation.read_answer_waits(
@@ -4343,6 +4380,7 @@ def _refresh_cache() -> bool:
         demands = _route_demands()
         result["route_sessions"] = demands
         result["route_status"] = {}
+        routes_ok = not demands
         if demands:
             try:
                 # Share registry generations with the answer-wait pass, and interpret
@@ -4355,19 +4393,151 @@ def _refresh_cache() -> bool:
                 if snapshot.observations.get("basic", {}).get("all_new") is True:
                     result["route_status"] = {key: label for key, label in session_route_status(snapshot).items()
                                               if key in demands}
+                    routes_ok = True
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):
             failure = {"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]}
             publish_cache(failure)
-            return False
+            return False, None, False
         _notify_result(result)
-        return True
+        return True, result, routes_ok
     except Exception:
         publish_cache({"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]})
+        return False, None, False
+
+
+def _reuse_last_pass() -> bool:
+    """Re-publish the last pass when nothing it read changed and no fold is due."""
+    last = _last_pass
+    if last is None:
         return False
+    try:
+        now = time.time()
+        if not 0 <= now - last["at"] < _QUIET_REFRESH:
+            return False
+        demands = _route_demands(now)
+        result = last["result"]
+        if (frozenset(demands) != last["demand_keys"]
+                or _fold_due(result.get("items", ()), now)
+                or _signal_names() != last["signals"]
+                or last["inputs"].changed()
+                or _process_census() != last["census"]):
+            return False
+        import pass_inputs
+        # Same items and labels; only the observation time and display interest move.
+        republished = dict(result, observed_at=now, route_sessions=demands)
+        with pass_inputs.own_writes(last["inputs"]):
+            if not publish_cache(republished):
+                return False
+            _notify_result(republished)
+        return True
+    except Exception:
+        return False
+
+
+def _fold_due(items, now) -> bool:
+    """A current wait reached the shared age fold since its pass computed it."""
+    for item in items:
+        if not isinstance(item, dict) or item.get("stale"):
+            continue
+        try:
+            since = float(item["since"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(since) and wait_fold(since, now) is not None:
+            return True
+    return False
+
+
+def _volatile_inputs():
+    """Inputs rewritten without a meaning change; their meaning is tracked separately.
+
+    Display interest is compared as its key set, signal files as their names plus
+    their own file generations, and Fleet tag assignments (rewritten each Fleet
+    tick only to count reaffirmations) through the harness process census.
+    """
+    root = state_root()
+    fleet = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-fleet"
+    return (root, root / ".demand", root / ".demand.lock",
+            fleet, fleet / "tag-assignments.json", fleet / "tag-assignments.lock")
+
+
+def _describe_input(path):
+    """Generations for inputs rewritten on a timer without a change in meaning.
+
+    Every open Claude session rewrites its statusline tap about once a minute,
+    idle or not: Claude advances ``cost.total_duration_ms`` and the statusline
+    refreshes its own ``hearting_display`` cache. Only the statusline itself
+    reads those fields back. The rest of the tap, and the tap names, still count.
+    """
+    if "/.statusline" not in path:
+        return None
+    import pass_inputs
+    parent, name = os.path.split(path)
+    if name == ".statusline":
+        names = pass_inputs.entry_names(path)
+        return None if names is None else ("names", names)
+    if os.path.basename(parent) != ".statusline" or not name.endswith(".json"):
+        return None
+    raw = pass_inputs.content(path, 65536)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            if isinstance(value.get("cost"), dict):
+                value["cost"].pop("total_duration_ms", None)
+            value.pop("hearting_display", None)
+            value.pop("hearting_display_observed_at", None)
+        raw = json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError):
+        pass
+    return ("tap", hashlib.sha256(raw).hexdigest())
+
+
+def _signal_names():
+    try:
+        return tuple(sorted(entry.name for entry in os.scandir(state_root())
+                            if entry.name.endswith(".json")
+                            and entry.name not in ("projection.json", "fleet.json")))
+    except OSError:
+        return None
+
+
+def _process_census():
+    """Identity of every harness process row from Fleet's existing census, or None."""
+    try:
+        _project_path()
+        from tools.fleet.collectors import procscan
+        import pass_inputs
+        rows = procscan.scan()
+        # An incomplete census (e.g. one unparsable ``ps`` row) is compared as
+        # observed: the same rows and the same reasons are the same census.
+        evidence = (getattr(rows, "census_complete", None), tuple(getattr(rows, "census_reasons", ())))
+        return (repr(evidence),) + tuple(sorted(repr((
+            getattr(row, "harness", None), getattr(row, "pid", None),
+            pass_inputs._process_start(getattr(row, "pid", 0) or 0),
+            *(getattr(row, name, None) for name in (
+                "cwd", "session_id", "is_child", "orphan", "detached", "app_server",
+                "managed_dir", "_tty")))) for row in rows))
+    except Exception:
+        return None
+
+
+def _release_memory():
+    """Hand the pass's freed heap back to the OS; the parse caches stay warm.
+
+    A pass frees hundreds of MiB of transient parse objects that glibc otherwise
+    keeps mapped for the producer's lifetime (measured: ~35 MiB per pass, 3 ms).
+    """
+    try:
+        import ctypes
+        ctypes.CDLL(None).malloc_trim(0)
+    except (OSError, AttributeError, ImportError, TypeError):
+        pass
 
 
 def _claim_notification(item_id: str, boundary: str):
@@ -4634,6 +4804,8 @@ def main(argv=None) -> int:
         reconnect_cache_producer(wait_for_commit=True)
         return 0
     if args.refresh_cache:
+        global _track_inputs
+        _track_inputs = True
         if args.lock_fd is not None:
             _producer_loop(args.lock_fd)
         else:
