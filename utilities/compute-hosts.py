@@ -3608,13 +3608,12 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, c
                                          "actual": _canonical_sha256(output_rows)}],
                         "retryable": False,
                         "next_action": "preserve the adopted row and verify its output rows", **hashes}
-            output_check = validate_compute_outputs(
-                direct.get("artifact_base"), direct.get("declared_outputs"), output_rows)
-            if not output_check.get("ok"):
-                return {"state": "not-quiescent", "reason": output_check.get("reason"),
-                        "differences": output_check.get("differences"),
-                        "retryable": output_check.get("retryable", False),
-                        "next_action": output_check.get("next_action"), **hashes}
+            changed = _route_direct_output_differences(direct.get("artifact_base"), output_rows)
+            if changed:
+                return {"state": "not-quiescent", "reason": "compute-run-output-changed",
+                        "differences": changed, "retryable": False,
+                        "next_action": "restore the original completed compute output before replaying",
+                        **hashes}
     elif (meta.get("run_id") != run_id or not isinstance(receipt.get("host"), str)
             or not receipt.get("host")
             or not isinstance(contract, dict)
@@ -3746,6 +3745,23 @@ def _route_direct_meta_differences(meta, contract):
     return differences
 
 
+def _route_direct_output_differences(base, rows):
+    """Recheck the output bytes a route-direct receipt recorded as present."""
+    differences = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("state") != "present":
+            continue
+        try:
+            actual = dict(zip(("sha256", "size"), _hash_compute_output(base, row["path"])))
+        except ComputeOutputError as error:
+            actual = {"error": error.reason}
+        if actual != {"sha256": row.get("sha256"), "size": row.get("size")}:
+            differences.append({"field": "outputs." + str(row.get("path")),
+                                "expected": {"sha256": row.get("sha256"), "size": row.get("size")},
+                                "actual": actual})
+    return differences
+
+
 def route_direct_execution_record(config, run_id, binding):
     """Build adoption evidence for a finished run launched directly under route provenance.
 
@@ -3792,23 +3808,21 @@ def route_direct_execution_record(config, run_id, binding):
         "inputs": binding.get("inputs") or [],
         "command": meta.get("command"), "cwd": meta.get("cwd"), "host": meta.get("host"),
         "gpus": meta.get("gpus"), "share": meta.get("share"),
+        "record": binding.get("record") or {},
     }
+    # Declared outputs that exist now are hashed into the receipt; a missing
+    # or undeclared output is recorded as such, not refused.
     try:
         expanded = _expand_compute_outputs(contract["artifact_base"], contract["declared_outputs"])
-        if expanded["missing_patterns"]:
-            return {"state": "unavailable", "reason": "compute-run-output-missing",
-                    "differences": [{"field": "outputs." + pattern,
-                                     "expected": "one or more regular files",
-                                     "actual": "no matching files"}
-                                    for pattern in expanded["missing_patterns"]],
-                    "next_action": "verify the run produced every declared output of its route node"}
         rows = []
         for relative in expanded["receipt_paths"]:
+            if relative in expanded["missing_patterns"]:
+                rows.append({"path": relative, "state": "missing"})
+                continue
             digest, size = _hash_compute_output(contract["artifact_base"], relative)
             rows.append({"path": relative, "sha256": digest, "size": size, "state": "present"})
     except ComputeOutputError as error:
-        return {"state": "unavailable", "reason": error.reason, "differences": [error.difference],
-                "next_action": "restore safe route-declared output files before retrying"}
+        rows = [{"state": "unavailable", "reason": error.reason}]
     execution = {
         "kind": "compute-hosts", "run_id": run_id,
         "run_root": str(Path(config["run_root"]).resolve(strict=True)),
@@ -3933,12 +3947,8 @@ def run_snapshot_differences(config, run_id, execution):
                 differences.append({"field": "compute_run.outputs_sha256",
                                     "expected": execution.get("outputs_sha256"),
                                     "actual": _canonical_sha256(execution.get("outputs"))})
-            output_check = validate_compute_outputs(
-                direct.get("artifact_base"), direct.get("declared_outputs"), execution.get("outputs"))
-            if not output_check.get("ok"):
-                differences.extend(output_check.get("differences") or [{
-                    "field": "outputs", "expected": "current sealed output set",
-                    "actual": output_check.get("reason")}])
+            differences.extend(_route_direct_output_differences(
+                direct.get("artifact_base"), execution.get("outputs")))
             stop_reason = _read_stop_reason(run_dir)
             if stop_reason is not None:
                 differences.append({"field": "compute_run.stop_reason", "expected": None,

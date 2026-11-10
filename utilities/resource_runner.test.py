@@ -756,8 +756,9 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
     The owner attempt of route rt-136853c5 launched `compute-hosts run`
     directly: the run recorded only route provenance (route file and id,
     owner attempt), no resource contract, no resource-runs.json row and no
-    outputs.json. Only the route's own run of one node is adopted; every
-    other shape keeps its refusal and writes nothing.
+    outputs.json. The route's own finished run is adopted; a
+    run that is plainly another route's, unfinished, failed or already
+    adopted is refused and writes nothing; missing evidence is only recorded.
     """
 
     RUN = "gpu-20261107-full"
@@ -933,10 +934,13 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         contract = adopted["execution"]["contract"]
         self.assertEqual(contract["kind"], "route-direct-v1")
         self.assertEqual(contract["attempt_id"], "att-launcher")
+        self.assertEqual(contract["record"], {
+            "launched_outside_resource_runner": True,
+            "approval": "route-start (no open human gate for this node)",
+            "owner_lineage": "matched", "cwd": "matched", "command_write_scope": "matched",
+            "smoke_attestation": "matched", "config": "matched", "gpu_lease": "matched"})
         self.assertEqual([row["path"] for row in adopted["execution"]["outputs"]],
                          ["parts/full-run/logs/train.log", "parts/full-run/run.json"])
-        self.assertEqual({item["name"] for item in contract["inputs"]}, {"smoke_attestation", "config"})
-        self.assertEqual(adopted["execution"]["provenance"]["route_hash"], "sha256:direct")
         self.assertEqual(self.arm_calls, 1)
         published = self.registry.read_bytes()
         self.watches = {"full-run": {"node": "full-run", "predecessor_kind": "resource",
@@ -946,6 +950,13 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         self.assertEqual(list(self.adopt()), ["full-run__a1"])
         self.assertEqual(self.registry.read_bytes(), published, "the repeat converges on one row")
 
+    def test_repeat_after_the_stage_settled_still_replays(self):
+        self.adopt()
+        published = self.registry.read_bytes()
+        (self.markers / "full-run.json").write_text("{}")  # full-run completed; host-run is next
+        self.adopt()
+        self.assertEqual(self.registry.read_bytes(), published)
+
     def test_route_direct_publish_then_arm_interruption_replays(self):
         self.adopt()
         published = self.registry.read_bytes()
@@ -953,6 +964,7 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         self.assertEqual(self.registry.read_bytes(), published)
         self.assertEqual(self.arm_calls, 1)
 
+    # Refused: the run is plainly not this route's finished, unadopted run.
     def test_route_free_run_is_refused(self):
         self.meta["provenance"] = {"attempt_id": "att-launcher"}
         self.refused("resource-compute-route-mismatch")
@@ -961,42 +973,6 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         self.meta["provenance"]["route"] = {"route_file": str(self.root / "other.json"),
                                             "route_id": "rt-other"}
         self.refused("resource-compute-route-mismatch")
-
-    def test_run_launched_by_no_owner_of_this_route_is_refused(self):
-        self.attempts["att-launcher"] = {**self.attempts["att-launcher"], "owner_route_id": "rt-other"}
-        detail = self.refused("resource-compute-binding-conflict")
-        self.assertEqual(detail["differences"][0]["field"], "provenance.attempt_id")
-        self.meta["provenance"]["attempt_id"] = "att-unknown"
-        self.refused("resource-compute-binding-conflict")
-
-    def test_another_nodes_run_is_refused(self):
-        # A host-run command writes into host-run's scope; its full-run
-        # dependency is not complete, so it is never full-run evidence.
-        self.meta["command"] = ["bash", "eval.sh", "--config", str(self.config_file),
-                                "--out", str(self.out / "parts" / "host-run" / "raw")]
-        detail = self.refused("resource-compute-binding-conflict")
-        self.assertEqual(detail["differences"][0]["field"], "dependency.full-run")
-
-    def test_command_outside_every_node_write_scope_is_refused(self):
-        self.meta["command"] = ["bash", "train.sh", "--config", str(self.config_file),
-                                "--log-dir", str(self.root / "elsewhere")]
-        detail = self.refused("resource-compute-binding-conflict")
-        self.assertIn("compute-run.command", [item["field"] for item in detail["differences"]])
-
-    def test_another_command_or_config_is_refused(self):
-        other = self.cwd / "other.yaml"
-        other.write_text("epochs: 9\n")
-        self.meta["command"][3] = str(other)
-        self.refused("resource-compute-contract-mismatch")
-        self.meta["command"][3] = str(self.config_file)
-        self.config_file.write_text("epochs: 3\n")  # config changed after smoke
-        self.refused("resource-compute-contract-mismatch")
-
-    def test_smoke_gated_after_the_run_started_is_refused(self):
-        (self.markers / "smoke.1.json").unlink()
-        self.write_smoke_marker("2026-11-10T04:03:44Z", history=False)
-        detail = self.refused("resource-compute-contract-mismatch")
-        self.assertTrue(detail["differences"][0]["field"].endswith("gated_before_run"))
 
     def test_running_run_is_refused(self):
         self.exit_code = None
@@ -1012,18 +988,52 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         self.receipt["exit_code"] = 3
         self.refused("resource-compute-exit-not-zero")
 
-    def test_gpu_lease_of_another_run_is_refused(self):
-        self.meta["gpu_lease"]["run_id"] = "gpu-other-run"
-        self.refused("resource-compute-binding-conflict")
+    def test_run_already_adopted_by_another_row_is_refused(self):
+        self.registry.write_text(json.dumps({"schema_version": 1, "runs": {"other__a1": {
+            "run_id": "other__a1", "node": "other", "compute_run_id": self.RUN,
+            "execution": {"run_root": str(self.compute_root.resolve())}}}}))
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "compute_run.adopted_by")
 
-    def test_node_with_another_resource_row_is_refused(self):
-        # Already adopted by another row (or launched through the runner):
-        # the receipt seat never opens beside an existing row of the node.
+    def test_run_that_writes_only_into_another_nodes_scope_is_refused(self):
+        self.meta["command"] = ["bash", "eval.sh", "--out", str(self.out / "parts" / "host-run" / "raw")]
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "compute-run.command")
+
+    def test_open_human_gate_for_the_node_stays(self):
+        self.route["human_gate_bindings"] = [{"gate": "full-run-approval", "node": "full-run"}]
+        self.refused("resource-compute-human-gate-open")
+
+    # Missing or mismatched evidence is recorded, never a refusal.
+    def test_missing_evidence_is_recorded_not_refused(self):
+        self.attempts.clear()                          # owner lineage unreadable
+        self.meta.pop("gpu_lease")
+        self.meta["command"] = ["bash", "train.sh"]    # no path names its config or scope
+        (self.markers / "smoke.json").write_text(json.dumps({
+            "route_id": "rt-direct", "route_hash": "sha256:direct", "node_id": "smoke",
+            "completion_gate": "hash-bound-smoke"}))   # no attestation evidence
+        record = self.adopt()["full-run__a1"]["execution"]["contract"]["record"]
+        for key in ("owner_lineage", "command_write_scope", "smoke_attestation", "config", "gpu_lease"):
+            self.assertEqual(record[key], "unverified", key)
+
+    def test_mismatched_evidence_is_recorded_not_refused(self):
+        self.attempts["att-launcher"]["owner_route_id"] = "rt-other"
+        self.meta["gpu_lease"]["run_id"] = "gpu-other-run"
+        self.config_file.write_text("epochs: 3\n")    # config changed after smoke
+        record = self.adopt()["full-run__a1"]["execution"]["contract"]["record"]
+        self.assertEqual((record["owner_lineage"], record["gpu_lease"], record["config"]),
+                         ("mismatched", "mismatched", "mismatched"))
+
+    def test_missing_declared_output_is_recorded(self):
+        (self.out / "parts" / "full-run" / "run.json").unlink()
+        rows = self.adopt()["full-run__a1"]["execution"]["outputs"]
+        self.assertIn({"path": "parts/full-run/run.json", "state": "missing"}, rows)
+
+    def test_unrelated_row_of_the_node_does_not_block(self):
         self.registry.write_text(json.dumps({"schema_version": 1, "runs": {"full-run__a1": {
             "run_id": "full-run__a1", "route": str(self.route_file.resolve()),
-            "node": "full-run", "status": "succeeded"}}}))
-        detail = self.refused("resource-compute-binding-conflict")
-        self.assertEqual(detail["differences"][0]["field"], "resource.rows")
+            "node": "full-run", "status": "failed"}}}))
+        self.assertIn("full-run__a2", self.adopt())
 
     def test_changed_output_after_adoption_refuses_the_replay(self):
         self.adopt()
