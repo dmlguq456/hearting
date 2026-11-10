@@ -95,6 +95,18 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const m=formatted?model.model:selected?line(selected+' · '+(effort||'?'),'loc_repo'):(model.model||line(t('checking','Checking')+' · ?'));
     add(m);
     if(model.warning)add(line(model.warning,'lvl_r'));
+    // A waiting result line (string; Claude's `notice` is its native row's
+    // segments). Side: up to 3 rows; bottom: one row with an ellipsis. An open
+    // question comes first, so the line waits until the answer is done.
+    const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
+    if(tidy&&!asking){
+      const parts=line('⚠ '+tidy,'lvl_y');
+      // A cut line ends in an ellipsis in either layout.
+      const rows=[];wrap(parts,side?4:2,undefined,rows);
+      const kept=rows.slice(0,side?3:1);
+      if(rows.length>kept.length){const last=kept.length-1,fit=clip(kept[last],inner-1);kept[last]=[...fit.parts,text('…','lvl_y')];}
+      for(const row of kept)add(row);
+    }
     if(status&&side)add(line(status,color));
     if(routeDetail){
       add(line(t('routes','Route')+' · '+t('back','Back'),'loc_repo'),'route');
