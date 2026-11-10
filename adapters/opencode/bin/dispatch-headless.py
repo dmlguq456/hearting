@@ -202,54 +202,7 @@ from route_authority import ANSI_RE as _ANSI_RE  # noqa: E402,F401
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
-    action = p.add_mutually_exclusive_group()
-    action.add_argument("--dry-run", action="store_true", help="print the command without writing jobs.log")
-    action.add_argument("--register", action="store_true", help="append an open job without launching")
-    action.add_argument("--start", action="store_true", help="append an open job and launch in background")
-    p.add_argument("--worktree", required=True)
-    p.add_argument("--slug", required=True)
-    p.add_argument("--capability", required=True)
-    p.add_argument("--capability-mode", help="entry capability mode (for example dev)")
-    p.add_argument("--worker-mode", help="non-owner unit/persona compatibility path")
-    p.add_argument("--mode", help="legacy compatibility input; scalar=capability, slash=worker")
-    p.add_argument("--qa", default=None)  # optional/derived from --intensity (CONVENTIONS §1.1)
-    p.add_argument("--intensity", default="standard")
-    p.add_argument("--dispatch-depth", dest="dispatch_depth", type=int, default=1)
-    p.add_argument(
-        "--parent", dest="parent_slug",
-        help="logical parent slug (never an attempt id)",
-    )
-    p.add_argument(
-        "--parent-attempt-id",
-        default=os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or None,
-        help="exact parent attempt id (never a slug)",
-    )
-    p.add_argument(
-        "--parent-session-id",
-        default=parent_completion.default_parent_session_id(),
-    )
-    p.add_argument(
-        "--parent-cwd",
-        default=os.environ.get("AGENT_DISPATCH_PARENT_CWD") or None,
-    )
-    p.add_argument("--worker-role", help="legacy compatibility metadata; not bootstrap identity")
-    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support", "frame"))
-    p.add_argument("--review-output", help="exact durable report path for a route-free review worker")
-    from review_input import add_arguments as review_input_arguments
-    review_input_arguments(p)
-    p.add_argument("--unit", default="", help="catalog unit ref for the assigned route node (roles/units/<unit>.md)")
-    p.add_argument("--assigned-contract")
-    p.add_argument("--owner", dest="capability_owner")
-    p.add_argument("--route-file")
-    p.add_argument("--route-id")
-    p.add_argument("--route-hash")
-    p.add_argument("--route-node")
-    p.add_argument("--registry-digest")
-    p.add_argument("--write-scope")
-    p.add_argument("--completion-gate")
-    p.add_argument("--harness-affinity")
-    p.add_argument("--explicit-adapter")  # the request a sealed worker/owner pin replaced; recorded only
+    p = DISPATCH_MAIN.base_parser(__doc__)
     p.add_argument(
         "--owner-harness",
         default=os.environ.get("AGENT_DISPATCH_OWNER_HARNESS") or "opencode",
@@ -265,36 +218,13 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not override model/variant; inherit the active OpenCode config for this dispatch",
     )
-    p.add_argument("--prompt-file")
-    p.add_argument("--prompt-text")
-    p.add_argument("--execution-access-file")
-    p.add_argument("--jobs")
-    p.add_argument("--attempt-id")
-    p.add_argument("--broker-request-id")
-    p.add_argument("--fallback-ordinal", type=int, default=0)
-    p.add_argument("--fallback-hop")
-    p.add_argument("--execution-surface", default="registered-headless")
-    p.add_argument("--registered-worker", type=int, choices=(0, 1), default=1)
-    p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
-    p.add_argument("--prior-attempt-id")
-    p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
-    p.add_argument("--cooled-model")
-    p.add_argument("--selection-source")
-    p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
+    DISPATCH_MAIN.add_launch_arguments(p)
     p.add_argument("--parent-harness", default=parent_completion.default_parent_harness("opencode"))
     p.add_argument(
         "--allow-unmanaged-parent-poll", action="store_true",
         help="operator-only recovery: permit explicit bounded polling for an unmanaged Codex parent",
     )
-    p.add_argument("--parent-transport", default=os.environ.get("AGENT_DISPATCH_CURRENT_TRANSPORT") or "unknown")
-    p.add_argument("--parent-sandbox", default=os.environ.get("AGENT_DISPATCH_CURRENT_SANDBOX") or "unknown")
-    # default None (not "unknown"): an explicitly supplied `--nested-eligibility
-    # unknown` must stay distinguishable from an absent flag — explicit evidence,
-    # even unknown, is never overwritten by the internal probe.
-    p.add_argument("--nested-eligibility", choices=("supported", "unsupported", "unknown"), default=None)
-    p.add_argument("--eligibility-source", default="")
-    p.add_argument("--eligibility-failure-class", default="")
-    p.add_argument("--log-dir")
+    DISPATCH_MAIN.add_parent_runtime_arguments(p)
     p.add_argument("--launch-lifecycle", choices=LIFECYCLES, default=DETACHED)
     p.add_argument(
         "--foreground-timeout",

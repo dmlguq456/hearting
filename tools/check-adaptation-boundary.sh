@@ -52,11 +52,17 @@ fail_msg() {
   fail=1
 }
 
-# A wrapper's worker environment is built by the launch phases the three
-# dispatch wrappers share; a literal there counts for the wrapper that calls it.
+# The three dispatch wrappers share their parser, worker environment and launch
+# phases (utilities/dispatch_headless_main.py); a literal there counts for a
+# wrapper that builds through it.
 wrapper_worker_env_has() {
   grep -Fq -- "$1" "$2" \
     || { grep -Fq 'DISPATCH_MAIN.worker_environment(' "$2" \
+      && grep -Fq -- "$1" utilities/dispatch_headless_main.py; }
+}
+wrapper_parser_has() {
+  grep -Fq -- "$1" "$2" \
+    || { grep -Fq 'DISPATCH_MAIN.base_parser(' "$2" \
       && grep -Fq -- "$1" utilities/dispatch_headless_main.py; }
 }
 
@@ -1009,7 +1015,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq '"quick", "light", "standard", "thorough", "adversarial"' utilities/dispatch_mode_contract.py \
     || ! grep -Fq 'render_worker_bootstrap' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'resolve_worker_type' adapters/codex/bin/dispatch-headless.py \
-    || ! grep -Fq -- '--worker-type' adapters/codex/bin/dispatch-headless.py \
+    || ! wrapper_parser_has '--worker-type' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'ending = worker_ending_prompt(' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/codex/bin/dispatch-headless.py \
     || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py \
@@ -2311,7 +2317,7 @@ check_opencode_bin_wrappers() {
     || ! grep -Fq '"quick", "light", "standard", "thorough", "adversarial"' utilities/dispatch_mode_contract.py \
     || ! grep -Fq 'render_worker_bootstrap' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq 'resolve_worker_type' adapters/opencode/bin/dispatch-headless.py \
-    || ! grep -Fq -- '--worker-type' adapters/opencode/bin/dispatch-headless.py \
+    || ! wrapper_parser_has '--worker-type' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq 'DISPATCH_MAIN.claim_registered_attempt(' adapters/opencode/bin/dispatch-headless.py \
     || ! grep -Fq 'Path(h.frame_repository.execution_path(prompt_path)).write_text(prompt_text, encoding="utf-8")' utilities/dispatch_headless_main.py; then
     fail_msg "adapters/opencode/bin/dispatch-headless.py must validate inputs and materialize typed worker prompts"
@@ -3909,7 +3915,7 @@ check_worker_bootstrap_contract() {
     dispatcher="adapters/$adapter/bin/dispatch-headless.py"
     if ! grep -Fq 'render_worker_bootstrap' "$dispatcher" \
       || ! grep -Fq 'resolve_worker_type' "$dispatcher" \
-      || ! grep -Fq -- '--worker-type' "$dispatcher" \
+      || ! wrapper_parser_has '--worker-type' "$dispatcher" \
       || ! wrapper_worker_env_has 'AGENT_DISPATCH_WORKER_TYPE' "$dispatcher"; then
       fail_msg "$dispatcher must render and register one portable worker type"
     fi
