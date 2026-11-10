@@ -75,6 +75,8 @@ class DeclarationTest(unittest.TestCase):
             {**good, "session_identity": {**good["session_identity"], "env": ["NOT A NAME"]}},
             {**good, "session_identity": {**good["session_identity"], "process_proof": "guess"}},
             {**good, "session_identity": {**good["session_identity"], "herdr_session_id": "maybe"}},
+            {**good, "session_identity": {**good["session_identity"], "sub_session_root": "guess"}},
+            {**good, "session_identity": {**good["session_identity"], "sub_session_root": "env:NOT A NAME"}},
             {k: v for k, v in good.items() if k != "session_identity"},
         )
         for value in broken:

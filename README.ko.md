@@ -152,8 +152,9 @@ SESSIONS에서 프로젝트를 누르면 캠페인 현황, 백로그·진행, �
 
 ### 선택해서 쓰는 세션 패널
 
-`hearting session shell enable`로 새 Claude·Codex·OpenCode 터미널에 공통 상태줄과
-읽기 전용 하단 패널을 켭니다. 기본값은 꺼짐입니다. `hearting session shell status`로
+새 설치에서는 Claude·Codex·OpenCode 터미널의 공통 상태줄과 HEARTING 작업 패널이
+기본으로 켜집니다. 갱신은 기존 선택을 보존하며, 설정이 없던 기존 설치도 그대로 둡니다.
+`hearting session shell enable`로 직접 켤 수 있습니다. `hearting session shell status`로
 설정을 확인하고 `hearting session shell disable`로 원래 실행 방식으로 되돌립니다.
 이미 실행 중인 세션은 그대로 동작합니다.
 

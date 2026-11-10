@@ -13,7 +13,8 @@
       "CLAUDE_SESSION_ID"
     ],
     "process_proof": "session-registry",
-    "herdr_session_id": "verified"
+    "herdr_session_id": "verified",
+    "sub_session_root": "shared-id"
   },
   "access": {
     "enforcement": "tool-permission",

@@ -60,6 +60,7 @@ from dispatch_contract import (
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     ROUTE_STATE_REFUSAL_REASONS,
     route_state_next_action,
+    codex_owner_network_posture,
     codex_standard_owner_network_enabled,
     dispatch_state_root,
     dispatch_state_roots,
@@ -1708,11 +1709,15 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
 
 
 def nested_headless_network_enabled(args: argparse.Namespace) -> bool:
-    """Apply the shared current-state fence to the existing owner network grant."""
+    """This launch's network grant: the shared owner rule under the current Git-state fence."""
     projection = commit_policy.launch_permission_projection(args)
-    return ((nested_headless_network_eligible(args)
-             or bool(projection["task_publish_scope"]))
-            and not projection["observation_only"])
+    return codex_owner_network_posture(
+        dispatch_depth=args.dispatch_depth,
+        worker_type=args.worker_type,
+        sandbox=args.sandbox,
+        gpu_resource_owner=getattr(args, "gpu_execution_scope", False),
+        observation_only=bool(projection["observation_only"]),
+    )
 
 
 def nested_headless_network_eligible(args: argparse.Namespace) -> bool:
@@ -2120,9 +2125,7 @@ def main(argv: list[str]) -> int:
         return rc
     permission_projection = commit_policy.capture_launch_permission_projection(args)
     args.task_publish_scope = permission_projection["task_publish_scope"]
-    args.nested_headless_network_eligible = (
-        nested_headless_network_eligible(args) or bool(args.task_publish_scope)
-    )
+    args.nested_headless_network_eligible = nested_headless_network_eligible(args)
     args.nested_headless_network = nested_headless_network_enabled(args)
     try:
         default_roots = adapter_default_roots(

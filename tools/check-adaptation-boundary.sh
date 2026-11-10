@@ -1631,6 +1631,14 @@ check_codex_tool_projection() {
   done
 }
 
+# A union merge of the census keeps both sides' rows; the row judgment (one list
+# per utility name, no row for a removed utility) lives in one place.
+check_census_rows() {
+  if ! out=$(python3 tools/check-utility-census.py 2>&1); then
+    fail_msg "tools/adaptation-census.tsv rows: $out"
+  fi
+}
+
 check_codex_scaffold_projection() {
   if [ ! -L codex_setting/scaffolds ]; then
     fail_msg "codex_setting/scaffolds must project adapters/codex/scaffolds"
@@ -4077,6 +4085,7 @@ check_install_layout_opencode_projection
 check_codex_bin_wrappers
 check_opencode_bin_wrappers
 check_codex_tool_projection
+check_census_rows
 check_codex_scaffold_projection
 check_codex_native_skill_projection
 check_codex_native_agent_projection
