@@ -166,10 +166,36 @@ def _owner(route, path, jobs, rows):
             continue
         if str(Path(fields[3]).resolve()) != str(Path(route["cwd"]).resolve()):
             continue
+        # `start --route` registers its owner with the route's own keys (route_id/route_hash)
+        # rather than an owner_route_* binding; with no current binding that row is this route's owner.
+        launched = (not any(meta.get(k) for k in ("owner_route_file", "owner_route_id", "owner_route_hash"))
+                    and (meta.get("route_id"), meta.get("route_hash")) == (route["route_id"], route["route_hash"]))
         relevant = (meta.get("owner_route_id") == route["route_id"]
                     or meta.get("owner_route_file") == str(path.resolve())
                     or route.get("owner_attempt_id") == aid)
         owned = AUTH.owns(meta, AUTH.default_parent_session_id(), jobs)
+        if launched and not relevant:
+            if fields[1] in OPEN and aid == os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
+                continue  # the owner closing its own route finishes it; nothing to stop
+            # Launch keys never move after an attachment/advance, so the current binding
+            # decides first. Only two readings stop this owner: a clean current binding that
+            # is exactly this route, or no binding record at all for it. Every other reading
+            # (another route, a read error, any non-current status, known or future) stops nothing.
+            try:
+                binding, reason = OWNER.resolve_owner_route_lifecycle(jobs, owner_attempt_id=aid)
+            except OWNER.OwnerRouteBindingError:
+                continue
+            if binding is None:
+                stops = reason == "owner-route-binding-absent"
+            else:
+                stops = reason in OWNER.CURRENT_ROUTE_STATUSES and (
+                    binding.route_id, binding.route_hash, binding.route_file) == (
+                    route["route_id"], route["route_hash"], str(path.resolve()))
+            if stops:
+                if fields[1] in OPEN and not AUTH.require_known(owned, meta, jobs):
+                    raise ValueError("parent-close-owner-not-owned")
+                candidates.append((aid, fields, meta))
+            continue
         if relevant and fields[1] in OPEN:
             # Only who holds this route's live owner changes the close; for it an unreadable
             # lineage is a wait. Another route's owner in the same folder is skipped as before.

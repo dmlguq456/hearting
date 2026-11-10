@@ -2033,6 +2033,265 @@ class ParentCloseTest(unittest.TestCase):
                     finally:
                         child.doCleanups()
 
+    def route_bound_owner(self, aid, process, harness):
+        # `start --route` registers its owner with the route's own keys, not owner_route_*.
+        return self.row(aid, process=process, harness=harness, owner_route_file="", owner_route_id="",
+                        owner_route_hash="", route_file=str(self.path), route_id=self.route["route_id"],
+                        route_hash=self.route["route_hash"], route_node="one-shot")
+
+    def test_route_bound_owner_stops_on_close_on_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    kept = child.base / "uncommitted.txt"
+                    kept.write_text("work in progress\n")
+                    owner = child.process("att-owner")
+                    child.route_bound_owner("att-owner", owner, harness)
+                    command = [sys.executable, str(HERE / "capability-route.py"), "close",
+                               "--route", str(child.path)]
+                    done = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual(json.loads(done.stdout)["state"], "cancelled", done.stdout)
+                    self.assertEqual(owner.wait(timeout=5), -signal.SIGTERM)
+                    self.assertIn("stopped_owner=" + child.aid("att-owner"), done.stderr)
+                    self.assertEqual(kept.read_text(), "work in progress\n")
+                    row = CLOSE._rows(child.jobs)[child.aid("att-owner")]
+                    self.assertEqual((row[0][1], row[1]["note"]), ("done", CLOSE.NOTE))
+                finally:
+                    child.doCleanups()
+
+    def test_route_bound_owner_closing_its_own_route_is_not_stopped(self):
+        owner = self.process("att-owner")
+        self.route_bound_owner("att-owner", owner, "claude")
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-owner")}):
+            self.assertIsNone(self.close())
+        self.assertIsNone(owner.poll())
+
+    def advanced_route_bound_owner(self, name_owner):
+        # PR #1492 review: an owner launched on A, attached, then advanced to B by a started stage.
+        import copy
+        import owner_route_binding as OWNER
+        import route_identity as RI
+        owner = self.process("att-owner")
+        self.route.update(advance_generation=0, route_family_key="fixture-family")
+        if name_owner:
+            self.route["owner_attempt_id"] = self.aid("att-owner")
+        self.route["route_hash"] = RI.route_hash(self.route)
+        self.route["route_id"] = RI.route_id_from_hash(self.route["route_hash"])
+        self.path = self.path.with_name(self.route["route_id"] + ".json")
+        self.path.write_text(json.dumps(self.route))
+        self.route_bound_owner("att-owner", owner, "codex")
+        env = {"AGENT_DISPATCH_ATTEMPT_ID": self.aid("att-owner"), "AGENT_DISPATCH_WORKER_TYPE": "owner",
+               "AGENT_DISPATCH_DEPTH": "1", "AGENT_DISPATCH_ATTEMPT_SCHEMA_VERSION": "2",
+               "AGENT_DISPATCH_EXECUTION_SURFACE": "registered-headless",
+               "AGENT_DISPATCH_REGISTERED_WORKER": "1", "AGENT_DISPATCH_OWNER_HARNESS": "codex",
+               "AGENT_DISPATCH_PARENT_SESSION_ID": "fixture-parent", "AGENT_DISPATCH_JOBS": str(self.jobs)}
+        ROUTE.verify_route(json.loads(self.path.read_text()))
+        OWNER.publish_owner_route_attachment_from_environment(
+            self.jobs, target_route={**self.route, "route_file": str(self.path)}, environ=env)
+        old = copy.deepcopy(self.route)
+        advanced = {**old, "advance_generation": 1, "source_route_id": old["route_id"],
+                    "source_route_hash": old["route_hash"],
+                    "source_route_supersession": {"from_route_id": old["route_id"],
+                                                  "from_route_hash": old["route_hash"]}}
+        advanced["route_hash"] = RI.route_hash(advanced)
+        advanced["route_id"] = RI.route_id_from_hash(advanced["route_hash"])
+        next_path = self.path.with_name(advanced["route_id"] + ".json")
+        next_path.write_text(json.dumps(advanced))
+        ROUTE.verify_route(advanced)
+        OWNER.publish_owner_route_advance_from_environment(
+            self.jobs, source_route={**old, "route_file": str(self.path)},
+            target_route={**advanced, "route_file": str(next_path)}, environ=env)
+        old_path = self.path
+        self.route, self.path = advanced, next_path  # the stage row carries B's keys
+        stage = self.process("att-new-stage")
+        self.row("att-new-stage", parent="att-owner", process=stage, route_file=str(next_path),
+                 route_node=advanced["nodes"][0]["id"], unit="dev/backend", capability="autopilot-code",
+                 capability_mode="dev", artifact_root=str(self.artifacts), intensity="standard")
+        self.route, self.path = old, old_path
+        current, _reason = OWNER.resolve_owner_route_lifecycle(self.jobs, owner_attempt_id=self.aid("att-owner"))
+        self.assertEqual(current.route_id, advanced["route_id"])
+        return owner, stage, (old, self.path), (advanced, next_path)
+
+    def test_closing_the_old_route_leaves_an_owner_advanced_to_another_route_running(self):
+        for name_owner in (True, False):
+            with self.subTest(route_names_owner=name_owner):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, (old, old_path), (advanced, next_path) = \
+                        child.advanced_route_bound_owner(name_owner)
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                    self.assertIn(CLOSE._rows(child.jobs)[child.aid("att-owner")][0][1], CLOSE.OPEN)
+                    if name_owner:  # the current route's close stops its owner as before
+                        child.route, child.path = advanced, next_path
+                        child.close()
+                        self.assertEqual(owner.wait(timeout=5), -signal.SIGTERM)
+                finally:
+                    child.doCleanups()
+
+    def test_an_unreadable_binding_record_is_not_absence_and_stops_nothing(self):
+        # PR #1492 R2: a record entry that is there but unreadable is a read error, not absence.
+        import owner_route_binding as OWNER
+        for state in ("dangling-link", "unreadable-directory", "dangling-advance"):
+            with self.subTest(state=state):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, (old, old_path), (advanced, _next) = child.advanced_route_bound_owner(False)
+                    aid = child.aid("att-owner")
+                    record = OWNER._attachment_root(child.jobs) / OWNER._attachment_key(aid)
+                    if state == "dangling-link":
+                        record.unlink()
+                        record.symlink_to(record.with_name("missing-record.json"))
+                        self.assertTrue(os.path.lexists(record) and not record.exists())
+                    elif state == "unreadable-directory":
+                        record.parent.chmod(0)
+                    else:
+                        predecessor = OWNER._advance_root(child.jobs) / OWNER._advance_key(
+                            aid, old["route_id"], old["route_hash"])
+                        moved = predecessor.with_name(predecessor.name + ".moved")
+                        predecessor.rename(moved)
+                        predecessor.symlink_to(predecessor.with_name("missing-predecessor"))
+                    with self.assertRaises(OWNER.OwnerRouteBindingError):
+                        OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                    self.assertIn(CLOSE._rows(child.jobs)[aid][0][1], CLOSE.OPEN)
+                finally:
+                    if state == "unreadable-directory":
+                        record.parent.chmod(0o700)
+                    child.doCleanups()
+
+    def _advanced_record_paths(self, child):
+        # The record paths of an owner advanced A -> B, relative to the state root (the jobs directory).
+        import owner_route_binding as OWNER
+        aid = child.aid("att-owner")
+        attachment = OWNER._attachment_root(child.jobs) / OWNER._attachment_key(aid)
+        advance_root = OWNER._advance_root(child.jobs)
+        (predecessor,) = [path for path in advance_root.iterdir() if path.is_dir()]
+        (candidate,) = list(predecessor.glob("*.json"))
+        root = child.jobs.resolve().parent
+        return root, {"attachment": attachment.relative_to(root), "advance": candidate.relative_to(root)}
+
+    def _record_component_cases(self):
+        # Every component from the leaf up to the one directly under the state root, so a
+        # deeper record layout is walked without listing it here.
+        child = ParentCloseTest()
+        child.setUp()
+        try:
+            child.advanced_route_bound_owner(False)
+            _root, records = self._advanced_record_paths(child)
+        finally:
+            child.doCleanups()
+        for record, relative in records.items():
+            for depth in range(len(relative.parts), 0, -1):
+                yield record, depth, depth == len(relative.parts)
+
+    def test_absence_is_only_a_missing_component_on_the_whole_record_path(self):
+        # PR #1492 R3: a component that is there but cannot be passed is a read error at every
+        # level of the record path; only a component that is really missing is absence.
+        import owner_route_binding as OWNER
+        cases = list(self._record_component_cases())
+        self.assertGreaterEqual(len(cases), 5)
+        for record, depth, leaf in cases:
+            forms = ("dangling-link", "unreadable-directory", "unreadable-file" if leaf else "regular-file")
+            for form in forms + ("missing",):
+                with self.subTest(record=record, depth=depth, form=form):
+                    child = ParentCloseTest()
+                    child.setUp()
+                    placed = None
+                    try:
+                        owner, stage, (old, _old_path), (advanced, _next) = child.advanced_route_bound_owner(False)
+                        root, records = self._advanced_record_paths(child)
+                        aid = child.aid("att-owner")
+                        placed = root.joinpath(*records[record].parts[:depth])
+                        placed.rename(placed.with_name(placed.name + ".retained"))
+                        if form == "dangling-link":
+                            placed.symlink_to(placed.with_name(placed.name + ".missing"))
+                            self.assertTrue(os.path.lexists(placed) and not placed.exists())
+                        elif form == "regular-file":
+                            placed.write_text("")
+                        elif form == "unreadable-directory":
+                            placed.mkdir()
+                            placed.chmod(0)
+                        elif form == "unreadable-file":
+                            placed.write_text("{}")
+                            placed.chmod(0)
+                        if form == "missing":
+                            current, status = OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                            if record == "attachment":
+                                self.assertEqual((current, status), (None, "owner-route-binding-absent"))
+                            else:  # no advance record: the attached route A is current
+                                self.assertEqual((current.route_id, status),
+                                                 (old["route_id"], "owner-route-post-launch-attachment"))
+                            continue
+                        with self.assertRaises(OWNER.OwnerRouteBindingError) as raised:
+                            OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                        self.assertEqual(str(raised.exception), "owner-route-%s-record-invalid" % record)
+                        child.close()
+                        self.assertIsNone(owner.poll())
+                        self.assertIsNone(stage.poll())
+                        self.assertIn(CLOSE._rows(child.jobs)[aid][0][1], CLOSE.OPEN)
+                    finally:
+                        if placed is not None and placed.is_dir() and not placed.is_symlink():
+                            placed.chmod(0o700)
+                        child.doCleanups()
+
+    def test_a_record_directory_reached_through_a_live_link_reads_as_current(self):
+        # A state directory on another volume behind a link with a target is a normal install.
+        import owner_route_binding as OWNER
+        for name in (OWNER.OWNER_ROUTE_ATTACHMENT_DIR, OWNER.OWNER_ROUTE_ADVANCE_DIR):
+            with self.subTest(directory=name):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, _old, (advanced, _next) = child.advanced_route_bound_owner(False)
+                    linked = child.jobs.resolve().parent / name
+                    elsewhere = child.base / "other-volume" / name
+                    elsewhere.parent.mkdir()
+                    linked.rename(elsewhere)
+                    linked.symlink_to(elsewhere)
+                    current, status = OWNER.resolve_owner_route_lifecycle(
+                        child.jobs, owner_attempt_id=child.aid("att-owner"))
+                    self.assertEqual((current.route_id, status), (advanced["route_id"], "owner-route-advance-current"))
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                finally:
+                    child.doCleanups()
+
+    def test_a_route_only_owner_stops_only_on_a_clean_match_or_no_record(self):
+        # Every status the binding module can name is read from its source, so a status added
+        # later is required to stop nothing unless it joins CURRENT_ROUTE_STATUSES.
+        import re
+        import owner_route_binding as OWNER
+        statuses = set(re.findall(r'"(owner-route-[a-z0-9-]+)"',
+                                  (HERE / "owner_route_binding.py").read_text(encoding="utf-8")))
+        self.assertIn("owner-route-advance-loop", statuses)
+        self.assertLessEqual(OWNER.CURRENT_ROUTE_STATUSES | {"owner-route-binding-absent"}, statuses)
+        owner = self.process("att-owner")
+        self.route_bound_owner("att-owner", owner, "claude")
+        aid = self.aid("att-owner")
+        here = OWNER.OwnerRouteBinding(str(self.path.resolve()), self.route["route_id"], self.route["route_hash"])
+        other = OWNER.OwnerRouteBinding(str(self.path.with_name("other.json")), "rt-other", "other-hash")
+        stopped = set()
+        for status in sorted(statuses):
+            for binding in (here, other, None):
+                with mock.patch.object(OWNER, "resolve_owner_route_lifecycle",
+                                       return_value=(binding, status)):
+                    selected, _ = CLOSE._owner(self.route, self.path, self.jobs, CLOSE._rows(self.jobs))
+                if selected == aid:
+                    stopped.add((binding and binding.route_id, status))
+        self.assertEqual(stopped, {(self.route["route_id"], status) for status in OWNER.CURRENT_ROUTE_STATUSES}
+                         | {(None, "owner-route-binding-absent")})
+        self.assertIsNone(owner.poll())
+
     def test_never_started_chain_and_post_nodes_fold_no_start_advice(self):
         owner = self.process("att-owner")
         self.row("att-owner", process=owner)
