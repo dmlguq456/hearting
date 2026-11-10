@@ -176,5 +176,75 @@ function context(extra=[]){
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class FooterReaderParityTests(unittest.TestCase):
+    """The host frame and the Python footer reader name the same current thread."""
+    FIXTURES = ROOT / 'utilities/fixtures/codex-0.163-shared-footer'
+    REAL = {'side-133x30-native91.txt': '01a1c650-6f32-7880-bb70-815b30d8bd06',
+            'bottom-80x24.txt': '01a1c655-bacb-75a2-b8d1-2997f18b9fcd'}
+    T = '01a1c520-2193-71f0-a79c-b1fb86bd1a21'
+    OTHER = '99a1c520-2193-71f0-a79c-b1fb86bd1a21'
+
+    def host_frames(self, screens):
+        script = r"""
+const fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync(process.argv[1],'utf8'),screens=JSON.parse(fs.readFileSync(0,'utf8'));
+const begin=source.indexOf('function nativeSelectionFrame()');
+const fn=source.slice(begin,source.indexOf('let checkingNativeSelection=',begin));
+console.log(JSON.stringify(screens.map(lines=>{
+ const c={screenRevision:3,epoch:1,terminal:{rows:lines.length,
+   buffer:{active:{viewportY:0,getLine:i=>({translateToString:()=>lines[i]})}}}};
+ vm.createContext(c);vm.runInContext(fn+'\nthis.out=nativeSelectionFrame();',c);return c.out;
+})));
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
+                                input=__import__('json').dumps(screens), text=True,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return __import__('json').loads(result.stdout)
+
+    @staticmethod
+    def current(state_sid):
+        state, sid = state_sid
+        return sid if state == 'current' else None
+
+    def test_both_readers_agree_on_real_and_edge_screens(self):
+        real = {name: self.FIXTURES.joinpath(name).read_text().splitlines() for name in self.REAL}
+        prompt = ['', '› Ask Codex to do anything', '']
+        rows = [
+            # Status line alone (Codex 0.163, no help row).
+            f'  {self.T} · {self.T} · master · Context 0% used · gpt default',
+            f'  {self.T} · proj · Context 12% used',
+            f'  {self.T} · {self.T[:-3]}…',
+            f'  {self.T} · {self.T[:8]}…  ⚠ 1 warning · f2 to view',
+            # Not a status line: no identity.
+            f'  text mentioning {self.T}', f'  {self.T} · master',
+            f'  {self.T} · {self.OTHER[:20]}…', f'  title · {self.T} · Context 1% used',
+        ]
+        layouts = {name: lines for name, lines in real.items()}
+        layouts.update({f'row-{i}': prompt + [row] for i, row in enumerate(rows)})
+        layouts.update({
+            'help-first': prompt + [f'  {self.T} · Context 10% used', '  ← for agents · ? for shortcuts'],
+            'help-last': prompt + [f'  proj · {self.T}', '  ? for shortcuts'],
+            'help-compact': prompt + [f'  {self.T} · {self.T}', '  ← for agents'],
+            'help-conflict': prompt + [f'  {self.T} · x · {self.OTHER}', '  ? for shortcuts'],
+            'menu': prompt + ['  Where should the new conversation run?'],
+            'no-prompt': ['  ' + self.T + ' · ' + self.T],
+        })
+        frames = dict(zip(layouts, self.host_frames(list(layouts.values()))))
+        for name, lines in layouts.items():
+            with self.subTest(screen=name):
+                frame = frames[name]
+                direct = self.current(pane_ownership._codex_current_footer(lines))
+                via_host = (None if frame.get('invalid')
+                            else self.current(pane_ownership._codex_current_footer(frame['lines'])))
+                self.assertEqual(via_host, direct)
+                if name in self.REAL:
+                    self.assertEqual(direct, self.REAL[name])
+                # Only identity evidence leaves the native viewport.
+                for line in frame['lines']:
+                    self.assertNotIn('master', line)
+                    self.assertNotIn('warning', line)
+
+
 if __name__ == '__main__':
     unittest.main()

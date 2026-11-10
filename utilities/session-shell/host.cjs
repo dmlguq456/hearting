@@ -136,6 +136,22 @@ function nativeSelectionFrame() {
   const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
     'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
   if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  // Codex 0.163 draws a configured status line with no help row under an idle
+  // composer. Accept exactly the row pane_ownership._codex_status_only accepts
+  // (whole thread-id first, then Context or the repeated unnamed-thread title;
+  // a warning or key hint may follow) and pass on only that identity evidence.
+  const uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const statusOnly=row=>{
+    const fields=row.split('·').map(value=>value.trim());
+    if(fields.length<2||!new RegExp('^'+uuid+'$').test(fields[0]))return '';
+    const context=new RegExp('^'+uuid+' · (?:[^·]* · )*Context (\\d{1,3})% used(?: ·|$)').exec(row);
+    if(context)return fields[0]+' · Context '+context[1]+'% used';
+    const repeated=fields[1].split(/\s+/).filter(Boolean)[0]||'';
+    return repeated===fields[0]||repeated.endsWith('…')&&repeated.length>8
+      &&fields[0].startsWith(repeated.slice(0,-1))?fields[0]+' · '+repeated:'';
+  };
+  const only=tail.length===1?statusOnly(tail[0]):'';
+  if(only)return {...frame,lines:['›',only]};
   const hint=tail[tail.length-1]||'';
   const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
   const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
