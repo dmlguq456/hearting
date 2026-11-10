@@ -1304,6 +1304,7 @@ async function setupOpenCodeV2(ctx) {
       if (v2WorkerSessions.has(sessionID)) {
         for (const key of inheritedIdentityEnv) env[key] = ""
         env[CARRIER_ENV] = ""
+        env[ROOT_SESSION_ENV] = ""
         if (sessionID) env.OPENCODE_SESSION_ID = sessionID
         return
       }
@@ -3257,6 +3258,21 @@ const inheritedIdentityEnv = [
   "CODEX_SESSION_ID",
 ]
 
+// The root session of a subagent (task tool) child, walking `parentID`; the session itself
+// for a root. An unreadable link stops the walk at what is known.
+const ROOT_SESSION_ENV = "OPENCODE_ROOT_SESSION_ID"
+async function rootSessionId(ctx, sid) {
+  let current = sid
+  for (let depth = 0; depth < 16; depth++) {
+    let info = null
+    try { info = await compactSessionInfo(ctx, current, true) } catch { info = null }
+    const parent = info && typeof info.parentID === "string" ? info.parentID : ""
+    if (!parent || parent === current || parent === sid) break
+    current = parent
+  }
+  return current
+}
+
 export const AgentHarnessGuards = async (ctx, options = {}) => {
   const initialize = options.initialize !== false
   // Record plugin-load marker once per plugin init. In a headless dispatch the
@@ -3600,6 +3616,10 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     for (const key of inheritedIdentityEnv) output.env[key] = ""
     const sid = input && input.sessionID
     if (sid) output.env.OPENCODE_SESSION_ID = sid
+    // A subagent's commands also name the root session, as a Claude subagent's do
+    // (harness-capabilities.json sub_session_root; utilities/session_identity.py).
+    const rootSid = sid ? await rootSessionId(ctx, sid) : ""
+    output.env[ROOT_SESSION_ENV] = rootSid && rootSid !== sid ? rootSid : ""
     output.env[CARRIER_ENV] = completionCarrier.env(sid) || ""
   },
   // The two kept write gates (hooks/core-write-guard.py): installed release copies

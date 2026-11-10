@@ -109,6 +109,49 @@ class SharedRendererTest(unittest.TestCase):
                 self.assertEqual(plan["config"]["source"], "user")
                 self.assertEqual({row["status"] for row in plan["agents"]}, {"shipped"})
 
+    def test_codex_pins_only_for_the_provider_that_serves_them(self):
+        # PG-52: on another provider Codex refuses a pinned agent it cannot resolve;
+        # there the agent keeps its effort and follows the session model.
+        cases = (("", "shipped"), ('model_provider = "openai"\n', "shipped"),
+                 ('model_provider = "local_fixture"\n', "rendered"),
+                 ('profile = "lab"\n[profiles.lab]\nmodel_provider = "local_fixture"\n', "rendered"),
+                 ("not = [valid toml", "shipped"),
+                 # `codex --profile review` reads `review.config.toml` (Codex 0.134+):
+                 # the home's agents serve that session as well (RV-PR1474 P2-2).
+                 ({"review.config.toml": 'model_provider = "local_fixture"\n'}, "rendered"),
+                 ({"review.config.toml": 'model_provider = "openai"\n'}, "shipped"),
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "review.config.toml": 'model = "fixture-model"\n'}, "shipped"),
+                 # A provider defined but never selected does not count.
+                 ('model_providers.local_fixture.name = "local"\n', "shipped"),
+                 # Codex refuses `--profile archive.backup` (exit 2, plain names only),
+                 # so that file is never a session's profile (RV-PR1474-R2 P2).
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "archive.backup.config.toml": 'model_provider = "local_fixture"\n'}, "shipped"),
+                 ({"config.toml": 'model_provider = "openai"\n',
+                   "archive.backup.config.toml": 'model_provider = "local_fixture"\n',
+                   "review.config.toml": 'model_provider = "local_fixture"\n'}, "rendered"))
+        for config, status in cases:
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
+                files = config if isinstance(config, dict) else (
+                    {"config.toml": config} if config else {})
+                for name, text in files.items():
+                    (Path(tmp) / name).write_text(text, encoding="utf-8")
+                plan = run_plan("codex", Path(tmp))
+                self.assertEqual({row["status"] for row in plan["agents"]}, {status})
+                for row in plan["agents"]:
+                    if status == "rendered":
+                        self.assertIsNone(row["model"])
+                        self.assertNotRegex(row["content"], r"(?m)^model\s*=")
+                        self.assertRegex(row["content"], r"(?m)^model_reasoning_effort = ")
+                    else:
+                        self.assertTrue(row["model"])
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "config.toml").write_text('model_provider = "local_fixture"\n', encoding="utf-8")
+            for adapter in ("claude", "opencode"):
+                plan = run_plan(adapter, Path(tmp))
+                self.assertEqual({row["status"] for row in plan["agents"]}, {"shipped"}, adapter)
+
     def test_legacy_user_copy_keeps_balanced_with_the_derived_model(self):
         for adapter in ADAPTERS:
             with self.subTest(adapter), tempfile.TemporaryDirectory() as tmp:

@@ -41,6 +41,15 @@ direct registered dispatch-depth-1 child finished:
     How far herdr's reported ``agent_session`` value may be taken as the
     session id: ``verified`` -- the publisher proved it from the process;
     ``claim`` -- a reported value that is not taken as proof.
+``sub_session_root``
+    Where a command run by a native sub-session (a subagent the session
+    spawned) finds the root session it belongs to, so the sub-session's
+    dispatches and reports name the session the user talks to:
+    ``shared-id`` -- the runtime exports the root's id to sub-sessions too
+    (a Claude subagent); ``spawn-edges`` -- the runtime's own spawn record
+    (Codex ``thread_spawn_edges`` in its state DB); ``env:<VARIABLE>`` -- the
+    adapter's plugin exports the root id in that variable beside the native
+    id (OpenCode, walking ``parentID``).
 
 ``access`` says how the runtime realizes a portable execution access request
 (read-only roots, writable roots, network) and how strongly:
@@ -71,7 +80,8 @@ PARENT_PROOFS = frozenset({"native-session", "runtime-hook", "carrier-env"})
 CARRIER_ENV = "AGENT_PARENT_COMPLETION_CARRIER"
 WITHOUT_CARRIER = frozenset({"poll", "refuse"})
 PARENT_COMPLETION_KEYS = ("carrier", "reason", "parent_proof", "without_carrier")
-SESSION_IDENTITY_KEYS = ("env", "process_proof", "herdr_session_id")
+SESSION_IDENTITY_KEYS = ("env", "process_proof", "herdr_session_id", "sub_session_root")
+SUB_SESSION_ROOTS = frozenset({"shared-id", "spawn-edges"})
 PROCESS_PROOFS = frozenset({"session-registry", "open-rollout", "tui-selection"})
 HERDR_SESSION_IDS = frozenset({"verified", "claim"})
 ACCESS_ENFORCEMENT = frozenset({"os-sandbox", "tool-permission"})
@@ -122,6 +132,10 @@ def _validate(harness: str, value: object) -> dict:
         refuse("session_identity.process_proof")
     if identity["herdr_session_id"] not in HERDR_SESSION_IDS:
         refuse("session_identity.herdr_session_id")
+    root = identity["sub_session_root"]
+    if not (root in SUB_SESSION_ROOTS
+            or (isinstance(root, str) and root.startswith("env:") and root[4:].isidentifier())):
+        refuse("session_identity.sub_session_root")
     access = value.get("access")
     if (not isinstance(access, dict) or sorted(access) != ["enforcement", "means"]
             or access["enforcement"] not in ACCESS_ENFORCEMENT
@@ -183,6 +197,12 @@ def _readable_identities() -> dict[str, dict]:
 def session_env() -> dict[str, tuple[str, ...]]:
     """``{harness: (variable, ...)}`` -- the session id variables the readable adapters declare."""
     return {harness: tuple(declared["env"]) for harness, declared in _readable_identities().items()}
+
+
+def sub_session_roots() -> dict[str, str]:
+    """``{harness: sub_session_root}`` for every readable adapter (see the module doc)."""
+    return {harness: declared["sub_session_root"]
+            for harness, declared in _readable_identities().items()}
 
 
 def herdr_verified_harnesses() -> frozenset[str]:

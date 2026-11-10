@@ -36,6 +36,7 @@ if str(UTILITIES_ROOT) not in sys.path:
 import harness_manifest
 import dispatch_contract
 import model_config
+import native_agents
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -815,6 +816,9 @@ def _native_agent_entries(
         runtime, str(active_root), str(home),
         _bytes_sha256(home / "agent-config" / "models.conf"),
         _bytes_sha256(active_root / "adapters" / runtime / "config" / "models.conf"),
+        # The Codex renderer fits its model pins to the providers these files select.
+        _bytes_sha256(home / "config.toml"),
+        tuple((path.name, _bytes_sha256(path)) for path in native_agents.codex_profile_configs(home)),
     )
     if key not in _NATIVE_AGENT_PLANS:
         if len(_NATIVE_AGENT_PLANS) > 32:
