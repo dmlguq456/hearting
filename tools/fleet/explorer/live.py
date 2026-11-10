@@ -3157,6 +3157,13 @@ def session_route_status(snapshot, now=None, *, include_details=False):
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
                              if isinstance(part, (tuple, list)) and part]
+            visibility = route.get("visibility")
+            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                                     "next": str(visibility.get("next") or "")[:120],
+                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                               for line in (visibility.get("lines") or ())[:14]
+                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
             records.append(row)
         for sid in info["ids"]:
             details[str(_get(info["session"], "harness")) + "\0" + sid] = records

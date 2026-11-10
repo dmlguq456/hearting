@@ -13,6 +13,23 @@ import session_shell as shell
 
 
 class PanelTest(unittest.TestCase):
+    def test_all_route_evidence_pages_remain_readable_without_question_effects(self):
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const lines=['route','why','owner','test','review','CI','gate','result','next'].map(label=>[label,label+' EVIDENCE '.repeat(10),'dim']);
+const model={routes:[{title:'Actual route',state:'working',stages:[{name:'inline',state:'active'}],visibility:{summary:'direct',lines}}]};
+for(const [width,height] of [[37,21],[80,14]]){
+ const parts=[];let pages=1;
+ for(let page=0;page<pages;page++){
+  const v=view.render({width,height,side:width<80,routeDetail:true,routePage:page,model,questions:()=>{throw Error('detail cannot submit');}});
+  pages=v.routePages;parts.push(v.rows.flat().map(p=>p.text).join(''));
+  assert(v.rows.length<=height);assert(v.hits.some(h=>h.action==='route-next'));
+ }
+ assert(pages>1);for(const [label] of lines)assert(parts.join('').includes(label+': '+label));
+}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_frame_is_panel_only_neutral_and_keeps_model_route_question_at_80(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

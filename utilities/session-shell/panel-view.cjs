@@ -9,7 +9,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,details=false,focused=false,cwd='',harness='',cellWidth}){
+function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,details=false,focused=false,cwd='',harness='',cellWidth}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -28,6 +28,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const color=failed?'g_dead':asking?'lvl_y':first?.state==='working'?'g_work':done?'lvl_g':'dim';
   const status=failed?(first.reason||t('unknown','Checking state')):asking?t('answer','Your answer needed'):first?.state==='working'?t('working','Working'):done?t('ready','Result ready'):'';
   const cfg={...defaults,...configuration};
+  let routePages=1;
   if(settings){
     add(line(t('settings_title','Hearting shell settings'),'loc_repo'));
     const start=Math.max(0,settings.index-Math.max(0,height-7));
@@ -62,13 +63,27 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       add(line('Esc · '+t('back','Back')),'details');
     }else if(routeDetail){
       add(line(t('routes','Route')+' · '+t('back','Back'),'loc_repo'),'route');
+      const start=content.length;
       for(const route of routes){
         wrap(line(route.title||t('checking','Checking'),'loc_repo'),2);
         for(const stage of route.stages||[])wrap(line((stage.name||stage.id)+' · '+stage.state),2);
-        if(route.stage_more)add(line('+'+route.stage_more+' · Fleet ›'),'fleet');
+        if(route.stage_more)add(line('+'+route.stage_more+' · Fleet'));
         wrap(line(route.reason||route.state),3);
         if(route.outcome)wrap(line(route.outcome,'lvl_g'),2);
+        for(const [label,value,tone] of route.visibility?.lines||[]){
+          wrap(line(label+': '+value,({good:'lvl_g',bad:'lvl_r',mixed:'lvl_y',info:'loc_repo',dim:'dim'})[tone]||'dim'),20);
+        }
+        const next=route.visibility?.next;
+        if(next&&!(route.visibility?.lines||[]).some(row=>row[1]===next))wrap(line(next),10);
       }
+      const detail=content.splice(start),budget=Math.max(1,height-3-start);
+      routePages=Math.max(1,Math.ceil(detail.length/budget));
+      const page=Math.max(0,Math.min(routePages-1,routePage));
+      const counter=` ‹ ${page+1}/${routePages} › `;
+      hits.push({row:content.length+1,left:2,right:4,action:'route-prev'});
+      hits.push({row:content.length+1,left:5,right:2+measure(counter),action:'route-next'});
+      add(line(counter+' · PgUp/PgDn'));
+      for(const row of detail.slice(page*budget,(page+1)*budget))add(row);
     }else{
       if(side){add(line(t('work','Current work')));wrap(line(model.title||(!sid||model.routes_known?t('no_work','No confirmed work yet'):t('checking','Checking')),'loc_repo'),2);add([]);}
       const routeTitle=first?.title||model.route_label||(model.routes_known?t('no_routes','No current route'):t('checking','Checking'));
@@ -80,6 +95,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
         if(flow&&(side||!focused))wrap(line(flow),side?2:1,'route');
         if(first.stage_more)add(line('+'+first.stage_more+' · Fleet ›'),'fleet');
         if(side||!focused)wrap(line([first.stage!=='·'?first.stage:'',first.reason||first.state].filter(Boolean).join(' · '),color),side?2:1,'route');
+        if(side&&!focused&&first.visibility?.summary)wrap(line(first.visibility.summary),1,'route');
       }
       if(routes.length>1)add(line('+'+(routes.length-1)+' · '+t('routes','Route')),'route');
       // Bound optional material first. Question editor gets the remaining rows,
@@ -122,6 +138,6 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const foot=clip(line(' '+(settings?'Esc · '+t('cancel','Cancel'):t('details','Session details')+' ›')+' '),width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
   if(!settings)hits.push({row:count-1,left:1,right:width-2,action:'details'});
-  return {rows,hits:hits.filter(h=>h.row<count),color};
+  return {rows,hits:hits.filter(h=>h.row<count),color,routePages};
 }
 module.exports={render,defaults,fields,change};

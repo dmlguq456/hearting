@@ -1861,6 +1861,50 @@
   "fleet.session_panel.save_failed": {
    "en": "Could not save · changes not applied",
    "ko": "저장할 수 없음 · 적용하지 않음"
+  },
+  "fleet.session_panel.evidence_route": {
+   "en": "Route",
+   "ko": "형태"
+  },
+  "fleet.session_panel.evidence_why": {
+   "en": "Basis",
+   "ko": "선택 근거"
+  },
+  "fleet.session_panel.evidence_owner": {
+   "en": "Owner",
+   "ko": "담당"
+  },
+  "fleet.session_panel.evidence_stages": {
+   "en": "Stages",
+   "ko": "단계"
+  },
+  "fleet.session_panel.evidence_test": {
+   "en": "Tests",
+   "ko": "시험"
+  },
+  "fleet.session_panel.evidence_review": {
+   "en": "Review",
+   "ko": "검토"
+  },
+  "fleet.session_panel.evidence_ci": {
+   "en": "CI",
+   "ko": "CI"
+  },
+  "fleet.session_panel.evidence_gate": {
+   "en": "Completion",
+   "ko": "마감"
+  },
+  "fleet.session_panel.evidence_result": {
+   "en": "Result",
+   "ko": "결과"
+  },
+  "fleet.session_panel.evidence_next": {
+   "en": "Next",
+   "ko": "다음"
+  },
+  "fleet.session_panel.evidence_brief": {
+   "en": "Report",
+   "ko": "보고"
   }
  }
 }

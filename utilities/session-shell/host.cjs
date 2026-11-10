@@ -86,7 +86,7 @@ let nativeContext;
 let displayValues={};
 let nativeSelected={};
 let nativeFooter=null,paintedCommon=[],panelSections;
-let panelModel={},panelHits=[],settings,routeDetail=false,sessionDetails=false,dragging=false;
+let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,sessionDetails=false,dragging=false;
 let panelSubscribers=new Set(),sidebarMounted=false,displaySequence=0;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
@@ -165,10 +165,10 @@ function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max
 function panelContent(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,details:sessionDetails,focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,details:sessionDetails,focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
-  panelHits=view.hits;return view.rows;
+  panelHits=view.hits;routePageCount=view.routePages;return view.rows;
 }
 function height(){
   if(fleetView)return 0;
@@ -453,7 +453,8 @@ function panelAction(action){
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
-  if(action==='route'){routeDetail=!routeDetail;sessionDetails=false;block.leave();}
+  if(action==='route'){routeDetail=!routeDetail;routePage=0;sessionDetails=false;block.leave();}
+  if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
   if(action==='details'){sessionDetails=!sessionDetails;routeDetail=false;block.leave();}
   if(action==='question'){routeDetail=false;sessionDetails=false;block.enter();}
   if(action.startsWith('setting:')&&settings){
@@ -514,8 +515,9 @@ function publishPanel(){
   if(!panelSubscribers.size)return;
   const view=panelView.render({width:37,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
     native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
-    routeDetail,details:sessionDetails,focused:block.focused,harness,cellWidth,
+    routeDetail,routePage,details:sessionDetails,focused:block.focused,harness,cellWidth,
     questions:options=>block.detail(options)});
+  routePageCount=view.routePages;
   const nativeRows=view.rows.map(row=>{
     const compact=[];
     for(const part of row){
@@ -549,6 +551,7 @@ function inputBytes(data) {
   while(data.length){
     if(relay){child.write(data);return;}
     if(settings){settingsInput(data);epoch+=data.length;return;}
+    if(routeDetail&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
     if((routeDetail||sessionDetails)&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;sessionDetails=false;queueDisplay();data=data.subarray(1);continue;}
     if(fleetView){
       const view=fleetView;
@@ -642,7 +645,7 @@ async function request(req) {
   }
   if(req.op==='display-action'){
     if(!displayReporter(req)||req.sid!==sid)return {ok:false};
-    if(['settings','route','details','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
+    if(['settings','route','route-prev','route-next','details','question','fleet','apply','cancel','defaults'].includes(req.action)||/^setting:[0-5]:(select|up|down)$/.test(req.action||''))panelAction(req.action);
     return {ok:true};
   }
   if(req.op==='event')return lifecycle(req);

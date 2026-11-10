@@ -19,9 +19,19 @@ def presentation(values, view, harness, sid, columns):
                 stages.append({"name": clean(node.get("name")), "state": clean(node.get("st"))})
         worker = row.get("worker") or []
         reason = "".join(str(part[0]) for part in worker if isinstance(part, (list, tuple)) and part)
+        visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
+        evidence = []
+        for line in (visibility.get("lines") or ())[:14]:
+            if isinstance(line, (list, tuple)) and len(line) == 3:
+                label = clean(line[0])
+                if label in {"route", "why", "owner", "stages", "test", "review", "CI", "gate", "result", "next", "brief"}:
+                    label = ui_text("fleet.session_panel.evidence_" + label.lower())
+                evidence.append([label, clean(line[1])[:200], clean(line[2])[:8]])
         routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
+                       "visibility": {"summary": clean(visibility.get("summary"))[:160],
+                                      "next": clean(visibility.get("next"))[:120], "lines": evidence},
                        "reason": clean(reason), "outcome": clean(row.get("outcome"))})
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]

@@ -59,6 +59,26 @@ class SessionRouteStatusTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in rows[0]["stages"]], ["inline"])
         self.assertNotIn("opencode\0sid-current", panels)
 
+    def test_shell_carries_exact_route_visibility_without_another_read(self):
+        snapshot = self.snapshot(stage="inline")
+        interpret = live._route_records
+        evidence = {"schema": "route_visibility_v1", "route_id": "rt-0",
+                    "summary": "direct · CI reported", "next": "closed",
+                    "lines": [["CI", "CI fixture PASS same-head", "good"]]}
+        def with_visibility(*args):
+            rows = interpret(*args)
+            for row in rows:
+                row["visibility"] = evidence
+            return rows
+        with mock.patch.object(live, "_route_records", side_effect=with_visibility) as read:
+            _, panels = live.session_route_status(snapshot, include_details=True)
+            self.assertEqual(read.call_count, 1)
+            actual = panels["claude\0sid-current"][0]["visibility"]
+            self.assertEqual(actual["lines"], evidence["lines"])
+            evidence["route_id"] = "rt-other"
+            _, other = live.session_route_status(snapshot, include_details=True)
+            self.assertNotIn("visibility", other["claude\0sid-current"][0])
+
     def test_scoped_rows_reuse_existing_job_and_evidence_interpreters(self):
         with tempfile.TemporaryDirectory() as tmp:
             jobs = Path(tmp) / "jobs.log"

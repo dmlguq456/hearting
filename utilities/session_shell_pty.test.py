@@ -87,7 +87,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=cfg.scenario==='side-columns'?new (require('@xterm/headless').Terminal)({cols:180,rows:40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -206,6 +206,26 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_ACTION\r').toString('base64')});await waitFor(/DONE_AFTER_ACTION/);
  }
  const displayLag=[];
+ if(cfg.scenario==='route-pages'){
+   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
+   value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
+     id:'rt-detail',title:'ROUTE_PAGE',state:'working',worker_stage:'inline',stages:[{name:'inline',st:'active'}],
+     visibility:{summary:'direct',next:'closed',lines:Array.from({length:14},(_,i)=>['test','EVIDENCE_'+i+' '.repeat(1)+'bounded detail '.repeat(5),'info'])}}];
+   fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
+   await waitFor(/ROUTE_PAGE/);
+   await new Promise(resolve=>sideTerm.write('',resolve));
+   let point;
+   for(let y=0;y<sideTerm.rows;y++){
+     const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
+     if(!line?.translateToString().includes('ROUTE_PAGE'))continue;
+     for(let x=0;x<sideTerm.cols;x++)if(line.getCell(x)?.getChars()==='⏳')point={x:x+1,y:y+1};
+   }
+   if(!point)throw Error('route detail target absent');
+   await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${point.x};${point.y}M\x1b[<0;${point.x};${point.y}m`).toString('base64')});
+   await waitFor(/PgUp\/PgDn/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~').toString('base64')});await waitFor(/‹ 2\//);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_DETAIL\r').toString('base64')});await waitFor(/DONE_AFTER_DETAIL/);
+ }
  // Registry publication precedes the first complete display observation.
  if(cfg.scenario==='display')await waitFor(/No current route/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
@@ -303,6 +323,7 @@ class SessionShellPTYTest(unittest.TestCase):
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
         if scenario in {'side-layout','side-columns'}:
             config.update(columns=180,rows=40)
+        if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
             fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
@@ -367,6 +388,10 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
         self.assertLess(result['ack_ms'],250)
+
+    def test_route_detail_pages_keep_navigation_out_of_native_input(self):
+        result=self.run_loop('route-pages')
+        self.assertTrue(result['status']['alive'])
 
     def test_native_model_paints_before_the_optional_backend_is_released(self):
         result=self.run_loop('startup-model',blocked_backend=True)

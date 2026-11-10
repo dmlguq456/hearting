@@ -66,6 +66,10 @@ its own line, wrapping within that choice; do not reserve a standalone
 session/age row. Hide an empty result section. Use the
 existing operator language setting and catalog. No last prompt is guessed
 into a goal. Full IDs, old peers and repo backlog belong to accessible details.
+Route details reuse the common route-visibility projection for shape, basis,
+tests, review, CI and completion evidence. Missing evidence is not a passing
+check. Bounded detail pages remain readable at narrow widths; opening them
+does not collect again or authorize an action.
 Retain every former status field there, and preserve Claude's native reserved
 status area. Managed Codex footer concealment still requires equivalent fields
 actually painted; moving a value to hidden details cannot prove that condition.
