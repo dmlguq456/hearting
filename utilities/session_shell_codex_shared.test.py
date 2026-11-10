@@ -93,21 +93,29 @@ class SharedCodexTest(unittest.TestCase):
      self.assertEqual(len(plan['fields']),7)
      for index,value in enumerate((self.sid,'Fixture title','fixture','Context 42% used','fixture high','5h 77% left','Weekly 40% left')):
       self.assertIn(value,plan['fields'][index])
-     self.assertIsNone(shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows[:-1])[0])
+     # Unpainted common rows leave only the shell-owned thread-id field concealable.
+     partial=shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows[:-1])[0]
+     self.assertFalse(partial['common']);self.assertEqual(partial['fields'],[[self.sid]]+[None]*6)
     long={**values,'title':'A'*100};rows=status_lines(long,100)
     plan,_=shell._codex_footer_plan(long,self.sid,self.child.pid,rows,rows)
     self.assertNotIn(long['title'],plan['fields'][1])
     long={**values,'branch':'long-branch-'*15};rows=status_lines(long,100)
-    self.assertIsNone(shell._codex_footer_plan(long,self.sid,self.child.pid,rows,rows)[0])
+    self.assertEqual(shell._codex_footer_plan(long,self.sid,self.child.pid,rows,rows)[0]['fields'][1:],[None]*6)
 
- def test_only_unmodified_default_config_has_a_managed_footer_observation(self):
+ def test_only_a_thread_id_first_config_has_a_managed_footer_observation(self):
   with tempfile.TemporaryDirectory(prefix='codex-footer-config-') as tmp:
    path=Path(tmp)/'config.toml';path.write_text(codex_tui_config.merge_status_line_text(''));path.chmod(0o600)
    self.assertEqual(codex_tui_config.managed_status_line_observation(tmp)['items'],list(codex_tui_config.DEFAULT_STATUS_LINE))
    for argv in (['--profile','custom'],['-c','tui.status_line=[]']):
     self.assertIsNone(codex_tui_config.managed_status_line_observation(tmp,argv=argv))
+   # Any order with thread-id first is observed; the shell owns only that field.
    path.write_text('[tui]\nstatus_line=["thread-id","context-used"]\n')
-   self.assertIsNone(codex_tui_config.managed_status_line_observation(tmp))
+   self.assertEqual(codex_tui_config.managed_status_line_observation(tmp)['items'],['thread-id','context-used'])
+   path.write_text('[tui]\nstatus_line=["thread-id"]\n')
+   self.assertEqual(codex_tui_config.managed_status_line_observation(tmp)['items'],['thread-id'])
+   for layout in ('["context-used","thread-id"]','["thread-id","thread-id"]','[]'):
+    path.write_text('[tui]\nstatus_line='+layout+'\n')
+    self.assertIsNone(codex_tui_config.managed_status_line_observation(tmp))
    path.write_text(codex_tui_config.merge_status_line_text(''));path.chmod(0o666)
    self.assertIsNone(codex_tui_config.managed_status_line_observation(tmp))
    path.chmod(0o600);other=path.with_name('other.toml');path.rename(other);path.symlink_to(other)

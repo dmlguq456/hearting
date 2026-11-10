@@ -320,9 +320,9 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 `$XDG_STATE_HOME/hearting/opencode-plugin-log/<pid>.jsonl`. The hearting session shell
 (`utilities/session-shell/entry.py`) wraps only the TUI, so the same carriers apply.
 
-**Session shell panel.** In a shell window OpenCode gets the same right (or, at
-narrow widths, bottom) HEARTING panel as Claude and Codex: same renderer,
-`layout`/`side_width` settings and content order. OpenCode's own sidebar is
+**Session shell panel.** In a shell window OpenCode gets the same right (left
+by choice, or bottom at narrow widths) HEARTING panel as Claude and Codex: same
+renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
 hidden there through its documented CLI settings: `session.sidebar` is `auto`
 ("Shows the sidebar when space permits") or `hide` ("always hides it"), and
 "OpenCode merges the inline settings over the global `cli.json`" from
