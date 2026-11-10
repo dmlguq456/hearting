@@ -259,6 +259,10 @@ function render() {
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
     const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
+    if(harness==='claude'){
+      const painted=claudePanelPainted();reportClaudePanel(painted);
+      if(painted)for(const y of nativeDisplay.claudeStatusRows(nativeLines,sid,claudeStatusRecord()))concealed.add(y);
+    }
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;
       if(observed?.model){bootstrapModel=false;nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
@@ -439,8 +443,33 @@ async function projection() {
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
+// Claude's statusline row may be blanked only while this visible panel paints
+// the same session's model and compact status. Any other state shows it.
+function claudePanelPainted(){
+  if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
+  const rows=(panelModel.summary||[]).map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
+  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
+}
+let claudePanelReported='';
+function reportClaudePanel(painted){
+  const value=JSON.stringify({session_id:sid,painted});
+  if(value===claudePanelReported)return;
+  const target=path.join(dir,'claude-panel.json'),temp=target+'.'+process.pid;
+  try{fs.writeFileSync(temp,value,{mode:0o600});fs.renameSync(temp,target);claudePanelReported=value;}catch{}
+}
+let claudeStatus={key:'',value:null};
+function claudeStatusRecord(){
+  try{
+    const s=fs.lstatSync(path.join(dir,'claude-status.json'));
+    if(!s.isFile()||s.uid!==process.getuid()||s.size>65536)return null;
+    const key=[s.ino,s.size,s.mtimeMs].join(':');
+    if(key!==claudeStatus.key)claudeStatus={key,value:JSON.parse(fs.readFileSync(path.join(dir,'claude-status.json'),'utf8'))};
+    return claudeStatus.value;
+  }catch{return null;}
+}
 function rawRelay() {
   if(relay||ended)return;
+  if(harness==='claude')reportClaudePanel(false);
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);frameTimer=projectionTimer=undefined;
@@ -825,6 +854,7 @@ server.listen(socketPath,()=>{
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{
+    if(harness==='claude')reportClaudePanel(false);
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     server.close();await source('unregister');backend?.stdin.end();

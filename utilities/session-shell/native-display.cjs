@@ -6,17 +6,14 @@ function observe(harness, lines, sid) {
   if(harness==='claude') {
     const at=lines.findLastIndex(line=>line.includes('📁 ')&&line.includes('⎇ '));
     if(at>=0) {
+      // The panel paints Claude's whole status area; this row owns no field.
+      // Its exact callback values are still display evidence for the header.
       const status=lines.slice(at,at+3).map(s=>s.trim()).join(' · ');
-      const route=status.match(/⏳ route \d+(?: · (?!◑|⏵)[^·]+)*/)?.[0]?.trim();
-      const wait=status.match(/◑ (\d+)\b/);
       const selected=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%\s*·\s*([^·]+?)\s*·\s*(?:5h|7d)\b/);
       const context=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%/);
       const choice=selected?.[2].trim().match(/^(.+?)(?:\s+(low|medium|high|xhigh|max|ultra))?$/);
-      const owned=[...(/context\s+(?:[━─█░]+\s+\d+(?:\.\d+)?%|\?)/.test(status)?['context']:[]),...(/(?:5h|7d)\s+(?:[\d.]+%|\?)/.test(status)?['quota']:[])];
-      if(route||wait||context||owned.length)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
-        owned,
-        ...(context&&valid(+context[1])?{percent:+context[1]}:{}),
-        ...(selected&&!/…|\.\.\.|^(?:\d+[hd]|weekly)\b/i.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})};
+      const model=selected&&!/…|\.\.\.|^(?:\d+[hd]|weekly)\b/i.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{};
+      if(context&&valid(+context[1]))return {sid,percent:+context[1],...model};
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
@@ -67,6 +64,27 @@ function observe(harness, lines, sid) {
     }
   }
   return null;
+}
+// Rows whose text equals the statusline output Claude's callback recorded for
+// this exact session. Only the bottom rows are searched, and only a complete
+// contiguous match counts; the previous record covers the paint in flight.
+function claudeStatusRows(lines,sid,record) {
+  if(!sid||!record||record.session_id!==sid)return new Set();
+  // Cell spacing after wide glyphs and emoji presentation selectors are
+  // terminal rendering, not text; every visible character must still match.
+  const norm=s=>String(s).replace(/[\s\uFE0F]+/g,'');
+  const same=(row,want)=>{
+    const a=norm(row),b=norm(want);if(!a||!b)return false;if(a===b)return true;
+    // Claude clips a line wider than its row with an ellipsis.
+    return a.length>=12&&/…$/.test(a)&&b.startsWith(a.slice(0,-1).trimEnd());
+  };
+  const bottom=Math.max(0,lines.length-10);
+  for(const want of [record.lines,record.previous]){
+    if(!Array.isArray(want)||!want.length||want.length>6||!want.every(s=>typeof s==='string'&&norm(s)))continue;
+    for(let y=lines.length-want.length;y>=bottom;y--)
+      if(want.every((line,i)=>same(lines[y+i],line)))return new Set(want.map((_l,i)=>y+i));
+  }
+  return new Set();
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
 function hiddenFooterRows(harness,lines,sid,plan,painted=[],details=[]) {
@@ -149,4 +167,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,observe,firstLine,hiddenFooterRows,blockHeight,titleSequence,publisher};
+module.exports={layout,observe,firstLine,hiddenFooterRows,claudeStatusRows,blockHeight,titleSequence,publisher};

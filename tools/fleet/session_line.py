@@ -53,8 +53,6 @@ def line_segments(values, columns, *, complete=False):
     groups = []
 
     def words(name, text, key, maximum, priority, before=(), after=(), minimum=1):
-        if values.get("_panel_owned") and name in {"model", "route", "wait"}:
-            return
         text = _text(text)
         groups.append({"name": name, "text": text, "key": key, "budget": min(maximum, cell_width(text)),
                        "minimum": min(minimum, cell_width(text)), "priority": priority,
@@ -270,16 +268,85 @@ def claude_native_statusline(callback, environ):
     values.update(title=environ.get("S_SESSION_DISPLAY"), git=git, branch=branch,
                   jobs=environ.get("git_jobs"), state=state, tag=assigned_tag("claude", sid),
                   route_label=route, answer_wait=waiting)
-    # In a wrapped session these fields have one stable home in the work panel.
-    # Claude still owns its reserved context/quota/Git rows and exact callback.
-    values["_panel_owned"] = bool(environ.get("HEARTING_SHELL_SOCKET"))
     try:
         columns = max(20, min(10000, int(environ.get("COLUMNS", "100"))))
     except ValueError:
         columns = 100
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
-    return "\n".join(ansi_segments(clip_segments(line, columns), colors=colors, no_color="NO_COLOR" in environ)
-                     for line in status_lines(values, columns))
+    # Every field stays in this row whenever the panel is not painting it. While
+    # the shell blanks this row behind a visible panel, one compact line keeps
+    # that blank to a single row and is still complete enough if it reappears
+    # before Claude's next callback.
+    rows = ([clip_segments(line_segments(values, columns - 2), columns)]
+            if claude_panel_painted(environ, sid) else
+            [clip_segments(line, columns) for line in status_lines(values, columns)])
+    _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
+    return "\n".join(ansi_segments(row, colors=colors, no_color="NO_COLOR" in environ) for row in rows)
+
+
+def _shell_directory(environ):
+    """The wrapper's private directory; any doubt means no shell display state."""
+    import os, stat
+    from pathlib import Path
+    endpoint = environ.get("HEARTING_SHELL_SOCKET")
+    if not endpoint:
+        return None
+    directory = Path(environ.get("HEARTING_SHELL_DIRECTORY") or Path(endpoint).parent)
+    try:
+        info = directory.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        return None
+    return directory
+
+
+def claude_panel_painted(environ, sid):
+    """The host's own report that its visible panel paints this session's status."""
+    import json
+    directory = _shell_directory(environ)
+    if not directory or not sid:
+        return False
+    try:
+        path = directory / "claude-panel.json"
+        if path.lstat().st_size > 1024:
+            return False
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get("painted") is True and value.get("session_id") == sid
+
+
+def _record_claude_rows(environ, sid, rows):
+    """Record the plain text Claude is about to paint, for exact-match blanking."""
+    import json, os
+    if environ.get("HEARTING_SHELL_INITIAL_REFRESH") or not sid:
+        return  # That refresh's output is discarded and never painted.
+    directory = _shell_directory(environ)
+    if not directory:
+        return
+    path = directory / "claude-status.json"
+    previous = []
+    try:
+        if path.lstat().st_size <= 65536:
+            old = json.loads(path.read_text())
+            if isinstance(old, dict) and old.get("session_id") == sid and isinstance(old.get("lines"), list):
+                previous = old["lines"]
+    except (OSError, ValueError):
+        pass
+    if previous == rows:
+        return
+    temp = directory / (".claude-status." + str(os.getpid()))
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"session_id": sid, "lines": rows, "previous": previous}, stream, ensure_ascii=False)
+        os.replace(temp, path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
 
 
 _CLAUDE_DISPLAY_FIELDS=('S_SESSION_DISPLAY','git_repo','git_branch','git_operation','git_merged',
