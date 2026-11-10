@@ -7151,6 +7151,36 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self.clear.settle_unsent_continue("codex", "sid-B"), 0)
         self.assertEqual(self.booking()["continued"]["state"], "pending")
 
+    def test_a_ref_bound_after_the_unsent_read_is_left_to_its_receipt(self):
+        # Review [7b] R3 §2: the settler reads a ref-less pending continue, then the
+        # ordinary controller queues it (claim, peer ref, bind) and the card is taken.
+        self.cleared(harness="codex", sid="sid-A", new="sid-A", receipt=False)
+        original, refs = self.clear.continue_card_reason, []
+
+        def queue_and_consume(req):
+            claim, why = self.clear.claim_continue(self.path, "n0nce")
+            self.assertTrue(claim, why)
+            peer = peer_steward.peer_message
+            _text, ref = peer.prepare_peer_message(
+                "이어서해", {"harness": "codex", "session_id": "sid-A", "name": "fixture"},
+                {"harness": "codex", "session_id": "sid-A", "name": None, "pane_id": self.seat_obj.pane},
+                defer=True, with_trailer=False, receipt="session-tidy-continue")
+            self.assertTrue(self.clear.bind_continue_transfer(claim, ref))
+            self.assertTrue(self.clear._finish_continue(
+                self.seat_obj.key, "n0nce", "queued", "native-queue-accepted",
+                claim_id=claim["continued"]["claim_id"], transfer_ref=ref))
+            seat = self.st.session_seat(self.seat_obj, "codex", "sid-A")
+            card = self.st.read_latest_card(seat)
+            self.st._write_consumed(seat, generation=card["generation"], receipts=["codex:sid-A:0"])
+            refs.append(ref)
+            return original(req)
+
+        with mock.patch.object(self.clear, "continue_card_reason", side_effect=queue_and_consume):
+            self.assertEqual(self.clear.settle_unsent_continue("codex", "sid-A"), 0)
+        held = self.booking()["continued"]
+        self.assertEqual((held["state"], held["transfer_ref"]), ("pending", refs[0]))
+        self.assertEqual(peer_steward.peer_message._read_pending(refs[0])["state"], "pending")
+
     def test_continue_requires_exact_new_sid_and_idle_without_screen_reads(self):
         self.cleared()
         req = self.booking()

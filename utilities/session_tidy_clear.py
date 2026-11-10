@@ -1929,7 +1929,8 @@ def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = Non
             continue
         if not reason and now > float(held.get("deadline", 0) or 0):
             reason = "expired"
-        if reason and _finish_continue(path.stem, str(req.get("nonce") or ""), "skipped", reason):
+        if reason and _finish_continue(path.stem, str(req.get("nonce") or ""), "skipped", reason,
+                                       unsent=True):
             settled += 1
     return settled
 
@@ -2180,8 +2181,11 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
 
 
 def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", *,
-                     claim_id: str = "", transfer_ref: str = "") -> bool:
-    """Settle only this continue claim; queued delivery keeps its exact native ref."""
+                     claim_id: str = "", transfer_ref: str = "", unsent: bool = False) -> bool:
+    """Settle only this continue claim; queued delivery keeps its exact native ref.
+
+    ``unsent`` settles a continue only while it still has no transfer ref: a ref bound
+    after the caller's read is settled by its receipt (``observe_continue_receipt``)."""
     initial = read_reservation(seat_key)
     if not initial:
         return False
@@ -2198,6 +2202,8 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
         if claim_id and held.get("claim_id") != claim_id:
             return False
         if held.get("state") == "sending" and not claim_id:
+            return False
+        if unsent and held.get("transfer_ref"):
             return False
         if outcome == "queued":
             req["continued"] = {**held, "state": "pending", "reason": reason}
