@@ -491,14 +491,17 @@ def _local_proc_identity(pid, proc_root=Path("/proc")):
 
 
 def _is_ssh_process(pid, proc_root=Path("/proc")):
-    root = Path(proc_root) / str(pid)
+    # Plain descriptors: this runs for every process on the host per probe.
+    root = os.path.join(os.fspath(proc_root), str(pid))
     try:
-        if (root / "comm").read_text(encoding="utf-8", errors="replace").strip() == "ssh":
-            return True
+        with open(os.path.join(root, "comm"), "rb") as handle:
+            if handle.read().decode("utf-8", errors="replace").strip() == "ssh":
+                return True
     except OSError:
         pass
     try:
-        argv0 = (root / "cmdline").read_bytes()[:4096].split(b"\0", 1)[0]
+        with open(os.path.join(root, "cmdline"), "rb") as handle:
+            argv0 = handle.read(4096).split(b"\0", 1)[0]
     except OSError:
         return False
     return os.path.basename(argv0.decode("utf-8", errors="ignore")) == "ssh"
@@ -1579,8 +1582,12 @@ def _socket_inodes(pid, proc_root=Path("/proc")):
 
 def _ssh_session_bridges_for_pid(pid, sockets, unix_listener_inodes,
                                  proc_root=Path("/proc")):
+    # The ssh test is the cheaper filter for the host's many other processes.
+    # Identity is read afterwards and re-verified, with the ssh test, below.
+    if not _is_ssh_process(pid, proc_root):
+        return []
     before = _local_proc_identity(pid, proc_root)
-    if before is None or not _is_ssh_process(pid, proc_root):
+    if before is None:
         return []
     owner = _unique_session_owner(_local_identity_env(pid, proc_root))
     if owner is None:
@@ -2609,21 +2616,27 @@ def _select(config, names):
     return [(n, hosts[n]) for n in names]
 
 
-def cmd_list(args):
+def list_payload(hosts=(), *, static=False):
+    """The ``list --json`` document; in-process readers share it with the CLI."""
     config = load_config()
     run_root = None if _namespace_self(config) else config["run_root"]
-    selected = _select(config, args.hosts)
+    selected = _select(config, list(hosts or ()))
     live_rows = ({row["host"]: row
                   for row in _probe_selected(selected, run_root)}
-                 if not args.static else {})
+                 if not static else {})
     rows = []
     for name, host in selected:
         row = {"host": name, "ssh": host.get("ssh_host"),
                "port": host.get("ssh_port"), "conda": host.get("conda"),
                "note": host.get("note"), "self": is_self(host)}
-        row.update(live_rows[name] if not args.static
+        row.update(live_rows[name] if not static
                    else {"reachable": None, "gpus": []})
         rows.append(row)
+    return config, rows
+
+
+def cmd_list(args):
+    config, rows = list_payload(args.hosts, static=args.static)
     if args.json:
         print(json.dumps({"run_root": str(config["run_root"]), "hosts": rows},
                          ensure_ascii=False, sort_keys=True))

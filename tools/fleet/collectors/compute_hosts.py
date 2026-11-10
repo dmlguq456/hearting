@@ -43,6 +43,50 @@ def _tool_argv():
     return None
 
 
+_INPROCESS = {}
+
+
+def _inprocess_module(argv):
+    """The default utility loaded once into this process, else None.
+
+    Each live poll used to start a new interpreter only to print the same
+    ``list --json`` document. An explicit tool override, or
+    ``FLEET_COMPUTE_HOSTS_INPROCESS=0``, keeps the subprocess surface.
+    """
+    if (os.environ.get("FLEET_COMPUTE_HOSTS_TOOL")
+            or os.environ.get("FLEET_COMPUTE_HOSTS_INPROCESS", "1").strip() == "0"
+            or not argv or len(argv) != 2 or argv[0] != sys.executable):
+        return None
+    path = argv[1]
+    if path in _INPROCESS:
+        return _INPROCESS[path]
+    module = None
+    try:
+        import importlib.util
+        utilities = str(Path(path).parent)
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        spec = importlib.util.spec_from_file_location("_fleet_compute_hosts", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if not callable(getattr(module, "list_payload", None)):
+            module = None
+    except Exception:
+        module = None
+    _INPROCESS[path] = module
+    return module
+
+
+def _list_inprocess(module):
+    """``(returncode, stdout, stderr)`` exactly as the CLI's ``list --json`` reports."""
+    try:
+        config, rows = module.list_payload(())
+    except module.ConfigError as exc:
+        return 2, "", "compute-hosts: %s\n" % exc
+    return 0, json.dumps({"run_root": str(config["run_root"]), "hosts": rows},
+                         ensure_ascii=False, sort_keys=True), ""
+
+
 def _config_path():
     override = os.environ.get("COMPUTE_HOSTS_CONFIG")
     if override:
@@ -99,11 +143,19 @@ def collect(timeout=COLLECT_TIMEOUT):
     if not argv:
         return _diagnostic("compute-hosts utility unavailable")
     observed_at = time.time()
+    module = _inprocess_module(argv)
     try:
-        result = subprocess.run(
-            argv + ["list", "--json"], stdin=subprocess.DEVNULL, text=True, capture_output=True,
-            timeout=max(0.1, deadline - time.monotonic()),
-        )
+        if module is not None:
+            try:
+                code, stdout, stderr = _list_inprocess(module)
+            except Exception as exc:  # the CLI would exit 1 with this traceback
+                code, stdout, stderr = 1, "", "%s: %s" % (type(exc).__name__, exc)
+            result = subprocess.CompletedProcess(argv, code, stdout, stderr)
+        else:
+            result = subprocess.run(
+                argv + ["list", "--json"], stdin=subprocess.DEVNULL, text=True, capture_output=True,
+                timeout=max(0.1, deadline - time.monotonic()),
+            )
     except subprocess.TimeoutExpired:
         return _diagnostic("compute-host probe timed out", observed_at)
     except OSError as exc:

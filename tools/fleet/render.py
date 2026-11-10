@@ -2791,6 +2791,7 @@ _EXPLORER_COMPOSE_MODEL = None
 _EXPLORER_COMPOSE_SNAPSHOT = None
 _EXPLORER_COMPOSE_DETAIL = None
 _EXPLORER_COMPOSE_GENERATION = None
+_EXPLORER_COMPOSE_MINUTE = None
 _EXPLORER_NATIVE_DISPLAY = None
 _EXPLORER_ORDER = []         # main-session ids in first-seen order, so the navigation does not reshuffle
 _EXPLORER_SIZE = None
@@ -3085,12 +3086,16 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
     global _SELECTABLE, _EXPLORER_NAV_ROWS, _EXPLORER_STATE, _EXPLORER_ALL_ROWS
     global _EXPLORER_GENERATION, _EXPLORER_MODEL, _EXPLORER_READINESS, _EXPLORER_ORDER
     global _EXPLORER_COMPOSE_MODEL, _EXPLORER_COMPOSE_SNAPSHOT
-    global _EXPLORER_COMPOSE_DETAIL, _EXPLORER_COMPOSE_GENERATION
+    global _EXPLORER_COMPOSE_DETAIL, _EXPLORER_COMPOSE_GENERATION, _EXPLORER_COMPOSE_MINUTE
     state = _explorer_state_for(state, cols)
+    # Age words are minute-granular and composed from the wall clock, so a
+    # board whose collection is quiet still advances them at each minute.
+    minute = int(time.time() // 60) if now is None else None
     same_inputs = (_EXPLORER_COMPOSE_MODEL is not None
                    and _EXPLORER_COMPOSE_SNAPSHOT is snapshot
                    and _EXPLORER_COMPOSE_DETAIL is focus_result
-                   and _EXPLORER_COMPOSE_GENERATION == _EXPLORER_GENERATION)
+                   and _EXPLORER_COMPOSE_GENERATION == _EXPLORER_GENERATION
+                   and _EXPLORER_COMPOSE_MINUTE == minute)
     if same_inputs:
         model = _EXPLORER_COMPOSE_MODEL
     else:
@@ -3103,6 +3108,7 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
     _EXPLORER_COMPOSE_SNAPSHOT = snapshot
     _EXPLORER_COMPOSE_DETAIL = focus_result
     _EXPLORER_COMPOSE_GENERATION = _EXPLORER_GENERATION
+    _EXPLORER_COMPOSE_MINUTE = minute
     _EXPLORER_COMPOSE_MODEL = model
     _EXPLORER_READINESS = readiness
     _EXPLORER_MODEL = model
@@ -6700,6 +6706,14 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             snapshot = _explorer_attach_remote_observation(
                 snapshot, _EXPLORER_REMOTE_OBSERVATION)
         snapshot.hearting = dict(_HEARTING) if isinstance(_HEARTING, dict) else None
+        if basic_events is not None:
+            # Watch exactly what this pass read before it is published; a
+            # change set by the rebuild covers writes since those reads.
+            try:
+                basic_events.configure(*collect_all.basic_event_sources(
+                    snapshot, display_reader.event_sources()))
+            except Exception:
+                pass
         # Publication makes these rows immutable to the detail worker. Every
         # basic tick stays cheap even while that worker is delayed on NAS.
         latest_basic[0] = snapshot
@@ -6837,6 +6851,16 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                                    name="fleet-native-display", adaptive_cadence=True)
     else:
         _EXPLORER_NATIVE_DISPLAY = None
+    # Basic collection follows its inputs: kernel notifications, user input and
+    # explicit refresh keep the normal cadence; a silent board refreshes on the
+    # long fallback that still covers NFS, /proc births and clock fields.
+    basic_events = basic_cadence = None
+    if _EXPLORER_ENABLED and callable(getattr(collect_all, "basic_event_sources", None)):
+        from .native_events import IdleCadence, idle_refresh_interval
+        idle_interval = idle_refresh_interval(interval)
+        if idle_interval is not None:
+            basic_events = NativeDisplayEvents()
+            basic_cadence = IdleCadence(idle_interval)
     selection_feed = None
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
@@ -6925,7 +6949,14 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             now = time.time()
             now_mono = time.monotonic()
             if background_started:
-                pump.request_due(now=now_mono)
+                if basic_cadence is None:
+                    pump.request_due(now=now_mono)
+                else:
+                    if basic_events.take_changed() or ch != curses.ERR:
+                        basic_cadence.mark()
+                    if (basic_cadence.due(now_mono, watching=basic_events.watching)
+                            and pump.request_due(now=now_mono)):
+                        basic_cadence.started(now_mono)
                 if (display_pump is not None and generation > 0
                         and display_events.take_changed()):
                     display_pump.request(force=True)
@@ -7131,6 +7162,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             display_pump.stop(join_timeout=1.0)
         if display_events is not None:
             display_events.stop(join_timeout=1.0)
+        if basic_events is not None:
+            basic_events.stop(join_timeout=1.0)
         _EXPLORER_NATIVE_DISPLAY = None
         pump.stop(join_timeout=1.0)
         detail_pump.stop(join_timeout=1.0)

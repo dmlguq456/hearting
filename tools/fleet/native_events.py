@@ -16,7 +16,9 @@ import threading
 from .collectors.procscan import read_proc_start
 
 _HEADER = struct.Struct('iIII')
-_MASK = 0x00000FCE  # modify/attrib/close-write, move/create/delete, directory loss
+# modify/attrib, move/create/delete, directory loss. Close-after-write is not a
+# change by itself: SQLite readers reopen a WAL read-write and close it untouched.
+_MASK = 0x00000FC6
 _RESET = 0x0000CC00  # self-delete/move, overflow, ignored watch
 
 
@@ -26,6 +28,9 @@ class NativeDisplayEvents:
         self._dirty = threading.Event()
         self._stopped = threading.Event()
         self.ready = threading.Event()
+        # True only while a kernel watch set is installed. A consumer that
+        # stretches its cadence on silence must not do so without one.
+        self.watching = False
         self._sources = None
         self._thread = None
         self._read = self._write = None
@@ -148,6 +153,7 @@ class NativeDisplayEvents:
                     pass
                 os.close(event_fd)
             event_fd = None
+        self.watching = event_fd is not None
         for pid, birth in processes:
             fd = None
             try:
@@ -223,6 +229,7 @@ class NativeDisplayEvents:
                     elif key.fd == event_fd:
                         changed, reset = self._files_changed(event_fd, watched)
                         if reset:
+                            self.watching = False
                             self.ready.clear()
                         if changed:
                             self._dirty.set()
@@ -230,10 +237,12 @@ class NativeDisplayEvents:
                             event_fd, watched = self._rebuild(selector, sources)
                             break
         except (OSError, ValueError):
+            self.watching = False
             # Event delivery is optional. The normal complete snapshot still
             # causes its existing display read; never substitute a new timer.
             self.ready.set()
         finally:
+            self.watching = False
             if selector is not None:
                 for key in list(selector.get_map().values()):
                     selector.unregister(key.fd)
@@ -241,3 +250,133 @@ class NativeDisplayEvents:
                         os.close(key.fd)
                 selector.close()
             self._close_controls()
+
+
+# Basic collection while its watched inputs stay silent. Inputs inotify cannot
+# see (NFS writes from another host, /proc births, Herdr panes, remote hosts)
+# and clock-derived fields still refresh at this cadence.
+DEFAULT_IDLE_REFRESH = 30.0
+MIN_IDLE_REFRESH = 2.0
+_SOURCE_LIMIT = 512
+
+
+def idle_refresh_interval(interval, env=None):
+    """``FLEET_IDLE_REFRESH_INTERVAL`` seconds; ``0`` keeps the periodic cadence."""
+    env = os.environ if env is None else env
+    raw = env.get("FLEET_IDLE_REFRESH_INTERVAL")
+    if raw is None or not str(raw).strip():
+        return max(float(interval), DEFAULT_IDLE_REFRESH)
+    try:
+        value = float(raw)
+    except ValueError:
+        return max(float(interval), DEFAULT_IDLE_REFRESH)
+    if value <= 0:
+        return None
+    return max(float(interval), MIN_IDLE_REFRESH, value)
+
+
+class IdleCadence:
+    """Gate a periodic pump on input change notifications.
+
+    Any notification, watch reset, user input or explicit refresh marks the
+    inputs dirty and restores the pump's own cadence at once. While nothing is
+    dirty, one fallback run per ``idle_interval`` keeps unwatched inputs and
+    clock-driven fields current. Without an installed watch set the pump keeps
+    its normal cadence.
+    """
+
+    def __init__(self, idle_interval):
+        self.idle_interval = None if idle_interval is None else float(idle_interval)
+        self._dirty = True
+        self._last_start = None
+
+    def mark(self):
+        self._dirty = True
+
+    @property
+    def dirty(self):
+        return self._dirty
+
+    def due(self, now, *, watching=True):
+        return (self.idle_interval is None or not watching or self._dirty
+                or self._last_start is None or now - self._last_start >= self.idle_interval)
+
+    def started(self, now):
+        self._dirty = False
+        self._last_start = float(now)
+
+
+def _proc_identity(pid, birth):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or birth in (None, ""):
+        return None
+    try:
+        actual = read_proc_start(pid)
+    except (OSError, ValueError):
+        return None
+    if actual is None or str(actual) != str(birth):
+        return None
+    return pid, actual
+
+
+def basic_event_sources(snapshot, display_sources=None):
+    """Watchable inputs of one basic collection: ``(paths, patterns, processes)``.
+
+    Only stable, existing identities are listed so an unchanged board keeps one
+    watch set. Paths are files whose parent directory is watched; patterns are
+    ``(directory, prefix)`` with ``""`` meaning any entry of that directory.
+    """
+    paths, patterns, processes = set(), set(), set()
+    if display_sources:
+        try:
+            shown_paths, shown_patterns, shown_processes = display_sources
+            # A Claude statusline tap is rewritten about once a minute while
+            # idle; the display reader owns those values, not basic collection.
+            paths.update(str(path) for path in shown_paths
+                         if Path(str(path)).parent.name != ".statusline")
+            patterns.update(tuple(item) for item in shown_patterns)
+            processes.update(tuple(item) for item in shown_processes)
+        except (TypeError, ValueError):
+            pass
+    try:
+        from . import session_registry
+        for harness in ("claude", "codex", "opencode"):
+            patterns.add((str(session_registry._dir_for(harness)), ""))
+    except Exception:
+        pass
+    try:
+        from .collectors import dispatch
+        paths.add(str(dispatch._jobs_path()))
+        paths.update(str(path) for path in dispatch._installed_registry_paths())
+    except Exception:
+        pass
+    try:
+        from .collectors import usage_cache
+        paths.update(str(usage_cache._path(harness)) for harness in ("claude", "codex", "opencode"))
+    except Exception:
+        pass
+    try:
+        import human_wait_state
+        paths.add(str(human_wait_state._fleet_cache_path()))
+    except Exception:
+        pass
+    rows = []
+    for name in ("sessions", "jobs", "resources"):
+        rows.extend(tuple(getattr(snapshot, name, None) or ())[:_SOURCE_LIMIT])
+    for row in rows:
+        identity = _proc_identity(getattr(row, "pid", None),
+                                  getattr(row, "proc_start", None) or getattr(row, "starttime", None))
+        if identity is None:
+            # A finished row's files are settled; its registry/roster changes
+            # arrive through the watched registries or the fallback.
+            continue
+        processes.add(identity)
+        for attribute in ("_transcript_path", "log_path", "registry_path"):
+            value = getattr(row, attribute, None)
+            if isinstance(value, (str, os.PathLike)) and str(value):
+                paths.add(str(value))
+    return (tuple(sorted(paths))[:_SOURCE_LIMIT], tuple(sorted(patterns))[:_SOURCE_LIMIT],
+            tuple(sorted(processes))[:_SOURCE_LIMIT])
