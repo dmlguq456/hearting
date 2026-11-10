@@ -38,6 +38,220 @@ class AdapterNamespace:
             raise AttributeError(name) from None
 
 
+def bind_entry(h, args, argv: list[str]) -> int | None:
+    """Reconcile the launch lifecycle and validate the retry evidence and worktree path."""
+    args.replacement_input_argv = h.frame_repository.durable_argv(argv[1:])
+    # parent_sandbox is used here only to tighten the override gate, never to
+    # loosen it, so consuming it before the tuple-validity check is safe even
+    # though it has not yet been validated.
+    args.launch_lifecycle_resolution = h.reconcile_launch_lifecycle(
+        args.launch_lifecycle, dict(os.environ), parent_sandbox=args.parent_sandbox
+    )
+    args.launch_lifecycle_requested = args.launch_lifecycle_resolution.requested
+    args.launch_lifecycle = args.launch_lifecycle_resolution.effective
+    args.nested_eligibility_explicit = args.nested_eligibility is not None
+    if args.nested_eligibility is None:
+        args.nested_eligibility = "unknown"
+    if args.capacity_retry and not all(
+        (args.prior_attempt_id, args.cooled_model, args.selection_source)
+    ):
+        return h.fail("capacity-retry-evidence-missing", 64, child_spawned="0")
+    if not Path(args.worktree).is_absolute():
+        return h.fail("worktree-must-be-absolute", 64, worktree=args.worktree)
+    args.worktree = h.frame_repository.canonical_worktree(args.worktree)
+    return None
+
+
+def bind_action(args) -> str:
+    """Name the launch action; a preview never carries an attempt identity."""
+    action = "start" if args.start else "register" if args.register else "dry-run"
+    args.action = action
+    args.command_attempt_id = args.attempt_id
+    if action == "dry-run":
+        # Preview output must never mint or echo an identity that resembles a
+        # registered attempt receipt.
+        args.attempt_id = None
+    return action
+
+
+def bind_repository(h, args) -> int | None:
+    """Require the worktree directory and bind its repository identity."""
+    worktree = Path(args.worktree)
+    if not worktree.is_dir():
+        return h.fail("worktree-not-found", 66, worktree=args.worktree)
+    try:
+        from dispatch_contract import launch_repository_identity
+        args.repository_identity, args.repository_kind = launch_repository_identity(
+            h.frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
+    except h.DispatchContractError as exc:
+        return h.fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
+    return None
+
+
+def validate_dispatch_shape(h, args, *, qa_fields: Mapping[str, str]) -> int:
+    """Resolve QA from intensity and validate the intensity and dispatch depth."""
+    try:
+        args.qa = h.resolve_qa(args.intensity, args.qa)
+    except h.DispatchModeContractError as exc:
+        return h.fail(exc.reason, 64, **exc.fields, **qa_fields)
+    if args.intensity not in h.INTENSITY_LEVELS:
+        return h.fail(
+            "invalid-dispatch-intensity",
+            64,
+            intensity=args.intensity,
+            allowed_intensity="direct,quick,standard,strong,thorough,adversarial",
+        )
+    if args.dispatch_depth not in (1, 2):
+        return h.fail("invalid-dispatch-depth", 64, dispatch_depth=str(args.dispatch_depth), allowed_dispatch_depth="1,2")
+    if args.dispatch_depth == 2 and not args.parent_slug:
+        return h.fail("missing-dispatch-parent", 64, dispatch_depth=str(args.dispatch_depth))
+    if args.dispatch_depth == 2 and args.intensity in {"direct", "quick"}:
+        return h.fail("invalid-depth-two-intensity", 64, dispatch_depth=str(args.dispatch_depth), intensity=args.intensity)
+    return 0
+
+
+def check_nested_eligibility(h, args, action: str, harness: str) -> int | None:
+    """Bind the internal eligibility probe and refuse an ineligible nested launch."""
+    args.eligibility_probe = "-"
+    h.bind_internal_eligibility_probe(args)
+    try:
+        h.validate_nested_eligibility(
+            dispatch_depth=args.dispatch_depth, action=action, parent_harness=args.parent_harness,
+            parent_transport=args.parent_transport, parent_sandbox=args.parent_sandbox,
+            child_harness=harness, launch_authority=args.launch_authority,
+            status=args.nested_eligibility, source=args.eligibility_source,
+        )
+    except h.DispatchContractError as e:
+        return h.fail(
+            e.reason, 69, detail=e.detail,
+            parent_harness=args.parent_harness or "-",
+            parent_transport=args.parent_transport or "-",
+            parent_sandbox=args.parent_sandbox or "-",
+            child_harness=harness,
+            launch_authority=args.launch_authority,
+            nested_eligibility=args.nested_eligibility,
+            eligibility_source=args.eligibility_source or "-",
+            eligibility_failure_class=args.eligibility_failure_class or "-",
+            eligibility_probe=args.eligibility_probe,
+        )
+    return None
+
+
+def bind_owner_route(h, args, harness: str) -> int | None:
+    """Bind the owner route from the environment and check its launch tuple."""
+    try:
+        args.owner_route_binding = h.binding_from_environment(
+            dict(os.environ),
+            worktree=args.worktree,
+            capability=args.capability,
+            capability_mode=args.capability_mode,
+            intensity=args.intensity,
+            harness=harness,
+        )
+        if args.owner_route_binding:
+            failure_fields = h.owner_binding_tuple_failure_fields(
+                dispatch_depth=args.dispatch_depth, worker_type=args.worker_type, route_file=args.route_file)
+            if failure_fields:
+                return h.fail("owner-route-binding-tuple-invalid", 65, child_spawned="0", **failure_fields)
+    except h.OwnerRouteBindingError as exc:
+        return h.fail(str(exc), 65, child_spawned="0")
+    return None
+
+
+def expect_replica_batch(h, args, action: str, harness: str) -> int | None:
+    """Read the parallel-group replica expectation; a member starts only through its batch."""
+    args.replica_batch_expectation = None
+    if action in {"register", "start"}:
+        try:
+            args.replica_batch_expectation = h.replica_batch_expectation(
+                args.route_file,
+                args.route_node,
+                action,
+                attempt_id=args.attempt_id or "",
+                parent_attempt_id=args.parent_attempt_id or "",
+                harness=harness,
+                fallback_hop=args.fallback_hop,
+                fallback_ordinal=args.fallback_ordinal,
+            )
+        except h.DispatchContractError as exc:
+            return h.fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
+        if (
+            args.replica_batch_expectation is not None
+            and not os.environ.get(h.GOVERNOR_RESERVATION_ENV)
+        ):
+            return h.fail(
+                "parallel-group-batch-required",
+                65,
+                detail="parallel-group start requires dispatch-batch admission",
+                child_spawned="0",
+            )
+    return None
+
+
+def rebind_replica_batch(h, args, action: str, harness: str, **identity) -> int | None:
+    """Re-read a starting replica's expectation once its attempt identity is known."""
+    if action == "start" and args.replica_batch_expectation is not None:
+        try:
+            args.replica_batch_expectation = h.replica_batch_expectation(
+                args.route_file,
+                args.route_node,
+                action,
+                attempt_id=args.attempt_id,
+                parent_attempt_id=args.parent_attempt_id or "",
+                harness=harness,
+                fallback_hop=args.fallback_hop,
+                fallback_ordinal=args.fallback_ordinal,
+                **identity,
+            )
+        except h.DispatchContractError as exc:
+            return h.fail(exc.reason, 65, detail=exc.detail, child_spawned="0")
+    return None
+
+
+def apply_attempt_policy(h, args, harness: str) -> int | None:
+    """Resolve the attempt's fallback hop, quick and replacement limits."""
+    try:
+        attempt_policy = h.headless_attempt_policy(
+            route_file=args.route_file, route_node=args.route_node,
+            intensity=args.intensity, harness=harness,
+            dispatch_depth=args.dispatch_depth, parent_slug=args.parent_slug,
+            execution_surface=args.execution_surface,
+            registered_worker=bool(args.registered_worker),
+            fallback_hop=args.fallback_hop,
+            fallback_ordinal=args.fallback_ordinal,
+            parent_harness=args.parent_harness,
+            parent_transport=args.parent_transport,
+            parent_sandbox=args.parent_sandbox,
+            launch_authority=args.launch_authority,
+        )
+    except h.DispatchContractError as e:
+        return h.fail(e.reason, 65, detail=e.detail, child_spawned="0")
+    args.fallback_hop = str(attempt_policy["fallback_hop"])
+    args.fallback_ordinal = int(attempt_policy["fallback_ordinal"])
+    args.quick_attempt = bool(attempt_policy["quick"])
+    args.quick_attempt_limit = attempt_policy["terminal_attempt_limit"]
+    args.replacement_attempt_limit = attempt_policy["replacement_attempt_limit"]
+    args.replacement_notes = attempt_policy["replacement_notes"]
+    return None
+
+
+def resolve_launch_models(h, args, *, model_error_fields: Mapping[str, str]) -> int | None:
+    """Resolve the model settings and the profile selection receipt."""
+    try:
+        args.resolved_model_settings = h.resolve_model_settings(args)
+        from model_profile import selection_receipt, ModelProfileError
+        try:
+            args.profile_selection_receipt = selection_receipt(args)
+        except (ModelProfileError, OSError, ValueError) as exc:
+            return h.fail(getattr(exc, "reason", "profile-selection-invalid"), 65, child_spawned="0")
+    except h.ModelSelectionError as e:
+        fields = {"detail": str(e), **model_error_fields}
+        if args.model_role:
+            fields["model_role"] = args.model_role
+        return h.fail(e.reason, 64, **fields)
+    return None
+
+
 def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path,
                        reservation_token: str, permission_env: Mapping[str, str],
                        current_sandbox: str, supervised: bool,
