@@ -150,6 +150,19 @@ instead of inferring from another adapter or from local harness state.
   independent verdicts into one status, emit one check per verdict. Surface a bounded cause — a fixed
   maximum number of lines and characters, drawn from the single invocation already made — never the raw
   report and never a second run.
+- **Measure behaviour, not structure**: a parity claim about what the person
+  sees (a wake, a turn continuation, a delivered report, a card, a retire)
+  rests on the same scenario run on each real TUI —
+  `utilities/harness_behavior_scenarios.py` installs this tree into a
+  throwaway HOME, drives the TUI against a loopback model, and records what
+  reached the model. Generated files, hook registration, and synthetic hook
+  payloads show wiring only.
+- **A difference stays open until it is fixed or the person decides**: every
+  documented harness difference (gap, fallback, unsupported, unknown,
+  unmeasured) has a row in the §10 register. Wording such as "separate
+  decision", "closed by decision", or "known difference" does not close it;
+  the row's state does. Fleet lists `open` and `needs-user-decision` rows with
+  the project's open work.
 - **Plan with verification**: when a projection change depends on a runtime
   capability, the implementation plan must include a current-doc citation or
   note, a local runtime/projection check, and a fallback if the feature is
@@ -992,3 +1005,49 @@ watch duty before its observer exits. A confirmed same-seat successor keeps the 
 open. A terminal receipt prevents lifecycle reconciliation
 from recreating an observer. Pane closure, steward closure, agent release, goal completion,
 and successful work are distinct outcomes.
+
+## 10. Open harness differences (parity register)
+
+Each row is one harness difference the person can notice. `State` is `open`
+(a fix is known or measurement is pending), `needs-user-decision` (the runtime
+cannot do it, or a product choice is needed; `Next` holds the recommendation),
+or `resolved` (behaviour measured equal; `Next` names the evidence). Fleet's
+project open list reads the `open` and `needs-user-decision` rows
+(`tools/fleet/collectors/memory.py` `parity_open_items`). Behaviour evidence:
+`utilities/harness_behavior_scenarios.py --scenario all`. Audit of 2026-11-10:
+`PARITY-BEHAVIOR-AUDIT-1110.md` under the v4-open research inputs.
+
+<!-- parity-register:start -->
+| ID | Harness | User-visible effect | State | Next |
+|---|---|---|---|---|
+| PG-1 | OpenCode | Completion receipts, peer reports, handoffs and owed-receipt turn continuation never reach an OpenCode 2 session (plugin runs in the `serve --stdio` child; TUI identity check never passes) | open | merge branch `opencode-carrier-parity-1110` (scenarios completion-receipt, stop-with-remaining-action, report-arrival, handoff-accept measured pass) |
+| PG-2 | Codex | A turn that ends while a completion receipt is owed is not continued; the receipt waits for the next typed prompt | open | merge branch `codex-carrier-parity-1110` (stop-with-remaining-action measured pass) |
+| PG-3 | OpenCode | A due periodic steward check never reaches the session, not even at the next prompt | open | branch `opencode-carrier-parity-1110` wakes it under the session shell (measured pass); in a plain terminal the notice is still never delivered |
+| PG-4 | Claude, Codex | Without the session shell (default off) or Herdr, an idle Claude session gets peer reports and due checks only at the next typed prompt; Codex wakes for reports natively | needs-user-decision | recommend: enable the session shell by default on install, since it is the wake carrier for idle sessions |
+| PG-5 | Codex | After the tidy `/clear`, the new Codex thread never receives the session-tidy card (`new-session-not-observed`; the shared app-server hook has no pane binding) | open | bind the post-clear thread to the TUI seat in `utilities/session_tidy.py` / `pane_ownership.codex_caller_binding` |
+| PG-6 | OpenCode | Session tidy answers `clear=manual` outside Herdr: no idle booking, no card after `/new` | open | prove the OpenCode pane seat without Herdr (`pane_ownership.verified_pane`) |
+| PG-7 | Codex | After retire or exit, the Fleet wait stays until the app-server daemon unloads the thread | open | clear the session's wait when its TUI exits, not only on daemon `SessionEnd` |
+| PG-8 | OpenCode | Retire refuses without Herdr corroboration; exiting OpenCode does not clear its Fleet wait | open | record OpenCode turn state outside Herdr; send a session-scoped clear on exit |
+| PG-9 | all | Under the session shell in plain tmux, retire and session tidy refuse with `pane-unverified` | open | accept the session-shell pane as the seat; measure under Herdr |
+| PG-10 | Codex | Interactive Codex gets no git index-lock hint after a failed Bash command | open | register `git-index-lock-context.py` in `adapters/codex/hooks/hooks.json` PostToolUse and the `run-hook.sh` allowlist |
+| PG-11 | Codex, OpenCode | The SD-11 stage-dispatch reminder never appears when a depth-1 conductor runs a code stage inline | open | Codex: emit it from `preflight.sh route`; OpenCode: from `tool.execute.before` on the `skill` tool |
+| PG-12 | OpenCode | Fleet shows no capability label for inline OpenCode skill work (no grounding marker) | open | call `capability-grounding.sh` from `tool.execute.after` on the `skill` tool |
+| PG-13 | Codex, OpenCode | A native subagent spawned without a model inherits the session model instead of its role default | open | record unsupported in the adapter docs or rewrite the spawn model where the tool accepts one |
+| PG-14 | Codex | Codex has no `PostToolUseFailure`, so a wait or index-lock hint after a failed tool call clears only at the next prompt or Stop | open | Codex `PostToolUse` also runs after a Bash command that exits non-zero (official hooks page): realize the failure-path clear and hint there |
+| PG-15 | OpenCode | `deep`/`top` work runs on a lower tier when the model file declares none | needs-user-decision | recommend: declare an OpenCode deep model in `models.conf` |
+| PG-16 | Codex | Codex skills carry far less step detail than the Claude skills | open | project step-level detail into generated Codex skills |
+| PG-17 | OpenCode | No automatic token self-regulation | open | port token self-regulation v2 to the OpenCode plugin |
+| PG-18 | OpenCode | A rate-limited `opencode run` child can hang until the liveness scan catches it | open | bound the child on provider errors |
+| PG-19 | OpenCode | No deterministic stage advance; the docs disagree on standard+ dispatch depth 2 | open | settle the OpenCode depth-2 claim in `adapters/opencode/ADAPTATION.md` and measure it |
+| PG-20 | OpenCode | No persistent Hearting statusline | open | render the harness signal in the OpenCode TUI `prompt.footer.status` slot (official TUI plugin API) |
+| PG-21 | Codex | `editorial-team` and `plan-team` agents are more permissive (no per-agent tool allowlist) | needs-user-decision | recommend: accept with sandbox modes |
+| PG-22 | OpenCode | Network and writable-root requests are not OS-enforced | needs-user-decision | recommend: accept `granted-unenforced` and keep refusing `os-sandbox` requests |
+| PG-23 | Codex | The design render loop works only interactively (noninteractive MCP calls are denied) | needs-user-decision | recommend: keep the visual-harness wrapper path |
+| PG-24 | Claude | A plugin-channel install lacks the route gate, waits, memory, card, rewake and compact hooks | needs-user-decision | recommend: support only `harness install claude` for full behaviour |
+| PG-25 | OpenCode | Whether Herdr detects an OpenCode agent and `herdr agent wait` returns is unmeasured (P-6) | open | run `utilities/herdr_integration_live.py --case opencode-busy` and record P-6 |
+| PG-26 | Codex | Memory injection at session start is opt-in (`CODEX_SESSION_MEMORY_INJECT=1`) | needs-user-decision | recommend: decide default-on or keep the explicit `preflight memory` |
+| PG-27 | OpenCode | Lifecycle context rides an experimental plugin hook and can stop silently after an OpenCode update | open | keep the boot scenario's hook-context check in the release smoke |
+| PG-28 | Codex | Custom-agent discovery, approval inheritance and headless behaviour are not measured | open | add a scenario that spawns a Codex custom agent |
+| PG-29 | Codex | An interrupted Codex turn gets no automatic change record | open | Codex documents an `Interrupt` hook event: run the turn-end change record from it |
+| PG-30 | Codex | Only Codex's built-in statusline items show; no Hearting signal in the footer | needs-user-decision | recommend: accept prompt-time signals (Codex `/statusline` takes built-in items only) |
+<!-- parity-register:end -->

@@ -241,7 +241,7 @@ native `read` tool; a successful marker command is not evidence of its contents.
 
 | Claude `settings.json` hook | OpenCode realization | Parity |
 |---|---|---|
-| `PreToolUse[Skill]` spec-skill gate (deny) | plugin `command.execute.before` → `preflight capability` (throws) | full — auto enforced (command path) |
+| `PreToolUse[Skill]` SD-11 stage-dispatch reminder (Claude has no Skill spec gate any more) | none — the plugin has no `command.execute.before` or `skill`-tool handler | gap — parity register PG-11 |
 | `PostToolUse[Read]` spec-read marker | plugin `tool.execute.after` on `read` → `preflight read` | full — auto enforced |
 | `PostToolUse[Edit|apply_patch]` spec sync nudge | plugin `tool.execute.after` passes native input to shared `hooks/spec-sync-nudge.sh --format text`; V1 appends to tool output and V2 appends a native `event.result.content` text part for main and worker sessions, preserving existing parts and metadata | full — automatic, fail-open; fixture-verified, live V2 model delivery unobserved |
 | `PostToolUse` design post-write | plugin `tool.execute.after` → `preflight design` | full — auto enforced |

@@ -309,6 +309,36 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         self.assertEqual(open_items[0]["links"], ("rt-0123456789abcdef",))
         self.assertIn("backlog", open_items[1]["tags"])
 
+    def test_parity_register_rows_stay_open_hearting_work(self):
+        self._make_db([{"id": "ob", "cwd_origin": "git:github.com/team/repo",
+                        "type": "unresolved-obligation", "headline": "repo work",
+                        "updated": "2026-10-30"}])
+        home = self.store / "agent-home"
+        (home / "core").mkdir(parents=True)
+        (home / "core" / "ADAPTATION.md").write_text(
+            "| PG-1 | outside | not in the register | open | - |\n"
+            "<!-- parity-register:start -->\n"
+            "| ID | Harness | Effect | State | Next |\n|---|---|---|---|---|\n"
+            "| PG-1 | Codex | no wake on receipt | open | fix in hooks |\n"
+            "| PG-2 | OpenCode | herdr only | needs-user-decision | ask |\n"
+            "| PG-3 | Claude | fixed | resolved | - |\n"
+            "<!-- parity-register:end -->\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(home)}):
+            memcol._project_cache.clear()
+            full = memcol._read_project_memory("2026-11-02")["by_repo"]
+            scoped = memcol._read_project_memory("2026-11-02", repo="repo")["by_repo"]
+            own = memcol._read_project_memory("2026-11-02", repo="hearting")["by_repo"]
+        rows = full["hearting"]["open"]
+        self.assertEqual(sorted(row["id"] for row in rows), ["parity:PG-1", "parity:PG-2"])
+        headlines = {row["id"]: row["headline"] for row in rows}
+        self.assertTrue(headlines["parity:PG-1"].startswith("[미결] PG-1 Codex"))
+        self.assertTrue(headlines["parity:PG-2"].startswith("[결정 필요] PG-2"))
+        self.assertTrue(all(memcol.open_stage(row) == "open" for row in rows))
+        self.assertEqual(full["hearting"]["open_total"], 2)
+        self.assertNotIn("hearting", scoped)
+        self.assertEqual(len(own["hearting"]["open"]), 2)
+        self.assertEqual([row["id"] for row in full["repo"]["open"]], ["ob"])
+
     def test_session_block_counts_only_the_records_the_repo_page_counts(self):
         origin = "git:github.com/team/repo"
         rows = [{"id": "work-%02d" % i, "cwd_origin": origin, "type": "backlog",
