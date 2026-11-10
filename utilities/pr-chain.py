@@ -9,9 +9,9 @@ merged or commented; the printed `next=` names the one action and its role.
 States, in the order they are decided:
   merged, closed, draft, ci-failed, conflict  - the PR itself settles the step
   needs-review       no review report given: the author sends the review request
-  awaiting-review    the report has no final verdict yet
-  fix-requested      the final verdict asks for changes
-  review-stale       the final verdict does not name the current head
+  awaiting-review    no closed-form verdict line for this head: a person reads the report
+  review-stale       closed-form verdicts name only another head
+  fix-requested      closed-form fix verdict on this head
   awaiting-ci        final merge verdict on this head, head CI still running
   ready-to-publish   final merge verdict on this head and head CI succeeded
 """
@@ -27,157 +27,93 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 
-# A verdict is one of three line forms (the line's own `>*#_-` decoration aside):
-#   labeled   `최종 판정:` / `판정:` / `Final verdict:` / `Verdict:` (an optional
-#             parenthesised date before the colon); "초도 판정", "변경분 판정" are notes
-#   first     the report's first non-heading line starts with a verdict phrase
-#             ("병합 가능 — 검토 head …", "수정 후 병합 …")
-#   title     a heading ending `— 최종 <verdict>`, read only when no other form exists
-# A verdict's block is its line and the lines after it up to a blank line or the next
-# verdict, plus a heading directly above it ("## 재검토 head …"); a title also takes
-# the paragraph under it. The head a verdict reviewed is the one its own line names
-# (a SHA labelled `head` first); only a line naming none takes it from its block.
-#
-# A merge is read only when it is certain; anything less is not a merge. A fix lead
-# ("수정 후 병합", "FAIL", "not mergeable") is a fix. A merge lead is a merge only when
-# the verdict statement - the line up to the reviewer's closing `**`, or the whole
-# line - carries no condition, hold or negation, and the rest of the line and block
-# carry no forward condition or unreviewed-head note. A doubted merge is a fix when
-# the doubt names a correction, otherwise unread, so a person reads the report.
-_DECOR = r"[\s>*#_\-]*"
-_LABELED = re.compile(
-    rf"^{_DECOR}(?:최종\s*판정|판정|final\s+verdict|verdict)\s*(?:\([^)\n]*\))?\s*[:：]\s*[*_`\s]*(?P<value>.*)$",
-    re.IGNORECASE)
-_TITLE = re.compile(r"^\s*#{1,6}\s.*[—–-]\s*최종\s+(?P<value>[^\n]+?)\s*$")
+# A verdict is read only from a closed list of whole-line forms; nothing else is
+# interpreted. The line, with its `**`/`__` emphasis, surrounding spaces and one
+# trailing period removed, must be exactly one of these and nothing more:
+#   최종 판정: 병합 가능 — head <7-40 hex>        Final verdict: mergeable — head <hex>
+#   최종 판정: 수정 후 병합 — head <hex>          Final verdict: changes requested — head <hex>
+# Any other wording on the line (a condition, a note, a second sentence) makes it not a
+# verdict, and the commentary after it is never read, so a person reads the report.
+# Lines inside fenced code blocks are examples, not verdicts. core/OPERATIONS.md §5.11
+# names the same four forms; keep the two in step.
+VERDICT_FORMS = (
+    ("merge", "최종 판정: 병합 가능"),
+    ("merge", "Final verdict: mergeable"),
+    ("fix", "최종 판정: 수정 후 병합"),
+    ("fix", "Final verdict: changes requested"),
+)
+
+
+def _form_pattern(label):
+    words = [re.escape(word) for word in label.replace(":", " : ").split()]
+    return r"\s*".join(words).replace(r"\s*:\s*", r"\s*[:：]\s*")
+
+
+_CLOSED = re.compile(
+    r"^(?P<label>" + "|".join(f"(?:{_form_pattern(label)})" for _, label in VERDICT_FORMS)
+    + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.IGNORECASE)
+_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind for kind, label in VERDICT_FORMS}
+# Only used to quote the line a person should read when no closed form is present.
+_LABELED = re.compile(r"^[\s>*#_\-]*(?:최종\s*판정|판정|final\s+verdict|verdict)\s*(?:\([^)\n]*\))?\s*[:：]",
+                      re.IGNORECASE)
 _HEADING = re.compile(r"^\s*#{1,6}\s")
-# Rejection wording that leads a verdict; checked before any merge word.
-_FIX = re.compile(
-    r"수정\s*후\s*병합|수정\s*(?:이\s*)?(?:필요|요구|요청)|병합\s*불가|거부|반려"
-    r"|병합\s*(?:가능\s*)?(?:하지|하진|하면)?\s*(?:않|안\s*됨|안\s*된|못|없|아니)"
-    r"|\b(?:changes?\s+requested|request(?:ing|ed)?\s+changes|with\s+changes|do\s+not\s+merge"
-    r"|don'?t\s+merge|not\s+(?:yet\s+)?(?:mergeable|merge-?ready|ready|approved?)|unmergeable"
-    r"|reject(?:ed)?|fix(?:es)?|fail(?:ed|s)?)\b", re.IGNORECASE)
-_MERGE = re.compile(
-    r"병합\s*가능|머지\s*가능|\b(?:merge-?ready|mergeable|ready\s+to\s+merge|approve[ds]?|pass(?:ed)?|lgtm)\b",
-    re.IGNORECASE)
-_NEGATION = re.compile(r"\b(?:not|never|cannot|no)\b|n't\b|않|불가|못|아니|금지", re.IGNORECASE)
-_FIRST = re.compile(rf"^{_DECOR}(?:{_FIX.pattern}|{_MERGE.pattern})", re.IGNORECASE)
-# The lead clause decides fix vs merge: "병합 가능. 차단0, 수정 불필요" leads with a merge.
-_CLAUSE_END = re.compile(r"[.,;(*—。]")
-# Kinds of doubt, not phrases: condition, hold/pending, need, negation, question.
-# "불필요", "없음" (nothing needed, no blocker) agree with a merge and are not doubt.
-_DOUBT = re.compile(
-    r"(?<![가-힣])단\s*[,:，]|다만|조건|보류|여부|대기|미검토|미확인|아직|검토\s*중|전까지"
-    r"|(?<!불)필요|요구|요청|후(?:에|로)?(?![가-힣])|않|못|불가|아니|금지|안\s*(?:됨|된|되)|\?"
-    r"|n't\b|\b(?:not|never|cannot|but|however|only|after|until|unless|pending|provided|once|if"
-    r"|conditional(?:ly)?|conditions?|hold|defer(?:red)?|wait(?:ing)?|re-?review|requires?|required"
-    r"|needs?|must|should|tbd)\b|\bwith\s+changes\b", re.IGNORECASE)
-# Commentary after the statement may narrate history ("아래 … 수정 후 병합은 이력"),
-# so only forward-looking doubt counts there.
-_FOLLOW = re.compile(
-    r"(?<![가-힣])단\s*[,:，]|다만|조건부|보류|전까지|미검토|아직|재검토\s*(?:가|이|를)?\s*(?:필요|전|하지)"
-    r"|검토하지\s*않|\b(?:but|however|only\s+(?:after|if|once|when)|until|unless|pending"
-    r"|not\s+(?:yet\s+)?(?:been\s+)?reviewed|unreviewed|on\s+hold|do\s+not\s+merge|don'?t\s+merge)\b",
-    re.IGNORECASE)
-_CORRECTION = re.compile(r"수정|보정|고쳐|고친|\bfix|\bchanges?\b|\bcorrect", re.IGNORECASE)
-_HEX = re.compile(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", re.IGNORECASE)
-_HEAD_LABEL = re.compile(r"(?:\bhead|헤드)[\s`'\"=:]*$", re.IGNORECASE)
+_FENCE = re.compile(r"^\s*(?:```|~~~)")
 
 
-def classify(value, context=""):
-    """merge | fix | none for one verdict value; context is the rest of its block."""
-    value = value or ""
-    clause = _CLAUSE_END.split(value, 1)[0].strip()
-    if _FIX.search(clause):
-        return "fix"
-    if not _MERGE.search(clause):
-        return "none"
-    if _NEGATION.search(clause):
-        return "fix"
-    statement = value.split("**", 1)[0]
-    if _DOUBT.search(statement):
-        return "fix" if _CORRECTION.search(statement) else "none"
-    for line in [value[len(statement):], *(context or "").splitlines()]:
-        if _FOLLOW.search(line):
-            return "fix" if _CORRECTION.search(line) else "none"
-    return "merge"
+def _normalize(line):
+    line = line.replace("**", "").replace("__", "").strip()
+    return line[:-1].rstrip() if line.endswith(".") else line
 
 
-def _heads(text):
-    """SHA runs in order, those labelled `head` first."""
-    labelled, other = [], []
-    for run in _HEX.finditer(text or ""):
-        target = labelled if _HEAD_LABEL.search(text[max(0, run.start() - 16):run.start()]) else other
-        target.append(run.group(0).lower())
-    return labelled + other
+def closed_verdict(line):
+    """(merge | fix, head hex) when the whole line is one closed form, else None."""
+    match = _CLOSED.match(_normalize(line or ""))
+    if not match:
+        return None
+    label = re.sub(r"\s+", "", match.group("label")).replace("：", ":").lower()
+    return _KINDS[label], match.group("head").lower()
 
 
-def _verdicts(text):
-    """[(value, line, rest-of-block, kind)] in document order; titles only as a fallback."""
-    lines = (text or "").splitlines()
-    found, titles = [], []
-    first = next((i for i, line in enumerate(lines) if line.strip() and not _HEADING.match(line)), None)
-    for i, line in enumerate(lines):
-        labeled = _LABELED.match(line)
-        if labeled:
-            found.append((i, labeled.group("value"), "labeled"))
-        elif i == first and _FIRST.match(line):
-            found.append((i, line.strip(" >*#_-"), "first"))
-        else:
-            title = _TITLE.match(line)
-            if title and classify(title.group("value")) != "none":
-                titles.append((i, title.group("value"), "title"))
-    rows = found or titles
-    starts = {i for i, _, _ in rows}
-    out = []
-    for i, value, kind in rows:
-        rest = []
-        j = i - 1
-        while j >= 0 and not lines[j].strip():
-            j -= 1
-        if j >= 0 and _HEADING.match(lines[j]) and j not in starts:
-            rest.append(lines[j])
-        j = i + 1
-        if kind == "title":
-            while j < len(lines) and not lines[j].strip():
-                j += 1
-        while j < len(lines) and lines[j].strip() and j not in starts:
-            rest.append(lines[j])
-            j += 1
-        out.append((value, lines[i], "\n".join(rest), kind))
-    return out
+def _lines(text):
+    """Document lines outside fenced code blocks."""
+    fenced = False
+    for line in (text or "").splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if not fenced:
+            yield line
 
 
-def _names(line, rest, head):
-    """True when the head this verdict reviewed is the given head.
-
-    The verdict's own line decides; another SHA in its block never replaces it.
-    """
-    head = (head or "").lower()
-    runs = _heads(line) or _heads(rest)
-    return len(head) >= 7 and bool(runs) and head.startswith(runs[0])
+def _unread_line(lines):
+    """The line a person is pointed at: a labelled verdict line, else the first text line."""
+    labelled = next((line for line in lines if _LABELED.match(line)), None)
+    first = next((line for line in lines if line.strip() and not _HEADING.match(line)), "")
+    return (labelled or first).strip()
 
 
 def review_reading(text, head):
-    """{verdict, names_head, line}: verdict merge | fix | none; line is the verdict read.
+    """{verdict, names_head, line}: verdict merge | fix | none; line is the verdict line.
 
-    The current verdict is the first one that reviewed the current head (a review
-    added below an older one, or kept above it, both count); without one, the first
-    verdict. Different readable verdicts on the current head are left unread.
+    Only closed-form lines count. A closed form whose head is a prefix of the current
+    head is a current verdict; different current verdicts are left unread (conflict).
+    Closed forms on other heads only give names_head False (review-stale).
     """
-    rows = _verdicts(text)
-    if not rows:
-        return {"verdict": "none", "names_head": False, "line": ""}
-    current = [(value, classify(value, rest)) for value, line, rest, _ in rows if _names(line, rest, head)]
+    head = (head or "").lower()
+    lines = list(_lines(text))
+    found = [(line, closed_verdict(line)) for line in lines]
+    found = [(line.strip(), verdict) for line, verdict in found if verdict]
+    current = [(line, kind) for line, (kind, hexa) in found if len(head) >= 7 and head.startswith(hexa)]
     if current:
-        readable = {verdict for _, verdict in current if verdict != "none"}
-        if len(readable) > 1:
+        if len({kind for _, kind in current}) > 1:
             return {"verdict": "none", "names_head": True, "line": "conflicting verdicts for this head",
                     "conflict": True}
-        value, verdict = current[0]
-        return {"verdict": verdict, "names_head": True, "line": value.strip()}
-    value, _, rest, _ = rows[0]
-    return {"verdict": classify(value, rest), "names_head": False, "line": value.strip()}
+        line, kind = current[0]
+        return {"verdict": kind, "names_head": True, "line": line}
+    if found:
+        line, (kind, _) = found[0]
+        return {"verdict": kind, "names_head": False, "line": line}
+    return {"verdict": "none", "names_head": False, "line": _unread_line(lines)}
 
 
 def review_verdict(text, head):
@@ -236,16 +172,18 @@ def decide(snapshot, review_text=None, merge_line=None):
     elif verdict == "none" and reading["line"]:
         quoted = " ".join(reading["line"].split())[:80]
         row.update(state="awaiting-review", role="reviewer",
-                   next=(f"verdict `{quoted}` is not readable as merge or fix; a person reads the report, "
-                         f"and the reviewer restates it as `최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}`"))
+                   next=(f"`{quoted}` is not a closed verdict line for head {head[:7]}; a person reads the "
+                         "report and takes the next step (a line exactly "
+                         f"`최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}` continues automatically)"))
     elif verdict == "none":
         row.update(state="awaiting-review", role="reviewer",
-                   next=f"write the final verdict for this head as `최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}`")
-    elif verdict == "fix":
-        row.update(state="fix-requested", role="author", next="apply the requested fix, push, then request review of the new head")
+                   next=(f"no closed verdict line for head {head[:7]}; a person reads the report (a line exactly "
+                         f"`최종 판정: 병합 가능|수정 후 병합 — head {head[:7]}` continues automatically)"))
     elif not names_head:
         row.update(state="review-stale", role="reviewer",
                    next=f"review the change up to head {head[:12]} and restate the final verdict with that head")
+    elif verdict == "fix":
+        row.update(state="fix-requested", role="author", next="apply the requested fix, push, then request review of the new head")
     elif ci == "pending":
         row.update(state="awaiting-ci", role="publisher",
                    next=f"publish through `hearting run merge-line {pr}`; it waits for this head's CI and refuses a failure")
