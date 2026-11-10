@@ -59,6 +59,7 @@ shared-utility-deferred	harness_behavior_cases_b.py
 shared-utility-deferred	harness_behavior_cases_c.py
 shared-utility-deferred	harness_behavior_cases_d.py
 shared-utility-deferred	harness_behavior_cases_e.py
+shared-utility-deferred	harness_behavior_cases_tidy.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
