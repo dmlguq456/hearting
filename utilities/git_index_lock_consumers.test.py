@@ -107,13 +107,19 @@ class GitIndexLockConsumerTest(unittest.TestCase):
         self.assertIn(str(self.lock), event["hookSpecificOutput"]["additionalContext"])
         self.assertIn("Ownership: unknown", event["hookSpecificOutput"]["additionalContext"])
 
-    def test_codex_native_text_response_without_terminal_status_is_not_reclassified(self):
+    def test_codex_native_text_response_names_its_missing_exit_status(self):
+        # Codex PostToolUse runs after a failed Bash too, but tool_response is the
+        # output text alone (no exit status); Git's lock error text is the evidence.
         payload = self.codex_payload()
-        payload["tool_response"] = self.response_text(self.result.stderr)
+        payload["tool_response"] = self.response_text(self.result.stdout + self.result.stderr)
         output = self.run_bridge("codex", payload)
         self.assertEqual(output.returncode, 0, output.stderr)
-        self.assertEqual(output.stdout, "")
+        context = json.loads(output.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(str(self.lock), context)
+        self.assertIn("no exit status reported", context)
         payload["tool_response"] = "command completed without an index-lock failure"
+        self.assertEqual(self.run_bridge("codex", payload).stdout, "")
+        payload["tool_response"] = "fatal: Unable to create '/tmp/unrelated/index.lock': File exists.\n"
         self.assertEqual(self.run_bridge("codex", payload).stdout, "")
 
     def test_python_wrapped_git_add_uses_only_the_selected_worktree_default_index(self):
@@ -388,9 +394,14 @@ console.log(JSON.stringify({{ output: output.output, metadata: output.metadata }
     def test_native_configurations_wire_only_the_original_shell_result_events(self):
         codex = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text(encoding="utf-8"))
         codex_hooks = codex["hooks"]
-        self.assertFalse(any(
-            "git-index-lock-context.py" in json.dumps(group)
-            for event_groups in codex_hooks.values() for group in event_groups))
+        self.assertEqual([event for event, groups in codex_hooks.items()
+                          if any("git-index-lock-context.py" in json.dumps(group) for group in groups)],
+                         ["PostToolUse"])
+        self.assertTrue(any(
+            group.get("matcher") == "Bash"
+            and any("git-index-lock-context.py" in hook.get("command", "")
+                    for hook in group.get("hooks", []))
+            for group in codex_hooks["PostToolUse"]))
         self.assertTrue(any(
             group.get("matcher") == "*"
             and any("posttooluse-interaction-clear.py" in hook.get("command", "")

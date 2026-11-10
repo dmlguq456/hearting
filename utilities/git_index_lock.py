@@ -549,13 +549,19 @@ def _fallback_worktree_context(cwd: str, env: dict[str, str] | None = None):
     return ["git", "-C", selected, "status"], selected, {}
 
 
-def _shell_failure_candidate(command: str, cwd: str, exit_code: int,
+def _shell_failure_candidate(command: str, cwd: str, exit_code: int | None,
                              output: str, parse_command, env: dict[str, str] | None = None):
-    """Cheaply recognize a structured, supported index-lock failure candidate."""
+    """Cheaply recognize a structured, supported index-lock failure candidate.
+
+    ``exit_code=None`` is a harness that reports no exit status (Codex's
+    PostToolUse ``tool_response`` is the command output alone); Git's own
+    lock error text is then the only failure evidence, and the diagnosis says so.
+    """
     if (not isinstance(command, str) or len(command) > 64 * 1024
             or not isinstance(cwd, str) or len(cwd) > 16 * 1024 or not os.path.isabs(cwd)
-            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
-            or exit_code <= 0 or exit_code > 128
+            or (exit_code is not None
+                and (not isinstance(exit_code, int) or isinstance(exit_code, bool)
+                     or exit_code <= 0 or exit_code > 128))
             or not isinstance(output, str) or len(output) > 1_000_000):
         return None
     match = _LOCK_ERROR_TEXT.search(output)
@@ -577,7 +583,7 @@ def codex_command_candidate(command: str, cwd: str, exit_code: int,
     ) is not None
 
 
-def _diagnose_shell_failure(command: str, cwd: str, exit_code: int, output: str,
+def _diagnose_shell_failure(command: str, cwd: str, exit_code: int | None, output: str,
                             *, output_source: str, parse_command,
                             env: dict[str, str] | None = None):
     candidate = _shell_failure_candidate(command, cwd, exit_code, output, parse_command, env)
@@ -695,6 +701,19 @@ def _hook_fields(payload: dict, harness: str):
 
 
 def diagnose_hook_payload(payload: dict, harness: str) -> dict | None:
+    if (harness == "codex" and payload.get("hook_event_name") == "PostToolUse"
+            and payload.get("tool_name") == "Bash"
+            and isinstance(payload.get("tool_response"), str)):
+        # Codex runs PostToolUse after a Bash command that exits non-zero too, but its
+        # tool_response is the model-facing output text with no exit status
+        # (https://learn.chatgpt.com/docs/hooks#posttooluse).
+        inputs = payload.get("tool_input")
+        return _diagnose_shell_failure(
+            inputs.get("command") if isinstance(inputs, dict) else None,
+            payload.get("cwd"), None, payload["tool_response"],
+            output_source="Codex PostToolUse output (no exit status reported)",
+            parse_command=_codex_command_argv,
+        )
     if harness == "opencode":
         name = payload.get("tool_name")
         inputs = payload.get("tool_input")
