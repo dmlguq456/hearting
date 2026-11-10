@@ -1,4 +1,6 @@
-# Lists that every PR only appends to: Git keeps both sides' new lines instead
-# of a conflict, so one landed PR does not block the next. Rows stay one name
-# per line; an out-of-order pair after a union is harmless to the census checks.
+# The census is one name per line, so Git keeps both sides' lines on a merge
+# instead of a conflict and one landed PR does not block the next. A union keeps
+# every line from both sides, not only additions: a name classified differently
+# by each side, or a row left for a utility the other side removed, is failed by
+# tools/check-utility-census.py (also run by check-adaptation-boundary.sh).
 tools/adaptation-census.tsv merge=union
