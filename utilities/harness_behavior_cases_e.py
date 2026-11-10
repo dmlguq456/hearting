@@ -1151,10 +1151,10 @@ try:
     out["network"] = bool(wrapper.nested_headless_network_enabled(ns))
     out["network_source"] = "codex dispatch-headless nested_headless_network_enabled"
 except Exception as exc:
-    from dispatch_contract_base import codex_standard_owner_network_enabled
-    out["network"] = bool(codex_standard_owner_network_enabled(
-        dispatch_depth=1, worker_type="owner", intensity=args["intensity"],
-        sandbox="workspace-write") or projection["task_publish_scope"])
+    from dispatch_contract_base import codex_owner_network_posture
+    out["network"] = bool(codex_owner_network_posture(
+        dispatch_depth=1, worker_type="owner", sandbox="workspace-write",
+        observation_only=bool(projection["observation_only"])))
     out["network_source"] = "fallback %s" % type(exc).__name__
 git_dir, common = commit_policy.worktree_git_dirs(args["worktree"])
 roots = [str(p) for p in (git_dir, common / "objects", common / "refs", common / "logs")]
@@ -1309,9 +1309,15 @@ class OwnerPublishScenario(Scenario):
         if not ran:
             run.note("a probe step never ran")
             return "inconclusive"
-        if all(row["pushed"] and row["network"] == "ok" for row in publishing):
-            return "pass"
-        return "fail"
+        if not all(row["pushed"] and row["network"] == "ok" for row in publishing):
+            return "fail"
+        # PG-51: a report-scope owner has the same posture on every harness (its
+        # scope is kept by the owner instruction), so it can also read what it
+        # reviews; a harness that blocks only this shape differs from the others.
+        if rows["report"]["network"] != "ok":
+            run.note("the report-scope owner has no network (PG-51)")
+            return "fail"
+        return "pass"
 
 
 def _port_open(port: int) -> bool:
@@ -1347,6 +1353,8 @@ class CustomAgentSpawnScenario(Scenario):
             names.update(re.findall(r'(?m)^model\s*=\s*"([^"]+)"', path.read_text(encoding="utf-8")))
         run.evidence["listed_agent_models"] = sorted(names)
         agents_dir = Path(run.home.env.get("CODEX_HOME", "/nonexistent"), "agents")
+        if run.harness == "codex":
+            run.evidence["activation_render"] = self.activation_render(run, agents_dir)
         shipped = agents_dir / f"{self.AGENT}.toml"
         if shipped.is_file():
             # The shipped Codex agent pins an account model the loopback provider
@@ -1360,6 +1368,32 @@ class CustomAgentSpawnScenario(Scenario):
             extra = getattr(module, "EXTRA_MODELS", None)
             if isinstance(extra, list) and hasattr(module, "ModelFixture"):
                 extra.extend(sorted(names - set(extra)))
+
+    @staticmethod
+    def activation_render(run, agents_dir: Path) -> dict:
+        """Project the agents as release activation does for this home's config.
+
+        A source install links the shipped files; activation renders each agent
+        for the home it installs into (`sync-native-agents.py --runtime-home`,
+        tools/install/runtime_activation.py), which is what a user runs. The
+        rendered file replaces the link; it never writes through it into the tree.
+        """
+        home = Path(run.home.env["CODEX_HOME"])
+        done = subprocess.run([sys.executable, "-B",
+                               str(_base().SOURCE / "adapters/codex/bin/sync-native-agents.py"),
+                               "--runtime-home", str(home), "--json"], env=run.home.env,
+                              text=True, capture_output=True, timeout=120)
+        if done.returncode != 0:
+            return {"error": done.stderr[-400:]}
+        rows = {}
+        for row in json.loads(done.stdout)["agents"]:
+            rows[row["name"]] = {"status": row["status"], "pinned": bool(row.get("model"))}
+            if row["status"] == "rendered":
+                dest = agents_dir / row["dest_name"]
+                if dest.is_symlink() or dest.exists():
+                    dest.unlink()
+                dest.write_text(row["content"], encoding="utf-8")
+        return rows
 
     def markers(self, mode: str):
         return (f"SCENARIO-AGENT-MAIN-{mode}-{self.nonce}",
@@ -1449,6 +1483,11 @@ class CustomAgentSpawnScenario(Scenario):
             return "fail"
         good = all(ev[m]["sub_requests"] and ev[m]["discovered"] and ev[m]["shell_ran"]
                    and ev[m]["parent_saw_result"] for m in ("tui", "headless"))
+        if any(ev[m].get("shipped_agent_unavailable") for m in ("tui", "headless")):
+            # PG-52: the installed agent itself must spawn; the fixture-model copy
+            # only keeps measuring discovery, approval and headless behind it.
+            run.note("the installed agent was refused (PG-52)")
+            return "fail"
         return "pass" if good and not ev["tui"]["approval_prompt_on_screen"] else "fail"
 
 
