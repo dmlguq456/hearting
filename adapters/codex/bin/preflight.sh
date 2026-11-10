@@ -818,15 +818,15 @@ runtime_surface=codex-native-mcp
 status=native-runtime-config
 mcp_surface=codex mcp
 config_surface=$CODEX_HOME/config.toml
-design_mcp_projection=policy-not-adopted-approval-gated
+design_mcp_projection=manual-registration-exec-approved
 design_mcp_registration=stdio-mcp_servers.design-node-server.js
-design_mcp_exec_gate=noninteractive-exec-approval-blocks-tool-calls
+design_mcp_exec_approval=mcp_servers.design.default_tools_approval_mode=approve
 design_mcp_convert=adapters/codex/bin/preflight.sh convert <pdf|bundle|pptx> <file.html>
 design_mcp_guidance=adapters/codex/ADAPTATION.md
 claude_settings_mcp=unsupported
 tool_contract_check=adapters/codex/bin/preflight.sh mcp --check
-fallback=use-adapter-visual-harness-or-register-design-mcp-under-approval-policy
-note=Codex can register the design MCP server (stdio [mcp_servers.design], node server.js) and its tools are discoverable and consume screenshots, but the adapter defaults to the owned visual harness; noninteractive codex exec auto-denies MCP tool calls until an approval/trust policy allows them. Do not copy Claude settings.json MCP registrations wholesale; see the MCP section of adapters/codex/ADAPTATION.md for the registration + approval path.
+fallback=use-adapter-visual-harness-when-the-design-mcp-server-is-not-registered
+note=Registering the design MCP server (stdio [mcp_servers.design], node server.js) stays manual. Release activation sets default_tools_approval_mode = "approve" on that one server when the user has not set it, so the render loop (preview, getConsoleLogs, screenshot, view_image) also runs in noninteractive codex exec, where approval_policy = "never" otherwise rejects every call. Without the server the owned visual harness is the path. Do not copy Claude settings.json MCP registrations wholesale; see the MCP section of adapters/codex/ADAPTATION.md.
 EOF
     if [ "$check_only" -eq 0 ]; then
       exit 0

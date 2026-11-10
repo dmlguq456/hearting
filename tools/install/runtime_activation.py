@@ -794,6 +794,17 @@ def _bytes_sha256(path: Path) -> str:
         return "absent"
 
 
+def _native_agent_plan_key(runtime: str, active_root: Path, home: Path) -> tuple:
+    return (
+        runtime, str(active_root), str(home),
+        _bytes_sha256(home / "agent-config" / "models.conf"),
+        _bytes_sha256(active_root / "adapters" / runtime / "config" / "models.conf"),
+        # The Codex renderer fits its model pins to the providers these files select.
+        _bytes_sha256(home / "config.toml"),
+        tuple((path.name, _bytes_sha256(path)) for path in native_agents.codex_profile_configs(home)),
+    )
+
+
 def _native_agent_entries(
     runtime: str, active_root: Path, home: Path
 ) -> tuple[List[dict], List[str]]:
@@ -812,20 +823,31 @@ def _native_agent_entries(
     if not (active_root / "utilities" / "native_agents.py").is_file() or not renderer.is_file():
         return _shipped_agent_links(runtime, active_root, home, projected), []
 
-    key = (
-        runtime, str(active_root), str(home),
-        _bytes_sha256(home / "agent-config" / "models.conf"),
-        _bytes_sha256(active_root / "adapters" / runtime / "config" / "models.conf"),
-        # The Codex renderer fits its model pins to the providers these files select.
-        _bytes_sha256(home / "config.toml"),
-        tuple((path.name, _bytes_sha256(path)) for path in native_agents.codex_profile_configs(home)),
-    )
+    key = _native_agent_plan_key(runtime, active_root, home)
     if key not in _NATIVE_AGENT_PLANS:
         if len(_NATIVE_AGENT_PLANS) > 32:
             _NATIVE_AGENT_PLANS.clear()
         _NATIVE_AGENT_PLANS[key] = _run_native_agent_plan(runtime, active_root, home, renderer, projected)
-    entries, lines = _NATIVE_AGENT_PLANS[key]
+    entries, lines = _NATIVE_AGENT_PLANS[key][:2]
     return [dict(entry) for entry in entries], list(lines)
+
+
+def _native_agent_default(runtime: str, active_root: Path, home: Path) -> Optional[dict]:
+    """The renderer's native sub-agent role default for this home (PG-13), or None.
+
+    A source whose renderer predates the field, or a plan that cannot run, yields None:
+    the runtime then keeps its own default and nothing is written for it.
+    """
+    try:
+        _native_agent_entries(runtime, active_root, home)
+    except ActivationError:
+        return None
+    plan = _NATIVE_AGENT_PLANS.get(_native_agent_plan_key(runtime, active_root, home))
+    value = plan[2] if plan and len(plan) > 2 else None
+    if isinstance(value, dict) and value and all(
+            isinstance(k, str) and isinstance(v, str) and v for k, v in value.items()):
+        return dict(value)
+    return None
 
 
 def _run_native_agent_plan(
@@ -840,6 +862,7 @@ def _run_native_agent_plan(
             tail = " ".join((proc.stderr or proc.stdout).strip().splitlines()[-3:])
             raise ActivationError(f"{runtime} native agent render failed: {tail[:300]}")
         plan = json.loads(proc.stdout)
+        default_subagent = plan.get("default_subagent")
         rows = plan["agents"]
         static_names = set(plan["static_names"])
         if plan["schema"] != "hearting.native-agents/v1" or not isinstance(rows, list):
@@ -861,6 +884,12 @@ def _run_native_agent_plan(
                         or Path(relpath).is_absolute():
                     raise ValueError(f"unsafe agent path for {name}")
                 shipped = agents_dir / relpath
+                if status == "shipped" and runtime == "codex":
+                    # Codex 0.163.0 opens a role file without following links and
+                    # refuses a linked one ("agent type is currently not available";
+                    # log: "failed to apply role to config: Symbolic link loop"), so
+                    # its agents are written as files even when they equal the shipped.
+                    status, row = "rendered", {**row, "content": shipped.read_text(encoding="utf-8")}
                 if status == "shipped":
                     entries.append(_entry(shipped, home / "agents" / dest_name, "agent"))
                 else:
@@ -872,7 +901,7 @@ def _run_native_agent_plan(
                     entries.append(entry)
             else:
                 lines.append(f"{runtime} native agent {name} {status}: {row.get('reason', '')}")
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OSError) as exc:
             raise ActivationError(f"{runtime} native agent plan row unusable: {exc}") from exc
     # Hand-written shipped definitions the renderer never decides (Claude memory-scout).
     entries.extend(_shipped_agent_links(runtime, active_root, home, static_names))
@@ -880,7 +909,7 @@ def _run_native_agent_plan(
         lines.append(f"{runtime} native agent {name} not-in-selected-catalog: "
                      "the selected models.conf does not list it, so no definition is projected")
     entries.sort(key=lambda entry: entry["dest"])
-    return entries, lines
+    return entries, lines, default_subagent
 
 
 def _linked_entries(
@@ -2201,6 +2230,168 @@ def _codex_feature_remove(text: str, record: Optional[dict]) -> str:
     return stripped
 
 
+def _toml_key(name: str) -> str:
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name)
+
+
+def _codex_table(data: dict, table: tuple):
+    """The table at ``table`` in parsed ``data``; ``None`` when absent, ``False`` when not a table."""
+    node = data
+    for part in table:
+        if not isinstance(node, dict):
+            return False
+        if part not in node:
+            return None
+        node = node[part]
+    return node if isinstance(node, dict) else False
+
+
+def _codex_table_keys_insert(text: str, table: tuple, values: dict, previous: Optional[dict], *,
+                             create_table: bool):
+    """``(text, record)``: add ``values`` under ``[table]`` without touching a user byte.
+
+    Any of the keys already present is the user's (or this receipt's own, which is carried
+    while its lines still hold the recorded values); nothing is added then. A missing table
+    is created at the end only with ``create_table``. Every candidate is parsed and may
+    differ from the original only by these keys; anything else leaves the text as it is.
+    """
+    import copy
+    import tomllib
+
+    try:
+        data = tomllib.loads(text) if text.strip() else {}
+    except ValueError:
+        return text, None
+    current = _codex_table(data, table)
+    if current is False or (current is None and not create_table):
+        return text, None
+    if current and any(key in current for key in values):
+        carried = previous if isinstance(previous, dict) and previous.get("lines") else None
+        if carried and (carried.get("values") != values or text.count(carried["lines"]) != 1
+                        or any(current.get(key) != value for key, value in values.items())):
+            carried = None
+        return text, carried
+    lines = "".join(f"{_toml_key(key)} = {json.dumps(value)}\n" for key, value in values.items())
+    expected = copy.deepcopy(data)
+    node = expected
+    for part in table:
+        node = node.setdefault(part, {})
+    node.update(values)
+
+    def accepted(candidate: str) -> bool:
+        try:
+            return tomllib.loads(candidate) == expected
+        except ValueError:
+            return False
+
+    dotted = ".".join(_toml_key(part) for part in table)
+    header_re = re.compile(r"(?m)^[ \t]*\[[ \t]*" + r"[ \t]*\.[ \t]*".join(
+        r"(?:%s|\"%s\"|'%s')" % (re.escape(part), re.escape(part), re.escape(part)) for part in table)
+        + r"[ \t]*\][ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
+    for match in header_re.finditer(text):
+        lead = "" if match.group(0).endswith("\n") else "\n"
+        candidate = text[:match.end()] + lead + lines + text[match.end():]
+        if accepted(candidate):
+            return candidate, {"table": list(table), "values": dict(values), "lines": lines, "header": ""}
+    if current is not None and not create_table:
+        return text, None
+    header = ("" if not text or text.endswith("\n") else "\n") + ("\n" if text else "")
+    header += f"[{dotted}]\n"
+    candidate = text + header + lines
+    if accepted(candidate):
+        return candidate, {"table": list(table), "values": dict(values), "lines": lines, "header": header}
+    return text, None
+
+
+def _codex_table_keys_remove(text: str, record: Optional[dict]) -> str:
+    """Remove only a receipt's own key lines (and its created header once the table is empty).
+
+    A key the user changed or removed leaves the text as it is.
+    """
+    import copy
+    import tomllib
+
+    if not isinstance(record, dict) or not isinstance(record.get("lines"), str) \
+            or not isinstance(record.get("values"), dict) or not isinstance(record.get("table"), list):
+        return text
+    table, values, lines = tuple(record["table"]), record["values"], record["lines"]
+    try:
+        data = tomllib.loads(text) if text.strip() else {}
+    except ValueError:
+        return text
+    current = _codex_table(data, table)
+    if not current or any(current.get(key) != value for key, value in values.items()) \
+            or text.count(lines) != 1:
+        return text
+    expected = copy.deepcopy(data)
+    node = _codex_table(expected, table)
+    for key in values:
+        del node[key]
+    candidate = text.replace(lines, "", 1)
+    try:
+        if tomllib.loads(candidate) != expected:
+            return text
+    except ValueError:
+        return text
+    header = record.get("header")
+    if isinstance(header, str) and header:
+        # The created header goes only while its table holds no user key: removing it must
+        # parse to the same data (a table implied by its sub-tables), or to the data without
+        # the now-empty table.
+        accepted = [expected]
+        if not node:
+            without = copy.deepcopy(expected)
+            parent = without
+            for part in table[:-1]:
+                parent = parent[part]
+            del parent[table[-1]]
+            accepted.append(without)
+        position = candidate.find(header)
+        while position != -1:
+            stripped = candidate[:position] + candidate[position + len(header):]
+            try:
+                if tomllib.loads(stripped) in accepted:
+                    return stripped
+            except ValueError:
+                pass
+            position = candidate.find(header, position + 1)
+    return candidate
+
+
+# Keys Hearting sets in Codex's config so its sessions behave as the other runtimes do,
+# each only where the user has not set it. (record name, table, create a missing table)
+#   design-mcp-approval: a registered `[mcp_servers.design]` server's tools run in
+#     noninteractive `codex exec` too (`approval_policy = "never"` otherwise rejects every
+#     call, PG-23). Only that one server; registering it stays the user's choice.
+#   subagent-default: a sub-agent spawned with no model gets the role default instead of the
+#     session model (PG-13); from the activated renderer, None where the home cannot serve it.
+CODEX_DESIGN_MCP_APPROVAL = {"default_tools_approval_mode": "approve"}
+
+
+def _codex_managed_keys(active_root: Path, scope: str) -> List[tuple]:
+    home = paths.runtime_home("codex", scope)
+    return [
+        ("design_mcp_approval", ("mcp_servers", "design"), CODEX_DESIGN_MCP_APPROVAL, False),
+        ("subagent_default", ("agents",), _native_agent_default("codex", active_root, home), True),
+    ]
+
+
+def _merge_codex_managed_keys(text: str, active_root: Path, scope: str, previous: dict):
+    """``(text, records)`` after applying `_codex_managed_keys` to ``text``."""
+    records = {}
+    for name, table, values, create in _codex_managed_keys(active_root, scope):
+        prior = previous.get(name) if isinstance(previous, dict) else None
+        if isinstance(prior, dict) and prior.get("values") != values:
+            text = _codex_table_keys_remove(text, prior)
+            prior = None
+        if not values:
+            continue
+        text, record = _codex_table_keys_insert(text, table, values, prior, create_table=create)
+        if record:
+            records[name] = record
+    return text, records
+
+
 def _codex_identity_fragment(active_root: Path):
     """``(block_body, set_values, excluded_keys)`` of the shipped fragment, or ``None``.
 
@@ -2485,6 +2676,9 @@ def _unmerge_codex_identity_config(
     remaining = codex_tui_config.restore_startup_update_default_text(
         text, record.get("startup_default") if isinstance(record, dict) else None)
     remaining = _codex_feature_remove(remaining, feature)
+    config_keys = record.get("config_keys") if isinstance(record, dict) else None
+    for key_record in (config_keys or {}).values() if isinstance(config_keys, dict) else ():
+        remaining = _codex_table_keys_remove(remaining, key_record)
     try:
         remaining = codex_tui_config.restore_status_line_text(remaining, managed.get("codex_tui"))
     except codex_tui_config.CodexTuiConfigError:
@@ -2812,6 +3006,15 @@ def _prepare_runtime_config(
                 managed_config = result.get("managed_config")
                 managed_config = dict(managed_config) if isinstance(managed_config, dict) else {}
                 managed_config["startup_default"] = startup_record
+                result["managed_config"] = managed_config
+            before_keys = updated
+            updated, key_records = _merge_codex_managed_keys(
+                updated, active_root, scope, prior_identity.get("config_keys") or {})
+            result["managed_keys_changed"] = updated != before_keys
+            if key_records:
+                managed_config = result.get("managed_config")
+                managed_config = dict(managed_config) if isinstance(managed_config, dict) else {}
+                managed_config["config_keys"] = key_records
                 result["managed_config"] = managed_config
             if updated != original:
                 _atomic_codex_config_text(config, updated)

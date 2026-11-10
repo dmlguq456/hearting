@@ -93,6 +93,17 @@ symlink, a differing one is written as an activation-owned regular file, and an 
 whose model is main-session-only in that config gets no file. Keep your own agents
 under other names.
 
+Sub-agent role default (PG-13). OpenCode gives a subagent with no configured model
+the parent session's model, and its `subagent` tool takes no model
+(https://opencode.ai/docs/agents/, https://opencode.ai/docs/tools/). Hearting's
+catalog agents carry their model in the file; the built-in `general` and `explore`
+get the portable `light` profile of the selected `models.conf` from the plugin —
+V2 through `ctx.agent.transform` (an agent's `model` is `{ providerID, id }`), V1
+through the `config` hook — only while the session model (the `model` the config
+files select) uses the same provider, and never over a model the user set for
+them. `utilities/opencode_context_window.py --subagent-default` resolves it.
+Measured with `utilities/harness_behavior_scenarios.py --scenario subagent-model`.
+
 Before adding or changing OpenCode-native skills, commands, or agents:
 
 1. Use `capabilities/<name>.md` and `roles/` as source, not

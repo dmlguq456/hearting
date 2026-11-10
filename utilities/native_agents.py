@@ -60,6 +60,9 @@ class Format:
     # (selected config, runtime home) -> the config to render for that home; None keeps it.
     # Lets an adapter fit its pins to what that home's runtime can serve (Codex, PG-52).
     runtime_config: Optional[Callable[[Mapping[str, str], Path], Mapping[str, str]]] = None
+    # (config fitted to the home) -> the role default a sub-agent spawned with no
+    # model of its own gets, or None where this home cannot serve it (PG-13).
+    default_subagent: Optional[Callable[[Mapping[str, str]], Optional[dict]]] = None
 
     @property
     def label(self) -> str:
@@ -83,6 +86,32 @@ class Agent:
     reason: str = ""
     body: str = ""
     model: Optional[str] = None
+
+
+# The portable profile a native sub-agent gets when neither the spawn nor its
+# agent definition names a model. Claude realizes it with
+# `hooks/subagent-model-default.sh` (CFG_NATIVE_SUBAGENT=light); Codex with
+# `[agents] default_subagent_model`; OpenCode by giving its built-in subagents
+# that model (PG-13, core/ADAPTATION.md §10).
+NATIVE_SUBAGENT_PROFILE = "light"
+
+
+def native_subagent_default(adapter: str, cfg: Mapping[str, str]) -> Optional[dict]:
+    """``{"model", "budget"}`` of the native sub-agent role default, or None.
+
+    None when the selected config cannot resolve the profile or names a
+    main-session-only model for it: a sub-agent then keeps the runtime's own
+    behavior instead of a model it must not use.
+    """
+    try:
+        resolved = model_profile.resolve_profile_values(adapter, cfg, NATIVE_SUBAGENT_PROFILE)
+    except model_profile.ModelProfileError:
+        return None
+    model = str(resolved.get("model") or "").strip()
+    if not model or model_config.restricted_model(
+            model, cfg.get("CFG_MAIN_SESSION_ONLY_MODELS", "").split()):
+        return None
+    return {"model": model, "budget": str(resolved.get("budget") or "")}
 
 
 def catalog_tokens(cfg: Mapping[str, str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -211,6 +240,7 @@ def runtime_plan(fmt: Format, runtime_home: Path) -> dict:
     return {
         "schema": SCHEMA,
         "adapter": fmt.adapter,
+        "default_subagent": fmt.default_subagent(cfg) if fmt.default_subagent else None,
         "config": {"source": receipt.source, "reason": receipt.reason, "path": receipt.selected_path},
         "static_names": list(fmt.static_names),
         "agents": rows,

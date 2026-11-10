@@ -211,6 +211,24 @@ def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[s
     return render_catalog_agent(name, profile, cfg)
 
 
+def default_subagent(cfg: Mapping[str, str]) -> Optional[dict]:
+    """`[agents] default_subagent_model`/`_reasoning_effort` for this home (PG-13).
+
+    Codex gives a spawn with no model and an agent with no `model` the parent's
+    model; this default takes its place (an explicit spawn model and an agent
+    file's own `model` still win). Same provider rule as the pins: Codex checks
+    the default against its own model list and refuses every such spawn when it
+    is not there, so a home that can select another provider gets none.
+    """
+    if cfg.get(UNPINNED_KEY):
+        return None
+    resolved = native_agents.native_subagent_default("codex", cfg)
+    if resolved is None:
+        return None
+    return {"default_subagent_model": resolved["model"],
+            "default_subagent_reasoning_effort": resolved["budget"]}
+
+
 FORMAT = native_agents.Format(
     adapter="codex",
     kernel_names=tuple(harness_manifest.load()["kernel"]["agents"]),
@@ -220,6 +238,7 @@ FORMAT = native_agents.Format(
     render=render,
     collect_glob="*.toml",
     runtime_config=runtime_config,
+    default_subagent=default_subagent,
 )
 
 
