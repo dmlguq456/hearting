@@ -353,7 +353,9 @@ carrier opens no further turn for it (log `resend_limit_reached`, then
 `resend-limit-deferred`): the record stays owed, and the session's next natural turn
 carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
 it in that turn's context, a completed tool of a running turn appends it to the result,
-and either acks it there. The count lives in the plugin, so a service restart allows the
+and either acks it there. A natural turn that comes while the limited send's claim is
+still live takes that exact claim over (the shared `settle` revalidates owner, lease and
+recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
 limit again; nothing is dropped. Measured with the history read forced empty: before the
 limit, one turn per expired lease without end (300 s: 3, 450 s: 4); after it, 2 turns and
 then none (450 s: 2), the next user prompt carried and acked it. A receipt that is only

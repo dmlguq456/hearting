@@ -1846,10 +1846,13 @@ function createCompletionCarrier(ctx) {
   // sid -> delivery ids that reached CARRIER_UNOBSERVED_SEND_LIMIT (in-turn only).
   const unobservedSends = new Map()
   const deferred = new Map()
+  // delivery_id -> {record, text} of the limited send: its claim may still be live,
+  // and the next natural turn takes that claim over instead of claiming anew.
+  const heldSends = new Map()
   const deferredIds = sid => deferred.get(sid) || new Set()
   const forgetDeferred = (sid, ids) => {
     const held = deferred.get(sid)
-    for (const id of ids) { unobservedSends.delete(id); held?.delete(id) }
+    for (const id of ids) { unobservedSends.delete(id); heldSends.delete(id); held?.delete(id) }
     if (held && !held.size) deferred.delete(sid)
   }
   let roots = null
@@ -2117,6 +2120,7 @@ function createCompletionCarrier(ctx) {
           if (count >= CARRIER_UNOBSERVED_SEND_LIMIT) {
             if (!deferred.has(sid)) deferred.set(sid, new Set())
             deferred.get(sid).add(record.delivery_id)
+            heldSends.set(record.delivery_id, { record, text: beforeSend.text })
             limited.push(record.delivery_id)
           }
         }
@@ -2191,7 +2195,21 @@ function createCompletionCarrier(ctx) {
       busy.add(sid)
       try {
         const messages = await compactMessages(ctx, sid)
-        const claimed = await command("deliver", sid, { messages: Array.isArray(messages) ? messages : [] })
+        const history = Array.isArray(messages) ? messages : []
+        // The limited send still holds its claim lease (a fresh claim is refused until
+        // it expires). Take that exact claim over: settle revalidates the record, its
+        // claim owner, live lease and recipient, and returns only what is still owed.
+        // An expired or changed claim comes back empty and the ordinary claim follows.
+        let claimed = null
+        const sends = [...deferredIds(sid)].map(id => heldSends.get(id)).filter(Boolean)
+        const sent = sends.find(item => item.text)
+        if (sent) {
+          const inherited = await command("settle", sid, {
+            records: sends.map(item => item.record), messages: history, text: sent.text })
+          forgetDeferred(sid, inherited?.received_ids || [])
+          if (inherited?.text && inherited.records?.length && !inherited.unknown_ids?.length) claimed = inherited
+        }
+        if (!claimed) claimed = await command("deliver", sid, { messages: history })
         if (!claimed?.text || !Array.isArray(claimed.records) || !claimed.records.length) return ""
         const acked = await command("ack", sid, { records: claimed.records })
         const ids = claimed.records.map(record => record.delivery_id)

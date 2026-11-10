@@ -513,6 +513,145 @@ try {
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_natural_turn_takes_over_the_live_claim_right_after_the_resend_limit(self):
+        # The review's gap (RV-PR1454): the limited second send still holds its
+        # 120-second claim lease, and a fresh claim is refused while it lives. A
+        # completed tool result or the user's next prompt arriving in that window
+        # must carry the body on that very turn by taking the exact claim over
+        # (settle revalidates owner, lease and recipient), then ack it once.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            script = root / "takeover.mjs"
+            script.write_text(r"""
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {createHash} from 'node:crypto'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const extract = (start, end) => {
+  const a = source.indexOf(start), b = source.indexOf(end, a)
+  assert(a >= 0 && b > a, `missing actual source: ${start}`)
+  return source.slice(a, b)
+}
+const limit = Number(/const CARRIER_UNOBSERVED_SEND_LIMIT = (\d+)/.exec(source)[1])
+const LEASE = 120
+const body = 'Hearting runtime delivery\nHEARTING_RECEIPT_V1 delivery-fixture ' + '0'.repeat(64)
+async function run(boundary, {expireFirst = false} = {}) {
+  // A shared-sweep stand-in that keeps the real lease rule: a live claim is not
+  // claimable again, and only its exact owner may settle, release or hand it on.
+  let now = 0, owners = 0, writes = 0, tick
+  const store = {state: 'pending', owner: null, deadline: 0, acked_by: null}
+  const actions = [], logs = []
+  const live = () => store.state === 'claimed' && now < store.deadline
+  const view = () => ({root: '/fixture', storage_key: 'B', delivery_id: 'delivery-fixture',
+    claim_owner: store.owner, immutable_identity: {delivery_id: 'delivery-fixture'}})
+  const command = async (action, sid, data) => {
+    actions.push(action)
+    if (action === 'roots') return ['/fixture']
+    if (action === 'recipients')
+      return {generation: 'g', digests: [], delivery_ids: sid === 'B' && store.state !== 'acked' ? ['delivery-fixture'] : []}
+    if (action === 'deliver') {
+      if (sid !== 'B' || store.state === 'acked' || live()) return {text: '', records: []}
+      store.state = 'claimed'; store.owner = 'owner-' + (++owners); store.deadline = now + LEASE
+      return {text: body, records: [view()]}
+    }
+    if (action === 'settle') {
+      const records = (data.records || []).filter(r => sid === 'B' && live() && r.claim_owner === store.owner)
+      const unknown = (data.records || []).filter(r => !records.includes(r)).map(r => r.delivery_id)
+      if (unknown.length) {
+        for (const r of data.records || []) if (store.state === 'claimed' && r.claim_owner === store.owner) store.state = 'pending'
+        return {received_ids: [], settled_count: 0, unknown_ids: unknown, text: '', records: []}
+      }
+      return {received_ids: [], settled_count: 0, unknown_ids: [], text: records.length ? body : '', records}
+    }
+    if (action === 'release') {
+      for (const r of data.records || []) if (store.state === 'claimed' && r.claim_owner === store.owner) store.state = 'pending'
+      return {count: 1}
+    }
+    if (action === 'ack') { store.state = 'acked'; store.acked_by = sid; return {count: data.records.length} }
+    throw Error('unexpected ' + action)
+  }
+  const nativeResponse = data => ({data, response: {ok: true, status: 200}})
+  const session = {
+    get: async () => nativeResponse({id: 'B', projectID: 'fixture', directory: process.cwd(),
+      slug: 'fixture', title: 'fixture', version: '1', time: {created: 1, updated: 1}}),
+    status: async () => nativeResponse({B: {type: 'idle'}}),
+    messages: async () => nativeResponse([]),
+    promptAsync: async () => { writes++; return {response: {ok: true, status: 204}} },
+  }
+  const ctx = {directory: process.cwd(), client: {session, app: {log: async row => logs.push(row.body.extra)}}}
+  const sync = (action, sid, data) => {
+    actions.push(action)
+    return {received_ids: [], settled_count: 0, unknown_ids: [], text: data.text, records: data.records}
+  }
+  const carrierCommand = (action, sid, data, observe, synchronous = false) =>
+    synchronous ? sync(action, sid, data) : command(action, sid, data)
+  const realTimeout = setTimeout
+  const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'readFileSync',
+    'realpathSync', 'createHash', 'setInterval', 'setTimeout', 'baseDir', 'isWorkerSession', 'pendingPeerDelivery',
+    `let paneNativeOrigin = {sid: 'B', directory: ctx.directory, state: 'pending'};
+     const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
+     let paneOwningContext = ctx;
+     const pendingPeerStatus = new Map();
+     const sessionInfoById = new Map(), v2SessionInfo = new Map();
+     ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
+     ${extract('function sdkResponseData(result)', 'function runCompactHook')}
+     ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
+     ${extract('const CARRIER_ENV =', '// One bounded sweep step')}
+     ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
+     return createCompletionCarrier(ctx);`)
+  const fastTimeout = (fn, ms) => realTimeout(fn, ms === 500 ? 0 : ms)
+  const carrier = setup(ctx, carrierCommand, path, fs.readdirSync, fs.readFileSync, fs.realpathSync,
+    createHash, fn => {tick = fn; return {unref(){}}}, fastTimeout, x => x.directory, () => false, async () => {})
+  carrier.env('B')
+  carrier.status('B', 'idle')
+  const drain = async () => {for (let i = 0; i < 200; i++) await new Promise(resolve => realTimeout(resolve, 0))}
+  try {
+    // Real ordering: one send per expired lease, 5-second ticks in between refuse a re-claim.
+    for (let pass = 0; pass < limit; pass++) {
+      tick(); await drain()
+      assert.equal(writes, pass + 1, JSON.stringify({pass, writes, actions, logs}))
+      now += 5; tick(); await drain()
+      assert.equal(writes, pass + 1)
+      if (pass + 1 < limit) now += LEASE
+    }
+    assert(logs.some(row => row.reason === 'sent-unobserved-held' && row.resend_limit_reached))
+    assert.equal(store.state, 'claimed')
+    assert(live(), 'the limited claim is still live')
+    if (expireFirst) {
+      // Control: the claim lease ends first; idle ticks still open no turn of their own.
+      now += LEASE + 5; tick(); await drain(); tick(); await drain()
+      assert.equal(writes, limit)
+    }
+    // The foreign session never gets the body or an ACK.
+    assert.equal(await carrier.inTurn('C'), '')
+    assert.notEqual(store.state, 'acked')
+    now += 1
+    // The natural turn arrives while the limited claim lives (boundary: a completed
+    // tool of the running turn, or the user's next prompt).
+    if (boundary === 'tool') carrier.status('B', 'busy')
+    const text = await carrier.inTurn('B')
+    assert.equal(text, body, JSON.stringify({boundary, actions, logs, store}))
+    assert.equal(store.state, 'acked')
+    assert.equal(store.acked_by, 'B')
+    assert.equal(await carrier.inTurn('B'), '')
+    carrier.status('B', 'idle'); tick(); await drain()
+    assert.equal(writes, limit)
+    return {boundary, expireFirst, writes, owners}
+  } finally { carrier.dispose(true) }
+}
+const out = []
+for (const boundary of ['tool', 'user']) out.push(await run(boundary))
+out.push(await run('user', {expireFirst: true}))
+console.log(JSON.stringify(out))
+""")
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_post_tool_context_reads_a_flushed_line_after_the_timeout_kill(self):
         node = shutil.which("node")
         self.assertIsNotNone(node, "node is required for behavioral carrier checks")
