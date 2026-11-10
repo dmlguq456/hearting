@@ -143,6 +143,8 @@ USER_PATH_CASES = (
     ("codex-post-tool", CODEX_HOOKS / "posttooluse-interaction-clear.py", "PostToolUse", ()),
     ("codex-start-receipt", CODEX_HOOKS / "start-receipt-context.py", "PostToolUse", ()),
     ("codex-stop", CODEX_HOOKS / "stop-lifecycle.py", "Stop", ()),
+    ("codex-turn-post-tool", CODEX_HOOKS / "turn-carrier.py", "PostToolUse", ("post-tool",)),
+    ("codex-turn-stop", CODEX_HOOKS / "turn-carrier.py", "Stop", ("stop",)),
 )
 GROWTH_RULES = ("growth", "stats")
 # A listed case may keep its recorded linear growth, never more: scale 2 doubles
