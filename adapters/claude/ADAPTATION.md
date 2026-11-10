@@ -383,7 +383,12 @@ example in `settings.json` `env`) turns the gate off.
 `Stop` runs `hooks/turn-change-record.py end`; both start the detached shared
 step `utilities/turn_change_record.py` with the payload `session_id` and `cwd`
 and return silently (`core/HOOKS.md`). Claude runs no `Stop` after a user
-interrupt, so an interrupted turn is not compared. The native plugin channel
+interrupt, so an interrupted turn is not compared: the hooks reference says
+`Stop` "Does not run if the stoppage occurred due to a user interrupt", lists
+no interrupt event, and a cancelled running tool fires no `PostToolUseFailure`
+(https://code.claude.com/docs/en/hooks#stop, #posttoolusefailure; checked
+2026-11-11). This is a runtime limit (PG-36); Codex (`Interrupt`) and OpenCode
+(`session.execution.interrupted`) record such a turn. The native plugin channel
 does not carry it, for the gate's reason above.
 
 ## Model Mapping

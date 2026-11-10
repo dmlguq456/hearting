@@ -167,8 +167,9 @@ class SessionShellTest(unittest.TestCase):
         for harness in ("claude", "codex"):
             with self.subTest(harness=harness), mock.patch.object(shell, "lifecycle") as report:
                 sid = "00000000-0000-4000-8000-000000000052"
-                env = dict(os.environ, HEARTING_SHELL_SOCKET=str(self.root / "native.sock"),
-                           HEARTING_SHELL_TOKEN="synthetic-private-control-token")
+                # Model a main TUI callback; the runner may itself be a worker.
+                env = {"HEARTING_SHELL_SOCKET": str(self.root / "native.sock"),
+                       "HEARTING_SHELL_TOKEN": "synthetic-private-control-token"}
                 session_tidy.run_hook(harness, "start", sid, source="resume",
                                       cwd=str(self.root), env=env)
                 report.assert_called_once_with(harness, "start", sid, env=env)

@@ -90,7 +90,9 @@ let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
 let displaySequence=0,nativeMcp;
 function binding() {
-  return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
+  // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
+  // session lookup can match it, so nothing is ever delivered to an old session.
+  return {schema:'hearting-session-shell-v1',harness,sid:sid||'-',incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
     broker_pid:Number(process.env.HEARTING_SHELL_BROKER_PID),broker_start:process.env.HEARTING_SHELL_BROKER_START};
 }
@@ -106,7 +108,7 @@ function live() { const row = native && processRow(native.pid); return !!row && 
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
-  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
+  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
     // Startup display replies are finite, asynchronous reads. A busy backend
@@ -134,16 +136,34 @@ function nativeSelectionFrame() {
   const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
     'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
   if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  // Codex 0.163 draws a configured status line with no help row under an idle
+  // composer. Accept exactly the row pane_ownership._codex_status_only accepts
+  // (whole thread-id first, then Context or the repeated unnamed-thread title;
+  // a warning or key hint may follow).
+  const uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const statusOnly=row=>{
+    const fields=row.split('·').map(value=>value.trim());
+    if(fields.length<2||!new RegExp('^'+uuid+'$').test(fields[0]))return false;
+    if(new RegExp('^'+uuid+' · (?:[^·]* · )*Context \\p{Nd}{1,3}% used(?: ·|$)','u').test(row))return true;
+    const repeated=fields[1].split(/\s+/).filter(Boolean)[0]||'';
+    return repeated===fields[0]||repeated.endsWith('…')&&repeated.length>8
+      &&fields[0].startsWith(repeated.slice(0,-1));
+  };
+  // Pass on the accepted row's layout with every identity-shaped word (whole or
+  // clipped thread-id) in place and nothing dropped; any other word becomes "?".
+  // Whether ids repeat or conflict is decided once, by the Python reader.
+  const evidence=row=>row.replace(/(Context[ \u00a0]\p{Nd}{1,3}%[ \u00a0]used)|[^\s·]+/gu,(word,context)=>
+    context||/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f][0-9a-f-]{0,35}…)$/.test(word)?word:'?')
+    .replace(/\?(?:[^\S·]+\?)+/g,'?');
+  if(tail.length===1&&statusOnly(tail[0]))return {...frame,lines:['›',evidence(tail[0])]};
   const hint=tail[tail.length-1]||'';
   const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
   const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
   if(!help)return frame;
   if(tail.length!==2)return {...frame,invalid:true};
-  // Only identity-shaped tokens leave the native viewport. Titles, telemetry
+  // Only identity-shaped words leave the native viewport. Titles, telemetry
   // and even footer-shaped draft text never travel in this read-only response.
-  const fields=tail[0].split('·'),safe=value=>/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f-]{0,27}…)$/.test(value.trim())?value.trim():'?';
-  const status=fields.length===1?safe(fields[0]):safe(fields[0])+' · '+safe(fields[fields.length-1]);
-  return {...frame,lines:['›',status,help]};
+  return {...frame,lines:['›',evidence(tail[0]),help]};
 }
 let checkingNativeSelection=false,nativeSelectionRevision=-1;
 function observeNativeSelection() {
@@ -162,7 +182,11 @@ function observeNativeSelection() {
        ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
     return lifecycle({token,harness,pid:native.pid,start:native.start,
       sid:data.selected_sid,seq:sequence+1,event:'select'});
-  }).finally(()=>{checkingNativeSelection=false;});
+  }).finally(()=>{
+    checkingNativeSelection=false;
+    // A screen painted while this check ran was skipped; look at it once now.
+    if(nativeSelectionRevision!==screenRevision)observeNativeSelection();
+  });
 }
 function readAction(extra,operation='action') {
   // A person-requested read or answer may be slow. It must not queue ahead
@@ -727,9 +751,9 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    const old=binding();selection++;sid='';state='unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
-    backend.stdin.write(JSON.stringify({id:++callID,op:'unregister',binding:old})+'\n');rebuildDisplay();return {ok:true};
+    source('register');rebuildDisplay();return {ok:true};
   }
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
@@ -758,6 +782,8 @@ async function request(req) {
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
+  // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
+  if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
@@ -816,6 +842,8 @@ server.listen(socketPath,()=>{
   startupResult('STARTED');activated=true;process.stdin.resume();
   backend=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
   backend.on('error',rawRelay);backend.on('exit',rawRelay);backend.stdin.on('error',()=>{});
+  // OpenCode starts on its home route with no session: publish the seat now.
+  if(harness==='opencode'&&!sid){state='idle';source('register');}
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });

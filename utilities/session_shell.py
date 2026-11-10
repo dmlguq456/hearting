@@ -217,6 +217,57 @@ def exact_binding(harness: str, sid: str) -> tuple[dict | None, str]:
     return (rows[0], "") if len(rows) == 1 else (None, "attachment-ambiguous" if rows else "attachment-unavailable")
 
 
+def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dict | None:
+    """The one attachment whose PTY owner is this pane's foreground: the pane's seat.
+
+    A shell-wrapped pane's foreground is the retained PTY owner (broker), not the
+    native TUI on its inner PTY. When that owner's exact birth leads the pane's
+    foreground group and its attachment is valid (births, parentage and descent
+    re-read by ``valid_binding``), the attachment's native session is the pane's
+    seat. Callers use this one fact instead of re-proving it per step.
+    """
+    if not isinstance(info, dict):
+        return None
+    group = info.get("foreground_process_group_id")
+    pids = {row.get("pid") for row in info.get("foreground_processes") or () if isinstance(row, dict)}
+    if type(group) is not int or group <= 1 or group not in pids:
+        return None
+    if birth is None:
+        def birth(pid):
+            row = process(pid)
+            return row["start"] if row else None
+    joined = []
+    for binding in bindings(harness=harness) if rows is None else rows:
+        owner = "broker" if "broker_pid" in binding else "host"
+        if binding.get(owner + "_pid") == group and birth(group) == binding.get(owner + "_start"):
+            joined.append(binding)
+    return joined[0] if len(joined) == 1 else None
+
+
+def native_screen(binding: dict):
+    """The native TUI's own screen as ``(char, faint)`` cell lines, or None.
+
+    A wrapped pane shows the shell's panel and frame around the native screen;
+    draft, form and footer judgments read the native cells the host parses.
+    """
+    result = control(binding, "screen")
+    screen = result.get("screen") if isinstance(result, dict) and result.get("ok") else None
+    if not isinstance(screen, list) or len(screen) > 512:
+        return None
+    lines = []
+    for runs in screen:
+        if not isinstance(runs, list):
+            return None
+        line = []
+        for run in runs:
+            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
+                    or type(run[1]) is not bool):
+                return None
+            line.extend((char, run[1]) for char in run[0])
+        lines.append(line)
+    return lines
+
+
 def open_panel(harness: str, sid: str) -> dict:
     """A display request keeps the caller's exact native address throughout."""
     binding, reason = exact_binding(harness, sid)
@@ -369,17 +420,26 @@ def _codex_selected_root(binding):
     if native_sid and native_sid != selected:
         return {"selected_sid": None}
     # Membership corroborates the native viewport; alone it never selects one
-    # of several roots retained by a shared daemon after /resume.
+    # of several roots retained by a shared daemon after /resume. A TUI with no
+    # daemon (--no-daemon) has no membership; there the exact process-native
+    # proof of the same thread corroborates it instead.
     member = codex.process_for_thread(selected, environ=procscan.read_environ(pid), fresh=True)
-    if member != (pid, birth):
+    if member != (pid, birth) and not (member is None and native_sid == selected):
         return {"selected_sid": None}
     latest_native = codex.session_id_of_process(pid, fresh=True)
     if latest_native and latest_native != selected:
         return {"selected_sid": None}
     second = control(binding, "native-selection")
-    if (not second.get("ok") or second.get("native_frame") != frame
-            or _process(pid) != record or not same_owner()):
+    later = second.get("native_frame") if second.get("ok") else None
+    if not isinstance(later, dict) or _process(pid) != record or not same_owner():
         return {"selected_sid": None}
+    if later != frame:
+        # Only a repaint (a working turn's spinner) between the reads: the same
+        # selection and no input. That is no stable observation, so the
+        # independent native proof decides, as when no frame is available.
+        repaint = (type(later.get("revision")) is int and later["revision"] > frame["revision"]
+                   and {**later, "revision": frame["revision"]} == frame)
+        return None if repaint else {"selected_sid": None}
     return {"selected_sid": selected, "native_revision": frame["revision"], "native_epoch": frame["epoch"]}
 
 
@@ -517,8 +577,9 @@ def publish_binding(value: dict) -> bool:
             os.replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
-    from fleet.session_tags import assign_observed
-    assign_observed(value["harness"], value["sid"], pid=value["native_pid"], proc_start=value["native_start"])
+    if value["sid"] != "-":  # an unselected seat has no session to tag
+        from fleet.session_tags import assign_observed
+        assign_observed(value["harness"], value["sid"], pid=value["native_pid"], proc_start=value["native_start"])
     return True
 
 
