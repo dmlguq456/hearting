@@ -108,6 +108,50 @@ function source(op, extra={}) {
     backend.stdin.write(frame);
   });
 }
+function nativeSelectionFrame() {
+  // Original native VT only: neither concealed paint nor the Hearting panel.
+  const lines=Array.from({length:terminal.rows},(_,i)=>
+    terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
+  while(lines.length&&!lines[lines.length-1].trim())lines.pop();
+  const prompt=lines.findLastIndex(line=>line.trimStart().startsWith('›'));
+  const tail=prompt<0?[]:lines.slice(prompt+1).map(line=>line.trim()).filter(Boolean);
+  const frame={revision:screenRevision,epoch,lines:[]};
+  // Refuse interstitial body without returning it. Keep the strict parser's
+  // location-menu veto even when a menu happens to occupy only two rows.
+  const flat=tail.join('').replace(/\s/g,'').toLowerCase();
+  const menu=['whereshouldthenewconversationrun','whereshouldtheforkedconversationrun',
+    'usecurrentgitworktree','keepusingthecurrentworkingdirectory','createnewgitworktree'];
+  if(tail.length>2||flat.length>16384||menu.some(word=>flat.includes(word)))return {...frame,invalid:true};
+  const hint=tail[tail.length-1]||'';
+  const compact=/^(?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9])(?: (?:(?:ctrl|shift|alt)\+|[⌃⇧⌥⌘^])*(?:[←→↑↓]|f\d{1,2}|enter|space|tab|esc|pgup|pgdn|home|end|[a-z0-9]))? for agents(?![0-9A-Za-z])/.exec(hint);
+  const help=hint.toLowerCase().replace(/\s/g,'').includes('?forshortcuts')?'? for shortcuts':compact?.[0];
+  if(!help)return frame;
+  if(tail.length!==2)return {...frame,invalid:true};
+  // Only identity-shaped tokens leave the native viewport. Titles, telemetry
+  // and even footer-shaped draft text never travel in this read-only response.
+  const fields=tail[0].split('·'),safe=value=>/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f-]{0,27}…)$/.test(value.trim())?value.trim():'?';
+  const status=fields.length===1?safe(fields[0]):safe(fields[0])+' · '+safe(fields[fields.length-1]);
+  return {...frame,lines:['›',status,help]};
+}
+let checkingNativeSelection=false,nativeSelectionRevision=-1;
+function observeNativeSelection() {
+  if(harness!=='codex'||!sid||ended||relay||checkingNativeSelection||nativeSelectionRevision===screenRevision)return;
+  const frame=nativeSelectionFrame();
+  // This is only an observation hint. Python owns the strict footer judgment,
+  // native root ownership and repeated, birth-bound snapshot verification.
+  const fields=(frame.lines.slice(1).find(line=>line.trim())||'').split('·');
+  const ids=[fields[0],fields[fields.length-1]].map(value=>value.trim())
+    .filter(value=>/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value));
+  if(!ids.some(id=>id!==sid))return;
+  checkingNativeSelection=true;nativeSelectionRevision=frame.revision;
+  const selected=selection;
+  source('selection').then(data=>{
+    if(!data.ok||relay||ended||selected!==selection||frame.revision!==screenRevision||frame.epoch!==epoch
+       ||data.native_revision!==screenRevision||data.native_epoch!==epoch||data.selected_sid===sid)return;
+    return lifecycle({token,harness,pid:native.pid,start:native.start,
+      sid:data.selected_sid,seq:sequence+1,event:'select'});
+  }).finally(()=>{checkingNativeSelection=false;});
+}
 function readAction(extra,operation='action') {
   // A person-requested read or answer may be slow. It must not queue ahead
   // of event-driven values or readiness on the ordinary projection worker.
@@ -181,6 +225,7 @@ function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
+    observeNativeSelection();
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
@@ -316,6 +361,7 @@ function applyLayout() {
 }
 function queueProjection() {
   if(ended||relay||projectionTimer)return;
+  nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
 function observeFiles(paths) {
@@ -501,6 +547,7 @@ async function lifecycle(req) {
 async function request(req) {
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
+  if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}

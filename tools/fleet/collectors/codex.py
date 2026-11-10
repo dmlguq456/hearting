@@ -1694,14 +1694,15 @@ def _daemon_session_for_process(pid, environ=None, observation=None, *, fresh=Fa
     return next(iter(candidates))
 
 
-def process_for_thread(thread_id, environ=None, *, expected_service=None):
+def process_for_thread(thread_id, environ=None, *, expected_service=None, fresh=False):
     """Return the unique live root TUI PID/start owning ``thread_id``'s MCP origin."""
     if not isinstance(thread_id, str) or _sid("rollout-x-%s.jsonl" % thread_id) != thread_id:
         return None
     from . import procscan
     env = dict(environ or os.environ)
-    origins = (_daemon_thread_origins(env, expected_service=expected_service)
-               if expected_service is not None else _daemon_thread_origins(env))
+    options = {"fresh": True} if fresh else {}
+    origins = (_daemon_thread_origins(env, expected_service=expected_service, **options)
+               if expected_service is not None else _daemon_thread_origins(env, **options))
     row = origins.get(thread_id) if origins else None
     if not row:
         return None
