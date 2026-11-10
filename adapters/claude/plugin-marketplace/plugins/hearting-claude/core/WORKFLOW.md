@@ -1258,7 +1258,10 @@ retry with `resource-runner start --compute-run <run-id>` after a completed
 the sealed command, inputs and provenance, exit evidence, output receipts, and
 fresh remote process-group quiescence; it preserves the prior failure row and
 sentinel. The owner's normal start admits verification separately; compute
-exit is execution evidence only.
+exit is execution evidence only. The same command adopts a run that an owner of
+this route launched directly with `compute-hosts run` (route provenance, no
+resource row) when it is this route's finished, unadopted run; other evidence
+is recorded, not required (see `core/OPERATIONS.md`).
 
 When an owner is replaced on the same route, its launched replacement may
 observe and consume the predecessor's supervised-resource result through the

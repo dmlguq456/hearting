@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Detached process runner with PID reuse-safe reattachment."""
-import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, select, signal, stat, subprocess, sys, time
+import argparse, contextlib, datetime, fcntl, glob, hashlib, importlib.util, json, os, re, select, signal, stat, subprocess, sys, time
 from pathlib import Path
 import resource_resume as RESOURCE_RESUME
 import resource_run_evidence as RUN_EVIDENCE
@@ -1185,6 +1185,253 @@ def sealed_compute_command(command):
     return values if values["command"] else None
 
 
+# compute-hosts.py ROUTE_DIRECT_CONTRACT_KIND: a run its route owner launched directly.
+ROUTE_DIRECT_CONTRACT_KIND = "route-direct-v1"
+
+
+def _write_scope_root(base, pattern):
+    """The concrete directory or file a sealed write-scope entry names."""
+    parts = []
+    for part in Path(str(pattern)).parts:
+        if any(char in part for char in "*?["):
+            break
+        parts.append(part)
+    return (Path(base).joinpath(*parts) if parts else None)
+
+
+def _instant(value):
+    """Seconds since the epoch for a recorded epoch number or ISO-8601 time, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        return moment.timestamp()
+    return None
+
+
+def _first_completed_at(completion_root, node_id):
+    """The earliest recorded completion of a node: its marker or any history `<node>.N.json`.
+
+    A replacement owner may rewrite `<node>.json` later, so only the first
+    completion says when the node's successors could have started.
+    """
+    times = []
+    for path in [completion_root / f"{node_id}.json",
+                 *completion_root.glob(f"{glob.escape(node_id)}.*.json")]:
+        if path.name != f"{node_id}.json" and not path.name[len(node_id) + 1:-5].isdigit():
+            continue
+        try:
+            moment = _instant(json.loads(path.read_text(encoding="utf-8")).get("completed_at"))
+        except (OSError, ValueError, AttributeError):
+            continue
+        if moment is not None:
+            times.append(moment)
+    return min(times) if times else None
+
+
+def _command_path_tokens(command):
+    tokens = []
+    for part in command if isinstance(command, list) else []:
+        if not isinstance(part, str):
+            continue
+        for value in ([part.split("=", 1)[1]] if part.startswith("--") and "=" in part else [part]):
+            if value.startswith("/"):
+                tokens.append(Path(value).resolve(strict=False))
+    return tokens
+
+
+def route_direct_compute_candidate(COMPUTE, config, compute_run_id, route, route_file, jobs, registry,
+                                   requested_node=None):
+    """Bind a finished run an owner launched directly under this route's provenance.
+
+    Such a run (`compute-hosts run` outside the route resource-runner) records
+    only route provenance: no resource contract, row or outputs.json. Adoption
+    needs only what keeps a wrong or unfinished run from counting as done:
+    this route's run (provenance route id/file), a normal finish (checked by the
+    compute record: exit 0, empty process group), and no other row holding it
+    (checked by the seat). Command, cwd, inputs, outputs and owner lineage are
+    recorded as matched / mismatched / unverified, never refused for lack of
+    evidence. A refusal also stays when the record plainly names another node:
+    the run started before the node's dependencies first completed, or its
+    command writes only into another resource node's write scope.
+
+    Returns None when the run carries a resource contract (the existing seats
+    decide it); otherwise the compute record or a typed refusal.
+    """
+    import dispatch_completion_join as JOIN
+    from dispatch_contract import dispatch_state_root
+
+    route_path = Path(route_file).resolve(strict=True)
+    run_dir = Path(config["run_root"]) / compute_run_id
+    try:
+        meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        fail_compute("resource-compute-observation-unavailable", differences=[
+            {"field": "compute-run", "expected": "readable meta.json", "actual": type(error).__name__}],
+            next_action="restore access to the configured compute-run evidence")
+    meta = meta if isinstance(meta, dict) else {}
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    if provenance.get("resource") is not None or meta.get("execution_contract"):
+        return None
+    recorded = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    recorded_file = (str(Path(recorded["route_file"]).resolve(strict=False))
+                     if isinstance(recorded.get("route_file"), str) else None)
+    if recorded_file != str(route_path) or recorded.get("route_id") != route.get("route_id"):
+        fail_compute("resource-compute-route-mismatch", differences=[
+            {"field": "provenance.route", "expected": {"route_id": route.get("route_id"),
+                                                       "route_file": str(route_path)},
+             "actual": recorded or None}],
+            next_action=("a run without this route's provenance is not its evidence; select a "
+                         "completed run recorded for this exact route or start the node through "
+                         "the route resource-runner"))
+    try:
+        artifacts = __import__("artifact_producer").prepare_route_artifact_env(
+            route_file, start=False, jobs=Path(jobs))
+        output_dir = Path(artifacts.get("AGENT_ARTIFACT_OUTPUT_DIR") or Path(registry).parent)
+    except Exception:  # an unreadable producer view leaves the registry's own cycle
+        output_dir = Path(registry).parent
+    output_dir = output_dir.resolve(strict=False)
+    if output_dir / "resource-runs.json" != Path(registry).resolve(strict=False):
+        fail_compute("resource-compute-binding-conflict", differences=[
+            {"field": "registry", "expected": str(output_dir / "resource-runs.json"),
+             "actual": str(registry)}],
+            next_action="pass the route cycle's own resource-runs.json as --registry")
+
+    # The node: an explicit --node, else the route's one current resource stage
+    # (every dependency marker present, its own absent).
+    completion_root = dispatch_state_root(Path(jobs)) / "completion" / str(route["route_id"])
+    nodes = [node for node in route.get("nodes") or [] if isinstance(node, dict)
+             and node.get("kind") == "resource-runner"
+             and (node.get("continuation") or {}).get("kind") == "supervised"]
+    try:
+        held = [row.get("node") for row in (json.loads(Path(registry).read_text(encoding="utf-8"))
+                                            .get("runs") or {}).values()
+                if isinstance(row, dict) and row.get("compute_run_id") == compute_run_id
+                and row.get("route") == str(route_path)]
+    except (OSError, ValueError):
+        held = []
+    if not requested_node and len(held) == 1:
+        requested_node = held[0]  # a repeat follows the row that already holds this run
+    if requested_node:
+        selected = [node for node in nodes if node.get("id") == requested_node]
+    else:
+        selected = [node for node in nodes
+                    if not (completion_root / f"{node['id']}.json").is_file()
+                    and all((completion_root / f"{dependency}.json").is_file()
+                            for dependency in node.get("depends_on") or [])]
+    if len(selected) != 1:
+        fail_compute("resource-compute-binding-conflict", differences=[
+            {"field": "node", "expected": "one current supervised resource-runner node",
+             "actual": [node.get("id") for node in selected]}],
+            next_action="repeat the same compute-run start with --node <resource node>")
+    node = selected[0]
+    # A run that started before this node's dependencies first completed is a
+    # run of an earlier stage (a smoke run of the same route), not this node's.
+    # Unreadable times are only recorded.
+    try:
+        started = _instant(json.loads((run_dir / "launch-receipt.json").read_text(
+            encoding="utf-8")).get("started_at"))
+    except (OSError, ValueError, AttributeError):
+        started = None
+    ready = {dependency: _first_completed_at(completion_root, dependency)
+             for dependency in node.get("depends_on") or []}
+    ready = {dependency: moment for dependency, moment in ready.items() if moment is not None}
+    if started is not None and ready and started < max(ready.values()):
+        fail_compute("resource-compute-binding-conflict", differences=[
+            {"field": "compute-run.started_at",
+             "expected": {"not_before_first_completion_of": ready},
+             "actual": started}],
+            next_action=(f"this run started before {node['id']}'s dependencies first completed, "
+                         "so it is an earlier stage's run; give the run started for this node"))
+    tokens = _command_path_tokens(meta.get("command"))
+
+    def writes_into(candidate):
+        roots = [root.resolve(strict=False) for root in
+                 (_write_scope_root(output_dir, item) for item in candidate.get("write_scope") or [])
+                 if root is not None]
+        return any(token == root or token.is_relative_to(root) for token in tokens for root in roots)
+    others = [item["id"] for item in nodes if item is not node and writes_into(item)]
+    if others and not writes_into(node):
+        fail_compute("resource-compute-binding-conflict", differences=[
+            {"field": "compute-run.command", "expected": f"a run of {node['id']}",
+             "actual": {"writes_into": others}}],
+            next_action="this run belongs to another node; adopt it for that node or run this node")
+    for binding in route.get("human_gate_bindings") or []:
+        if isinstance(binding, dict) and binding.get("node") == node["id"]:
+            import dispatch_resource_wait as OWNER_RESOURCE
+            import workflow_state as WS
+            journal = OWNER_RESOURCE.supervisor().ledger_for(route, str(jobs)).journal()
+            if WS.human_gate_resolution(journal, binding.get("gate")).get("status") != "proceed":
+                fail_compute("resource-compute-human-gate-open", differences=[
+                    {"field": "human_gate." + str(binding.get("gate")), "expected": "proceed",
+                     "actual": "unanswered"}],
+                    next_action="answer the route's existing human gate, then repeat the same start")
+
+    def verdict(ok):
+        return "unverified" if ok is None else ("matched" if ok else "mismatched")
+    try:
+        owner = JOIN.exact_attempt_row(Path(jobs), provenance.get("attempt_id")).metadata
+        owner_ok = (owner.get("worker_type") == "owner"
+                    and owner.get("owner_route_id") == route.get("route_id")
+                    and owner.get("owner_route_hash") == route.get("route_hash"))
+    except Exception:  # no readable lineage is "unverified", never a refusal
+        owner_ok = None
+    smoke = {}
+    for dependency in node.get("depends_on") or []:
+        try:
+            marker = json.loads((completion_root / f"{dependency}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        evidence = marker.get("evidence") or {}
+        if marker.get("completion_gate") == "hash-bound-smoke" and evidence.get("path"):
+            smoke = {"path": evidence["path"], "sha256": evidence.get("sha256"),
+                     "current": _resource_input_sha256(evidence["path"])}
+    config_ok = None
+    if smoke.get("current"):
+        try:
+            attestation = json.loads(Path(smoke["path"]).read_text(encoding="utf-8"))
+            config_path = attestation.get("config_source_path")
+            config_ok = bool(config_path and Path(config_path).resolve(strict=False) in tokens
+                             and _resource_input_sha256(config_path) == attestation.get("config_sha256"))
+            smoke["config"] = config_path
+        except (OSError, ValueError, TypeError):
+            config_ok = None
+    cwd_ok = (None if not meta.get("cwd") else
+              Path(meta["cwd"]).resolve(strict=False) == Path(str(route.get("cwd"))).resolve(strict=False))
+    record = {
+        "launched_outside_resource_runner": True,
+        "approval": "route-start (no open human gate for this node)",
+        "owner_lineage": verdict(owner_ok),
+        "cwd": verdict(cwd_ok),
+        "command_write_scope": verdict(writes_into(node) or None),
+        "started_after_dependencies": verdict(True if started is not None and ready else None),
+        "smoke_attestation": verdict(None if not smoke.get("current")
+                                     else smoke["current"] == smoke.get("sha256")),
+        "config": verdict(config_ok),
+        "gpu_lease": verdict(None if not isinstance(meta.get("gpu_lease"), dict)
+                             else (meta["gpu_lease"].get("run_id") == compute_run_id
+                                   and meta["gpu_lease"].get("host") == meta.get("host"))),
+    }
+    binding = {"route": {"route_id": route.get("route_id"), "route_file": str(route_path),
+                         "route_hash": route.get("route_hash")},
+               "node": node["id"], "artifact_base": str(output_dir),
+               "declared_outputs": list(node.get("outputs") or []),
+               "inputs": [item for item in (
+                   {"name": "smoke_attestation", "path": smoke.get("path"), "sha256": smoke.get("current")},
+                   {"name": "config", "path": smoke.get("config"),
+                    "sha256": _resource_input_sha256(smoke["config"]) if smoke.get("config") else None})
+                   if item["path"]],
+               "record": record, "registry": str(Path(registry).resolve(strict=False))}
+    return COMPUTE.route_direct_execution_record(config, compute_run_id, binding)
+
+
 def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     """Attach one evidenced compute-hosts execution to its same-route retry."""
     import dispatch_resource_wait as OWNER_RESOURCE
@@ -1193,8 +1440,16 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     from resource_run_registry import compute_execution_identity
     from dispatch_owner_input import _locked as owner_input_lock, _target as owner_input_target
 
-    registry = Path(registry).resolve(strict=True)
+    # The route's cycle registry may not exist yet: a run its owner launched
+    # directly never wrote a resource row. Every seat reads it the same way.
+    registry = Path(registry).resolve()
     jobs = Path(args.jobs or os.environ.get("AGENT_DISPATCH_JOBS", "")).resolve(strict=True)
+
+    def read_registry():
+        try:
+            return json.loads(registry.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"schema_version": 1, "runs": {}}
     compute_path = Path(__file__).with_name("compute-hosts.py")
     compute_spec = importlib.util.spec_from_file_location("resource_runner_compute_hosts", compute_path)
     if compute_spec is None or compute_spec.loader is None:
@@ -1205,6 +1460,14 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     try:
         config = COMPUTE.load_config()
         candidate = COMPUTE.execution_record(config, compute_run_id)
+        if (candidate.get("state") != "quiescent"
+                and candidate.get("reason") == "compute-run-contract-unavailable"
+                and callable(getattr(COMPUTE, "route_direct_execution_record", None))):
+            # No resource contract: an owner of this route may have launched the
+            # run directly through compute-hosts. Bind it to its node or refuse.
+            candidate = route_direct_compute_candidate(
+                COMPUTE, config, compute_run_id, route, route_file, jobs, registry,
+                getattr(args, "node", None)) or candidate
     except (OSError, ValueError, KeyError, TypeError, COMPUTE.ConfigError) as error:
         fail_compute("resource-compute-observation-unavailable",
                      differences=[{"field": "compute-run", "expected": "readable sealed run evidence",
@@ -1350,7 +1613,7 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     # Discover an already-adopted run by its canonical execution locator before
     # identity lookup or retry ordinal selection. A changed receipt must never
     # become a new __aN row merely because it no longer matches the old identity.
-    registry_snapshot = json.loads(registry.read_text(encoding="utf-8"))
+    registry_snapshot = read_registry()
     locator_rows = adopted_locator_rows((registry_snapshot.get("runs") or {}).values())
     if len(locator_rows) > 1:
         fail_compute("resource-compute-binding-conflict", differences=[
@@ -1370,51 +1633,34 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     eligible = []
     differences = []
     refusal_reason = "resource-compute-contract-unavailable"
-    for armed in armed_rows:
-        node_id = armed["node"]
-        if (armed.get("predecessor_kind") != "resource"
-                or armed.get("resource_registry") != str(registry)
-                or armed.get("jobs") != str(jobs)):
-            continue
-        node = WS.route_node(route, node_id)
-        if not isinstance(node, dict) or node.get("kind") != "resource-runner":
-            continue
-        original = json.loads(registry.read_text(encoding="utf-8")).get("runs", {}).get(
-            armed.get("predecessor_id"))
-        original_holder = OWNER_RESOURCE.resource_holder(original or {})
-        if not original_holder.get("observed", True):
-            fail_compute("resource-compute-observation-unavailable", differences=[
-                {"field": "resource.holder", "expected": "readable route lineage",
-                 "actual": original_holder.get("unobserved_reason")}],
-                next_action="restore access to the route lineage, then retry the same compute run",
-                retryable=True)
-        if (original_holder.get("route_id"), original_holder.get("route_hash")) != (
-                route.get("route_id"), route.get("route_hash")):
-            continue
-        if not original_holder.get("inherited") and (
-                armed.get("route_id") != route.get("route_id")
-                or armed.get("route_hash") != route.get("route_hash")):
-            continue
+    direct_run_id = provenance.get("run_id")
+
+    def seat_binding_differences(seat_node_id, seat_node, seat_row, origin, seat_artifact_base):
+        """Shared exact-binding checks for one receipt-bound registry row seat.
+
+        The provenance contract of the completed run names one resource row
+        (route, node, run id, owner attempt, sealed command/baseline/inputs);
+        every adoptable seat passes the same checks before any status rule.
+        """
         parent = provenance.get("contract") or {}
-        # A run no handoff moved is bound to this route's own file and hash; only
-        # an inherited run is bound to the address that first recorded it.
-        origin = (original_holder.get("origin") or {} if original_holder.get("inherited") else
-                  {"route_file": str(Path(route_file).resolve(strict=True)),
-                   "route_hash": route.get("route_hash")})
         candidate_bindings = [
             ("resource_policy", "supervised-owner",
-             original.get("resource_policy") if isinstance(original, dict) else None),
+             seat_row.get("resource_policy") if isinstance(seat_row, dict) else None),
             ("resource.route", origin.get("route_file"),
-             original.get("route") if isinstance(original, dict) else None),
-            ("resource.node", node_id, original.get("node") if isinstance(original, dict) else None),
-            ("resource.jobs", str(jobs), original.get("jobs") if isinstance(original, dict) else None),
-            ("provenance.run_id", original.get("run_id") if isinstance(original, dict) else None,
+             seat_row.get("route") if isinstance(seat_row, dict) else None),
+            ("resource.node", seat_node_id,
+             seat_row.get("node") if isinstance(seat_row, dict) else None),
+            ("resource.jobs", str(jobs),
+             seat_row.get("jobs") if isinstance(seat_row, dict) else None),
+            ("provenance.run_id",
+             seat_row.get("run_id") if isinstance(seat_row, dict) else None,
              provenance.get("run_id")),
-            ("provenance.node", node_id, provenance.get("node")),
+            ("provenance.node", seat_node_id, provenance.get("node")),
             ("provenance.parent_attempt_id",
-             original.get("parent_attempt_id") if isinstance(original, dict) else None,
+             seat_row.get("parent_attempt_id") if isinstance(seat_row, dict) else None,
              provenance.get("parent_attempt_id")),
-            ("contract.run_id", original.get("run_id") if isinstance(original, dict) else None,
+            ("contract.run_id",
+             seat_row.get("run_id") if isinstance(seat_row, dict) else None,
              parent.get("run_id")),
             ("contract.route_hash", origin.get("route_hash"), parent.get("route_hash")),
         ]
@@ -1422,28 +1668,24 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                                  for field, expected, actual in candidate_bindings
                                  if expected != actual]
         if candidate_differences:
-            differences.extend(candidate_differences)
-            refusal_reason = "resource-compute-binding-conflict"
-            continue
-        if (parent.get("artifact_base") != armed.get("artifact_base")
-                or parent.get("declared_outputs") != list(node.get("outputs") or [])):
-            differences.append({"field": "declared_outputs", "expected": {
-                                    "artifact_base": armed.get("artifact_base"),
-                                    "outputs": list(node.get("outputs") or [])},
-                                "actual": {"artifact_base": parent.get("artifact_base"),
-                                           "outputs": parent.get("declared_outputs")}})
-            continue
+            return candidate_differences, True
+        if (parent.get("artifact_base") != seat_artifact_base
+                or parent.get("declared_outputs") != list(seat_node.get("outputs") or [])):
+            return [{"field": "declared_outputs", "expected": {
+                        "artifact_base": seat_artifact_base,
+                        "outputs": list(seat_node.get("outputs") or [])},
+                    "actual": {"artifact_base": parent.get("artifact_base"),
+                               "outputs": parent.get("declared_outputs")}}], False
         sealed = parent.get("sealed") or {}
         baseline_differences = []
         for key in ("command", "cwd", "config_ref", "config_sha256", "source_commit",
                     "source_dirty", "source_git_state", "config_layout", "launch_request"):
-            if sealed.get(key) != original.get(key):
+            if sealed.get(key) != seat_row.get(key):
                 baseline_differences.append({"field": "resource." + key,
-                                             "expected": original.get(key), "actual": sealed.get(key)})
+                                             "expected": seat_row.get(key), "actual": sealed.get(key)})
         if baseline_differences:
-            differences.extend(baseline_differences)
-            continue
-        launch_request = original.get("launch_request") or {}
+            return baseline_differences, False
+        launch_request = seat_row.get("launch_request") or {}
         input_rows = parent.get("inputs")
         expected_inputs = {name: (launch_request.get(name), launch_request.get(name + "_sha256"))
                            for name in ("smoke_attestation", "config_manifest")
@@ -1476,21 +1718,53 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                 input_diff.append({"field": "inputs." + name + ".sha256",
                                    "expected": expected_sha, "actual": actual_sha})
         if input_diff:
-            differences.extend(input_diff)
-            continue
+            return input_diff, False
         contract = execution.get("contract") or {}
-        launch = original.get("command")
-        expected_contract = sealed_compute_command(launch)
+        expected_contract = sealed_compute_command(seat_row.get("command"))
         if expected_contract is None:
-            differences.append({"field": "compute-hosts.command", "expected": "explicit --cwd, --env and -- command",
-                                "actual": launch})
+            return [{"field": "compute-hosts.command",
+                     "expected": "explicit --cwd, --env and -- command",
+                     "actual": seat_row.get("command")}], False
+        return [{"field": "compute-hosts." + key, "expected": value, "actual": contract.get(key)}
+                for key, value in expected_contract.items()
+                if contract.get(key) != value], False
+
+    for armed in armed_rows:
+        node_id = armed["node"]
+        if (armed.get("predecessor_kind") != "resource"
+                or armed.get("resource_registry") != str(registry)
+                or armed.get("jobs") != str(jobs)):
             continue
-        current_differences = [{"field": "compute-hosts." + key, "expected": value,
-                                "actual": contract.get(key)}
-                               for key, value in expected_contract.items()
-                               if contract.get(key) != value]
-        if current_differences:
-            differences.extend(current_differences)
+        node = WS.route_node(route, node_id)
+        if not isinstance(node, dict) or node.get("kind") != "resource-runner":
+            continue
+        original = read_registry().get("runs", {}).get(
+            armed.get("predecessor_id"))
+        original_holder = OWNER_RESOURCE.resource_holder(original or {})
+        if not original_holder.get("observed", True):
+            fail_compute("resource-compute-observation-unavailable", differences=[
+                {"field": "resource.holder", "expected": "readable route lineage",
+                 "actual": original_holder.get("unobserved_reason")}],
+                next_action="restore access to the route lineage, then retry the same compute run",
+                retryable=True)
+        if (original_holder.get("route_id"), original_holder.get("route_hash")) != (
+                route.get("route_id"), route.get("route_hash")):
+            continue
+        if not original_holder.get("inherited") and (
+                armed.get("route_id") != route.get("route_id")
+                or armed.get("route_hash") != route.get("route_hash")):
+            continue
+        # A run no handoff moved is bound to this route's own file and hash; only
+        # an inherited run is bound to the address that first recorded it.
+        origin = (original_holder.get("origin") or {} if original_holder.get("inherited") else
+                  {"route_file": str(Path(route_file).resolve(strict=True)),
+                   "route_hash": route.get("route_hash")})
+        seat_differences, binding_conflict = seat_binding_differences(
+            node_id, node, original, origin, armed.get("artifact_base"))
+        if seat_differences:
+            differences.extend(seat_differences)
+            if binding_conflict:
+                refusal_reason = "resource-compute-binding-conflict"
             continue
         try:
             if not OWNER_RESOURCE.resource_binding_matches(armed, original):
@@ -1526,7 +1800,7 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
         # can converge before treating that successful row as a new baseline.
         replay_node_id = node_id
         replay_node = WS.route_node(route, replay_node_id) if isinstance(replay_node_id, str) else None
-        replay_rows = [row for row in (json.loads(registry.read_text(encoding="utf-8")).get("runs") or {}).values()
+        replay_rows = [row for row in (read_registry().get("runs") or {}).values()
                        if isinstance(row, dict)
                        and identity is not None
                        and (row.get("execution") or {}).get("identity_key") == compute_execution_identity(
@@ -1545,15 +1819,146 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                     replay_bound.append((replay_node_id, replay_armed, replay_node, replay_row))
         if len(replay_bound) == 1:
             eligible.append(replay_bound[0])
+        if not eligible and not any(
+                isinstance(row, dict) and row.get("predecessor_kind") == "resource"
+                and row.get("predecessor_id") == direct_run_id
+                and row.get("resource_registry") == str(registry)
+                for row in armed_rows):
+            # A prior owner attempt of this same route can have launched a
+            # finished run directly through compute-hosts and ended before any
+            # settlement: the receipt's contract then names a leftover
+            # `running` row with no watch left to own it. Adopt exactly that
+            # receipt as the route's full-run evidence and settle the row —
+            # never an inherited lineage, another route, or a live watch.
+            leftover = (read_registry()
+                        .get("runs", {}).get(direct_run_id))
+            # A retry after publication but before the arm finished finds the
+            # leftover already settled by that receipt, next to exactly one
+            # published row: the same seat re-opens so the existing identity
+            # replay below finishes the arm instead of refusing the retry.
+            leftover_open = isinstance(leftover, dict) and (
+                leftover.get("status") == "running"
+                or (leftover.get("status") == "succeeded"
+                    and leftover.get("liveness_reason") == "compute-run-receipt"
+                    and len(replay_rows) == 1))
+            if leftover_open and leftover.get("resource_policy") == "supervised-owner":
+                direct_holder = OWNER_RESOURCE.resource_holder(leftover)
+                if not direct_holder.get("observed", True):
+                    fail_compute("resource-compute-observation-unavailable", differences=[
+                        {"field": "resource.holder", "expected": "readable route lineage",
+                         "actual": direct_holder.get("unobserved_reason")}],
+                        next_action="restore access to the route lineage, then retry the same compute run",
+                        retryable=True)
+                direct_differences = []
+                origin = {"route_file": str(Path(route_file).resolve(strict=True)),
+                          "route_hash": route.get("route_hash")}
+                if (direct_holder.get("route_id"), direct_holder.get("route_hash")) != (
+                        route.get("route_id"), route.get("route_hash")):
+                    direct_differences.append({"field": "provenance.route_id",
+                                               "expected": {"route_id": route.get("route_id"),
+                                                            "route_hash": route.get("route_hash")},
+                                               "actual": {"route_id": direct_holder.get("route_id"),
+                                                          "route_hash": direct_holder.get("route_hash")}})
+                elif direct_holder.get("inherited"):
+                    direct_differences.append({"field": "resource.route",
+                                               "expected": "this route's own directly launched row",
+                                               "actual": origin})
+                else:
+                    direct_node = WS.route_node(route, provenance.get("node"))
+                    if isinstance(direct_node, dict) and direct_node.get("kind") == "resource-runner":
+                        direct_differences, direct_conflict = seat_binding_differences(
+                            provenance.get("node"), direct_node, leftover, origin,
+                            (provenance.get("contract") or {}).get("artifact_base"))
+                        if direct_differences and direct_conflict:
+                            refusal_reason = "resource-compute-binding-conflict"
+                    else:
+                        direct_differences = [{"field": "resource.node",
+                                               "expected": "route resource-runner node",
+                                               "actual": provenance.get("node")}]
+                if not direct_differences and (leftover.get("execution") or {}).get(
+                        "kind") != "compute-hosts":
+                    # The compute run itself was observed quiescent above; a
+                    # local process the row recorded is refused only when it is
+                    # positively still alive. Absent or finished identity adopts.
+                    from resource_run_registry import classify_identity
+                    try:
+                        leftover_liveness, _identity, leftover_reason = classify_identity(leftover)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        leftover_liveness, leftover_reason = "stale", "identity-unreadable"
+                    if leftover_liveness in {"working", "reaping"}:
+                        fail_compute("resource-compute-not-quiescent", differences=[
+                            {"field": "resource.process", "expected": "exited or unrecorded",
+                             "actual": {"liveness": leftover_liveness, "reason": leftover_reason,
+                                        "pid": leftover.get("pid")}}],
+                            next_action=("wait for the recorded process to exit, then repeat "
+                                         "the same compute-run start"),
+                            retryable=True)
+                if direct_differences:
+                    differences.extend(direct_differences)
+                else:
+                    direct_node = WS.route_node(route, provenance.get("node"))
+                    armed = {"predecessor_id": direct_run_id,
+                             "artifact_base": (provenance.get("contract") or {}).get("artifact_base"),
+                             "direct_baseline": True}
+                    original = leftover
+                    node_id = provenance.get("node")
+                    node = direct_node
+                    eligible.append((node_id, armed, node, original))
+    route_direct = (execution.get("contract") or {}).get("kind") == ROUTE_DIRECT_CONTRACT_KIND
+    if not eligible and route_direct:
+        # The run's owner launched it directly under route provenance, so no
+        # resource row exists for it: the receipt itself is the seat. Only a
+        # row that already holds this same run refuses (duplicate adoption);
+        # its own published row replays below through the identity lookup.
+        direct_contract = execution["contract"]
+        direct_node_id = direct_contract["node"]
+        direct_node = WS.route_node(route, direct_node_id)
+        holders = {key: row for key, row in (read_registry().get("runs") or {}).items()
+                   if isinstance(row, dict) and row.get("compute_run_id") == compute_run_id
+                   and (row.get("execution") or {}).get("run_root") == execution.get("run_root")}
+        published = [row for row in holders.values()
+                     if (row.get("execution") or {}).get("identity_key") == identity
+                     and row.get("route") == route_path and row.get("node") == direct_node_id]
+        node_watches = supervisor_resource_watches(sup, ledger, direct_node_id)
+        if holders and not (len(holders) == 1 and len(published) == 1):
+            differences.append({"field": "compute_run.adopted_by", "expected": None,
+                                "actual": sorted(holders)})
+            refusal_reason = "resource-compute-binding-conflict"
+        elif node_watches and not published:
+            differences.append({"field": "resource.watch", "expected": None,
+                                "actual": [row.get("predecessor_id") for row in node_watches]})
+            refusal_reason = "resource-compute-binding-conflict"
+        elif isinstance(direct_node, dict):
+            smoke = next((item for item in direct_contract.get("inputs") or []
+                          if item.get("name") == "smoke_attestation"), {})
+            config_input = next((item for item in direct_contract.get("inputs") or []
+                                 if item.get("name") == "config"), {})
+            seat = {"run_id": direct_node_id, "route": route_path, "node": direct_node_id,
+                    "jobs": str(jobs), "resource_policy": "supervised-owner",
+                    "cwd": direct_contract.get("cwd"), "command": direct_contract.get("command"),
+                    "config_ref": config_input.get("path"), "config_sha256": config_input.get("sha256"),
+                    "launch_request": {"smoke_attestation": smoke.get("path"),
+                                       "smoke_attestation_sha256": smoke.get("sha256"),
+                                       "config_manifest": None, "config_manifest_sha256": None}}
+            eligible.append((direct_node_id, {"predecessor_id": direct_node_id,
+                                              "artifact_base": direct_contract.get("artifact_base"),
+                                              "route_direct": True}, direct_node, seat))
     if len(eligible) != 1:
         if eligible:
             fail_compute("resource-compute-baseline-ambiguous")
         if differences:
-            fail_compute(refusal_reason if refusal_reason == "resource-compute-binding-conflict"
-                         else "resource-compute-contract-mismatch", differences=differences,
+            if refusal_reason == "resource-compute-binding-conflict":
+                # A binding mismatch is not a changed contract: re-running the
+                # smoke/config flow would only lead to another GPU run.
+                fail_compute(refusal_reason, differences=differences,
+                             next_action="repair the existing route/resource binding before retrying")
+            fail_compute("resource-compute-contract-mismatch", differences=differences,
                          next_action="run the existing smoke/config flow for the changed contract")
         fail_compute(refusal_reason, differences=[{"field": "resource-candidate",
-                    "expected": "one exactly bound failed resource row", "actual": "no eligible row"}],
+                    "expected": ("one exactly bound failed resource row, a route-bound "
+                                 "exit-0 receipt over a leftover running row, or a route-bound "
+                                 "exit-0 run its owner launched directly for a node with no row"),
+                    "actual": "no eligible row"}],
                      next_action="repair the existing route/resource binding before retrying")
     node_id, armed, node, original = eligible[0]
 
@@ -1563,7 +1968,10 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     artifact_base = Path(armed.get("artifact_base") or "")
     declared = list(node.get("outputs") or [])
     output_rows = execution.get("outputs")
-    output_check = COMPUTE.validate_compute_outputs(artifact_base, declared, output_rows)
+    # A route-direct receipt hashed whichever declared outputs exist and recorded
+    # the rest; the observation above already rechecked those bytes.
+    output_check = ({"ok": True} if armed.get("route_direct") else
+                    COMPUTE.validate_compute_outputs(artifact_base, declared, output_rows))
     if not output_check.get("ok"):
         reason = output_check.get("reason") or "compute-run-output-missing"
         token = compute_output_refusal(reason)
@@ -1584,7 +1992,7 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     if not owner_wait:
         fail_compute("resource-compute-owner-unavailable")
 
-    data = json.loads(registry.read_text(encoding="utf-8"))
+    data = read_registry()
     runs = data.get("runs") or {}
     # Recheck the locator against the latest registry snapshot as well. A
     # concurrent publisher may have written the same run after the earlier
@@ -1675,7 +2083,7 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
     adopted["resource_binding"] = OWNER_RESOURCE.resource_legacy_body_digest(adopted)
     if adopted.get("resource_operation") is not None:
         adopted["resource_current_binding"] = OWNER_RESOURCE.resource_body_digest(adopted)
-    if OWNER_RESOURCE.resource_evidence_paths_conflict(original, adopted):
+    if not armed.get("route_direct") and OWNER_RESOURCE.resource_evidence_paths_conflict(original, adopted):
         fail_compute("resource-compute-binding-conflict", differences=[
             {"field": "resource.evidence_paths", "expected": "no shared evidence path or inode",
              "actual": {"existing_run": original.get("run_id"), "adopted_run": adopted_id,
@@ -1689,7 +2097,15 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                 next_action="continue only after the route owner opens a new authorized route")
         current_armed = supervisor_resource_watch_for_run(
             sup, ledger, node_id, registry, armed.get("predecessor_id"))
-        if current_armed != armed:
+        if armed.get("direct_baseline") or armed.get("route_direct"):
+            # A direct-baseline adoption keeps its own settlement ownership:
+            # any watch that materialized for the same run now races it.
+            if current_armed is not None:
+                fail_compute("resource-compute-binding-conflict", differences=[
+                    {"field": "resource.watch", "expected": None,
+                     "actual": current_armed.get("predecessor_id")}],
+                    next_action="re-read the current owner route state before retrying the same compute run")
+        elif current_armed != armed:
             fail_compute("resource-compute-binding-conflict", differences=[
                 {"field": "armed_row", "expected": hashlib.sha256(json.dumps(
                     armed, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -1700,15 +2116,21 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
         stage = state.get("nodes", {}).get(node_id, {})
         failure_states = WS.vocabulary()["failure_states"]
         invalid_states = []
-        if stage.get("state") not in {"RUNNING", "FAILED_RETRYABLE"}:
+        # A node its owner ran directly was never armed: its ledger has no
+        # stage state yet, and the arm below records it exactly as a normal
+        # start would before the receipt settles it.
+        stage_states = ({None, "RUNNING"} if armed.get("route_direct")
+                        else {"RUNNING", "FAILED_RETRYABLE"})
+        workflow_states = {"RUNNING", "STAGE_SUCCEEDED", "NEXT_REGISTERED", "NEXT_RUNNING",
+                           "FAILED_RETRYABLE"} | ({"CREATED", "READY"} if armed.get("route_direct")
+                                                  else set())
+        if stage.get("state") not in stage_states:
             invalid_states.append({"field": f"nodes.{node_id}.state",
-                                   "expected": ["RUNNING", "FAILED_RETRYABLE"],
+                                   "expected": sorted(value or "absent" for value in stage_states),
                                    "actual": stage.get("state")})
-        if state.get("workflow_state") not in {
-                "RUNNING", "STAGE_SUCCEEDED", "NEXT_REGISTERED", "NEXT_RUNNING", "FAILED_RETRYABLE"}:
+        if state.get("workflow_state") not in workflow_states:
             invalid_states.append({"field": "workflow_state",
-                                   "expected": ["RUNNING", "STAGE_SUCCEEDED", "NEXT_REGISTERED",
-                                                "NEXT_RUNNING", "FAILED_RETRYABLE"],
+                                   "expected": sorted(workflow_states),
                                    "actual": state.get("workflow_state")})
         failed_nodes = [name for name, value in state.get("nodes", {}).items()
                         if name != node_id and value.get("state") in failure_states]
@@ -1768,6 +2190,17 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                     next_action="continue only after the route owner opens a new authorized route")
             require_current_compute_snapshot()
             def publish(document):
+                if armed.get("route_direct"):
+                    # No other row may have taken this same run since the seat opened.
+                    raced = sorted(key for key, row in document["runs"].items()
+                                   if isinstance(row, dict)
+                                   and row.get("compute_run_id") == compute_run_id)
+                    if raced or adopted_id in document["runs"]:
+                        raise ValueError(json.dumps({"field": "resource_registry.publication",
+                                                     "expected": {"compute_run_adopted_by": []},
+                                                     "actual": {"compute_run_adopted_by": raced}}))
+                    document["runs"][adopted_id] = adopted
+                    return
                 current = document["runs"].get(original["run_id"])
                 if current != original or adopted_id in document["runs"]:
                     raise ValueError(json.dumps({"field": "resource_registry.publication",
@@ -1782,6 +2215,13 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                                 separators=(",", ":")).encode()).hexdigest()
                                 if adopted_id in document["runs"] else None}}))
                 document["runs"][adopted_id] = adopted
+                if armed.get("direct_baseline"):
+                    # The leftover running row ends with the run it named: one
+                    # settle, in the same transaction as the published receipt.
+                    document["runs"][original["run_id"]] = {**original,
+                        "status": "succeeded", "workflow_state": "STAGE_SUCCEEDED",
+                        "exit_code": 0, "ended_at": execution.get("ended_at"),
+                        "failure_class": None, "liveness_reason": "compute-run-receipt"}
             try:
                 locked_update(registry, publish)
             except ValueError as error:
@@ -1792,9 +2232,16 @@ def adopt_compute_run(registry, args, route, route_file, compute_run_id):
                               "actual": str(error)}
                 fail_compute("resource-compute-binding-conflict", differences=[detail],
                              next_action="re-read the resource registry and retry only if the original binding remains current")
+    if armed.get("route_direct"):
+        # A registry first written by this adoption joins the resource index
+        # exactly like one a normal start writes.
+        with contextlib.suppress(OSError, ValueError):
+            register_registry(registry)
     arm_adopted(adopted)
     print(json.dumps({**adopted, "replayed": False, "payload_spawned": False,
                       "compute_run_id": compute_run_id,
+                      **({"adoption_record": execution["contract"].get("record")}
+                         if armed.get("route_direct") else {}),
                       "next_action": "start run-verify through its existing owner route"}, sort_keys=True))
 
 
