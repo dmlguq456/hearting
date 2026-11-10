@@ -154,6 +154,13 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
         for(const item of items){
           let i=slots.findIndex((slot,n)=>size(slot)+(slot.length?3:0)+size(item)<=limit(n));
           if(i<0)i=slots.findIndex(slot=>!slot.length);
+          // A long title must not take the running jobs' place: shorten the
+          // fullest row with an ellipsis. The branch shows only in room left.
+          if(i<0&&!clean(item[0]?.text||'').startsWith('⎇')){
+            const n=slots.reduce((best,slot,k)=>size(slot)>size(slots[best])?k:best,0);
+            const left=limit(n)-3-Math.min(size(item),limit(n)>>1);
+            if(left>=2){const fit=clip(slots[n],left-1);slots[n].splice(0,Infinity,...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'});i=n;}
+          }
           if(i<0)break;
           if(slots[i].length)slots[i].push(text(' · '));
           slots[i].push(...item);
