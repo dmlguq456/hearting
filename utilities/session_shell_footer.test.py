@@ -102,6 +102,20 @@ a.equal(d.hiddenFooterRows('claude',make(80,'  '+sid),sid,idPlan).size,0);
 const footer='  '+[sid,'Title','branch','Context 10% used','fixture high'].join(' · ');
 const partial={sid,config:full,common:false,fields:[[sid],null,null,null,null,null,null],lines:[]};
 a.deepEqual(mask(make(133,footer),partial),{rows:[],cells:[[1,2+sid.length+3]]});
+// An untitled thread's title repeats the ID, and a working thread's ID carries a spinner.
+a.deepEqual(mask(make(133,'  '+sid+' · '+sid+' · Context 0%…'),partial),{rows:[],cells:[[1,2+2*(sid.length+3)]]});
+a.deepEqual(mask(make(133,'  '+sid+' ⠏ · '+sid+' ⠏ · Contex…'),partial),{rows:[],cells:[[1,2+2*(sid.length+5)]]});
+a.deepEqual(mask(make(80,'  '+sid+' · '+sid),idPlan),{rows:[1],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid+' ⠏'),idPlan),{rows:[1],cells:[]});
+// Measured: with a typed draft Codex drops the help row; the composer anchors the footer.
+const draft=['› OWNED_HUMAN_DRAFT','','  '+sid+' · Context 10% used','            ⚠ 1 warning · f2 to view'];
+a.deepEqual(mask(draft,partial),{rows:[],cells:[[2,2+sid.length+3]]});
+a.deepEqual(mask(['transcript','','  '+sid+' · Context 10% used','            ⚠ 1 warning · f2 to view'],partial),{rows:[],cells:[]});
+// Measured at 80 columns: the default footer is clipped right after the ID.
+a.deepEqual(mask(make(80,'  '+sid+' ·…'),partial),{rows:[1],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid+' · '+sid+' ·…'),partial),{rows:[1],cells:[]});
+a.deepEqual(mask(make(80,'  '+sid+' · Fixture ti…'),partial),{rows:[],cells:[[1,2+sid.length+3]]});
+a.deepEqual(mask(make(133,'  '+sid+' · 00000000-0000-4000-8000-000000000053 · Context 0%'),partial),{rows:[],cells:[[1,2+sid.length+3]]});
 const compact=['fixture · high','context 10%'],status='📁 project · Title · ⎇ branch';
 const painted={sid,config:full,common:true,presentation:'session-panel',fields:[[sid],[sid,'Title'],['branch'],['Context 10% used'],['fixture high'],null,null],lines:compact,detail_lines:[status]};
 a.deepEqual(mask(make(133,footer),painted,compact,[status]),{rows:[1],cells:[]});

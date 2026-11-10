@@ -119,10 +119,17 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   const expected=plan.fields.filter(field=>Array.isArray(field)&&field.length);
   const id=sid.replace(/[^0-9a-f-]/gi,'');
   if(id!==sid||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid))return none;
-  const only=new RegExp('^ +'+id+'\\s*$'),leading=new RegExp('^( +'+id+' · ).+$');
+  // Codex marks a working thread with a spinner after the ID, and an untitled
+  // thread's `thread-title` field repeats its ID. Both belong to the ID cells.
+  // A narrow footer clipped right after them (`·…`) carries nothing else.
+  const cell=id+'(?: [\\u2800-\\u28ff])?';
+  const only=new RegExp('^ +'+cell+'(?: · '+cell+')?(?: ·…| …|…)?\\s*$'),leading=new RegExp('^( +'+cell+' · (?:'+cell+' · )?).+$');
   const found=[];
   for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
-    if(!/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))continue;
+    // The help row anchors the footer; while a draft is typed Codex drops
+    // `? for shortcuts`, and the composer row just above anchors it instead.
+    const help=/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]);
+    if(!help&&!lines.slice(Math.max(0,y-3),y).some(row=>/^›/.test(row)))continue;
     if(only.test(lines[y])){found.push({y});continue;}
     const match=lines[y].match(leading);
     if(!match)continue;

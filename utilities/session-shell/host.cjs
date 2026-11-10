@@ -277,9 +277,12 @@ function render() {
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
-      const masked=fleetView?0:footerMask.cells.get(y)||0;
-      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):
-        (masked?'\x1b[0m'+' '.repeat(masked):'')+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked);
+      // The rest of a Codex footer row whose ID cells are concealed keeps the
+      // row's own indent instead of starting after a blank gap.
+      const masked=fleetView?0:footerMask.cells.get(y)||0,indent=masked?Math.min(masked,nativeLines[y].match(/^ */)[0].length):0;
+      let line=y===notice?noticeRow(view.cols):concealed.has(y)?'\x1b[0m'+' '.repeat(view.cols):masked?
+        '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
+        serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(!fleetView&&geometry().side){
         const panel=y<panelRows.length?panelRows[y]:' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;

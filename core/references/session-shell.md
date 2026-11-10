@@ -104,11 +104,13 @@ does not collect again or authorize an action.
 The panel paints no thread ID: sessions are told apart by their number and
 title. Inside the shell, Codex's footer field `thread-id` (the first
 `[tui].status_line` item) belongs to the shell and is not shown: a footer row
-holding only the ID is blanked, and otherwise only its leading ID cells are.
+holding only the ID (or the ID and a clip mark) is blanked, and otherwise only its leading ID cells are
+(with a working spinner, and an untitled thread's title, which repeats the ID).
 The value stays on the inner screen, where shell-wrapped identification and
 peer delivery read it. The rest of that row may yield duplicate paint only to
 the panel's visible model, compact status and session rows, all actually
-painted. Exact native SID, the help row beneath, an unchanged configuration
+painted. Exact native SID, the help row beneath (or, while a draft hides it,
+the composer just above), an unchanged configuration
 with `thread-id` first and matching native values are still required. Display
 availability does not establish selection or input authority. A Codex window
 started without the shell keeps the ID visible, since that footer row is then
