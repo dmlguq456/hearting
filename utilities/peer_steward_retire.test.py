@@ -9095,7 +9095,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
             self.sent.append((target, text))
             return send(target, text) if send is not None else (0, {})
 
-        def screen_lines(_target):
+        def screen_lines(_target, **_):
             value = self.screen["value"]
             return None if value is None else peer_steward._screen_lines(value)
 
@@ -9291,7 +9291,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_from_name", return_value="steward"), \
              mock.patch.object(peer_steward, "_project_of", return_value="/fixture"), \
              mock.patch.object(peer_steward, "_read_screen",
-                               side_effect=lambda _target: (
+                               side_effect=lambda _target, **_: (
                                    None if self.screen["value"] is None
                                    else peer_steward._screen_lines(self.screen["value"]))), \
              mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane",

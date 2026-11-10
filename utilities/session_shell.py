@@ -279,6 +279,25 @@ def native_screen(binding: dict):
     return lines
 
 
+def native_takes_keys(binding: dict) -> bool:
+    """Whether the host says keys typed into this seat's empty native box reach native now.
+
+    A host whose ``focused`` covers the Fleet explorer says so
+    (``focus_covers_fleet``) and is judged by ``focused`` alone. A host started
+    before that, and still running, leaves its Fleet explorer out of
+    ``focused``; its input-wait answer (``status`` ``empty``) has always left
+    every shell editor out, so for it that answer must agree as well. That
+    answer is also false while native holds unsubmitted keys, which is why a
+    newer host is not judged by it. A writer about to type into the empty
+    native box it read from the cells asks this; reading the screen (trust
+    reason, dialog, draft) does not.
+    """
+    result = control(binding, "status")
+    if not isinstance(result, dict) or result.get("ok") is not True or result.get("focused") is not False:
+        return False
+    return result.get("focus_covers_fleet") is True or result.get("empty") is True
+
+
 def open_panel(harness: str, sid: str) -> dict:
     """A display request keeps the caller's exact native address throughout."""
     binding, reason = exact_binding(harness, sid)

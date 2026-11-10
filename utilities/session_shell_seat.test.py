@@ -142,6 +142,49 @@ class ShellSeatTest(unittest.TestCase):
                 self.assertIsNone(fixture.peer._read_screen(self.pane))
                 pane.assert_not_called()
 
+    def test_an_older_running_host_keeps_fleet_keys_out_of_a_typed_write(self):
+        # Review [52] R2 P1: a host started before `focused` covered the Fleet explorer
+        # still says `focused: false` there, while its input-wait answer (`status.empty`)
+        # has always left every shell editor out. A writer typing into the empty native
+        # box asks that answer too; reading the screen does not.
+        self.publish("claude")
+        rule = "─" * 40
+        empty = [[["❯ earlier", False]], [], [[rule, False]], [["❯ ", False]], [[rule, False]],
+                 [["  footer", False]]]
+        draft = [[["❯ earlier", False]], [], [[rule, False]], [["❯ half typed text", False]],
+                 [[rule, False]], [["  footer", False]]]
+        def host(cells, status):
+            return lambda _binding, op, **_: (
+                {"ok": True, "screen": cells, "focused": False} if op == "screen" else status)
+        fleet_old = {"ok": True, "state": "idle", "empty": False, "focused": False}
+        with mock.patch.object(session_shell, "control", side_effect=host(empty, fleet_old)), \
+             mock.patch.object(fixture.peer, "_herdr_argv") as pane:
+            self.assertIsNotNone(fixture.peer._read_screen(self.pane))          # reading: unchanged
+            self.assertIsNone(fixture.peer._read_screen(self.pane, typing=True))  # typing: refused
+            pane.assert_not_called()
+        normal = {"ok": True, "state": "idle", "empty": True, "focused": False}
+        with mock.patch.object(session_shell, "control", side_effect=host(empty, normal)):
+            self.assertIsNotNone(fixture.peer._read_screen(self.pane, typing=True))
+        # A host whose `focused` covers the Fleet explorer is judged by `focused` alone: an
+        # erased native draft (keys never submitted) keeps `empty` false yet the box takes keys.
+        erased = {"ok": True, "state": "idle", "empty": False, "focused": False, "focus_covers_fleet": True}
+        with mock.patch.object(session_shell, "control", side_effect=host(empty, erased)):
+            self.assertIsNotNone(fixture.peer._read_screen(self.pane, typing=True))
+        held = {**erased, "focused": True}
+        with mock.patch.object(session_shell, "control", side_effect=host(empty, held)):
+            self.assertIsNone(fixture.peer._read_screen(self.pane, typing=True))
+        # A native draft keeps its own reason; the host's answer is not asked for it.
+        with mock.patch.object(session_shell, "control", side_effect=host(draft, fleet_old)) as ctl:
+            lines = fixture.peer._read_screen(self.pane, typing=True)
+            self.assertEqual(fixture.peer._screen_ready("claude", lines), "draft")
+            self.assertEqual([call.args[1] for call in ctl.call_args_list], ["screen"])
+        # Raw relay: the pane is native and its keys go there; no host answer is needed.
+        with mock.patch.object(session_shell, "control",
+                               return_value={"ok": False, "reason": "display-unavailable"}), \
+             mock.patch.object(fixture.peer, "_herdr_argv", return_value=["false"]) as pane:
+            fixture.peer._read_screen(self.pane, typing=True)
+            pane.assert_called_once()
+
     def test_herdr_unknown_turn_takes_the_shell_lifecycle_state_only_for_the_seat(self):
         self.publish("codex")
         payload = {"result": {"type": "agent_info", "agent": {"agent": "codex", "agent_status": "unknown"}}}

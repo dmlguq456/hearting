@@ -696,7 +696,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_agent_state",
                                side_effect=lambda _: (observation["state"], pane)), \
              mock.patch.object(peer_steward, "_read_screen",
-                 side_effect=lambda _: peer_steward._screen_lines(observation["screen"])), \
+                 side_effect=lambda _, **__: peer_steward._screen_lines(observation["screen"])), \
              mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane",
                                return_value=((), "observed")), \
              mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send:
@@ -2426,7 +2426,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                                        side_effect=lambda *_a, **_k: sid))
                 stack.enter_context(mock.patch.object(
                     peer_steward, "_read_screen",
-                    side_effect=lambda _target: peer_steward._screen_lines(state.screens["value"])))
+                    side_effect=lambda _target, **_: peer_steward._screen_lines(state.screens["value"])))
                 printed = stack.enter_context(mock.patch("builtins.print"))
                 rc = peer_steward.main(["prompt", "child", body])
                 state.output = [call.args[0] for call in printed.call_args_list if call.args]
@@ -2884,7 +2884,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                      mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                        return_value=proof), \
                      mock.patch.object(peer_steward, "_read_screen",
-                                       side_effect=lambda _target: peer_steward._screen_lines(
+                                       side_effect=lambda _target, **_: peer_steward._screen_lines(
                                            CLAUDE_EMPTY if harness == "claude"
                                            else OPENCODE_FORM if harness == "opencode"
                                            else CODEX_EMPTY)), \
