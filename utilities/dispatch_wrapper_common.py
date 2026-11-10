@@ -269,6 +269,39 @@ def jobs_lock(jobs: Path):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+def annotate_job_row(jobs: Path, slug: str, worktree: str, extra_kv: str, attempt_id: str | None = None) -> bool:
+    """Append `,<extra_kv>` to the pipe column of this dispatch's open row.
+
+    Same match keys and flock discipline as close_job_row. Used right after
+    launch to record the child pid (`pid=<n>`, OPERATIONS §5.10 job registry)
+    so dispatch-liveness judges the child by process instead of transcript
+    mtime — a conductor sharing the child's worktree keeps the transcript
+    directory fresh and masks an exited child behind ALIVE (shared-worktree
+    aliasing, observed 2026-07-13).
+    """
+    if not jobs.is_file():
+        return False
+    with jobs_lock(jobs):
+        lines = jobs.read_text(encoding="utf-8").splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 6:
+                continue
+            ts, status, repo, wt, row_slug, pipe = parts[:6]
+            if status != "open" or row_slug != slug or wt != worktree:
+                continue
+            metadata = parse_registry_metadata(pipe)
+            if metadata.get("attempt_schema_version") != "2":
+                continue
+            if attempt_id and f"attempt_id={attempt_id}" not in pipe.split(","):
+                continue
+            lines[i] = f"{ts}\t{status}\t{repo}\t{wt}\t{row_slug}\t{pipe},{extra_kv}\n"
+            # Lock-free readers (join, owner input) must never see a truncated registry.
+            _atomic_registry_replace(jobs, "".join(lines).splitlines())
+            return True
+    return False
+
+
 def route_node_leg_fields(args):
     """Read the sealed leg_class/auxiliary_check off this wrapper's route node.
 

@@ -105,6 +105,7 @@ resolve_report_bundle_root = WRAPPER_COMMON.resolve_report_bundle_root
 seed_launch_heartbeat = WRAPPER_COMMON.seed_launch_heartbeat
 _registered_owner = WRAPPER_COMMON.registered_owner
 completion_state_path = WRAPPER_COMMON.completion_state_path
+annotate_job_row = WRAPPER_COMMON.annotate_job_row
 from dispatch_summary import launch_summary_owner  # noqa: E402
 from artifact_producer import (  # noqa: E402
     ProducerError,
@@ -1064,39 +1065,6 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
         jobs, slug, worktree, reason, reset, attempt_id,
         materialize=materialize_after_terminal_close,
     )
-
-
-def annotate_job_row(jobs: Path, slug: str, worktree: str, extra_kv: str, attempt_id: str | None = None) -> bool:
-    """Append `,<extra_kv>` to the pipe column of this dispatch's open row.
-
-    Same match keys and flock discipline as close_job_row. Used right after
-    launch to record the child pid (`pid=<n>`, OPERATIONS §5.10 job registry)
-    so dispatch-liveness judges the child by process instead of transcript
-    mtime — a conductor sharing the child's worktree keeps the transcript
-    directory fresh and masks an exited child behind ALIVE (shared-worktree
-    aliasing, observed 2026-07-13).
-    """
-    if not jobs.is_file():
-        return False
-    with jobs_lock(jobs):
-        lines = jobs.read_text(encoding="utf-8").splitlines(keepends=True)
-        for i, line in enumerate(lines):
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 6:
-                continue
-            ts, status, repo, wt, row_slug, pipe = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
-            if status != "open" or row_slug != slug or wt != worktree:
-                continue
-            metadata = parse_registry_metadata(pipe)
-            if metadata.get("attempt_schema_version") != "2":
-                continue
-            if attempt_id and f"attempt_id={attempt_id}" not in pipe.split(","):
-                continue
-            lines[i] = f"{ts}\t{status}\t{repo}\t{wt}\t{row_slug}\t{pipe},{extra_kv}\n"
-            # Lock-free readers (join, owner input) must never see a truncated registry.
-            _atomic_registry_replace(jobs, "".join(lines).splitlines())
-            return True
-    return False
 
 
 def resolve_agent_home() -> Path:
