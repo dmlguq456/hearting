@@ -9,7 +9,7 @@ const prefix=plugin.slice(a,b).replace('createSignal<any>','createSignal').repla
 const observations=[];
 const handlers={},wire={on(event,fn){handlers[event]=fn;return this;},write(){},destroy(){handlers.close?.();}};
 const c={net:{connect:()=>wire},createSignal:value=>[()=>value,next=>{value=next;}],Buffer,JSON,
- process:{env:{HEARTING_SHELL_SOCKET:'private-fixture'}},proof:{},rpc(value){observations.push(value);},ctx:{ui:{router:{current:()=>({sessionID:'fixture'})}}}};
+ process:{env:{HEARTING_SHELL_SOCKET:'private-fixture'}},proof:{},rpc(value){observations.push(value);},ctx:{renderer:{width:133,height:30,on(){},off(){}},ui:{router:{current:()=>({sessionID:'fixture'})}}}};
 vm.createContext(c);vm.runInContext(prefix+'\nthis.peek=view;',c);
 handlers.data(Buffer.from(JSON.stringify({sid:'fixture',visible:true,rows:[[{text:'Question fixture'}]],hits:[]})+'\n'));
 assert.equal(c.peek().visible,true);
@@ -17,7 +17,7 @@ console.log('PASS normal subscriber data paints its view');
 const host=fs.readFileSync(path.join(root,'utilities/session-shell/host.cjs'),'utf8');
 const start=host.indexOf("conn.on('close',()=>{panelSubscribers.delete(conn);");
 const end=host.indexOf(';publishPanel()',start);assert(start>=0&&end>start);
-const server={conn:{on(event,fn){this.close=fn;}},panelSubscribers:new Set(),sidebarMounted:true,queueLayout(){}};
+const server={conn:{on(event,fn){this.close=fn;}},panelSubscribers:new Set(),sidebarMounted:true,nativeLayoutPending:true,queueLayout(){}};
 server.panelSubscribers.add(server.conn);vm.createContext(server);vm.runInContext(host.slice(start,end)+';',server);
 server.conn.close();
 if(process.argv[3]!=='close-only')handlers.error(new Error('fixture lost persistent display stream'));handlers.close?.();
@@ -30,3 +30,5 @@ assert.equal(observations.length,1);assert.equal(observations[0].visible,false);
 handlers.data(Buffer.from(JSON.stringify({sid:'fixture',visible:true,rows:[[{text:'late stale data'}]],hits:[]})+'\n'));
 assert.equal(c.peek().visible,false);assert.equal(c.peek().rows.length,0);
 console.log('PASS late data stays hidden and fallback is notified once');
+
+assert.equal(server.nativeLayoutPending,false);

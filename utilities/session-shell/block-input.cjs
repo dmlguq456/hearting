@@ -47,6 +47,10 @@ module.exports=function({changed,answer,action}) {
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
   function active(row){return !stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
+  function waitingForReceipt(){
+    const row=current();
+    return focused&&!!row&&!busy&&!stale&&['submitted','received','applied'].includes(state(row.item).state);
+  }
   function formValues(row){
     const local=state(row.item),result={};
     for(const question of row.item.questions||[]){
@@ -155,5 +159,5 @@ module.exports=function({changed,answer,action}) {
     }
     changed();return Buffer.alloc(0);
   }
-  return {get focused(){return focused;},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
+  return {get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
 };

@@ -762,6 +762,26 @@
    "en": "Back",
    "ko": "돌아가기"
   },
+  "fleet.session_panel.basis_default": {
+   "en": "Default route",
+   "ko": "기본 경로"
+  },
+  "fleet.session_panel.basis_frame-proposal": {
+   "en": "Plan proposal",
+   "ko": "계획 제안"
+  },
+  "fleet.session_panel.basis_preset": {
+   "en": "Preset",
+   "ko": "정해진 경로"
+  },
+  "fleet.session_panel.basis_unknown": {
+   "en": "Basis ?",
+   "ko": "근거 ?"
+  },
+  "fleet.session_panel.basis_user": {
+   "en": "User choice",
+   "ko": "사용자 선택"
+  },
   "fleet.session_panel.bottom": {
    "en": "Bottom",
    "ko": "하단"
@@ -774,9 +794,17 @@
    "en": "Checking",
    "ko": "확인 중"
   },
+  "fleet.session_panel.ci_same_head": {
+   "en": "CI same head",
+   "ko": "CI 해당 head"
+  },
   "fleet.session_panel.compact": {
    "en": "Compact bottom",
    "ko": "간단 하단"
+  },
+  "fleet.session_panel.context": {
+   "en": "context",
+   "ko": "문맥"
   },
   "fleet.session_panel.defaults": {
    "en": "Defaults",
@@ -830,13 +858,33 @@
    "en": "Tests",
    "ko": "시험"
   },
+  "fleet.session_panel.evidence_unknown": {
+   "en": "Verification ?",
+   "ko": "검증 ?"
+  },
   "fleet.session_panel.evidence_why": {
    "en": "Basis",
    "ko": "선택 근거"
   },
   "fleet.session_panel.fixed_width": {
-   "en": "OpenCode sidebar: fixed 42 columns",
-   "ko": "OpenCode sidebar: 42열 고정"
+   "en": "OpenCode · fixed 42 columns",
+   "ko": "OpenCode · 42열 고정"
+  },
+  "fleet.session_panel.gate_failed": {
+   "en": "Completion failed",
+   "ko": "마감 미통과"
+  },
+  "fleet.session_panel.gate_none": {
+   "en": "No completion record",
+   "ko": "마감 기록 없음"
+  },
+  "fleet.session_panel.gate_proven": {
+   "en": "Completion verified",
+   "ko": "마감 확인"
+  },
+  "fleet.session_panel.gate_unproven": {
+   "en": "Completion unverified",
+   "ko": "마감 미확인"
   },
   "fleet.session_panel.height": {
    "en": "Bottom rows",
@@ -850,6 +898,42 @@
    "en": "Narrow window",
    "ko": "좁은 창"
   },
+  "fleet.session_panel.next_attention": {
+   "en": "Needs attention",
+   "ko": "확인 필요"
+  },
+  "fleet.session_panel.next_close": {
+   "en": "Ready to close",
+   "ko": "마감 대기"
+  },
+  "fleet.session_panel.next_closed": {
+   "en": "Closed",
+   "ko": "마감됨"
+  },
+  "fleet.session_panel.next_no-response": {
+   "en": "No response observed",
+   "ko": "응답 관측 없음"
+  },
+  "fleet.session_panel.next_person": {
+   "en": "Your decision needed",
+   "ko": "사용자 판단 필요"
+  },
+  "fleet.session_panel.next_resume": {
+   "en": "Inspect failed stage",
+   "ko": "실패 단계 확인"
+  },
+  "fleet.session_panel.next_start": {
+   "en": "Ready to start",
+   "ko": "시작 대기"
+  },
+  "fleet.session_panel.next_unknown": {
+   "en": "Next action ?",
+   "ko": "다음 행동 ?"
+  },
+  "fleet.session_panel.next_wait": {
+   "en": "Waiting",
+   "ko": "대기"
+  },
   "fleet.session_panel.no_routes": {
    "en": "No current route",
    "ko": "아직 라우트 없음"
@@ -857,6 +941,10 @@
   "fleet.session_panel.no_work": {
    "en": "No confirmed work yet",
    "ko": "아직 확인된 작업 없음"
+  },
+  "fleet.session_panel.not_recorded": {
+   "en": "No record",
+   "ko": "기록 없음"
   },
   "fleet.session_panel.open_fleet": {
    "en": "open in Fleet",
@@ -869,6 +957,42 @@
   "fleet.session_panel.results": {
    "en": "Results & connected work",
    "ko": "결과 · 연결된 일"
+  },
+  "fleet.session_panel.review_none": {
+   "en": "Review ?",
+   "ko": "검토 ?"
+  },
+  "fleet.session_panel.review_pass": {
+   "en": "Review passed",
+   "ko": "검토 통과"
+  },
+  "fleet.session_panel.review_recorded": {
+   "en": "Review recorded",
+   "ko": "검토 기록"
+  },
+  "fleet.session_panel.role_frame": {
+   "en": "Plan",
+   "ko": "계획"
+  },
+  "fleet.session_panel.role_gate": {
+   "en": "Completion",
+   "ko": "마감"
+  },
+  "fleet.session_panel.role_resource": {
+   "en": "Resource",
+   "ko": "자원"
+  },
+  "fleet.session_panel.role_review": {
+   "en": "Review",
+   "ko": "검토"
+  },
+  "fleet.session_panel.role_test": {
+   "en": "Test",
+   "ko": "시험"
+  },
+  "fleet.session_panel.role_work": {
+   "en": "Work",
+   "ko": "작업"
   },
   "fleet.session_panel.routes": {
    "en": "Route",
@@ -890,13 +1014,117 @@
    "en": "Hearting shell settings",
    "ko": "하팅 셸 설정"
   },
+  "fleet.session_panel.shape_direct": {
+   "en": "direct",
+   "ko": "직접"
+  },
+  "fleet.session_panel.shape_framed": {
+   "en": "framed",
+   "ko": "분담형"
+  },
+  "fleet.session_panel.shape_solo": {
+   "en": "solo",
+   "ko": "단독"
+  },
+  "fleet.session_panel.shape_staged": {
+   "en": "staged",
+   "ko": "단계형"
+  },
+  "fleet.session_panel.shape_unknown": {
+   "en": "Shape ?",
+   "ko": "형태 ?"
+  },
+  "fleet.session_panel.short_ci_same_head": {
+   "en": "CI record",
+   "ko": "CI 기록"
+  },
+  "fleet.session_panel.short_review_none": {
+   "en": "review?",
+   "ko": "검토?"
+  },
+  "fleet.session_panel.short_review_pass": {
+   "en": "review✓",
+   "ko": "검토✓"
+  },
+  "fleet.session_panel.short_review_recorded": {
+   "en": "review…",
+   "ko": "검토…"
+  },
+  "fleet.session_panel.short_test_none": {
+   "en": "tests?",
+   "ko": "시험?"
+  },
+  "fleet.session_panel.short_test_pass": {
+   "en": "tests✓",
+   "ko": "시험✓"
+  },
+  "fleet.session_panel.short_test_recorded": {
+   "en": "tests…",
+   "ko": "시험…"
+  },
   "fleet.session_panel.side": {
    "en": "Side",
    "ko": "옆"
   },
+  "fleet.session_panel.state_attention": {
+   "en": "Needs attention",
+   "ko": "확인 필요"
+  },
+  "fleet.session_panel.state_degraded": {
+   "en": "Degraded",
+   "ko": "일부 미충족"
+  },
+  "fleet.session_panel.state_done": {
+   "en": "Done",
+   "ko": "완료"
+  },
+  "fleet.session_panel.state_failed": {
+   "en": "Failed",
+   "ko": "실패"
+  },
+  "fleet.session_panel.state_idle": {
+   "en": "Idle",
+   "ko": "쉬는 중"
+  },
+  "fleet.session_panel.state_reconciling": {
+   "en": "Reconciling",
+   "ko": "결과 확인 중"
+  },
+  "fleet.session_panel.state_recovering": {
+   "en": "Recovering",
+   "ko": "복구 중"
+  },
+  "fleet.session_panel.state_unknown": {
+   "en": "?",
+   "ko": "?"
+  },
+  "fleet.session_panel.state_unrecorded": {
+   "en": "Unrecorded",
+   "ko": "기록 없음"
+  },
+  "fleet.session_panel.state_waiting": {
+   "en": "Waiting",
+   "ko": "대기"
+  },
+  "fleet.session_panel.state_working": {
+   "en": "Working",
+   "ko": "진행 중"
+  },
   "fleet.session_panel.summary": {
    "en": "Summary",
    "ko": "기본"
+  },
+  "fleet.session_panel.test_none": {
+   "en": "Tests ?",
+   "ko": "시험 ?"
+  },
+  "fleet.session_panel.test_pass": {
+   "en": "Tests passed",
+   "ko": "시험 통과"
+  },
+  "fleet.session_panel.test_recorded": {
+   "en": "Tests recorded",
+   "ko": "시험 기록"
   },
   "fleet.session_panel.threshold": {
    "en": "Side minimum columns",

@@ -85,9 +85,11 @@ let actionWorker;
 let nativeContext;
 let displayValues={};
 let nativeSelected={};
+let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,sessionDetails=false,dragging=false;
-let panelSubscribers=new Set(),sidebarMounted=false,displaySequence=0;
+let panelSubscribers=new Set(),sidebarMounted=false,nativeLayoutPending=false,displaySequence=0;
+let sidebarViews=[],sidebarMouseHeld=false;
 function binding() {
   return {schema:'hearting-session-shell-v1',harness,sid,incarnation,host_pid:host.pid,host_start:host.start,
     native_pid:native?.pid,native_start:native?.start,socket:socketPath,
@@ -102,10 +104,10 @@ function publishNativeDisplay() {
     ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && !block.focused && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
-  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
+  if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
     const id=++callID;
     const timer=setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
@@ -172,6 +174,7 @@ function panelContent(){
 }
 function height(){
   if(fleetView)return 0;
+  if(harness==='opencode'&&nativeLayoutPending)return 0;
   if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side')return 0;
   if(!expanded)return harness==='claude'?0:1;
   if(geometry().side)return rows;
@@ -180,23 +183,41 @@ function height(){
 
 }
 function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
+function displayModelKey(lines){return lines.slice(-4).join('\n');}
+function observeSelectedModel(lines){
+  if(harness!=='codex'||modelReading||!native||nativeSelected.model)return;
+  const key=displayModelKey(lines);
+  if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
+  modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
+  source('display-model',{lines}).then(data=>{
+    const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
+    if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
+      nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
+    }
+  }).finally(()=>{modelReading=false;});
+}
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
+    observeSelectedModel(nativeLines);
+    const selectedChanged=!!observed?.model&&(observed.model!==displayValues.model||(observed.effort||'')!==(displayValues.effort||''));
     if(harness==='opencode'&&observed&&!nativeSidebar){
       // A confirmed native sidebar keeps this attachment at bottom. Do not
       // oscillate geometry across partial native redraws or compete with it.
       const wasSide=geometry().side;nativeSidebar=true;if(wasSide){queueLayout();queueProjection();}
     }
-    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon);
+    const concealed=fleetView?new Set():nativeDisplay.hiddenFooterRows(harness,nativeLines,sid,nativeFooter,paintedCommon,(panelModel.status||[]).map(row=>row.map(p=>p.text).join('')));
     if((observed||harness==='claude')&&JSON.stringify(observed)!==JSON.stringify(nativeContext)){
       nativeContext=observed;
-      if(observed?.model){nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
+      if(observed?.model){bootstrapModel=false;nativeSelected={model:observed.model,effort:observed.effort||''};displayValues={...displayValues,...nativeSelected};}
       if(typeof observed?.percent==='number')displayValues.context_percent=observed.percent;
       publishNativeDisplay();queueDisplay();if(harness!=='codex')queueProjection();}
+    // Paint the observed selected model with the same native frame, rather
+    // than first emitting a known model beside an obsolete Checking row.
+    if(selectedChanged)return;
     let text='\x1b[?2026h\x1b[?25l\x1b[?7l';
     const view=fleetView?.terminal||terminal;
     for(let y=0;y<view.rows;y++) {
@@ -357,12 +378,14 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:sidebarMounted?37:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const data=await source('projection',{columns:sidebarMounted?panelView.nativeSidebarColumns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes]);
-    displayValues={...displayValues,...Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null)),...nativeSelected};publishNativeDisplay();
+    const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
+    if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
+    displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
     if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
@@ -479,8 +502,8 @@ function settingsInput(data){
     const key=/^\x1b\[[ABCDZ]/.exec(settingsTail)?.[0]||settingsTail[0];settingsTail=settingsTail.slice(key.length);
     if(key==='\x1b'||key==='\x1d'){cancelSettings();break;}
     if(key==='\r'||key==='\n'){applySettings();continue;}
-    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%panelView.fields.length;
-    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+panelView.fields.length-1)%panelView.fields.length;
+    if(key==='\t'||key==='\x1b[B')settings.index=(settings.index+1)%(harness==='opencode'?5:panelView.fields.length);
+    else if(key==='\x1b[A'||key==='\x1b[Z')settings.index=(settings.index+(harness==='opencode'?5:panelView.fields.length)-1)%(harness==='opencode'?5:panelView.fields.length);
     else if(['\x1b[D','\x1b[C','-','+'].includes(key)){
       if(harness==='opencode'&&['side_width','side_min_columns'].includes(panelView.fields[settings.index]))continue;
       settings.value=panelView.change(settings.value,panelView.fields[settings.index],['\x1b[D','-'].includes(key)?-1:1);previewSettings();
@@ -490,6 +513,13 @@ function settingsInput(data){
 }
 function panelMouse(code,x,y,release){
   if(fleetView||paste||relay)return false;
+  if(sidebarMouseHeld){if(release)sidebarMouseHeld=false;return true;}
+  if(harness==='opencode'&&sidebarMounted&&displayConfiguration.layout==='side'&&!release&&(code&3)===0&&code<32){
+    // Native may still be painting the preceding frame after focus changed.
+    // Retain only four bounded published frames; match the actual full VT.
+    const hit=sidebarViews.map(view=>panelView.nativePanelHit(terminal,view,x-1,y-1)).find(Boolean);
+    if(hit){sidebarMouseHeld=true;if(hit.action)panelAction(hit.action);return true;}
+  }
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
     if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
@@ -513,10 +543,11 @@ function displayReporter(req){
 }
 function publishPanel(){
   if(!panelSubscribers.size)return;
-  const view=panelView.render({width:37,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
+  const view=panelView.render({width:panelView.nativeSidebarColumns,height:Math.max(8,Math.min(26,rows-9)),side:true,fill:false,model:panelModel,
     native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,settings,
     routeDetail,routePage,details:sessionDetails,focused:block.focused,harness,cellWidth,
     questions:options=>block.detail(options)});
+  if(JSON.stringify(sidebarViews[0]?.rows)!==JSON.stringify(view.rows))sidebarViews=[view,...sidebarViews].slice(0,4);
   routePageCount=view.routePages;
   const nativeRows=view.rows.map(row=>{
     const compact=[];
@@ -642,7 +673,11 @@ async function request(req) {
     if(typeof req.model==='string'&&req.model.length<=128&&!/[\x00-\x1f\x7f]/.test(req.model))nativeSelected.model=req.model;
     if(typeof req.effort==='string'&&req.effort.length<=64&&!/[\x00-\x1f\x7f]/.test(req.effort))nativeSelected.effort=req.effort;
     displayValues={...displayValues,...nativeSelected};
-    if(typeof req.visible==='boolean'){sidebarMounted=req.visible;queueLayout();}
+    if(typeof req.visible==='boolean'){
+      sidebarMounted=req.visible;
+      if(req.native_columns===cols&&req.native_rows===rows)nativeLayoutPending=false;
+      queueLayout();
+    }
     publishNativeDisplay();queueDisplay();return {ok:true};
   }
   if(req.op==='display-action'){
@@ -658,7 +693,7 @@ async function request(req) {
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
   if(deliveries.has(req.ref))return {ok:true,duplicate:true,state:deliveries.get(req.ref)};
-  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&!block.focused&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
+  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
   if(!safe())return {ok:false,reason:'not-idle-empty',not_started:true};
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
@@ -686,7 +721,7 @@ server=net.createServer(conn=>{
       let result;try{
         const req=JSON.parse(raw.subarray(0,newline).toString());
         if(req.op==='display-subscribe'&&displayReporter(req)){
-          conn.setTimeout(0);panelSubscribers.add(conn);conn.on('close',()=>{panelSubscribers.delete(conn);if(!panelSubscribers.size){sidebarMounted=false;queueLayout();}});publishPanel();return;
+          conn.setTimeout(0);panelSubscribers.add(conn);conn.on('close',()=>{panelSubscribers.delete(conn);if(!panelSubscribers.size){sidebarMounted=false;nativeLayoutPending=false;queueLayout();}});publishPanel();return;
         }
         result=await request(req);}
       catch{result={ok:false,reason:'control-unavailable',not_started:false};}
@@ -725,7 +760,14 @@ server.listen(socketPath,()=>{
   });
   child.onData(data=>{if(relay)emit(data);else try{terminal.write(data);}catch{rawRelay();emit(data);}});
   process.stdin.on('data',userInput);
-  process.stdout.on('resize',()=>{cols=process.stdout.columns;rows=process.stdout.rows;try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}});
+  process.stdout.on('resize',()=>{
+    cols=process.stdout.columns;rows=process.stdout.rows;
+    // Let the native sidebar choose its placement at the final new terminal
+    // size before reserving a fallback bottom. Its existing resize event
+    // reports that choice; never guess native sidebar preferences.
+    nativeLayoutPending=harness==='opencode'&&panelSubscribers.size>0;
+    try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
+  });
   child.onExit(async event=>{
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();

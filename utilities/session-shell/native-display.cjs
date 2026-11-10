@@ -10,9 +10,13 @@ function observe(harness, lines, sid) {
       const route=status.match(/⏳ route \d+(?: · (?!◑|⏵)[^·]+)*/)?.[0]?.trim();
       const wait=status.match(/◑ (\d+)\b/);
       const selected=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%\s*·\s*([^·]+?)\s*·\s*(?:5h|7d)\b/);
+      const context=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%/);
       const choice=selected?.[2].trim().match(/^(.+?)(?:\s+(low|medium|high|xhigh|max|ultra))?$/);
-      if(route||wait||selected)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
-        ...(selected?{percent:Number(selected[1]),...(!/…|\.\.\./.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})}:{})};
+      const owned=[...(context?['context']:[]),...(/(?:5h|7d)\s+(?:[\d.]+%|\?)/.test(status)?['quota']:[])];
+      if(route||wait||context)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
+        owned,
+        ...(context&&valid(+context[1])?{percent:+context[1]}:{}),
+        ...(selected&&!/…|\.\.\./.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})};
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
@@ -37,12 +41,12 @@ function observe(harness, lines, sid) {
       if(footer)return {model:footer[1],effort:footer[2]};
     }
     const rows=lines.slice(0,12),at=rows.findIndex(s=>/OpenAI Codex\s*\(v[\d.]+\)/.test(s));
-    if(at>=0)for(const line of rows.slice(at+1,at+5)){
+    if(!sid&&at>=0)for(const line of rows.slice(at+1,at+5)){
       const chosen=line.match(/^\s*[│ ]\s*model:\s+([\w./:-]+)(?:\s+(low|medium|high|xhigh|max|ultra))?(?:\s+\/model|\s*│?\s*$)/);
       if(chosen)return {model:chosen[1],effort:chosen[2]||''};
     }
   }
-  if(harness==='claude'){
+  if(harness==='claude'&&!sid){
     const at=lines.slice(0,10).findIndex(line=>/Claude Code v\d/.test(line));
     if(at>=0)for(const line of lines.slice(at+1,at+3)){
       const choice=line.match(/\s{2}([A-Za-z0-9][^·│]{0,96}?)\s+·\s+(?:API Usage Billing|Claude (?:Max|Pro)|Team|Enterprise)/);
@@ -52,24 +56,28 @@ function observe(harness, lines, sid) {
   if(harness==='opencode') {
     for(const line of lines.slice(-3)){
       const percent=line.match(/\s+\d[\d,.]*[KkMm]?\s+\((\d+(?:\.\d+)?)%\)\s+ctrl\+p commands\b/);
-      if(percent&&valid(Number(percent[1])))return {percent:Number(percent[1]),sid};
+      if(percent&&valid(Number(percent[1])))return {percent:Number(percent[1]),sid,owned:['context']};
     }
     const width=Math.max(0,...lines.map(s=>s.length));
     for(let i=0;i+2<lines.length;i++) {
       const at=lines[i].search(/Context\s*$/);
       if(at<Math.max(20,width/2))continue;
       const tokens=lines[i+1].slice(at).trim(),m=lines[i+2].slice(at).trim().match(/^(\d+(?:\.\d+)?)% used$/);
-      if(/^\d[\d,]* tokens$/.test(tokens)&&m&&valid(Number(m[1])))return {percent:Number(m[1]),sid};
+      if(/^\d[\d,]* tokens$/.test(tokens)&&m&&valid(Number(m[1])))return {percent:Number(m[1]),sid,owned:['context']};
     }
   }
   return null;
 }
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-function hiddenFooterRows(harness,lines,sid,plan,painted=[]) {
+function hiddenFooterRows(harness,lines,sid,plan,painted=[],details=[]) {
   const found=[];
   if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
-     ||!Array.isArray(plan.lines)||!plan.lines.length
-     ||!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))return new Set();
+     ||!Array.isArray(plan.lines)||!plan.lines.length)return new Set();
+  if(plan.presentation==='session-panel'){
+    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
+       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
+       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))return new Set();
+  }else if(!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))return new Set();
   try {
     const s=fs.lstatSync(plan.config.path,{bigint:true});
     const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);

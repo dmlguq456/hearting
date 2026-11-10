@@ -3164,6 +3164,11 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                                      "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
                                                for line in (visibility.get("lines") or ())[:14]
                                                if isinstance(line, (list, tuple)) and len(line) == 3]}
+                # Already bounded by the shared reader. Keep its codes intact;
+                # presentation translates them, never reinterprets report prose.
+                codes = visibility.get("codes")
+                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+                    row["visibility"]["codes"] = codes
             records.append(row)
         for sid in info["ids"]:
             details[str(_get(info["session"], "harness")) + "\0" + sid] = records

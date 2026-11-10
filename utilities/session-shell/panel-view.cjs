@@ -1,6 +1,28 @@
 'use strict';
 // Geometry and paint only. The existing question controller owns drafts/effects.
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14};
+// OpenCode owns the 42-cell container and its native scrollbar. Keep a cell
+// of owned gutter inside the additive slot, without painting that scrollbar.
+const nativeSidebarColumns=35;
+function nativePanelHit(terminal,view,x,y){
+  // Match our entire currently painted additive frame, in cells. This only
+  // routes a display click; it supplies no session identity or input proof.
+  if(!view?.rows?.length||view.rows.length>terminal.rows)return null;
+  const expected=view.rows.map(row=>row.map(part=>part.text).join(''));
+  const buffer=terminal.buffer.active,candidates=[];
+  for(let top=0;top+expected.length<=terminal.rows;top++){
+    if(y<top||y>=top+expected.length)continue;
+    const row=buffer.getLine(buffer.viewportY+top);
+    for(let left=Math.max(0,terminal.cols-42);left+nativeSidebarColumns<=terminal.cols;left++){
+      if(x<left||x>=left+nativeSidebarColumns||row?.getCell(left)?.getChars()!=='┌')continue;
+      if(expected.every((text,i)=>buffer.getLine(buffer.viewportY+top+i)?.translateToString(true,left,left+nativeSidebarColumns)===text))
+        candidates.push({left,top});
+    }
+  }
+  if(candidates.length!==1)return null;
+  const {left,top}=candidates[0];
+  return {action:view.hits.find(h=>h.row===y-top&&x-left>=h.left&&x-left<=h.right)?.action};
+}
 const fields=['layout','side_width','narrow','auxiliary','bottom_rows','side_min_columns'];
 const names=['layout','width','narrow','auxiliary','height','threshold'];
 function change(value,key,step){
@@ -19,7 +41,18 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
   const inner=width-4,content=[],hits=[];
   function add(parts,action){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);}
-  function wrap(parts,maximum=3,action){let current=[],used=0,count=0;for(const part of parts){for(const c of clean(part.text)){const n=measure(c);if(used+n>inner){add(current,action);current=[];used=0;if(++count>=maximum)return;}current.push({...part,text:c});used+=n;}}if(current.length)add(current,action);}
+  function wrap(parts,maximum=3,action){
+    let current=[],used=0,count=0,space=false;
+    for(const part of parts)for(const token of clean(part.text).match(/\s+|\S+/gu)||[]){
+      if(/^\s+$/.test(token)){space=used>0;continue;}
+      const size=measure(token),gap=space&&used?1:0;
+      if(used&&used+gap+size>inner){add(current,action);current=[];used=0;space=false;if(++count>=maximum)return;}
+      if(space&&used){current.push({...part,text:' '});used++;}space=false;
+      if(size>inner){const fit=clip([{...part,text:token}],inner-1);current.push(...fit.parts,{...part,text:'…'});used=inner;}
+      else{current.push({...part,text:token});used+=size;}
+    }
+    if(current.length)add(current,action);
+  }
   const routes=model.routes||[],first=routes[0];
   const asking=!!model.answerable;
   // UI attention is not native agent liveness. Only a confirmed route failure
@@ -34,9 +67,8 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const start=Math.max(0,settings.index-Math.max(0,height-7));
     for(let i=start;i<fields.length&&content.length<height-4;i++){
       const key=fields[i],value=settings.value[key],v=typeof value==='string'?t(value,value):value;
-      if(harness==='opencode'&&['side_width','side_min_columns'].includes(key)){
-        add(line('  '+t('fixed_width','OpenCode sidebar: fixed 42 columns')));continue;
-      }
+      if(harness==='opencode'&&key==='side_min_columns')continue;
+      if(harness==='opencode'&&key==='side_width'){add(line((i===settings.index?'› ':'  ')+t('fixed_width','OpenCode · fixed 42 columns'),i===settings.index?'loc_repo':'dim'));continue;}
       const prefix=`${i===settings.index?'›':' '} ${t(names[i],names[i])}  `,left=2+measure(prefix);
       hits.push({row:content.length+1,left,right:left+1,action:'setting:'+i+':down'});
       hits.push({row:content.length+1,left:left+measure('‹ '+v+' '),right:left+measure('‹ '+v+' ›'),action:'setting:'+i+':up'});
@@ -52,7 +84,9 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     if(settings.error)add(line(t('save_failed','Could not save'),'lvl_r'));
     else add(line('Tab ↑↓ · ←/→ · Enter · Esc'));
   }else{
-    const m=native.model&&(native.model!==model.model_value||native.effort&&native.effort!==model.effort_value)?line(native.model+(native.effort?' · '+native.effort:''),'loc_repo'):(model.model||line(t('checking','Checking')));
+    const selected=native.model||model.model_value,effort=native.model?native.effort:model.effort_value;
+    const formatted=selected===model.model_value&&(effort||'')===(model.effort_value||'')&&model.model?.some(p=>String(p.text).includes(' · '));
+    const m=formatted?model.model:selected?line(selected+' · '+(effort||'?'),'loc_repo'):(model.model||line(t('checking','Checking')+' · ?'));
     add(m);
     if(model.warning)add(line(model.warning,'lvl_r'));
     if(status&&side)add(line(status,color));
@@ -68,7 +102,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
         wrap(line(route.title||t('checking','Checking'),'loc_repo'),2);
         for(const stage of route.stages||[])wrap(line((stage.name||stage.id)+' · '+stage.state),2);
         if(route.stage_more)add(line('+'+route.stage_more+' · Fleet'));
-        wrap(line(route.reason||route.state),3);
+        wrap(line(route.reason||route.state_label||route.state),3);
         if(route.outcome)wrap(line(route.outcome,'lvl_g'),2);
         for(const [label,value,tone] of route.visibility?.lines||[]){
           wrap(line(label+': '+value,({good:'lvl_g',bad:'lvl_r',mixed:'lvl_y',info:'loc_repo',dim:'dim'})[tone]||'dim'),20);
@@ -85,28 +119,32 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       add(line(counter+' · PgUp/PgDn'));
       for(const row of detail.slice(page*budget,(page+1)*budget))add(row);
     }else{
-      if(side){add(line(t('work','Current work')));wrap(line(model.title||(!sid||model.routes_known?t('no_work','No confirmed work yet'):t('checking','Checking')),'loc_repo'),2);add([]);}
+      add(line(t('work','Current work')+(side?'':' · '+(model.title||t('no_work','No confirmed work yet')))));
+      if(side){wrap(line(model.title||(!sid||model.routes_known?t('no_work','No confirmed work yet'):t('checking','Checking')),'loc_repo'),2);add([]);}
       const routeTitle=first?.title||model.route_label||(model.routes_known?t('no_routes','No current route'):t('checking','Checking'));
-      const heading=side&&first?.title===model.title?'⏳ '+t('routes','Route'):
+      const flow=(first?.stages||[]).map(s=>(s.current?'› ':'')+(s.name||s.id||'')).filter(Boolean).join(' → ');
+      const heading=!side&&flow?'⏳ '+t('routes','Route')+' · '+routeTitle+' · '+flow:side&&first?.title===model.title?'⏳ '+t('routes','Route'):
         !first&&model.route_label?model.route_label:'⏳ '+t('routes','Route')+' · '+routeTitle;
       wrap(line(heading,'loc_repo'),side?2:1,'route');
       if(first){
-        const flow=(first.stages||[]).map(s=>s.name||s.id).filter(Boolean).join(' → ');
-        if(flow&&(side||!focused))wrap(line(flow),side?2:1,'route');
+        if(flow&&side)wrap(line(flow),2,'route');
         if(first.stage_more)add(line('+'+first.stage_more+' · Fleet ›'),'fleet');
-        if(side||!focused)wrap(line([first.stage!=='·'?first.stage:'',first.reason||first.state].filter(Boolean).join(' · '),color),side?2:1,'route');
-        if(side&&!focused&&first.visibility?.summary)wrap(line(first.visibility.summary),1,'route');
+        if(side)wrap(line([first.stage!=='·'?first.stage:'',first.reason||first.state_label||first.state].filter(Boolean).join(' · '),color),2,'route');
+        if(first.visibility?.summary)wrap(line(first.visibility.summary),1,'route');
       }
       if(routes.length>1)add(line('+'+(routes.length-1)+' · '+t('routes','Route')),'route');
       // Bound optional material first. Question editor gets the remaining rows,
       // and keeps its own overflow/Tab/form/draft/revision handling unchanged.
-      const remaining=Math.max(2,height-2-content.length);
-      const q=questions({budget:Math.max(2,remaining-2),columns:inner-2});
+      // At a short bottom editor the answer owns the scarce rows, identically
+      // for every harness. Telemetry remains in details/native-owned fields.
+      const summary=focused&&!side?[]:(model.summary||[]).slice(0,2);
+      const remaining=Math.max(2,height-2-content.length-summary.length);
+      const q=questions({budget:Math.max(2,remaining-2),columns:inner-4});
       if(q.length){
         add(line('╭'+'─'.repeat(inner-2)+'╮',asking?'lvl_y':'dim'),'question');
         for(const row of q.slice(0,Math.max(0,height-3-content.length))){
-          const fit=clip(row,inner-2);
-          add([text('│',asking?'lvl_y':'dim'),...fit.parts,text(' '.repeat(inner-2-fit.used)),text('│',asking?'lvl_y':'dim')],'question');
+          const fit=clip(row,inner-4);
+          add([text('│ ',asking?'lvl_y':'dim'),...fit.parts,text(' '.repeat(inner-3-fit.used)),text('│',asking?'lvl_y':'dim')],'question');
         }
         add(line('╰'+'─'.repeat(inner-2)+'╯',asking?'lvl_y':'dim'),'question');
       }
@@ -115,16 +153,11 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
         add([]);add(line(t('results','Results & connected work')),'details');
         add(line(result.outcome,'lvl_g'),'details');
       }
-      const statusRows=model.status||[];
-      // Existing native fields remain secondary, but when they all fit they
-      // are actually painted (required before concealing a managed footer).
-      if(harness!=='claude'&&statusRows.length&&statusRows.length<=height-2-content.length){
-        for(const row of statusRows)add(row,'details');
-      }else if(cfg.auxiliary==='detail')for(const row of statusRows){if(content.length>=height-3)break;wrap(row,1,'details');}
-      if(content.length<height-2&&typeof native.context_percent==='number'){
-        const pct=native.context_percent;
-        add(line(`context ${pct}%`),'details');
-      }
+      // Every harness uses this bottom summary; verbose native fields and IDs
+      // remain in explicit details. Ownership is supplied as observed facts.
+      const room=Math.max(0,height-2-content.length),kept=summary.slice(0,room);
+      if(fill&&kept.length)while(content.length<height-2-kept.length)add([]);
+      for(const row of kept)add(row,'details');
     }
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
@@ -140,4 +173,4 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   if(!settings)hits.push({row:count-1,left:1,right:width-2,action:'details'});
   return {rows,hits:hits.filter(h=>h.row<count),color,routePages};
 }
-module.exports={render,defaults,fields,change};
+module.exports={render,defaults,fields,change,nativeSidebarColumns,nativePanelHit};

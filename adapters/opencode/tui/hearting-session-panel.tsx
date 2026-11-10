@@ -13,7 +13,13 @@ function color(n: number | undefined) {
 }
 export function sessionPanel(ctx: any, proof: any, rpc: (request: any)=>void) {
   const [view,setView]=createSignal<any>({rows:[],hits:[],sid:''});
-  let raw='',closed=false,lastModel='',streamLost=false;
+  let raw='',closed=false,lastModel='',streamLost=false,mounted=false;
+  const reportGeometry=()=>{
+    if(!closed)rpc({op:'display-observation',visible:mounted&&!streamLost,
+      native_columns:ctx.renderer.width,native_rows:ctx.renderer.height});
+  };
+  const resized=()=>queueMicrotask(reportGeometry);
+  ctx.renderer.on('resize',resized);
   const socket=net.connect(process.env.HEARTING_SHELL_SOCKET!);
   function unavailable(){
     if(streamLost)return;streamLost=true;raw='';
@@ -29,10 +35,10 @@ export function sessionPanel(ctx: any, proof: any, rpc: (request: any)=>void) {
   });
   const action=(name: string)=>rpc({op:'display-action',action:name,sid:ctx.ui.router.current()?.sessionID||''});
   function Panel(props: any){
-    onMount(()=>rpc({op:'display-observation',visible:!streamLost}));
-    onCleanup(()=>{if(!closed)rpc({op:'display-observation',visible:false});});
+    onMount(()=>{mounted=true;reportGeometry();});
+    onCleanup(()=>{mounted=false;reportGeometry();});
     return <Show when={view().visible&&(!view().sid||view().sid===props.sessionID)}>
-      <box flexDirection="column" flexShrink={0}>
+      <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1}>
         <Index each={view().rows}>{(row: any,index: number)=>{
           let surface: any;
           return <box ref={(value: any)=>surface=value} width="100%" height={1} flexShrink={0} flexDirection="row" onMouseDown={(event: any)=>{
@@ -54,6 +60,6 @@ export function sessionPanel(ctx: any, proof: any, rpc: (request: any)=>void) {
       const next=JSON.stringify(current||null);if(next===lastModel)return;lastModel=next;
       if(current)rpc({op:'display-observation',model:current.modelID,effort:current.variant||''});
     },
-    dispose(){closed=true;unmount();socket.destroy();}
+    dispose(){closed=true;ctx.renderer.off('resize',resized);unmount();socket.destroy();}
   };
 }
