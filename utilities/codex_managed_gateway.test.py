@@ -1416,7 +1416,7 @@ class ManagedGatewayTest(unittest.TestCase):
             "thread-1", request["receipt"], "dlv-fixture"
         )
         context = params["additionalContext"]["hearting-completion"]["value"]
-        command = next(line for line in context.splitlines() if " harvest --jobs " in line)
+        command = next(line for line in context.splitlines() if " observed-status --jobs " in line)
         self.assertNotIn("--failure-detail", command)
         environment = dict(os.environ)
         for name in (
@@ -1426,6 +1426,7 @@ class ManagedGatewayTest(unittest.TestCase):
             "AGENT_DISPATCH_COMPLETION_STATE_FILE",
         ):
             environment.pop(name, None)
+        original = jobs.read_bytes()
         result = subprocess.run(
             shlex.split(command),
             text=True,
@@ -1434,8 +1435,12 @@ class ManagedGatewayTest(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"job_registry={jobs}", result.stdout)
-        self.assertIn("matched=1", result.stdout)
+        self.assertEqual(jobs.read_bytes(), original)
+        self.assertEqual(shlex.split(command)[shlex.split(command).index("--jobs") + 1], str(jobs))
+        view = json.loads(next(line.partition("=")[2] for line in result.stdout.splitlines()
+                               if line.startswith("headless_evidence=")))
+        self.assertEqual((view["total"], view["shown"]), (1, 1))
+        self.assertEqual(view["rows"][0]["attempt_id"], attempt)
 
         # Attention can mean a delivery/cleanup obligation on a PASS row.
         # The generated inspection must remain usable for that exact row.
@@ -1444,7 +1449,10 @@ class ManagedGatewayTest(unittest.TestCase):
         result = subprocess.run(shlex.split(command), text=True, capture_output=True,
                                 env=environment, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("matched=1", result.stdout)
+        view = json.loads(next(line.partition("=")[2] for line in result.stdout.splitlines()
+                               if line.startswith("headless_evidence=")))
+        self.assertEqual((view["total"], view["shown"]), (1, 1))
+        self.assertEqual(view["rows"][0]["attempt_id"], attempt)
 
     def test_active_manual_turn_receipt_steers_without_second_turn(self) -> None:
         self.client.request(
