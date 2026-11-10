@@ -81,7 +81,12 @@ def _campaign_documents(root):
     return entrance_snapshot(root)
 
 
-ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals, _campaign_documents)
+def _canonical_topics(root):
+    from artifact_spec_storage import entrance_snapshot
+    return entrance_snapshot(root)
+
+
+ROW_SOURCES: Tuple[Callable[[Path], Iterable[Mapping]], ...] = (_daily_journals, _campaign_documents, _canonical_topics)
 _DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 ENTRANCE_NAMES = store.ENTRANCE_NAMES
@@ -563,10 +568,10 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
     if not all(isinstance(value, str) for value in (kind, date, title, doc)):
         return None
     kind, date, title = _nfc(kind).strip(), _nfc(date), _nfc(title).strip()
-    # Campaign documents already exist at this exact filesystem locator.
-    # Normalizing a decomposed name would point to a different file on Linux.
-    doc = doc if kind == 'campaign-document' else _nfc(doc)
-    if not kind or kind == "cycle" or not title or not _DATE_FULL.match(date):
+    # Existing documents and immutable provider paths retain their exact
+    # filesystem spelling, including decomposed Unicode names.
+    doc = doc if kind in ('campaign-document', 'canonical-topic') else _nfc(doc)
+    if not kind or kind == "cycle" or not title or not (_DATE_FULL.match(date) or (kind == 'canonical-topic' and date == '')):
         return None
     if _document_path(root, doc) is None:
         return None
@@ -587,6 +592,14 @@ def _source_row(root: Path, raw: Any) -> Optional[Dict[str, Any]]:
         "extra": extra if isinstance(extra, int) and not isinstance(extra, bool) and extra > 0 else 0,
         "selected_by": "source",
     }
+    if kind == 'canonical-topic':
+        from artifact_identity import is_well_formed
+        if not (is_well_formed(raw.get('reference_id'), 'shared_reference')
+                and is_well_formed(raw.get('revision_id'), 'shared_reference_revision')):
+            return None
+        row.update({key: raw.get(key) for key in ('artifact_root_id', 'repository_id', 'campaign_id',
+            'cycle_id', 'cycle_path', 'artifact_id', 'artifact_revision_id', 'reference_id', 'component',
+            'revision_id', 'source_revision_id', 'source_path', 'logical_locator', 'status', 'coverage', 'digest')})
     if kind == "journal-entry":
         from artifact_journal import is_well_formed
         if not (is_well_formed(raw.get("artifact_id", ""), "artifact")
@@ -688,7 +701,7 @@ def _record_target(row):
 
 
 def _record_md_href(row):
-    return _href(row['doc_path']) if row['kind'] == 'campaign-document' else _md_href(_record_target(row))
+    return _href(row['doc_path']) if row['kind'] in ('campaign-document', 'canonical-topic') else _md_href(_record_target(row))
 
 
 def _record_href(row):
@@ -1206,7 +1219,7 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
     if chosen is None:
         words = [word.casefold() for word in args if word.strip()]
         matches = [row for row in rows if all(
-            word in (" ".join([row["title"], row["summary"], row["doc_path"], row["cycle_path"]]).casefold())
+            word in (" ".join([row["title"], row["summary"], row["doc_path"], row["cycle_path"] or '']).casefold())
             for word in words)]
         if not matches:
             print(t("open.not_found", query=selector), file=sys.stderr)
@@ -1222,7 +1235,8 @@ def _command_open(root: Path, args: Sequence[str]) -> int:
         return 1
     anchor = chosen.get("anchor")
     print(str(target) + ("#" + anchor if anchor else ""))
-    url = _show_viewer(root, target, t)
+    viewer_target = root / chosen['logical_locator'] if chosen['kind'] == 'canonical-topic' else target
+    url = _show_viewer(root, viewer_target, t)
     if url:
         _open_externally(url + ("#" + anchor if anchor else ""))
     else:
