@@ -290,6 +290,15 @@ def verified_terminal_caller(process_info, *, pid=None):
         return False
 
 
+def _native_user_tui(pid, harness):
+    """Whether a seat's native process is ``harness``'s own TUI, not a service or worker.
+
+    The seat join proves birth, descent and foreground; it does not prove this role.
+    Tidy's caller seat and retire's effect target both need it before acting.
+    """
+    return _runtime(pid) == (harness, False) and not _registered_worker(pid)
+
+
 def _runtime(pid):
     try:
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
@@ -849,7 +858,7 @@ def _shell_seat_pane(pane, harness, sid, pid, *, executable, server=None, socket
         if own is None or (target and binding["sid"] != target):
             return ""
         native = binding["native_pid"]
-        if _runtime(native) != (harness, False) or _registered_worker(native):
+        if not _native_user_tui(native, harness):
             return ""  # a service or registered worker behind the shell is no user seat
         # Protection, not re-proof: a shared Codex daemon retains several roots, so
         # its caller's thread must be the one the TUI selects now. The TUI itself

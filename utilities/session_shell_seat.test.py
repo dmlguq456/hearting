@@ -89,6 +89,11 @@ class ShellSeatTest(unittest.TestCase):
     def test_wrapped_retire_foreground_is_the_seat_native_for_every_harness(self):
         info = {**self.info, "shell_pid": os.getpid()}
         record = {"sessionId": self.sid, "procStart": self.native["start"]}
+        import pane_ownership as po
+        mock.patch.object(po, "_registered_worker", return_value=False).start()
+        harness = None  # The native's role is synthetic; its birth and descent are real.
+        mock.patch.object(po, "_runtime", side_effect=lambda pid:
+            (harness, False) if pid == self.native["pid"] else (None, False)).start()
         for harness in ("claude", "opencode"):
             with self.subTest(harness=harness), \
                  mock.patch("fleet.collectors.claude.read_registry", return_value=record):
@@ -99,6 +104,7 @@ class ShellSeatTest(unittest.TestCase):
                 self.assertEqual(found["attachment"]["broker_pid"], self.broker["pid"])
                 session_shell.binding_path(harness, value["host_pid"]).unlink()
         # Claude's own record naming another session (a /resume) is no exit target.
+        harness = "claude"
         self.publish("claude")
         with mock.patch("fleet.collectors.claude.read_registry",
                         return_value={**record, "sessionId": "another-session"}):

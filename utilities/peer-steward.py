@@ -2148,6 +2148,11 @@ def _wrapped_foreground(pane, harness, info):
         shell_start = _proc_start_ticks(info.get("shell_pid"))
         if (not identity or identity["start"] != binding["native_start"] or not shell_start):
             return None, True
+        # Protection: the join proves birth and foreground, not role. Only the
+        # requested harness's own TUI (no service, no registered worker) is a target.
+        from pane_ownership import _native_session, _native_user_tui
+        if not _native_user_tui(pid, harness):
+            return None, True
         # Protection, not re-proof: a shared Codex daemon can retain several roots,
         # so input goes only to the thread the TUI currently selects.
         import session_shell
@@ -2156,7 +2161,6 @@ def _wrapped_foreground(pane, harness, info):
             return None, True
         # Protection: Claude's own record must still show the attachment's session
         # (a /resume to another session in the same TUI is not the booked target).
-        from pane_ownership import _native_session
         if harness == "claude" and _native_session(pid, harness) != binding["sid"]:
             return None, True
         keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
