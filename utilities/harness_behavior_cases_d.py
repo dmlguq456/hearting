@@ -73,6 +73,12 @@ from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
 import harness_behavior_cases_a as ca  # noqa: E402
 import harness_behavior_cases_b as cb  # noqa: E402
 
+def _base():
+    """The running harness module (``__main__`` when run as a script) for its globals."""
+    main = sys.modules.get("__main__")
+    return main if hasattr(main, "Run") and hasattr(main, "SOURCE") else base
+
+
 # Register rows each scenario measures (core/ADAPTATION.md §10).
 PG = {
     "report-burst": "PG-31", "report-long": "PG-31", "report-after-error": "PG-31",
@@ -293,11 +299,17 @@ class ReportBurstScenario(Scenario):
         lost = [i for i, (tail, state) in enumerate(zip(self.tails, states))
                 if state == "acked" and tail not in seen]
         ev["acked_unseen"] = lost
+        ev["spilled_to_file"] = any(
+            ("persisted-output" in r["text"] or "Full hook output saved to" in r["text"])
+            and f"HB-BURST-{self.nonce}" in r["text"]
+            for r in run.main_requests()[ev["flow"]["before"]:])
         undelivered = [i for i, tail in enumerate(self.tails) if tail not in seen]
         run.note(f"seen {len(seen)}/{self.COUNT}; states {ev['states']}; "
                  f"woken without prompt {ev['flow']['woken_without_prompt']}")
         if lost:
-            run.note(f"{len(lost)} notices recorded acked but never reached the model")
+            run.note(f"{len(lost)} notices recorded acked but never reached the model"
+                     + ("; the native hook output limit saved the rest to a file and showed "
+                        "a preview" if ev["spilled_to_file"] else ""))
             return "fail"
         if not undelivered:
             return "pass"
@@ -417,10 +429,10 @@ class ReportAfterErrorScenario(Scenario):
             later = cb.first_with(run, self.marker, count)
             ev["delivered_next_prompt"] = later
             ev["pending_final"] = cb.pending_state(run, ref)
-            run.note("not delivered at the error boundary; "
-                     + ("delivered at the next prompt" if later is not None
-                        else "not delivered at the next prompt either"))
-            return "pass" if later is not None else "fail"
+            run.note("not delivered at the error boundary or later in the turn; "
+                     + ("delivered at the next prompt (no loss, no carrier after a failed tool)"
+                        if later is not None else "not delivered at the next prompt either"))
+            return "gap" if later is not None else "fail"
         run.note(f"delivered {'at the error-tool boundary' if at_boundary else 'later in the turn'}"
                  f" (request #{in_turn}); state {state_after}")
         return "pass"
@@ -430,7 +442,9 @@ class SubsessionCompletionScenario(Scenario):
     name = "subsession-completion"
     summary = "A native sub-session registers a child; its completion wakes the session."
     carrier = "parent_completion"
-    AGENT = "general-purpose"
+    # A built-in general agent on each harness: the sub-session is measured, not a
+    # custom agent's model pin (custom agents are custom-agent-spawn, PG-28).
+    AGENTS = {"claude": "general-purpose", "codex": "default", "opencode": "general"}
     NEXT = "HB-SUB-NEXT"
 
     def __init__(self):
@@ -457,7 +471,8 @@ class SubsessionCompletionScenario(Scenario):
                 return Reply("Sub-task started; I will continue when it reports.")
             if self.main in record["last_text"] and not any(
                     str(r["reply"].get("shell") or "").startswith("spawn:") for r in earlier):
-                return Reply(shell=spawn_call(self.AGENT, f"{self.sub} register the child"))
+                return Reply(shell=spawn_call(self.AGENTS[run.harness],
+                                              f"{self.sub} register the child"))
             return Reply("Nothing new.")
         return answer
 
@@ -682,7 +697,7 @@ class CompletionNoticeSameRootScenario(Scenario):
 # --------------------------------------------------------------------------
 
 def source_status() -> str | None:
-    done = subprocess.run(["git", "-C", str(base.SOURCE), "status", "--porcelain"],
+    done = subprocess.run(["git", "-C", str(_base().SOURCE), "status", "--porcelain"],
                           text=True, capture_output=True, timeout=30)
     return done.stdout if done.returncode == 0 else None
 
@@ -691,7 +706,7 @@ def delink_config(env: dict) -> list[str]:
     """Replace config files linked into the measured tree with private copies."""
     roots = [Path(env[key]) for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME") if env.get(key)]
     roots.append(Path(env["XDG_CONFIG_HOME"]) / "opencode")
-    source = base.SOURCE.resolve()
+    source = _base().SOURCE.resolve()
     changed = []
     for root in roots:
         if not root.is_dir():
@@ -862,6 +877,16 @@ def _agents_for_pane(payload, pane: str) -> list[dict]:
     return found
 
 
+SHELL_STATUS_CODE = r"""
+import session_shell
+binding, reason = session_shell.exact_binding(args["harness"], args["sid"])
+status = session_shell.control(binding, "status") if binding else {}
+print(json.dumps({"binding_reason": reason, "status": {k: status.get(k) for k in (
+    "ok", "state", "empty", "focused", "expanded", "held_bytes", "epoch", "alive",
+    "projection_state")}}, default=str))
+"""
+
+
 class HerdrPeerPromptScenario(Scenario):
     name = "herdr-peer-prompt"
     summary = ("The TUI runs in a private Herdr pane (Claude suggestions on); peer-steward "
@@ -916,8 +941,8 @@ class HerdrPeerPromptScenario(Scenario):
         ev["delinked"] = delink_config(env)
         ev["source_status_before"] = source_status()
         activation = subprocess.run(
-            [str(base.SOURCE / "tools/install/harness.sh"), "runtime", "activate", "--runtime",
-             run.harness, "--mode", "packaged", "--source", str(base.SOURCE), "--json"],
+            [str(_base().SOURCE / "tools/install/harness.sh"), "runtime", "activate", "--runtime",
+             run.harness, "--mode", "packaged", "--source", str(_base().SOURCE), "--json"],
             env=env, cwd=str(run.home.workspace), text=True, capture_output=True, timeout=120)
         ev["runtime_activation"] = {"exit": activation.returncode,
                                     "stdout": activation.stdout[-500:],
@@ -990,14 +1015,25 @@ class HerdrPeerPromptScenario(Scenario):
         agents = _agents_for_pane(_json(listed.stdout), tui.pane)
         ev["herdr_agent_list"] = {"exit": listed.returncode, "agents": agents}
         target = (agents[0].get("name") if agents and agents[0].get("name") else tui.pane)
+        # A terminal focus report (FocusIn/FocusOut) lands in the pane as Herdr or the
+        # operator's terminal sends it; it is not a draft (E9-TASK-GHOST-TEXT).
+        if os.environ.get("HEARTING_SCENARIO_HERDR_FOCUS", "1") != "0":
+            focus = tui.herdr("pane", "send-text", tui.pane, "\x1b[I")
+            ev["focus_report_sent"] = focus.returncode == 0
+        else:
+            ev["focus_report_sent"] = None   # diagnostics: the same run without it
+        time.sleep(1.5)
         before = len(run.main_requests())
-        sent = subprocess.run([sys.executable, str(base.SOURCE / "utilities/peer-steward.py"),
+        sent = subprocess.run([sys.executable, str(_base().SOURCE / "utilities/peer-steward.py"),
                                "--herdr-session", run.herdr["session"], "prompt", tui.pane,
                                "--body-stdin"], input=f"[steer] {self.marker} please acknowledge",
                               env=run.home.env, cwd=str(run.home.workspace), text=True,
                               capture_output=True, timeout=60)
         ev["peer_steward_prompt"] = {"exit": sent.returncode, "stdout": sent.stdout[-600:],
                                      "stderr": sent.stderr[-400:]}
+        if "not-idle-empty" in sent.stdout and "session_shell" in ev:
+            ev["session_shell_status"] = cb.fixture_python(run, SHELL_STATUS_CODE, {
+                "harness": run.harness, "sid": sid})
         arrived = wait_for(lambda: cb.first_with(run, self.marker, before) is not None, 60)
         ev["prompt_arrived_request"] = cb.first_with(run, self.marker, before)
         run.wait_idle(6, 60)
@@ -1066,7 +1102,7 @@ print(json.dumps(out))
 
 def synthetic_route(workspace: Path, artifact_root: Path, shape: str) -> dict:
     """A sealed-looking autopilot-code route for ``workspace`` (valid hash and id)."""
-    sys.path.insert(0, str(base.SOURCE / "utilities"))
+    sys.path.insert(0, str(_base().SOURCE / "utilities"))
     import route_identity
     route = {"schema_version": 2, "capability": "autopilot-code", "capability_mode": "dev",
              "requested_intensity": "quick", "effective_intensity": "quick",
@@ -1155,7 +1191,7 @@ class OwnerPublishScenario(Scenario):
         if run.harness != "codex":
             return {"sandbox": "none (host process)", "route_id": route["route_id"]}
         done = subprocess.run([sys.executable, "-B", "-c", POSTURE_CODE, json.dumps({
-            "source": str(base.SOURCE), "route_file": str(route_file),
+            "source": str(_base().SOURCE), "route_file": str(route_file),
             "route_id": route["route_id"], "route_hash": route["route_hash"],
             "worktree": str(ws), "intensity": route["effective_intensity"],
             "output_dir": str(output)})], env=run.home.env, cwd=str(ws), text=True,
