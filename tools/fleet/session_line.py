@@ -53,6 +53,8 @@ def line_segments(values, columns, *, complete=False):
     groups = []
 
     def words(name, text, key, maximum, priority, before=(), after=(), minimum=1):
+        if values.get("_panel_owned") and name in {"model", "route", "wait"}:
+            return
         text = _text(text)
         groups.append({"name": name, "text": text, "key": key, "budget": min(maximum, cell_width(text)),
                        "minimum": min(minimum, cell_width(text)), "priority": priority,
@@ -268,6 +270,9 @@ def claude_native_statusline(callback, environ):
     values.update(title=environ.get("S_SESSION_DISPLAY"), git=git, branch=branch,
                   jobs=environ.get("git_jobs"), state=state, tag=assigned_tag("claude", sid),
                   route_label=route, answer_wait=waiting)
+    # In a wrapped session these fields have one stable home in the work panel.
+    # Claude still owns its reserved context/quota/Git rows and exact callback.
+    values["_panel_owned"] = bool(environ.get("HEARTING_SHELL_SOCKET"))
     try:
         columns = max(20, min(10000, int(environ.get("COLUMNS", "100"))))
     except ValueError:

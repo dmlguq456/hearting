@@ -41,18 +41,27 @@ def _private_json(path: Path, limit: int):
     return json.loads(raw)
 
 
-def _configuration(environ=None):
-    value = _private_json(policy_path(environ), MAX_RECORD_BYTES)
-    keys = {"enabled", "layout", "side_width", "side_min_columns"}
+DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
+                    "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14}
+
+
+def _validate_configuration(value):
+    keys = {"enabled", *DISPLAY_DEFAULTS}
     if not isinstance(value, dict) or not set(value) <= keys or type(value.get("enabled")) is not bool:
         raise ValueError("invalid shell configuration")
-    if value.get("layout", "bottom") not in {"bottom", "side"}:
+    if value.get("layout", "side") not in {"bottom", "side"}:
         raise ValueError("invalid shell layout")
-    for key, default, lower, upper in (("side_width", 40, 32, 80), ("side_min_columns", 132, 80, 1000)):
+    if value.get("narrow", "bottom") not in {"bottom", "compact"} or value.get("auxiliary", "summary") not in {"summary", "detail"}:
+        raise ValueError("invalid shell presentation")
+    for key, default, lower, upper in (("side_width", 40, 32, 80), ("side_min_columns", 100, 80, 1000), ("bottom_rows", 14, 8, 20)):
         number = value.get(key, default)
         if type(number) is not int or not lower <= number <= upper:
             raise ValueError("invalid shell geometry")
     return value
+
+
+def _configuration(environ=None):
+    return _validate_configuration(_private_json(policy_path(environ), MAX_RECORD_BYTES))
 
 
 def policy(environ: Mapping[str, str] | None = None) -> tuple[bool, str]:
@@ -71,8 +80,31 @@ def display_policy(environ=None):
         value = _configuration(environ)
     except (OSError, ValueError, TypeError):
         value = {}
-    return {key: value.get(key, default) for key, default in
-            (("layout", "bottom"), ("side_width", 40), ("side_min_columns", 132))}
+    return {key: value.get(key, default) for key, default in DISPLAY_DEFAULTS.items()}
+
+
+def save_display_policy(settings, environ=None):
+    """Explicit shell-settings Apply. Preserve enablement and backup exact bytes."""
+    if not isinstance(settings, dict) or set(settings) != set(DISPLAY_DEFAULTS):
+        raise ValueError("invalid shell settings")
+    path = policy_path(environ)
+    before = _private_json(path, MAX_RECORD_BYTES)
+    value = _validate_configuration({**before, **settings})
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/install"))
+    import safe_fs
+    import hashlib
+    state = safe_fs.capture_state(path, include_payload=True)
+    if json.loads(state.payload) != before:
+        raise ValueError("shell settings changed")
+    backup = path.with_name(path.name + ".backup-" + hashlib.sha256(state.payload).hexdigest()[:16])
+    if not backup.exists():
+        authority = safe_fs.authority(backup, owner="session-shell:settings-backup", allowed_paths=(backup,), expected=safe_fs.capture_state(backup))
+        safe_fs.atomic_write_bytes(authority, state.payload, state.mode or 0o600)
+    elif backup.is_symlink() or backup.read_bytes() != state.payload:
+        raise ValueError("shell settings backup changed")
+    authority = safe_fs.authority(path, owner="session-shell:settings", allowed_paths=(path,), expected=state)
+    safe_fs.atomic_write_bytes(authority, (json.dumps(value, ensure_ascii=False) + "\n").encode(), state.mode or 0o600)
+    return {key: value[key] for key in DISPLAY_DEFAULTS}
 
 
 def process(pid: int) -> dict | None:
@@ -424,6 +456,7 @@ def _lifecycle_owner(harness: str, sid: str, env: dict):
 def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
     """Silent native hook report, separate from all prompt classification."""
     env = os.environ if env is None else env
+    native_model = env.get("HEARTING_SHELL_NATIVE_MODEL")
     if harness not in HARNESSES or not _SID.fullmatch(sid or ""):
         return
     if harness != "codex" and not env.get("HEARTING_SHELL_SOCKET"):
@@ -444,6 +477,8 @@ def lifecycle(harness: str, event: str, sid: str, *, env=None) -> None:
     import time
     req = {"op": "event", "harness": harness, "sid": sid, "event": event,
            "token": token, "pid": me["pid"], "start": me["start"], "seq": time.monotonic_ns() // 1000}
+    if isinstance(native_model, str) and 0 < len(native_model) <= 128 and all(ord(c) >= 32 and ord(c) != 127 for c in native_model):
+        req["native_model"] = native_model
     try:
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(0.5)
@@ -481,7 +516,7 @@ def _plain(value, limit=256):
     return " ".join("".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in value).split())[:limit]
 
 
-def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding=""):
+def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="", panel_lines=None, detail_lines=None):
     """Conceal only known native fields already represented in the common area."""
     from fleet.collectors import procscan
     from fleet.render_cells import _half_up
@@ -494,12 +529,12 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
         return None, None
     observed = codex_tui_config.managed_status_line_observation(home, argv=procscan._read_argv(pid))
     path = str(Path(home) / "config.toml")
-    if not observed or not status_rows or painted_rows[:len(status_rows)] != status_rows:
+    if not observed or not status_rows or (panel_lines is None and painted_rows[:len(status_rows)] != status_rows):
         return None, path
     model, effort, percent = values.get("model"), values.get("effort"), values.get("ctx_pct")
     if not model or type(percent) not in (int, float) or not 0 <= percent <= 100:
         return None, path
-    common = "\n".join("".join(text for text, _key in row) for row in status_rows)
+    common = "\n".join(detail_lines) if detail_lines is not None else "\n".join("".join(text for text, _key in row) for row in status_rows)
     if sid not in common:
         return None, path
     title = _plain(values.get("title"), 512)
@@ -526,8 +561,11 @@ def _codex_footer_plan(values, sid, pid, status_rows, painted_rows, *, padding="
                 options.extend((f"{name}: {100-used}% left", f"{name} {100-used}% left",
                                 f"{name} {100-used}% remaining", f"{name} {used}% used"))
         fields[item] = options or None
-    return {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
-            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}, path
+    plan = {"sid": sid, "config": observed, "fields": [fields[item] for item in observed["items"]],
+            "lines": [padding + "".join(text for text, _key in row) for row in status_rows]}
+    if panel_lines is not None and detail_lines:
+        plan.update(presentation="session-panel", lines=panel_lines, detail_lines=detail_lines)
+    return plan, path
 
 
 def session_questions(harness, sid, *, view=None, retained=()):
@@ -580,6 +618,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.config import ui_text
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count
+    from fleet.session_panel import presentation
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
@@ -614,7 +653,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     prefix, tail = block_sections(values, columns=columns, route=_plain(route), received=peers,
                                  human=human_line,
                                  work=(str(open_count(work)) + " open · " + _plain(work[0].get("headline"))) if work else "")
-    question_presentations(board, columns, native_wait=values.get("native_wait"))
+    question_presentations(board, max(20, columns - 4), native_wait=values.get("native_wait"))
     for item in board:
         for question in item.get("questions") or ():
             question["display"] = {key: ([styled(line) for line in value] if key != "head" else styled(value))
@@ -638,9 +677,18 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         except Exception:
             pass  # Optional metadata cannot interrupt this terminal's display.
     native_footer = None
+    native_owned = (native_badges or {}).get("owned", ()) if isinstance(native_badges, dict) else ()
+    panel = presentation(values, view, harness, sid, columns, native_owned=native_owned)
+    panel["model"] = styled(panel["model"])
+    panel["status"] = [styled(line) for line in panel["status"]]
+    panel["summary"] = [styled(line) for line in panel["summary"]]
+    panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
+                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
-                                                       status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ")
+                                                       status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
+                                                       panel_lines=["".join(p["text"] for p in row) for row in [panel["model"], *panel["summary"]]],
+                                                       detail_lines=["".join(p["text"] for p in row) for row in panel["status"]])
         if config_path:
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
@@ -653,7 +701,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                       for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
-            "help": ui_text("fleet.session_block.editor_help")}
+            "panel": panel, "help": ui_text("fleet.session_block.editor_help")}
 
 
 def _block_action(binding, request):
@@ -774,6 +822,46 @@ def _input_readiness(binding, request):
 def _backend_operation(request: dict) -> dict:
     op = request.get("op")
     binding = request.get("binding") or {}
+    if op in {"display-settings", "display-bootstrap", "display-model"}:
+        # Local display preferences need no SID, but still only our live parent.
+        host = process(binding.get("host_pid"))
+        if not host or host["pid"] != os.getppid() or host["start"] != binding.get("host_start"):
+            return {"ok": False, "reason": "attachment-changed"}
+        if op == "display-model":
+            from pane_ownership import codex_footer_threads
+            lines = request.get("lines")
+            if (binding.get("harness") != "codex" or not isinstance(lines, list)
+                    or len(lines) > 1000 or any(not isinstance(line, str) for line in lines)
+                    or sum(len(line) for line in lines) > 60000):
+                return {"ok": False}
+            ids = codex_footer_threads(lines, current_id_only=True)
+            if len(ids) != 1:
+                return {"ok": False}
+            display_sid = next(iter(ids))
+            candidate = {**binding, "sid": display_sid}
+            if not valid_binding(candidate):
+                return {"ok": False}
+            registry_root()
+            from fleet.native_display import codex_selected_model
+            values = codex_selected_model(candidate["native_pid"], candidate["native_start"], display_sid)
+            return {"ok": bool(values) and valid_binding(candidate), "display": values}
+        if op == "display-bootstrap":
+            registry_root()
+            from fleet.session_panel import presentation
+            from fleet.palette import style_components
+            panel = presentation({}, {}, binding.get("harness"), "", 40)
+            no_color = "NO_COLOR" in os.environ
+            colors = 256 if "256color" in os.environ.get("TERM", "") or os.environ.get("COLORTERM") else 8
+            panel["model"] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in panel["model"]]
+            panel["status"] = []
+            panel["summary"] = []
+            panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
+                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+            return {"ok": True, "panel": panel}
+        try:
+            return {"ok": True, "settings": save_display_policy(request.get("settings"))}
+        except (OSError, ValueError, TypeError):
+            return {"ok": False, "reason": "settings-unavailable"}
     if op == "unregister":
         host = process(binding.get("host_pid"))
         if not host or host["pid"] != os.getppid() or host["start"] != binding.get("host_start"):

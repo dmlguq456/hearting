@@ -5,6 +5,22 @@ from tools.fleet.explorer.grid import cell_width
 
 
 class SessionBlockTest(unittest.TestCase):
+    def test_choices_wrap_within_each_choice_and_do_not_reserve_a_source_row(self):
+        from tools.fleet.session_block import question_presentations
+        choices = ['A long first choice that needs several lines', 'Second choice']
+        item = {'id': 'exact', 'answerable': True, 'age': '0m',
+                'questions': [{'id': 'q', 'question': 'Choose', 'choices': choices}]}
+        question_presentations([item], 30)
+        display = item['questions'][0]['display']
+        lines = [''.join(text for text, _ in line) for line in display['options']]
+        self.assertTrue(lines[0].startswith('1 '))
+        second = next(index for index, line in enumerate(lines) if line.startswith('2 '))
+        self.assertGreater(second, 1)
+        self.assertTrue(all(line.startswith('  ') for line in lines[1:second]))
+        self.assertTrue(all(cell_width(line) <= 26 for line in lines))
+        self.assertEqual(display['source'], [])
+        self.assertEqual(item['questions'][0]['choices'], choices)
+
     def values(self):
         return dict(harness='claude',tag='52',state='idle',cwd='/work/project',title='A session',
                     branch='topic*',ctx_pct=42,model='opus',effort='high',weekly_pct=60)

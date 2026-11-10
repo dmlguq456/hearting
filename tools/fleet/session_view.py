@@ -77,6 +77,10 @@ def observe(harness, pid, proc_start, sid):
                 from .token_budget import codex_compaction_pressure
                 sess.compaction_pressure = codex_compaction_pressure(
                     sid, transcript, count, home=codex._rollout_home(transcript))
+        if not sess.model:
+            from .native_display import codex_selected_model
+            selected = codex_selected_model(pid, proc_start, sid)
+            sess.model, sess.effort = selected.get("model"), selected.get("effort")
     else:
         db = opencode._db()
         paths.extend((db, db + "-wal"))
