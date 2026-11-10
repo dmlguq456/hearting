@@ -100,12 +100,35 @@ class StopTest(CarrierCase):
         self.assertIn("required_action=complete-open", first[0]["reason"])
         self.assertEqual(second, [])
 
-    def test_a_tool_after_the_receipt_means_no_continuation(self):
+    def test_a_tool_naming_the_attempt_means_no_continuation(self):
         carrier.note_received("thread-1", "turn-1", carrier.owed_items([completion()]),
                               root=self.root)
-        carrier.note_tool("thread-1", "turn-1", root=self.root)
+        carrier.note_tool("thread-1", "turn-1", root=self.root,
+                          command="preflight.sh harvest --attempt-id att-1")
         with mock.patch.object(carrier, "collect", return_value=("", [])):
             self.assertEqual(self.run_stop(), [])
+
+    def test_an_unrelated_tool_does_not_clear_an_owed_completion(self):
+        carrier.note_received("thread-1", "turn-1", carrier.owed_items([completion()]),
+                              root=self.root)
+        carrier.note_tool("thread-1", "turn-1", root=self.root, command="ls -la")
+        with mock.patch.object(carrier, "collect", return_value=("", [])):
+            first = self.run_stop()
+        self.assertEqual(first[0]["decision"], "block")
+        self.assertIn("attempt=att-1", first[0]["reason"])
+
+    def test_a_record_without_a_handle_keeps_the_any_tool_rule(self):
+        notice = {"delivery_id": "d3", "receipt": {"kind": "notice", "subject": "check",
+                                                   "required_action": "run-steward-check"}}
+        carrier.note_received("thread-1", "turn-1", carrier.owed_items([notice]), root=self.root)
+        carrier.note_tool("thread-1", "turn-1", root=self.root, command="ls")
+        with mock.patch.object(carrier, "collect", return_value=("", [])):
+            self.assertEqual(self.run_stop(), [])
+
+    def test_a_report_to_the_person_owes_no_tool(self):
+        items = carrier.owed_items([
+            {"delivery_id": "d4", "receipt": {"kind": "notice", "required_action": "report-to-user"}}])
+        self.assertEqual(items, [])
 
     def test_reading_only_records_owe_nothing(self):
         items = carrier.owed_items([
@@ -197,6 +220,7 @@ class CollectTest(CarrierCase):
         record = completion()
         with mock.patch.object(dispatch_session_sweep, "addressed_records", return_value=([record], 1)), \
                 mock.patch.object(dispatch_session_sweep, "sweep_deliver") as sweep, \
+                mock.patch.object(carrier, "queue_endpoint_absent", return_value=False), \
                 mock.patch.object(carrier, "native_receiving_turn", return_value=None):
             text, batches = carrier.collect("thread-1", "turn-1", budget_seconds=1.0)
         self.assertEqual((text, batches), ("", []))
@@ -248,6 +272,7 @@ class RealRecordTest(unittest.TestCase):
         self.assertIsNotNone(self.record)
         mock.patch.object(carrier, "_roots", return_value=[self.state]).start()
         mock.patch.object(carrier, "native_receiving_turn", return_value=None).start()
+        mock.patch.object(carrier, "queue_endpoint_absent", return_value=False).start()
 
     def tearDown(self):
         mock.patch.stopall()
@@ -287,6 +312,8 @@ class BudgetAndMixedRootTest(unittest.TestCase):
         mock.patch.object(carrier, "_roots", return_value=[self.state]).start()
         mock.patch.object(carrier, "native_receiving_turn", return_value=None).start()
         mock.patch.object(carrier, "watch_receipts", return_value=(None, [])).start()
+        self.socketless = mock.patch.object(carrier, "queue_endpoint_absent", return_value=False)
+        self.socketless.start()
 
     def tearDown(self):
         mock.patch.stopall()
@@ -322,6 +349,49 @@ class BudgetAndMixedRootTest(unittest.TestCase):
                 self.assertTrue(left)
                 self.assertTrue(all(self.status(record) == "pending" for record in left))
         self.assertTrue(any(self.status(record) == "acked" for record in records))
+
+    def completion_record(self):
+        import dispatch_pending_delivery as pending
+        jobs = self.state / "jobs.log"
+        jobs.touch()
+        attempt, parent = "att-" + "b" * 32, "att-" + "a" * 32
+        receipt = {"schema_version": 2, "state": "delivered", "parent_attempt_id": parent,
+                   "job_registry": str(jobs), "delivery_classification": "attention",
+                   "children": [{"attempt_id": attempt, "status": "done", "readiness": "ready",
+                                 "reason": "terminal-failure-or-unclosed",
+                                 "required_action": "inspect-done-failure", "harness": "codex",
+                                 "delivery_classification": "attention"}]}
+        done_id = "delivery-" + "a" * 32
+        pending.create(root=self.state, recipient_kind="codex-native-queue", recipient_key=self.sid,
+                       delivery_id=done_id, session_generation="", session_generation_supported="0",
+                       attempt_ids=[attempt], parent_attempt_id=parent, route_id="rt-fixture",
+                       route_node="execute", receipt=receipt,
+                       receipt_digest=pending._canonical_receipt_digest(receipt),
+                       row_revisions={attempt: "deadbeef"})
+        return done_id, attempt
+
+    def test_socketless_completion_reaches_the_running_turn_once_and_stays_pending(self):
+        import dispatch_pending_delivery as pending
+        self.socketless.stop()
+        mock.patch.object(carrier, "queue_endpoint_absent", return_value=True).start()
+        done_id, attempt = self.completion_record()
+        out = io.StringIO()
+        carrier.post_tool({"session_id": self.sid, "turn_id": "turn-a", "tool_name": "Bash"}, out)
+        context = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(attempt, context)
+        # Shown, never ACKed: the prompt carrier still shows it at the next prompt.
+        self.assertEqual(pending.read(self.state, self.sid, done_id)["state"], "pending")
+        # The same turn's Stop asks once for the action, since no tool named the attempt.
+        out = io.StringIO()
+        carrier.stop({"session_id": self.sid, "turn_id": "turn-a"}, out)
+        reason = json.loads(out.getvalue())["reason"]
+        self.assertIn(f"attempt={attempt}", reason)
+        self.assertNotIn("Arrived before this turn ended", reason)
+        # A later turn's tool boundary does not show it again.
+        out = io.StringIO()
+        carrier.post_tool({"session_id": self.sid, "turn_id": "turn-b", "tool_name": "Bash"}, out)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(pending.read(self.state, self.sid, done_id)["state"], "pending")
 
     def test_unbound_completion_does_not_hold_back_a_notice(self):
         import dispatch_pending_delivery as pending
