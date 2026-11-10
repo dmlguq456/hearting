@@ -10688,17 +10688,8 @@ OPENCODE_DRAFT = "     ▣  Build · Model\n\n  ┃  hello there\n  ┃\n  ┃  
 # permission surface in the same keymap footer OpenCode prints.
 OPENCODE_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
 CODEX_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
-OPENCODE_HOME_BLANK = "\n" * 12 + "  /path/to/project:main\n\n"     # 1.18.34: nothing but the cwd line
-OPENCODE_HOME = "\n\n  ┃  Ask anything... \"Fix broken tests\"\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n"
 NO_BOX = "just some output\nwith no prompt box at all\n"
 OLD_T = "01000014-0000-7000-8000-00000000001e"
-NEW_T = "01000014-0000-7000-8000-00000000001f"
-
-
-def codex_screen(footer):
-    """A measured codex 0.160.0 bottom: the input box, one blank line, the status line, the hint line."""
-    return ("• recap of the last turn\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  "
-            + footer + "\n  ? for shortcuts\n")
 
 
 class _ClearWorld:
@@ -10713,6 +10704,7 @@ class _ClearWorld:
         self.calls = []
         self.prompt_rc = 0
         self.reads = 0
+        self.on_send = None
 
     def agent(self):
         sid = self.new_sid if (self.sent and self.new_sid) else self.sid
@@ -10738,6 +10730,8 @@ class _ClearWorld:
         if argv[:3] == ["herdr", "agent", "prompt"]:
             if self.prompt_rc == 0:
                 self.sent = True
+                if self.on_send:
+                    self.on_send()
             return subprocess.CompletedProcess(argv, self.prompt_rc, stdout="{}", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
 
@@ -10792,18 +10786,29 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
     def rows(self):
         return [r for r in self._all_records() if r.get("kind") == "notice"]
 
+    def compacts(self, world, harness="claude", sid="sid-A", pane="w1:pX"):
+        """The booked session's PostCompact ledger row lands once /compact is typed."""
+        st = self.st
+        seat = st.Seat("pane", st._digest("pane", pane), pane, harness, "")
+
+        def compacted():
+            with st.seat_lock(seat.key):
+                st.record_event(seat, harness, sid, "compact")
+        world.on_send = compacted
+        return world
+
     # -- success ------------------------------------------------------------------------
 
-    def test_an_idle_claude_with_an_empty_box_gets_exactly_one_clear_and_it_is_true(self):
+    def test_an_idle_claude_with_an_empty_box_gets_exactly_one_compact_and_it_is_true(self):
         self.book()
-        world = _ClearWorld(screens=[CLAUDE_EMPTY])
+        world = self.compacts(_ClearWorld(screens=[CLAUDE_EMPTY], new_sid=None))
         rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 0, line)
         self.assertIn("cleared=true", line)
         self.assertIn("old_session=sid-A", line)
-        self.assertIn("new_session=sid-B", line)
+        self.assertIn("new_session=sid-A", line)                       # the same session stays
         prompts = [c for c in world.calls if c[:3] == ["herdr", "agent", "prompt"]]
-        self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/clear"]])   # no trailer, no wait
+        self.assertEqual(prompts, [["herdr", "agent", "prompt", "w1:pX", "/compact"]])   # no trailer, no wait
         self.assertEqual([c for c in world.calls if c[:3] == ["herdr", "agent", "send-keys"]], [])
 
     def test_background_agents_get_one_compact_and_the_helper_waits_for_its_evidence(self):
@@ -10842,7 +10847,7 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                 "harness": "claude", "sid": "sid-A", "cwd": str(self.tmp_root), "origin": "compact",
                 "compact": {**context}, "card_generation": card["generation"], "prompt_seq": 0})
         self.path = clear.reservation_path(seat.key)
-        world = _ClearWorld(screens=[CLAUDE_EMPTY])
+        world = self.compacts(_ClearWorld(screens=[CLAUDE_EMPTY]))
         rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 3, line)
         self.assertIn("reason=compact-pending", line)
@@ -10862,7 +10867,7 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                                (CLAUDE_DRAFT_SECOND_LINE, "reason=draft")):
             with self.subTest(screen=screen[:30]):
                 self.book()
-                world = _ClearWorld(screens=[screen])
+                world = self.compacts(_ClearWorld(screens=[screen], new_sid=None))
                 rc, line = self.clear_cmd(world)
                 self.assertIn(expect, line)
                 self.assertEqual(rc, 0 if expect == "cleared=true" else 3)
@@ -10873,51 +10878,34 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                                (CODEX_POPUP, "reason=draft-unknown")):
             with self.subTest(screen=screen[:40]):
                 self.book(harness="codex", sid="thr-A")
-                world = _ClearWorld(harness="codex", sid="thr-A", screens=[screen], new_sid="thr-B")
+                world = self.compacts(_ClearWorld(harness="codex", sid="thr-A", screens=[screen], new_sid=None),
+                                      harness="codex", sid="thr-A")
                 # This screen fixture has an explicit current native selection.
-                with mock.patch.object(peer_steward, "_process_session", side_effect=
-                                       lambda *_: None if world.sent else world.sid):
+                with mock.patch.object(peer_steward, "_process_session", return_value="thr-A"):
                     rc, line = self.clear_cmd(world)
                 self.assertIn(expect, line)
-                self.assertEqual(len(world.typed()), 1 if expect == "cleared=true" else 0)
+                self.assertEqual(world.typed(), [["herdr", "agent", "prompt", "w1:pX", "/compact"]]
+                                 if expect == "cleared=true" else [])
+                if expect == "cleared=true":
+                    self.assertIn("new_session=thr-A", line)
 
-    def test_opencode_types_new_and_the_home_screen_is_the_proof(self):
-        self.book(harness="opencode", sid="ses_A")
-        world = _ClearWorld(harness="opencode", sid="ses_A", screens=[OPENCODE_EMPTY], new_sid=None,
-                            home_after=OPENCODE_HOME)
-        with mock.patch.object(peer_steward, "_process_session",
-                               side_effect=lambda *_args: None if world.sent else "ses_A"):
-            rc, line = self.clear_cmd(world)
-        self.assertEqual((rc, "cleared=true" in line), (0, True), line)
-        self.assertEqual(world.typed(), [["herdr", "agent", "prompt", "w1:pX", "/new"]])
-        for after, expect in ((OPENCODE_HOME_BLANK, "cleared=true"), (OPENCODE_EMPTY, "cleared=unverified"),
-                              ("\n\n", "cleared=unverified")):
-            with self.subTest(after=after[:20]):
+    def test_opencode_types_compact_once_and_reports_its_compaction(self):
+        for compacted, expect, code in ((False, "reason=compact-pending", 5), (True, "cleared=true", 0)):
+            with self.subTest(compacted=compacted):
                 self.book(harness="opencode", sid="ses_A")
-                world = _ClearWorld(harness="opencode", sid="ses_A", screens=[OPENCODE_EMPTY], new_sid=None,
-                                    home_after=after)
-                with mock.patch.object(peer_steward, "_process_session",
-                                       side_effect=lambda *_args: None if world.sent else "ses_A"), \
-                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                world = _ClearWorld(harness="opencode", sid="ses_A", screens=[OPENCODE_EMPTY], new_sid=None)
+                if compacted:
+                    self.compacts(world, harness="opencode", sid="ses_A")
+                with mock.patch.object(peer_steward, "_process_session", return_value="ses_A"):
                     rc, line = self.clear_cmd(world)
-                self.assertIn(expect, line)
-                self.assertEqual(len(world.typed()), 1, line)
-        # OpenCode's pane stays `done` through /new, so the pause between looks is a wait for the
-        # screen (event-driven), not the idle wait that would return at once.
-        self.book(harness="opencode", sid="ses_A")
-        world = _ClearWorld(harness="opencode", sid="ses_A", screens=[OPENCODE_EMPTY], new_sid=None,
-                            home_after=OPENCODE_EMPTY)
-        with mock.patch.object(peer_steward, "_process_session",
-                               side_effect=lambda *_args: None if world.sent else "ses_A"), \
-             mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 3):
-            rc, line = self.clear_cmd(world)
-        self.assertIn("cleared=unverified", line)
-        self.assertEqual(len([c for c in world.calls if c[:3] == ["herdr", "pane", "wait-output"]]), 2)
+                self.assertEqual((rc, expect in line), (code, True), line)
+                self.assertEqual(world.typed(), [["herdr", "agent", "prompt", "w1:pX", "/compact"]])
+                if compacted:
+                    self.assertIn("new_session=ses_A", line)
         for screen, reason in ((OPENCODE_DRAFT, "draft"), (NO_BOX, "draft-unknown")):
             self.book(harness="opencode", sid="ses_A")
             world = _ClearWorld(harness="opencode", sid="ses_A", screens=[screen], new_sid=None)
-            with mock.patch.object(peer_steward, "_process_session",
-                                   side_effect=lambda *_args: None if world.sent else "ses_A"):
+            with mock.patch.object(peer_steward, "_process_session", return_value="ses_A"):
                 rc, line = self.clear_cmd(world)
             self.assertEqual((rc, f"reason={reason}" in line, world.typed()), (3, True, []), line)
 
@@ -10971,29 +10959,18 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         rc, line = self.clear_cmd(world)
         self.assertEqual((rc, "reason=target-changed" in line), (3, True))
 
-    def test_the_new_session_is_the_process_one_when_herdr_reports_a_stale_session(self):
-        for proof, expect in (("sid-NEW", "cleared=true"), ("sid-A", "cleared=unverified")):
-            with self.subTest(process_says=proof):
-                self.book()
-                world = _ClearWorld(sid="sid-A", new_sid="sid-stale-older")   # herdr names an older session
-                with mock.patch("fleet.collectors.claude.session_id_of_process", return_value=proof), \
-                        mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-                    rc, line = self.clear_cmd(world)
-                self.assertIn(expect, line)
-                if expect == "cleared=true":
-                    self.assertIn("new_session=sid-NEW", line)
-
     def test_a_pane_record_that_lags_a_clear_is_settled_by_the_process_not_guessed(self):
-        # herdr still reports the session before the previous /clear; the process knows better.
+        # herdr still reports an older session for the pane; the process knows better.
         for proof, expect_typed in (("sid-A", 1), ("sid-other", 0), (None, 0)):
             with self.subTest(process_says=proof):
                 self.book()
-                world = _ClearWorld(sid="sid-before-the-last-clear", new_sid="sid-B")
-                with mock.patch("fleet.collectors.claude.session_id_of_process",
-                                side_effect=lambda pid: "sid-B" if world.sent else proof):
+                world = self.compacts(_ClearWorld(sid="sid-before-the-last-clear", new_sid=None))
+                with mock.patch("fleet.collectors.claude.session_id_of_process", return_value=proof):
                     rc, line = self.clear_cmd(world)
                 self.assertEqual(len(world.typed()), expect_typed, line)
                 self.assertEqual("cleared=true" in line, bool(expect_typed), line)
+                if expect_typed:
+                    self.assertIn("new_session=sid-A", line)
                 if not expect_typed:
                     self.assertIn("reason=target-changed", line)
 
@@ -11007,8 +10984,7 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                     world = _ClearWorld(harness=harness, sid=None, new_sid=None, screens=[screen])
                     with mock.patch(f"fleet.collectors.{collector}.session_id_of_process", return_value=proof), \
                             mock.patch("pane_ownership.current_codex_thread",
-                                       return_value=proof or ""), \
-                            mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                                       return_value=proof or ""):
                         rc, line = self.clear_cmd(world)
                     self.assertEqual(len(world.typed()), expect_typed, line)
                     if not expect_typed:
@@ -11025,12 +11001,12 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
             with self.subTest(metadata=metadata, native=native):
                 self.book(harness="codex", sid="sid-B")
                 world = _ClearWorld(harness="codex", sid=metadata, new_sid=None, screens=[CODEX_EMPTY])
-                with mock.patch.object(peer_steward, "_process_session", return_value=native), \
-                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                with mock.patch.object(peer_steward, "_process_session", return_value=native):
                     rc, line = self.clear_cmd(world)
                 self.assertEqual(len(world.typed()), int(native == "sid-B"), line)
                 if native == "sid-B":
                     self.assertIn("cleared=unverified", line)
+                    self.assertIn("reason=compact-pending", line)
                 else:
                     reason = "target-changed" if native else "session-identity-unknown"
                     self.assertIn("reason=" + reason, line)
@@ -11061,8 +11037,7 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                     return value
 
                 with mock.patch.object(peer_steward, "_clear_look", side_effect=look), \
-                     mock.patch.object(peer_steward, "_process_session", side_effect=native), \
-                     mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
+                     mock.patch.object(peer_steward, "_process_session", side_effect=native):
                     rc, line = self.clear_cmd(world)
                 self.assertEqual(len(world.typed()), int(final == "sid-B"), line)
                 if final != "sid-B":
@@ -11076,26 +11051,12 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
 
     def test_a_send_that_cannot_be_confirmed_is_unverified_and_nothing_else_is_typed(self):
         self.book()
-        world = _ClearWorld(new_sid=None)                               # herdr keeps the old id, no hook note
+        world = _ClearWorld(new_sid=None)                               # no compaction boundary or ledger row
         rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 5, line)
         self.assertIn("cleared=unverified", line)
-        self.assertEqual(len(world.typed()), 1)                         # one /clear, no Enter retry, no resend
-
-    def test_the_start_hook_note_alone_proves_the_new_conversation(self):
-        seat = self.book()
-        world = _ClearWorld(new_sid=None)
-        original = world.run
-
-        def run(argv, **kw):
-            result = original(argv, **kw)
-            if argv[:3] == ["herdr", "agent", "prompt"]:               # the new session's start hook fires
-                with self.st.seat_lock(seat.key):
-                    self.clear.note_start_locked(seat, "claude", "sid-NEW", time.time() + 1)
-            return result
-        world.run = run
-        rc, line = self.clear_cmd(world)
-        self.assertEqual((rc, "new_session=sid-NEW" in line), (0, True), line)
+        self.assertIn("reason=compact-pending", line)
+        self.assertEqual(world.typed(), [["herdr", "agent", "prompt", "w1:pX", "/compact"]])   # no Enter retry, no resend
 
     def test_a_failing_herdr_prompt_is_failed_and_herdr_missing_is_failed(self):
         self.book()
@@ -11108,47 +11069,6 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
              mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
             rc = peer_steward.main(["clear", "w1:pX", "--request", str(self.path)])
         self.assertEqual((rc, printed[-1]), (1, "cleared=failed reason=herdr-not-found"))
-
-    def test_a_new_thread_on_the_codex_status_line_proves_the_clear(self):
-        self.book(harness="codex", sid=OLD_T)
-        world = _ClearWorld(harness="codex", sid=OLD_T, new_sid=None, screens=[codex_screen("proj · main · Fix it")],
-                            home_after=codex_screen(f"proj · main · Context 0% used · {NEW_T}"))
-        with mock.patch("fleet.collectors.codex.session_id_of_process", return_value=None), \
-                mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-            # This screen fixture has an explicit current native selection.
-            with mock.patch.object(peer_steward, "_process_session", side_effect=
-                                   lambda *_: None if world.sent else world.sid):
-                rc, line = self.clear_cmd(world)
-        self.assertEqual((rc, f"new_session={NEW_T}" in line), (0, True), line)
-        self.assertEqual(len(world.typed()), 1)
-
-    def test_only_the_complete_last_status_line_field_is_current_identity(self):
-        other = "01000014-aaaa-7bbb-8ccc-dddddddddddd"
-        st = self.st
-        seat = st.Seat("pane", st._digest("pane", "w1:pX"), "w1:pX", "codex", "")
-        with st.seat_lock(seat.key):
-            st.record_event(seat, "codex", other, "prompt", cwd="/w", now=time.time() - 300)
-        cases = ((f"proj · {NEW_T} · Fix it", f"proj · {NEW_T} · Fix it", "already shown", False),
-                 ("proj · Fix it", f"proj · {NEW_T} · 01000014-eeee-7fff-8000-111111111111",
-                  "earlier UUID does not override last", True),
-                 ("proj · Fix it", "proj · Context 0% used · 01000014-d65e-7041-9744-c8f5300f…",
-                  "cut id", False),
-                 (f"proj · {OLD_T}", f"proj · {OLD_T} · {NEW_T}",
-                  "last field wins over earlier UUID", True),
-                 ("proj · Fix it", f"proj · {other}", "a session the seat already knows", False))
-        for before, after, label, changed in cases:
-            with self.subTest(label):
-                self.book(harness="codex", sid=OLD_T)
-                world = _ClearWorld(harness="codex", sid=OLD_T, new_sid=None, screens=[codex_screen(before)],
-                                    home_after=codex_screen(after))
-                with mock.patch("fleet.collectors.codex.session_id_of_process", return_value=None), \
-                        mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-                    # This screen fixture has an explicit current native selection.
-                    with mock.patch.object(peer_steward, "_process_session", side_effect=
-                                           lambda *_: None if world.sent else world.sid):
-                        rc, line = self.clear_cmd(world)
-                self.assertEqual("cleared=true" in line, changed, line)
-                self.assertEqual(rc, 0 if changed else 5, line)
 
     def test_a_user_opened_codex_location_menu_is_never_selected_by_clear(self):
         self.book(harness="codex", sid=OLD_T)
@@ -11166,29 +11086,28 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
         self.assertIn("reason=form-open", line)
         self.assertEqual(world.typed(), [])
 
-    def test_a_clear_opened_location_menu_is_not_reported_as_cleared_or_selected(self):
+    def test_a_codex_compact_without_its_boundary_is_unverified_and_never_followed_up(self):
         self.book(harness="codex", sid=OLD_T)
         menu = ("Where should the new conversation run?\n"
                 "❯ Use current Git worktree\n"
                 "Keep using the current working directory\n"
                 "Create new Git worktree\n")
-        world = _ClearWorld(harness="codex", sid=OLD_T, new_sid=NEW_T,
+        world = _ClearWorld(harness="codex", sid=OLD_T, new_sid=None,
                             screens=[CODEX_EMPTY], home_after=menu)
-        with mock.patch.object(peer_steward, "_CLEAR_OBSERVE_ROUNDS", 1):
-            # This screen fixture has an explicit current native selection.
-            with mock.patch.object(peer_steward, "_process_session", side_effect=
-                                   lambda *_: None if world.sent else world.sid):
-                rc, line = self.clear_cmd(world)
+        # This screen fixture has an explicit current native selection.
+        with mock.patch.object(peer_steward, "_process_session", return_value=OLD_T):
+            rc, line = self.clear_cmd(world)
         self.assertEqual(rc, 5, line)
         self.assertIn("cleared=unverified", line)
-        self.assertEqual(len(world.typed()), 1)  # the authorized /clear only
+        self.assertIn("reason=compact-pending", line)
+        self.assertEqual(world.typed(), [["herdr", "agent", "prompt", "w1:pX", "/compact"]])  # one send only
         self.assertEqual([c for c in world.calls if c[:3] == ["herdr", "agent", "send-keys"]], [])
 
     def test_every_judged_call_leaves_one_notice_ledger_row_with_the_action(self):
         self.book()
         self.clear_cmd(_ClearWorld(screens=[CLAUDE_DRAFT]))
         self.book()
-        self.clear_cmd(_ClearWorld(screens=[CLAUDE_EMPTY]))
+        self.clear_cmd(self.compacts(_ClearWorld(screens=[CLAUDE_EMPTY], new_sid=None)))
         rows = self.rows()
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(r["kind"] == "notice" and "action=clear" in r["delivery"]["receipt"] for r in rows))

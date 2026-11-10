@@ -7,7 +7,7 @@ metadata:
   fam: ops
   invocation_class: model-support
   modes: []
-  blurb: "Write a handoff card; tidy memory; clear the window."
+  blurb: "Write a handoff card; tidy memory; compact the same session."
   use_when: "Use when context fills, before compact, on handoff to another session, after a large task, or on request."
   not_for: "Not for primary routing or memory writes."
 ---

@@ -488,8 +488,6 @@ class EdgeGenerationWriterTest(IsolatedCase):
     def test_every_confirmed_edge_writer_bumps_and_activity_rows_do_not(self):
         self.assertIn("_bump_dispatch_edge_generation", inspect.getsource(handover.record_retire_handover))
         self.assertIn("_bump_dispatch_edge_generation", inspect.getsource(handover._record_locked))
-        self.assertIn("bump_dispatch_edge_generation",
-                      inspect.getsource(tidy._record_tidy_clear_succession_locked))
         self.assertIn("bump_dispatch_edge_generation", inspect.getsource(tidy._fold_ledger))
         # Prompt and real-prompt activity rows are not edges: no bump there.
         self.assertNotIn("bump_dispatch_edge_generation", inspect.getsource(tidy._append_ledger_entry))
@@ -519,19 +517,6 @@ class EdgeGenerationWriterTest(IsolatedCase):
         self.assertIsNotNone(row)
         self.assertEqual((handover._st()._handover_origin(row), row["sid"]),
                          (("claude", "clear-old"), "clear-new"))
-        self.assertEqual(inbox.read_edge_generation(self.dispatch_root), before + 1)
-
-    def test_tidy_clear_succession_bumps(self):
-        seat = tidy.Seat("pane", "tidy-seat", pane="w1:pTidy", harness="claude")
-        tidy.atomic_write_json(clear.reservation_path(seat.key), {
-            "schema": clear.SCHEMA, "nonce": "fixture-nonce", "seat": seat.as_dict(),
-            "harness": "claude", "sid": "tidy-old",
-            "observed": {"harness": "claude", "sid": "tidy-new"}})
-        before = inbox.read_edge_generation(self.dispatch_root)
-        tidy._record_tidy_clear_succession_locked(seat, "claude", "tidy-new", tidy.now_epoch())
-        rows = tidy._read_ledger_lines(tidy.session_seat(seat, "claude", "tidy-new"), strict=True)
-        self.assertTrue(any(row.get("event") == "succession" and row.get("sid") == "tidy-new"
-                            for row in rows))
         self.assertEqual(inbox.read_edge_generation(self.dispatch_root), before + 1)
 
     def test_fold_that_drops_edges_bumps(self):

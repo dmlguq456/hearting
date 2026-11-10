@@ -57,6 +57,7 @@ shared-utility-deferred	governor_identity.py
 shared-utility-deferred	harness_behavior_cases_a.py
 shared-utility-deferred	harness_behavior_cases_b.py
 shared-utility-deferred	harness_behavior_cases_c.py
+shared-utility-deferred	harness_behavior_cases_tidy_compact.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py

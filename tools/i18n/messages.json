@@ -1686,21 +1686,9 @@
    "en": "[tidy] The automatic tidy's window switch was not confirmed.",
    "ko": "[정리] 자동 정리의 창 전환을 확인하지 못했습니다."
   },
-  "tidy.clear.compact_failed": {
-   "en": "[tidy] Background agents were running, so the tidy tried /compact, but it failed ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
-   "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 실패했습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
-  },
-  "tidy.clear.compact_skipped": {
-   "en": "[tidy] Background agents were running, so the tidy was to use /compact, but it did not ({why}). Run /compact if needed (or /clear once all agents are done).{kept}",
-   "ko": "[정리] 백그라운드 에이전트가 있어 /compact로 정리하려 했지만 하지 않았습니다({why}). 필요하면 /compact 하세요(에이전트가 모두 끝난 뒤라면 /clear도 됩니다).{kept}"
-  },
-  "tidy.clear.compact_unverified": {
-   "en": "[tidy] Background agents were running, so /compact was sent, but the compaction was not confirmed. Check the window and run /compact if it did not compact.{kept}",
-   "ko": "[정리] 백그라운드 에이전트가 있어 /compact를 보냈지만 압축을 확인하지 못했습니다. 창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}"
-  },
   "tidy.clear.failed": {
-   "en": "[tidy] Clearing the window failed ({why}). Run {hint} if needed.{kept}",
-   "ko": "[정리] 창 비우기에 실패했습니다({why}). 필요하면 {hint} 하세요.{kept}"
+   "en": "[tidy] Typing /compact failed ({why}). Run /compact if needed.{kept}",
+   "ko": "[정리] /compact 입력에 실패했습니다({why}). 필요하면 /compact 하세요.{kept}"
   },
   "tidy.clear.idle_not_sent": {
    "en": "[tidy] The automatic idle tidy request was not sent ({why}). Nothing was typed into this window; it is tried again after the next input from a person once the conditions hold. {terms}",
@@ -1711,20 +1699,16 @@
    "ko": "[정리] 자동 유휴 정리 요청은 보냈지만 창 전환을 확인하지 못했습니다({why}). {terms}"
   },
   "tidy.clear.kept": {
-   "en": " The card is saved; after {hint} the new window receives it.",
-   "ko": " 카드는 저장돼 있어 {hint} 하면 새 창이 카드를 받습니다."
-  },
-  "tidy.clear.kept_compact": {
-   "en": " The card is saved; this session receives it after the compaction.",
-   "ko": " 카드는 저장돼 있어 압축 뒤 이 세션이 받습니다."
+   "en": " The card is saved; this session receives it on its next turn after a compaction.",
+   "ko": " 카드는 저장돼 있어 압축 뒤 이 세션의 다음 차례에 실립니다."
   },
   "tidy.clear.skipped": {
-   "en": "[tidy] The window was not cleared automatically ({why}). Run {hint} if needed.{kept}",
-   "ko": "[정리] 창을 자동으로 비우지 않았습니다({why}). 필요하면 {hint} 하세요.{kept}"
+   "en": "[tidy] /compact was not typed automatically ({why}). Run /compact if needed.{kept}",
+   "ko": "[정리] /compact를 자동으로 입력하지 않았습니다({why}). 필요하면 /compact 하세요.{kept}"
   },
   "tidy.clear.unverified": {
-   "en": "[tidy] Clearing the window was requested, but its result was not confirmed. Check the window and run {hint} if needed.{kept}",
-   "ko": "[정리] 창 비우기를 요청했지만 결과를 확인하지 못했습니다. 창 상태를 확인하고 필요하면 {hint} 하세요.{kept}"
+   "en": "[tidy] /compact was typed, but the compaction was not confirmed. Check the window and run /compact if it did not compact.{kept}",
+   "ko": "[정리] /compact를 입력했지만 압축을 확인하지 못했습니다. 창 상태를 확인하고 압축되지 않았으면 /compact 하세요.{kept}"
   },
   "tidy.compact.after": {
    "en": "[Conversation after the compaction]",
@@ -1763,24 +1747,24 @@
    "ko": "원본 대화 기록: {source}"
   },
   "tidy.continue.failed": {
-   "en": "[tidy] The window was cleared, but {said} could not be typed ({why}). To continue, type {said}.",
-   "ko": "[정리] 창은 비웠지만 {said}를 넣지 못했습니다({why}). 이어서 하려면 {said}라고 입력하세요."
+   "en": "[tidy] The session was compacted, but {said} could not be typed ({why}). To continue, type {said}.",
+   "ko": "[정리] 대화는 압축했지만 {said}를 넣지 못했습니다({why}). 이어서 하려면 {said}라고 입력하세요."
   },
   "tidy.continue.not_idle": {
-   "en": "the new session did not start waiting for input",
-   "ko": "새 세션이 입력 대기 상태가 되지 않았습니다"
+   "en": "the session did not start waiting for input after the compaction",
+   "ko": "압축 뒤 세션이 입력 대기 상태가 되지 않았습니다"
   },
   "tidy.continue.skipped": {
-   "en": "[tidy] The window was cleared, but {said} was not typed ({why}). To continue, type {said}.",
-   "ko": "[정리] 창은 비웠지만 {said}를 넣지 않았습니다({why}). 이어서 하려면 {said}라고 입력하세요."
+   "en": "[tidy] The session was compacted, but {said} was not typed ({why}). To continue, type {said}.",
+   "ko": "[정리] 대화는 압축했지만 {said}를 넣지 않았습니다({why}). 이어서 하려면 {said}라고 입력하세요."
   },
   "tidy.continue.status_unverified": {
    "en": "[tidy] The automatic status summary was not confirmed. Waiting for the next input.",
    "ko": "[정리] 자동 현황 안내를 확인하지 못했습니다. 다음 입력을 기다립니다."
   },
   "tidy.continue.unverified": {
-   "en": "[tidy] {said} was typed into the new session, but its delivery was not confirmed. If nothing happened, type {said}.",
-   "ko": "[정리] 새 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
+   "en": "[tidy] {said} was typed into this session after the compaction, but its delivery was not confirmed. If nothing happened, type {said}.",
+   "ko": "[정리] 압축 뒤 이 세션에 {said}를 넣었지만 전달을 확인하지 못했습니다. 진행되지 않았다면 {said}라고 입력하세요."
   },
   "tidy.history.available": {
    "en": "transcript available",
@@ -1815,8 +1799,8 @@
    "ko": "새 세션이 카드를 받지 못했습니다"
   },
   "tidy.hold.card-taken": {
-   "en": "the card was already handed to another session",
-   "ko": "카드가 이미 다른 세션에 전달됐습니다"
+   "en": "the card was already delivered",
+   "ko": "카드가 이미 전달됐습니다"
   },
   "tidy.hold.clear-in-flight": {
    "en": "a window clear is already being sent",
@@ -2035,20 +2019,16 @@
    "ko": "대화 기록을 읽지 못했습니다({reason})"
   },
   "tidy.say.accepted": {
-   "en": "The card and memory tidy are accepted. The window-clear result will be reported in one line on your next input.",
-   "ko": "카드와 기억 정리 접수를 마쳤습니다. 창 비우기 결과는 다음 입력 때 한 줄로 알려 드립니다."
+   "en": "The card and memory tidy are accepted. The compaction result will be reported in one line on your next input.",
+   "ko": "카드와 기억 정리 접수를 마쳤습니다. 압축 결과는 다음 입력 때 한 줄로 알려 드립니다."
   },
-  "tidy.say.clear_and_continue": {
-   "en": "When the input box is empty, this window will be cleared and a new session will receive the card and continue. Typing before then keeps the window.",
-   "ko": "입력창이 비어 있으면 곧 이 창을 비우고, 새 세션이 카드를 받아 이어서 진행합니다. 그 전에 입력하시면 비우지 않습니다."
+  "tidy.say.compact_and_continue": {
+   "en": "Once this turn ends with the input box empty and no prompt open, this window types /compact once; after the compaction is confirmed the same session receives the card and continues. Typing before then skips it, and an unconfirmed compaction gets one result line and no continue.",
+   "ko": "이 차례가 끝나고 입력창이 비어 있고 질문 창이 없으면 이 창에 /compact를 한 번 입력합니다. 압축이 확인되면 같은 세션이 카드를 받아 이어서 진행합니다. 그 전에 입력하시면 압축하지 않고, 압축이 확인되지 않으면 결과를 한 줄로 알리고 이어가지 않습니다."
   },
-  "tidy.say.clear_soon": {
-   "en": "When the input box is empty, this window will be cleared shortly. Typing before then keeps the window.",
-   "ko": "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다."
-  },
-  "tidy.say.compact_for_agents": {
-   "en": "Background agents are still running, so this window is tidied with /compact",
-   "ko": "백그라운드 에이전트가 있어 /compact로 정리"
+  "tidy.say.compact_soon": {
+   "en": "Once this turn ends with the input box empty and no prompt open, this window types /compact once. Typing before then skips it.",
+   "ko": "이 차례가 끝나고 입력창이 비어 있고 질문 창이 없으면 이 창에 /compact를 한 번 입력합니다. 그 전에 입력하시면 압축하지 않습니다."
   },
   "tidy.say.window_kept": {
    "en": "This window stays as it is. You can now {command} or close it.",
