@@ -1,8 +1,11 @@
 #!/bin/sh
-# PostToolUse(Skill): record an inline entry-capability grounding marker so Fleet can show
-# `capability(mode·intensity)` for entry-skill work that runs inline and thus leaves no jobs.log
-# dispatch row. Capability is exact (the Skill name); mode/intensity are best-effort from the
-# invocation args (structured `--mode`/`--intensity`, else the fixed intensity vocabulary).
+# PostToolUse(Skill) and UserPromptSubmit: record an inline entry-capability grounding marker so
+# Fleet can show `capability(mode·intensity)` for entry-skill work that runs inline and thus
+# leaves no jobs.log dispatch row. A model-invoked Skill arrives as PostToolUse(Skill); the person
+# starting an entry router by name (`/autopilot-code ...`, the only way an explicit-only Skill
+# starts) loads it without a Skill tool call, so its prompt is read at UserPromptSubmit.
+# Capability is exact (the Skill name); mode/intensity are best-effort from the invocation args
+# (structured `--mode`/`--intensity`, else the fixed intensity vocabulary).
 # POSIX sh reads the hook JSON on stdin; python3 parses it and calls the portable utility.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -25,9 +28,16 @@ try:
     payload = json.loads(os.environ.get("CG_INPUT") or "")
 except Exception:
     sys.exit(0)
-if payload.get("tool_name") != "Skill":
+if payload.get("hook_event_name") == "UserPromptSubmit":
+    match = re.match(r"\s*/(autopilot-[a-z]+)(?![\w-])[ \t]*(.*)", str(payload.get("prompt") or ""),
+                     re.S)
+    if not match:
+        sys.exit(0)
+    tool_input = {"skill": match.group(1), "args": match.group(2)}
+elif payload.get("tool_name") == "Skill":
+    tool_input = payload.get("tool_input") or {}
+else:
     sys.exit(0)
-tool_input = payload.get("tool_input") or {}
 skill = str(tool_input.get("skill") or "").strip()
 ENTRY = {
     "autopilot-apply", "autopilot-code", "autopilot-design", "autopilot-draft",

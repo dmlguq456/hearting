@@ -146,11 +146,14 @@ jobs:
 
       - name: Smoke test the published release
         if: steps.plan.outputs.release == 'true'
-        timeout-minutes: 10
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.plan.outputs.version }}
-        run: ./tools/release/post-publish-smoke.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+        run: |
+          # The OpenCode boot scenario drives the TUI in a private tmux server.
+          command -v tmux >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq tmux; }
+          ./tools/release/post-publish-smoke.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG"
 
       - name: Summarize release
         if: steps.plan.outputs.release == 'true'

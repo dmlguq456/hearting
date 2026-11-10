@@ -123,4 +123,32 @@ if os.path.exists(sys.argv[1]):
         sys.exit(f"post-publish smoke: uninstall left the claude context window: {env}")
 PY
 
+# Lifecycle context reaches OpenCode only through plugin hooks, which an
+# OpenCode update can rename without an error. Boot the published tree in a
+# pinned real OpenCode against the loopback fixture model; the scenario fails
+# when the hook-injected local-evidence block is missing from the first request.
+OPENCODE_VERSION=2.2.7
+OPENCODE_SHA256=89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7
+mkdir -p "$SMOKE/opencode" "$SMOKE/boot-home"
+fetch_asset "https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/opencode-linux-x64.tar.gz" \
+  "$SMOKE/opencode.tar.gz"
+echo "$OPENCODE_SHA256  $SMOKE/opencode.tar.gz" | sha256sum -c - >/dev/null
+tar xzf "$SMOKE/opencode.tar.gz" -C "$SMOKE/opencode"
+fetch_asset "$url/hearting.tar.gz" "$SMOKE/hearting.tar.gz"
+fetch_asset "$url/hearting.tar.gz.sha256" "$SMOKE/hearting.tar.gz.sha256"
+(cd "$SMOKE" && sha256sum -c hearting.tar.gz.sha256 >/dev/null)
+tar xzf "$SMOKE/hearting.tar.gz" -C "$SMOKE"
+env -i HOME="$SMOKE/boot-home" TMPDIR="$SMOKE" PATH="$PATH" LANG=C.UTF-8 \
+  HEARTING_SCENARIO_OPENCODE_BIN="$SMOKE/opencode/opencode" \
+  timeout 300 python3 "$SMOKE/hearting/utilities/harness_behavior_scenarios.py" \
+  --scenario boot --harness opencode --output-dir "$SMOKE/boot" >/dev/null
+python3 - "$SMOKE/boot/results.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+bad = [(r["harness"], r["verdict"], r.get("notes"), r.get("error")) for r in rows
+       if r["verdict"] != "pass"]
+if not rows or bad:
+    sys.exit(f"post-publish smoke: OpenCode boot scenario failed: {bad or 'no rows'}")
+PY
+
 echo "post-publish smoke: PASS ($VERSION)"

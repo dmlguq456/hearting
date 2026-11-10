@@ -241,7 +241,8 @@ native `read` tool; a successful marker command is not evidence of its contents.
 
 | Claude `settings.json` hook | OpenCode realization | Parity |
 |---|---|---|
-| `PreToolUse[Skill]` SD-11 stage-dispatch reminder (Claude has no Skill spec gate any more) | none — the plugin has no `command.execute.before` or `skill`-tool handler | gap — parity register PG-11 |
+| `PreToolUse[Skill]` SD-11 stage-dispatch reminder (Claude has no Skill spec gate any more) | plugin `tool.execute.before` on `skill` (V2 input `id`, V1 `name`) runs the shared `hooks/stage-dispatch-reminder.sh --skill <id>` with the session's `AGENT_DISPATCH_DEPTH`/`AGENT_DISPATCH_INTENSITY`; `tool.execute.before` has no context channel, so the reminder is appended to that skill's completed result in `tool.execute.after` (main and worker sessions) | full — measured `skill-stage-reminder` pass on Claude and OpenCode 2.0.32 (Codex: no skill tool). Stage skills are withheld from every native skill list, so the reminder fires only where a profile exposes the stage skill, on every harness alike |
+| `PostToolUse[Skill]` + `UserPromptSubmit` capability grounding | plugin `tool.execute.after` on a completed `skill` load of an `autopilot-*` entry, and `chat.message` on the generated `/autopilot-*` command body (`portable capability \`<name>\``; mode/intensity from its `User arguments from OpenCode` line) → detached `utilities/capability-grounding.sh record`; main sessions only | full — measured `skill-grounding` pass on all three harnesses |
 | `PostToolUse[Read]` spec-read marker | plugin `tool.execute.after` on `read` → `preflight read` | full — auto enforced |
 | `PostToolUse[Edit|apply_patch]` spec sync nudge | plugin `tool.execute.after` passes native input to shared `hooks/spec-sync-nudge.sh --format text`; V1 appends to tool output and V2 appends a native `event.result.content` text part for main and worker sessions, preserving existing parts and metadata | full — automatic, fail-open; fixture-verified, live V2 model delivery unobserved |
 | `PostToolUse` design post-write | plugin `tool.execute.after` → `preflight design` | full — auto enforced |
@@ -261,11 +262,16 @@ OpenCode runtime surface limits, not adapter debt:
    signals (git risk, headless jobs) are injected per prompt
    through the plugin transform instead of shown persistently. Functional, not a
    persistent display.
-2. **Prompt-lifecycle injection rides an experimental hook.**
-   `experimental.chat.system.transform` is in OpenCode's `experimental.*`
-   namespace; if OpenCode changes it, lifecycle injection breaks and the
-   explicit preflight wrappers (`memory` / `prompt-signal` /
-   `briefing`) remain the manual fallback.
+2. **Prompt-lifecycle injection rides a runtime plugin hook.** V1 reaches it
+   through `experimental.chat.system.transform`, in OpenCode's
+   `experimental.*` namespace; V2 through the documented `context` session
+   hook (https://opencode.ai/docs/build/plugins/migrate-v1). If an OpenCode
+   update renames or drops it, lifecycle injection stops. The `boot` behaviour
+   scenario (`utilities/harness_behavior_scenarios.py --scenario boot`) now
+   fails when Hearting's hook-injected local-evidence block is missing from the
+   first model request — measured: a copy whose plugin registers the hook under
+   another name fails `boot` — and the explicit preflight wrappers
+   (`memory` / `prompt-signal` / `briefing`) remain the manual fallback.
 
 ### Delivery channel — why every model call is re-decorated
 
@@ -560,9 +566,22 @@ SD-16 cache), and surfaces `early_death=`/`row_closed=`. It
 also adds a `jobs_lock` flock so the SD-15 row-rewrite and concurrent appends cannot interleave.
 No retry — detection/closure/surfacing only.
 
-**Disclosed structural constraint (axis not fully realized)**: `opencode run` has a known bug
+**Worker retry bound (V2)**: OpenCode 2.0.32 `opencode run` exits at once on a terminal quota
+error (`provider.quota`, measured 0.9 s) but follows a retryable 429's back-off: with a one-hour
+`retry-after` it proposes a 900 s delay and stays silent (measured: still running at 90 s). The
+plugin's V2 `retry` session hook (https://opencode.ai/docs/build/plugins/server, Retry policy)
+vetoes a proposed retry longer than 60 s only inside a registered dispatch's own process
+(`AGENT_DISPATCH_REGISTERED_WORKER=1`, which `dispatch-headless` exports to each standalone V2
+worker), so the run prints the provider error line and exits 1 within about a second, and the
+launch watch and terminal row see it. A session title or agent name alone does not qualify: an
+ordinary `opencode run --title hearting-worker-notes` keeps OpenCode's retry (measured: still
+waiting at 20 s). Shorter
+retries keep OpenCode's own policy and its attempt ceiling (2 s back-off: 11 attempts, exit at
+82 s); interactive sessions are unchanged.
+
+**Disclosed structural constraint (V1)**: `opencode run` V1 has a known bug
 (anomalyco/opencode#8203) where it **hangs indefinitely on API errors** (rate limit / 429)
-instead of exiting. The launch early-exit-watch requires the child to *exit*, so a hang-on-limit
+instead of exiting, and V1 has no retry hook. The launch early-exit-watch requires the child to *exit*, so a hang-on-limit
 escapes it and the row stays `open`. That case is instead caught by **axis 6** — 
 `adapters/opencode/bin/dispatch-liveness.py`'s shared `route_authority.scan_anchored_death` log-tail scan (SD-15b) judges the open
 row DEAD from the `Rate limited`/`Provider Rate Limit exceeded`/`429` line the hung child leaves
