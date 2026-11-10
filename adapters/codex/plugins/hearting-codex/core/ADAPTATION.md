@@ -161,8 +161,9 @@ instead of inferring from another adapter or from local harness state.
   documented harness difference (gap, fallback, unsupported, unknown,
   unmeasured) has a row in the §10 register. Wording such as "separate
   decision", "closed by decision", or "known difference" does not close it;
-  the row's state does. Fleet lists `open` and `needs-user-decision` rows with
-  the project's open work.
+  the row's state does. A platform limit confirmed by official documentation
+  is closed as `limit` with the documentation link. The Fleet screen lists the
+  rows that are not closed with the project's open work.
 - **Plan with verification**: when a projection change depends on a runtime
   capability, the implementation plan must include a current-doc citation or
   note, a local runtime/projection check, and a fallback if the feature is
@@ -1060,45 +1061,57 @@ and successful work are distinct outcomes.
 ## 10. Open harness differences (parity register)
 
 Each row is one harness difference the person can notice. `State` is `open`
-(a fix is known or measurement is pending), `needs-user-decision` (the runtime
-cannot do it, or a product choice is needed; `Next` holds the recommendation),
-or `resolved` (behaviour measured equal; `Next` names the evidence). Fleet's
-project open list reads the `open` and `needs-user-decision` rows
-(`tools/fleet/collectors/memory.py` `parity_open_items`). Behaviour evidence:
-`utilities/harness_behavior_scenarios.py --scenario all`. Audit of 2026-11-10:
-`PARITY-BEHAVIOR-AUDIT-1110.md` under the v4-open research inputs.
+(a fix is known, decided, or measurement is pending), `needs-user-decision` (a
+product choice only the person can make; `Next` holds the recommendation),
+`limit` (official documentation confirms the runtime cannot do it; `Next` links
+it), or `resolved` (behaviour measured equal; `Next` names the evidence). Only
+`resolved` and `limit` close a row; any other value, a typo included, stays open.
+The Fleet screen's project open list and counts read the rows that are not
+closed (`tools/fleet/collectors/memory.py` `parity_open_items`); the session
+work list behind the periodic steward check and the session shell does not.
+Behaviour evidence: `utilities/harness_behavior_scenarios.py --scenario all`
+(`gap`: the harness declares no carrier for it; `fail`: a declared carrier or
+wired path did not deliver). Update a row in the PR that changes its behaviour,
+from that PR's scenario run; the scenario named in `Next` is the one to rerun.
+Audit of 2026-11-10: `PARITY-BEHAVIOR-AUDIT-1110.md` under the v4-open research
+inputs; review `RV-PR1443-1110.md`.
 
 <!-- parity-register:start -->
 | ID | Harness | User-visible effect | State | Next |
 |---|---|---|---|---|
-| PG-1 | OpenCode | Completion receipts, peer reports, handoffs and owed-receipt turn continuation never reach an OpenCode 2 session (plugin runs in the `serve --stdio` child; TUI identity check never passes) | open | merge branch `opencode-carrier-parity-1110` (scenarios completion-receipt, stop-with-remaining-action, report-arrival, handoff-accept measured pass) |
-| PG-2 | Codex | A turn that ends while a completion receipt is owed is not continued; the receipt waits for the next typed prompt | open | merge branch `codex-carrier-parity-1110` (stop-with-remaining-action measured pass) |
+| PG-1 | OpenCode | Completion receipts, peer reports, handoffs and owed-receipt turn continuation never reach an OpenCode 2 session (plugin runs in the `serve --stdio` child; TUI identity check never passes) | open | branch `opencode-carrier-parity-1110` (#1436) measured pass on completion-receipt, stop-with-remaining-action, report-arrival, handoff-accept, but review RV-PR1436 P1 found a shared-service stall and report loss after an error tool; its fix `2e5af8039` (head `642e5004e`) is under re-review. Merge only after that review passes |
+| PG-2 | Codex | A turn that ends while a completion receipt is owed is not continued; the receipt waits for the next typed prompt | resolved | #1435 (`codex-carrier-parity-1110`) merged in `d55abe4c7`; stop-with-remaining-action measured pass on that main (RV-PR1443 §1.3) |
 | PG-3 | OpenCode | A due periodic steward check never reaches the session, not even at the next prompt | open | branch `opencode-carrier-parity-1110` wakes it under the session shell (measured pass); in a plain terminal the notice is still never delivered |
-| PG-4 | Claude, Codex | Without the session shell (default off) or Herdr, an idle Claude session gets peer reports and due checks only at the next typed prompt; Codex wakes for reports natively | needs-user-decision | recommend: enable the session shell by default on install, since it is the wake carrier for idle sessions |
+| PG-4 | Claude, Codex | Without the session shell (default off) or Herdr, an idle Claude session gets peer reports and due checks only at the next typed prompt; Codex wakes for reports natively | open | user decision 2026-11-10: enable the session shell by default on install, after PG-9. Gain: idle wake for reports and due checks. Cost until PG-9 is fixed: under the shell Claude retire fails and session tidy is a gap. Route `rt-4be29a0cda0d84be` (branch `parity-defaults-1110`) implements PG-9 then the default |
 | PG-5 | Codex | After the tidy `/clear`, the new Codex thread never receives the session-tidy card (`new-session-not-observed`; the shared app-server hook has no pane binding) | open | bind the post-clear thread to the TUI seat in `utilities/session_tidy.py` / `pane_ownership.codex_caller_binding` |
 | PG-6 | OpenCode | Session tidy answers `clear=manual` outside Herdr: no idle booking, no card after `/new` | open | prove the OpenCode pane seat without Herdr (`pane_ownership.verified_pane`) |
 | PG-7 | Codex | After retire or exit, the Fleet wait stays until the app-server daemon unloads the thread | open | clear the session's wait when its TUI exits, not only on daemon `SessionEnd` |
 | PG-8 | OpenCode | Retire refuses without Herdr corroboration; exiting OpenCode does not clear its Fleet wait | open | record OpenCode turn state outside Herdr; send a session-scoped clear on exit |
-| PG-9 | all | Under the session shell in plain tmux, retire and session tidy refuse with `pane-unverified` | open | accept the session-shell pane as the seat; measure under Herdr |
+| PG-9 | all | Under the session shell in plain tmux, retire and session tidy refuse with `pane-unverified` | open | accept the session-shell pane as the seat; measure retire and session-tidy-card with `--session-shell`, then under Herdr. Comes before PG-4 (route `rt-4be29a0cda0d84be`) |
 | PG-10 | Codex | Interactive Codex gets no git index-lock hint after a failed Bash command | open | register `git-index-lock-context.py` in `adapters/codex/hooks/hooks.json` PostToolUse and the `run-hook.sh` allowlist |
 | PG-11 | Codex, OpenCode | The SD-11 stage-dispatch reminder never appears when a depth-1 conductor runs a code stage inline | open | Codex: emit it from `preflight.sh route`; OpenCode: from `tool.execute.before` on the `skill` tool |
 | PG-12 | OpenCode | Fleet shows no capability label for inline OpenCode skill work (no grounding marker) | open | call `capability-grounding.sh` from `tool.execute.after` on the `skill` tool |
 | PG-13 | Codex, OpenCode | A native subagent spawned without a model inherits the session model instead of its role default | open | record unsupported in the adapter docs or rewrite the spawn model where the tool accepts one |
 | PG-14 | Codex | Codex has no `PostToolUseFailure`, so a wait or index-lock hint after a failed tool call clears only at the next prompt or Stop | open | Codex `PostToolUse` also runs after a Bash command that exits non-zero (official hooks page): realize the failure-path clear and hint there |
-| PG-15 | OpenCode | `deep`/`top` work runs on a lower tier when the model file declares none | needs-user-decision | recommend: declare an OpenCode deep model in `models.conf` |
+| PG-15 | OpenCode | `deep`/`top` work runs on a lower tier when the model file declares none | needs-user-decision | the model (cost, account) is the person's choice; recommend declaring an OpenCode deep model in `models.conf`. Next run: list the available providers and model candidates to attach here |
 | PG-16 | Codex | Codex skills carry far less step detail than the Claude skills | open | project step-level detail into generated Codex skills |
 | PG-17 | OpenCode | No automatic token self-regulation | open | port token self-regulation v2 to the OpenCode plugin |
 | PG-18 | OpenCode | A rate-limited `opencode run` child can hang until the liveness scan catches it | open | bound the child on provider errors |
 | PG-19 | OpenCode | No deterministic stage advance; the docs disagree on standard+ dispatch depth 2 | open | settle the OpenCode depth-2 claim in `adapters/opencode/ADAPTATION.md` and measure it |
 | PG-20 | OpenCode | No persistent Hearting statusline | open | render the harness signal in the OpenCode TUI `prompt.footer.status` slot (official TUI plugin API) |
-| PG-21 | Codex | `editorial-team` and `plan-team` agents are more permissive (no per-agent tool allowlist) | needs-user-decision | recommend: accept with sandbox modes |
-| PG-22 | OpenCode | Network and writable-root requests are not OS-enforced | needs-user-decision | recommend: accept `granted-unenforced` and keep refusing `os-sandbox` requests |
-| PG-23 | Codex | The design render loop works only interactively (noninteractive MCP calls are denied) | needs-user-decision | recommend: keep the visual-harness wrapper path |
-| PG-24 | Claude | A plugin-channel install lacks the route gate, waits, memory, card, rewake and compact hooks | needs-user-decision | recommend: support only `harness install claude` for full behaviour |
+| PG-21 | Codex | `editorial-team` and `plan-team` agents are more permissive (no per-agent tool allowlist) | limit | Codex custom agents take name, description, instructions, model settings and feature toggles, no per-agent tool allowlist (https://learn.chatgpt.com/docs/agent-configuration/subagents); sandbox modes remain the narrowing |
+| PG-22 | OpenCode | Network and writable-root requests are not OS-enforced | limit | OpenCode permissions are allow/ask/deny tool rules and the shell runs with the host user's filesystem and network authority (https://opencode.ai/docs/permissions/); access stays `granted-unenforced` and `os-sandbox` requests are refused |
+| PG-23 | Codex | The design render loop works only interactively (noninteractive MCP calls are denied) | open | the config reference documents `mcp_servers.<id>.default_tools_approval_mode` and per-tool `approval_mode` (`approve`) (https://learn.chatgpt.com/docs/config-file/config-reference): set it for the design MCP server and measure the render loop under `codex exec`; the visual-harness wrapper path stays the fallback |
+| PG-24 | Claude | A plugin-channel install lacks the route gate, waits, memory, card, rewake and compact hooks | open | investigate first whether the Claude plugin `hooks/hooks.json` can carry the same events: if it can, project them; if not, record the limit with its documentation link |
 | PG-25 | OpenCode | Whether Herdr detects an OpenCode agent and `herdr agent wait` returns is unmeasured (P-6) | open | run `utilities/herdr_integration_live.py --case opencode-busy` and record P-6 |
-| PG-26 | Codex | Memory injection at session start is opt-in (`CODEX_SESSION_MEMORY_INJECT=1`) | needs-user-decision | recommend: decide default-on or keep the explicit `preflight memory` |
+| PG-26 | Codex | Memory injection at session start is opt-in (`CODEX_SESSION_MEMORY_INJECT=1`) | open | user decision 2026-11-10: Codex injects memory at session start by default, as Claude and OpenCode do; route `rt-4be29a0cda0d84be` (branch `parity-defaults-1110`) implements it |
 | PG-27 | OpenCode | Lifecycle context rides an experimental plugin hook and can stop silently after an OpenCode update | open | keep the boot scenario's hook-context check in the release smoke |
 | PG-28 | Codex | Custom-agent discovery, approval inheritance and headless behaviour are not measured | open | add a scenario that spawns a Codex custom agent |
 | PG-29 | Codex | An interrupted Codex turn gets no automatic change record | open | Codex documents an `Interrupt` hook event: run the turn-end change record from it |
-| PG-30 | Codex | Only Codex's built-in statusline items show; no Hearting signal in the footer | needs-user-decision | recommend: accept prompt-time signals (Codex `/statusline` takes built-in items only) |
+| PG-30 | Codex | Only Codex's built-in statusline items show; no Hearting signal in the footer | limit | `tui.status_line` is an ordered list of built-in item identifiers with no custom command item (https://learn.chatgpt.com/docs/config-file/config-reference); Hearting signals ride prompt-time context |
+| PG-31 | all | Reports lost after a burst, a truncation or an error (a carrier that ACKs a truncated batch; a report recorded `received` after an error tool; a sub-session not reached) — RV-PR1435 P1, RV-PR1436 P1-2/P2-2. Fixed where found, but no scenario catches a regression | open | add scenarios: 20 reports at once, an 8,000-character report, a tool that ends in error, a task sub-session |
+| PG-32 | all | Continuation or injection that must not happen (a quoted `peer-from:` in a document continues Stop; a socketless completion blocks a notice of the same root) — RV-PR1435 P2. Every scenario checks only that delivery happens | open | add negative scenarios that assert no continuation and no injection |
+| PG-33 | all | The real Herdr pane injection path is unmeasured: the fixture hides Herdr and suppresses prompt suggestions, so a peer prompt held for a Claude autocomplete suggestion mistaken for a draft (E9-TASK-GHOST-TEXT, `not-idle-empty`) is not caught | open | measure peer-prompt pane injection under a private Herdr server (`utilities/herdr_integration_live.py`, with PG-25), suggestions enabled |
+| PG-34 | all | Owner execution posture (sandbox, network) differs per harness: a Codex owner was blocked at push (BC-CODEX-OWNER-PUBLISH, #1438). No scenario compares it | open | add a scenario that runs a registered owner's push and network step on each harness |
+| PG-35 | Claude | A Claude owner route's completion summary names `adapters/codex/bin/preflight.sh harvest` (E9-TASK-COMPLETION-SUMMARY) | open | check the route summary text against the owner harness and name that harness's command |
 <!-- parity-register:end -->
