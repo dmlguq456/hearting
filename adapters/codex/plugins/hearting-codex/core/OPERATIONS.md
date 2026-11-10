@@ -3483,6 +3483,17 @@ pane-only sidless first-input path, and a queued carrier result remains
 distinct from exact receiver evidence.
 
 Clear and retire retain their checked foreground/form/draft and successor safety.
+For wrapped Claude and Codex panes, target foreground discovery reuses the same
+attachment join as caller discovery. Its lifetime is the inner native PID/birth;
+the outer owner remains the physical carrier. Prompt, handoff and each retire
+effect recheck that same attachment and native selection. A returned shell and
+the original native lifetime's exit still govern cleanup, independently of
+wrapper process names or foreground process counts.
+An owned retire request without a recorded native lifetime can settle as
+`target-closed-unproven` when a complete observation of its original Herdr
+endpoint confirms the pane is absent. This cancels only that unsent request;
+it establishes neither normal native exit nor handover and keeps the original
+target without selecting a replacement. The requester and failed evidence remain recorded.
 For Claude peers, `peer-steward.py prompt` uses `herdr agent prompt` for the guarded idle plain-TUI
 case above; busy Claude delivery waits for its existing callback. Neither a helper
 return nor a status flip is a receive receipt. Continue retains its existing native
