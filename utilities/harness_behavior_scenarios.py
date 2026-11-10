@@ -48,6 +48,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # another checkout (read-only) to measure that tree's uncommitted carriers.
 SOURCE = ROOT
 FIXTURE_MODEL = "hearting-fixture"
+# Further model ids the fixture lists (a scenario adds the ids its agents name).
+EXTRA_MODELS: list[str] = []
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 HARNESSES = ("claude", "codex", "opencode")
 NATIVE_ENV = {
@@ -220,9 +222,9 @@ class ModelFixture:
                 path = self.path.split("?")[0].rstrip("/")
                 if path.endswith("/models"):
                     body = json.dumps({"object": "list", "data": [{
-                        "id": FIXTURE_MODEL, "object": "model", "created": 0,
+                        "id": name, "object": "model", "created": 0,
                         "owned_by": "hearting-fixture", "type": "model",
-                        "display_name": FIXTURE_MODEL}]}).encode()
+                        "display_name": name} for name in (FIXTURE_MODEL, *EXTRA_MODELS)]}).encode()
                     self._send(200, body)
                     return
                 self._send(404, b"{}")
@@ -882,15 +884,16 @@ class Run:
                 self.evidence["hook_trust"] = self.home.trust_codex_hooks(binary)
             if SESSION_SHELL:
                 self.evidence["session_shell"] = enable_session_shell(self.home)
-            self.scenario.prepare(self)
-            tui = PrivateTui(root, self.home.env, harness_argv(self.harness, binary),
-                             self.home.workspace)
-            self.tui = tui
+            self.binary = binary
             self.fixture = fixture
-            tui.start()
-            ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
-            self.evidence["ready"] = bool(ready)
-            self._dismiss_startup(tui)
+            self.scenario.prepare(self)
+            if getattr(self.scenario, "needs_tui", True):
+                tui = self.scenario.make_tui(self, root, harness_argv(self.harness, binary))
+                self.tui = tui
+                tui.start()
+                ready = wait_for(lambda: tui.alive() and self._ready(tui.screen()), 90)
+                self.evidence["ready"] = bool(ready)
+                self._dismiss_startup(tui)
             verdict = self.scenario.drive(self)
             declared = declared_carrier(self.harness, self.scenario)
             if verdict == "gap" and declared:
@@ -905,6 +908,8 @@ class Run:
                 with contextlib.suppress(Exception):
                     (root / "screen.txt").write_text(tui.screen(), encoding="utf-8")
                 tui.stop()
+            with contextlib.suppress(Exception):
+                self.scenario.cleanup(self)
             self.evidence["retired_fixture_pids"] = len(retire_fixture_processes(root))
             fixture.close()
             requests = fixture.requests
@@ -988,6 +993,17 @@ class Scenario:
         return answer
 
     def prepare(self, run: Run):
+        return None
+
+    # A headless scenario (``needs_tui = False``) drives the native CLI itself.
+    needs_tui = True
+
+    def make_tui(self, run: Run, root: Path, argv: list[str]):
+        """The terminal the TUI runs in: a private tmux server by default."""
+        return PrivateTui(root, run.home.env, argv, run.home.workspace)
+
+    def cleanup(self, run: Run):
+        """Stop scenario-owned servers before the fixture processes are retired."""
         return None
 
     def drive(self, run: Run) -> str:
