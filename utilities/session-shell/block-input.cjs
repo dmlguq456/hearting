@@ -155,5 +155,5 @@ module.exports=function({changed,answer,action}) {
     }
     changed();return Buffer.alloc(0);
   }
-  return {get focused(){return focused;},enter,leave,update,input,detail:preview,references};
+  return {get focused(){return focused;},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
 };

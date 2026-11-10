@@ -9,14 +9,51 @@ function observe(harness, lines, sid) {
       const status=lines.slice(at,at+3).map(s=>s.trim()).join(' · ');
       const route=status.match(/⏳ route \d+(?: · (?!◑|⏵)[^·]+)*/)?.[0]?.trim();
       const wait=status.match(/◑ (\d+)\b/);
-      if(route||wait)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid};
+      const selected=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%\s*·\s*([^·]+?)\s*·\s*(?:5h|7d)\b/);
+      const choice=selected?.[2].trim().match(/^(.+?)(?:\s+(low|medium|high|xhigh|max|ultra))?$/);
+      if(route||wait||selected)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid,
+        ...(selected?{percent:Number(selected[1]),...(!/…|\.\.\./.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{})}:{})};
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
     const m=line.match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\s*·.*?Context\s+(\d+(?:\.\d+)?)% used(?:\s*·|\s*$)/i);
-    if(m&&(!sid||m[1]===sid)&&valid(Number(m[2])))return {percent:Number(m[2]),sid:m[1]};
+    if(m&&(!sid||m[1]===sid)&&valid(Number(m[2]))){
+      const chosen=line.match(/Context\s+[\d.]+% used\s*·\s*([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)(?=\s*·|\s*$)/);
+      return {percent:Number(m[2]),sid:m[1],...(chosen?{model:chosen[1],effort:chosen[2]}:{})};
+    }
+  }
+  if(harness==='codex'){
+    // Before a thread exists, native omits the ID/title fields from its managed
+    // footer. The selected model is still present beside the native help row.
+    for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++){
+      if(!/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1])||!/^ {2}\S/.test(lines[y]))continue;
+      const seen=lines[y].match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0];
+      if(seen&&sid&&seen!==sid)continue;
+      const selected=lines[y].match(/(?:^ {2}| · )([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)(?=\s*·|\s*$)/);
+      if(selected){const context=lines[y].match(/Context (\d+(?:\.\d+)?)% used/);return {model:selected[1],effort:selected[2],...(seen?{sid:seen}:{}),...(context&&valid(+context[1])?{percent:+context[1]}:{})};}
+    }
+    for(const line of lines.slice(-4)){
+      const footer=line.match(/^ {2}([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)\s+·\s+(?:\/|~)/);
+      if(footer)return {model:footer[1],effort:footer[2]};
+    }
+    const rows=lines.slice(0,12),at=rows.findIndex(s=>/OpenAI Codex\s*\(v[\d.]+\)/.test(s));
+    if(at>=0)for(const line of rows.slice(at+1,at+5)){
+      const chosen=line.match(/^\s*[│ ]\s*model:\s+([\w./:-]+)(?:\s+(low|medium|high|xhigh|max|ultra))?(?:\s+\/model|\s*│?\s*$)/);
+      if(chosen)return {model:chosen[1],effort:chosen[2]||''};
+    }
+  }
+  if(harness==='claude'){
+    const at=lines.slice(0,10).findIndex(line=>/Claude Code v\d/.test(line));
+    if(at>=0)for(const line of lines.slice(at+1,at+3)){
+      const choice=line.match(/\s{2}([A-Za-z0-9][^·│]{0,96}?)\s+·\s+(?:API Usage Billing|Claude (?:Max|Pro)|Team|Enterprise)/);
+      if(choice){const effort=lines.slice(-8).map(s=>s.match(/● (low|medium|high|max) · \/effort/)).find(Boolean);return {model:choice[1].trim(),effort:effort?.[1]||''};}
+    }
   }
   if(harness==='opencode') {
+    for(const line of lines.slice(-3)){
+      const percent=line.match(/\s+\d[\d,.]*[KkMm]?\s+\((\d+(?:\.\d+)?)%\)\s+ctrl\+p commands\b/);
+      if(percent&&valid(Number(percent[1])))return {percent:Number(percent[1]),sid};
+    }
     const width=Math.max(0,...lines.map(s=>s.length));
     for(let i=0;i+2<lines.length;i++) {
       const at=lines[i].search(/Context\s*$/);
@@ -32,7 +69,7 @@ function hiddenFooterRows(harness,lines,sid,plan,painted=[]) {
   const found=[];
   if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
      ||!Array.isArray(plan.lines)||!plan.lines.length
-     ||!plan.lines.every((line,i)=>line.trimEnd()===painted[i]?.trimEnd()))return new Set();
+     ||!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))return new Set();
   try {
     const s=fs.lstatSync(plan.config.path,{bigint:true});
     const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
@@ -56,9 +93,9 @@ function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) 
   const side=expanded&&!nativeSidebar&&configuration.layout==='side'
     &&Number.isInteger(width)&&width>=32&&width<=80
     &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
-    &&cols>=minimum&&cols-width-2>=60&&rows>=8;
+    &&cols>=minimum&&cols-width-2>=48&&rows>=8;
   return {side,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
-    panelColumn:side?cols-width:0,panelRow:side?2:null};
+    panelColumn:side?cols-width:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);

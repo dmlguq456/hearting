@@ -20,6 +20,7 @@ sid=sys.argv[1]
 def event(kind,identity=sid):
     raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
     request={'op':'event','event':kind,'harness':'claude','sid':identity,
+        'native_model':'NATIVE_SELECTED_MODEL',
         'pid':os.getpid(),'start':start,'token':os.environ['HEARTING_SHELL_TOKEN'],
         'seq':time.monotonic_ns()//1000}
     registry=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/str(os.getpid())
@@ -122,12 +123,13 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!fs.readFileSync('/proc/'+child.pid+'/environ').includes(Buffer.from('HERDR_AGENT=claude\0')))throw Error('foreground initial exec environment has no native hint');
  }
  const ack=Number(raw.match(/ACK_MS=([0-9.]+)/)[1]);
+ if(cfg.scenario==='startup-model')await waitFor(/NATIVE_SELECTED_MODEL/);
  if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);barrier=undefined;}
  await existing(cfg.hostPidFile);const hostPID=Number(fs.readFileSync(cfg.hostPidFile,'utf8'));
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/› [·?]/);
+ await waitFor(/No current route/);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -174,12 +176,12 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('side-unicode\r').toString('base64')});await waitFor(/🙂/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const line=sideTerm.buffer.active.getLine(2);
-   if(line.getCell(142).getChars()!=='›'||[140,141].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
+   if(line.getCell(140).getChars()!=='│'||[138,139].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
    child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_80x(?:1[4-9]|2[0-4])/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_80x(?:1[2-9]|2[0-4])/);
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
  }
@@ -205,7 +207,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const displayLag=[];
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/› [·?]/);
+ if(cfg.scenario==='display')await waitFor(/No current route/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='⏳ route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
@@ -270,7 +272,7 @@ class SessionShellPTYTest(unittest.TestCase):
         cache.mkdir(mode=0o700,parents=True,exist_ok=True);cache.chmod(0o700)
         key='claude\0'+sid;now=time.time()
         (cache/'projection.json').write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],
-            'by_session':{},'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}))
+            'by_session':{},'total':0,'older':0,'complete':True,'route_panels':{key:[]},'route_status':{key:''},'route_sessions':{key:now}}))
         (cache/'projection.json').chmod(0o600)
         backend=sys.executable;barrier=None
         if blocked_backend:
@@ -364,6 +366,10 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
+        self.assertLess(result['ack_ms'],250)
+
+    def test_native_model_paints_before_the_optional_backend_is_released(self):
+        result=self.run_loop('startup-model',blocked_backend=True)
         self.assertLess(result['ack_ms'],250)
 
     def test_enter_and_following_draft_in_one_chunk_stays_nonempty(self):

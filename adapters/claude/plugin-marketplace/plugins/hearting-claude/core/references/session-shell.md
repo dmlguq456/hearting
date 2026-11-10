@@ -46,23 +46,43 @@ prepared assets, without an auxiliary Node version probe. Native execution
 retains the existing display-ready boundary, exact binding and same-child
 input/relay ownership.
 
-The block opens by default, using its actual content height up to ten rows.
-Questions take space first; absent sections disappear. Its light, dim labels
-and short glyphs follow native status lines, with Fleet's semantic value colors.
-The status area retains every former Hearting-native field: folder and explicit
-session subject; branch/flags/worktrees and Git observation/time; the contiguous
-ten-cell colored context gauge; model/effort; 5h/7d percentages and reset times,
-model-specific quota buckets, answer waits, routes and any running-jobs line.
-Long status fields wrap in expanded mode; question space wins on small screens.
-The key guidance appears only while the person focuses the block.
-The existing optional session-shell configuration selects `layout: bottom`
-(default) or `side`, with `side_width: 40` and `side_min_columns: 132` defaults.
-Side changes geometry only: the same status, question editor and receipt source
-remain in use. Narrow windows fall back to bottom and return when widened.
-An observed OpenCode native sidebar keeps that attachment at bottom, avoiding
-competing rails. Preserve the same native process and input/relay boundaries
-through layout changes; the full-window Fleet modal remains full-window.
-The default bottom uses the question-first B layout. The current question,
+The approved v3.3 shell opens as a right HEARTING work panel when space permits,
+with bottom placement at narrow widths. All four edges belong to Hearting and
+share its representative state color; never frame the native terminal itself.
+Use the terminal's neutral background, without tinted fills. Text and glyphs
+accompany state colors. Native permission UI remains native; idle alone means
+neither work complete nor failed. Unknown evidence stays unknown.
+
+The header keeps settings and observed model/effort in view even before session
+binding completes. Native-selected display evidence is independent of question
+or route binding; configured defaults never masquerade as observed selection.
+An official startup callback's active-model field may travel with its existing
+birth-checked lifecycle event, without another observation pass or event. This
+display field never selects a session or authorizes input.
+Show confirmed current work, its actual route name/flow/state and next action,
+then the person's question and results. A direct route has only its own stages.
+Clicking a route opens its existing read-only detail. Put each answer choice on
+its own line, wrapping within that choice; do not reserve a standalone
+session/age row. Hide an empty result section. Use the
+existing operator language setting and catalog. No last prompt is guessed
+into a goal. Full IDs, old peers and repo backlog belong to accessible details.
+Retain every former status field there, and preserve Claude's native reserved
+status area. Managed Codex footer concealment still requires equivalent fields
+actually painted; moving a value to hidden details cannot prove that condition.
+
+The header's settings change only Hearting's existing session-shell policy:
+side/bottom layout, side width, narrow-window behavior and auxiliary detail.
+The same side width changes by dragging its boundary or by value controls.
+Apply saves after backing up the existing file; Cancel discards the preview;
+Defaults previews the defaults. Never edit native model or permission config.
+Respect a minimum native area; use configurable bounded bottom height at 80
+columns and preserve the same child through resize. No new global hotkey.
+OpenCode uses only an additive HEARTING section inside its existing sidebar;
+preserve native title, Context, MCP, footer, background and fixed container width.
+When that slot is unavailable or hidden, use the common bottom panel without a
+second rail. Native sidebar integration never changes question authority.
+
+The current question,
 choices or free-text affordance and exact request state are readable before
 focus; an empty question section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
@@ -73,7 +93,7 @@ Secret answers remain masked while selected, submitted, unfocused or consumed;
 only the unchanged canonical response carries their actual value.
 Pending transport and proved consumption are distinct, and unavailable, expired
 or cancelled questions offer no active choices. Long questions remain readable
-with focused scrolling and an explicit overflow count. Use at most ten rows,
+with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
 fields and Claude's native-owned status area. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.

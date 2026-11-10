@@ -3107,7 +3107,7 @@ def current_route_counts(routes):
     return counts, opened
 
 
-def session_route_status(snapshot, now=None):
+def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
@@ -3136,7 +3136,31 @@ def session_route_status(snapshot, now=None):
         harness = _get(session, "harness")
         for sid in index[tag]["ids"]:
             result[str(harness) + "\0" + sid] = label
-    return result
+    if not include_details:
+        return result
+    # Reuse this very interpretation for the shell. No second collection or
+    # authority store: bounded display fields in the existing projection.
+    details = {}
+    for tag, info in index.items():
+        selected = [r for r in routes if r.get("session_tag") == tag and r.get("current") is True]
+        recent = sorted((r for r in routes if r.get("session_tag") == tag and not r.get("current")
+                         and r.get("state") == "done" and r.get("outcome") and r.get("result_at") is not None),
+                        key=lambda r: r["result_at"], reverse=True)
+        selected += recent[:2]
+        records = []
+        for route in selected[:8]:
+            row = {key: str(route.get(key) or "")[:320] for key in
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
+                              "st": str(stage.get("st") or "")[:24]}
+                             for stage in (route.get("stages") or ())[:16]]
+            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+            row["worker"] = [[str(part[0])[:160], "dim"] for part in (route.get("worker") or ())[:8]
+                             if isinstance(part, (tuple, list)) and part]
+            records.append(row)
+        for sid in info["ids"]:
+            details[str(_get(info["session"], "harness")) + "\0" + sid] = records
+    return result, details
 
 
 def session_index(snapshot, now=None):
