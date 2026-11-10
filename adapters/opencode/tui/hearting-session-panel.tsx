@@ -13,17 +13,23 @@ function color(n: number | undefined) {
 }
 export function sessionPanel(ctx: any, proof: any, rpc: (request: any)=>void) {
   const [view,setView]=createSignal<any>({rows:[],hits:[],sid:''});
-  let raw='',closed=false,lastModel='';
+  let raw='',closed=false,lastModel='',streamLost=false;
   const socket=net.connect(process.env.HEARTING_SHELL_SOCKET!);
-  socket.on('connect',()=>socket.write(JSON.stringify({...proof,op:'display-subscribe'})+'\n'));
-  socket.on('error',()=>{});
+  function unavailable(){
+    if(streamLost)return;streamLost=true;raw='';
+    setView({visible:false,rows:[],hits:[],sid:''});socket.destroy();
+    if(!closed)rpc({op:'display-observation',visible:false});
+  }
+  socket.on('connect',()=>{socket.setEncoding('utf8');socket.write(JSON.stringify({...proof,op:'display-subscribe'})+'\n');});
+  socket.on('error',unavailable);socket.on('close',unavailable);
   socket.on('data',bytes=>{
+    if(streamLost)return;
     raw+=bytes.toString();if(Buffer.byteLength(raw)>131072){socket.destroy();return;}
     let index;while((index=raw.indexOf('\n'))>=0){const body=raw.slice(0,index);raw=raw.slice(index+1);try{setView(JSON.parse(body));}catch{}}
   });
   const action=(name: string)=>rpc({op:'display-action',action:name,sid:ctx.ui.router.current()?.sessionID||''});
   function Panel(props: any){
-    onMount(()=>rpc({op:'display-observation',visible:true}));
+    onMount(()=>rpc({op:'display-observation',visible:!streamLost}));
     onCleanup(()=>{if(!closed)rpc({op:'display-observation',visible:false});});
     return <Show when={view().visible&&(!view().sid||view().sid===props.sessionID)}>
       <box flexDirection="column" flexShrink={0}>

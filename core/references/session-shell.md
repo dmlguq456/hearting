@@ -87,7 +87,9 @@ columns and preserve the same child through resize. No new global hotkey.
 OpenCode uses only an additive HEARTING section inside its existing sidebar;
 preserve native title, Context, MCP, footer, background and fixed container width.
 When that slot is unavailable or hidden, use the common bottom panel without a
-second rail. Native sidebar integration never changes question authority.
+second rail. A disconnected display stream clears its last sidebar paint and
+visibility notification so only the host's current bottom fallback remains.
+Native sidebar integration never changes question authority.
 
 The current question,
 choices or free-text affordance and exact request state are readable before

@@ -13,6 +13,13 @@ import session_shell as shell
 
 
 class PanelTest(unittest.TestCase):
+    def test_native_sidebar_disconnect_clears_stale_rows_and_notifies_fallback(self):
+        for mode in ("error-close", "close-only"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-sidebar-disconnect.cjs"), str(ROOT), mode],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_mouse_opened_editor_owns_keys_during_peer_delivery(self):
         result = subprocess.run(["node", str(ROOT / "utilities/fixtures/session-shell-delivery-focus.cjs"), str(ROOT)],
                                 capture_output=True, text=True, timeout=10)
