@@ -27,7 +27,7 @@ class CompletionMeaningTest(unittest.TestCase):
         self.root = Path(self.tmp.name);self.repo=self.root/'repo';self.repo.mkdir()
         self.artifacts=self.root/'.agent_reports';self.artifacts.mkdir()
         self.report=self.artifacts/'audit.md'
-        self.report.write_text('## 검토 결과\n판정: 수정 후 병합\n## 검증\nfocused PASS\n## 남은 것\nP1 수정 필요\n')
+        self.report.write_text('최종 판정: 수정 후 병합 — head abcdef0\n## 검증\nfocused PASS\n## 남은 것\nP1 수정 필요\n')
         self.jobs=self.root/'jobs.log'
         self.route={'capability':'audit','work_request':{'text':'Review this exact patch'},
                     'artifact_root':str(self.artifacts),'cwd':str(self.repo)}
@@ -118,60 +118,59 @@ class CompletionMeaningTest(unittest.TestCase):
         self.seed(capability='audit');self.meta['route_hash']='sha256:wrong';self.write_row('open')
         self.assertEqual(self.live().failure_class,'fail')
 
-    def test_unperformed_empty_and_ambiguous_audits_remain_fail_in_all_paths(self):
-        completed = self.report.read_text()
+    def test_only_closed_negative_verdicts_complete_legacy_audit_failures(self):
+        closed = '최종 판정: 수정 후 병합 — head abcdef0'
         reports = {
             'empty': '',
-            'not-performed': '# 검토 실행 실패\n대상 checkout을 읽을 수 없어 검토를 수행하지 못했습니다.\n## 검증\n검토와 시험은 실행하지 못함.\n',
-            'no-evidence': '판정: 수정 후 병합\n아직 근거 없음.\n',
+            'not-performed': '# 검토 실행 실패\n대상 checkout을 읽을 수 없어 검토를 수행하지 못했습니다.\n',
             'unclassified': 'FAIL\n작업이 끝나지 않았습니다.\n',
-            'copied-example': '검토 결과 확인 중\n```text\n' + completed + '```\n',
-            'contradictory': completed + '\n대상을 읽을 수 없어 검토를 완료하지 못했습니다.\n',
-            'not-reviewed-english': 'Final verdict: changes required\nFinding 1: parser error\nNot reviewed.\n',
-            'future-review-english': 'Final verdict: changes required\nFinding 1: parser error\nThis will be reviewed.\n',
-            'could-not-review': completed + '\n대상을 읽을 수 없어 검토하지 못했습니다.\n',
-            'contradictory-english': completed + '\nThe review was not performed: target read failed.\n',
-            'partial-read': completed + 'x' * (64 * 1024) + '\n검토 미수행\n',
+            'loose-disposition': '판정: 수정 후 병합\nfocused PASS\nP1 수정 필요\n',
+            'negation-en': 'Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch has not been reviewed.\n',
+            'contraction-en': "Final verdict: changes required\nFinding 1: Target source unavailable.\nThe patch wasn't reviewed.\n",
+            'negation-ko': '최종 판정: 수정 후 병합\nP1 — 대상 파일에 접근할 수 없음.\n검토를 할 수 없었습니다.\n검증: PASS 없음.\n',
+            'fenced': '```text\n' + closed + '\n```\n',
+            'quoted': '> ' + closed,
+            'condition': closed + ' (검토할 수 있을 때)',
+            'extra-sentence': closed + '. Review not performed.',
+            'short-head': closed[:-1],
+            'long-head': 'Final verdict: changes requested — head ' + 'a' * 41,
+            'not-hex': closed.replace('abcdef0', 'ghijklm'),
+            'positive-disposition': '최종 판정: 병합 가능 — head abcdef0',
+            'conflicting': closed + '\nFinal verdict: mergeable — head abcdef0',
+            'different-heads': closed + '\nFinal verdict: changes requested — head 1234567',
+            'partial-read': closed + '\n' + 'x' * (64 * 1024),
         }
         for harness in ('claude', 'codex', 'opencode'):
             for case, report in reports.items():
                 with self.subTest(harness=harness, case=case):
-                    self.report.write_text(report)
-                    self.seed(harness)
+                    self.report.write_text(report); self.seed(harness)
                     self.assertEqual(self.live(harness).failure_class, 'fail')
                     view = terminal_reader.inspect_terminal_attempt(self.log, worktree=self.repo,
                         artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
-                    self.assertEqual(view['verdict'], 'FAIL')
-                    self.assertNotIn('assessment_verdict', view)
+                    self.assertEqual(view['verdict'], 'FAIL'); self.assertNotIn('assessment_verdict', view)
                     carrier, extra = terminal_reader.carrier_terminal_note(self.log, worktree=self.repo,
                         artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
                     self.assertEqual(carrier['verdict'], 'FAIL')
-                    self.assertNotEqual(extra.get('reconcile_reason'), 'completed-audit-with-findings')
                     recovered = supervisor.completed_owner_assessment(
                         supervisor.classify_supervisor_log(self.log, harness), None,
                         jobs=self.jobs, attempt_id=self.aid)
                     self.assertEqual(recovered.failure_class, 'fail')
 
-    def test_negated_or_uncertain_tokens_do_not_supply_performed_work(self):
-        descriptions = (
-            "The patch has not been reviewed.",
-            "The patch wasn't reviewed.",
-            '검토를 할 수 없었습니다.\n검증: PASS 없음.',
-            'Review status: unknown.\nNo PASS result is available.',
-            'Review may be completed later.\nPASS is the desired result.',
-        )
-        for harness in ('claude', 'codex', 'opencode'):
-            for description in descriptions:
-                with self.subTest(harness=harness, description=description):
-                    self.report.write_text('Final verdict: changes required\nFinding 1: Target source unavailable.\n' + description + '\n')
-                    self.seed(harness)
-                    self.assertEqual(self.live(harness).failure_class, 'fail')
-                    view = terminal_reader.inspect_terminal_attempt(self.log, worktree=self.repo,
-                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
-                    self.assertEqual(view['verdict'], 'FAIL')
-                    carrier, _ = terminal_reader.carrier_terminal_note(self.log, worktree=self.repo,
-                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
-                    self.assertEqual(carrier['verdict'], 'FAIL')
+    def test_closed_verdict_normalization_and_prose_is_not_an_authority_source(self):
+        for report in (
+            '최종 판정: 수정 후 병합 — head abcdef0',
+            'Final verdict: changes requested — head ' + 'a' * 40,
+            '  **Final verdict: changes requested — head `AbCdEf0`**.  ',
+            '__최종 판정：수정 후 병합 — head abcdef0__.',
+            '# Audit report\n\nFinal verdict: changes requested — head abcdef0\n',
+        ):
+            with self.subTest(report=report):
+                self.report.write_text(report); self.seed()
+                self.assertEqual(self.live().failure_class, 'pass')
+                # Body prose has no verdict authority under the supervisor's
+                # closed-line contract; only declarations can conflict.
+                self.report.write_text(report + '\nPASS 0; reviewed? unknown.\n')
+                self.assertEqual(self.live().failure_class, 'pass')
 
     def test_unreadable_report_content_and_directory_do_not_establish_a_completed_review(self):
         self.seed()
@@ -181,19 +180,6 @@ class CompletionMeaningTest(unittest.TestCase):
         (self.report / 'notes.md').write_text('review output is not identified')
         self.assertEqual(self.live().failure_class, 'fail')
         self.seed(artifact='-')
-        self.assertEqual(self.live().failure_class, 'fail')
-
-    def test_negative_subject_disposition_needs_performed_work_but_not_a_new_template(self):
-        reports = (
-            '최종 판정: 수정 후 병합\nF1 — 누락된 오류 처리\n## 실행한 명령\n- python3 parser.test.py → OK\n',
-            'Final verdict: changes required\nReviewed the changed error path.\nFinding 1: target parser drops the error.\n',
-            '최종 판정: 수정 후 병합 — head abcdef0\n변경 부분을 재검토했다.\nP1 — 입력이 누락됨.\n전체 native 시험은 실행하지 못함.\n',
-        )
-        for report in reports:
-            with self.subTest(report=report):
-                self.report.write_text(report); self.seed()
-                self.assertEqual(self.live().failure_class, 'pass')
-        self.seed(blocker='target read failed; audit was not performed')
         self.assertEqual(self.live().failure_class, 'fail')
 
     def test_runtime_failure_and_already_committed_rows_are_unchanged(self):

@@ -31,12 +31,16 @@ A completed audit can find blocking defects. Its task completion and its
 judgment about the inspected subject are separate: "changes required" or
 "do not merge" belongs in the report and does not make the audit execution a
 failure. The existing final handoff reports completion of the assigned audit;
-no new report field or format is required. For a bound audit owner, a successful
-native turn with a `FAIL` handoff is compatible with completed-with-findings
-only when the report clearly records a negative subject disposition, findings
-and performed review work. A readable file alone is not completion evidence.
-Empty, incomplete or ambiguous reports retain the original failure; explicit
-inability to perform the audit takes precedence over a copied disposition.
+no new handoff field is required. For a bound audit owner with a successful
+native turn, the legacy `FAIL` assessment means completed-with-findings only
+when its report has one unambiguous closed negative verdict:
+`최종 판정: 수정 후 병합 — head <7-40 hex>` or
+`Final verdict: changes requested — head <7-40 hex>`.
+These use the same whole-line forms as the PR review/publish reader; emphasis,
+spaces and a final period are normalized, but extra wording is not a verdict.
+Fenced examples, empty reports, conflicting declarations and other wording
+retain FAIL. Free prose, including a loose `reviewed` or `PASS`, never supplies
+completion authority. Existing PASS handoffs are unchanged.
 The handoff may describe subject findings in its blocker text; preserve them
 as assessment detail. `BLOCKED`, runtime errors, missing artifacts and
 unfinished children remain unresolved.

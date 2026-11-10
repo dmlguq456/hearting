@@ -1082,79 +1082,61 @@ def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None)
         return (route.get("capability") == "audit" and route.get("route_id") == rid
                 and bool(digest) and route.get("route_hash") == digest
                 and route_identity.route_hash(route) == digest
-                and _completed_negative_audit_report(artifact_path, parsed.get("blocker", "")))
+                and _completed_negative_audit_report(artifact_path))
     except (OSError, ValueError, TypeError):
         return False
 
 
-# Compatibility for an owner who used FAIL for the subject, not for the audit.
-# This recognizes existing report prose; it is not a new required field/template.
-# Unrecognized or contradictory evidence retains FAIL. Do not infer completion
-# from native exit=0, file existence, a bare FAIL, or an example verdict.
+# Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
+# negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
 _AUDIT_REPORT_BYTES = 64 * 1024
-_AUDIT_DISPOSITION = re.compile(
-    r"^(?:(?:최종\s*)?판정|(?:final\s+)?(?:verdict|disposition))\s*[:：]\s*"
-    r"(?:수정\s*후\s*병합|병합\s*불가|수용\s*불가|changes?\s+required|"
-    r"request\s+changes|not\s+mergeable|do\s+not\s+merge)(?:\s*(?:[—–:·.(]|$))", re.I)
-_AUDIT_INCOMPLETE = re.compile(
-    r"(?:검토|감사)(?:를|가|는|는\s*것을)?[^\n.]{0,24}"
-    r"(?:수행하지\s*못|실행하지\s*못|완료하지\s*못|미수행|미완료|불가|불능|중단|실행\s*실패)|"
-    r"(?:검토|감사)(?:를)?\s*(?:하지\s*못|하지\s*않)|"
-    r"\b(?:audit|review)\b[^\n.]{0,40}\b(?:not\s+(?:performed|completed|conducted)|"
-    r"incomplete|could\s+not|cannot|blocked|aborted)\b|"
-    r"\b(?:unable\s+to|could\s+not|cannot)\s+(?:perform|complete|conduct)\s+(?:the\s+)?(?:audit|review)\b|"
-    r"\b(?:not(?:\s+yet)?|will\s+be|to\s+be)\s+reviewed\b|"
-    r"\btarget\s+read\s+failed\b", re.I)
-_AUDIT_FINDING = re.compile(r"^(?:\[?(?:P[0-3](?:-\w+)?|F\d+)\b|finding\s+\d+\b).+", re.I)
-# Affirmative records only: never search for a loose "reviewed" or "PASS"
-# token and try to enumerate every way prose can negate it. Unrecognized prose
-# contributes no completion evidence. These are existing sentences/check lines,
-# not a template required from the writer.
-_AUDIT_PERFORMED = re.compile(
-    r"^(?:(?:I|We)\s+)?Reviewed\s+(?:the|this|these|those|all)\s+[^\n.!?]+\.\s*$|"
-    r"^Review\s+completed[.!]?\s*$|"
-    r"(?:^|(?<=[.!?])\s+)[^\n.!?\"'“”]{0,256}"
-    r"(?:검토를\s*마쳤(?:다|습니다)|재?검토했(?:다|습니다))\.(?:\s|$)|"
-    r"^[A-Za-z0-9_./-]+[ \t]+PASS[.!]?[ \t]*$|"
-    r"^`?(?:python3?|pytest|node|bash)\s+[^\n]+(?:→|->)\s*OK[.!]?[ \t]*$",
-    re.I | re.M)
+_AUDIT_VERDICT_FORMS = (
+    ("merge", "최종 판정: 병합 가능"),
+    ("merge", "Final verdict: mergeable"),
+    ("fix", "최종 판정: 수정 후 병합"),
+    ("fix", "Final verdict: changes requested"),
+)
 
 
+def _audit_form_pattern(label):
+    words = [re.escape(word) for word in label.replace(":", " : ").split()]
+    return r"\s*".join(words).replace(r"\s*:\s*", r"\s*[:：]\s*")
 
-def _completed_negative_audit_report(path, blocker):
+
+_AUDIT_CLOSED = re.compile(
+    r"^(?P<label>" + "|".join(f"(?:{_audit_form_pattern(label)})" for _, label in _AUDIT_VERDICT_FORMS)
+    + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.I)
+_AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
+                for kind, label in _AUDIT_VERDICT_FORMS}
+
+
+def _completed_negative_audit_report(path):
     if path is None:
         return False
     try:
         with Path(path).open("rb") as handle:
             raw = handle.read(_AUDIT_REPORT_BYTES + 1)
-        # Never accept the beginning of a truncated/undecodable report: its tail
-        # may explain that the audit could not run.
         if not raw or len(raw) > _AUDIT_REPORT_BYTES:
             return False
         text = raw.decode("utf-8")
     except (OSError, UnicodeError):
         return False
-    lines, fence = [], None
+    declarations, fenced = set(), False
     for line in text.splitlines():
-        line = line.strip()
-        if line.startswith(("```", "~~~")):
-            marker = line[:3]
-            fence = None if fence == marker else (fence or marker)
+        if re.match(r"^\s*(?:```|~~~)", line):
+            fenced = not fenced
             continue
-        if fence or line.startswith(">"):
+        if fenced:
             continue
-        line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", line)
-        line = line.replace("**", "").strip()
-        if line:
-            lines.append(line)
-    prose = "\n".join(lines)
-    if _AUDIT_INCOMPLETE.search(prose + "\n" + str(blocker)):
-        return False
-    # Only an opening disposition counts, never an old/example decision later
-    # in the report. Findings and performed work must independently support it.
-    return (any(_AUDIT_DISPOSITION.match(line) for line in lines[:2])
-            and any(_AUDIT_FINDING.match(line) for line in lines)
-            and bool(_AUDIT_PERFORMED.search(prose)))
+        line = line.replace("**", "").replace("__", "").strip()
+        line = line[:-1].rstrip() if line.endswith(".") else line
+        match = _AUDIT_CLOSED.fullmatch(line)
+        if match:
+            label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
+            declarations.add((_AUDIT_KINDS[label], match["head"].lower()))
+    # Multiple heads/dispositions are ambiguous here: unlike the publication
+    # reader, this handoff has no separate authoritative reviewed-head input.
+    return len(declarations) == 1 and next(iter(declarations))[0] == "fix"
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
