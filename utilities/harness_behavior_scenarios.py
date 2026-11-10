@@ -1260,7 +1260,11 @@ SCENARIOS = {cls.name: cls for cls in (BootScenario, ShellScenario)}
 
 
 def _load_extra():
-    """Register the behaviour scenarios defined in the companion modules."""
+    """Register the behaviour scenarios defined in the companion modules.
+
+    Name a new companion module by its topic (``harness_behavior_cases_<topic>.py``),
+    not the next letter: parallel branches picking the next letter collide.
+    """
     import importlib
     for path in sorted(Path(__file__).resolve().parent.glob("harness_behavior_cases*.py")):
         if path.name.endswith(".test.py"):

@@ -555,6 +555,12 @@ def main() -> int:
     except Exception:
         pass
     try:
+        # The daemon keeps this thread after its TUI exits; clear the wait on that exit.
+        from codex_tui_exit import launch as watch_tui_exit
+        watch_tui_exit(interaction_sid or "")
+    except Exception:
+        pass
+    try:
         from herdr_session_projection import project
         project(payload, interaction_sid or "", worker=False)
     except Exception:

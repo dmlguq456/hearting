@@ -15,6 +15,8 @@
 # a narrow pane drops trailing telemetry and title fields, not the UUID. The
 # merge moves it there in an existing list and keeps every other item's order;
 # the former default (thread-id last) becomes this order on the next refresh.
+# Inside the Hearting session shell the shell hides this field (the value stays
+# on its inner screen); a Codex window without the shell still shows it.
 # The pane header remains the shared human-facing session label;
 # `thread-title` remains available as a separate title.
 
