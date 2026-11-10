@@ -2346,17 +2346,10 @@ def run_profile(
     timeout: int,
     install_prefix: Path | None,
     durations: dict[str, float] | None = None,
-    retry_now: Callable[[SuiteResult], float | None] | None = None,
-    retried: Callable[[SuiteResult], None] | None = None,
 ) -> list[SuiteResult]:
     """Run one profile's suites. With ``durations`` the parallel batch starts
     longest-first, so a long suite cannot begin last and set the wall time;
-    the returned order is always the input order.
-
-    ``retry_now(result)`` is asked about every finished parallel attempt; a
-    timeout it returns puts one more attempt of that suite at the front of the
-    pool's queue, and ``retried`` receives that attempt's result. The returned
-    list keeps first attempts only."""
+    the returned order is always the input order."""
     results_by_index: dict[int, SuiteResult] = {}
     tmp_by_index: dict[int, Path] = {}
     tmp_identity_by_index: dict[int, tuple[int, int, int] | None] = {}
@@ -2379,14 +2372,13 @@ def run_profile(
             return build_ci_like_env(tmp, root)
         raise ValueError(profile)
 
-    def run_reaped(idx: int, suite: Path, env: dict[str, str],
-                   attempt_timeout: float | None = None) -> SuiteResult:
+    def run_reaped(idx: int, suite: Path, env: dict[str, str]) -> SuiteResult:
         # A suite's detached fixtures end with that suite, not with the whole
         # profile. Outputs are drained after owned helpers settle and before
         # the exact attempt root is removed.
         try:
             return run_suite_with_scratch(
-                suite, root, env, profile, timeout if attempt_timeout is None else attempt_timeout,
+                suite, root, env, profile, timeout,
                 tmp_by_index[idx], tmp_identity_by_index[idx],
             )
         finally:
@@ -2436,24 +2428,14 @@ def run_profile(
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             pending = {}
             remaining_suites = iter(parallel)
-            # Retry attempts: (attempt index, suite, timeout). They run before
-            # the rest of the queue instead of after the whole pool.
-            retry_queue: list[tuple[int, Path, float]] = []
-            retry_indices: set[int] = set()
-            next_retry_index = len(suites)
-            suite_of: dict[int, Path] = dict(parallel)
 
             def submit_next() -> bool:
-                if retry_queue:
-                    idx, suite, attempt_timeout = retry_queue.pop(0)
-                else:
-                    try:
-                        idx, suite = next(remaining_suites)
-                    except StopIteration:
-                        return False
-                    attempt_timeout = None
+                try:
+                    idx, suite = next(remaining_suites)
+                except StopIteration:
+                    return False
                 env = prepare_env(idx, suite)
-                pending[pool.submit(run_reaped, idx, suite, env, attempt_timeout)] = idx
+                pending[pool.submit(run_reaped, idx, suite, env)] = idx
                 return True
 
             for _ in range(max(1, jobs)):
@@ -2463,18 +2445,7 @@ def run_profile(
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for fut in completed:
                     idx = pending.pop(fut)
-                    result = fut.result()
-                    if idx in retry_indices:
-                        assert retried is not None
-                        retried(result)
-                    else:
-                        results_by_index[idx] = result
-                    attempt_timeout = retry_now(result) if retry_now is not None else None
-                    if attempt_timeout is not None:
-                        retry_indices.add(next_retry_index)
-                        suite_of[next_retry_index] = suite_of[idx]
-                        retry_queue.append((next_retry_index, suite_of[idx], attempt_timeout))
-                        next_retry_index += 1
+                    results_by_index[idx] = fut.result()
                     submit_next()
 
         # The pool context has joined every parallel suite before an exclusive
@@ -2665,55 +2636,6 @@ def _run_main(argv: list[str]) -> int:
             if not args.report_only:
                 return 70
 
-    def retry_policy(rel: str, first_failed: bool) -> str | None:
-        """`flaky` or `unlisted` when the suite gets --retries more attempts."""
-        rows = [row for (sp, _), row in baseline.items() if sp == rel]
-        # A foreign row cannot select a suite for retry aggregation either.
-        # The aggregate branch below computes its verdict directly instead
-        # of going through classify_result(), so without this filter it
-        # would be a side entrance around the P8 contract: a failing suite
-        # whose only row is foreign could come out KNOWN-FAIL.
-        if any(row["reason"].startswith("flaky-timing:")
-               and baseline_row_applicable(row, run_fingerprint) for row in rows):
-            return "flaky"
-        # An unlisted suite that failed under the parallel main run also gets
-        # one serial retry: a load- or timing-sensitive test that passes alone
-        # is reported as FLAKY-PASS instead of failing the whole run, while a
-        # suite that fails again still fails. Suites with any baseline row keep
-        # the baseline contract (no side entrance around a declared failure).
-        return "unlisted" if not rows and first_failed else None
-
-    # The retry pass used to start only after the whole main run, so one failed
-    # long suite added its full duration again as a serial tail. A retry now
-    # joins the front of the pool's queue as soon as its attempt ends, while
-    # the budget still holds the attempt's full timeout; one the budget cannot
-    # cover waits for the serial pass below, which hands the rest of the budget
-    # to short suites first. Which suites retry and how often is unchanged.
-    retry_budget = args.retry_budget if args.retry_budget is not None else args.timeout
-    retry_spent = 0.0
-    retry_reserved = 0.0
-    first_failed: dict[str, bool] = {}
-    immediate: dict[str, list[SuiteResult]] = {}
-
-    def retry_now(result: SuiteResult) -> float | None:
-        nonlocal retry_reserved
-        rel = result.relpath
-        first_failed.setdefault(rel, not result.passed)
-        if not args.retries or retry_policy(rel, first_failed[rel]) is None:
-            return None
-        if len(immediate.setdefault(rel, [])) >= args.retries:
-            return None
-        if retry_budget - retry_spent - retry_reserved < args.timeout:
-            return None
-        retry_reserved += args.timeout
-        return float(args.timeout)
-
-    def retried(result: SuiteResult) -> None:
-        nonlocal retry_reserved, retry_spent
-        retry_reserved -= args.timeout
-        retry_spent += result.duration_s
-        immediate[result.relpath].append(result)
-
     all_results: list[SuiteResult] = []
     results_by_suite: dict[str, list[SuiteResult]] = {}
     for profile in ISOLATION_PROFILES:
@@ -2721,21 +2643,22 @@ def _run_main(argv: list[str]) -> int:
         if not batch:
             continue
         batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix,
-                                    durations, retry_now=retry_now, retried=retried)
+                                    durations)
         all_results.extend(batch_results)
         for result in batch_results:
             results_by_suite.setdefault(result.relpath, []).append(result)
-            results_by_suite[result.relpath].extend(immediate.get(result.relpath, []))
 
     # Retries are deliberately limited to baseline rows explicitly marked as
     # flaky-timing. Every attempt receives a fresh isolated environment.
     retry_budget_exhausted: set[str] = set()
     unlisted_retried: set[str] = set()
     if args.retries:
-        # Retries left after the main run run serially, and nothing bounded
-        # their total cost: N flaky suites could each consume the full
-        # per-suite timeout. The per-suite timeout still applies to every
+        # The retry pass re-runs flaky suites serially after the main run, and
+        # nothing bounded its total cost: N flaky suites could each consume the
+        # full per-suite timeout. The per-suite timeout still applies to every
         # attempt; --retry-budget bounds the sum (P3).
+        retry_budget = args.retry_budget if args.retry_budget is not None else args.timeout
+        retry_spent = 0.0
         retry_order = sorted(
             selected,
             key=lambda suite: (
@@ -2746,15 +2669,32 @@ def _run_main(argv: list[str]) -> int:
         )
         for suite in retry_order:
             rel = suite_relpath(root, suite)
-            first = results_by_suite.get(rel, [])[:1]
-            policy = retry_policy(rel, any(not r.passed for r in first))
-            if policy is None:
+            rows = [row for (sp, _), row in baseline.items() if sp == rel]
+            # A foreign row cannot select a suite for retry aggregation either.
+            # The aggregate branch below computes its verdict directly instead
+            # of going through classify_result(), so without this filter it
+            # would be a side entrance around the P8 contract: a failing suite
+            # whose only row is foreign could come out KNOWN-FAIL.
+            flaky_declared = any(
+                row["reason"].startswith("flaky-timing:")
+                and baseline_row_applicable(row, run_fingerprint)
+                for row in rows
+            )
+            # An unlisted suite that failed under the parallel main run also gets
+            # one serial retry: a load- or timing-sensitive test that passes alone
+            # is reported as FLAKY-PASS instead of failing the whole run, while a
+            # suite that fails again still fails. Suites with any baseline row keep
+            # the baseline contract (no side entrance around a declared failure).
+            failed_unlisted = (not rows) and any(
+                not r.passed for r in results_by_suite.get(rel, [])
+            )
+            if not (flaky_declared or failed_unlisted):
                 continue
-            if policy == "unlisted":
+            if failed_unlisted:
                 unlisted_retried.add(rel)
             profile = profile_of[rel]
             extra: list[SuiteResult] = []
-            for _ in range(args.retries - len(immediate.get(rel, []))):
+            for _ in range(args.retries):
                 remaining = retry_budget - retry_spent
                 if remaining <= 0:
                     retry_budget_exhausted.add(rel)

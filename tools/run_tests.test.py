@@ -1454,30 +1454,6 @@ class RetryFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(order.read_text().splitlines(), ["b-fast", "a-slow"])
 
-    def test_a_retry_the_budget_covers_runs_before_the_rest_of_the_queue(self):
-        # A retry used to wait for the whole main run and then add its suite's
-        # duration again as a serial tail.
-        order = self.root / "order.txt"
-        write_suite(self.root, "a-flaky.test.py", f"""
-            from pathlib import Path
-            import sys
-            count = Path('a.count')
-            n = int(count.read_text()) + 1 if count.exists() else 1
-            count.write_text(str(n))
-            with open({str(order)!r}, 'a') as stream: stream.write(f'a-{{n}}\\n')
-            sys.exit(1 if n == 1 else 0)
-        """)
-        for name in ("b-steady", "c-steady"):
-            write_suite(self.root, name + ".test.py", f"""
-                with open({str(order)!r}, 'a') as stream: stream.write({name!r} + '\\n')
-            """)
-        result, rows = self.run_fixture([], extra_args=["--retries", "1", "--jobs", "1"])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(order.read_text().splitlines(), ["a-1", "a-2", "b-steady", "c-steady"])
-        flaky = [row for row in rows if row["suite_path"] == "a-flaky.test.py"]
-        self.assertEqual([row["verdict"] for row in flaky], ["FLAKY-PASS"])
-        self.assertIn("attempts=2; outcomes=fail,pass; policy=unlisted-serial-retry", flaky[0]["detail"])
-
 
 class ChildStderrDiagnosticsFixture(RunTestsFixtureBase):
     """A failing suite's diagnostics keep the stderr of a child it captured.
