@@ -203,6 +203,102 @@ print(json.dumps(out, default=str)[:4000])
 """
 
 
+# Samples each read ``_continue_look`` makes, with its time, from the clear on:
+# the booking's own record says only which reason ended the continue.
+SAMPLER = r"""
+import importlib.util, json, os, sys, time
+from pathlib import Path
+src, harness, folder, seconds, out = sys.argv[1:6]
+tag = sys.argv[6] if len(sys.argv) > 6 else 'driver'
+spawned = tag != 'driver'      # one copy runs in the native TUI's own environment
+sys.path[:0] = [src + '/utilities', src + '/tools']
+spec = importlib.util.spec_from_file_location('ps', src + '/utilities/peer-steward.py')
+ps = importlib.util.module_from_spec(spec); spec.loader.exec_module(ps)
+from fleet.process_identity import process_identity
+child, limit, end = None, time.time() + 600, None      # loaded before the clear; stops `seconds` after it
+with open(out, 'a', encoding='utf-8') as sink:
+    while time.time() < (end or limit):
+        found = sorted(Path(folder).glob('*.json'))
+        try:
+            req = json.load(open(found[-1])) if found else {}
+        except (OSError, ValueError):
+            req = {}
+        if req.get('status') != 'cleared':
+            time.sleep(0.05)
+            continue
+        end = end or time.time() + float(seconds)
+        row = {'t': round(time.time(), 3), 'env': tag}
+        try:
+            pane = (req.get('seat') or {}).get('pane')
+            row.update(status=req.get('status'), new=req.get('new_session'),
+                       continued=req.get('continued'))
+            state, ident, _rc, why = ps._retire_target(pane)
+            row['target'] = [state, ident.get('session_id'), why]
+            info = ps._retire_pane_info(pane)
+            row['fg'] = info and [[p.get('pid'), (p.get('argv') or [''])[0].rsplit('/', 1)[-1]]
+                                  for p in info.get('foreground_processes', [])]
+            if info:
+                binding, why = ps._pane_shell_binding_result(pane, harness, info=info)
+                row['binding'] = binding and binding.get('sid'), why
+                if binding:
+                    pid = binding['native_pid']
+                    if not spawned:
+                        spawned = True
+                        import subprocess
+                        raw = open(f'/proc/{pid}/environ', 'rb').read().split(b'\0')
+                        native_env = dict(item.decode('utf-8', 'replace').split('=', 1)
+                                          for item in raw if b'=' in item)
+                        native_env['HB_SAMPLER'] = os.environ['HB_SAMPLER']
+                        import session_tidy_clear as clear
+                        socket = str((req.get('herdr_transport') or {}).get('socket_path') or '')
+                        helper_env = clear._helper_env(native_env, socket_path=socket)
+                        helper_env['HB_SAMPLER'] = os.environ['HB_SAMPLER']
+                        child = [subprocess.Popen([sys.executable, '-B', '-c', os.environ['HB_SAMPLER'],
+                                                   src, harness, folder, seconds, out, name],
+                                                  env=env, cwd=cwd,
+                                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 for name, env, cwd in (
+                                     ('native', native_env, os.readlink(f'/proc/{pid}/cwd')),
+                                     ('helper', helper_env, str(clear.st.state_root())))]
+                    ident2 = process_identity(pid, harness)
+                    row['native_identity'] = [ident2.session_id, ident2.confidence]
+                    registry = os.path.expanduser(f'~/.claude/sessions/{pid}.json')
+                    try:
+                        row['registry_sid'] = json.load(open(registry)).get('sessionId')
+                    except (OSError, ValueError):
+                        row['registry_sid'] = None
+                if binding:
+                    import pane_ownership as po
+                    rec = po._process(pid)
+                    nenv = {}
+                    try:
+                        nenv = dict(i.decode('utf-8', 'replace').split('=', 1) for i in
+                                    open(f'/proc/{pid}/environ', 'rb').read().split(b'\0') if b'=' in i)
+                    except OSError:
+                        pass
+                    sock = (ps.herdr_observation.socket_path_for_endpoint(ps._HERDR_SESSION or 'default')
+                            or ps._herdr_env_for_server(ps._HERDR_SESSION).get('HERDR_SOCKET_PATH', ''))
+                    row['wns'] = {'start_ok': bool(rec) and str(rec[5]) == binding['native_start'],
+                                  'tty_fg': bool(rec) and bool(rec[3]) and rec[2] == rec[4],
+                                  'runtime': po._runtime(pid), 'worker': po._registered_worker(pid),
+                                  'native_session': po._native_session(pid, harness),
+                                  'pane_env': nenv.get('HERDR_PANE_ID'), 'native_sock': nenv.get('HERDR_SOCKET_PATH'),
+                                  'requested_sock': sock, 'my_sock': os.environ.get('HERDR_SOCKET_PATH'),
+                                  'same_sock': po._same_socket_endpoint(nenv.get('HERDR_SOCKET_PATH', ''), sock,
+                                                                         ps._HERDR_SESSION)}
+                wrapped, observed = ps._wrapped_foreground(pane, harness, info)
+                row['wrapped'] = [wrapped and wrapped.get('session_id'), observed]
+                row['native'] = ps._continue_native_session(pane, harness, process_info=info)
+            row['look'] = ps._continue_look(pane, req)
+        except Exception as exc:
+            row['error'] = repr(exc)[:300]
+        row['t_end'] = round(time.time(), 3)
+        sink.write(json.dumps(row, default=str) + chr(10)); sink.flush()
+for proc in child or ():
+    proc.wait(timeout=120)
+"""
+
+
 def _is_memory_worker(record) -> bool:
     return "ops/session-tidy-memory" in record["text"]
 
@@ -278,6 +374,28 @@ class TidyContinue(Scenario):
         except (ValueError, IndexError):
             return {"stdout": done.stdout[-800:], "stderr": done.stderr[-1500:]}
 
+    def start_sampler(self, run, seconds=20):
+        folder = cc.state_home(run) / "hearting" / "session-tidy" / "clear"
+        env = cc.tmux_env(run) if self.surface == "tmux" else run.home.env
+        out = run.home.root / "continue-look.jsonl"
+        return subprocess.Popen([sys.executable, "-B", "-c", SAMPLER, str(cc._source(run)),
+                                 run.harness, str(folder), str(seconds), str(out)],
+                                env={**env, "HB_SAMPLER": SAMPLER}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), out
+
+    def stop_sampler(self, sampler, wait=60):
+        if not sampler:
+            return None
+        proc, out = sampler
+        try:
+            proc.wait(timeout=wait and 180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        try:
+            return [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        except (OSError, ValueError):
+            return None
+
     def _end_old_arm(self, run, old_sid):
         """End only this fixture's carrier process whose arm still names the cleared session."""
         arm = Path(run.home.env["AGENT_DISPATCH_JOBS"]).parent / "rewake-arms" / f"{self.attempt}.json"
@@ -304,6 +422,7 @@ class TidyContinue(Scenario):
     def drive(self, run):
         ev = run.evidence
         t0 = time.time()
+        sampler = self.start_sampler(run)
         run.prompt("SCENARIO-TIDYC-START 등록하고 세션을 정리해 주세요")
         run.wait_idle(8, 120)
         mains = run.main_requests()
@@ -314,6 +433,7 @@ class TidyContinue(Scenario):
         ev["tidy_output"] = tool[-1500:]
         if "FX-TIDY-RC" not in tool:
             run.note("tidy shell call never reached the model")
+            self.stop_sampler(sampler, wait=0)
             return "inconclusive"
 
         def cleared():
@@ -321,8 +441,12 @@ class TidyContinue(Scenario):
                     if r.get("new_session") or r.get("status") == "cleared"] or None
         manual = "clear=manual" in tool
         hit = None if manual else wait_for(cleared, 90, 0.3)
+        if manual:
+            self.stop_sampler(sampler, wait=0)
+            sampler = None
         ev["cleared_after_s"] = round(time.time() - t0, 1) if hit else None
         if not hit:
+            ev["continue_look_samples"] = self.stop_sampler(sampler)
             ev["reservations_final"] = self._reservations(run)
             run.note("tidy answered clear=manual; nothing cleared without a person" if manual
                      else "the window was not cleared or the new session was not observed")
@@ -346,6 +470,7 @@ class TidyContinue(Scenario):
                                        "has_attempt": self.attempt in req["text"]}
         else:
             ev["diag_after_window"] = self.diag(run)
+        ev["continue_look_samples"] = self.stop_sampler(sampler)
         ev["first_untyped"] = bool(first)
         ev["card_on_first_turn"] = bool(first and CARD_MARK in first[0]["text"])
         ev["continue_sent"] = any(CONTINUE_TEXT in r["last_text"] for r in conversation())
@@ -401,4 +526,106 @@ class TidyContinueHerdrGone(TidyContinueHerdr):
     end_old_arm = True
 
 
-SCENARIOS = (TidyContinue, TidyContinueHerdr, TidyContinueHerdrNow, TidyContinueHerdrGone)
+class TidyContinueHerdrShell(TidyContinueHerdr):
+    """The window an operator with the session shell on has: the TUI runs under
+    ``session-shell/entry.py`` -> ``host.cjs``, so the pane's foreground is the
+    shell host and the native session is found through its attachment binding."""
+    name = "tidy-continue-herdr-shell"
+    summary = "tidy-continue-herdr with the TUI launched through Hearting's session shell."
+
+    def prepare(self, run):
+        module = cc._base_module(run)
+        run.evidence["session_shell"] = module.enable_session_shell(run.home)
+        super().prepare(run)
+        factory, previous = module.PrivateTui, module.SESSION_SHELL
+        module.SESSION_SHELL = True     # read by harness_argv for this run's TUI only
+
+        def shell_factory(*args, **kwargs):
+            module.SESSION_SHELL = previous
+            return factory(*args, **kwargs)
+        module.PrivateTui = shell_factory
+
+
+class TidyContinueHerdrShellTwice(TidyContinueHerdrShell):
+    """The same window cleared twice in a row keeps one session number (#1451)."""
+    name = "tidy-continue-herdr-shell-twice"
+    summary = "tidy-continue-herdr-shell, then a second tidy clear: the seat keeps its number."
+    AGAIN = "SCENARIO-TIDYC-AGAIN"
+
+    def script(self, run):
+        first = super().script(run)
+
+        def answer(record, earlier):
+            if (self.AGAIN in record["last_text"] and record["last_kind"] != "tool"
+                    and not any("FX-TIDY2-RC" in (r["reply"].get("shell") or "") for r in earlier)):
+                return Reply(shell='python3 "$AGENT_HOME/utilities/session_tidy.py" tidy --text '
+                             + shlex.quote(CARD_BODY) + " 2>&1; echo FX-TIDY2-RC=$?")
+            if record["last_kind"] == "tool" and "FX-TIDY2-RC" in record["last_text"]:
+                return Reply("두 번째 정리 요청 완료")
+            return first(record, earlier)
+        return answer
+
+    def _tags(self, run):
+        path = cc.state_home(run) / "agent-fleet" / "tag-assignments.json"
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8")).get("assignments") or []
+        except (OSError, ValueError):
+            return {}
+        return {row.get("session_id"): row.get("tag") for row in rows
+                if row.get("harness") == run.harness}
+
+    def drive(self, run):
+        import threading
+        ev = run.evidence
+        seen, stop = {}, threading.Event()
+
+        def watch():                       # every number any session held, in order
+            while not stop.wait(0.2):
+                for sid, tag in self._tags(run).items():
+                    seen.setdefault(sid, tag)
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+        try:
+            return self._twice(run, ev, seen)
+        finally:
+            stop.set()
+            watcher.join(timeout=5)
+            ev["tags_seen"] = dict(seen)
+
+    def _twice(self, run, ev, seen):
+        first = super().drive(run)
+        ev["tags_after_first"] = self._tags(run)
+        sids = [r.get("new_session") for r in self._reservations(run)]
+        if first != "pass" or not sids or not sids[-1]:
+            run.note("first clear did not finish; the second was not tried")
+            return first
+        middle = sids[-1]
+        run.prompt(f"{self.AGAIN} 한 번 더 정리해 주세요")
+
+        def cleared_again():
+            return [r for r in self._reservations(run)
+                    if r.get("sid") == middle and r.get("status") == "cleared"
+                    and r.get("new_session")] or None
+        again = wait_for(cleared_again, 150, 0.5)
+        ev["second_clear"] = again
+        if not again:
+            run.note("the second tidy did not clear the window")
+            return "fail"
+        last = again[0]["new_session"]
+        wait_for(lambda: (self._reservations(run)[-1].get("continued") or {}).get("state")
+                 not in (None, "pending", "sending") or None, 150, 1)
+        run.wait_idle(8, 60)
+        ev["reservations_final"] = self._reservations(run)
+        tags = self._tags(run)
+        ev["tags_after_second"] = tags
+        origin = next(iter(seen.values()), None)
+        before = ev["tags_after_first"].get(middle)
+        ev["tag_kept"] = bool(before) and tags.get(last) == before == origin
+        ev["second_continue"] = (ev["reservations_final"][-1].get("continued") or {}).get("state")
+        run.note(f"tag origin={origin} first={before} second={tags.get(last)} "
+                 f"second_continue={ev['second_continue']}")
+        return "pass" if ev["tag_kept"] and ev["second_continue"] == "sent" else "fail"
+
+
+SCENARIOS = (TidyContinue, TidyContinueHerdr, TidyContinueHerdrNow, TidyContinueHerdrGone,
+             TidyContinueHerdrShell, TidyContinueHerdrShellTwice)

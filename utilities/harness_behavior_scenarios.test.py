@@ -130,6 +130,7 @@ class TidyContinueCaseTest(unittest.TestCase):
         patched = ca.FX_HELPER.replace(tidy.ROUTED_PATCH[0], tidy.ROUTED_PATCH[1], 1)
         compile(patched, "hb_fx.py", "exec")
         self.assertIn('"worker_type=frame"', patched)
+        compile(tidy.SAMPLER, "continue-look-sampler", "exec")   # runs as `python3 -c`
 
 
 if __name__ == "__main__":
