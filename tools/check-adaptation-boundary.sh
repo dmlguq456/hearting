@@ -1187,7 +1187,8 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'hookSpecificOutput' adapters/codex/hooks/userprompt-lifecycle.py; then
     fail_msg "Codex lifecycle hook bridges must route through preflight.sh lifecycle commands"
   fi
-  if ! grep -Fq 'keeps session start context silent by default' hooks/portable-guards.test.sh \
+  if ! grep -Fq 'injects session start memory context by default' hooks/portable-guards.test.sh \
+    || ! grep -Fq 'explicit memory disable remains silent' hooks/portable-guards.test.sh \
     || ! grep -Fq 'can opt into session start memory context' hooks/portable-guards.test.sh \
     || ! grep -Fq 'CODEX_SESSION_MEMORY_INJECT=1' hooks/portable-guards.test.sh \
     || ! grep -Fq 'out["hookEventName"]=="SessionStart"' hooks/portable-guards.test.sh \
@@ -1204,7 +1205,7 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'CODEX_SESSION_MEMORY_INJECT' adapters/codex/hooks/sessionstart-lifecycle.py \
     || ! grep -Fq 'hookSpecificOutput.additionalContext' adapters/codex/README.md \
     || ! grep -Fq 'hookSpecificOutput.additionalContext' adapters/codex/ADAPTATION.md; then
-    fail_msg "Codex lifecycle hooks must prove silent defaults plus opt-in/non-default additionalContext paths in portable guards"
+    fail_msg "Codex lifecycle hooks must prove default memory injection, explicit disable and other additionalContext paths in portable guards"
   fi
   if ! grep -Fq 'def candidate_context' adapters/codex/hooks/userprompt-lifecycle.py \
     || ! grep -Fq 'RECALL_HOOK' adapters/codex/hooks/userprompt-lifecycle.py \

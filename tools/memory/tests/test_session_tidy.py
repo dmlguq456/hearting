@@ -4166,6 +4166,18 @@ class ClearHelperTest(TidyCase):
         self.assertNotIn("AGENT_HERDR_SESSION", child_env)
         self.assertNotIn("HERDR_PANE_ID", child_env)
 
+    def test_every_pane_booking_keeps_its_herdr_socket_for_the_helper(self):
+        """2026-11-10 wB:pBA: a Claude booking had no socket, so its helper's steward could not
+        join the session-shell attachment (`same socket` refused) and never continued."""
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness), self.iso.patched_environ(self.extra), \
+                    mock.patch.object(clear, "_start_helper", return_value=1):
+                seat = st.Seat("pane", st._digest("pane", harness, PANE), pane=PANE, harness=harness,
+                               socket_path="/run/herdr/booked.sock")
+                clear.schedule_for_enqueue(seat, harness, "sid-A", str(self.cwd))
+                req = clear.read_reservation(seat.key)
+                self.assertEqual(req["herdr_transport"], {"socket_path": "/run/herdr/booked.sock"})
+
     def booked(self, harness="claude", sid="sid-A"):
         with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=1):
             seat = st.resolve_seat(harness, str(self.cwd))
