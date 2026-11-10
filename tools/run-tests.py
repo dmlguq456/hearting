@@ -66,12 +66,23 @@ DEFAULT_JOBS = 4
 _RUN_DEADLINE: float | None = None
 DEADLINE_NOT_STARTED = "run-tests: not started; the --deadline run budget was spent\n"
 DEADLINE_STOPPED = "run-tests: stopped at the --deadline run budget\n"
+# A suite cut by the run budget reports kind "deadline", never "timeout": a
+# baseline or flaky-timing row that allows a suite's own timeout must not turn
+# a spent run budget (or a suite that never ran) into KNOWN-FAIL and exit 0.
+# "deadline" is not an expected_failure_kind, so no baseline row can allow it.
+RUN_DEADLINE_KIND = "deadline"
 
 
 def _deadline_remaining() -> float | None:
     if _RUN_DEADLINE is None:
         return None
     return _RUN_DEADLINE - time.monotonic()
+
+
+def deadline_not_started_result(relpath: str, profile: str) -> "SuiteResult":
+    result = SuiteResult(relpath, 124, True, "", DEADLINE_NOT_STARTED, 0.0, profile)
+    result.run_deadline = "not-started"
+    return result
 
 # This suite repeatedly activates all three runtime projections in both linked
 # and packaged modes. Running it beside other install/projection suites makes
@@ -697,6 +708,7 @@ class SuiteResult:
         "profile",
         "failing_test_ids",
         "child_stderr",
+        "run_deadline",
     )
 
     def __init__(self, relpath, returncode, timed_out, stdout, stderr, duration_s, profile):
@@ -709,6 +721,9 @@ class SuiteResult:
         self.profile = profile
         self.failing_test_ids = extract_failing_test_ids(stdout, stderr)
         self.child_stderr = ""
+        # "not-started" or "stopped" when the --deadline run budget, not this
+        # suite's own --timeout, ended the attempt; "" otherwise.
+        self.run_deadline = ""
 
     @property
     def passed(self) -> bool:
@@ -1028,11 +1043,12 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
     started_monotonic = time.monotonic()
     remaining = _deadline_remaining()
     if remaining is not None and remaining <= 0:
-        _suite_progress("suite_not_started", relpath, profile, result="timeout", duration_s=0.0)
-        return SuiteResult(relpath, 124, True, "", DEADLINE_NOT_STARTED, 0.0, profile)
+        _suite_progress("suite_not_started", relpath, profile, result=RUN_DEADLINE_KIND, duration_s=0.0)
+        return deadline_not_started_result(relpath, profile)
     attempt_timeout = timeout if remaining is None else min(float(timeout), remaining)
     _suite_progress("suite_start", relpath, profile)
     timed_out = False
+    run_deadline = ""
     # start_new_session=True makes the child the leader of its own process
     # group. That ordering matters: killpg() is only ever called after this
     # guarantee, because killing the runner's own group would kill the runner.
@@ -1081,6 +1097,7 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
             out, err = reap_process_group(proc)
             if attempt_timeout < timeout:
                 err = (err or "") + DEADLINE_STOPPED
+                run_deadline = "stopped"
     finally:
         if pgid is not None:
             with _ALL_RUN_PGIDS_LOCK:
@@ -1095,11 +1112,13 @@ def run_suite(suite: Path, root: Path, env: dict[str, str], profile: str, timeou
                 _OWNED_LIVE_PATHS_BY_SUITE.setdefault(relpath, set()).update(snapshot)
     duration = time.monotonic() - started_monotonic
     result = SuiteResult(relpath, rc, timed_out, out, err, duration, profile)
+    result.run_deadline = run_deadline
     _suite_progress(
         "suite_timeout" if timed_out else "suite_end",
         relpath,
         profile,
-        result="timeout" if timed_out else "pass" if result.passed else "fail",
+        result=(RUN_DEADLINE_KIND if run_deadline else "timeout") if timed_out
+        else "pass" if result.passed else "fail",
         duration_s=round(duration, 3),
     )
     return result
@@ -1488,6 +1507,8 @@ def last_nonempty_line(text: str) -> str:
 
 
 def classify_kind(result: SuiteResult) -> str:
+    if result.run_deadline:
+        return RUN_DEADLINE_KIND
     if result.timed_out:
         return "timeout"
     captured = "\n".join((result.stderr or "", result.stdout or ""))
@@ -1637,11 +1658,14 @@ HARD_FAIL_VERDICTS = {
 
 
 class Verdict:
-    def __init__(self, suite_path, test_id, verdict, detail=""):
+    def __init__(self, suite_path, test_id, verdict, detail="", kind=None):
         self.suite_path = suite_path
         self.test_id = test_id
         self.verdict = verdict
         self.detail = detail
+        # Report kind when it differs from the suite result's own kind (an
+        # aggregate row whose first attempt passed); None keeps the default.
+        self.kind = kind
 
 
 def classify_result(
@@ -1662,6 +1686,13 @@ def classify_result(
     """
     suite_path = result.relpath
     verdicts: list[Verdict] = []
+
+    if result.run_deadline:
+        # The run budget ended this attempt, not the suite: no baseline row
+        # applies, and the run must not pass on a suite it did not finish.
+        return [Verdict(suite_path, "-", "TIMEOUT",
+                        detail=f"run-deadline={result.run_deadline}",
+                        kind=RUN_DEADLINE_KIND)]
 
     all_whole_file = baseline.get((suite_path, "-"))
     all_specific = {
@@ -1914,6 +1945,9 @@ def write_seed_baseline(path: Path, rows: list[dict[str, str]], fingerprint: str
     proposed = []
     for row in rows:
         if row.get("verdict") not in SEED_VERDICTS:
+            continue
+        if row.get("kind") == RUN_DEADLINE_KIND:
+            # A spent run budget is not a suite failure to propose.
             continue
         proposed.append({
             "suite_path": row["suite_path"],
@@ -2717,11 +2751,16 @@ def _run_main(argv: list[str]) -> int:
                 if remaining <= 0:
                     retry_budget_exhausted.add(rel)
                     break
-                # Past the run deadline the first failure stands; a retry
-                # attempt would only be reported as not started.
+                # Past the run deadline the retry is recorded as not started
+                # instead of run: a flaky suite's unfinished retry must not
+                # leave a passing or known-fail aggregate behind.
                 run_left = _deadline_remaining()
                 if run_left is not None:
                     if run_left <= 0:
+                        if flaky_declared:
+                            _suite_progress("suite_not_started", rel, profile,
+                                            result=RUN_DEADLINE_KIND, duration_s=0.0)
+                            extra.append(deadline_not_started_result(rel, profile))
                         break
                     remaining = min(remaining, run_left)
                 # Checking the budget only *before* an attempt does not bound
@@ -2837,8 +2876,12 @@ def _run_main(argv: list[str]) -> int:
             expected = {row["expected_failure_kind"] for row in flaky_rows}
             outcomes = []
             mismatch = False
+            deadline_cut = []
             for attempt in attempt_results:
-                if attempt.passed:
+                if attempt.run_deadline:
+                    outcomes.append(RUN_DEADLINE_KIND)
+                    deadline_cut.append(attempt.run_deadline)
+                elif attempt.passed:
                     outcomes.append("pass")
                 else:
                     actual = classify_kind(attempt)
@@ -2861,17 +2904,21 @@ def _run_main(argv: list[str]) -> int:
                 detail += f"; failing={','.join(failing_ids)}"
             if result.relpath in retry_budget_exhausted:
                 detail += "; retry-budget-exhausted"
+            if deadline_cut:
+                detail += f"; run-deadline={','.join(deadline_cut)}"
             # A flaky-timing suite's all-pass aggregate is not a genuine
             # unexpected pass: one run (or one budget-limited run) proves
             # nothing about a suite explicitly declared flaky, so it gets its
             # own non-fatal verdict distinct from a non-flaky suite's XPASS.
             verdict = (
-                "KIND-MISMATCH" if mismatch
+                "TIMEOUT" if deadline_cut
+                else "KIND-MISMATCH" if mismatch
                 else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
                 else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
                 else "FLAKY-KNOWN-FAIL"
             )
-            verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
+            verdicts = [Verdict(result.relpath, "-", verdict, detail=detail,
+                                kind=RUN_DEADLINE_KIND if deadline_cut else None)]
             if verdict == "FLAKY-PASS":
                 flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
         elif result.relpath in unlisted_retried and len(attempt_results) > 1:
@@ -2893,7 +2940,8 @@ def _run_main(argv: list[str]) -> int:
             verdicts = classify_result(result, baseline, today, run_fingerprint)
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
-            result_kind = test_failure_kind(result, v.test_id) if not result.passed else ""
+            result_kind = v.kind if v.kind is not None else (
+                test_failure_kind(result, v.test_id) if not result.passed else "")
             signature = failure_signature(result) if not result.passed else ""
             report_rows.append(
                 {
