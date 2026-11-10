@@ -114,6 +114,14 @@ class SessionShellInstallTest(unittest.TestCase):
         self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none'})
         install.set_enabled(False)
         self.assertEqual(json.loads(policy.read_text())['side_width'],48)
+        # A stored appearance choice (position, theme, shade) survives both toggles.
+        chosen={'position':'left','theme':'mono','shade':'medium'}
+        policy.write_text(json.dumps({**json.loads(policy.read_text()),**chosen}))
+        for enabled in (True,False):
+            install.set_enabled(enabled)
+            stored=json.loads(policy.read_text())
+            self.assertEqual({key:stored[key] for key in chosen},chosen)
+            self.assertEqual({key:install._client().display_policy()[key] for key in chosen},chosen)
 
     def test_enable_and_disable_restore_a_profile_without_its_own_final_lf(self):
         before = b"alias keep='printf keep'"
