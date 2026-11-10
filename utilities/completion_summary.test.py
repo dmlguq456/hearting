@@ -152,6 +152,27 @@ class CompletionMeaningTest(unittest.TestCase):
                         jobs=self.jobs, attempt_id=self.aid)
                     self.assertEqual(recovered.failure_class, 'fail')
 
+    def test_negated_or_uncertain_tokens_do_not_supply_performed_work(self):
+        descriptions = (
+            "The patch has not been reviewed.",
+            "The patch wasn't reviewed.",
+            '검토를 할 수 없었습니다.\n검증: PASS 없음.',
+            'Review status: unknown.\nNo PASS result is available.',
+            'Review may be completed later.\nPASS is the desired result.',
+        )
+        for harness in ('claude', 'codex', 'opencode'):
+            for description in descriptions:
+                with self.subTest(harness=harness, description=description):
+                    self.report.write_text('Final verdict: changes required\nFinding 1: Target source unavailable.\n' + description + '\n')
+                    self.seed(harness)
+                    self.assertEqual(self.live(harness).failure_class, 'fail')
+                    view = terminal_reader.inspect_terminal_attempt(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(view['verdict'], 'FAIL')
+                    carrier, _ = terminal_reader.carrier_terminal_note(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(carrier['verdict'], 'FAIL')
+
     def test_unreadable_report_content_and_directory_do_not_establish_a_completed_review(self):
         self.seed()
         self.report.write_bytes(b'\xff\xfe')

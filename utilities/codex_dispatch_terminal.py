@@ -1106,9 +1106,19 @@ _AUDIT_INCOMPLETE = re.compile(
     r"\b(?:not(?:\s+yet)?|will\s+be|to\s+be)\s+reviewed\b|"
     r"\btarget\s+read\s+failed\b", re.I)
 _AUDIT_FINDING = re.compile(r"^(?:\[?(?:P[0-3](?:-\w+)?|F\d+)\b|finding\s+\d+\b).+", re.I)
+# Affirmative records only: never search for a loose "reviewed" or "PASS"
+# token and try to enumerate every way prose can negate it. Unrecognized prose
+# contributes no completion evidence. These are existing sentences/check lines,
+# not a template required from the writer.
 _AUDIT_PERFORMED = re.compile(
-    r"검토를\s*마쳤|재?검토했|재?검토했다|\breviewed\b|\breview\s+completed\b|"
-    r"\bPASS\b|(?:→|->)\s*OK\b|\b\d+\s+(?:tests?\s+)?passed\b|\d+개\s*통과", re.I)
+    r"^(?:(?:I|We)\s+)?Reviewed\s+(?:the|this|these|those|all)\s+[^\n.!?]+\.\s*$|"
+    r"^Review\s+completed[.!]?\s*$|"
+    r"(?:^|(?<=[.!?])\s+)[^\n.!?\"'“”]{0,256}"
+    r"(?:검토를\s*마쳤(?:다|습니다)|재?검토했(?:다|습니다))\.(?:\s|$)|"
+    r"^[A-Za-z0-9_./-]+[ \t]+PASS[.!]?[ \t]*$|"
+    r"^`?(?:python3?|pytest|node|bash)\s+[^\n]+(?:→|->)\s*OK[.!]?[ \t]*$",
+    re.I | re.M)
+
 
 
 def _completed_negative_audit_report(path, blocker):
