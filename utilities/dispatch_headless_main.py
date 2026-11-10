@@ -252,6 +252,167 @@ def resolve_launch_models(h, args, *, model_error_fields: Mapping[str, str]) -> 
     return None
 
 
+def select_model_settings(h, args, *, harness: str, label: str, knob: str,
+                          role_settings: Callable[[Any], dict],
+                          top_from_request: bool = False,
+                          missing_selection_detail: str | None = None) -> dict:
+    """Choose a launch's model: inherited, route-sealed profile, role or explicit.
+
+    `knob` names the harness's model tuning argument and settings key (Claude
+    `effort`, Codex `reasoning`, OpenCode `variant`); `role_settings` resolves a
+    `--model-role` through the harness's role map. OpenCode reads the `top`
+    exception from the requested profile (`top_from_request`) because it
+    resolves `top` to another label.
+    """
+    tuning = getattr(args, knob)
+    try:
+        h.validate_registered_profile(
+            args.model_profile,
+            registered_worker=bool(args.registered_worker),
+            dispatch_depth=args.dispatch_depth,
+            worker_type=args.worker_type,
+        )
+    except h.ModelProfileError as exc:
+        raise h.ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
+    try:
+        binding = getattr(args, "owner_route_binding", None)
+        h.require_top_route(
+            getattr(args, "route_file", None) or getattr(binding, "route_file", None),
+            profile=args.model_profile or "",
+            # Pass the launching node so a frame anchor leg is checked against
+            # ITS OWN sealed profile, not the owner's. Without this the route
+            # compiles `top` onto the anchor and this wrapper refuses it.
+            node=getattr(args, "route_node", None),
+        )
+    except h.ModelProfileError as exc:
+        raise h.ModelSelectionError(exc.reason, str(exc)) from exc
+    if args.inherit_model_settings:
+        if args.model_profile or args.model_role or args.model or tuning:
+            raise h.ModelSelectionError(
+                "invalid-dispatch-model-selection",
+                f"--inherit-model-settings is mutually exclusive with --model-profile, --model-role, --model, and --{knob}",
+            )
+        # The shared rule (model_config.inheritance_refusal): refused while this
+        # adapter declares a main-session-only model and off the documented surface.
+        refusal = h.inheritance_refusal(h._model_policy(), label)
+        if refusal:
+            raise h.ModelSelectionError(*refusal)
+        return {
+            "source": "inherit", "role": "inherit", "profile": "unsealed",
+            "tier": "inherit", "granularity": "legacy", "model": "inherit", knob: "inherit",
+        }
+    if args.model_profile:
+        if not args.model_role and args.worker_type != "owner":
+            raise h.ModelSelectionError(
+                "model-profile-role-required",
+                "route-bound --model-profile requires the independently sealed --model-role",
+            )
+        if bool(args.model) != bool(tuning):
+            raise h.ModelSelectionError(
+                "invalid-dispatch-model-selection",
+                f"capacity override requires --model and --{knob} together",
+            )
+        if (args.model or tuning) and not args.capacity_retry:
+            raise h.ModelSelectionError(
+                "model-profile-override-forbidden",
+                "a route-sealed model profile may use a concrete override only on a checked capacity retry "
+                "(to choose a model, seal it at compose time: capability-route.py compose --pin <target>=<harness>:<model>[@<effort>])",
+            )
+        top_profile = h.TOP_PROFILE
+        top_override = (
+            "profile-top-override-forbidden",
+            "the top exception profile admits no concrete --model override, capacity retry included",
+        )
+        if top_from_request and args.model_profile == top_profile and args.model:
+            # No cascade in or out, on every adapter: nothing runs under the
+            # `top` label but the top model itself, even where `top` collapses
+            # onto another tier and the resolved label no longer says `top`.
+            raise h.ModelSelectionError(*top_override)
+        try:
+            resolved, _receipt = h.resolve_runtime_profile(
+                harness, args.model_profile, source_root=h.ROOT
+            )
+        except h.ModelProfileError as exc:
+            raise h.ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
+        model = args.model or resolved["model"]
+        if not top_from_request and resolved["profile"] == top_profile and args.model:
+            # No cascade in or out: nothing runs under the `top` label but the
+            # top model itself (top review m1).
+            raise h.ModelSelectionError(*top_override)
+        # A route-sealed selection pin (`compose --pin`) beats the profile's
+        # own model; a checked capacity retry still replaces it, and the receipt
+        # then says `pin+capacity` with the pinned model so nothing is
+        # overwritten silently.
+        try:
+            pin = h.route_selection_pin(
+                getattr(args, "route_file", None)
+                or getattr(getattr(args, "owner_route_binding", None), "route_file", None),
+                worker_type=args.worker_type, adapter=harness,
+            )
+        except h.ModelProfileError as exc:
+            raise h.ModelSelectionError(exc.reason, str(exc)) from exc
+        pin_model = pin.get("model")
+        value = tuning or resolved["budget"]
+        if pin["status"] == "applied":
+            if not args.model:
+                model, value = pin_model, pin["effort"] or resolved["budget"]
+            source = "pin+capacity" if args.model else "pin"
+            if h.route_authority.pin_target(args.worker_type) != "frame":
+                # Compose already dropped a main-session-only pin model; this
+                # guards a route edited after sealing and the model a capacity
+                # retry actually substitutes.
+                h._require_headless_model(model, source)
+        elif top_from_request:
+            source = "profile+capacity" if args.model else "profile"
+            if args.model_profile != top_profile:
+                # The route-sealed `top` profile is the one door to a
+                # main-session-only model, as on the other adapters.
+                h._require_headless_model(model, f"profile:{args.model_profile}")
+        elif resolved["profile"] == top_profile:
+            # The one door: a route-sealed `top` profile resolves to the
+            # main-session-only model on purpose (2026-09-09 maintainer decision). The
+            # waiver covers exactly that resolved model.
+            source = "profile-top"
+        else:
+            h._require_headless_model(model, f"profile:{args.model_profile}")
+            source = "profile+capacity" if args.model else "profile"
+        return {
+            "source": source,
+            "role": args.model_role or "_kernel/owner",
+            "profile": resolved["profile"],
+            "tier": resolved["tier"],
+            "granularity": resolved["granularity"],
+            "model": model,
+            knob: value,
+            "pin_status": pin["status"],
+            **({"pin_model": pin_model} if pin["status"] == "applied" else {}),
+        }
+    if args.model_role and args.model:
+        raise h.ModelSelectionError(
+            "invalid-dispatch-model-selection",
+            "--model-role is mutually exclusive with --model (tier-hopping); "
+            f"situational tuning keeps the role's tier and adjusts --{knob} only",
+        )
+    if args.model_role:
+        # 2026-07-22 사용자 원칙: 역할의 티어(모델)는 고정, 상황별 조절은 knob만.
+        return role_settings(args)
+    if not args.model and not tuning:
+        raise h.ModelSelectionError(
+            "missing-dispatch-model-selection",
+            missing_selection_detail or f"main dispatch must choose --model-role or --model with --{knob}",
+        )
+    if not args.model or not tuning:
+        raise h.ModelSelectionError(
+            "invalid-dispatch-model-selection",
+            f"--model and --{knob} must be provided together",
+        )
+    h._require_headless_model(args.model, "explicit")
+    return {
+        "source": "explicit", "role": "-", "profile": "unsealed",
+        "tier": "explicit", "granularity": "legacy", "model": args.model, knob: tuning,
+    }
+
+
 def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path,
                        reservation_token: str, permission_env: Mapping[str, str],
                        current_sandbox: str, supervised: bool,

@@ -382,154 +382,30 @@ def _model_config_state() -> tuple[str, str]:
 
 
 def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
-    try:
-        validate_registered_profile(
-            args.model_profile,
-            registered_worker=bool(args.registered_worker),
-            dispatch_depth=args.dispatch_depth,
-            worker_type=args.worker_type,
+    return DISPATCH_MAIN.select_model_settings(
+        _ADAPTER, args, harness="claude", label="Claude", knob="effort",
+        role_settings=_role_model_settings,
+    )
+
+
+def _role_model_settings(args: argparse.Namespace) -> dict[str, str]:
+    # 2026-07-22 사용자 원칙: 역할의 티어(모델)는 고정, 상황별 조절은 effort만.
+    # --model-role + --effort = the sanctioned situational-tuning surface.
+    fields = role_map(args.model_role)
+    _require_headless_model(fields["model"], f"role:{args.model_role}")
+    effort = args.effort or fields["effort"]
+    source = "role+effort" if args.effort else "role"
+    if args.model_role.startswith("deep ") and effort in ("medium", "low"):
+        # 사다리(2026-07-22): deep 기본 xhigh, 아래 단계는 high; medium 이하는
+        # '정말 쉬운 것만'의 예외적 선택 — 허용하되 조심을 상기시킨다.
+        print(
+            f"caution=deep-tier-low-effort role={args.model_role!r} effort={effort} "
+            "(step-down is high; medium/low is for genuinely easy work only)",
+            file=sys.stderr,
         )
-    except ModelProfileError as exc:
-        raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-    try:
-        binding = getattr(args, "owner_route_binding", None)
-        require_top_route(
-            getattr(args, "route_file", None) or getattr(binding, "route_file", None),
-            profile=args.model_profile or "",
-            # Pass the launching node so a frame anchor leg is checked against
-            # ITS OWN sealed profile, not the owner's. Without this the route
-            # compiles `top` onto the anchor and this wrapper refuses it --
-            # and because each harness has its own copy of this call, omitting
-            # it in one place breaks that one harness only.
-            node=getattr(args, "route_node", None),
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError(exc.reason, str(exc)) from exc
-    if args.inherit_model_settings:
-        if args.model_profile or args.model_role or args.model or args.effort:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "--inherit-model-settings is mutually exclusive with --model-profile, --model-role, --model, and --effort",
-            )
-        refusal = inheritance_refusal(_model_policy(), "Claude")
-        if refusal:
-            raise ModelSelectionError(*refusal)
-        return {
-            "source": "inherit", "role": "inherit", "profile": "unsealed",
-            "tier": "inherit", "granularity": "legacy", "model": "inherit", "effort": "inherit",
-        }
-    if args.model_profile:
-        if not args.model_role and args.worker_type != "owner":
-            raise ModelSelectionError(
-                "model-profile-role-required",
-                "route-bound --model-profile requires the independently sealed --model-role",
-            )
-        if bool(args.model) != bool(args.effort):
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "capacity override requires --model and --effort together",
-            )
-        if (args.model or args.effort) and not args.capacity_retry:
-            raise ModelSelectionError(
-                "model-profile-override-forbidden",
-                "a route-sealed model profile may use a concrete override only on a checked capacity retry "
-                "(to choose a model, seal it at compose time: capability-route.py compose --pin <target>=<harness>:<model>[@<effort>])",
-            )
-        try:
-            resolved, _receipt = resolve_runtime_profile(
-                "claude", args.model_profile, source_root=ROOT
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-        model = args.model or resolved["model"]
-        if resolved["profile"] == TOP_PROFILE and args.model:
-            # No cascade in or out: nothing runs under the `top` label but the
-            # top model itself (top review m1).
-            raise ModelSelectionError(
-                "profile-top-override-forbidden",
-                "the top exception profile admits no concrete --model override, capacity retry included",
-            )
-        # A route-sealed selection pin (`compose --pin`) beats the profile's
-        # own model; a checked capacity retry still replaces it, and the receipt
-        # then says `pin+capacity` with the pinned model so nothing is
-        # overwritten silently.
-        try:
-            pin = route_selection_pin(
-                getattr(args, "route_file", None)
-                or getattr(getattr(args, "owner_route_binding", None), "route_file", None),
-                worker_type=args.worker_type, adapter="claude",
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError(exc.reason, str(exc)) from exc
-        pin_model = pin.get("model")
-        effort = args.effort or resolved["budget"]
-        if pin["status"] == "applied":
-            if not args.model:
-                model, effort = pin_model, pin["effort"] or resolved["budget"]
-            source = "pin+capacity" if args.model else "pin"
-            if pin_target(args.worker_type) != "frame":
-                # Compose already dropped a main-session-only pin model; this
-                # guards a route edited after sealing and the model a capacity
-                # retry actually substitutes.
-                _require_headless_model(model, source)
-        elif resolved["profile"] == TOP_PROFILE:
-            # The one door: a route-sealed `top` profile resolves to the
-            # main-session-only model on purpose (2026-09-09 maintainer decision). The
-            # waiver covers exactly that resolved model.
-            source = "profile-top"
-        else:
-            _require_headless_model(model, f"profile:{args.model_profile}")
-            source = "profile+capacity" if args.model else "profile"
-        return {
-            "source": source,
-            "role": args.model_role or "_kernel/owner",
-            "profile": resolved["profile"],
-            "tier": resolved["tier"],
-            "granularity": resolved["granularity"],
-            "model": model,
-            "effort": effort,
-            "pin_status": pin["status"],
-            **({"pin_model": pin_model} if pin["status"] == "applied" else {}),
-        }
-    if args.model_role and args.model:
-        raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model-role is mutually exclusive with --model (tier-hopping); "
-            "situational tuning keeps the role's tier and adjusts --effort only",
-        )
-    if args.model_role:
-        # 2026-07-22 사용자 원칙: 역할의 티어(모델)는 고정, 상황별 조절은 effort만.
-        # --model-role + --effort = the sanctioned situational-tuning surface.
-        fields = role_map(args.model_role)
-        _require_headless_model(fields["model"], f"role:{args.model_role}")
-        effort = args.effort or fields["effort"]
-        source = "role+effort" if args.effort else "role"
-        if args.model_role.startswith("deep ") and effort in ("medium", "low"):
-            # 사다리(2026-07-22): deep 기본 xhigh, 아래 단계는 high; medium 이하는
-            # '정말 쉬운 것만'의 예외적 선택 — 허용하되 조심을 상기시킨다.
-            print(
-                f"caution=deep-tier-low-effort role={args.model_role!r} effort={effort} "
-                "(step-down is high; medium/low is for genuinely easy work only)",
-                file=sys.stderr,
-            )
-        return {
-            "source": source, "role": args.model_role, "profile": "unsealed",
-            "tier": "legacy", "granularity": "legacy", "model": fields["model"], "effort": effort,
-        }
-    if not args.model and not args.effort:
-        raise ModelSelectionError(
-            "missing-dispatch-model-selection",
-            "main dispatch must choose --model-role or --model with --effort",
-        )
-    if not args.model or not args.effort:
-        raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model and --effort must be provided together",
-        )
-    _require_headless_model(args.model, "explicit")
     return {
-        "source": "explicit", "role": "-", "profile": "unsealed",
-        "tier": "explicit", "granularity": "legacy", "model": args.model, "effort": args.effort,
+        "source": source, "role": args.model_role, "profile": "unsealed",
+        "tier": "legacy", "granularity": "legacy", "model": fields["model"], "effort": effort,
     }
 
 

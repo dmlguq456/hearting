@@ -490,173 +490,46 @@ def _model_config_state() -> tuple[str, str]:
 
 
 def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
+    return DISPATCH_MAIN.select_model_settings(
+        _ADAPTER, args, harness="codex", label="Codex", knob="reasoning",
+        role_settings=_role_model_settings,
+    )
+
+
+def _role_model_settings(args: argparse.Namespace) -> dict[str, str]:
     try:
-        validate_registered_profile(
-            args.model_profile,
-            registered_worker=bool(args.registered_worker),
-            dispatch_depth=args.dispatch_depth,
-            worker_type=args.worker_type,
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-    try:
-        binding = getattr(args, "owner_route_binding", None)
-        require_top_route(
-            getattr(args, "route_file", None) or getattr(binding, "route_file", None),
-            profile=args.model_profile or "",
-            # Pass the launching node so a frame anchor leg is checked against
-            # ITS OWN sealed profile, not the owner's. Without this the route
-            # compiles `top` onto the anchor and this wrapper refuses it --
-            # and because each harness has its own copy of this call, omitting
-            # it in one place breaks that one harness only.
-            node=getattr(args, "route_node", None),
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError(exc.reason, str(exc)) from exc
-    if args.inherit_model_settings:
-        if args.model_profile or args.model_role or args.model or args.reasoning:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "--inherit-model-settings is mutually exclusive with --model-profile, --model-role, --model, and --reasoning",
-            )
-        # The shared rule (model_config.inheritance_refusal): refused while this
-        # adapter declares a main-session-only model -- on this machine the
-        # interactive default IS that model -- and off the documented surface.
-        refusal = inheritance_refusal(_model_policy(), "Codex")
-        if refusal:
-            raise ModelSelectionError(*refusal)
-        return {
-            "source": "inherit", "role": "inherit", "profile": "unsealed",
-            "tier": "inherit", "granularity": "legacy", "model": "inherit", "reasoning": "inherit",
-        }
-    if args.model_profile:
-        if not args.model_role and args.worker_type != "owner":
-            raise ModelSelectionError(
-                "model-profile-role-required",
-                "route-bound --model-profile requires the independently sealed --model-role",
-            )
-        if bool(args.model) != bool(args.reasoning):
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "capacity override requires --model and --reasoning together",
-            )
-        if (args.model or args.reasoning) and not args.capacity_retry:
-            raise ModelSelectionError(
-                "model-profile-override-forbidden",
-                "a route-sealed model profile may use a concrete override only on a checked capacity retry "
-                "(to choose a model, seal it at compose time: capability-route.py compose --pin <target>=<harness>:<model>[@<effort>])",
-            )
-        try:
-            resolved, _receipt = resolve_runtime_profile(
-                "codex", args.model_profile, source_root=ROOT
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-        model = args.model or resolved["model"]
-        if resolved["profile"] == TOP_PROFILE and args.model:
-            # No cascade in or out: nothing runs under the `top` label but the
-            # top model itself (top review m1).
-            raise ModelSelectionError(
-                "profile-top-override-forbidden",
-                "the top exception profile admits no concrete --model override, capacity retry included",
-            )
-        # A route-sealed selection pin (`compose --pin`) beats the profile's
-        # own model; a checked capacity retry still replaces it, and the receipt
-        # then says `pin+capacity` with the pinned model so nothing is
-        # overwritten silently.
-        try:
-            pin = route_selection_pin(
-                getattr(args, "route_file", None)
-                or getattr(getattr(args, "owner_route_binding", None), "route_file", None),
-                worker_type=args.worker_type, adapter="codex",
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError(exc.reason, str(exc)) from exc
-        pin_model = pin.get("model")
-        reasoning = args.reasoning or resolved["budget"]
-        if pin["status"] == "applied":
-            if not args.model:
-                model, reasoning = pin_model, pin["effort"] or resolved["budget"]
-            source = "pin+capacity" if args.model else "pin"
-            if pin_target(args.worker_type) != "frame":
-                # Compose already dropped a main-session-only pin model; this
-                # guards a route edited after sealing and the model a capacity
-                # retry actually substitutes.
-                _require_headless_model(model, source)
-        elif resolved["profile"] == TOP_PROFILE:
-            # The one door to the main-session-only model from registered
-            # dispatch: a route-sealed `top` profile (2026-09-09 maintainer decision).
-            # The waiver covers exactly the resolved model.
-            source = "profile-top"
-        else:
-            _require_headless_model(model, f"profile:{args.model_profile}")
-            source = "profile+capacity" if args.model else "profile"
-        return {
-            "source": source,
-            "role": args.model_role or "_kernel/owner",
-            "profile": resolved["profile"],
-            "tier": resolved["tier"],
-            "granularity": resolved["granularity"],
-            "model": model,
-            "reasoning": reasoning,
-            "pin_status": pin["status"],
-            **({"pin_model": pin_model} if pin["status"] == "applied" else {}),
-        }
-    if args.model_role and args.model:
+        fields = role_map(args.model_role)
+    except ValueError as exc:
         raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model-role is mutually exclusive with --model (tier-hopping); "
-            "situational tuning keeps the role's tier and adjusts --reasoning only",
+            "invalid-dispatch-model-role",
+            str(exc),
+        ) from exc
+    model = fields.get("exact_model_id")
+    reasoning = fields.get("reasoning")
+    if not model or not reasoning:
+        raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and reasoning")
+    if model in {"role-set", "role-profile", "unconfigured"}:
+        raise ModelSelectionError(
+            "invalid-dispatch-model-role",
+            f"model role {args.model_role!r} resolved to non-runnable model={model}",
         )
-    if args.model_role:
-        try:
-            fields = role_map(args.model_role)
-        except ValueError as exc:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-role",
-                str(exc),
-            ) from exc
-        model = fields.get("exact_model_id")
-        reasoning = fields.get("reasoning")
-        if not model or not reasoning:
-            raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and reasoning")
-        if model in {"role-set", "role-profile", "unconfigured"}:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-role",
-                f"model role {args.model_role!r} resolved to non-runnable model={model}",
+    _require_headless_model(model, f"role:{args.model_role}")
+    # 역할 티어 고정 + 상황별 reasoning 오버라이드 (2026-07-22 사용자 원칙).
+    if args.reasoning:
+        if args.model_role.startswith("deep ") and args.reasoning in ("medium", "low"):
+            # 사다리: deep 기본 xhigh → 아래는 high; medium 이하는 '정말 쉬운 것만'.
+            print(
+                f"caution=deep-tier-low-effort role={args.model_role!r} reasoning={args.reasoning} "
+                "(step-down is high; medium/low is for genuinely easy work only)",
+                file=sys.stderr,
             )
-        _require_headless_model(model, f"role:{args.model_role}")
-        # 역할 티어 고정 + 상황별 reasoning 오버라이드 (2026-07-22 사용자 원칙).
-        if args.reasoning:
-            if args.model_role.startswith("deep ") and args.reasoning in ("medium", "low"):
-                # 사다리: deep 기본 xhigh → 아래는 high; medium 이하는 '정말 쉬운 것만'.
-                print(
-                    f"caution=deep-tier-low-effort role={args.model_role!r} reasoning={args.reasoning} "
-                    "(step-down is high; medium/low is for genuinely easy work only)",
-                    file=sys.stderr,
-                )
-            return {
-                "source": "role+effort", "role": args.model_role, "profile": "unsealed",
-                "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": args.reasoning,
-            }
         return {
-            "source": "role", "role": args.model_role, "profile": "unsealed",
-            "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": reasoning,
+            "source": "role+effort", "role": args.model_role, "profile": "unsealed",
+            "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": args.reasoning,
         }
-    if not args.model and not args.reasoning:
-        raise ModelSelectionError(
-            "missing-dispatch-model-selection",
-            "main dispatch must choose --model-role or --model with --reasoning",
-        )
-    if not args.model or not args.reasoning:
-        raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model and --reasoning must be provided together",
-        )
-    _require_headless_model(args.model, "explicit")
     return {
-        "source": "explicit", "role": "-", "profile": "unsealed",
-        "tier": "explicit", "granularity": "legacy", "model": args.model, "reasoning": args.reasoning,
+        "source": "role", "role": args.model_role, "profile": "unsealed",
+        "tier": "legacy", "granularity": "legacy", "model": model, "reasoning": reasoning,
     }
 
 

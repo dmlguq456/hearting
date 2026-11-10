@@ -368,155 +368,35 @@ def _model_config_state() -> tuple[str, str]:
 
 
 def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
-    try:
-        validate_registered_profile(
-            args.model_profile,
-            registered_worker=bool(args.registered_worker),
-            dispatch_depth=args.dispatch_depth,
-            worker_type=args.worker_type,
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-    try:
-        binding = getattr(args, "owner_route_binding", None)
-        require_top_route(
-            getattr(args, "route_file", None) or getattr(binding, "route_file", None),
-            profile=args.model_profile or "",
-            # Pass the launching node so a frame anchor leg is checked against
-            # ITS OWN sealed profile, not the owner's. Without this the route
-            # compiles `top` onto the anchor and this wrapper refuses it --
-            # and because each harness has its own copy of this call, omitting
-            # it in one place breaks that one harness only.
-            node=getattr(args, "route_node", None),
-        )
-    except ModelProfileError as exc:
-        raise ModelSelectionError(exc.reason, str(exc)) from exc
-    if args.inherit_model_settings:
-        if args.model_profile or args.model_role or args.model or args.variant:
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "--inherit-model-settings is mutually exclusive with --model-profile, --model-role, --model, and --variant",
-            )
-        refusal = inheritance_refusal(_model_policy(), "OpenCode")
-        if refusal:
-            raise ModelSelectionError(*refusal)
-        return {
-            "source": "inherit", "role": "inherit", "profile": "unsealed",
-            "tier": "inherit", "granularity": "legacy", "model": "inherit", "variant": "inherit",
-        }
-    if args.model_profile:
-        if not args.model_role and args.worker_type != "owner":
-            raise ModelSelectionError(
-                "model-profile-role-required",
-                "route-bound --model-profile requires the independently sealed --model-role",
-            )
-        if bool(args.model) != bool(args.variant):
-            raise ModelSelectionError(
-                "invalid-dispatch-model-selection",
-                "capacity override requires --model and --variant together",
-            )
-        if (args.model or args.variant) and not args.capacity_retry:
-            raise ModelSelectionError(
-                "model-profile-override-forbidden",
-                "a route-sealed model profile may use a concrete override only on a checked capacity retry "
-                "(to choose a model, seal it at compose time: capability-route.py compose --pin <target>=<harness>:<model>[@<effort>])",
-            )
-        if args.model_profile == TOP_PROFILE and args.model:
-            # No cascade in or out, on every adapter (combined review m5):
-            # nothing runs under the `top` label but the top model itself,
-            # even where `top` collapses onto another tier. This adapter
-            # must read the *requested* profile, not the resolved one:
-            # opencode resolves `top` to `collapsed-top-to-balanced-deep`, so a check
-            # on `resolved["profile"]` (what claude and codex use, where the
-            # label survives) would never fire here (guard review m3).
-            raise ModelSelectionError(
-                "profile-top-override-forbidden",
-                "the top exception profile admits no concrete --model override, capacity retry included",
-            )
-        try:
-            resolved, _receipt = resolve_runtime_profile(
-                "opencode", args.model_profile, source_root=ROOT
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError("invalid-dispatch-model-profile", str(exc)) from exc
-        # A route-sealed selection pin (`compose --pin`) beats the profile's
-        # own model; a checked capacity retry still replaces it, and the receipt
-        # then says `pin+capacity` with the pinned model so nothing is
-        # overwritten silently.
-        try:
-            pin = route_selection_pin(
-                getattr(args, "route_file", None)
-                or getattr(getattr(args, "owner_route_binding", None), "route_file", None),
-                worker_type=args.worker_type, adapter="opencode",
-            )
-        except ModelProfileError as exc:
-            raise ModelSelectionError(exc.reason, str(exc)) from exc
-        model = args.model or resolved["model"]
-        variant = args.variant or resolved["budget"]
-        source = "profile+capacity" if args.model else "profile"
-        if pin["status"] == "applied":
-            if not args.model:
-                model, variant = pin["model"], pin["effort"] or resolved["budget"]
-            source = "pin+capacity" if args.model else "pin"
-            if route_authority.pin_target(args.worker_type) != "frame":
-                _require_headless_model(model, source)
-        elif args.model_profile != TOP_PROFILE:
-            # The route-sealed `top` profile is the one door to a main-session-only
-            # model, as on the other adapters.
-            _require_headless_model(model, f"profile:{args.model_profile}")
-        return {
-            "source": source,
-            "role": args.model_role or "_kernel/owner",
-            "profile": resolved["profile"],
-            "tier": resolved["tier"],
-            "granularity": resolved["granularity"],
-            "model": model,
-            "variant": variant,
-            "pin_status": pin["status"],
-            **({"pin_model": pin["model"]} if pin["status"] == "applied" else {}),
-        }
-    if args.model_role and args.model:
+    return DISPATCH_MAIN.select_model_settings(
+        _ADAPTER, args, harness="opencode", label="OpenCode", knob="variant",
+        role_settings=_role_model_settings,
+        top_from_request=True,
+        missing_selection_detail="main dispatch must choose --model-role, --model with --variant, or --inherit-model-settings",
+    )
+
+
+def _role_model_settings(args: argparse.Namespace) -> dict[str, str]:
+    fields = role_map(args.model_role)
+    model = fields.get("model")
+    variant = fields.get("variant")
+    if not model or not variant:
+        raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and variant")
+    if model == "opencode-default" or variant == "runtime-default":
         raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model-role is mutually exclusive with --model (tier-hopping); "
-            "situational tuning keeps the role's tier and adjusts --variant only",
+            "invalid-dispatch-model-role",
+            f"model role {args.model_role!r} resolved to runtime defaults; configure AGENT_MODEL_* and AGENT_VARIANT_* or pass --model/--variant",
         )
-    if args.model_role:
-        fields = role_map(args.model_role)
-        model = fields.get("model")
-        variant = fields.get("variant")
-        if not model or not variant:
-            raise ModelSelectionError("invalid-dispatch-model-role", "role map did not return model and variant")
-        if model == "opencode-default" or variant == "runtime-default":
-            raise ModelSelectionError(
-                "invalid-dispatch-model-role",
-                f"model role {args.model_role!r} resolved to runtime defaults; configure AGENT_MODEL_* and AGENT_VARIANT_* or pass --model/--variant",
-            )
-        _require_headless_model(model, f"role:{args.model_role}")
-        # 역할 티어 고정 + 상황별 variant 오버라이드 (2026-07-22 사용자 원칙).
-        if args.variant:
-            return {
-                "source": "role+effort", "role": args.model_role, "profile": "unsealed",
-                "tier": "legacy", "granularity": "legacy", "model": model, "variant": args.variant,
-            }
+    _require_headless_model(model, f"role:{args.model_role}")
+    # 역할 티어 고정 + 상황별 variant 오버라이드 (2026-07-22 사용자 원칙).
+    if args.variant:
         return {
-            "source": "role", "role": args.model_role, "profile": "unsealed",
-            "tier": "legacy", "granularity": "legacy", "model": model, "variant": variant,
+            "source": "role+effort", "role": args.model_role, "profile": "unsealed",
+            "tier": "legacy", "granularity": "legacy", "model": model, "variant": args.variant,
         }
-    if not args.model and not args.variant:
-        raise ModelSelectionError(
-            "missing-dispatch-model-selection",
-            "main dispatch must choose --model-role, --model with --variant, or --inherit-model-settings",
-        )
-    if not args.model or not args.variant:
-        raise ModelSelectionError(
-            "invalid-dispatch-model-selection",
-            "--model and --variant must be provided together",
-        )
-    _require_headless_model(args.model, "explicit")
     return {
-        "source": "explicit", "role": "-", "profile": "unsealed",
-        "tier": "explicit", "granularity": "legacy", "model": args.model, "variant": args.variant,
+        "source": "role", "role": args.model_role, "profile": "unsealed",
+        "tier": "legacy", "granularity": "legacy", "model": model, "variant": variant,
     }
 
 
