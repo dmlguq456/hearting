@@ -180,8 +180,9 @@ compact status for the callback's exact session does the shell blank Claude's
 statusline area, the rows directly under the input box, when their text equals
 the callback's latest recorded output. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude has no supported way to
-remove those rows, so one or two blank rows remain (two when the complete
-status wraps or lists jobs); keeping every value visible comes first. A
+remove those rows, so as many blank rows remain as the complete status takes
+(measured: two at 133 and 80 columns, three with a running job); keeping every
+value visible comes first. A
 hidden, collapsed, focused or not-yet-bound panel, a lost display host and
 unwrapped sessions show the complete native rows unchanged. Unwrapped
 displays remain intact.
