@@ -114,7 +114,7 @@ Prefer one airtight answer over broad partial coverage.
 # A pin is written only where the runtime home's provider serves it. The shipped
 # models are account models of Codex's own provider; on another provider Codex
 # cannot resolve the pinned model's metadata, refuses the spawn ("agent type is
-# currently not available") and the parent sees only that tool error (PG-45).
+# currently not available") and the parent sees only that tool error (PG-52).
 # There the agent keeps its effort and sandbox and follows the session model.
 UNPINNED_KEY = "_CODEX_AGENT_MODEL_UNPINNED"
 ACCOUNT_PROVIDERS = frozenset({"openai"})

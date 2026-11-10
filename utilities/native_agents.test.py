@@ -110,7 +110,7 @@ class SharedRendererTest(unittest.TestCase):
                 self.assertEqual({row["status"] for row in plan["agents"]}, {"shipped"})
 
     def test_codex_pins_only_for_the_provider_that_serves_them(self):
-        # PG-45: on another provider Codex refuses a pinned agent it cannot resolve;
+        # PG-52: on another provider Codex refuses a pinned agent it cannot resolve;
         # there the agent keeps its effort and follows the session model.
         cases = (("", "shipped"), ('model_provider = "openai"\n', "shipped"),
                  ('model_provider = "local_fixture"\n', "rendered"),

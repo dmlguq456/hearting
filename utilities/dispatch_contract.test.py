@@ -694,14 +694,14 @@ class DispatchContractTest(unittest.TestCase):
            "sandbox":"workspace-write"}
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
-  # PG-44: a quick (and so also a report-scope) owner has the same network posture.
+  # PG-51: a quick (and so also a report-scope) owner has the same network posture.
   for intensity in ("direct", "quick", "standard", "thorough"):
    self.assertTrue(D.codex_standard_owner_network_enabled(
     dispatch_depth=1, worker_type="owner", intensity=intensity,
     sandbox="workspace-write"), intensity)
 
  def test_codex_owner_network_posture_is_exactly_the_declared_set(self):
-  # PG-44 / RV-PR1474 P2-1: on for a depth-1 owner (any capability, intensity or
+  # PG-51 / RV-PR1474 P2-1: on for a depth-1 owner (any capability, intensity or
   # entry scope; those are not inputs), off for depth-2 and other workers, a
   # read-only sandbox and the observation-only Git fence. No other path widens it.
   import itertools

@@ -42,7 +42,7 @@ class IdentityTest(unittest.TestCase):
 
 
 class SubSessionRootTest(unittest.TestCase):
-    """A native sub-session answers with its root session, as a Claude subagent does (PG-42)."""
+    """A native sub-session answers with its root session, as a Claude subagent does (PG-49)."""
 
     def test_codex_thread_walks_the_spawn_edges_to_its_root(self):
         import sqlite3

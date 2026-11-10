@@ -249,7 +249,7 @@ native `read` tool; a successful marker command is not evidence of its contents.
 | `UserPromptSubmit` capsule candidates / routing-contract signal / briefing | plugin `chat.message` → prompt/turn capture, then `experimental.chat.system.transform` → `candidates` / `prompt-signal` / `briefing`, computed once per user turn and re-emitted on every model call of that turn | full — candidate output is active current-project/global capsule-only, maximum six / 1,200 UTF-8 bytes; the prompt is held in plugin memory only (never written) and dropped at `session.deleted` |
 | `SessionEnd` memory sync | none — `session.idle` keeps summary, pane, heartbeat and the cycle checkpoint observation only (D-82); `mem.py` exchanges after writes and reads | n/a — no session-end memory step on any adapter |
 | `Stop` cycle checkpoint (`open-cycle-checkpoint.py`) | plugin `session.idle` → detached `utilities/artifact_checkpoint_trigger.py turn-end --harness opencode` with `{sessionID}` on stdin and the session's own environment (a worker's `AGENT_ARTIFACT_ROOT`/`AGENT_ARTIFACT_CYCLE_ID` included); main and worker both run it; `AGENT_ARTIFACT_CHECKPOINT=off` starts nothing | full — same launcher, interval and checkpoint child as Claude and Codex Stop (§45 D-124); no hook trust or user config is changed |
-| `PreToolUse[Edit|Write|MultiEdit|NotebookEdit|Bash]` route presence gate (deny) | plugin `tool.execute.before` on `write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash` (V2: `shell`) → `utilities/route_presence_gate.py --opencode` with `{tool, args, sessionID, cwd}`; exit 1 throws the one-line compose instruction. The session id is the plugin's `input.sessionID`, the same id `shell.env` exports as `OPENCODE_SESSION_ID`, which the route-chain writer records. For a subagent (task tool) child `shell.env` also exports its root session, walking `parentID`, as `OPENCODE_ROOT_SESSION_ID`, so a dispatch or report the child starts names and wakes the root, as a Claude subagent's does (PG-42) | full — auto enforced |
+| `PreToolUse[Edit|Write|MultiEdit|NotebookEdit|Bash]` route presence gate (deny) | plugin `tool.execute.before` on `write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash` (V2: `shell`) → `utilities/route_presence_gate.py --opencode` with `{tool, args, sessionID, cwd}`; exit 1 throws the one-line compose instruction. The session id is the plugin's `input.sessionID`, the same id `shell.env` exports as `OPENCODE_SESSION_ID`, which the route-chain writer records. For a subagent (task tool) child `shell.env` also exports its root session, walking `parentID`, as `OPENCODE_ROOT_SESSION_ID`, so a dispatch or report the child starts names and wakes the root, as a Claude subagent's does (PG-49) | full — auto enforced |
 | `UserPromptSubmit`/`Stop` automatic change record | plugin `chat.message` → detached `utilities/turn_change_record.py start --harness opencode --session <id> --cwd <dir>`; `session.idle` → the same with `end`; main sessions only: a child session (`parentID`, the task tool's subagent) is skipped because its work falls inside the parent's turn, as a Claude subagent's does; the step applies the shared exemptions itself | full — the same shared step as Claude and Codex |
 | `PreToolUse[Bash]` worktree-path guard (deny) | retired with the write gates; `preflight worktree-path` remains a no-op alias that prints a retired notice | none — the portable `git worktree add` path check is no longer enforced (`core/HOOKS.md:45`) |
 
@@ -348,7 +348,18 @@ The post-tool context helper is asynchronous too. Service `/global/health` laten
 A completion prompt that OpenCode accepted but whose exact text did not appear in the
 native history keeps its claim (log `sent-unobserved-held`): a later idle pass settles it
 from history, and only the existing 120 s claim lease, once expired, makes it deliverable
-again. Measured with the history read forced empty: one turn in 120 s (before: 11).
+again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
+carrier opens no further turn for it (log `resend_limit_reached`, then
+`resend-limit-deferred`): the record stays owed, and the session's next natural turn
+carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
+it in that turn's context, a completed tool of a running turn appends it to the result,
+and either acks it there. A natural turn that comes while the limited send's claim is
+still live takes that exact claim over (the shared `settle` revalidates owner, lease and
+recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
+limit again; nothing is dropped. Measured with the history read forced empty: before the
+limit, one turn per expired lease without end (300 s: 3, 450 s: 4); after it, 2 turns and
+then none (450 s: 2), the next user prompt carried and acked it. A receipt that is only
+late (history hidden for 8 s) still settles at the next pass with one turn.
 
 **Open differences from Claude** (not closed by this measurement):
 
@@ -361,9 +372,12 @@ again. Measured with the history read forced empty: one turn in 120 s (before: 1
 - The herdr pane status projection (`recordNativeTurnStatus`, the pane publisher) still
   assumes the V1 TUI-process origin; under the OpenCode 2 service its pane state is not
   re-measured here.
-- Each 5 s pass still starts one asynchronous helper per idle root session (no service
-  stall, but CPU on the host); every plugin instance of the service evaluates its own
-  directory's sessions.
+- Each 5 s pass still starts two asynchronous helpers per idle root session (the idle
+  peer courier's `pending` read and the completion carrier's `recipients` look, which the
+  base already had): no service stall, but CPU on the host, linear in idle root sessions;
+  every plugin instance of the service evaluates its own directory's sessions. Measured at
+  40 idle root sessions: about 960 helpers a minute, about 1.9 cores of helper CPU (base
+  before the carriers: about 2.2).
 
 ## Explicit Non-Support
 

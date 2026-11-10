@@ -2061,6 +2061,65 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
         self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch")
         self.assertEqual(directive.get("parent_next_command"), "-")
 
+    def _codex_env(self, with_socket):
+        import socket as socket_module
+        env = self._env("idle")
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env["CODEX_THREAD_ID"] = "019a0000-0000-7000-8000-0000000000cc"
+        home = self.tmp_root / ("codex-home-socket" if with_socket else "codex-home-none")
+        (home / "app-server-control").mkdir(parents=True, exist_ok=True)
+        env["CODEX_HOME"] = str(home)
+        if with_socket:
+            sock = socket_module.socket(socket_module.AF_UNIX)
+            path = home / "app-server-control" / "app-server-control.sock"
+            try:
+                sock.bind(str(path))
+            except OSError:
+                sock.close()
+                self.skipTest("unix socket path too long here")
+            self.addCleanup(sock.close)
+        return env
+
+    def test_a_codex_watch_with_its_native_queue_ends_the_turn(self):
+        proc = self._run("watch", "peer-a", env=self._codex_env(True))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("wake=queue", proc.stdout)
+        directive = self._directive(proc.stdout)
+        self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
+        self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch-codex-queue")
+
+    def test_a_codex_queue_watch_receipt_is_handed_to_the_message_courier(self):
+        code = r"""
+import importlib.util, json, sys
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location("ps", sys.argv[1] + "/peer-steward.py")
+ps = importlib.util.module_from_spec(spec); spec.loader.exec_module(ps)
+sid = "019a0000-0000-7000-8000-0000000000cc"
+steward = {"harness": "codex", "session_id": sid}
+_text, ref = ps.peer_message.prepare_peer_message(
+    "[peer-steward] watch_id=w1 state=done target=t; exact watch receipt is available",
+    steward, steward, defer=True, refs=["peer-watch:w1"], receipt="peer-steward-watch:w1")
+import peer_obligations
+peer_obligations.ensure_normal_runner = lambda *a, **k: None
+import peer_steward_watch
+queued = peer_steward_watch._queue_watch_notice(ref, {"wake": "queue", "server": "default"})
+duty = ps.peer_obligations.ObligationStore().get("message-" + ref)
+print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or {}).get("kind"),
+                  "to": ((duty or {}).get("intent") or {}).get("to")}))
+"""
+        done = subprocess.run([sys.executable, "-c", code, str(_HERE)], capture_output=True,
+                              text=True, env=self._codex_env(True), timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        result = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertEqual((result["queued"], result["kind"]), (True, "message"), result)
+        self.assertEqual(result["to"]["harness"], "codex")
+
+    def test_a_codex_watch_without_a_queue_socket_still_waits(self):
+        proc = self._run("watch", "peer-a", env=self._codex_env(False))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("wake=none", proc.stdout)
+        self.assertEqual(self._directive(proc.stdout).get("parent_next"), "bounded-wait")
+
     def test_a_watch_with_no_carrier_tells_the_caller_to_wait_with_a_bound(self):
         proc = self._run("watch", "peer-a", "--wake", "none", env=self._env("idle"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -11932,6 +11991,77 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(rc, 3, line)
                 self.assertIn("reason=" + reason, line)
                 self.assertFalse(self.booking().get("continued", {}).get("transfer_ref"))
+
+    def test_unproven_new_session_is_relooked_then_ends_with_a_notice(self):
+        """2026-11-10 wB:pBA: a session-shell window whose helper could not prove the new
+        session left a silent pending continue (``queued`` without a sender) until it expired."""
+        looks = []
+
+        def look(_target, req):
+            looks.append(req.get("new_session"))
+            return "new-session-unknown"
+        self.cleared()
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", side_effect=look), \
+             mock.patch.object(peer_steward, "_herdr_prompt",
+                               side_effect=AssertionError("typed into an unproven session")), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            rc = peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                                    "--nonce", "n0nce"])
+        self.assertEqual(len(looks), peer_steward._CONTINUE_LOOK_ROUNDS)
+        self.assertEqual(rc, 3, printed)
+        self.assertIn("continued=skipped", printed[-1])
+        self.assertIn("reason=new-session-unknown", printed[-1])
+
+    def test_failed_continue_shows_its_line_on_the_booked_herdr_without_input(self):
+        """2026-11-10: the skipped line reached the person only with their next input (~55 min)."""
+        self.cleared()
+        data = self.booking()
+        data["herdr_transport"] = {"socket_path": "/run/herdr/booked.sock"}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.assertTrue(self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped",
+                                                        "new-session-unknown"))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["/usr/bin/herdr", "notification", "show", "Hearting"])
+        self.assertIn(self.clear.CONTINUE_TEXT, argv[-1])
+        self.assertEqual(run.call_args.kwargs["env"]["HERDR_SOCKET_PATH"], "/run/herdr/booked.sock")
+        self.assertEqual(self.booking()["continued"]["state"], "skipped")
+        # A booking without its Herdr endpoint (tmux, native) keeps only the seat notice.
+        self.cleared()
+        with mock.patch.object(self.clear.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(self.clear.subprocess, "run") as run:
+            self.clear._finish_continue(self.seat_obj.key, "n0nce", "skipped", "new-session-unknown")
+        run.assert_not_called()
+
+    def test_unproven_new_session_proven_on_a_later_look_continues(self):
+        answers = iter(["new-session-unknown", "new-session-unknown", None, None, None])
+        self.cleared()
+        guard = mock.Mock(return_value=(None, {"pid": 202}))
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", side_effect=lambda *_a: next(answers)), \
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", guard), \
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send, \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            rc = peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                                    "--nonce", "n0nce"])
+        self.assertEqual(rc, 0, printed)
+        self.assertIn("continued=true", printed[-1])
+        send.assert_called_once()
+
+    def test_booking_without_its_new_session_stays_pending_for_the_first_hook(self):
+        self.cleared(harness="codex", new="-")
+        printed = []
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", return_value="new-session-unknown"), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
+                               "--nonce", "n0nce"])
+        self.assertIn("continued=queued", printed[-1])
+        self.assertEqual(self.booking()["continued"]["state"], "pending")
 
     def test_herdr_missing_remains_a_typed_failure(self):
         self.cleared()

@@ -88,6 +88,113 @@ def compact_status(values, columns, native_owned=()):
     return [parts] if parts else []
 
 
+SESSION_FIELDS = frozenset({"folder", "title", "thread", "branch", "model_quota"})
+
+
+def session_status(values, columns):
+    """The statusline items the panel paints besides its model row and summary.
+
+    Folder, title, thread, branch with its Git state and observation, per-model
+    quotas, quota resets and running jobs, in the native statusline's order and
+    glyphs. Context, 5h/7d, model, route and answer counts are already painted
+    elsewhere in the panel; an item without a value is left out.
+    """
+    from .session_line import _remaining, SEPARATOR, _text
+    from .explorer.grid import cell_width
+    known = {**values, "jobs": None, "model_quotas": [(label, used) for label, used in values.get("model_quotas") or ()
+                                                      if _percent(used) != "?"]}
+    rows = status_lines(known, columns, wrap_long=True, fields=SESSION_FIELDS)
+    if values.get("jobs"):
+        # Running jobs join the last row when they fit, saving a row at 80.
+        job = [(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")]
+        width = lambda parts: sum(cell_width(text) for text, _key in parts)
+        if rows and width(rows[-1]) + cell_width(SEPARATOR) + width(job) <= columns:
+            rows[-1] = rows[-1] + [(SEPARATOR, "dim")] + job
+        else:
+            rows.extend(status_lines({"jobs": values["jobs"]}, columns, wrap_long=True, fields=()))
+    resets = [(str(label), _remaining(reset)) for label, _used, reset in values.get("quota_windows") or ()]
+    resets = [(label, left) for label, left in resets if left]
+    if resets:
+        parts = [("↻ ", "dim")]
+        for index, (label, left) in enumerate(resets):
+            parts += [(" · " if index else "", "dim"), (label + " ", "dim"), (left, "dim")]
+        rows.append([part for part in parts if part[0]])
+    return rows
+
+
+def session_brief(values):
+    """Title, running jobs and branch as short items, most needed first.
+
+    The panel packs these into whatever is left (a spare row or its bottom
+    edge) when a question takes the rows the full session rows would use, so
+    no observed value leaves the screen while the question is shown first.
+    """
+    from .session_line import line_segments, _text
+    items = []
+    title = line_segments(values, 10000, complete=True, fields={"title"})
+    if title:
+        items.append(title)
+    if values.get("jobs"):
+        items.append([(">_ ", "lvl_g"), (_text(values["jobs"]), "loc_repo")])
+    if values.get("branch"):
+        items.append([("⎇ ", "dim"), (_text(values["branch"]), "branch_s")])
+    return items
+
+
+NOTICE_NEWS_SECONDS = 600
+
+
+def notice_line(values, routes, questions, display, now):
+    """The one line under Claude's input while the panel paints the status area.
+
+    Only what the person must know now, one item by priority: an answer this
+    session owes, a warning already computed elsewhere, then fresh news. No
+    item means an empty line. Values, glyphs and colors are the panel's own;
+    nothing here collects, judges or authorizes anything new.
+    """
+    from .render_cells import _LIVE_GLYPH
+    waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
+                  and (item.get("request_state") or "open") == "open")
+    if waiting:
+        return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"),
+                (ui_text("fleet.session_panel.answer") + " " + str(waiting), "lvl_y"),
+                (" · Ctrl+]", "dim")]
+    if compaction_imminent(values.get("compaction_pressure")):
+        return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
+    readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
+    readings += [(str(label), used) for label, used, _reset in values.get("quota_windows") or ()]
+    readings += [(str(label), used) for label, used in values.get("model_quotas") or ()]
+    for label, used in readings:
+        if _percent(used) != "?" and _level(used) == "lvl_r":
+            return [("⚠ ", "lvl_r"), (label + " ", "dim"), (_percent(used), "lvl_r")]
+    for route in routes or ():
+        if route.get("state") in {"dead", "failed", "attention", "degraded"}:
+            return [(_LIVE_GLYPH["dead"] + " ", "g_dead"), (route.get("state_label") or "", "g_dead"),
+                    (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
+        if route.get("state") == "blocked":
+            # The common reader's blocked route waits on a person: Fleet's ◑ and
+            # its "answer needed" wording, not a failure.
+            return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"), (ui_text("fleet.session_block.open"), "lvl_y"),
+                    (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
+    human = (display or {}).get("human") or {}
+    since = human.get("at") if type(human.get("at")) in (int, float) else 0
+    news = []
+    for row in (display or {}).get("received") or ():
+        at = row.get("at")
+        if type(at) in (int, float) and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS:
+            news.append((at, [("⇄ ", "loc_repo"), (sanitize_title(str(row.get("sender") or "peer"))[:48] + " · ", "loc_repo"),
+                              (sanitize_title(str(row.get("text") or ""))[:160], "dim")]))
+    for route in routes or ():
+        at = route.get("result_at")
+        if (route.get("state") == "done" and route.get("outcome") and type(at) in (int, float)
+                and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS):
+            news.append((at, [(_LIVE_GLYPH["done"] + " ", "lvl_g"),
+                              (ui_text("fleet.session_panel.ready") + " · ", "lvl_g"),
+                              (route.get("title") or route.get("id") or "", "loc_repo"),
+                              (" · " + route["outcome"], "dim")]))
+    return max(news, key=lambda item: item[0])[1] if news else []
+
+
 def presentation(values, view, harness, sid, columns, *, native_owned=()):
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
@@ -107,7 +214,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
-                       "reason": clean(reason), "outcome": clean(row.get("outcome"))})
+                       "reason": clean(reason), "outcome": clean(row.get("outcome")),
+                       "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
     effort = _effort_text(values.get("effort"))
@@ -123,4 +231,6 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "route_label": values.get("route_label") or "",
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
+            "session": session_status(values, max(20, columns - 4)),
+            "brief": session_brief(values),
             "status": status_lines(values, max(20, columns - 4), wrap_long=True)}

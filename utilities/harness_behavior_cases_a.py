@@ -131,7 +131,7 @@ def register(flags):
           f"binding={'yes' if binding else 'no'} sidecar={'yes' if sidecar and 'pid' in sidecar else 'no'}")
 
 
-def complete():
+def complete(flags=()):
     import dispatch_contract, dispatch_completion_join
     state = json.loads(state_file.read_text())
     pid = int(state["child_pid"])
@@ -146,8 +146,11 @@ def complete():
         except OSError:
             break
         time.sleep(0.05)
-    closed = dispatch_contract.close_attempt_row(jobs, attempt, "completed-marker",
-                                                 evidence={"failure_class": "pass"})
+    # `complete fail`: the child died, so its receipt owes inspect-done-failure.
+    note, failure = (("dead-exit-nonzero", "fail") if "fail" in flags
+                     else ("completed-marker", "pass"))
+    closed = dispatch_contract.close_attempt_row(jobs, attempt, note,
+                                                 evidence={"failure_class": failure})
     path = dispatch_completion_join.materialize_after_terminal_close(jobs, attempt) if closed else None
     print(json.dumps({"closed": closed, "record": str(path) if path else None, **state}))
 
@@ -210,7 +213,7 @@ action = sys.argv[1]
 if action == "register":
     register(sys.argv[2:])
 elif action == "complete":
-    complete()
+    complete(sys.argv[2:])
 elif action == "steward-due":
     steward_due()
 else:

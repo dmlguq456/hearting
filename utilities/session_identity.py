@@ -29,7 +29,7 @@ state DB (`thread_spawn_edges`), and the OpenCode plugin exports the root id
 beside the native one (`harness-capabilities.json`
 `session_identity.sub_session_root`). The sub-session's own id stays in
 `native_session_id`. A dispatch it starts, a report it sends and a duty it
-records then name the session the user talks to, which is the one woken (PG-42).
+records then name the session the user talks to, which is the one woken (PG-49).
 An unreadable spawn record leaves the native id.
 """
 from __future__ import annotations

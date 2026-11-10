@@ -327,7 +327,7 @@ def codex_owner_network_posture(
     On: a dispatch-depth-1 owner in the `workspace-write` sandbox (or a GPU
     resource owner in `danger-full-access`), whatever its capability (audit
     included), intensity or entry scope, the posture a Claude or OpenCode
-    depth-1 owner process has (PG-44). A `report` scope is kept by the owner
+    depth-1 owner process has (PG-51). A `report` scope is kept by the owner
     instruction on all three harnesses.
     Off: every dispatch-depth-2 (or other non-owner) worker, a `read-only`
     sandbox, and the observation-only fence while the worktree is mid-merge,
@@ -1229,6 +1229,10 @@ def launch_repository_identity(path: str | Path, route_file: str | Path | None) 
 
 
 ATTEMPT_DESCENDANT_ENV = "AGENT_DISPATCH_ATTEMPT_ID"
+# Hearting's own detached settlement (the turn-end checkpoint) drops the descendant
+# tag but keeps the owner it writes for under this separate name, so the owner's
+# cleanup-scope guard still applies at its entry without counting it as live work.
+CLEANUP_OWNER_ENV = "AGENT_CLEANUP_OWNER_ATTEMPT_ID"
 
 
 def governance_environment(environ=None):

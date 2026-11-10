@@ -57,7 +57,7 @@ class Format:
     render: Callable[[str, Optional[str], Mapping[str, str]], tuple[str, Optional[str]]]
     collect_glob: Optional[str] = None        # stale-file sweep on write; None keeps strays
     # (selected config, runtime home) -> the config to render for that home; None keeps it.
-    # Lets an adapter fit its pins to what that home's runtime can serve (Codex, PG-45).
+    # Lets an adapter fit its pins to what that home's runtime can serve (Codex, PG-52).
     runtime_config: Optional[Callable[[Mapping[str, str], Path], Mapping[str, str]]] = None
 
     @property

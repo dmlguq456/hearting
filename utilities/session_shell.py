@@ -682,12 +682,17 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
     panel["summary"] = [styled(line) for line in panel["summary"]]
+    panel["session"] = [styled(line) for line in panel["session"]]
+    panel["brief"] = [styled(line) for line in panel["brief"]]
+    if harness == "claude":
+        from fleet.session_panel import notice_line
+        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
-                                                       panel_lines=["".join(p["text"] for p in row) for row in [panel["model"], *panel["summary"]]],
+                                                       panel_lines=["".join(p["text"] for p in row) for row in [panel["model"], *panel["summary"], *panel["session"]]],
                                                        detail_lines=["".join(p["text"] for p in row) for row in panel["status"]])
         if config_path:
             watched.append(config_path)
