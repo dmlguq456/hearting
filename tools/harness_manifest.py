@@ -122,9 +122,10 @@ def entry_read_instruction(identifier: str) -> str:
             f"Registered owners read only `capabilities/{identifier}/references/owner-execution.md`; "
             "stage workers read only their assigned contracts.")
 
-# Entry-router step text every runtime's entry Skill carries (Claude router,
-# Codex and OpenCode native Skills), so the owner boundary and the route guard
-# read the same everywhere (PG-16).
+# Entry-router step text shared by the runtimes' entry Skills (PG-16): the owner
+# boundary goes into every one; the Claude router carries the whole guard pointer,
+# the Codex and OpenCode route step its direct-route clause (their entry byte
+# budget, tools/context-footprint-baseline.json, holds no second copy of the rest).
 ENTRY_OWNER_BOUNDARY = ("The other entry-router steps apply to the main session. A registered owner uses\n"
                         "only its Route steps and the latest receipt for runtime commands.")
 ENTRY_GUARD_POINTER = """Follow the portable artifact, worktree, role, and verification guards in the
@@ -134,6 +135,9 @@ inline node, not route absence. A restriction on native subagents/agents is
 surface-local and never selects direct execution. Runtime projections must
 report unsupported mechanics and must not claim physical instruction masking,
 token, billing, or cost savings without verified evidence."""
+# The guard-pointer clause the native entry Skills add to their route step.
+ENTRY_DIRECT_ROUTE = ("Compile it even for direct intensity: direct is a compiled inline node, "
+                      "not route absence.")
 
 
 def skill_capabilities(manifest: dict) -> dict:

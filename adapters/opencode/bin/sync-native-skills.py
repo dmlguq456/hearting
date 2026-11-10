@@ -108,18 +108,16 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
     projected_details = "" if invocation_class == "entry-router" else portable_sections(source, identifier)
     procedure_index = harness_manifest.render_procedure_index(identifier)
     # The entry Skill's intro already says it is not a compatibility copy; its
-    # byte budget (tools/entry-skill-layer.test.py) goes to the guard pointer.
+    # byte budget (tools/entry-skill-layer.test.py) goes to the owner/route steps.
     legacy_note = "" if invocation_class == "entry-router" else (
         "Do not use legacy compatibility Skill files or non-native adapter Skill files\n"
         "as OpenCode-native source. Those files are compatibility/reference surfaces only.\n")
-    if invocation_class == "entry-router":
-        procedure_index = procedure_index.rstrip("\n") + "\n\n## Guard pointer\n\n" + harness_manifest.ENTRY_GUARD_POINTER + "\n"
     description = compact(f"{invocation['use_when']} {invocation['not_for']}")
     if invocation_class == "entry-router":
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
 2. Present the intent card from `core/WORKFLOW.md §0.4` unless the same route and scope are already approved.
 3. {harness_manifest.entry_read_instruction(identifier)} {harness_manifest.ENTRY_OWNER_BOUNDARY.replace(chr(10), " ")}
-4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`.
+4. Before the first durable capability artifact, compile and bind the checked route with `preflight.sh route --capability {identifier} ...`. {harness_manifest.ENTRY_DIRECT_ROUTE} A native-agent restriction never authorizes direct execution.
 5. Run `adapters/opencode/bin/preflight.sh capability-info {identifier}` and obey the reported status:"""
         route_guard = f"- Before durable capability output: `adapters/opencode/bin/preflight.sh route --capability {identifier} <complete compile arguments>`"
     else:
