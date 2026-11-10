@@ -1,0 +1,12 @@
+
+  >_ OpenAI Codex (v0.163.0)
+     /tmp/rv1499-native-3l7j5527/workspace
+  permissions: YOLO mode
+
+  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra
+  performance at a lower cost.
+
+
+› Ask Codex to do anything
+
+  00000000-0000-4000-8000-000000000052 · Context 0% used · 01a1c6e9-1c21-70d0-b…
