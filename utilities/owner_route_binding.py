@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import time
@@ -112,18 +113,38 @@ CURRENT_ROUTE_STATUSES = frozenset({
 })
 
 
-def _record_entry_present(path: Path, reason: str) -> bool:
-    """True when a record entry exists, False only when nothing is there at all.
+def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
+    """The one absence rule for a binding record beside the jobs registry.
 
-    A dangling link, an unreadable directory, or any other lookup error is a read
-    error, never absence.
+    Walk the record path from the filesystem root down to its leaf (the jobs
+    directory followed by ``parts``).  The record is absent only when the first
+    component that ``lstat`` cannot find is reached; nothing below it can exist.
+    A component that is there but cannot be passed (a link whose target is
+    missing, a non-directory where a directory belongs, a permission or other
+    lookup error) is a read error, never absence.  A link whose target exists
+    is followed as normal.
     """
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise OwnerRouteBindingError(reason) from exc
+    jobs_path = Path(jobs).expanduser()
+    if not jobs_path.is_absolute():
+        raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
+    target = jobs_path.parent.joinpath(*parts)
+    walked = Path(target.anchor)
+    names = target.parts[1:]
+    for index, name in enumerate(names):
+        walked = walked / name
+        try:
+            entry = os.lstat(walked)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise OwnerRouteBindingError(reason) from exc
+        if stat.S_ISLNK(entry.st_mode):
+            try:  # the link is there, so a missing target is a read error
+                entry = os.stat(walked)
+            except OSError as exc:
+                raise OwnerRouteBindingError(reason) from exc
+        if index < len(names) - 1 and not stat.S_ISDIR(entry.st_mode):
+            raise OwnerRouteBindingError(reason)
     return True
 
 
@@ -584,7 +605,8 @@ def _resolve_attachment_locked(jobs: Path, owner_attempt_id: str,
     path = _attachment_root(jobs) / _attachment_key(owner_attempt_id)
     if observer is not None:
         observer("file", path)
-    if not _record_entry_present(path, "owner-route-attachment-record-invalid"):
+    if not _record_present(jobs, OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key(owner_attempt_id),
+                           reason="owner-route-attachment-record-invalid"):
         return None
     try:
         attachment = _attachment_from_payload(
@@ -673,7 +695,9 @@ def resolve_owner_route_lifecycle(jobs: str | Path, *, owner_attempt_id: str,
     if observer is not None:
         observer("file", attachment_path)
     if row_binding is not None:
-        if _record_entry_present(attachment_path, "owner-route-attachment-record-invalid"):
+        if _record_present(canonical_jobs, OWNER_ROUTE_ATTACHMENT_DIR,
+                           _attachment_key(owner_attempt_id),
+                           reason="owner-route-attachment-record-invalid"):
             raise OwnerRouteBindingError("owner-route-attachment-conflicts-sealed-binding")
         anchor = row_binding
         anchor_status = "owner-route-launch-binding"
@@ -774,9 +798,10 @@ def _candidate_started_by_owner(
     return any(continuation_attempt_state(meta) == "started" for _fields, meta in relevant)
 
 
-def _advance_candidates(predecessor: Path) -> list[Path]:
+def _advance_candidates(jobs: str | Path, predecessor: Path) -> list[Path]:
     """Candidate records under one predecessor; an entry that is there but unreadable is an error."""
-    if not _record_entry_present(predecessor, "owner-route-advance-record-invalid"):
+    if not _record_present(jobs, OWNER_ROUTE_ADVANCE_DIR, predecessor.name,
+                           reason="owner-route-advance-record-invalid"):
         return []
     try:
         names = os.listdir(predecessor)
@@ -807,10 +832,11 @@ def resolve_owner_route_advance(
         jobs_path = Path(jobs).expanduser()
         if observer is not None:
             observer("file", jobs_path)
-        registry_rows = registry_view(jobs_path) if jobs_path.is_file() else []
+        registry_rows = registry_view(jobs_path) if _record_present(
+            jobs_path, jobs_path.name, reason="owner-route-jobs-unreadable") else []
     if observer is not None:
         observer("members", first_path)
-    first_candidates = _advance_candidates(first_path)
+    first_candidates = _advance_candidates(jobs, first_path)
     try:
         _current_raw, current_route = _verified_binding(anchor, observer=observer)
         route_generation = int(current_route.get("advance_generation") or 0)
@@ -833,7 +859,7 @@ def resolve_owner_route_advance(
         )
         if observer is not None:
             observer("members", predecessor)
-        paths = sorted(_advance_candidates(predecessor))
+        paths = sorted(_advance_candidates(jobs, predecessor))
         if not paths:
             return current, (
                 "owner-route-advance-absent"

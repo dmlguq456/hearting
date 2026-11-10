@@ -2168,6 +2168,104 @@ class ParentCloseTest(unittest.TestCase):
                         record.parent.chmod(0o700)
                     child.doCleanups()
 
+    def _advanced_record_paths(self, child):
+        # The record paths of an owner advanced A -> B, relative to the state root (the jobs directory).
+        import owner_route_binding as OWNER
+        aid = child.aid("att-owner")
+        attachment = OWNER._attachment_root(child.jobs) / OWNER._attachment_key(aid)
+        advance_root = OWNER._advance_root(child.jobs)
+        (predecessor,) = [path for path in advance_root.iterdir() if path.is_dir()]
+        (candidate,) = list(predecessor.glob("*.json"))
+        root = child.jobs.resolve().parent
+        return root, {"attachment": attachment.relative_to(root), "advance": candidate.relative_to(root)}
+
+    def _record_component_cases(self):
+        # Every component from the leaf up to the one directly under the state root, so a
+        # deeper record layout is walked without listing it here.
+        child = ParentCloseTest()
+        child.setUp()
+        try:
+            child.advanced_route_bound_owner(False)
+            _root, records = self._advanced_record_paths(child)
+        finally:
+            child.doCleanups()
+        for record, relative in records.items():
+            for depth in range(len(relative.parts), 0, -1):
+                yield record, depth, depth == len(relative.parts)
+
+    def test_absence_is_only_a_missing_component_on_the_whole_record_path(self):
+        # PR #1492 R3: a component that is there but cannot be passed is a read error at every
+        # level of the record path; only a component that is really missing is absence.
+        import owner_route_binding as OWNER
+        cases = list(self._record_component_cases())
+        self.assertGreaterEqual(len(cases), 5)
+        for record, depth, leaf in cases:
+            forms = ("dangling-link", "unreadable-directory", "unreadable-file" if leaf else "regular-file")
+            for form in forms + ("missing",):
+                with self.subTest(record=record, depth=depth, form=form):
+                    child = ParentCloseTest()
+                    child.setUp()
+                    placed = None
+                    try:
+                        owner, stage, (old, _old_path), (advanced, _next) = child.advanced_route_bound_owner(False)
+                        root, records = self._advanced_record_paths(child)
+                        aid = child.aid("att-owner")
+                        placed = root.joinpath(*records[record].parts[:depth])
+                        placed.rename(placed.with_name(placed.name + ".retained"))
+                        if form == "dangling-link":
+                            placed.symlink_to(placed.with_name(placed.name + ".missing"))
+                            self.assertTrue(os.path.lexists(placed) and not placed.exists())
+                        elif form == "regular-file":
+                            placed.write_text("")
+                        elif form == "unreadable-directory":
+                            placed.mkdir()
+                            placed.chmod(0)
+                        elif form == "unreadable-file":
+                            placed.write_text("{}")
+                            placed.chmod(0)
+                        if form == "missing":
+                            current, status = OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                            if record == "attachment":
+                                self.assertEqual((current, status), (None, "owner-route-binding-absent"))
+                            else:  # no advance record: the attached route A is current
+                                self.assertEqual((current.route_id, status),
+                                                 (old["route_id"], "owner-route-post-launch-attachment"))
+                            continue
+                        with self.assertRaises(OWNER.OwnerRouteBindingError) as raised:
+                            OWNER.resolve_owner_route_lifecycle(child.jobs, owner_attempt_id=aid)
+                        self.assertEqual(str(raised.exception), "owner-route-%s-record-invalid" % record)
+                        child.close()
+                        self.assertIsNone(owner.poll())
+                        self.assertIsNone(stage.poll())
+                        self.assertIn(CLOSE._rows(child.jobs)[aid][0][1], CLOSE.OPEN)
+                    finally:
+                        if placed is not None and placed.is_dir() and not placed.is_symlink():
+                            placed.chmod(0o700)
+                        child.doCleanups()
+
+    def test_a_record_directory_reached_through_a_live_link_reads_as_current(self):
+        # A state directory on another volume behind a link with a target is a normal install.
+        import owner_route_binding as OWNER
+        for name in (OWNER.OWNER_ROUTE_ATTACHMENT_DIR, OWNER.OWNER_ROUTE_ADVANCE_DIR):
+            with self.subTest(directory=name):
+                child = ParentCloseTest()
+                child.setUp()
+                try:
+                    owner, stage, _old, (advanced, _next) = child.advanced_route_bound_owner(False)
+                    linked = child.jobs.resolve().parent / name
+                    elsewhere = child.base / "other-volume" / name
+                    elsewhere.parent.mkdir()
+                    linked.rename(elsewhere)
+                    linked.symlink_to(elsewhere)
+                    current, status = OWNER.resolve_owner_route_lifecycle(
+                        child.jobs, owner_attempt_id=child.aid("att-owner"))
+                    self.assertEqual((current.route_id, status), (advanced["route_id"], "owner-route-advance-current"))
+                    child.close()
+                    self.assertIsNone(owner.poll())
+                    self.assertIsNone(stage.poll())
+                finally:
+                    child.doCleanups()
+
     def test_a_route_only_owner_stops_only_on_a_clean_match_or_no_record(self):
         # Every status the binding module can name is read from its source, so a status added
         # later is required to stop nothing unless it joins CURRENT_ROUTE_STATUSES.
