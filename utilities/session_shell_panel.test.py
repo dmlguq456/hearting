@@ -59,6 +59,59 @@ assert.equal(unknown.color,'dim'); // Native permission state is not route failu
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_waiting_result_line_is_painted_without_the_next_input(self):
+        # 2026-11-10: a continue that was not sent stayed unseen until the next input.
+        # #1483 review: Claude's projection overwrote it with its native row's
+        # segments, so the real projection -> renderer path is what is checked.
+        import session_tidy as st
+        from unittest import mock
+        from fleet import session_panel
+        shell.registry_root()
+        native = [("⚠ ", "lvl_r"), ("NATIVE ROW", "lvl_r")]
+        models = {}
+        for number, harness in enumerate(("claude", "codex", "opencode")):
+            sid = "00000000-0000-4000-8000-00000000148%d" % number
+            seat = st.resolve_seat(harness, env={}, sid=sid)
+            project = lambda: shell.panel_projection(harness, sid, columns=40, rows=30)["panel"]
+            states = {"none": project()}
+            with mock.patch.object(session_panel, "notice_line", return_value=list(native)):
+                states["native"] = project()
+            st.write_notice(seat, '[정리] 창은 비웠지만 "이어서해"를 넣지 않았습니다 ' + "이유와 다음 할 일. " * 8,
+                            author_harness=harness, author_sid=sid, notice_id="panel-" + harness)
+            states["new"] = project()
+            with mock.patch.object(session_panel, "notice_line", return_value=list(native)):
+                states["both"] = project()
+            if harness == "claude":
+                self.assertTrue(any("NATIVE ROW" in part["text"] for part in states["both"]["notice"]),
+                                "Claude's native status row keeps its own segments")
+            st.run_hook(harness, "prompt", sid, cwd=str(ROOT), prompt_text="next input")
+            states["resolved"] = project()
+            models[harness] = states
+        script = r"""
+const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
+const qs=['Q: where?','1 here','2 there','› draft','Tab next'];
+const paint=(m,width,asking)=>view.render({width,height:width===80?14:24,side:width<80,fill:width<80,focused:asking,configuration:{},
+ model:{...m,answerable:asking},questions:o=>asking?qs.slice(0,o.budget).map(text=>[{text}]):[]}).rows.map(r=>r.map(s=>s.text).join(''));
+for(const [harness,states] of Object.entries(models))for(const width of [35,40,80])for(const asking of [false,true]){
+ const id=harness+'/'+width+'/'+asking,none=paint(states.none,width,asking).join('\n');
+ for(const s of ['native','resolved'])assert.equal(paint(states[s],width,asking).join('\n'),none,id+' '+s);
+ for(const s of ['new','both']){
+  const rows=paint(states[s],width,asking),text=rows.join('\n');
+  assert(!text.includes('[object Object]')&&!text.includes('NATIVE ROW'),id+' '+s);
+  // An open question comes first: its rows stay and the line waits.
+  if(asking){assert.equal(text,none,id+' '+s);continue;}
+  const first=rows.findIndex(l=>l.includes('⚠ [정리]')),lines=rows.slice(first,rows.findIndex(l=>l.includes('Current work')));
+  assert(first>=0&&text.includes('이어서해'),id+' '+s);
+  // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
+  assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length);
+  assert.equal(rows.length,width===80?none.split('\n').length+1:rows.length,id);
+ }
+}
+"""
+        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
+                                 json.dumps(models, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_session_rows_are_always_painted_after_the_question_with_no_details_view(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

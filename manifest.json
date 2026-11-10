@@ -980,6 +980,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__capability-grounding-marker__UserPromptSubmit",
+      "name": "capability-grounding-marker",
+      "mono": "capability-grounding-marker",
+      "event": "UserPromptSubmit",
+      "hard_block": false
+    },
+    {
       "slug": "hook__dispatch-session-sweep.py__UserPromptSubmit",
       "name": "dispatch-session-sweep.py",
       "mono": "dispatch-session-sweep.py",

@@ -13,7 +13,8 @@
       "CODEX_SESSION_ID"
     ],
     "process_proof": "open-rollout",
-    "herdr_session_id": "verified"
+    "herdr_session_id": "verified",
+    "sub_session_root": "spawn-edges"
   },
   "access": {
     "enforcement": "os-sandbox",
