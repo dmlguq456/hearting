@@ -162,6 +162,9 @@ def main() -> int:
             pass
 
     parts = []
+    source = ""
+    emitted = False
+    delivered = False
     try:
         if not worker:
             forget_shown_candidates(payload)
@@ -182,17 +185,22 @@ def main() -> int:
             # shared daemon hook sees the daemon's environment, so the memory
             # policy file carries the same switch (codex_start_summary).
             source = nested_string(payload, "source").lower()
-            emitted = False
             if summary_enabled() and (start_summary is None
                                       or start_summary.summary_due(sid, source)):
                 summary = run_preflight("memory", current_cwd)
                 emitted = bool(summary.strip())
                 parts.append(summary)
-            if start_summary is not None:
-                start_summary.note_start(sid, source, emitted)
         emit_context("SessionStart", parts)
+        delivered = True
     finally:
         if not worker:
+            # Mark only what actually reached the output (a failed write
+            # leaves no mark that could drop the next compact's summary).
+            if start_summary is not None:
+                try:
+                    start_summary.note_start(sid, source, emitted, delivered=delivered)
+                except Exception:
+                    pass
             request_lifecycle_recovery()
     return 0
 

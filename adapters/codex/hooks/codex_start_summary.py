@@ -15,7 +15,10 @@ Two native facts shape this helper (Codex 0.163):
   at every start, so it carries the switch there. The process environment still
   wins field-for-field, as it does for the sync keys in the same file.
 
-Every failure is silent and keeps the existing default (emit).
+Every failure is silent and keeps the existing default (emit): a mark is
+written only after the summary reached the hook output, and a mark that cannot
+be removed is blanked so it can no longer suppress anything. A duplicate copy
+is tolerable; a missing summary is not.
 """
 
 from __future__ import annotations
@@ -91,33 +94,70 @@ def summary_due(sid: str, source: str, *, env=None, now=None) -> bool:
     return not (0 <= now - at <= PAIR_WINDOW_SECONDS)
 
 
-def note_start(sid: str, source: str, emitted: bool, *, env=None, now=None) -> None:
-    """Record the start whose summary the next request will carry, if any."""
+def _forget(path: Path) -> None:
+    """Make a mark unable to suppress anything: remove it, or blank it in place."""
+    try:
+        path.unlink(missing_ok=True)
+        return
+    except OSError:
+        pass
+    try:
+        # An empty file is unreadable as a mark, so ``summary_due`` emits.
+        with open(path, "w", encoding="utf-8"):
+            pass
+    except OSError:
+        pass
+
+
+def _prune(directory: Path, now: float) -> None:
+    """Drop marks and leftover temporary files no start can still pair with."""
+    try:
+        for entry in directory.iterdir():
+            try:
+                if now - entry.stat().st_mtime > 10 * PAIR_WINDOW_SECONDS:
+                    entry.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def note_start(sid: str, source: str, emitted: bool, *, delivered: bool = True,
+               env=None, now=None) -> None:
+    """Record the start whose summary the next request will carry, if any.
+
+    Call only after the hook output was written: ``delivered=False`` (the
+    output failed) leaves no mark that could suppress a later summary.
+    """
     if not sid:
         return
     env = os.environ if env is None else env
     path = _mark_path(sid, env)
+    if not delivered:
+        _forget(path)
+        return
+    if not emitted:
+        # A skipped compact keeps the earlier mark: that summary is the one
+        # still waiting for this request.
+        if source != "compact":
+            _forget(path)
+        return
+    now = time.time() if now is None else now
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
     try:
-        if not emitted:
-            # A skipped compact keeps the earlier mark: that summary is the one
-            # still waiting for this request.
-            if source != "compact":
-                path.unlink(missing_ok=True)
-            return
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}")
-        tmp.write_text(json.dumps({"source": source or "", "at": time.time() if now is None else now}),
-                       encoding="utf-8")
+        _prune(path.parent, now)
+        tmp.write_text(json.dumps({"source": source or "", "at": now}), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
-        pass
+        # No trustworthy mark: the next compact emits again (a duplicate is
+        # tolerable, a missing summary is not).
+        _forget(tmp)
+        _forget(path)
 
 
 def note_prompt(sid: str, *, env=None) -> None:
     """A prompt reached the model with the summary; later compacts need it again."""
     if not sid:
         return
-    try:
-        _mark_path(sid, os.environ if env is None else env).unlink(missing_ok=True)
-    except OSError:
-        pass
+    _forget(_mark_path(sid, os.environ if env is None else env))
