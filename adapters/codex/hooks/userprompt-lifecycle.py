@@ -413,6 +413,32 @@ def native_queue_prompt_receipts(sid: str, *, read_context=None):
     return batches, [context] if context else []
 
 
+def fit_prompt_receipts(sid: str, batches, other_parts: list[str], *, rendered=()):
+    """The receipts text that fits, whole, beside the rest of this hook's context.
+
+    Codex shows one hook context of at most about 2,500 tokens inline and
+    elides the middle of a longer one (PG-40), so only the leading records
+    whose text fits in what the other parts leave are rendered and ACKed; the
+    rest are handed back pending for the next boundary. Returns
+    ``(text, kept_batches)``; ``rendered`` is the whole text already rendered.
+    """
+    try:
+        from dispatch_session_sweep import (CODEX_CONTEXT_BYTES, fit_inline, release_claims,
+                                            utf8_len)
+        others = "\n".join(part.strip() for part in other_parts if part.strip())
+        budget = max(1_000, CODEX_CONTEXT_BYTES - utf8_len(others) - 1)
+        whole = "\n".join(part.strip() for part in rendered if part.strip())
+        if whole and utf8_len(whole) <= budget:
+            return whole, batches
+        text, kept, rest = fit_inline(batches, budget, measure=utf8_len)
+        if rest:
+            release_claims(sid, rest, "codex-native-queue", reason="codex-prompt-context-over-limit")
+        return text, kept
+    except Exception:
+        # Nothing shown is ACKed; the claims return at their lease.
+        return "", []
+
+
 def native_receiving_turn(payload: dict[str, Any], thread_id: str) -> dict[str, str] | None:
     """Bind the hook to a turn ID that Codex itself exposes and confirms.
 
@@ -567,7 +593,7 @@ def main() -> int:
     batches = []
     ackable = set()
     try:
-        batches, parts = native_queue_prompt_receipts(sid, read_context=discovery_context)
+        batches, receipt_parts = native_queue_prompt_receipts(sid, read_context=discovery_context)
         from dispatch_session_sweep import retain_receiving_turn
         ackable = retain_receiving_turn(
             batches, interaction_sid,
@@ -575,7 +601,8 @@ def main() -> int:
             request_context=current_prompt,
         )
     except Exception:
-        parts = []
+        receipt_parts = []
+    parts = []
     if ("peer-from:" in current_prompt or "runtime-from:" in current_prompt
             or "cross-session-message" in current_prompt):
         import importlib.util
@@ -590,6 +617,10 @@ def main() -> int:
     parts.extend(probe_parts)
     if context_notice:
         parts.append(context_notice)
+    if batches or receipt_parts:
+        receipts, batches = fit_prompt_receipts(sid, batches, parts, rendered=receipt_parts)
+        if receipts:
+            parts.insert(0, receipts)
     emit_context("UserPromptSubmit", parts,
                  system_message="\n".join(human_notices + ([context_notice] if context_notice else [])))
     # Commit candidate/card consumption only after the context above actually

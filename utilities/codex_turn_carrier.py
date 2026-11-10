@@ -282,61 +282,10 @@ def _is_completion(record: dict) -> bool:
     return isinstance((record.get("receipt") or {}).get("children"), list)
 
 
-def _units(batches) -> list[tuple[Path, list[dict]]]:
-    """Split claimed batches into the units that are rendered and ACKed together.
-
-    Members of one sealed batch share their group claim owner, so a unit never
-    splits a batch; every other record is its own unit.
-    """
-    units: list[tuple[Path, list[dict]]] = []
-    index: dict[tuple, int] = {}
-    for root, records in batches:
-        for record in records:
-            owner = record.get("claim_owner")
-            key = ((str(root), str(owner)) if isinstance(owner, str) and owner
-                   else (str(root), "delivery", str(record.get("delivery_id"))))
-            if key in index:
-                units[index[key]][1].append(record)
-            else:
-                index[key] = len(units)
-                units.append((root, [record]))
-    return units
-
-
-def _batches(units) -> list[tuple[Path, list[dict]]]:
-    merged: list[tuple[Path, list[dict]]] = []
-    for root, records in units:
-        if merged and merged[-1][0] == root:
-            merged[-1][1].extend(records)
-        else:
-            merged.append((root, list(records)))
-    return merged
-
-
 def fit(batches, render, max_chars: int):
-    """Choose the leading units whose full rendering fits ``max_chars``.
-
-    Returns ``(text, chosen_batches, rest_batches)``. The text is never cut:
-    only what it contains whole is ACKed, and the rest stays pending for the
-    next boundary. The first unit is always chosen so a single large receipt
-    still moves.
-    """
-    units = _units(batches)
-    if not units:
-        return "", [], []
-    whole = render(_batches(units))
-    if len(whole) <= max_chars or len(units) == 1:
-        return whole, _batches(units), []
-    best_n, best_text = 1, render(_batches(units[:1]))
-    lo, hi = 2, len(units) - 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        text = render(_batches(units[:mid]))
-        if len(text) <= max_chars:
-            best_n, best_text, lo = mid, text, mid + 1
-        else:
-            hi = mid - 1
-    return best_text, _batches(units[:best_n]), _batches(units[best_n:])
+    """The shared leading-units fit (``dispatch_session_sweep.fit``), by characters."""
+    from dispatch_session_sweep import fit as shared_fit
+    return shared_fit(batches, render, max_chars)
 
 
 def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = frozenset(),
@@ -411,29 +360,8 @@ def collect(sid: str, tid: str, *, budget_seconds: float, skip: set[str] = froze
 
 def release(sid: str, batches) -> None:
     """Return this process's own sweep claims on records it did not ACK."""
-    import dispatch_pending_delivery as pending
-    from dispatch_session_sweep import STORAGE_KEY
-    owner_prefix = f"session-sweep:{RECIPIENT_KIND}:{os.getpid()}:"
-    for root, records in batches:
-        for record in records:
-            delivery_id = record.get("delivery_id")
-            storage = record.get(STORAGE_KEY) or sid
-            if not isinstance(delivery_id, str) or not delivery_id:
-                continue
-            try:
-                fresh = pending.read(root, storage, delivery_id)
-                owner = (fresh or {}).get("claim_owner")
-                if (fresh is None or fresh.get("state") != "claimed"
-                        or not isinstance(owner, str) or not owner.startswith(owner_prefix)):
-                    continue
-                # A distinct reason per release keeps the courier's retry delay
-                # at its base instead of growing it on every tool boundary.
-                pending.release_claim(
-                    root, storage, delivery_id, claim_owner=owner,
-                    failure_reason=f"codex-turn-carrier-unacked:{time.time_ns()}",
-                    expected_identity=pending.received_ack_identity(fresh, storage, delivery_id))
-            except Exception:  # noqa: BLE001 - an unreleased claim only waits for its lease
-                continue
+    from dispatch_session_sweep import release_claims
+    release_claims(sid, batches, RECIPIENT_KIND, reason="codex-turn-carrier-unacked")
 
 
 def acknowledge(sid: str, batches) -> list[str]:

@@ -2,8 +2,9 @@
 """SD-122 peer-message ledger recorder.
 
 Two subcommands, dispatched by argv[1]:
-  post-tool  -- PostToolUse hook. Records one peer_message_v1 for each
-                SendMessage tool call.
+  post-tool  -- PostToolUse / PostToolUseFailure hook. Records one
+                peer_message_v1 for each SendMessage tool call (not a failed one)
+                and delivers pending peer bodies at the tool's end.
   prompt     -- UserPromptSubmit hook. Records one `notice` peer_message_v1
                 when the injected prompt carries a cross-session message, and
                 sweeps up to five un-acked detached-watch receipts into
@@ -429,8 +430,13 @@ def main(exit_guard=False):
     if exit_guard:
         _exit_after_flush(out)
     if mode == "post-tool":
+        # Registered on PostToolUse and PostToolUseFailure (PG-41): a failed
+        # tool's end is a boundary too, but a failed SendMessage sent nothing.
+        failed = payload.get("hook_event_name") == "PostToolUseFailure"
+        event = "PostToolUseFailure" if failed else "PostToolUse"
         try:
-            handle_post_tool(payload)
+            if not failed:
+                handle_post_tool(payload)
         finally:
             mod = _peer_message_module()
             # PostToolUse runs inside subagents too, but its session_id names the
@@ -439,7 +445,7 @@ def main(exit_guard=False):
             # remains active for subagent calls.
             if mod and not str(payload.get("agent_id") or "").strip():
                 mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                      "PostToolUse", native_delivery=True,
+                                      event, native_delivery=True,
                                       deadline=_deadline(), stream=out)
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:

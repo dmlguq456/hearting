@@ -34,9 +34,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import dispatch_state_roots, resolve_agent_home  # noqa: E402
 from dispatch_session_sweep import (  # noqa: E402
     ACTION_BUDGET_SECONDS,
+    CLAUDE_CONTEXT_CHARS,
     activate,
     ack_delivered,
-    delivery_context,
+    fit_inline,
+    release_claims,
     request_obligation_reconciliation,
     sweep_deliver,
 )
@@ -167,7 +169,13 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
     with registry_read_scope():
         # Rendering happens after the claims and is not an authority decision:
         # one observation covers the delivery text and every followup.
-        context = delivery_context(batches)
+        # Claude Code shows at most CLAUDE_CONTEXT_CHARS of one hook context
+        # inline (PG-40): only the leading records whose text fits whole are
+        # shown and ACKed; the rest are handed back pending for the next prompt.
+        context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
+    prompt = _event_name(payload) == "UserPromptSubmit"
+    if rest and prompt:
+        release_claims(session_id, rest, RECIPIENT_KIND, reason="claude-prompt-context-over-limit")
     if not context:
         return 0
     print(
@@ -184,7 +192,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         flush=True,
     )
     sys.stdout.flush()
-    if _event_name(payload) == "UserPromptSubmit":
+    if prompt:
         for root, records in batches:
             try:
                 ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")

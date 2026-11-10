@@ -4111,6 +4111,44 @@ def retry_pending_codex(recipient, *, deadline=None):
 _LATE_CLAIM_WINDOW_S = 1.0
 
 
+# A hook boundary whose flushed additionalContext is the recipient's own
+# consumption (SD-113): Claude adds PostToolUseFailure context beside the error.
+_NATIVE_BOUNDARY_EVENTS = frozenset({"UserPromptSubmit", "PostToolUse", "PostToolUseFailure"})
+
+
+def _fit_claude_context(claims, context):
+    """Keep one Claude hook context within the native inline limit (PG-40).
+
+    Claude Code shows at most about 10,000 characters of one hook context and
+    puts the rest in a file it does not ask the model to read, so a body that
+    would land past the limit is released back to pending for the next
+    boundary instead of being recorded received unseen. A single body over
+    the limit by itself is shown as its head plus the path of a whole copy,
+    keeping its trailer inline. ``claims`` and ``context`` change in place.
+    """
+    if len("\n\n".join(context)) <= 9_000:  # below every limit: no import on the hot path
+        return
+    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, overflow_pointer
+    while len(claims) > 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
+        row = claims.pop()
+        release_pending_herdr_claim(row)
+        try:
+            context.remove(row["text"])
+        except ValueError:
+            pass
+    if len(claims) == 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
+        row = claims[0]
+        try:
+            index = context.index(row["text"])
+        except ValueError:
+            return
+        others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
+        shown = overflow_pointer(row["text"], _pending_dir().parent,
+                                 max(1_000, CLAUDE_CONTEXT_CHARS - others), keep_last_lines=1)
+        context[index] = shown
+        row["shown_text"] = shown
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
     """Use an existing native context boundary, settling only exact native delivery.
@@ -4172,7 +4210,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
-            native_boundary = bool(native_delivery and event in {"UserPromptSubmit", "PostToolUse"})
+            native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
             try:
                 claimed = reserve_pending_herdr(
                     row["ref"], recipient, receipt="hook-context-inflight",
@@ -4222,6 +4260,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         context.append(extra_context)
     if not context:
         return
+    if recipient["harness"] == "claude" and claims:
+        _fit_claude_context(claims, context)
     begun = []
     for row in claims:
         writing = begin_pending_write(row, recipient=recipient,
@@ -4231,7 +4271,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         else:
             release_pending_herdr_claim(row)
             try:
-                context.remove(row["text"])
+                context.remove(row.get("shown_text", row["text"]))
             except ValueError:
                 pass
     claims = begun
@@ -4243,7 +4283,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     print(json.dumps(output, ensure_ascii=False), file=stream)
     stream.flush()
     for row in claims:
-        native_boundary = bool(native_delivery and event in {"UserPromptSubmit", "PostToolUse"})
+        native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
         if native_boundary and not row.get("no_trailer"):
             try:
                 receive_peer_message(row["text"], recipient, summary_text=(
