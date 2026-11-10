@@ -166,8 +166,10 @@ stays empty unless you owe an answer, a warning applies or news just arrived.
 The full statusline returns whenever the panel is hidden.
 The panel's four colored edges separate Hearting's current work, actual route
 flow and questions from the native conversation. Its background stays neutral.
-Click a route for its stages and result; the bottom edge opens session details,
-including usage, branch, messages and your last input. Press **Ctrl+]** to focus it: answer
+Below the route and any question, the panel always shows the rest of the
+statusline: folder, title, branch and Git state, usage and running jobs, then
+messages and your last input, as rows allow. Click a route for its stages and
+result. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
 you focus the block. The question-first bottom shows the current question and

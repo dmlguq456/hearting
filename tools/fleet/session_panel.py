@@ -88,6 +88,59 @@ def compact_status(values, columns, native_owned=()):
     return [parts] if parts else []
 
 
+SESSION_FIELDS = frozenset({"folder", "title", "thread", "branch", "model_quota"})
+
+
+def session_status(values, columns):
+    """The statusline items the panel paints besides its model row and summary.
+
+    Folder, title, thread, branch with its Git state and observation, per-model
+    quotas, quota resets and running jobs, in the native statusline's order and
+    glyphs. Context, 5h/7d, model, route and answer counts are already painted
+    elsewhere in the panel; an item without a value is left out.
+    """
+    from .session_line import _remaining, SEPARATOR, _text
+    from .explorer.grid import cell_width
+    known = {**values, "jobs": None, "model_quotas": [(label, used) for label, used in values.get("model_quotas") or ()
+                                                      if _percent(used) != "?"]}
+    rows = status_lines(known, columns, wrap_long=True, fields=SESSION_FIELDS)
+    if values.get("jobs"):
+        # Running jobs join the last row when they fit, saving a row at 80.
+        job = [(">_", "lvl_g"), (" running: ", "dim"), (_text(values["jobs"]), "loc_repo")]
+        width = lambda parts: sum(cell_width(text) for text, _key in parts)
+        if rows and width(rows[-1]) + cell_width(SEPARATOR) + width(job) <= columns:
+            rows[-1] = rows[-1] + [(SEPARATOR, "dim")] + job
+        else:
+            rows.extend(status_lines({"jobs": values["jobs"]}, columns, wrap_long=True, fields=()))
+    resets = [(str(label), _remaining(reset)) for label, _used, reset in values.get("quota_windows") or ()]
+    resets = [(label, left) for label, left in resets if left]
+    if resets:
+        parts = [("↻ ", "dim")]
+        for index, (label, left) in enumerate(resets):
+            parts += [(" · " if index else "", "dim"), (label + " ", "dim"), (left, "dim")]
+        rows.append([part for part in parts if part[0]])
+    return rows
+
+
+def session_brief(values):
+    """Title, running jobs and branch as short items, most needed first.
+
+    The panel packs these into whatever is left (a spare row or its bottom
+    edge) when a question takes the rows the full session rows would use, so
+    no observed value leaves the screen while the question is shown first.
+    """
+    from .session_line import line_segments, _text
+    items = []
+    title = line_segments(values, 10000, complete=True, fields={"title"})
+    if title:
+        items.append(title)
+    if values.get("jobs"):
+        items.append([(">_ ", "lvl_g"), (_text(values["jobs"]), "loc_repo")])
+    if values.get("branch"):
+        items.append([("⎇ ", "dim"), (_text(values["branch"]), "branch_s")])
+    return items
+
+
 NOTICE_NEWS_SECONDS = 600
 
 
@@ -178,4 +231,6 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "route_label": values.get("route_label") or "",
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
+            "session": session_status(values, max(20, columns - 4)),
+            "brief": session_brief(values),
             "status": status_lines(values, max(20, columns - 4), wrap_long=True)}
