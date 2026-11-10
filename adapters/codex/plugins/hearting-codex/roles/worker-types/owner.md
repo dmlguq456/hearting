@@ -45,9 +45,9 @@ goal.
 For an `audit` assignment, completing the review is distinct from approving its
 subject. Keep any negative disposition and findings in the report; the existing
 final handoff's completion verdict describes whether the assigned audit was
-performed. An audit that cannot finish remains BLOCKED; native execution errors
-remain failures. No new report
-template or user recovery step is required.
+performed. An audit that cannot finish remains BLOCKED or FAIL; native execution
+errors remain failures. Empty or ambiguous reports never establish completed
+review work. No new report template or user recovery step is required.
 
 Use a branch-backed route worktree, even for spec-only work. A detached HEAD cannot launch
 children: run `git switch -c <new-branch>` at the existing HEAD before dispatching; never

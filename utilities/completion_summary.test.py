@@ -1,6 +1,7 @@
 """Task completion is independent of an audit subject's negative disposition."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +21,8 @@ import dispatch_terminal_commit as commit
 
 class CompletionMeaningTest(unittest.TestCase):
     def setUp(self):
+        language = mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"})
+        language.start(); self.addCleanup(language.stop)
         self.tmp = tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name);self.repo=self.root/'repo';self.repo.mkdir()
         self.artifacts=self.root/'.agent_reports';self.artifacts.mkdir()
@@ -114,6 +117,61 @@ class CompletionMeaningTest(unittest.TestCase):
                 self.seed(**args);self.assertNotEqual(self.live().failure_class,'pass')
         self.seed(capability='audit');self.meta['route_hash']='sha256:wrong';self.write_row('open')
         self.assertEqual(self.live().failure_class,'fail')
+
+    def test_unperformed_empty_and_ambiguous_audits_remain_fail_in_all_paths(self):
+        completed = self.report.read_text()
+        reports = {
+            'empty': '',
+            'not-performed': '# 검토 실행 실패\n대상 checkout을 읽을 수 없어 검토를 수행하지 못했습니다.\n## 검증\n검토와 시험은 실행하지 못함.\n',
+            'no-evidence': '판정: 수정 후 병합\n아직 근거 없음.\n',
+            'unclassified': 'FAIL\n작업이 끝나지 않았습니다.\n',
+            'copied-example': '검토 결과 확인 중\n```text\n' + completed + '```\n',
+            'contradictory': completed + '\n대상을 읽을 수 없어 검토를 완료하지 못했습니다.\n',
+            'could-not-review': completed + '\n대상을 읽을 수 없어 검토하지 못했습니다.\n',
+            'contradictory-english': completed + '\nThe review was not performed: target read failed.\n',
+            'partial-read': completed + 'x' * (64 * 1024) + '\n검토 미수행\n',
+        }
+        for harness in ('claude', 'codex', 'opencode'):
+            for case, report in reports.items():
+                with self.subTest(harness=harness, case=case):
+                    self.report.write_text(report)
+                    self.seed(harness)
+                    self.assertEqual(self.live(harness).failure_class, 'fail')
+                    view = terminal_reader.inspect_terminal_attempt(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(view['verdict'], 'FAIL')
+                    self.assertNotIn('assessment_verdict', view)
+                    carrier, extra = terminal_reader.carrier_terminal_note(self.log, worktree=self.repo,
+                        artifact_root_metadata=self.artifacts, worker_type='owner', artifact_binding=self.meta)
+                    self.assertEqual(carrier['verdict'], 'FAIL')
+                    self.assertNotEqual(extra.get('reconcile_reason'), 'completed-audit-with-findings')
+                    recovered = supervisor.completed_owner_assessment(
+                        supervisor.classify_supervisor_log(self.log, harness), None,
+                        jobs=self.jobs, attempt_id=self.aid)
+                    self.assertEqual(recovered.failure_class, 'fail')
+
+    def test_unreadable_report_content_and_directory_do_not_establish_a_completed_review(self):
+        self.seed()
+        self.report.write_bytes(b'\xff\xfe')
+        self.assertEqual(self.live().failure_class, 'fail')
+        self.report.unlink(); self.report.mkdir()
+        (self.report / 'notes.md').write_text('review output is not identified')
+        self.assertEqual(self.live().failure_class, 'fail')
+        self.seed(artifact='-')
+        self.assertEqual(self.live().failure_class, 'fail')
+
+    def test_negative_subject_disposition_needs_performed_work_but_not_a_new_template(self):
+        reports = (
+            '최종 판정: 수정 후 병합\nF1 — 누락된 오류 처리\n## 실행한 명령\n- python3 parser.test.py → OK\n',
+            'Final verdict: changes required\nReviewed the changed error path.\nFinding 1: target parser drops the error.\n',
+            '최종 판정: 수정 후 병합 — head abcdef0\n변경 부분을 재검토했다.\nP1 — 입력이 누락됨.\n전체 native 시험은 실행하지 못함.\n',
+        )
+        for report in reports:
+            with self.subTest(report=report):
+                self.report.write_text(report); self.seed()
+                self.assertEqual(self.live().failure_class, 'pass')
+        self.seed(blocker='target read failed; audit was not performed')
+        self.assertEqual(self.live().failure_class, 'fail')
 
     def test_runtime_failure_and_already_committed_rows_are_unchanged(self):
         self.seed();self.write_row('done');before=self.jobs.read_bytes()

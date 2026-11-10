@@ -31,9 +31,12 @@ A completed audit can find blocking defects. Its task completion and its
 judgment about the inspected subject are separate: "changes required" or
 "do not merge" belongs in the report and does not make the audit execution a
 failure. The existing final handoff reports completion of the assigned audit;
-no new report field or format is required. For a bound audit owner, a readable
-report plus a successful native turn and a `FAIL` assessment is the compatible
-completed-with-findings result, matching the existing review-worker meaning.
+no new report field or format is required. For a bound audit owner, a successful
+native turn with a `FAIL` handoff is compatible with completed-with-findings
+only when the report clearly records a negative subject disposition, findings
+and performed review work. A readable file alone is not completion evidence.
+Empty, incomplete or ambiguous reports retain the original failure; explicit
+inability to perform the audit takes precedence over a copied disposition.
 The handoff may describe subject findings in its blocker text; preserve them
 as assessment detail. `BLOCKED`, runtime errors, missing artifacts and
 unfinished children remain unresolved.

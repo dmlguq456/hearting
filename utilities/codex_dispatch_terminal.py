@@ -888,6 +888,7 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
         )
 
     artifact = str(parsed["artifact"])
+    artifact_path = None
     if artifact == "-":
         parsed["artifact_state"] = "none"
     else:
@@ -1019,7 +1020,7 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
     if review_blocking_handoff(parsed, worker_type):
         parsed["failure_note"] = REVIEW_BLOCKING_NOTE
 
-    if completed_audit_assessment(parsed, worker_type, artifact_binding):
+    if completed_audit_assessment(parsed, worker_type, artifact_binding, artifact_path):
         parsed.update(verdict="PASS", assessment_verdict="FAIL", assessment_blocker=parsed.get("blocker"),
                       blocker="none", blocker_reason="none", failure_class="pass", failure_note="",
                       envelope_normalized=",".join(filter(None, (parsed.get("envelope_normalized"), "completed-audit-with-findings"))))
@@ -1057,18 +1058,20 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
     return parsed
 
 
-def completed_audit_assessment(parsed, worker_type, binding):
+def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None):
     """A negative subject judgment is not a failed audit execution.
 
-    Only an exact registered audit owner with a readable bound artifact qualifies,
-    like a finished review worker. Stage reviews and ordinary code work do not.
+    Only an exact registered audit owner with a completed negative review report
+    qualifies. Native success or a readable file alone cannot prove that review
+    work happened. Stage reviews and ordinary code work do not qualify.
     """
     if (worker_type != "owner" or not isinstance(binding, Mapping)
             or binding.get("worker_type") != "owner" or binding.get("dispatch_depth") != "1"
             or binding.get("workflow_completion") != "runtime-v1"
             or str(binding.get("note", "")).startswith("dead-")
             or parsed.get("state") != "valid" or parsed.get("verdict") != "FAIL"
-            or parsed.get("artifact_state") != "readable"):
+            or parsed.get("artifact_state") != "readable"
+            or parsed.get("artifact_shape") != "file"):
         return False
     try:
         import route_identity
@@ -1078,9 +1081,69 @@ def completed_audit_assessment(parsed, worker_type, binding):
         rid = binding.get("owner_route_id") or binding.get("route_id")
         return (route.get("capability") == "audit" and route.get("route_id") == rid
                 and bool(digest) and route.get("route_hash") == digest
-                and route_identity.route_hash(route) == digest)
+                and route_identity.route_hash(route) == digest
+                and _completed_negative_audit_report(artifact_path, parsed.get("blocker", "")))
     except (OSError, ValueError, TypeError):
         return False
+
+
+# Compatibility for an owner who used FAIL for the subject, not for the audit.
+# This recognizes existing report prose; it is not a new required field/template.
+# Unrecognized or contradictory evidence retains FAIL. Do not infer completion
+# from native exit=0, file existence, a bare FAIL, or an example verdict.
+_AUDIT_REPORT_BYTES = 64 * 1024
+_AUDIT_DISPOSITION = re.compile(
+    r"^(?:(?:최종\s*)?판정|(?:final\s+)?(?:verdict|disposition))\s*[:：]\s*"
+    r"(?:수정\s*후\s*병합|병합\s*불가|수용\s*불가|changes?\s+required|"
+    r"request\s+changes|not\s+mergeable|do\s+not\s+merge)(?:\s*(?:[—–:·.(]|$))", re.I)
+_AUDIT_INCOMPLETE = re.compile(
+    r"(?:검토|감사)(?:를|가|는|는\s*것을)?[^\n.]{0,24}"
+    r"(?:수행하지\s*못|실행하지\s*못|완료하지\s*못|미수행|미완료|불가|불능|중단|실행\s*실패)|"
+    r"(?:검토|감사)(?:를)?\s*(?:하지\s*못|하지\s*않)|"
+    r"\b(?:audit|review)\b[^\n.]{0,40}\b(?:not\s+(?:performed|completed|conducted)|"
+    r"incomplete|could\s+not|cannot|blocked|aborted)\b|"
+    r"\b(?:unable\s+to|could\s+not|cannot)\s+(?:perform|complete|conduct)\s+(?:the\s+)?(?:audit|review)\b|"
+    r"\btarget\s+read\s+failed\b", re.I)
+_AUDIT_FINDING = re.compile(r"^(?:\[?(?:P[0-3](?:-\w+)?|F\d+)\b|finding\s+\d+\b).+", re.I)
+_AUDIT_PERFORMED = re.compile(
+    r"검토를\s*마쳤|재?검토했|재?검토했다|\breviewed\b|\breview\s+completed\b|"
+    r"\bPASS\b|(?:→|->)\s*OK\b|\b\d+\s+(?:tests?\s+)?passed\b|\d+개\s*통과", re.I)
+
+
+def _completed_negative_audit_report(path, blocker):
+    if path is None:
+        return False
+    try:
+        with Path(path).open("rb") as handle:
+            raw = handle.read(_AUDIT_REPORT_BYTES + 1)
+        # Never accept the beginning of a truncated/undecodable report: its tail
+        # may explain that the audit could not run.
+        if not raw or len(raw) > _AUDIT_REPORT_BYTES:
+            return False
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    lines, fence = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(("```", "~~~")):
+            marker = line[:3]
+            fence = None if fence == marker else (fence or marker)
+            continue
+        if fence or line.startswith(">"):
+            continue
+        line = re.sub(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", line)
+        line = line.replace("**", "").strip()
+        if line:
+            lines.append(line)
+    prose = "\n".join(lines)
+    if _AUDIT_INCOMPLETE.search(prose + "\n" + str(blocker)):
+        return False
+    # Only an opening disposition counts, never an old/example decision later
+    # in the report. Findings and performed work must independently support it.
+    return (any(_AUDIT_DISPOSITION.match(line) for line in lines[:2])
+            and any(_AUDIT_FINDING.match(line) for line in lines)
+            and bool(_AUDIT_PERFORMED.search(prose)))
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
