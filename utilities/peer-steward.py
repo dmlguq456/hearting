@@ -2309,8 +2309,29 @@ def _retire_followup_ready(duty, identity, reason, handover, *,
     return not unresolved
 
 
+def _clear_retired_wait(identity):
+    """The retired session no longer waits on anyone: clear its exact Fleet wait.
+
+    Claude and OpenCode clear it from their own session-end hook; a Codex thread
+    lives on in its app-server daemon, whose SessionEnd comes only when the
+    thread unloads. Retire has seen the TUI leave, so it clears the wait itself.
+    """
+    session_id, harness = identity.get("session_id"), identity.get("harness")
+    if not session_id or not harness:
+        return
+    try:
+        tools_dir = str(Path(__file__).resolve().parent.parent / "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from fleet import interaction
+        interaction.clear_wait(session_id, harness)
+    except Exception:  # noqa: BLE001 -- retire never depends on Fleet state
+        pass
+
+
 def _mark_completed_retire_followup(store, duty, identity, reason, handover, *,
                                     defer_if_missing=False):
+    _clear_retired_wait(identity)
     release = {}
     complete = _retire_followup_ready(
         duty, identity, reason, handover, defer_if_missing=defer_if_missing,

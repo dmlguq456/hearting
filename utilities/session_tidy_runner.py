@@ -1455,6 +1455,17 @@ def resume_handoff_acceptance(ref, *, steward=None):
         return _settle_accepted_handoff(ref, row, context, successor, steward=steward)
 
 
+def _handoff_delivered(row):
+    """Whether the card was handed to the successor's input at all.
+
+    A ``pending`` row was never given to any carrier. Once queued, steered or
+    written, the successor can see it before its receipt is confirmed (OpenCode
+    confirms ``received`` from native history after the turn), so only a row
+    still ``pending`` counts as undelivered.
+    """
+    return row.get("state") != "pending"
+
+
 def accept_handoff(ref, caller, *, steward=None):
     """The agent explicitly asserts it read the card/docs and accepts this transfer."""
     seat, harness, sid = caller
@@ -1463,6 +1474,11 @@ def accept_handoff(ref, caller, *, steward=None):
     with peer.pending_lock(ref):
         row = peer._read_pending(ref)
         context, successor = validate_handoff_receiver(row, caller, steward=steward)
+        if (row.get("acceptance") or {}).get("read_and_accepted") is not True \
+                and not _handoff_delivered(row):
+            # Acceptance says the successor read this card; a card that never
+            # reached it is not recorded as read. The courier keeps delivering it.
+            return "accepted=false reason=handoff-not-delivered", 5
         # Receipt callbacks never set this. Keep progress in the existing row.
         # Register recovery before recording acceptance. Until that explicit
         # record exists the runner waits; it can never infer agent approval.

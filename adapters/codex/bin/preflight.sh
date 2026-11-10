@@ -350,6 +350,17 @@ case "$cmd" in
     "$0" prompt-signal "$cwd" "$sid"
     "$0" capability-info "$name"
     "$0" capability "$name" "$cwd" "$sid"
+    # SD-11: Claude reminds a dispatch-depth-1 conductor from PreToolUse(Skill);
+    # Codex has no Skill-invocation hook, so its explicit router prints the same
+    # reminder text (silent outside a standard+ conductor's code stage).
+    set -- --skill "$name"
+    [ -z "$intensity" ] || set -- "$@" --intensity "$intensity"
+    sh "$ROOT/hooks/stage-dispatch-reminder.sh" "$@" 2>/dev/null | python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+if text:
+    print(json.loads(text)["hookSpecificOutput"]["additionalContext"])
+' 2>/dev/null || :
     # Codex has no native Skill-invocation hook.  Realize the portable inline
     # capability-grounding contract at its explicit router instead (F-43).
     # Display evidence is best-effort and never turns a successful route into

@@ -3282,6 +3282,52 @@ def pending_notices(seat: Seat, harness: str, sid: str, *, now: Optional[float] 
     return out
 
 
+def _notice_groups(seat: Seat, harness: str, sid: str, *, now: float,
+                   summary: Optional[dict] = None) -> tuple[list, list[dict]]:
+    """The result lines this session's next hook shows: its own and its exact predecessor's."""
+    predecessor_seat = None
+    if _native_session_key(harness, sid):
+        predecessor = confirmed_predecessor_identity(seat, harness, sid)
+        if predecessor:
+            predecessor_seat = session_seat(seat, predecessor["harness"], predecessor["sid"])
+    sessions = summary if summary is not None else session_summary(seat)
+    groups = [(seat, pending_notices(seat, harness, sid, now=now, summary=sessions))]
+    if predecessor_seat:
+        current_notice_state = read_json(_notices_path(seat))
+        received_ids = set((current_notice_state or {}).get("lineage_received", [])) \
+            if isinstance(current_notice_state, dict) else set()
+        groups.append((predecessor_seat, [item for item in pending_notices(
+            predecessor_seat, harness, sid, now=now, summary=sessions)
+            if item.get("id") not in received_ids]))
+    groups = [(origin, [n for n in group if not str(n.get("id", "")).startswith("idle:")])
+              for origin, group in groups]
+    notices, seen = [], set()
+    for _origin, group in groups:
+        for item in group:
+            if item.get("id") not in seen:
+                notices.append(item)
+                seen.add(item.get("id"))
+    return groups, notices
+
+
+def waiting_notice_display(seat: Seat, harness: str, sid: str, *,
+                           now: Optional[float] = None) -> tuple[str, list[str]]:
+    """Read-only: the newest result line still waiting for this session's next hook.
+
+    A cleared window's next hook is the person's next input, so the shell panel and
+    the status line paint this line meanwhile (2026-11-10: a failed continue stayed
+    unseen for ~55 minutes). Returns the line and the files to watch; reading it
+    delivers nothing and settles nothing -- the hook still shows it to the session.
+    """
+    seat = session_seat(seat, harness, sid)
+    try:
+        groups, notices = _notice_groups(seat, harness, sid, now=now_epoch() if now is None else now)
+    except Exception:
+        return "", []
+    paths = list(dict.fromkeys(str(_notices_path(origin)) for origin, _group in groups))
+    return (str(notices[-1].get("text") or "") if notices else ""), paths
+
+
 def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[str, str]) -> bool:
     """Whether this session began after the author's last recorded activity."""
     author = sessions.get(author_key)
@@ -3710,24 +3756,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             predecessor = confirmed_predecessor_identity(seat, harness, sid)
             if predecessor:
                 predecessor_seat = session_seat(seat, predecessor["harness"], predecessor["sid"])
-        notice_groups = [(seat, pending_notices(seat, harness, sid, now=now, summary=sessions))]
-        if predecessor_seat:
-            current_notice_state = read_json(_notices_path(seat))
-            received_ids = set((current_notice_state or {}).get("lineage_received", [])) \
-                if isinstance(current_notice_state, dict) else set()
-            prior_notices = [item for item in pending_notices(
-                predecessor_seat, harness, sid, now=now, summary=sessions)
-                if item.get("id") not in received_ids]
-            notice_groups.append((predecessor_seat, prior_notices))
-        notice_groups = [(origin, [n for n in group if not str(n.get("id", "")).startswith("idle:")])
-                         for origin, group in notice_groups]
-        notices = []
-        notice_ids = set()
-        for _source_seat, group in notice_groups:
-            for item in group:
-                if item.get("id") not in notice_ids:
-                    notices.append(item)
-                    notice_ids.add(item.get("id"))
+        notice_groups, notices = _notice_groups(seat, harness, sid, now=now, summary=sessions)
         notice_block = ""
         if notices:
             t = _ui_translator()

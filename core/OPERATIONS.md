@@ -567,8 +567,13 @@ new reads. The result preserves
 the existing top-level unknown counts and records bounded causes beside them,
 and the bytes one pass freed (`freed_bytes`);
 `summary-owner-unknown`, `quiescence-unverifiable` and `route-unknown` remain
-fail-closed categories. Shared `homes/codex`,
-`<slug>.<profile>` and `destination=` homes are not enumerated. Detaching is one
+fail-closed categories. A shared nested Codex owner home
+(`homes/codex/<worktree-key>.<release-key>`) follows the same rule for every
+attempt that claims it (each row declaring it as `runtime_home`, plus the manifest
+identity) and is detached only when all of them are eligible and the home, its
+entries and any Fleet view are idle; its results are under `codex` in the same
+state file. Other `homes/codex` shapes, `<slug>.<profile>` and other
+`destination=` homes are not enumerated. Detaching is one
 rename into `homes/worker-retention/retiring/` under a nonblocking registry lock
 and a reader-mark lock. Evidence is prepared outside the registry lock; its
 freshness and the full idle clock are checked before rename. Sorted reference
@@ -576,7 +581,9 @@ admission excludes related publication through the journal and rename; writer
 change tokens invalidate prepared observations without becoming absence evidence.
 Saved progress contains only the bounded cohort, directory position/generation
 and protection/activity summaries, not a copy of delivery history. Per-detach freshness
-covers candidate-relevant evidence; out-of-protocol late writes into unrelated
+covers candidate-relevant evidence: an atomic registry replacement is read through
+`jobs.log.lineage.json` from the prefix it kept, so only rows that changed, or that
+name the candidate, keep a due home; out-of-protocol late writes into unrelated
 historical delivery groups are caught by the next pass's discovery. Available,
 compatible mount identities are proved before detachment. Complete malformed
 registry lines are skipped, while a torn final append leaves the pass uncertain. The
@@ -3612,7 +3619,10 @@ ordinary messages and cards have no accept command or successor authority.
 Logical transfer records the current holder's explicit request independently
 of content delivery — the holder's own command, or a supervisor's `--from`
 command whose sealed sender is the observed holder and whose executor is
-informational only. Acceptance revalidates the exact native receiver, replays
+informational only. Acceptance records only a card that was handed to the
+successor's input (queued, steered, written or received); on a card still
+pending the command answers `accepted=false reason=handoff-not-delivered` and
+records nothing, while the courier keeps delivering it. Acceptance revalidates the exact native receiver, replays
 the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
