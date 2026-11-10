@@ -2541,6 +2541,9 @@ def _resume_retire_obligation(duty, store, *, read_context=None,
         return
     if duty.get("state") == "cancelled":
         return
+    if (phase == "waiting" and _settle_closed_unbound_retire(
+            store, duty, (duty.get("intent") or {}).get("requester") or {})):
+        return
     if phase == "shell-returned":
         foreground = observation.get("foreground") or {}
         if foreground:

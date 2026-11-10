@@ -231,6 +231,17 @@ class WrappedForegroundTest(unittest.TestCase):
         self.assertNotEqual(self.store.get(duty["id"])["state"], "cancelled")
         self.assertEqual(self.actions, [])
 
+    def test_existing_retire_runner_settles_its_unsent_closed_request_without_operator_retry(self):
+        duty = self.unbound_request()
+        census = peer.herdr_observation.PaneCensus("default", (), 1.0)
+        with mock.patch.object(peer.herdr_observation, "pane_census", return_value=census), \
+             contextlib.redirect_stdout(io.StringIO()):
+            peer._resume_retire_obligation(duty, self.store)
+        settled = self.store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["result"]), ("cancelled", "target-closed-unproven"))
+        self.assertEqual(settled["intent"], duty["intent"])
+        self.assertEqual(self.actions, [])
+
 
 if __name__ == "__main__":
     unittest.main()
