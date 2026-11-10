@@ -2072,20 +2072,26 @@ def collapse_replicated_report_durations(rows: Iterable[dict[str, str]]) -> dict
     return durations
 
 
-def shard_weights(relpaths: list[str], durations: dict[str, float]) -> dict[str, float]:
+def shard_weights(relpaths: list[str], durations: dict[str, float], jobs: int = 1) -> dict[str, float]:
+    """Suite-seconds per suite. A SERIAL_SUITES member runs after the parallel
+    batch with every other slot idle, so it costs ``jobs`` slots for its whole
+    duration and weighs ``jobs`` times as much."""
     known = sorted(durations[r] for r in relpaths if r in durations)
     if known:
         mid = len(known) // 2
         fallback = known[mid] if len(known) % 2 else (known[mid - 1] + known[mid]) / 2
     else:
         fallback = DEFAULT_SHARD_WEIGHT_S
-    return {r: durations.get(r, fallback) for r in relpaths}
+    return {r: durations.get(r, fallback) * (max(1, jobs) if r in SERIAL_SUITES else 1)
+            for r in relpaths}
 
 
-def partition_shards(relpaths: list[str], durations: dict[str, float], count: int) -> list[list[str]]:
-    """Greedy longest-first split. The input is only the sorted suite paths and
-    the committed table, so every runner computes the same shards."""
-    weights = shard_weights(relpaths, durations)
+def partition_shards(relpaths: list[str], durations: dict[str, float], count: int,
+                     jobs: int = 1) -> list[list[str]]:
+    """Greedy longest-first split. The input is only the sorted suite paths,
+    the committed table and the job count, so every runner computes the same
+    shards."""
+    weights = shard_weights(relpaths, durations, jobs)
     shards: list[list[str]] = [[] for _ in range(count)]
     totals = [0.0] * count
     for rel in sorted(relpaths, key=lambda r: (-weights[r], r)):
@@ -2339,7 +2345,11 @@ def run_profile(
     jobs: int,
     timeout: int,
     install_prefix: Path | None,
+    durations: dict[str, float] | None = None,
 ) -> list[SuiteResult]:
+    """Run one profile's suites. With ``durations`` the parallel batch starts
+    longest-first, so a long suite cannot begin last and set the wall time;
+    the returned order is always the input order."""
     results_by_index: dict[int, SuiteResult] = {}
     tmp_by_index: dict[int, Path] = {}
     tmp_identity_by_index: dict[int, tuple[int, int, int] | None] = {}
@@ -2407,6 +2417,9 @@ def run_profile(
             for idx, suite in indexed
             if suite_relpath(root, suite) not in SERIAL_SUITES
         ]
+        if durations is not None:
+            weights = shard_weights([suite_relpath(root, suite) for _, suite in parallel], durations)
+            parallel.sort(key=lambda item: (-weights[suite_relpath(root, item[1])], item[0]))
         serial = [
             (idx, suite)
             for idx, suite in indexed
@@ -2533,6 +2546,7 @@ def _run_main(argv: list[str]) -> int:
     # Sharding splits what --select/--exclude left. STALE below is still judged
     # against the whole corpus, so it needs the pre-split view.
     shard_index = shard_count = 0
+    durations: dict[str, float] | None = None
     if args.shard:
         shard_index, shard_count = parse_shard(args.shard[0])
         try:
@@ -2541,7 +2555,7 @@ def _run_main(argv: list[str]) -> int:
             print(f"duration table error: {exc}", file=sys.stderr)
             return 65
         selected_rel = [suite_relpath(root, s) for s in selected]
-        mine = set(partition_shards(selected_rel, durations, shard_count)[shard_index - 1])
+        mine = set(partition_shards(selected_rel, durations, shard_count, args.jobs)[shard_index - 1])
         selected = [s for s, r in zip(selected, selected_rel) if r in mine]
 
     if args.suite_list:
@@ -2628,7 +2642,8 @@ def _run_main(argv: list[str]) -> int:
         batch = suites_by_profile[profile]
         if not batch:
             continue
-        batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix)
+        batch_results = run_profile(batch, root, profile, args.jobs, args.timeout, install_prefix,
+                                    durations)
         all_results.extend(batch_results)
         for result in batch_results:
             results_by_suite.setdefault(result.relpath, []).append(result)

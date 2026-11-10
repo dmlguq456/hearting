@@ -66,8 +66,12 @@ jobs:
         run: python3 tools/check-scope-placeholders.py
 
   install-lifecycle:
-    needs: adaptation-boundary
-    if: needs.adaptation-boundary.outputs.full_tests == 'true'
+    permissions:
+      contents: read
+      # Each expensive job selects its own scope with the same ci_scope.py call
+      # as adaptation-boundary, so it starts at once instead of waiting about a
+      # minute for that job's projection checks.
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -78,12 +82,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Select checks for the changed files
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/release/ci_scope.py >> "$GITHUB_OUTPUT"
+
       - name: Run launcher binding suites
+        if: steps.scope.outputs.full_tests == 'true'
         run: |
           python3 tools/install/codex_launcher.test.py
           python3 utilities/codex_launcher.test.py
 
       - name: Verify destructive mutation safety
+        if: steps.scope.outputs.full_tests == 'true'
         run: |
           python3 tools/install/check_destructive_calls.py tools/install
           python3 tools/install/test_destructive_guard.py
@@ -95,6 +107,7 @@ jobs:
           python3 tools/install/installer_runtime.test.py
 
       - name: Run activation and lifecycle suites
+        if: steps.scope.outputs.full_tests == 'true'
         run: |
           python3 utilities/codex_tui_config.test.py
           python3 tools/install/runtime_activation.test.py
@@ -103,11 +116,16 @@ jobs:
           ./tools/install/extension-lifecycle.test.sh
 
       - name: Check the installed-layout regression trigger (C-4)
+        if: steps.scope.outputs.full_tests == 'true'
         run: python3 tools/check-installed-layout-trigger.py --base HEAD~1 --head HEAD
 
   dispatch-pid-namespace:
-    needs: adaptation-boundary
-    if: needs.adaptation-boundary.outputs.full_tests == 'true'
+    permissions:
+      contents: read
+      # Each expensive job selects its own scope with the same ci_scope.py call
+      # as adaptation-boundary, so it starts at once instead of waiting about a
+      # minute for that job's projection checks.
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -118,7 +136,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Select checks for the changed files
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/release/ci_scope.py >> "$GITHUB_OUTPUT"
+
       - name: Install PID namespace fixture
+        if: steps.scope.outputs.full_tests == 'true'
         run: |
           bash tools/release/install-ci-fixtures.sh bubblewrap
           # GitHub Ubuntu runners confine unprivileged user namespaces via
@@ -127,12 +152,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Verify Codex detached receipt and marker ordering
+        if: steps.scope.outputs.full_tests == 'true'
         env:
           HEARTING_REQUIRE_PIDNS: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 utilities/dispatch_namespace_e2e.test.py -v
 
       - name: Run pinned native Codex permission-profile tests
+        if: steps.scope.outputs.full_tests == 'true'
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
@@ -184,15 +211,19 @@ jobs:
           PY
 
   full-suite-shard:
-    needs: adaptation-boundary
-    if: needs.adaptation-boundary.outputs.full_tests == 'true'
+    permissions:
+      contents: read
+      # Each expensive job selects its own scope with the same ci_scope.py call
+      # as adaptation-boundary, so it starts at once instead of waiting about a
+      # minute for that job's projection checks.
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       # Every shard reports even when a sibling fails, so one run shows all causes.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - name: Check out the source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -201,10 +232,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Select checks for the changed files
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/release/ci_scope.py >> "$GITHUB_OUTPUT"
+
       - name: Install full-suite tracing fixtures
+        if: steps.scope.outputs.full_tests == 'true'
         run: bash tools/release/install-ci-fixtures.sh ripgrep strace
 
       - name: Run shard ${{ matrix.shard }} of the full isolated test suite (C-3/C-4)
+        if: steps.scope.outputs.full_tests == 'true'
         timeout-minutes: 35
         # --seed-baseline uploads the proposed rows stamped with this runner's
         # fingerprint; adopting them is a human decision, never automatic.
@@ -269,8 +308,10 @@ jobs:
           PY
           }
           observe_claude full-suite-before | tee "${{ runner.temp }}/shard-out/progress.log"
+          # Runner speed varies by about 1.5x between hosts; keep the CPU next to the timings.
+          grep -m1 '^model name' /proc/cpuinfo | tee -a "${{ runner.temp }}/shard-out/progress.log" || true
           python3 tools/run-tests.py --retries 1 \
-            --shard ${{ matrix.shard }}/8 \
+            --shard ${{ matrix.shard }}/10 \
             --suite-list ${{ runner.temp }}/shard-out/suite-list.tsv \
             --xpass-nonfatal \
             --strict-leak-sweep \
@@ -280,10 +321,10 @@ jobs:
             2>&1 | tee -a "${{ runner.temp }}/shard-out/progress.log"
 
       - name: Upload shard report, manifest and baseline seed
-        if: always()
+        if: always() && steps.scope.outputs.full_tests == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: run-tests-report-shard-${{ matrix.shard }}-of-8-attempt-${{ github.run_attempt }}
+          name: run-tests-report-shard-${{ matrix.shard }}-of-10-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shard-out
           if-no-files-found: ignore
 

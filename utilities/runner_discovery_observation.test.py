@@ -40,7 +40,7 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
     duties = peer.SessionNoticeIntegrationCorrectionTest.duties
     transport = peer.SessionNoticeIntegrationCorrectionTest.transport
     prepared_notice = peer.SessionNoticeIntegrationCorrectionTest.prepared_notice
-    pending_message = peer.ObligationStartupTest.pending_message
+    pending_message = fixture.peer_prompt.ObligationStartupTest.pending_message
 
     def setUp(self):
         super().setUp()

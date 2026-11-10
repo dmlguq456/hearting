@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest import mock
 
-path=Path(__file__).with_name('peer_steward.test.py')
+path=Path(__file__).with_name('peer_steward_prompt.test.py')
 spec=importlib.util.spec_from_file_location('resume_courier_fixture',path)
 fixture=importlib.util.module_from_spec(spec);sys.modules[spec.name]=fixture;spec.loader.exec_module(fixture)
 import session_resume
