@@ -384,10 +384,7 @@ def role_map(role: str) -> dict[str, str]:
     return fields
 
 
-class ModelSelectionError(ValueError):
-    def __init__(self, reason: str, detail: str):
-        super().__init__(detail)
-        self.reason = reason
+ModelSelectionError = WRAPPER_COMMON.ModelSelectionError
 
 
 def _model_policy() -> dict[str, str]:

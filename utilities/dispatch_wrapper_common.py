@@ -1416,6 +1416,14 @@ def acquire_review_lease_after_claim(
     )
 
 
+class ModelSelectionError(ValueError):
+    """A refused model selection: `reason` is the receipt reason, the message its detail."""
+
+    def __init__(self, reason: str, detail: str):
+        super().__init__(detail)
+        self.reason = reason
+
+
 def model_policy(harness: str, *, error) -> dict[str, str]:
     """This launch's model policy; the wrapper passes its own harness name and
     its `ModelSelectionError` class, so each adapter keeps raising its own."""

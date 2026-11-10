@@ -250,10 +250,7 @@ def parser() -> argparse.ArgumentParser:
 completion_gate_fail_fields = route_authority.completion_gate_fail_fields
 
 
-class ModelSelectionError(ValueError):
-    def __init__(self, reason: str, detail: str):
-        super().__init__(detail)
-        self.reason = reason
+ModelSelectionError = WRAPPER_COMMON.ModelSelectionError
 
 
 def role_map(role: str) -> dict[str, str]:
