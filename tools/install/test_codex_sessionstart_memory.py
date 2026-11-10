@@ -20,7 +20,6 @@ import fixture_env
 spec = importlib.util.spec_from_file_location("codex_start_memory", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
-import codex_start_summary  # the bridge put its hooks directory on sys.path
 
 
 class SessionStartMemoryTest(unittest.TestCase):
@@ -99,92 +98,28 @@ class SessionStartMemoryTest(unittest.TestCase):
             self.assertEqual(actual, bridge.run_preflight("memory", str(self.cwd)).strip())
             self.assertLessEqual(len(actual), 400)
 
-    def test_resume_then_compact_before_first_request_carries_one_summary(self):
+    def test_every_start_order_carries_the_summary_and_resume_compact_doubles(self):
         # Codex 0.163 drains queued start sources back to back before the
         # prompt hook and keeps both contexts in that request
         # (core/tests/suite/hooks.rs resumed_thread_runs_resume_then_compact_session_start_hooks).
+        # No start is suppressed: that request carries two copies, accepted
+        # as the price of never dropping one (core/MEMORY.md).
         for first in ("resume", "startup", "clear"):
             with self.subTest(first=first):
                 sid = f"synthetic-pair-{first}"
                 request = [self.context(first, sid), self.context("compact", sid)]
-                self.assertEqual(sum(part.count(self.expected) for part in request), 1)
-                self.assertEqual(request[0], self.expected)
-
-    def test_compact_after_a_prompt_restores_the_summary(self):
+                self.assertEqual(request, [self.expected, self.expected])
         sid = "synthetic-later-compact"
         self.assertEqual(self.context("resume", sid), self.expected)
-        self.assertEqual(self.context("compact", sid), "")
         self.prompt(sid)
         self.assertEqual(self.context("compact", sid), self.expected)
-        # A second compact in the same turn follows a compact summary, which
-        # that compaction has replaced: it needs the summary again.
         self.assertEqual(self.context("compact", sid), self.expected)
 
-    def test_stale_or_unemitted_start_does_not_suppress_compact(self):
-        sid = "synthetic-stale"
-        self.assertEqual(self.context("resume", sid), self.expected)
-        mark = codex_start_summary._mark_path(sid, os.environ)
-        data = json.loads(mark.read_text())
-        data["at"] -= codex_start_summary.PAIR_WINDOW_SECONDS + 1
-        mark.write_text(json.dumps(data))
-        self.assertEqual(self.context("compact", sid), self.expected)
-        sid = "synthetic-unemitted"
-        with patch.dict(os.environ, CODEX_SESSION_MEMORY_INJECT="0"):
-            self.assertEqual(self.start("resume", sid), "")
-        self.assertEqual(self.context("compact", sid), self.expected)
-
-    def test_failed_output_leaves_no_mark_and_the_compact_emits(self):
-        # Review R2 order A: the resume hook's JSON never reached the native
-        # side, so the compact start is the only chance for this request.
-        class BrokenOutput:
-            def write(self, data):
-                raise BrokenPipeError("synthetic closed hook output")
-
-            def flush(self):
-                pass
-
-        sid = "synthetic-broken-output"
-        payload = {"session_id": sid, "cwd": str(self.cwd), "source": "resume"}
-        with patch.dict(sys.modules, {
-                "herdr_session_projection": SimpleNamespace(project=lambda *a, **kw: None),
-                "session_tidy": SimpleNamespace(run_hook=lambda *a, **kw: None)}), \
-             patch.object(bridge, "request_lifecycle_recovery"), \
-             patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
-             contextlib.redirect_stdout(BrokenOutput()):
-            with self.assertRaises(BrokenPipeError):
-                bridge.main()
-        self.assertFalse(codex_start_summary._mark_path(sid, os.environ).exists())
-        self.assertEqual(self.context("compact", sid), self.expected)
-
-    def test_prompt_that_cannot_remove_the_mark_still_restores_the_compact_summary(self):
-        # Review R2 order B: a mark the prompt could not delete must not pass
-        # for a summary still waiting for its first request.
-        sid = "synthetic-undeletable-mark"
-        self.assertEqual(self.context("resume", sid), self.expected)
-        with patch.object(codex_start_summary.Path, "unlink", side_effect=OSError("synthetic refusal")):
-            codex_start_summary.note_prompt(sid)
-        self.assertEqual(self.context("compact", sid), self.expected)
-
-    def test_mark_write_failure_emits_again_and_leaves_no_temporary_file(self):
-        sid = "synthetic-replace-failure"
-        with patch.object(codex_start_summary.os, "replace", side_effect=OSError("synthetic refusal")):
-            self.assertEqual(self.context("resume", sid), self.expected)
-        mark = codex_start_summary._mark_path(sid, os.environ)
-        self.assertEqual([p.name for p in mark.parent.iterdir() if p.name.startswith(".")], [])
-        self.assertEqual(self.context("compact", sid), self.expected)
-
-    def test_old_marks_of_other_sessions_are_pruned_on_write(self):
-        old = codex_start_summary._mark_path("synthetic-abandoned", os.environ)
-        old.parent.mkdir(parents=True, exist_ok=True)
-        old.write_text(json.dumps({"source": "resume", "at": 0}))
-        leftover = old.with_name(f".{old.name}.1")
-        leftover.write_text("{}")
-        for path in (old, leftover):
-            os.utime(path, (0, 0))
-        self.assertEqual(self.context("resume", "synthetic-fresh"), self.expected)
-        self.assertFalse(old.exists())
-        self.assertFalse(leftover.exists())
-        self.assertTrue(codex_start_summary._mark_path("synthetic-fresh", os.environ).exists())
+    def test_start_writes_no_session_state_of_its_own(self):
+        state = Path(os.environ["XDG_STATE_HOME"]) / "hearting" / "codex-start-memory"
+        self.assertEqual(self.context("resume", "synthetic-no-mark"), self.expected)
+        self.prompt("synthetic-no-mark")
+        self.assertFalse(state.exists())
 
     def policy(self, value):
         path = Path(os.environ["XDG_CONFIG_HOME"]) / "hearting" / "memory-sync.json"
