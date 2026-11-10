@@ -92,6 +92,10 @@ birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
 Show confirmed current work, its actual route name/flow/state and next action,
 then the person's question and results. A direct route has only its own stages.
+The route's depth-1 owner reads as Fleet's route row does (`owner · codex
+(GPT-5.5·high)`); a one-shot owner runs its node itself, so its line says
+`owner`, while `worker` names only a depth-2 attempt the owner launched. The
+route summary ends with its completion gate (`gate✓`) as Fleet's card marks it.
 Clicking a route opens its existing read-only detail. Put each answer choice on
 its own line, wrapping within that choice; do not reserve a standalone
 session/age row. Hide an empty result section. Use the

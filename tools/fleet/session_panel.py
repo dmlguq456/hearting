@@ -42,6 +42,10 @@ def route_evidence(visibility):
         summary.append(text("short_ci_same_head"))
     else:
         summary.append("CI ?")
+    # The route's completion gate, as Fleet's route card marks it (``gate ✓``): a one-shot
+    # route has no test or review stage, so this is its one recorded verification.
+    if verification.get("gate") in {"proven", "failed", "unproven"}:
+        summary.append(text("short_gate_" + verification["gate"]))
     lines = [[text("evidence_route"), text("shape_" + shape), "info"]]
     basis = codes.get("basis") or {}
     kind = basis.get("kind")
@@ -211,12 +215,18 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                 stages.append({"name": clean(node.get("name")), "state": state_label(node.get("st")), "current": node.get("st") in {"active", "running", "working"}})
         worker = row.get("worker") or []
         reason = "".join(str(part[0]) for part in worker if isinstance(part, (list, tuple)) and part)
+        # The route's depth-1 owner, as Fleet's route row reads it. A one-shot owner runs its
+        # node itself, so its body line already says ``owner …`` and no second line repeats it.
+        owner = clean(row.get("owner"))
+        owner_text = "owner · " + owner if owner else ""
+        runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
         routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
+                       "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]

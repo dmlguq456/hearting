@@ -1070,6 +1070,18 @@
    "en": "CI record",
    "ko": "CI 기록"
   },
+  "fleet.session_panel.short_gate_failed": {
+   "en": "gate✕",
+   "ko": "마감✕"
+  },
+  "fleet.session_panel.short_gate_proven": {
+   "en": "gate✓",
+   "ko": "마감✓"
+  },
+  "fleet.session_panel.short_gate_unproven": {
+   "en": "gate·",
+   "ko": "마감·"
+  },
   "fleet.session_panel.short_review_none": {
    "en": "review?",
    "ko": "검토?"

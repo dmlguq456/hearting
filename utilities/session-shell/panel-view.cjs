@@ -158,8 +158,12 @@ function render({width,height,side,fill=side,paint=true,model={},native={},state
       if(first){
         if(flow&&side)wrap(line(flow),2,'route');
         if(first.stage_more)add(line('+'+first.stage_more+' · Fleet ›'),'fleet');
+        if(side&&first.owner_line)wrap(line(first.owner_line),2,'route');
         if(side)wrap(line([first.stage!=='·'?first.stage:'',first.reason||first.state_label||first.state].filter(Boolean).join(' · '),color),2,'route');
-        if(first.visibility?.summary)wrap(line(first.visibility.summary),1,'route');
+        // The bottom panel keeps its rows: the route owner shares the summary row.
+        const verdict=first.visibility?.summary||'';
+        const owned=!side&&first.owner?[verdict,first.owner].filter(Boolean).join(' · '):verdict;
+        if(owned)wrap(line(owned),1,'route');
       }
       if(routes.length>1)add(line('+'+(routes.length-1)+' · '+t('routes','Route')),'route');
       // Bound optional material first. Question editor gets the remaining rows,
