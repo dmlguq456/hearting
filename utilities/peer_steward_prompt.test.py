@@ -7027,16 +7027,16 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.st, self.clear = st, clear
 
     def cleared(self, harness="claude", sid="sid-A", new="sid-B", pane="w1:pX",
-                seq=0, receipt=True, window=120):
+                seq=0, receipt=False, window=120):
         st, clear = self.st, self.clear
         shutil.rmtree(st.state_root(), ignore_errors=True)
         seat = st.Seat("pane", st._digest("pane", pane), pane, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
             card = st.write_card(seat, harness, sid, "card body", prompt_seq=seq)
-            if receipt and harness == "claude":
+            if receipt:  # some prompt already took this card generation
                 st._write_consumed(st.session_seat(seat, harness, sid),
-                                   generation=card["generation"], receipts=[f"claude:{new}:0"])
+                                   generation=card["generation"], receipts=[f"{harness}:{new}:0"])
             clear._write_reservation({
                 "schema": 1, "nonce": "n0nce", "status": "cleared", "created": now - 30,
                 "deadline": now + 570,
@@ -7177,6 +7177,15 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
             transfer_ref="2" * 32))
         self.assertEqual(self.booking()["continued"]["transfer_ref"], "2" * 32)
         self.assertEqual(self.booking()["continued"]["state"], "pending")
+
+    def test_continue_needs_no_start_receipt_and_stops_only_for_a_taken_card(self):
+        # Claude's SessionStart renders no card (2026-11-10: a tidy clear waited for a start
+        # receipt that never comes and the person had to type).
+        for harness in ("claude", "codex", "opencode"):
+            for receipt, expected in ((False, None), (True, "card-taken")):
+                with self.subTest(harness=harness, receipt=receipt):
+                    self.cleared(harness=harness, receipt=receipt)
+                    self.assertEqual(peer_steward._continue_card_reason(self.booking()), expected)
 
     def test_continue_requires_exact_new_sid_and_idle_without_screen_reads(self):
         self.cleared()
