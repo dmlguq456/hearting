@@ -35,8 +35,13 @@ terminal; a worker or service callback cannot select another terminal's session.
 For a shared Codex daemon callback, reuse the native MCP origin's live TUI
 PID/thread proof and its current unique selection. Read the attachment only
 from that TUI's own initial environment; never inherit the daemon's first
-client socket. Its PID/birth and exact wrapped PTY checks still apply. Unknown,
-ambiguous, worker, remote or changed evidence grants no attachment or input.
+client socket. Its PID/birth and exact wrapped PTY checks still apply. After
+`/resume`, retained roots are membership, not selection. The existing strict
+native footer judgment may select one of those roots from two unchanged raw
+PTY viewport observations, joined to that same live TUI's fresh native origin.
+This reuses the existing attachment and selection event; projected status text,
+model/context telemetry and an arbitrary screen UUID never supply authority.
+Unknown, conflicting, worker, remote or changed evidence grants no attachment or input.
 Preserve native shared startup: do not insert a footer configuration override
 that silently selects embedded mode. Existing explicit native modes keep
 their own behavior and the existing pending queue semantics.
@@ -151,7 +156,8 @@ in its existing private answer claim. Reuse the lifecycle bridge's current-root
 proof before accepting it and at the existing native effect boundary, including
 retained delivery retries. These authority reads refresh MCP origins even for
 already loaded roots; loaded membership alone does not prove current selection.
-An unknown or multiple root withholds the answer;
+An unknown selection, including multiple roots without that native viewport
+and process evidence, withholds the answer;
 an old displayed question, a later question or a waiting worker grants nothing.
 This restriction belongs to the wrapped answer, not ordinary full-session-ID
 queue delivery. Existing queue and consumption receipts remain unchanged, and

@@ -2731,11 +2731,21 @@ acceptance and native receipt are not a completed check. A harness whose transpo
 unconfirmed stays unconfirmed. `steward check` shows only the caller's own
 `role_targets` (one winner per target) and uses only existing observations (herdr
 state, liveness, undelivered messages and notices): a live PID alone is not health and
-an unobserved session is not declared dead. With no change since the previous check it
-prints `changes=none`, and the steward leaves a line or two of status and starts no new
-work. When the role has no targets, every target is finished or the sessions are ready
-to tidy, one short request recommends closing ended sessions and releasing the flag
-through the ordinary `steward off` path; while that state is unchanged the next due
+an unobserved session is not declared dead. It also matches waiting targets against
+remaining work from existing sources only — the holder repository's open records
+(`fleet.session_work.observe`, the repo page's work source, kept only when the shared
+`memory.open_stage` classification calls them open; a record awaiting a user decision is
+shown as one to raise with the user, not one to assign), peer requests still queued for
+delivery to the holder or a live target (an ended target's undeliverable rows are left
+out) — and prints each as a `next=` action (for example
+`next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
+duty's own earlier observations. `changes=none` does not mean nothing remains: while
+any next action exists the request names those actions (`assign-next`) and leaves release
+or stop advice out; it repeats each interval while a target is live and unfinished and is
+otherwise sent once per changed state. Only when the role has no targets, every
+target is finished or the sessions are ready to tidy, and no open work or queued peer
+request remains, one short request recommends closing ended sessions and releasing the
+flag through the ordinary `steward off` path; while that state is unchanged the next due
 point produces no model turn. A session that closed through an ordinary path lets go of
 what it held at that moment: a retire that finished (`normal-exit`, `target-already-gone`),
 a confirmed same-seat `/clear` (for what the successor did not take over), and a window
@@ -3511,6 +3521,17 @@ pane-only sidless first-input path, and a queued carrier result remains
 distinct from exact receiver evidence.
 
 Clear and retire retain their checked foreground/form/draft and successor safety.
+For wrapped Claude and Codex panes, target foreground discovery reuses the same
+attachment join as caller discovery. Its lifetime is the inner native PID/birth;
+the outer owner remains the physical carrier. Prompt, handoff and each retire
+effect recheck that same attachment and native selection. A returned shell and
+the original native lifetime's exit still govern cleanup, independently of
+wrapper process names or foreground process counts.
+An owned retire request without a recorded native lifetime can settle as
+`target-closed-unproven` when a complete observation of its original Herdr
+endpoint confirms the pane is absent. This cancels only that unsent request;
+it establishes neither normal native exit nor handover and keeps the original
+target without selecting a replacement. The requester and failed evidence remain recorded.
 For Claude peers, `peer-steward.py prompt` uses `herdr agent prompt` for the guarded idle plain-TUI
 case above; busy Claude delivery waits for its existing callback. Neither a helper
 return nor a status flip is a receive receipt. Continue retains its existing native
@@ -3579,10 +3600,11 @@ the same logical record and schedules the retained reply. Physical retirement
 has its own original lifetime and preserved-context checks; native acceptance
 may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
 remain receipt facts.
-For an actionable peer request that can be completed now, reply once with the
-result; a PR result also goes straight to the next role its assignment names
-(§5.11 `pr-chain`). For work that will wait or take sustained effort, send one short receipt and
-continue through the existing registered continuation. Informational/no-reply
+For an actionable peer request, do the requested work now; an acknowledgement
+alone is not completion. Reply once with the result; a PR result also goes
+straight to the next role its assignment names (§5.11 `pr-chain`). When part has
+to wait or take sustained effort, say so in one line and keep working on it in
+this turn or the existing registered continuation. Informational/no-reply
 notices need no reply. Put the condition, result, and any required decision or
 blocker first; keep PID, start, exit, digest, and path detail in existing
 evidence. Completion reception requires actual approved result

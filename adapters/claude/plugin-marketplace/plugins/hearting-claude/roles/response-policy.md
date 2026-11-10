@@ -246,10 +246,10 @@ an unnecessary question just to make the UI more visible.
   *Violation signal:* "should I also update the record / re-commit?" after the
   fact.
 
-- **Peer follow-through** — when an actionable request can be completed now,
-  reply once with its result. When it must wait or take sustained work, send one
-  short receipt and continue through the existing registered continuation;
-  informational/no-reply notices need no reply. Put the condition, result, and
+- **Peer follow-through** — do the requested work now; an acknowledgement alone
+  is not completion. Reply once with its result. When part must wait or take
+  sustained work, say so in one line and keep working on it in this turn or the
+  existing registered continuation; informational/no-reply notices need no reply. Put the condition, result, and
   any required decision or blocker first. Keep PID, start, exit, digest, and path
   detail in existing evidence and refer to it only when useful. Preserve exact
   typed handoff acceptance commands and predecessor duties. Read exact completion
