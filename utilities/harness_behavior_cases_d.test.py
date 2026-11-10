@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_behavior_scenarios as hb  # noqa: E402
+import harness_behavior_cases_a as ca  # noqa: E402
+import harness_behavior_cases_b as cb  # noqa: E402
 import harness_behavior_cases_d as cd  # noqa: E402
 
 
@@ -136,6 +141,202 @@ class DelinkTest(unittest.TestCase):
             (codex / "hooks.json").write_text('{"changed": 1}', encoding="utf-8")
             self.assertEqual((source / "hooks.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual(len(changed), 2)
+
+
+def _record(index, text):
+    return {"main_index": index, "text": text, "last_kind": "tool", "last_text": text,
+            "protocol": "responses", "at": index, "reply": {"text": "done", "shell": None},
+            "main": True}
+
+
+class _Run:
+    """Only the measured inputs of drive() are fixed; the verdict code is real."""
+
+    harness = "codex"
+
+    def __init__(self):
+        self.evidence, self.notes, self.rows = {}, [], [_record(0, "initial user turn")]
+
+    def prompt(self, text):
+        return True
+
+    def wait_requests(self, *args):
+        return True
+
+    def wait_idle(self, *args):
+        return len(self.rows)
+
+    def main_requests(self):
+        return self.rows
+
+    def note(self, text):
+        self.notes.append(text)
+
+
+class OracleTest(unittest.TestCase):
+    """Deliberately broken inputs must not pass (PR #1458 review, oracle-probe)."""
+
+    def burst(self, kind):
+        scenario, run, items = cd.ReportBurstScenario(), _Run(), []
+
+        def notify(_run, _sid, values):
+            items.extend(values)
+            return [str(i) for i in range(20)]
+
+        def flow(*args, **kwargs):
+            if kind == "whole":
+                text = "\n".join(x["text"] for x in items)
+            elif kind == "acked_missing_tail":
+                text = "\n".join(x["text"] for x in items[:-1])
+            else:
+                text = "\n".join(scenario.tails)
+            run.rows.append(_record(1, text))
+            return {"before": 1, "woken_without_prompt": 0, "typed_rounds": [20]}
+        with patch.object(cb, "session_id", return_value="root"), \
+                patch.object(cd, "notify", side_effect=notify), \
+                patch.object(cd, "notice_states", return_value=["acked"] * 20), \
+                patch.object(cd, "prompt_until", side_effect=flow):
+            return scenario.drive(run), run.evidence
+
+    def test_burst_counts_whole_bodies_not_tail_markers(self):
+        self.assertEqual(self.burst("whole")[0], "pass")
+        self.assertEqual(self.burst("acked_missing_tail")[0], "fail")
+        verdict, ev = self.burst("tail_tokens_only")
+        self.assertEqual(verdict, "fail")
+        self.assertEqual((ev["seen"], ev["bodies_seen"]), (20, 0))
+        self.assertEqual(len(ev["tail_without_body"]), 20)
+
+    def test_body_match_ignores_whitespace_reflow(self):
+        requests = [{"main_index": 0, "text": "- burst 0: A  b\n c TAIL (x)"}]
+        self.assertEqual(cd.seen_bodies(requests, ["A b c TAIL", "A b TAIL"]), {0})
+
+    def subsession(self, kind):
+        scenario, run = cd.SubsessionCompletionScenario(), _Run()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run.home = SimpleNamespace(root=root)
+            registered = "child" if kind.startswith("sub") else "root"
+            (root / "hb_fx_state.json").write_text(json.dumps(
+                {"harness": "codex", "session_id": registered}))
+            run.rows = [_record(0, scenario.main), _record(1, scenario.sub + " HB-REGISTERED")]
+
+            def helper(_run, command):
+                if command == "complete":
+                    who = scenario.sub if kind.startswith("sub") else scenario.main
+                    run.rows.append(_record(2, f"{who} {scenario.attempt} completion"))
+                    if kind != "main_wake_no_next":
+                        run.rows.append(_record(3, f"{who} {scenario.NEXT}-42"))
+                    if kind == "sub_wake_relayed":
+                        run.rows.append(_record(4, f"{scenario.main} {scenario.attempt} relayed"))
+                        run.rows.append(_record(5, f"{scenario.main} {scenario.NEXT}-42"))
+                return {"command": command}
+            with patch.object(cb, "session_id", return_value="root"), \
+                    patch.object(ca, "_helper", side_effect=helper), \
+                    patch.object(cd.time, "sleep"), \
+                    patch.object(cd, "wait_for", side_effect=lambda fn, *a, **kw: fn()):
+                return scenario.drive(run), run.evidence
+
+    def test_subsession_passes_only_when_the_root_receives_and_acts(self):
+        self.assertEqual(self.subsession("main_wake_next_ran")[0], "pass")
+        self.assertEqual(self.subsession("main_wake_no_next")[0], "fail")
+        verdict, ev = self.subsession("sub_wake_next_ran")
+        self.assertEqual(verdict, "fail")
+        self.assertEqual((ev["woken_thread"], ev["root_received"]), ("sub", False))
+        verdict, ev = self.subsession("sub_wake_relayed")
+        self.assertEqual(verdict, "pass")
+        self.assertTrue(ev["root_next_action_ran"])
+
+    def herdr(self, agent):
+        scenario, run = cd.HerdrPeerPromptScenario(), _Run()
+        run.harness = "opencode"
+        run.fixture = SimpleNamespace(requests=[])
+        run.home = SimpleNamespace(env={}, workspace=Path("/tmp"))
+        run.herdr = {"session": "private-fake"}
+
+        def herdr(*args, **kwargs):
+            payload = ([{"pane_id": "w1:p1", "agent": agent, "agent_status": "idle"}]
+                       if args[:2] == ("agent", "list") else {})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        run.tui = SimpleNamespace(pane="w1:p1", settle=lambda *a: True,
+                                  screen=lambda: "composer empty", herdr=herdr)
+        fake = SimpleNamespace(run=lambda *a, **kw: SimpleNamespace(
+            returncode=0, stdout="prompted=queued", stderr=""))
+        with patch.object(cb, "session_id", return_value="root"), \
+                patch.object(cb, "first_with", return_value=1), \
+                patch.object(cd.time, "sleep"), \
+                patch.object(cd, "wait_for", side_effect=lambda fn, *a, **kw: fn()), \
+                patch.object(scenario, "source_changed", return_value=False), \
+                patch.object(cd, "subprocess", fake):
+            return scenario.drive(run), run.evidence
+
+    def test_herdr_detection_needs_the_launched_harness(self):
+        self.assertEqual(self.herdr("opencode")[0], "pass")
+        for wrong in ("codex", None):
+            verdict, ev = self.herdr(wrong)
+            self.assertEqual((verdict, ev["verdict_detection"]), ("fail", "fail"), wrong)
+
+
+class SourceGuardTest(unittest.TestCase):
+    """The real prepare() on a linked dummy source (PR #1458 review, source-write-probe)."""
+
+    def test_prepare_writes_no_linked_source_file(self):
+        real_run = subprocess.run
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+                   "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_AUTHOR_NAME": "F", "GIT_AUTHOR_EMAIL": "f@example.invalid",
+                   "GIT_COMMITTER_NAME": "F", "GIT_COMMITTER_EMAIL": "f@example.invalid"}
+
+            def git(*args):
+                return real_run(["git", "-C", str(source), *args], env=env, text=True,
+                                capture_output=True, check=True).stdout
+            git("init", "-q")
+            target = source / "settings.json"
+            target.write_text("{}\n")
+            git("add", ".")
+            git("commit", "-qm", "fixture")
+            claude, codex, config = root / "claude", root / "codex", root / "config"
+            for folder in (claude, codex, config, root / "home"):
+                folder.mkdir()
+            (claude / "settings.json").symlink_to(target)
+            initial = target.read_bytes()
+            run = SimpleNamespace(harness="claude", evidence={}, home=SimpleNamespace(
+                env={**env, "CLAUDE_CONFIG_DIR": str(claude), "CODEX_HOME": str(codex),
+                     "XDG_CONFIG_HOME": str(config)},
+                workspace=root, configure_model=lambda: None))
+            scenario = cd.HerdrPeerPromptScenario()
+
+            def harmless(argv, **kw):
+                if argv and argv[0] == "git":
+                    return real_run(argv, **kw)
+                return subprocess.CompletedProcess(argv, 0, "{}", "")
+            fake = SimpleNamespace(run=harmless, DEVNULL=subprocess.DEVNULL,
+                                   TimeoutExpired=subprocess.TimeoutExpired,
+                                   Popen=lambda *a, **kw: SimpleNamespace(pid=-999,
+                                                                          poll=lambda: 0))
+            try:
+                with patch.object(hb, "SOURCE", source), \
+                        patch.object(cd, "real_herdr", return_value="/bin/true"), \
+                        patch.object(cd, "subprocess", fake), \
+                        patch.object(cd, "wait_for", return_value=True):
+                    scenario.prepare(run)
+                    changed = scenario.source_changed(run)
+                    self.assertEqual(target.read_bytes(), initial)
+                    self.assertFalse(changed)
+                    self.assertFalse((claude / "settings.json").is_symlink())
+                    self.assertTrue(json.loads((claude / "settings.json").read_text())
+                                    ["promptSuggestionEnabled"])
+                    # A second edit to an already-dirty file is still a change.
+                    target.write_text("{\"a\": 1}\n")
+                    dirty = cd.source_status()
+                    target.write_text("{\"a\": 2}\n")
+                    self.assertNotEqual(cd.source_status(), dirty)
+            finally:
+                if scenario.scratch:
+                    shutil.rmtree(scenario.scratch, ignore_errors=True)
 
 
 class RegistrationTest(unittest.TestCase):

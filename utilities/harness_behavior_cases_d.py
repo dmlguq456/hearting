@@ -54,6 +54,7 @@ operator's Herdr server, tmux server and shared services are never addressed.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -250,6 +251,26 @@ def prompt_until(run, markers, prompts: int, typed: str, wake: float = 40) -> di
     return {"before": before, "woken_without_prompt": len(woken), "typed_rounds": rounds}
 
 
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def seen_bodies(requests, bodies, start: int = 0) -> set:
+    """Indexes of ``bodies`` whose whole text (whitespace-normalised) reached one request.
+
+    A marker alone is not delivery: a preview that keeps only each notice's tail
+    must not count as the notice reaching the model.
+    """
+    wanted = [_flat(body) for body in bodies]
+    found = set()
+    for record in requests[start:]:
+        text = _flat(record["text"])
+        for index, body in enumerate(wanted):
+            if body in text:
+                found.add(index)
+    return found
+
+
 def _is_sub(record, main_marker: str, sub_marker: str) -> bool:
     return sub_marker in record["text"] and main_marker not in record["text"]
 
@@ -260,7 +281,8 @@ def _is_sub(record, main_marker: str, sub_marker: str) -> bool:
 
 class ReportBurstScenario(Scenario):
     name = "report-burst"
-    summary = "20 notices at once: every notice recorded delivered reached the model."
+    summary = ("20 notices at once: every notice recorded delivered reached the model "
+               "with its whole body, not only its tail marker.")
     carrier = "parent_completion"
     COUNT = 20
 
@@ -294,26 +316,31 @@ class ReportBurstScenario(Scenario):
         ev["flow"] = prompt_until(run, self.tails, 3, "SCENARIO-BURST anything new?")
         states = notice_states(run, sid, ids)
         seen = seen_markers(run.main_requests(), self.tails, ev["flow"]["before"])
+        whole = seen_bodies(run.main_requests(), [item["text"] for item in items],
+                            ev["flow"]["before"])
         ev["states"] = {state: states.count(state) for state in set(states)}
         ev["seen"] = len(seen)
-        lost = [i for i, (tail, state) in enumerate(zip(self.tails, states))
-                if state == "acked" and tail not in seen]
+        ev["bodies_seen"] = len(whole)
+        ev["tail_without_body"] = [i for i, tail in enumerate(self.tails)
+                                   if tail in seen and i not in whole]
+        lost = [i for i, state in enumerate(states) if state == "acked" and i not in whole]
         ev["acked_unseen"] = lost
         ev["spilled_to_file"] = any(
             ("persisted-output" in r["text"] or "Full hook output saved to" in r["text"])
             and f"HB-BURST-{self.nonce}" in r["text"]
             for r in run.main_requests()[ev["flow"]["before"]:])
-        undelivered = [i for i, tail in enumerate(self.tails) if tail not in seen]
-        run.note(f"seen {len(seen)}/{self.COUNT}; states {ev['states']}; "
+        undelivered = [i for i in range(self.COUNT) if i not in whole]
+        run.note(f"seen {len(seen)}/{self.COUNT} tails, {len(whole)}/{self.COUNT} whole bodies; "
+                 f"states {ev['states']}; "
                  f"woken without prompt {ev['flow']['woken_without_prompt']}")
         if lost:
-            run.note(f"{len(lost)} notices recorded acked but never reached the model"
+            run.note(f"{len(lost)} notices recorded acked but never reached the model whole"
                      + ("; the native hook output limit saved the rest to a file and showed "
                         "a preview" if ev["spilled_to_file"] else ""))
             return "fail"
         if not undelivered:
             return "pass"
-        return "gap" if len(seen) == 0 else "fail"
+        return "gap" if len(seen) == 0 and not whole else "fail"
 
 
 class ReportLongScenario(Scenario):
@@ -440,7 +467,8 @@ class ReportAfterErrorScenario(Scenario):
 
 class SubsessionCompletionScenario(Scenario):
     name = "subsession-completion"
-    summary = "A native sub-session registers a child; its completion wakes the session."
+    summary = ("A native sub-session registers a child; its completion reaches the root "
+               "session, which runs the next action.")
     carrier = "parent_completion"
     # A built-in general agent on each harness: the sub-session is measured, not a
     # custom agent's model pin (custom agents are custom-agent-spawn, PG-28).
@@ -504,12 +532,21 @@ class SubsessionCompletionScenario(Scenario):
         ev["probe_after_wait"] = ca._helper(run, "probe")
         if woke:
             first = woke[0]
-            ran = any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests()[first["main_index"]:])
             ev["wake_request"] = ca._summary(first)
             ev["woken_thread"] = "sub" if _is_sub(first, self.main, self.sub) else "main"
+            # Only the root counts: a sub-thread may relay the receipt, but the
+            # completion is delivered when the root receives it and acts on it.
+            root = next((r for r in woke if not _is_sub(r, self.main, self.sub)), None)
+            ev["root_received"] = root is not None
+            ran = bool(root) and any(
+                f"{self.NEXT}-42" in r["text"] and not _is_sub(r, self.main, self.sub)
+                for r in run.main_requests()[root["main_index"]:])
+            ev["root_next_action_ran"] = ran
             run.note(f"completion woke the {ev['woken_thread']} thread at request "
-                     f"#{first['main_index']}" + ("; next action ran" if ran else
-                                                   "; next action did not run"))
+                     f"#{first['main_index']}"
+                     + (f"; root received it at request #{root['main_index']}" if root
+                        else "; the root never received it")
+                     + ("; root ran the next action" if ran else "; root did not run the next action"))
             return "pass" if ran else "fail"
         count = len(run.main_requests())
         run.prompt(f"{self.main}-NEXT anything new?")
@@ -697,10 +734,33 @@ class CompletionNoticeSameRootScenario(Scenario):
 # --------------------------------------------------------------------------
 
 def source_status() -> str | None:
-    done = subprocess.run(["git", "--no-optional-locks", "-C", str(_base().SOURCE), "status",
-                           "--porcelain"],
+    """The measured tree's Git status plus a digest of every dirty or untracked file.
+
+    Status letters alone miss a second edit to a file that was already dirty, so
+    each listed path also carries its content hash.  Clean tracked files are
+    compared by Git itself.
+    """
+    source = _base().SOURCE
+    done = subprocess.run(["git", "--no-optional-locks", "-C", str(source), "status",
+                           "--porcelain", "-z", "--untracked-files=all"],
                           text=True, capture_output=True, timeout=30)
-    return done.stdout if done.returncode == 0 else None
+    if done.returncode != 0:
+        return None
+    lines, entries = [], iter(done.stdout.split("\0"))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            entry += " <- " + next(entries, "")   # -z puts a rename's origin next
+        path = source / entry[3:].split(" <- ")[0]
+        digest = "-"
+        with contextlib.suppress(OSError):
+            if path.is_file() and not path.is_symlink():
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            elif path.is_symlink():
+                digest = "link:" + os.readlink(path)
+        lines.append(f"{entry} {digest}")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def delink_config(env: dict) -> list[str]:
@@ -902,10 +962,17 @@ class HerdrPeerPromptScenario(Scenario):
         binary = real_herdr()
         if not binary:
             raise RuntimeError("herdr-executable-unavailable")
+        ev = run.evidence
+        env = run.home.env
+        # The source install links config files into the measured tree; this
+        # prepare step and Herdr's integration install edit them in place, so
+        # before any write each linked file becomes a private copy and the
+        # source state is recorded (the measured tree is never written).
+        ev["delinked"] = delink_config(env)
+        ev["source_status_before"] = source_status()
         # A short private root: Herdr's socket path must fit sun_path.
         self.scratch = Path(tempfile.mkdtemp(prefix="hbh-", dir="/tmp"))
         session = "hb-" + uuid.uuid4().hex[:8]
-        env = run.home.env
         # Herdr places its sockets under XDG_CONFIG_HOME/herdr/sessions/<name>; the
         # fixture's config root is too long for sun_path, so a short mirror of it
         # (symlinks to every existing entry) becomes the config root for the run.
@@ -934,13 +1001,7 @@ class HerdrPeerPromptScenario(Scenario):
             data["promptSuggestionEnabled"] = True
             settings.write_text(json.dumps(data, indent=1), encoding="utf-8")
         run.herdr = {"bin": binary, "session": session, "config": str(config)}
-        ev = run.evidence
         ev["herdr_private"] = {"session": session, "config": str(config)}
-        # The source install links config files into the measured tree; Herdr's
-        # integration install edits them in place, so each linked file it may
-        # touch becomes a private copy first (the measured tree is never written).
-        ev["delinked"] = delink_config(env)
-        ev["source_status_before"] = source_status()
         activation = subprocess.run(
             [str(_base().SOURCE / "tools/install/harness.sh"), "runtime", "activate", "--runtime",
              run.harness, "--mode", "packaged", "--source", str(_base().SOURCE), "--json"],
@@ -1042,11 +1103,14 @@ class HerdrPeerPromptScenario(Scenario):
                            timeout=30)
         ev["herdr_agent_wait"] = {"target": target, "exit": waited.returncode,
                                   "stdout": waited.stdout[-300:], "stderr": waited.stderr[-200:]}
-        detected = bool(agents)
+        # A pane row (even one with only idle metadata) is not detection: Herdr must
+        # name the harness this run launched.
+        ev["herdr_agents_seen"] = [a.get("agent") for a in agents]
+        detected = any(a.get("agent") == run.harness for a in agents)
         returned = waited.returncode == 0
         run.note(f"pane prompt {'arrived' if arrived else 'did not arrive'}"
                  f" ({' '.join(re.findall(r'(?:prompted|verify|state_before)=\S+', sent.stdout))})"
-                 f"; agent detected={detected}; agent wait returned={returned}"
+                 f"; {run.harness} detected={detected} (agents {ev['herdr_agents_seen']}); agent wait returned={returned}"
                  + (f"; suggestion visible={ev['suggestion_visible']}" if run.harness == "claude"
                     else ""))
         if self.source_changed(run):
