@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import inspect
@@ -568,6 +569,16 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         sleep.assert_not_called()
 
+    def assert_exact_failure_inspection(self, message: str) -> None:
+        commands = [line for line in message.splitlines() if " observed-status " in line]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(shlex.split(commands[0]), [
+            "python3", str(ROOT / "utilities/dispatch-registry.py"), "observed-status",
+            "--jobs", str(self.jobs), "--attempt", "att-owner-1",
+        ])
+        self.assertNotIn("--mark-done", message)
+        self.assertNotIn("--failure-detail", message)
+
     def test_receipt_forbids_visible_monitor_rearming(self) -> None:
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
@@ -597,8 +608,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn("state=attention", message)
         self.assertIn("Hearting dispatch requires attention", message)
-        self.assertIn("--status done", message)
-        self.assertNotIn("--failure-detail", message)
+        self.assert_exact_failure_inspection(message)
 
     def parked_owner_receipt(self, status: str) -> str:
         launch = rewake.parse_launch(self.payload())
@@ -1024,10 +1034,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             launch, "attention", "terminal-failure-or-unclosed", self.root
         )
         self.assertIn("required_action=inspect-done-failure", message)
-        self.assertIn(f"--jobs {self.jobs}", message)
-        self.assertIn("--attempt-id att-owner-1", message)
-        self.assertIn("--status done", message)
-        self.assertNotIn("--failure-detail", message)
+        self.assert_exact_failure_inspection(message)
 
     def test_complete_open_receipt_names_the_exact_registry(self) -> None:
         launch = rewake.parse_launch(self.payload())
