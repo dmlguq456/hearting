@@ -323,8 +323,10 @@ class ProjectMemoryReadTest(_TmpStoreCase):
             "| PG-1 | Codex | no wake on receipt | open | fix in hooks |\n"
             "| PG-2 | OpenCode | herdr only | needs-user-decision | ask |\n"
             "| PG-3 | Claude | fixed | resolved | - |\n"
-            "| PG-4 | Codex | platform | limit | official docs |\n"
+            "| PG-4 | Codex | platform | limit | official docs (https://example.test/docs) |\n"
             "| PG-5 | Codex | typo | opne | - |\n"
+            "| PG-6 | Codex | still fixable | limit | - |\n"
+            "| PG-7 | Codex | still fixable | limit | official docs |\n"
             "<!-- parity-register:end -->\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(home)}):
             memcol._project_cache.clear()
@@ -332,18 +334,21 @@ class ProjectMemoryReadTest(_TmpStoreCase):
             scoped = memcol._read_project_memory("2026-11-02", repo="repo")["by_repo"]
             own = memcol._read_project_memory("2026-11-02", repo="hearting")["by_repo"]
         rows = full["hearting"]["open"]
-        # Only resolved and limit close a row; an unknown state (a typo) stays open.
+        # Only resolved and a linked limit close a row; an unknown state (a typo) and a
+        # limit whose Next carries no link stay open.
         self.assertEqual(sorted(row["id"] for row in rows),
-                         ["parity:PG-1", "parity:PG-2", "parity:PG-5"])
+                         ["parity:PG-1", "parity:PG-2", "parity:PG-5", "parity:PG-6", "parity:PG-7"])
         headlines = {row["id"]: row["headline"] for row in rows}
         self.assertTrue(headlines["parity:PG-1"].startswith("[미결] PG-1 Codex"))
         self.assertTrue(headlines["parity:PG-2"].startswith("[결정 필요] PG-2"))
         self.assertTrue(headlines["parity:PG-5"].startswith("[미결] PG-5"))
+        self.assertTrue(headlines["parity:PG-6"].startswith("[limit 근거 없음] PG-6"))
+        self.assertTrue(headlines["parity:PG-7"].startswith("[limit 근거 없음] PG-7"))
         self.assertIn("user-decision", {row["id"]: row for row in rows}["parity:PG-2"]["tags"])
         self.assertTrue(all(memcol.open_stage(row) == "open" for row in rows))
-        self.assertEqual(full["hearting"]["open_total"], 3)
+        self.assertEqual(full["hearting"]["open_total"], 5)
         self.assertNotIn("hearting", scoped)
-        self.assertEqual(len(own["hearting"]["open"]), 3)
+        self.assertEqual(len(own["hearting"]["open"]), 5)
         self.assertEqual([row["id"] for row in full["repo"]["open"]], ["ob"])
 
     def test_shipped_parity_register_parses_with_known_states(self):
@@ -355,13 +360,16 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         for line in body.splitlines():
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
             if len(cells) >= 5 and re.fullmatch(r"PG-\d{1,4}", cells[0]):
-                states[cells[0]] = cells[3].strip("`").casefold()
+                states[cells[0]] = (cells[3].strip("`").casefold(), cells[4])
         self.assertTrue(states)
         known = set(memcol._REGISTER_STATES) | set(memcol._REGISTER_CLOSED)
-        self.assertEqual({k: v for k, v in states.items() if v not in known}, {})
+        self.assertEqual({k: v for k, (v, _) in states.items() if v not in known}, {})
+        # Every shipped limit row links its evidence, so none is listed as unlinked.
+        self.assertEqual({k for k, (v, n) in states.items()
+                          if v == "limit" and not memcol.register_row_closed(v, n)}, set())
         listed = {row["id"] for row in memcol.parity_open_items(register)}
-        self.assertEqual(listed, {f"parity:{k}" for k, v in states.items()
-                                  if v not in memcol._REGISTER_CLOSED})
+        self.assertEqual(listed, {f"parity:{k}" for k, (v, n) in states.items()
+                                  if not memcol.register_row_closed(v, n)})
 
     def test_session_block_counts_only_the_records_the_repo_page_counts(self):
         origin = "git:github.com/team/repo"

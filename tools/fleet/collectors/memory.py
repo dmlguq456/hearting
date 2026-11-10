@@ -263,7 +263,20 @@ _REGISTER_START = "<!-- parity-register:start -->"
 _REGISTER_END = "<!-- parity-register:end -->"
 _REGISTER_STATES = {"open": "미결", "needs-user-decision": "결정 필요"}
 _REGISTER_CLOSED = frozenset({"resolved", "limit"})
+_REGISTER_LINK = re.compile(r"https?://[^\s)>\]|]+")
 _parity_cache = {}
+
+
+def register_row_closed(state, follow):
+    """``resolved`` closes a row; ``limit`` closes it only when ``Next`` links its evidence.
+
+    A ``limit`` without a link is the documented definition unmet, so it stays open
+    rather than letting one word hide a fixable difference.
+    """
+    state = state.strip("`").casefold()
+    if state == "limit":
+        return bool(_REGISTER_LINK.search(follow))
+    return state in _REGISTER_CLOSED
 
 
 def _register_path():
@@ -274,8 +287,9 @@ def parity_open_items(path=None):
     """Open rows of the parity register as open-record dicts (headline only).
 
     Row shape: ``| PG-n | harnesses | user-visible effect | state | next |``.  Only
-    ``resolved`` and ``limit`` close a row; any other state, a typo included, stays
-    open so a row cannot disappear unclosed.  A missing or unreadable register yields none.
+    ``resolved`` and a ``limit`` whose ``Next`` links its evidence close a row; any
+    other state, a typo or an unlinked ``limit`` included, stays open so a row
+    cannot disappear unclosed.  A missing or unreadable register yields none.
     """
     path = Path(path) if path is not None else _register_path()
     try:
@@ -299,9 +313,9 @@ def parity_open_items(path=None):
                 continue
             ident, harnesses, effect, state, follow = cells[:5]
             state = state.strip("`").casefold()
-            if state in _REGISTER_CLOSED:
+            if register_row_closed(state, follow):
                 continue
-            label = _REGISTER_STATES.get(state, "미결")
+            label = "limit 근거 없음" if state == "limit" else _REGISTER_STATES.get(state, "미결")
             tags = ("parity", "backlog") + (("user-decision",) if state == "needs-user-decision" else ())
             items.append({
                 "id": f"parity:{ident}", "type": "unresolved-obligation",

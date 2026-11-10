@@ -1065,7 +1065,8 @@ Each row is one harness difference the person can notice. `State` is `open`
 product choice only the person can make; `Next` holds the recommendation),
 `limit` (official documentation confirms the runtime cannot do it; `Next` links
 it), or `resolved` (behaviour measured equal; `Next` names the evidence). Only
-`resolved` and `limit` close a row; any other value, a typo included, stays open.
+`resolved` and a `limit` whose `Next` carries the documentation link close a row;
+any other value, a typo or a `limit` without a link included, stays open.
 The Fleet screen's project open list and counts read the rows that are not
 closed (`tools/fleet/collectors/memory.py` `parity_open_items`); the session
 work list behind the periodic steward check and the session shell does not.
