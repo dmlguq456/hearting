@@ -4246,6 +4246,8 @@ class DetachedCommonRecoveryTest(IsolatedRootMixin, unittest.TestCase):
             "AGENT_PEER_LEDGER_ROOT": str(self.root.parent / "peer-ledger"),
             "AGENT_DISPATCH_JOBS": str(jobs_path),
             "AGENT_HOME": str(fixture_agent_home),
+            # This partial lifecycle fixture has recovery only, no memory runtime.
+            "CODEX_SESSION_MEMORY_INJECT": "0",
             "COMMON_ENTRY_PID_FILE": str(wrapper_pid_file),
             "COMMON_ENTRY_ENV_FILE": str(wrapper_env_file),
             "COMMON_ENTRY_EXEC_MARKER": str(exec_marker),
