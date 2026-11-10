@@ -938,7 +938,7 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
             "launched_outside_resource_runner": True,
             "approval": "route-start (no open human gate for this node)",
             "owner_lineage": "matched", "cwd": "matched", "command_write_scope": "matched",
-            "smoke_attestation": "matched", "config": "matched", "gpu_lease": "matched"})
+            "started_after_dependencies": "matched", "smoke_attestation": "matched", "config": "matched", "gpu_lease": "matched"})
         self.assertEqual([row["path"] for row in adopted["execution"]["outputs"]],
                          ["parts/full-run/logs/train.log", "parts/full-run/run.json"])
         self.assertEqual(self.arm_calls, 1)
@@ -1000,6 +1000,23 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         detail = self.refused("resource-compute-binding-conflict")
         self.assertEqual(detail["differences"][0]["field"], "compute-run.command")
 
+    def test_same_route_smoke_run_started_before_the_first_smoke_completion_is_refused(self):
+        # BC_ResNet, 2026-11-10 review G1: the route's own smoke run
+        # `...-v5-smoke2` (exit 0) started before the smoke stage first
+        # completed and was adopted as full-run. A replacement owner later
+        # rewrote smoke.json, so the earliest completion (smoke.1.json) decides.
+        self.write_smoke_marker("1970-01-01T00:05:00Z", history=False)  # rewritten later
+        (self.markers / "smoke.1.json").write_text(json.dumps({
+            "node_id": "smoke", "completed_at": "1970-01-01T00:02:30Z"}))
+        self.receipt["started_at"] = 120.0          # before the first completion (150)
+        self.meta["command"] = ["bash", "smoke.sh", "--output", str(self.attestation)]
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "compute-run.started_at")
+        self.assertFalse(self.registry.exists())
+        self.receipt["started_at"] = 200.0          # the real full run: after the first completion
+        self.meta["command"] = ["bash", "train.sh", "--config", str(self.config_file)]
+        self.assertEqual(list(self.adopt()), ["full-run__a1"])
+
     def test_open_human_gate_for_the_node_stays(self):
         self.route["human_gate_bindings"] = [{"gate": "full-run-approval", "node": "full-run"}]
         self.refused("resource-compute-human-gate-open")
@@ -1011,9 +1028,11 @@ class RouteDirectComputeAdoptionTest(unittest.TestCase):
         self.meta["command"] = ["bash", "train.sh"]    # no path names its config or scope
         (self.markers / "smoke.json").write_text(json.dumps({
             "route_id": "rt-direct", "route_hash": "sha256:direct", "node_id": "smoke",
-            "completion_gate": "hash-bound-smoke"}))   # no attestation evidence
+            "completion_gate": "hash-bound-smoke"}))   # no attestation evidence or completion time
+        (self.markers / "smoke.1.json").unlink()
         record = self.adopt()["full-run__a1"]["execution"]["contract"]["record"]
-        for key in ("owner_lineage", "command_write_scope", "smoke_attestation", "config", "gpu_lease"):
+        for key in ("owner_lineage", "command_write_scope", "smoke_attestation", "config", "gpu_lease",
+                    "started_after_dependencies"):
             self.assertEqual(record[key], "unverified", key)
 
     def test_mismatched_evidence_is_recorded_not_refused(self):

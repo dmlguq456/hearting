@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Detached process runner with PID reuse-safe reattachment."""
-import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, select, signal, stat, subprocess, sys, time
+import argparse, contextlib, datetime, fcntl, glob, hashlib, importlib.util, json, os, re, select, signal, stat, subprocess, sys, time
 from pathlib import Path
 import resource_resume as RESOURCE_RESUME
 import resource_run_evidence as RUN_EVIDENCE
@@ -1199,6 +1199,43 @@ def _write_scope_root(base, pattern):
     return (Path(base).joinpath(*parts) if parts else None)
 
 
+def _instant(value):
+    """Seconds since the epoch for a recorded epoch number or ISO-8601 time, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        return moment.timestamp()
+    return None
+
+
+def _first_completed_at(completion_root, node_id):
+    """The earliest recorded completion of a node: its marker or any history `<node>.N.json`.
+
+    A replacement owner may rewrite `<node>.json` later, so only the first
+    completion says when the node's successors could have started.
+    """
+    times = []
+    for path in [completion_root / f"{node_id}.json",
+                 *completion_root.glob(f"{glob.escape(node_id)}.*.json")]:
+        if path.name != f"{node_id}.json" and not path.name[len(node_id) + 1:-5].isdigit():
+            continue
+        try:
+            moment = _instant(json.loads(path.read_text(encoding="utf-8")).get("completed_at"))
+        except (OSError, ValueError, AttributeError):
+            continue
+        if moment is not None:
+            times.append(moment)
+    return min(times) if times else None
+
+
 def _command_path_tokens(command):
     tokens = []
     for part in command if isinstance(command, list) else []:
@@ -1221,7 +1258,9 @@ def route_direct_compute_candidate(COMPUTE, config, compute_run_id, route, route
     compute record: exit 0, empty process group), and no other row holding it
     (checked by the seat). Command, cwd, inputs, outputs and owner lineage are
     recorded as matched / mismatched / unverified, never refused for lack of
-    evidence. A refusal also stays when the record plainly names another node.
+    evidence. A refusal also stays when the record plainly names another node:
+    the run started before the node's dependencies first completed, or its
+    command writes only into another resource node's write scope.
 
     Returns None when the run carries a resource contract (the existing seats
     decide it); otherwise the compute record or a typed refusal.
@@ -1266,8 +1305,7 @@ def route_direct_compute_candidate(COMPUTE, config, compute_run_id, route, route
             next_action="pass the route cycle's own resource-runs.json as --registry")
 
     # The node: an explicit --node, else the route's one current resource stage
-    # (every dependency marker present, its own absent). Refuse only when the
-    # command plainly writes into another resource node's sealed write scope.
+    # (every dependency marker present, its own absent).
     completion_root = dispatch_state_root(Path(jobs)) / "completion" / str(route["route_id"])
     nodes = [node for node in route.get("nodes") or [] if isinstance(node, dict)
              and node.get("kind") == "resource-runner"
@@ -1294,6 +1332,24 @@ def route_direct_compute_candidate(COMPUTE, config, compute_run_id, route, route
              "actual": [node.get("id") for node in selected]}],
             next_action="repeat the same compute-run start with --node <resource node>")
     node = selected[0]
+    # A run that started before this node's dependencies first completed is a
+    # run of an earlier stage (a smoke run of the same route), not this node's.
+    # Unreadable times are only recorded.
+    try:
+        started = _instant(json.loads((run_dir / "launch-receipt.json").read_text(
+            encoding="utf-8")).get("started_at"))
+    except (OSError, ValueError, AttributeError):
+        started = None
+    ready = {dependency: _first_completed_at(completion_root, dependency)
+             for dependency in node.get("depends_on") or []}
+    ready = {dependency: moment for dependency, moment in ready.items() if moment is not None}
+    if started is not None and ready and started < max(ready.values()):
+        fail_compute("resource-compute-binding-conflict", differences=[
+            {"field": "compute-run.started_at",
+             "expected": {"not_before_first_completion_of": ready},
+             "actual": started}],
+            next_action=(f"this run started before {node['id']}'s dependencies first completed, "
+                         "so it is an earlier stage's run; give the run started for this node"))
     tokens = _command_path_tokens(meta.get("command"))
 
     def writes_into(candidate):
@@ -1355,6 +1411,7 @@ def route_direct_compute_candidate(COMPUTE, config, compute_run_id, route, route
         "owner_lineage": verdict(owner_ok),
         "cwd": verdict(cwd_ok),
         "command_write_scope": verdict(writes_into(node) or None),
+        "started_after_dependencies": verdict(True if started is not None and ready else None),
         "smoke_attestation": verdict(None if not smoke.get("current")
                                      else smoke["current"] == smoke.get("sha256")),
         "config": verdict(config_ok),
