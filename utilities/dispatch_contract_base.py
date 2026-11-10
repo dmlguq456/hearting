@@ -1201,6 +1201,10 @@ def launch_repository_identity(path: str | Path, route_file: str | Path | None) 
 
 
 ATTEMPT_DESCENDANT_ENV = "AGENT_DISPATCH_ATTEMPT_ID"
+# Hearting's own detached settlement (the turn-end checkpoint) drops the descendant
+# tag but keeps the owner it writes for under this separate name, so the owner's
+# cleanup-scope guard still applies at its entry without counting it as live work.
+CLEANUP_OWNER_ENV = "AGENT_CLEANUP_OWNER_ATTEMPT_ID"
 
 
 def governance_environment(environ=None):

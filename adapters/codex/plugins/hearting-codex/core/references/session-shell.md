@@ -61,10 +61,21 @@ The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
 Keep the observed model/effort at the top (an unavailable effort is `?`) and
 compact session information at the bottom, never opportunistically in the
-middle. Full session IDs and long diagnostics belong to details. The wrapped Claude native row yields model/effort and route/wait badges to
-the common header and work/question sections. Its exact callback remains the
-source. Fields already painted in a native-owned status area are omitted from the compact duplicate.
-Physical exceptions are explicit: Claude's reserved native status rows and
+middle. There is no separate session-details view: below the route and any
+question, the panel always paints the rest of the statusline (folder, title,
+full thread ID, branch with dirty, ahead/behind, worktrees and Git
+observation, quota resets and running jobs), then peer news and the last
+input, each only in rows left after the question, and an item without a value
+is left out. Running jobs join the last session row when they fit. While a
+question leaves too few rows for every session row, the title, running jobs
+and branch, in that order, are packed into rows the panel already paints (a
+filled side panel's rows, or its spacer row) and then into the panel's bottom
+edge, so they never leave the screen; the question keeps the rows it had and a
+bottom panel does not grow for them. Claude's exact statusline callback remains the source of its
+values; the panel shows them in the same header, compact status and session
+rows as the other harnesses.
+Fields already painted in a native-owned status area are omitted from the compact duplicate.
+Physical exceptions are explicit: Claude's reserved native status row and
 OpenCode's fixed sidebar, native Context/footer and native scroll gutter.
 Native-owned spaces are not recolored or resized to imitate another harness.
 Question interiors have one blank cell on both sides. Route state and shared
@@ -84,16 +95,14 @@ Clicking a route opens its existing read-only detail. Put each answer choice on
 its own line, wrapping within that choice; do not reserve a standalone
 session/age row. Hide an empty result section. Use the
 existing operator language setting and catalog. No last prompt is guessed
-into a goal. Full IDs, old peers and repo backlog belong to accessible details.
+into a goal. Old peers and repo backlog stay in Fleet.
 Route details reuse the common route-visibility projection for shape, basis,
 tests, review, CI and completion evidence. Missing evidence is not a passing
 check. Bounded detail pages remain readable at narrow widths; opening them
 does not collect again or authorize an action.
-Retain every former status field there, and preserve Claude's native reserved
-status area. For the work panel, the managed Codex footer may yield duplicate
-paint to its visible model/compact status and the same session's complete
-details. This keeps the full ID in details instead of putting it in front of
-the person merely to hide a duplicate footer. Exact native SID, unchanged
+For the work panel, the managed Codex footer may yield duplicate paint only to
+its visible model, compact status and session rows, including the full thread
+ID, all actually painted. Exact native SID, unchanged
 managed configuration and matching native values are still required. Display
 availability does not establish selection or input authority.
 
@@ -132,7 +141,7 @@ Pending transport and proved consumption are distinct, and unavailable, expired
 or cancelled questions offer no active choices. Long questions remain readable
 with focused scrolling and an explicit overflow count. Use the bounded configured row budget,
 preserve at least six native rows where possible, and retain the shared status
-fields and Claude's native-owned status area. The former rows/3 estimate does
+fields. The former rows/3 estimate does
 not hide a question or require another user decision at 80 columns.
 It shows the same session's routes, questions, received peers, repo work and
 last real human input. Only session-owned GPU work warrants a resource row.
@@ -171,18 +180,39 @@ lag (median/p95) for end-of-turn context/model, route creation/stage/closure and
 question creation/answer across all three harnesses. The target is at most one
 additional second; keyboard latency stays within the prototype's +2–11 ms.
 A value that cannot meet this is compared with retaining that native field.
-While wrapped, Claude paints the common status area in its own native statusline
-rows, directly from its callback. It calls the same formatter as the block and
-retains every former Hearting field. Claude's lower block omits that status area
-and keeps routes, questions, messages, work and the last human input. Codex and
-OpenCode retain the status area in their block. Unwrapped displays remain intact.
+While wrapped, Claude's panel shows the common status area in the same place
+and with the same formatter as Codex and OpenCode. Claude keeps its reserved
+statusline row and keeps running its callback, which stays the value source and
+paints every former Hearting field with that formatter on every callback; the
+panel never shortens it. Its first callback at session start reads the same
+shared Git observation as later callbacks, so folder, branch and model show
+before the first input; context and quota readings Claude has not reported yet
+(it sends them after its first response) are left out, as the native statusline
+did, rather than shown as `?`. Only while the panel actually paints its model,
+compact status and session rows for the callback's exact session does the shell blank Claude's
+statusline area, the rows directly under the input box, when their text equals
+the callback's latest recorded output. A screen without that input box, such
+as the Ctrl+O transcript, keeps every row. Claude has no supported way to
+remove those rows, so as many rows remain as the complete status takes
+(measured: two at 133 and 80 columns, three with a running job); keeping every
+value visible comes first. The first of
+them is a notice row, empty unless the person must know something now, and any
+other stays blank. One function picks a single item by priority from existing
+values: an answer this session owes, then an already computed warning
+(compaction imminent, a context or usage reading at Fleet's red level, a
+failed, blocked or attention-needing route), then news that arrived since the
+last human input within ten minutes (a received peer report or a completed
+route result). It reuses Fleet's glyphs and colors and adds no collection,
+setting or judgment. A hidden, collapsed, focused or not-yet-bound panel, a
+lost display host and unwrapped sessions show the complete native rows
+unchanged. Unwrapped displays remain intact.
 First display and updates are compared beside native and Fleet. Last-known
 values and event observations belong in their shared source, not a block-only
 store.
 The marker did not survive Native Ink, so no native row is removed or inferred
-from geometry. The approved replacement uses that space for the common line.
-Claude's status row follows its native callback cadence; block updates retain
-their event-driven contract. Parity compares Claude's native row and block together.
+from geometry; blanking matches exact recorded text only. Claude's status row
+follows its native callback cadence; block updates retain their event-driven
+contract. Parity compares Claude's panel status with its native row.
 First paint reuses the latest display observation before optional collection.
 Native terminal context is presentation evidence only, never input authority.
 Fleet may consume that same narrow display observation between its normal
@@ -192,14 +222,12 @@ or model text does not admit a new session, refresh action authority, complete a
 collection generation or schedule another detail pass. Basic collection and its
 CPU protection keep their existing cadence.
 OpenCode's visible context percentage owns its common-line percentage too.
-Claude's native status row owns route/wait badges; the block retains question
-contents without repeating those badges.
 Wrapped Codex keeps its original native arguments, settings and permission flags.
 OpenCode's Hearting route footer yields to the shell. The wrapped Codex viewport
 reads its native footer unchanged. Concealment requires the unchanged managed
 default preference, exact native SID and matching values for all seven managed
-items. The work panel must actually paint its model and compact status, with
-the remaining fields available in that same selected session's details. Custom,
+items. The work panel must actually paint its model, compact status and session
+rows for that same selected session. Custom,
 clipped, stale or ambiguous content stays visible. This affects
 painting, not the native VT, its coordinates or its input/identity observations.
 Person-requested answers use the existing separate action worker so a slow
@@ -245,4 +273,4 @@ consumes that mouse press/release as it does its own bottom/side controls, so it
 does not masquerade as unsubmitted native draft bytes. A mismatch stays with
 native mouse handling. This display hit test never supplies input authority.
 At a short bottom answer editor all harnesses prioritize the same question/
-choices/draft/control rows; auxiliary telemetry stays in session details.
+choices/draft/control rows; session rows take only the rows left after them.

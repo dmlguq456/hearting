@@ -36,9 +36,14 @@ def _files(root: Path, skip=(".runtime/artifact-producer/v1/journal", ".runtime/
         if not path.is_file() or path.is_symlink():
             continue
         rel = path.relative_to(root).as_posix()
-        # Disposable lookup projections are outside the rollback's durable state.
+        # Disposable lookup projections are outside the rollback's durable state. The two
+        # producer accelerators are written by a reconcile pass only once the observed
+        # identities are older than the settle margin, so whether they exist depends on how
+        # long the fixture took (a slow runner writes them between snapshot and rollback).
         if rel in {".runtime/routes/.route-children-index.json",
-                   ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json"}:
+                   ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json",
+                   f".runtime/artifact-producer/v1/{P.CONTROL_MEMO_NAME}",
+                   f".runtime/artifact-producer/v1/{P.HISTORY_QUIET_NAME}"}:
             continue
         if any(rel.startswith(s) for s in skip):
             continue
