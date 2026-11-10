@@ -1828,6 +1828,33 @@ class RunDeadlineFixture(RunTestsFixtureBase):
         # Under host load the retry may find the budget already spent.
         self.assertRegex(rows[0]["detail"], r"run-deadline=(stopped|not-started)")
 
+    def test_an_earlier_passing_retry_does_not_hide_a_later_deadline_cut(self):
+        # RV-PR1478-R2 [7b] residual: an unlisted suite fails, its first retry
+        # passes, its second retry is cut by the run budget. The pass must
+        # not turn the aggregate into FLAKY-PASS.
+        write_suite(self.root, "unlisted.test.py", """
+            from pathlib import Path
+            import sys, time
+            p = Path('attempt-count')
+            n = int(p.read_text()) + 1 if p.exists() else 1
+            p.write_text(str(n))
+            if n == 1:
+                sys.exit(1)
+            if n >= 3:
+                time.sleep(60)
+        """)
+        result, rows = self.run_fixture(
+            [], extra_args=["--jobs", "1", "--timeout", "30", "--deadline", "5", "--retries", "2"],
+        )
+        self.assertEqual((self.root / "attempt-count").read_text(), "3", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["verdict"], "TIMEOUT")
+        self.assertEqual(rows[0]["kind"], "deadline")
+        self.assertIn("outcomes=fail,pass,deadline", rows[0]["detail"])
+        self.assertIn("policy=unlisted-serial-retry", rows[0]["detail"])
+        self.assertIn("run-deadline=stopped", rows[0]["detail"])
+
     def test_a_non_positive_deadline_is_a_usage_error(self):
         result = run_runner(["--root", str(self.root), "--deadline", "0"])
         self.assertEqual(result.returncode, 64)

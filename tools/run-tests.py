@@ -1668,6 +1668,21 @@ class Verdict:
         self.kind = kind
 
 
+def retry_aggregate_deadline(relpath: str, attempts, detail: str) -> "Verdict | None":
+    """Shared rule for every retry aggregate: a run-deadline cut wins.
+
+    An attempt the run budget stopped or never started did not finish, so a
+    pass on another attempt (earlier or later) cannot turn the aggregate into
+    success. Each aggregate path calls this before its own success rule.
+    """
+    cut = [attempt.run_deadline for attempt in attempts if attempt.run_deadline]
+    if not cut:
+        return None
+    return Verdict(relpath, "-", "TIMEOUT",
+                   detail=f"{detail}; run-deadline={','.join(cut)}",
+                   kind=RUN_DEADLINE_KIND)
+
+
 def classify_result(
     result: SuiteResult,
     baseline: dict[tuple[str, str], dict[str, str]],
@@ -2876,11 +2891,9 @@ def _run_main(argv: list[str]) -> int:
             expected = {row["expected_failure_kind"] for row in flaky_rows}
             outcomes = []
             mismatch = False
-            deadline_cut = []
             for attempt in attempt_results:
                 if attempt.run_deadline:
                     outcomes.append(RUN_DEADLINE_KIND)
-                    deadline_cut.append(attempt.run_deadline)
                 elif attempt.passed:
                     outcomes.append("pass")
                 else:
@@ -2904,34 +2917,40 @@ def _run_main(argv: list[str]) -> int:
                 detail += f"; failing={','.join(failing_ids)}"
             if result.relpath in retry_budget_exhausted:
                 detail += "; retry-budget-exhausted"
-            if deadline_cut:
-                detail += f"; run-deadline={','.join(deadline_cut)}"
-            # A flaky-timing suite's all-pass aggregate is not a genuine
-            # unexpected pass: one run (or one budget-limited run) proves
-            # nothing about a suite explicitly declared flaky, so it gets its
-            # own non-fatal verdict distinct from a non-flaky suite's XPASS.
-            verdict = (
-                "TIMEOUT" if deadline_cut
-                else "KIND-MISMATCH" if mismatch
-                else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
-                else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
-                else "FLAKY-KNOWN-FAIL"
-            )
-            verdicts = [Verdict(result.relpath, "-", verdict, detail=detail,
-                                kind=RUN_DEADLINE_KIND if deadline_cut else None)]
-            if verdict == "FLAKY-PASS":
-                flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
+            deadline_verdict = retry_aggregate_deadline(result.relpath, attempt_results, detail)
+            if deadline_verdict is not None:
+                verdicts = [deadline_verdict]
+            else:
+                # A flaky-timing suite's all-pass aggregate is not a genuine
+                # unexpected pass: one run (or one budget-limited run) proves
+                # nothing about a suite explicitly declared flaky, so it gets its
+                # own non-fatal verdict distinct from a non-flaky suite's XPASS.
+                verdict = (
+                    "KIND-MISMATCH" if mismatch
+                    else "FLAKY-PASS" if all(x == "pass" for x in outcomes)
+                    else "KNOWN-FAIL" if all(x == "known-fail" for x in outcomes)
+                    else "FLAKY-KNOWN-FAIL"
+                )
+                verdicts = [Verdict(result.relpath, "-", verdict, detail=detail)]
+                if verdict == "FLAKY-PASS":
+                    flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
         elif result.relpath in unlisted_retried and len(attempt_results) > 1:
             retries = attempt_results[1:]
-            if any(attempt.passed for attempt in retries):
-                failing_ids = sorted({
-                    test_id for attempt in attempt_results
-                    if not attempt.passed for test_id in attempt.failing_test_ids
-                })
-                outcomes = ",".join("pass" if a.passed else "fail" for a in attempt_results)
-                detail = f"attempts={len(attempt_results)}; outcomes={outcomes}; policy=unlisted-serial-retry"
-                if failing_ids:
-                    detail += f"; failing={','.join(failing_ids)}"
+            failing_ids = sorted({
+                test_id for attempt in attempt_results
+                if not attempt.passed for test_id in attempt.failing_test_ids
+            })
+            outcomes = ",".join(
+                RUN_DEADLINE_KIND if a.run_deadline else "pass" if a.passed else "fail"
+                for a in attempt_results
+            )
+            detail = f"attempts={len(attempt_results)}; outcomes={outcomes}; policy=unlisted-serial-retry"
+            if failing_ids:
+                detail += f"; failing={','.join(failing_ids)}"
+            deadline_verdict = retry_aggregate_deadline(result.relpath, attempt_results, detail)
+            if deadline_verdict is not None:
+                verdicts = [deadline_verdict]
+            elif any(attempt.passed for attempt in retries):
                 verdicts = [Verdict(result.relpath, "-", "FLAKY-PASS", detail=detail)]
                 flaky_names.extend(_flaky_name_lines(result.relpath, attempt_results))
             else:
