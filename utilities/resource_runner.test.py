@@ -750,6 +750,287 @@ class ComputeRunAdoptionTest(unittest.TestCase):
                                   for path in before_workflow.rglob("*") if path.is_file()}, before_journal)
 
 
+class RouteDirectComputeAdoptionTest(unittest.TestCase):
+    """BC_ResNet event, 2026-11-10: the route's owner ran the full run itself.
+
+    The owner attempt of route rt-136853c5 launched `compute-hosts run`
+    directly: the run recorded only route provenance (route file and id,
+    owner attempt), no resource contract, no resource-runs.json row and no
+    outputs.json. Only the route's own run of one node is adopted; every
+    other shape keeps its refusal and writes nothing.
+    """
+
+    RUN = "gpu-20261107-full"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.root = Path(self.tmp.name)
+        self.art = root / "art"
+        self.out = self.art / "cycle" / "artifacts"
+        self.route_file = self.art / ".runtime" / "routes" / "rt-direct.json"
+        self.route_file.parent.mkdir(parents=True)
+        self.cwd = root / "src"
+        self.cwd.mkdir()
+        self.config_file = self.cwd / "run.yaml"
+        self.config_file.write_text("epochs: 2\n")
+        self.jobs = root / "state" / "jobs.log"
+        self.jobs.parent.mkdir()
+        self.jobs.write_text("")
+        self.registry = self.out / "resource-runs.json"
+        self.attestation = self.out / "_internal" / "smoke" / "smoke-attestation.json"
+        self.attestation.parent.mkdir(parents=True)
+        self.attestation.write_text(json.dumps({
+            "cwd": str(self.cwd), "config_source_path": str(self.config_file),
+            "config_sha256": hashlib.sha256(self.config_file.read_bytes()).hexdigest()}))
+        for relative, text in (("parts/full-run/run.json", '{"science":1}\n'),
+                               ("parts/full-run/logs/train.log", "epoch 1\n")):
+            (self.out / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.out / relative).write_text(text)
+        self.route = {
+            "route_id": "rt-direct", "route_hash": "sha256:direct", "capability": "autopilot-code",
+            "artifact_root": str(self.art), "cwd": str(self.cwd),
+            "codex_execution_sandbox": {"gpu_resource_nodes": ["full-run"]},
+            "nodes": [
+                {"id": "smoke", "kind": "review-worker", "completion_gate": "hash-bound-smoke",
+                 "outputs": ["_internal/smoke/smoke-attestation.json"]},
+                {"id": "full-run", "kind": "resource-runner", "depends_on": ["smoke"],
+                 "completion_gate": "authorized-full-run", "start_approval": "full-run",
+                 "inputs": ["_internal/smoke/smoke-attestation.json", "config"],
+                 "outputs": ["parts/full-run/run.json", "parts/full-run/logs/**"],
+                 "write_scope": ["parts/full-run/run.json", "parts/full-run/logs/**"],
+                 "continuation": {"kind": "supervised"}},
+                {"id": "host-run", "kind": "resource-runner", "depends_on": ["full-run"],
+                 "completion_gate": "resource-exit", "outputs": ["parts/host-run/run.json"],
+                 "write_scope": ["parts/host-run/**"], "continuation": {"kind": "supervised"}}]}
+        self.route_file.write_text(json.dumps(self.route))
+        self.markers = self.jobs.parent / "completion" / "rt-direct"
+        self.markers.mkdir(parents=True)
+        self.write_smoke_marker("1970-01-01T00:00:50Z")
+        self.compute_root = root / "compute"
+        self.run_dir = self.compute_root / self.RUN
+        self.run_dir.mkdir(parents=True)
+        self.compute_config = root / "compute-hosts.yaml"
+        self.compute_config.write_text(f"schema_version: 1\nrun_root: {self.compute_root}\nhosts:\n"
+                                       "  gpu:\n    ssh_host: fixture-host\n")
+        self.meta = {
+            "run_id": self.RUN, "host": "gpu", "gpus": "1", "share": True, "cwd": str(self.cwd),
+            "artifact_root": str(self.art),
+            "command": ["bash", "train.sh", "--config", str(self.config_file),
+                        "--log-dir", str(self.out / "parts" / "full-run" / "logs")],
+            "gpu_lease": {"run_id": self.RUN, "host": "gpu", "gpus": ["1"]},
+            "execution_contract": None,
+            "provenance": {"attempt_id": "att-launcher",
+                           "route": {"route_file": str(self.route_file), "route_id": "rt-direct",
+                                     "source": "environment"}}}
+        self.receipt = {"schema_version": 1, "run_id": self.RUN, "host": "fixture-host",
+                        "state": "finished", "exit_code": 0, "started_at": 100.0, "ended_at": 200.0,
+                        "identity": {"pid": 9, "starttime": "11", "process_group": 9,
+                                     "pid_namespace": "pid:[fixture]", "boot_id": "boot"}}
+        self.exit_code = "0\n"
+        self.attempts = {"att-launcher": {"worker_type": "owner",
+                                          "owner_route_file": str(self.route_file),
+                                          "owner_route_id": "rt-direct",
+                                          "owner_route_hash": "sha256:direct"}}
+        self.remote_state = "empty"
+        self.ledger_state = {"workflow_state": "CREATED", "nodes": {}}
+        self.watches = {}
+
+    def write_smoke_marker(self, completed_at, history=True):
+        digest = hashlib.sha256(self.attestation.read_bytes()).hexdigest()
+        marker = {"route_id": "rt-direct", "route_hash": "sha256:direct", "node_id": "smoke",
+                  "completion_gate": "hash-bound-smoke", "completed_at": completed_at,
+                  "evidence": {"path": str(self.attestation), "sha256": digest}}
+        (self.markers / "smoke.json").write_text(json.dumps(marker))
+        if history:
+            (self.markers / "smoke.1.json").write_text(json.dumps(marker))
+
+    def write_run(self):
+        self.run_dir.joinpath("meta.json").write_text(json.dumps(self.meta))
+        self.run_dir.joinpath("launch-receipt.json").write_text(json.dumps(self.receipt))
+        if self.exit_code is not None:
+            self.run_dir.joinpath("exit_code").write_text(self.exit_code)
+
+    def adopt(self):
+        """Run the real adoption: only the live owner, its input target, the
+        producer's cycle lookup and the remote host probe are stand-ins."""
+        import dispatch_completion_join as JOIN
+        import dispatch_resource_wait as OWNER_RESOURCE
+        self.write_run()
+        owner_wait = {"parent_attempt_id": "att-current", "session_id": "sid-current",
+                      "route_id": "rt-direct", "route_hash": "sha256:direct",
+                      "jobs": str(self.jobs.resolve()), "owner_pid": 1, "owner_start": "1"}
+        ledger = SimpleNamespace(lock=contextlib.nullcontext, root=self.root / "workflow",
+                                 state=lambda: self.ledger_state, claims=lambda: {},
+                                 journal=lambda: [])
+        sup = SimpleNamespace(ledger_for=lambda *_a: ledger,
+                              read_armed=lambda _ledger: dict(self.watches),
+                              resource_predecessors=lambda *_a: [],
+                              resource_continuation_cancelled=lambda *_a: False)
+        remote = mock.Mock(side_effect=lambda *_a, **_k: SimpleNamespace(
+            returncode=0, stdout=json.dumps({"state": self.remote_state, "reason": "fixture"}) + "\n"))
+        real_spec = importlib.util.spec_from_file_location
+
+        def compute_spec(name, location, *positional, **keywords):
+            spec = real_spec(name, location, *positional, **keywords)
+            if spec and Path(location).name == "compute-hosts.py":
+                source_loader = spec.loader
+
+                class Loader:
+                    def create_module(self, module_spec):
+                        return None
+
+                    def exec_module(self, module):
+                        source_loader.exec_module(module)
+                        module.remote = remote
+                spec.loader = Loader()
+            return spec
+
+        def attempt_row(_jobs, attempt_id, **_kwargs):
+            if attempt_id not in self.attempts:
+                raise JOIN.JoinContractError("attempt-row-missing")
+            return SimpleNamespace(metadata=self.attempts[attempt_id])
+        artifacts = SimpleNamespace(prepare_route_artifact_env=lambda *_a, **_k: {
+            "AGENT_ARTIFACT_OUTPUT_DIR": str(self.out)})
+        arm = mock.Mock(return_value=subprocess.CompletedProcess(["arm"], 0))
+        with mock.patch.object(OWNER_RESOURCE, "start_binding", return_value=owner_wait), \
+                mock.patch.object(OWNER_RESOURCE, "supervisor", return_value=sup), \
+                mock.patch.object(JOIN, "exact_attempt_row", side_effect=attempt_row), \
+                mock.patch("dispatch_owner_input._locked", side_effect=lambda *_a: contextlib.nullcontext()), \
+                mock.patch("dispatch_owner_input._target",
+                           side_effect=lambda *_a: (SimpleNamespace(status="running"), "target")), \
+                mock.patch("importlib.util.spec_from_file_location", side_effect=compute_spec), \
+                mock.patch.dict(sys.modules, {"artifact_producer": artifacts}), \
+                mock.patch.object(R, "verify_launch_input"), \
+                mock.patch.object(R, "register_registry"), \
+                mock.patch.object(R.subprocess, "run", arm), \
+                mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs),
+                                             "AGENT_DISPATCH_COMPLETION_MODE": "supervised",
+                                             "COMPUTE_HOSTS_CONFIG": str(self.compute_config)}), \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            R.adopt_compute_run(self.registry, SimpleNamespace(jobs=str(self.jobs), parent_attempt_id=None),
+                                self.route, self.route_file, self.RUN)
+        self.arm_calls = arm.call_count
+        return json.loads(self.registry.read_text())["runs"]
+
+    def refused(self, token):
+        before = self.registry.read_bytes() if self.registry.exists() else None
+        with self.assertRaises(SystemExit) as refusal:
+            self.adopt()
+        self.assertEqual(refusal.exception.code, 65)
+        self.assertIn(token, refusal.exception.resource_message)
+        after = self.registry.read_bytes() if self.registry.exists() else None
+        self.assertEqual(before, after, "a refusal writes no registry row")
+        return json.loads(refusal.exception.resource_message)
+
+    def test_route_direct_run_is_adopted_and_a_repeat_replays(self):
+        runs = self.adopt()
+        self.assertEqual(list(runs), ["full-run__a1"])
+        adopted = runs["full-run__a1"]
+        self.assertEqual((adopted["status"], adopted["exit_code"], adopted["node"]),
+                         ("succeeded", 0, "full-run"))
+        self.assertEqual(adopted["parent_attempt_id"], "att-current")
+        contract = adopted["execution"]["contract"]
+        self.assertEqual(contract["kind"], "route-direct-v1")
+        self.assertEqual(contract["attempt_id"], "att-launcher")
+        self.assertEqual([row["path"] for row in adopted["execution"]["outputs"]],
+                         ["parts/full-run/logs/train.log", "parts/full-run/run.json"])
+        self.assertEqual({item["name"] for item in contract["inputs"]}, {"smoke_attestation", "config"})
+        self.assertEqual(adopted["execution"]["provenance"]["route_hash"], "sha256:direct")
+        self.assertEqual(self.arm_calls, 1)
+        published = self.registry.read_bytes()
+        self.watches = {"full-run": {"node": "full-run", "predecessor_kind": "resource",
+                                     "predecessor_id": "full-run__a1",
+                                     "resource_registry": str(self.registry),
+                                     "artifact_base": str(self.out)}}
+        self.assertEqual(list(self.adopt()), ["full-run__a1"])
+        self.assertEqual(self.registry.read_bytes(), published, "the repeat converges on one row")
+
+    def test_route_direct_publish_then_arm_interruption_replays(self):
+        self.adopt()
+        published = self.registry.read_bytes()
+        self.adopt()  # no watch yet: the published row is found and armed again
+        self.assertEqual(self.registry.read_bytes(), published)
+        self.assertEqual(self.arm_calls, 1)
+
+    def test_route_free_run_is_refused(self):
+        self.meta["provenance"] = {"attempt_id": "att-launcher"}
+        self.refused("resource-compute-route-mismatch")
+
+    def test_another_routes_run_is_refused(self):
+        self.meta["provenance"]["route"] = {"route_file": str(self.root / "other.json"),
+                                            "route_id": "rt-other"}
+        self.refused("resource-compute-route-mismatch")
+
+    def test_run_launched_by_no_owner_of_this_route_is_refused(self):
+        self.attempts["att-launcher"] = {**self.attempts["att-launcher"], "owner_route_id": "rt-other"}
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "provenance.attempt_id")
+        self.meta["provenance"]["attempt_id"] = "att-unknown"
+        self.refused("resource-compute-binding-conflict")
+
+    def test_another_nodes_run_is_refused(self):
+        # A host-run command writes into host-run's scope; its full-run
+        # dependency is not complete, so it is never full-run evidence.
+        self.meta["command"] = ["bash", "eval.sh", "--config", str(self.config_file),
+                                "--out", str(self.out / "parts" / "host-run" / "raw")]
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "dependency.full-run")
+
+    def test_command_outside_every_node_write_scope_is_refused(self):
+        self.meta["command"] = ["bash", "train.sh", "--config", str(self.config_file),
+                                "--log-dir", str(self.root / "elsewhere")]
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertIn("compute-run.command", [item["field"] for item in detail["differences"]])
+
+    def test_another_command_or_config_is_refused(self):
+        other = self.cwd / "other.yaml"
+        other.write_text("epochs: 9\n")
+        self.meta["command"][3] = str(other)
+        self.refused("resource-compute-contract-mismatch")
+        self.meta["command"][3] = str(self.config_file)
+        self.config_file.write_text("epochs: 3\n")  # config changed after smoke
+        self.refused("resource-compute-contract-mismatch")
+
+    def test_smoke_gated_after_the_run_started_is_refused(self):
+        (self.markers / "smoke.1.json").unlink()
+        self.write_smoke_marker("2026-11-10T04:03:44Z", history=False)
+        detail = self.refused("resource-compute-contract-mismatch")
+        self.assertTrue(detail["differences"][0]["field"].endswith("gated_before_run"))
+
+    def test_running_run_is_refused(self):
+        self.exit_code = None
+        self.receipt.update(state="running", exit_code=None)
+        self.refused("resource-compute-not-quiescent")
+
+    def test_live_process_group_is_refused(self):
+        self.remote_state = "populated"
+        self.refused("resource-compute-not-quiescent")
+
+    def test_nonzero_exit_is_refused(self):
+        self.exit_code = "3\n"
+        self.receipt["exit_code"] = 3
+        self.refused("resource-compute-exit-not-zero")
+
+    def test_gpu_lease_of_another_run_is_refused(self):
+        self.meta["gpu_lease"]["run_id"] = "gpu-other-run"
+        self.refused("resource-compute-binding-conflict")
+
+    def test_node_with_another_resource_row_is_refused(self):
+        # Already adopted by another row (or launched through the runner):
+        # the receipt seat never opens beside an existing row of the node.
+        self.registry.write_text(json.dumps({"schema_version": 1, "runs": {"full-run__a1": {
+            "run_id": "full-run__a1", "route": str(self.route_file.resolve()),
+            "node": "full-run", "status": "succeeded"}}}))
+        detail = self.refused("resource-compute-binding-conflict")
+        self.assertEqual(detail["differences"][0]["field"], "resource.rows")
+
+    def test_changed_output_after_adoption_refuses_the_replay(self):
+        self.adopt()
+        (self.out / "parts" / "full-run" / "run.json").write_text('{"science":2}\n')
+        self.refused("resource-compute-evidence-changed")
+
+
 class FastExitSettleTest(unittest.TestCase):
     def test_exited_detached_payload_settles_with_its_exit_code_before_its_reap(self):
         # CI (41576230552, 41576786995): the detached wrapper of a command that

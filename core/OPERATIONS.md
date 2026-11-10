@@ -2401,6 +2401,17 @@ declared outputs, then rechecks the remote process group. The run id alone is
 not completion evidence. A successful handoff creates a new same-node retry
 while retaining the original row and history; the route owner's ordinary
 successor start remains responsible for verification admission.
+A run that an owner of the same route launched directly with `compute-hosts
+run` carries route provenance but no resource contract, row or `outputs.json`.
+The same command adopts it as `<node>__a1` only while that node has no resource
+row: the run's owner attempt is an owner of this route in the dispatch
+registry, cwd and artifact root match, the command writes into exactly one
+resource node's sealed write scope, that node's dependency markers are complete
+and were written over the same input bytes before the run started (a smoke
+attestation re-verifies against the command's unchanged config), a GPU node's
+run holds its own lease, and the exit is zero with an empty process group. The
+node's declared outputs are hashed into the receipt at adoption. The route-start
+approval already covers the node; adoption records no new approval.
 
 `claim <host> <pid> [--harness <runtime> --session <id>]` (default: the calling
 session, when it is one unique harness session) is the narrow bridge for

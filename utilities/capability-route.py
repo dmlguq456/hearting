@@ -2640,7 +2640,9 @@ def main():
                                 "use the resource node's existing start path; a completed compute-hosts "
                                 "candidate may be supplied with --compute-run <run-id>; a route-bound "
                                 "exit-0 run whose receipt names only a leftover `running` row is adopted "
-                                "and that row is settled")
+                                "and that row is settled; a run this route's owner launched directly "
+                                "(route provenance, no resource row) is adopted for the one node whose "
+                                "write scope it used")
                         print(json.dumps(result, sort_keys=True))
                         return
                     if not jobs or not attempt_id:
