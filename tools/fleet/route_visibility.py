@@ -692,6 +692,16 @@ def detail_lines(desc):
 
 
 CODES_SCHEMA = "route_visibility_codes_v1"
+_SHAPES = ("direct", "solo", "staged", "framed", "unknown")
+_STAGE_STATES = ("done", "active", "reconciling", "recovering", "pending", "failed", "attention",
+                 "degraded", "unrecorded", "unknown")
+_ROLES = ("work", "review", "test", "gate", "frame", "resource")
+_NEXT_KINDS = ("closed", "attention", "no-response", "wait", "resume", "person", "start", "close", "unknown")
+_BASIS_KINDS = ("user", "default", "frame-proposal", "preset", "unknown")
+
+
+def _enum(value, allowed):
+    return value if value in allowed else allowed[-1] if allowed[-1] == "unknown" else allowed[0]
 
 
 def _s(value, limit=64):
@@ -717,6 +727,7 @@ def codes(desc):
     """Structured, string-only codes beside the English sentences, for a display layer that
     translates or abbreviates on its own (the session shell). Enums, not prose:
 
+    * ``shape``: direct|solo|staged|framed|unknown;
     * ``stages``: ``[[id, role, state, gate_passed "1"|"0"], ...]``; ``state`` is one of
       done|active|reconciling|recovering|pending|failed|attention|degraded|unrecorded|unknown;
     * ``basis``: ``{kind: user|default|frame-proposal|preset|unknown, codes: [...]}``;
@@ -724,7 +735,9 @@ def codes(desc):
       node, harness}``;
     * ``verification``: review none|stages|rv-record|frame, review_passed/total, independence,
       ci none|recorded|same-head, ci_text (as written), ci_text_short (40-hex heads cut to 7),
-      gate none|proven|unproven|failed, gate_reasons, head (7), head_full, closed_at (ISO);
+      gate none|proven|unproven|failed, gate_reasons, gates ``[[node, gate, passed, reason]]``
+      with passed "1" recorded pass, "0" recorded fail, "" no record; head (7), head_full,
+      closed_at (ISO);
     * ``owner``: liveness, started_at (epoch seconds), elapsed_min, harness, attempt_id;
     * ``quoted``: ``[[label, text], ...]`` report sentences as written (never translate).
     Absent values are ``""``."""
@@ -745,11 +758,12 @@ def codes(desc):
         quoted.append(["result", verification["result"]])
     return {
         "schema": CODES_SCHEMA,
-        "stages": [[_s(s.get("id")), _s(s.get("role"), 16), _s(s.get("state"), 16),
+        "shape": _enum(desc.get("shape"), _SHAPES),
+        "stages": [[_s(s.get("id")), _enum(s.get("role"), _ROLES), _enum(s.get("state"), _STAGE_STATES),
                     "1" if s.get("gate_passed") else "0"] for s in desc.get("stages") or ()],
-        "basis": {"kind": _s(basis.get("kind"), 24) or "unknown",
+        "basis": {"kind": _enum(basis.get("kind"), _BASIS_KINDS),
                   "codes": [_s(code, 80) for code in basis.get("codes") or ()]},
-        "next": {"kind": _s(nxt.get("kind"), 16) or "unknown", "node": _s(nxt.get("node")),
+        "next": {"kind": _enum(nxt.get("kind"), _NEXT_KINDS), "node": _s(nxt.get("node")),
                  "harness": _s(nxt.get("harness"), 24)},
         "verification": {
             "review": _review_code(verification, desc),
@@ -762,6 +776,9 @@ def codes(desc):
             "gate": _gate_code(verification),
             "gate_reasons": [_s(g.get("reason"), 48) for g in verification.get("completion_gates") or ()
                              if g.get("passed") is not True and g.get("reason")],
+            "gates": [[_s(g.get("node")), _s(g.get("gate")),
+                       {True: "1", False: "0"}.get(g.get("passed"), ""), _s(g.get("reason"), 48)]
+                      for g in verification.get("completion_gates") or ()],
             "head": head[:7], "head_full": head,
             "closed_at": _s(verification.get("closed_at"), 40),
         },

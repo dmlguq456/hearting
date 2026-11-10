@@ -277,6 +277,20 @@ class RouteVisibilityTests(unittest.TestCase):
         from tools.fleet.tests.test_explorer_live_shape import route_extension
         self.assertTrue(route_extension("visibility", out))
 
+    def test_contract_enums_are_closed_and_no_record_differs_from_failure(self):
+        nodes = [{"id": "plan", "completion_gate": "code-plan"},
+                 {"id": "report", "completion_gate": "code-report", "depends_on": ["plan"], "terminal": True}]
+        record = _record(self.root, "rt-enum", "staged", nodes, intensity="standard", topology="staged")
+        view = {"nodes": [{"id": "plan", "state": "someday-new-state"}, {"id": "report", "state": "pending"}]}
+        codes = rv.bounded(rv.describe(record, view))["codes"]
+        self.assertEqual(codes["shape"], "staged")
+        self.assertEqual([row[2] for row in codes["stages"]], ["unknown", "pending"])
+        self.assertEqual(codes["verification"]["gates"], [["report", "code-report", "", ""]])  # no record
+        self.assertEqual(codes["verification"]["gate"], "unproven")
+        record["selection"]["shape"] = "weird"
+        record["execution_topology"] = "weird"
+        self.assertEqual(rv.bounded(rv.describe(record, view))["codes"]["shape"], "unknown")
+
     def test_p2_1_why_names_the_direct_predicates_that_did_not_hold(self):
         record = _record(self.root, "rt-gap", "solo", [{"id": "one-shot", "completion_gate": "g", "terminal": True}])
         record["selection"]["selection_basis"] += [
@@ -308,6 +322,7 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertIn("code-report ✕ completion-marker-absent", gate)
         self.assertIn("gate ✕", rv.summary_text(desc))
         codes = rv.bounded(desc)["codes"]["verification"]
+        self.assertEqual(codes["gates"], [["report", "code-report", "0", "completion-marker-absent"]])
         self.assertEqual(codes["gate"], "failed")
         self.assertEqual(codes["gate_reasons"], ["completion-marker-absent"])
         self.assertEqual(codes["independence"], "independent")
