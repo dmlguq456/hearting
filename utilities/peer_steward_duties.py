@@ -1067,13 +1067,10 @@ def _prompt_carrier_note(ref, target, outcome):
     except (OSError, ValueError):
         pass
 
-# --- clear: the one typed command that starts a fresh conversation (session-tidy auto-clear) ---
+# --- clear: the one typed /compact of a session-tidy booking (name kept for callers) ---
 
-_CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
 _CLEAR_EXIT = {"true": 0, "skipped": 3, "queued": 3, "failed": 1, "unverified": 5}
 _CLEAR_LEDGER_STATUS = {"true": "sent", "failed": "failed", "skipped": "unknown", "queued": "unknown", "unverified": "unknown"}
-_CLEAR_OBSERVE_ROUNDS = 8             # bounded waits between looks at the pane after the send (OpenCode repaints its home in ~5 s)
-_CLEAR_OBSERVE_SETTLE_MS = 1500
 _RULE_LINE = re.compile(r"^[\s\u2500-\u257f]*\u2500{8,}[\s\u2500-\u257f]*$")
 _OPENCODE_HOME_PLACEHOLDER = "askanything"
 
@@ -1162,12 +1159,6 @@ def _screen_ready(harness, lines):
     if draft != "empty":
         return "draft-unknown"
     return None
-
-
-def _codex_footer_threads(lines):
-    """Strict current-footer identity shared by clear observation and pane ownership."""
-    from pane_ownership import codex_footer_threads
-    return codex_footer_threads([_plain(cells) for cells in lines], current_id_only=True)
 
 
 def _codex_rollout_exists(thread_id):

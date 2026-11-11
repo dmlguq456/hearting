@@ -196,6 +196,10 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
+   // The open explorer holds the outer keys: the screen answer says the native cells are not their target.
+   const pinned=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
+   const during=await rpc(pinned.socket,{...pinned,op:'screen'});
+   if(!during.ok||during.focused!==true)throw Error('Fleet explorer key owner missing from screen '+JSON.stringify({ok:during.ok,focused:during.focused}));
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
    await rpc(cfg.inlet,{batch:Buffer.from('[A\x1b[200~PASTE\x1dTAIL\x1b[201~').toString('base64')});
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_FLEET\r').toString('base64')});

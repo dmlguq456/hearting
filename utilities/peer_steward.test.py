@@ -4680,17 +4680,8 @@ OPENCODE_DRAFT = "     ▣  Build · Model\n\n  ┃  hello there\n  ┃\n  ┃  
 # permission surface in the same keymap footer OpenCode prints.
 OPENCODE_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
 CODEX_FORM = "Permission required\n ❯ 1. Allow once\n   2. Always allow\n Esc to cancel · Enter to select\n"
-OPENCODE_HOME_BLANK = "\n" * 12 + "  /path/to/project:main\n\n"     # 1.18.34: nothing but the cwd line
-OPENCODE_HOME = "\n\n  ┃  Ask anything... \"Fix broken tests\"\n  ┃\n  ┃  Build auto · Model OpenCode Go\n  ╹▀▀▀▀▀\n"
 NO_BOX = "just some output\nwith no prompt box at all\n"
 OLD_T = "01000014-0000-7000-8000-00000000001e"
-NEW_T = "01000014-0000-7000-8000-00000000001f"
-
-
-def codex_screen(footer):
-    """A measured codex 0.160.0 bottom: the input box, one blank line, the status line, the hint line."""
-    return ("• recap of the last turn\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  "
-            + footer + "\n  ? for shortcuts\n")
 
 
 class _ClearWorld:
@@ -4705,6 +4696,7 @@ class _ClearWorld:
         self.calls = []
         self.prompt_rc = 0
         self.reads = 0
+        self.on_send = None
 
     def agent(self):
         sid = self.new_sid if (self.sent and self.new_sid) else self.sid
@@ -4730,6 +4722,8 @@ class _ClearWorld:
         if argv[:3] == ["herdr", "agent", "prompt"]:
             if self.prompt_rc == 0:
                 self.sent = True
+                if self.on_send:
+                    self.on_send()
             return subprocess.CompletedProcess(argv, self.prompt_rc, stdout="{}", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
 

@@ -173,6 +173,37 @@ def _last_turn(payload: dict, protocol: str):
     return last.get("role", "user"), _flatten_text(last.get("content"))
 
 
+def _user_inputs(payload: dict, protocol: str) -> list[dict]:
+    """Every person-role input in the request, oldest first: ``{"id", "text"}``.
+
+    One item per user text part (Anthropic, chat) or user message (Responses, which
+    carries the message id).  Tool results are not inputs.  A scenario reads what
+    actually reached the model from this, not from the newest item alone.
+    """
+    out: list[dict] = []
+
+    def parts(content):
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [p.get("text") for p in content if isinstance(p, dict)
+                    and p.get("type") in ("text", "input_text") and isinstance(p.get("text"), str)]
+        return []
+    if protocol == "responses":
+        items = payload.get("input") or []
+        if isinstance(items, str):
+            return [{"id": None, "text": items}]
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == "user" \
+                    and item.get("type", "message") == "message":
+                out.append({"id": item.get("id"), "text": "\n".join(parts(item.get("content")))})
+        return out
+    for message in payload.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user":
+            out.extend({"id": None, "text": text} for text in parts(message.get("content")))
+    return out
+
+
 def _tool_names(payload: dict) -> list[str]:
     names = []
     for tool in payload.get("tools") or []:
@@ -206,8 +237,10 @@ def _shell_call(protocol: str, names: list[str], command: str):
 class ModelFixture:
     """Threaded loopback server for all three model wire protocols."""
 
-    def __init__(self, script):
-        self.script = script
+    def __init__(self, script, side=None):
+        # ``side`` answers a request that offers no tools (a title, or a harness's own
+        # compaction request); returning None keeps the default title reply.
+        self.script, self.side = script, side
         self.requests: list[dict] = []
         self.lock = threading.Lock()
         owner = self
@@ -292,10 +325,11 @@ class ModelFixture:
                 "main_index": index if main else None,
                 "last_kind": kind, "last_text": last_text[-4000:],
                 "text": text, "tools": names[:60],
+                "user_inputs": _user_inputs(payload, protocol),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
             reply = self.script(record, [r for r in self.requests if r["main"]]) if main \
-                else Reply("fixture title")
+                else (self.side and self.side(record)) or Reply("fixture title")
             record["reply"] = reply.as_dict()
             self.requests.append(record)
         streaming = bool(payload.get("stream", protocol != "anthropic"))
@@ -671,6 +705,19 @@ class InstalledHome:
         # bind or reach the operator's shared service port.
         (config_dir / "service.json").write_text(
             json.dumps({"port": _free_port()}) + "\n", encoding="utf-8")
+        # Release activation (tools/install/runtime_activation.py, opencode branch)
+        # places the OpenCode 2 terminal plugins under plugins/<name>/: the session
+        # shell's selected-session report and the TUI identity record. A source-tree
+        # fixture install skips that step; the identity entry's relative import
+        # resolves to the fixture's own tui/ copy.
+        for source, name in (("adapters/opencode/tui/hearting-session-shell.js",
+                              "hearting-session-shell/tui.js"),
+                             ("adapters/opencode/plugins/hearting-tui-identity/tui.ts",
+                              "hearting-tui-identity/tui.ts")):
+            target = config_dir / "plugins" / name
+            if (SOURCE / source).is_file() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(SOURCE / source, target)
         self.env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         self.env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
         self.env["OPENCODE_DISABLE_LSP_DOWNLOAD"] = "1"
@@ -1085,7 +1132,7 @@ class Run:
                   else f"hb-{self.harness}-{self.scenario.name}-")
         root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(runtime)))
         row["fixture_root"] = str(root)
-        fixture = ModelFixture(self.scenario.script(self))
+        fixture = ModelFixture(self.scenario.script(self), self.scenario.side_script(self))
         tui = None
         try:
             self.home = InstalledHome(root, self.harness, fixture)
@@ -1212,6 +1259,10 @@ class Scenario:
             return Reply(f"OK {record['main_index']}")
         return answer
 
+    def side_script(self, run: Run):
+        """Answer for a request without tools; None keeps the fixture title reply."""
+        return None
+
     def prepare(self, run: Run):
         return None
 
@@ -1220,12 +1271,19 @@ class Scenario:
 
     def make_tui(self, run: Run, root: Path, argv: list[str]):
         """The terminal the TUI runs in: the selected ``--surface`` (a private
-        tmux server, or a private Herdr server for ``--surface herdr``)."""
-        if SURFACE == "herdr":
-            tui = PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
+        tmux server, or a private Herdr server for ``--surface herdr``).
+
+        Read from the module whose ``Run`` executes (``__main__`` when run as a
+        script): that is where ``--surface`` is set and where a companion module
+        replaces ``PrivateTui`` for its own terminal (a host shell, Herdr)."""
+        module = sys.modules.get(type(run).__module__)
+        if not hasattr(module, "PrivateTui"):
+            module = sys.modules[__name__]
+        if module.SURFACE == "herdr":
+            tui = module.PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
             run.surface = tui
             return tui
-        return PrivateTui(root, run.home.env, argv, run.home.workspace)
+        return module.PrivateTui(root, run.home.env, argv, run.home.workspace)
 
     def cleanup(self, run: Run):
         """Stop scenario-owned servers before the fixture processes are retired."""

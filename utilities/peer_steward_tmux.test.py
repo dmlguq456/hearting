@@ -198,19 +198,17 @@ class TmuxPeerStewardTest(unittest.TestCase):
         path.write_text(json.dumps({"type": "user", "sessionId": OLD}) + "\n")
         return path
 
-    def test_an_idle_claude_with_an_empty_box_is_cleared_once_and_the_new_session_is_seen(self):
+    def test_an_idle_claude_with_an_empty_box_gets_one_compact_and_keeps_its_session(self):
+        # Every tidy booking types /compact once in the same session, as in a herdr pane.
         self.transcript()
         self.start_claude()
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
-        self.assertEqual(rc, 0, line)
-        self.assertIn("cleared=true", line)
         self.assertIn(f"old_session={OLD}", line)
-        self.assertIn(f"new_session={NEW}", line)
-        self.assertEqual(self.typed(), b"\x1b[200~/clear\x1b[201~\r")
+        self.assertIn("reason=compact-pending", line)
+        self.assertEqual(self.typed(), b"\x1b[200~/compact\x1b[201~\r")
 
     def test_without_its_transcript_the_tmux_pane_gets_compact_like_a_herdr_pane(self):
-        # Agents that may still run keep their window: the shared booking types /compact.
         self.start_claude()
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")

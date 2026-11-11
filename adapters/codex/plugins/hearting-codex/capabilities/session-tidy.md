@@ -10,7 +10,7 @@ This is the portable capability contract for `session-tidy`. It defines runtime-
 | Identifier | `session-tidy` |
 | Group | `ops` |
 | Supported modes | `none` |
-| Portable meaning | Write a handoff card; tidy memory; clear the window. |
+| Portable meaning | Write a handoff card; tidy memory; compact the same session. |
 | Argument shape | `[정리] \| 정리만 \| 인계 <받을 세션>` |
 
 ## Invocation Semantics
@@ -42,9 +42,9 @@ Claude Code, Codex, and OpenCode give the interactive main session a non-blockin
 
 Native runtime compaction is not a session-tidy invocation. PreCompact adds no
 card instructions; PostCompact records the exact native session's compaction
-boundary only. It creates no card, memory-tidy queue, clear, card request or
+boundary only. It creates no card, memory-tidy queue, card request or
 continuation. Never block compaction or ask the model to repeat its summary.
-Existing manual session-tidy, clear and handoff behavior remains unchanged.
+Manual session-tidy and handoff behavior below is unchanged by it.
 
 Automatic idle tidy has one shared policy for Claude, Codex and OpenCode.
 The optional `${XDG_CONFIG_HOME:-~/.config}/hearting/session-tidy.json` keeps
@@ -130,17 +130,53 @@ internal operation/coverage/undo text as a second user notification. Only the
 saved-card plus native-compaction result emits the short human notice, through
 the existing adapter output and notice receipt handling, with no model turn.
 
-For manually invoked tidy only, clearing and continuing remain the default flow. Inside herdr or tmux, `enqueue` also books the calling window's clear (`utilities/session_tidy_clear.py`, a detached helper that never waits for the memory tidy): once the turn has ended and the window is idle, `utilities/peer-steward.py clear` types the harness's own new-conversation command once (Claude `/clear`, Codex `/clear`, OpenCode `/new`), only when no prompt was submitted after the card, no form is open and the input box reads as empty. While a Claude window still has native background agents (a launch whose last completion notice is missing or says it waits on its own background work, or whose own record was written after that notice; a transcript or record that cannot be read counts as running), the same booking and checks type `/compact` instead: the session and its agents stay, no handover snapshot is taken, the compaction is confirmed by a `compact_boundary` row in that session's transcript or its PostCompact row, the continue goes to the same session, and that PostCompact writes no card and queues no second memory tidy. `tidy` then prints one more `say=` line saying so. Codex and OpenCode keep their clear: no Codex rollout here has a background subagent notification and OpenCode task subagents run inside the turn. A clear counts as confirmed only with evidence the conversation changed (the new session's start hook, its session id from the pane's process or herdr, a new thread id on Codex's status line — hearting's Codex status line shows `thread-title`, the thread id until the thread has a title — or OpenCode's home screen). After a confirmed clear, the helper asks `utilities/peer-steward.py continue` once for the exact new session. It preserves the booking, claim, card generation, seat, unchanged prompt count and expiry. An exact-native seat with a supported attachment keeps that bounded path: it rechecks the booked process, idle state, form and empty input, then writes the no-trailer continue command once to that session. Other targets create one no-trailer private pending ref bound to the new SID; the runtime's native carrier processes it and exact native receipt confirms consumption. Neither path targets an inherited pane, retries a send or invents a wake. A newer prompt, changed card, handoff, expired booking, changed SID or unavailable native callback leaves the booking pending or skipped under the existing result rules. `정리만` (`enqueue --no-clear`) keeps the window and cancels a pending booking; `enqueue --no-continue` clears without the continue action. Outside herdr the session prints the harness's manual clear command (Claude `/clear`, Codex `/clear`, OpenCode `/new`). A handoff clears only the calling window, never the target. Confirmed or retained delivery marks the card as handed off so that window does not continue from it; failed delivery preserves the card for normal continuation.
+Manual and idle tidy end the same way: one native `/compact` in the same session,
+for Claude, Codex and OpenCode alike. No tidy types `/clear` or `/new`, so the
+session id, its Fleet number, its supervisor role, its native background agents
+and its pending completion notices stay where they are, and the earlier
+conversation stays visible above the compaction. Inside herdr or tmux, `enqueue`
+also books that compaction for the calling window (`utilities/session_tidy_clear.py`,
+a detached helper that never waits for the memory tidy): once the turn has ended
+and the window is idle, `utilities/peer-steward.py clear` types `/compact` once,
+only when no person prompt was submitted after the card (runtime task
+notifications do not count), no form is open and the input box reads as empty.
+The compaction counts as confirmed only from that session's own native history
+after the claim (Claude's `compact_boundary` row, Codex's `compacted` row, or the
+session's PostCompact/compaction ledger row); a screen label or transport ACK is
+not evidence. The PostCompact of a booked compaction writes no card and queues
+no second memory tidy. After a confirmed compaction a manual booking asks
+`utilities/peer-steward.py continue` once for the same session. It preserves the
+booking, claim, card generation, seat, unchanged prompt count and expiry. An
+exact-native seat with a supported attachment keeps that bounded path: it
+rechecks the booked process, idle state, form and empty input, then writes the
+no-trailer continue command once to that session. Other targets create one
+no-trailer private pending ref bound to the same SID; the runtime's native
+carrier processes it and exact native receipt confirms consumption. Neither path
+targets an inherited pane, retries a send or invents a wake. The card reaches
+that continue turn because the compaction starts a new card epoch for the same
+session. A newer prompt, changed card, handoff, expired booking, changed SID or
+unavailable native callback leaves the booking pending or skipped under the
+existing result rules. `정리만` (`enqueue --no-clear`) keeps the window as it is
+and cancels a pending booking; `enqueue --no-continue` compacts without the
+continue action. Outside herdr or tmux the session prints the manual `/compact`
+command. A handoff compacts only the calling window, never the target, and that
+window does not continue from a card marked as handed off; failed delivery
+preserves the card for normal continuation.
 
-Running work follows the window. `enqueue` also snapshots registered depth-1 owner/frame attempts the tidying session answers for (the runtime reads them from the dispatch registry; a card's text grants nothing). Every eligible logical job and all its exact attempt/parent bindings stay in the existing flat snapshot and ledger; display limits do not limit ownership. When the next session at the same herdr pane starts through a confirmed clear (a `clear` start source or the clear booking's own observation; for OpenCode, its first message in a new session), `session_tidy.py hook` appends one handover row (old session → new session, with the bindings) to the seat ledger. A retry registered between snapshot and confirmed clear is added only when it belongs to a logical job already selected in that snapshot and passes the existing handover authority check. From then on the new session may resume those attempts (`work_start`, replacement authority, the Claude wake re-arm, the interactive frame handback) and receives their pending completions (Claude/Codex prompt sweeps, the Codex queue target), while the registry row keeps its registered `parent_sid`, receipt, digest and gate identity and the pending records stay stored, claimed and acked under that registered parent. One direction (old → new), the same pane and harness only, never old → two sessions at once; a further clear hands over only through the new session's own next tidy, and the session at the end of that chain answers for every attempt an earlier row bound unless a later row handed it elsewhere (delivery and resume authority read the same chain). The card carries the verified route and the existing resume command in one line. Without a handover every call behaves as before. OpenCode direct owners still complete through the poll fallback: the new session can resume them, but there is no turn carrier for their completion.
-
-The clear hook may publish its confirmed succession before the binding handover.
-That same exact transition preserves every snapshot and eligible retry binding,
-including its registered parent, in both the ledger and refreshed snapshot.
+Running work stays with the session: there is no successor, so a tidy takes no
+dispatch handover snapshot and records no succession or handover row. Registered
+attempts keep their registered parent, waits and pending completions are
+delivered to that same session by the existing carriers, and the card carries
+the verified route and existing resume command in one line as before. Existing
+snapshot, succession and handover rows written by earlier tidy clears remain
+readable through the lineage rules below; a person's own `/clear` or `/new`
+still receives the seat card in the new conversation (the card is due to a
+different session), creates no lineage edge, and leaves running work with the
+registered parent.
 
 Pane seats include the exact Herdr socket when one is known, so matching pane
-labels on separate endpoints keep separate session histories. OpenCode clear
-and successor observation use the foreground TUI's current PID-birth-bound
+labels on separate endpoints keep separate session histories. OpenCode session
+observation uses the foreground TUI's current PID-birth-bound
 selection. A delayed start callback cannot replace the seat after the native
 selection has moved. Start reports retain the native sequence/source and
 provider-supplied transcript when available. Herdr resume argv is the original
@@ -156,15 +192,15 @@ excluded from public snapshots and exports.
 
 An inherited pane label never grants access to that pane's card or input. A
 runtime that provides an exact, live native session target may instead keep a
-separate seat for that target and clear it through its official attachment
+separate seat for that target and compact it through its official attachment
 command in a private terminal. The booking binds the runtime process, start
-time and native job identity; clear and continue revalidate those bindings,
-the prompt count, card generation, idle state and empty input. A confirmed new
-conversation at that same target receives the card and existing work handover.
+time and native job identity; compact and continue revalidate those bindings,
+the prompt count, card generation, idle state and empty input. The same session
+at that target then receives the card on its continue turn.
 Other adapters use this same evidence rule: without an implemented exact
 target transport they keep their checked pane path and manual fallback.
-Claude's messaging inbox carries text, not new-conversation commands; an inbox
-message containing `/clear` is never evidence that the conversation cleared.
+Claude's messaging inbox carries text, not session commands; an inbox message
+containing `/compact` or `/clear` is never evidence of either.
 
 Confirmed tidy succession and same-seat handover edges form one lineage for
 both previous-conversation display and pending-result delivery. A resume that
@@ -206,8 +242,9 @@ and never rescan conversations on a rendering tick or create another store.
 
 ## Portable Procedure
 
-Modes are `정리` (default), `정리만` (keep this window), and `인계 <받을 세션>`
-(pass the card to an already-running peer while only this window may clear). Use
+Modes are `정리` (default: compact this session and continue), `정리만` (keep
+this window as it is), and `인계 <받을 세션>` (pass the card to an
+already-running peer; only this window may compact). Use
 `python3 $AGENT_HOME/utilities/session_tidy.py tidy`; add `--no-clear` for
 `정리만`, `--no-continue` when asked to stop after tidying, and
 `--handoff <받을 세션>` for a peer handoff. Card writing, queueing and optional
@@ -215,7 +252,7 @@ handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
 
 `정리만` / `--no-clear` saves the card and queues the existing memory work while
-keeping the conversation. Saving does not shrink its context, disable native
+keeping the conversation uncompacted. Saving does not shrink its context, disable native
 automatic compaction or establish that compaction was avoided.
 
 A supervisor or user may run the same transfer for a session it names:
@@ -313,7 +350,7 @@ continues to apply. Old nine-section cards remain readable, including `관련`,
 The 2,400-byte injection remains a preview with its full-card location and uses
 complete lines too; this changes neither its event nor idle scheduling/compaction.
 
-Continue with the existing enqueue and handoff flow. An ordinary peer message or card grants no successor authority and has no session-tidy accept command. A confirmed same-seat clear continues through the existing seat snapshot and handover ledger without peer acceptance. For a typed cross-seat session-tidy handoff, read the card and referenced documents, then use only the exact receiver command supplied in the sealed handoff body. Explicit acceptance revalidates the native receiver, replays the existing logical record, and retains reply and retirement separately; it does not infer reading from delivery. The retained reply and predecessor retire keep their existing duties and exact identities. Delivery, queue consumption and ACK are receipt facts, not acceptance; the original requester, predecessor, successor, and completion storage identities remain unchanged.
+Continue with the existing enqueue and handoff flow. An ordinary peer message or card grants no successor authority and has no session-tidy accept command. A same-session compaction needs no peer acceptance; earlier confirmed same-seat clears keep their recorded snapshot and handover ledger rows. For a typed cross-seat session-tidy handoff, read the card and referenced documents, then use only the exact receiver command supplied in the sealed handoff body. Explicit acceptance revalidates the native receiver, replays the existing logical record, and retains reply and retirement separately; it does not infer reading from delivery. The retained reply and predecessor retire keep their existing duties and exact identities. Delivery, queue consumption and ACK are receipt facts, not acceptance; the original requester, predecessor, successor, and completion storage identities remain unchanged.
 
 The same-seat snapshot carries already valid steward evidence and unresolved exact watch
 references separately from registered bindings, including when the binding list is empty.
@@ -328,8 +365,8 @@ Peer messages and `이어서해` select the exact native session through the
 existing harness carrier. A queued message remains owned by its pending record
 until that session's native consumer records the exact reference. Unsupported
 native wake keeps the existing pending delivery for the next native callback;
-it does not read or send the target's composer. Clear retains its existing
-foreground, form, draft, and successor checks.
+it does not read or send the target's composer. The tidy `/compact` retains its
+existing foreground, form, draft and same-session checks.
 
 A peer held during the idle card turn or compaction retains its existing
 message obligation. Completing the exact session's compaction wakes that
@@ -349,8 +386,8 @@ a merely adjacent session; the complete hook output, including guidance,
 notices, resume data and memory references, remains within the existing 2,400
 UTF-8 byte limit.
 
-When a new session starts from a clear or confirmed handover and has a
-predecessor, show the person a short, non-blocking way to open that predecessor
+When a new session starts from a confirmed handover (including a tidy clear
+recorded before tidy switched to compaction) and has a predecessor, show the person a short, non-blocking way to open that predecessor
 read-only. Keep this human notice separate from model context and from the
 2,400-byte injection budget. In herdr, use the managed `prefix+shift+h` command
 when that exact command is installed and available; elsewhere show
@@ -382,7 +419,7 @@ Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concre
 Adapters must preserve the portable invariants relevant to this capability:
 
 - state lives under `${XDG_STATE_HOME:-~/.local/state}/hearting/session-tidy/` (directories 0700, files 0600), never in the artifact root. The one exception is the memory worker's exchange folder `<artifact root>/.runtime/session-tidy/<batch>/` (0700; the input copy, the prompt and the one `actions.json` it writes): its sandbox allows the artifact root the checked wrapper launches it with and not the state folder. The runner reads that file back without following a link, checks it, copies the checked result into state and deletes the folder (a failed batch keeps only the worker's answer until it is pruned); sandboxes and permissions are never widened for it;
-- clear input goes only through `utilities/peer-steward.py clear`, at most once after the existing safety checks; exact-native seats may use their bounded attachment for one no-trailer continue write to the booked process after rechecking the empty input and form state, while other targets use one sealed pending ref through the native carrier and exact receipt; neither path targets an inherited pane;
+- tidy `/compact` input goes only through `utilities/peer-steward.py clear`, at most once after the existing safety checks; exact-native seats may use their bounded attachment for one no-trailer continue write to the booked process after rechecking the empty input and form state, while other targets use one sealed pending ref through the native carrier and exact receipt; neither path targets an inherited pane;
 - the memory worker never calls a memory write command; only `mem tidy-apply` writes, and it never deletes.
 - existing archived runtime-compact cards put a delivered last reply before the summary and prefer it over conflicting summary claims of non-delivery or non-completion; preserve post-summary turns separately. Some recent turns may remain verbatim depending on runtime: do not infer delivery from an omitted summary turn, name the last turn the summary covers when known, and say when the preserved transcript needs checking. Never assume the tail is visible or available.
 
