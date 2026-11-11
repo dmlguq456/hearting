@@ -315,7 +315,7 @@ Portable hook semantics are named by invariant:
 
 Adapters decide whether each invariant is enforced by native hook, wrapper,
 manual preflight, or unsupported fallback. Realized (steward role, `OPERATIONS §5.14`,
-v56 herdr-unified): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
+v56 herdr-unified; peer delivery is Hearting-native since 2026-11-11): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
 `hooks/peer-message-record.py`) for the ledger, `utilities/peer-steward.py wait` →
 `herdr agent wait` (measured) for bounded foreground watching, and for detached watching
 `utilities/peer-steward.py watch/join/status/rearm/ack` plus two carriers — a
@@ -1013,34 +1013,36 @@ receiver's consumption evidence records `received`; completion and acceptance
 remain separate duties. A transport timeout or ambiguous reply retains the
 same transfer reference and its existing owner.
 
-Peer delivery follows one rule, and only its native transport differs: the
-sender uses the native path it can address, otherwise the guarded PTY input,
-otherwise the row waits under one `message-<ref>` carrier. Codex steers
+Peer delivery follows one rule, and only its native transport differs. The
+address resolves from Hearting's records (`utilities/peer_address.py`), never from
+a terminal multiplexer; a session-shell attachment takes the row through its host,
+Codex through its exact thread, otherwise the row waits under one `message-<ref>`
+carrier for the session's next native callback. Codex steers
 ordinary peer input into the active turn with `turn/steer` (same
 `clientUserMessageId`, `expectedTurnId`) and otherwise uses its exact native
-per-thread queue. Claude and OpenCode with the exact session ID share the same
-guarded PTY input; OpenCode's native plugin callback may also take its own
-pending row, and the existing `rpc_claim` lets exactly one side send.
+per-thread queue. Claude and OpenCode with a shell attachment share the host's
+input; OpenCode's native plugin callback may also take its own pending row, and
+the existing `rpc_claim` lets exactly one side send. A Claude or OpenCode window
+outside the session shell receives no typed input; Claude reads the row from its
+hook context (mid-turn included) and OpenCode from its plugin callback.
 A non-ambiguous steer refusal falls back to the queue; an ambiguous result is
 never repeated, and a steer whose turn ended without the id in complete exact
 history is re-queued once. The sender's earlier Hearting items are first moved
 into the turn after `deleted:true` is confirmed. An interrupted thread is
-started only when the same sender-side gate saw no form and an empty composer
-and the queue holds no non-Hearting item, and then only for the exact Hearting
-item; the retry recomputes that gate, otherwise the receipt is
+started only when its shell host reports an idle, empty, unfocused input and the
+queue holds no non-Hearting item, and then only for the exact Hearting item;
+without a shell attachment it stays queued and the receipt is
 `native-queue-held-interrupted:<reason>`.
-The guarded PTY input (Claude, and OpenCode with the exact session ID) requires
-the exact native SID, pane, foreground PID birth and namespace, native `idle`
-state, ready registered-work state, no open form or question, and an empty
-visible composer. A dim prompt suggestion is empty. Terminal focus reports
-invalidate an in-flight observation but do not leave an unsubmitted draft;
-the following observation still checks the native composer and identity.
-Focus-looking bytes inside a paste remain input. Busy, blocked, unknown,
-form-open, nonempty-draft, or unreadable targets remain `pending` under the one
-`message-<ref>` carrier and receive no PTY input; a write that provably never
-started returns to `pending`, while an ambiguous write is never retyped. Prompt
-submission is only `queued`; the exact receiver ref remains the only
-peer-delivery receipt.
+The shell host input requires the exact attachment (native SID, PID births and
+descent), an inner native process not proven on another session, native `idle`
+state, no open form or question, and an empty input on the host's own screen. A
+dim prompt suggestion is empty. Terminal focus and wheel reports invalidate an
+in-flight observation but do not leave an unsubmitted draft. Focus-looking bytes
+inside a paste remain input. Busy, blocked, unknown, form-open, nonempty-draft,
+or unreadable targets remain `pending` under the one `message-<ref>` carrier
+(`not-idle-empty`); a write that provably never started returns to `pending`,
+while an ambiguous write is never retyped. Prompt submission is only `queued`;
+the exact receiver ref remains the only peer-delivery receipt.
 
 For Claude's peer-message context path, SD-113 §13.34.1 recognizes successful
 synchronous `additionalContext` injection from the native

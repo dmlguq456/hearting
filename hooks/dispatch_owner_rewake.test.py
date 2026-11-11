@@ -1782,11 +1782,17 @@ from split_module_fixture import patch_split  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 
 
-# The Codex courier's interrupted-start gate reads the visible pane once; an empty
-# input box (same shape as peer_steward.test.py CODEX_EMPTY) lets it start.
-CODEX_SCREEN_READ = ("agent", "read", "w1:p9", "--source", "visible", "--format", "ansi")
-CODEX_EMPTY_SCREEN = ("recap line\n\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n"
-                      "  proj · master · Context 85% used\n")
+import peer_session_fixture  # noqa: E402
+
+
+def _install_session_bridge(test, steward):
+    """Live sessions for ``peer_address`` come from the mocked ``agent list`` reply;
+    no Codex thread owner is read from this machine's processes."""
+    import peer_address
+    test.enterContext(mock.patch.object(peer_address, "native_sessions", peer_address.native_sessions))
+    peer_session_fixture.install(steward)
+    from fleet.collectors import codex as codex_collector
+    test.enterContext(mock.patch.object(codex_collector, "process_for_thread", return_value=None))
 
 
 class CarrierOneClaimGateTest(unittest.TestCase):
@@ -1970,9 +1976,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
     def test_original_retained_duty_follows_confirmed_handover(self):
         self._check_lost_carrier_completion(recipient_sid="session-2")
 
-    def test_changed_pane_does_not_receive_or_complete_retained_duty(self):
-        self._check_lost_carrier_completion(changed_pane=True)
-
     def test_a_live_native_holder_cannot_suppress_wake_after_its_parent_died(self):
         self._check_lost_carrier_completion(live_holder=True)
 
@@ -2005,6 +2008,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         from dispatch_session_sweep import activate, sweep_deliver
         self.enterContext(mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(self.root)}))
         self.enterContext(mock.patch.object(steward.peer_obligations, "ensure_normal_runner"))
+        _install_session_bridge(self, steward)
         # The recipient is a restorable native session: activation happens
         # while its agent is unavailable, then the same session becomes
         # available below. Keep the recorded parent process live for this
@@ -2058,11 +2062,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     elif command[:2] == ["pane", "process-info"]:
                         self.assertEqual(command[command.index("--pane") + 1], "w1:p9")
                         payload = {"result": {"process_info": process_info}}
-                    elif harness == "codex" and command == list(CODEX_SCREEN_READ):
-                        # The Codex courier reads the visible screen once, read-only, as
-                        # its interrupted-start gate; answer with an empty input box.
-                        return subprocess.CompletedProcess(
-                            argv, 0, stdout=CODEX_EMPTY_SCREEN, stderr="")
                     else:
                         self.fail(f"unexpected herdr observation request: {command!r}")
                     return subprocess.CompletedProcess(
@@ -2170,7 +2169,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                             mock.patch.object(steward, "_from_name", return_value="fixture"), \
                             mock.patch.object(steward, "_pane_readiness", return_value=type(
                                 "Ready", (), {"state": "ready", "reason": ""})()), \
-                            mock.patch.object(steward, "_flush_pending_for_target", return_value=(0, 0)), \
                             mock.patch.object(steward, "_schedule_message_obligation") as scheduled, \
                             mock.patch.object(steward, "_herdr_prompt",
                                               side_effect=AssertionError("native courier used PTY prompt")), \
@@ -2180,10 +2178,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                               side_effect=codex_native_send), \
                             mock.patch.object(steward, "_record"):
                         code = real_prompt(args, **kwargs)
-                        if harness == "codex":
-                            scheduled.assert_not_called()
-                        else:
-                            scheduled.assert_called_once()
+                        # A runtime-produced notice is retried by its registered
+                        # duty, never by a separate peer message duty.
+                        scheduled.assert_not_called()
                         if immediate and harness in {"claude", "opencode"}:
                             receive_native(steward.peer_message._read_pending(prepared_refs[0])["text"])
                         if immediate and recovery is None:
@@ -2224,21 +2221,15 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     self.assertEqual(prompt_call.call_args.kwargs["expected_recipient"], (harness, "session-1"))
                     self.assertTrue(any(call.kwargs.get("jobs") == self.jobs
                                         for call in claim_spy.call_args_list))
-                    self.assertIn(("agent", "get", "w1:p9"), observed_commands)
-                    self.assertTrue(any(command[:2] == ("pane", "process-info")
-                                        for command in observed_commands))
-                    screen_reads = observed_commands.count(CODEX_SCREEN_READ)
+                    # The recipient is addressed as harness:session from Hearting's
+                    # records: only the live-session table is read, never the window
+                    # (no agent get, process-info or screen read).
+                    self.assertEqual(set(observed_commands), {("agent", "list")})
+                    self.assertEqual(prompt_call.call_args.args[0].target, harness + ":session-1")
                     if harness == "codex":
-                        self.assertTrue(codex_thread_calls)
-                        self.assertTrue(all(pane == "w1:p9" and pid == process_pid
-                                            for pane, pid, _server in codex_thread_calls))
-                        self.assertEqual(screen_reads, 1)
-                        self.assertEqual(native_send_restarts[:1], [True])
-                    else:
-                        self.assertEqual(screen_reads, 0)
-                        self.assertTrue(native_identity_calls)
-                        self.assertTrue(all((pid, observed_harness) == (process_pid, harness)
-                                            for pid, observed_harness in native_identity_calls))
+                        # Without a shell attachment there is no input evidence to
+                        # restart an interrupted thread; the exact queue holds it.
+                        self.assertEqual(native_send_restarts[:1], [False])
                     if not immediate:
                         queued = store.get(duty["id"])
                         self.assertEqual(queued["state"], "pending")
@@ -2273,9 +2264,13 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                 self.assertEqual(len(native_sends), send_count)
                             else:
                                 self.assertIsNotNone(msg)
-                                with mock.patch.object(steward, "_flush_pending_for_target") as resend:
+                                import session_shell
+                                with mock.patch.object(session_shell, "deliver_pending") as resend, \
+                                        mock.patch.object(steward.peer_message,
+                                                          "deliver_pending_codex") as requeue:
                                     steward._resume_message_obligation(msg, store)
                                     resend.assert_not_called()
+                                    requeue.assert_not_called()
                             if msg is not None:
                                 self.assertEqual(store.get(msg["id"])["state"], "complete")
                             self.assertEqual(
@@ -2336,7 +2331,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 self.jobs.write_text("")
 
     def _check_lost_carrier_completion(self, crash_sid="session-1", recipient_sid="session-1",
-                                       changed_pane=False, live_holder=False):
+                                       live_holder=False):
         self._open_row()
         from route_identity import route_hash
         route = {"route_id": "rt-owner", "nodes": [{"id": "report"}]}
@@ -2349,6 +2344,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("retained_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steward)
+        _install_session_bridge(self, steward)
         launch = rewake.Launch("att-owner-1", self.jobs, crash_sid)
         claim = rewake.ArmClaim(rewake.arm_path(self.jobs, launch.attempt_id), launch.attempt_id,
                                 launch.session_id, 1, tuple(DEAD_HOLDER))
@@ -2367,7 +2363,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                      **{"from": "session-1"}, ts=1,
                      bindings=[rewake.seat_handover.binding_of(self.jobs, meta)]))
         sent = []
-        real_prompt = steward.cmd_prompt
         def prompt(args, *, expected_recipient, on_prepared=None, producer_binding=None):
             self.assertEqual(expected_recipient, ("claude", recipient_sid))
             self.assertIsInstance(producer_binding, dict)
@@ -2385,18 +2380,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             self.assertEqual(producer_binding["route_node"], "report")
             self.assertEqual(args.ref, [duty["id"], duty["intent"]["identity"]["attempt_id"],
                                         delivery["delivery_id"]])
-            if changed_pane:
-                # The real courier must refuse before sealing any payload if
-                # its own target read no longer matches the retained identity.
-                with patch_split(steward, "_herdr_missing", return_value=False), \
-                        mock.patch.object(steward, "_resolve_prompt_target", return_value=({
-                            "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
-                            "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \
-                        mock.patch.object(steward.peer_message, "prepare_peer_message") as sealed:
-                    code = real_prompt(args, expected_recipient=expected_recipient,
-                                       on_prepared=on_prepared, producer_binding=producer_binding)
-                    sealed.assert_not_called()
-                    return code
+            self.assertEqual(args.target, "claude:" + recipient_sid)
             sent.append(Path(args.body_file).read_text())
             return 0
         agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
@@ -2414,11 +2398,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             self.assertEqual(sent, [])
             path = self._close_and_materialize()
             steward._resume_registered_obligation(duty, store)
-            if changed_pane:
-                self.assertEqual(sent, [])
-                self.assertEqual(store.get(duty["id"])["state"], "pending")
-                self.assertEqual(json.loads(path.read_text())["state"], "pending")
-                return
             self.assertEqual(len(sent), 1)
             self.assertIn("att-owner-1", sent[0])
             self.assertEqual(store.get(duty["id"])["state"], "pending")

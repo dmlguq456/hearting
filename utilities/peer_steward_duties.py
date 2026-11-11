@@ -16,7 +16,6 @@ from pathlib import Path
 import peer_obligations
 import shared_readiness
 import dispatch_batch_obligations
-import herdr_observation
 
 from peer_steward_base import (
     _codex_home_dir, _plain, peer_message,
@@ -460,23 +459,24 @@ def _publish_run_states(store, notice_duties):
 
 
 def _live_recipients(root):
-    """Sessions that may need a derived inbox: census panes and open handovers."""
+    """Sessions that may need a derived inbox: live native sessions and open handovers.
+
+    Live sessions come from Hearting's own records (``peer_address.native_sessions``:
+    shell attachments and exact native session records), never a terminal census."""
     from harness_capabilities import HARNESSES, parent_completion
     from dispatch_seat_handover import _registered_parent_harness
+    import peer_address
 
     found = set()
     try:
-        census = herdr_observation.pane_census()
-    except (OSError, ValueError, TypeError, RuntimeError):
-        census = None
-    if census is not None and census.complete:
-        for pane in census.panes:
-            harness = pane.get("agent")
-            session = pane.get("agent_session")
-            value = session.get("value") if isinstance(session, dict) else None
-            if (harness in HARNESSES and isinstance(value, str) and value
-                    and parent_completion(harness).get("carrier")):
-                found.add((harness, value))
+        sessions = peer_address.native_sessions()
+    except Exception:  # noqa: BLE001 - an unreadable table names no live session
+        sessions = []
+    for row in sessions:
+        harness, value = row.get("harness"), row.get("sid")
+        if (harness in HARNESSES and isinstance(value, str) and value
+                and parent_completion(harness).get("carrier")):
+            found.add((harness, value))
     jobs = root / "jobs.log"
     from dispatch_supervision import _rows
     try:
