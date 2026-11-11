@@ -7008,15 +7008,20 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
     try:
         for _sweep in range(NOTICE_UNAVAILABLE_SWEEP_LIMIT):
             if selection is not None:
-                selection.pop("last_outcome", None)
+                selection.pop("last_pick_ids", None)
             result = _resume_session_notice_pass(duties, store, read_context=read_context,
                 selection=selection, runner_incarnation=runner_incarnation)
-            if (selection is None or selection.get("last_outcome") != "recipient-unavailable"
-                    or selection.get("last_pick_tier") != "live"):
+            picked = () if selection is None else selection.get("last_pick_ids") or ()
+            if not picked or selection.get("last_pick_tier") != "live":
+                return result
+            latest = {duty_id: store.get(duty_id) for duty_id in picked}
+            if not all(((value or {}).get("observation") or {}).get("reason")
+                       == "recipient-unavailable" for value in latest.values()):
                 return result
             # The found-gone group is now parked; stay on the live tier.
             selection["parked_turn"] = False
-            duties = [store.get(duty["id"]) or duty for duty in duties]
+            duties = [latest.get(duty["id"]) or store.get(duty["id"]) or duty
+                      for duty in duties]
         return result
     finally:
         # Source completion may have recovered from an earlier failed write.
@@ -7175,6 +7180,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
         selection["parked_turn"] = bool(parked_keys) and not parked_turn
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
+    if selection is not None:
+        selection["last_pick_ids"] = tuple(item[0]["id"] for item in batch)
     # Resume needs idle/empty; ordinary notices keep their existing steering
     # policy. An obsolete resume must not hold a useful completion behind it.
     resume_only = session_resume.is_resume(batch[0][4])
@@ -7267,8 +7274,6 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     store.update(item[0]["id"], observer_error="recipient-unavailable",
                                  observation={**(item[0].get("observation") or {}),
                                               "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
-                if selection is not None:
-                    selection["last_outcome"] = "recipient-unavailable"
                 return
             target = matches[0].get("pane_id")
             if not isinstance(target, str) or not target or target == "-":
@@ -7276,8 +7281,6 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     store.update(item[0]["id"], observer_error="recipient-unavailable",
                                  observation={**(item[0].get("observation") or {}),
                                               "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
-                if selection is not None:
-                    selection["last_outcome"] = "recipient-unavailable"
                 return
             if _resolve_target(target)[:2] != (harness, recipient_sid):
                 return
