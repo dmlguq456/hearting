@@ -1148,21 +1148,8 @@ def collapse_duplicate_sids(sessions):
 
 def _context_tokens_from_payload(payload):
     tokens = payload.get("tokens") if isinstance(payload, dict) else None
-    if not isinstance(tokens, dict):
-        return None
-    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-    total_tokens = tokens.get("total")
-    if (isinstance(total_tokens, (int, float)) and not isinstance(total_tokens, bool)
-            and math.isfinite(total_tokens) and total_tokens >= 0):
-        return int(total_tokens)
-    total = 0
-    observed = False
-    for value in (tokens.get("input"), tokens.get("output"), cache.get("read"), cache.get("write")):
-        if (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value) and value >= 0):
-            total += value
-            observed = True
-    return total if observed else None
+    from ..token_budget import opencode_context_tokens
+    return opencode_context_tokens(tokens)
 
 
 def _last_request_context(con, sid):

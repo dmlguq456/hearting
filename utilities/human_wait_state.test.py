@@ -3165,6 +3165,31 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
             self.assertEqual(state.cached_statusline("claude", "sid-a"), (None, ""))
             request.assert_called_once_with("claude", "sid-a")
 
+    def test_statusline_tidy_notice_is_a_third_line_only_when_asked(self):
+        # PG-20: the OpenCode footer asks for the waiting session-tidy result the
+        # Claude status line shows; Claude's two-line read stays unchanged.
+        import contextlib
+        import io
+
+        def run(*extra):
+            out = io.StringIO()
+            with mock.patch.object(state, "cached_statusline",
+                                   return_value=((3, 1), "⏳ route 1 · plan")), \
+                 mock.patch.object(state, "statusline_tidy_notice",
+                                   return_value="continue not sent") as notice, \
+                 contextlib.redirect_stdout(out):
+                self.assertEqual(state.main(["--statusline", "opencode", "ses_a", *extra]), 0)
+            return out.getvalue().split("\n"), notice
+
+        lines, notice = run()
+        self.assertEqual(lines, ["3 1", "⏳ route 1 · plan", ""])
+        notice.assert_not_called()
+        lines, notice = run("--with-tidy-notice")
+        self.assertEqual(lines, ["3 1", "⏳ route 1 · plan", "continue not sent", ""])
+        notice.assert_called_once_with("opencode", "ses_a")
+        with mock.patch.dict(sys.modules, {"session_tidy": None}):
+            self.assertEqual(state.statusline_tidy_notice("opencode", "ses_a"), "")
+
     def test_returned_route_display_reuses_the_idle_single_flight_without_repeated_wakes(self):
         # #1369's idle wake and the route consumer share one real flock/demand.
         root = state.state_root()

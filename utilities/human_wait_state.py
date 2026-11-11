@@ -4128,6 +4128,17 @@ def cached_statusline(harness, session_id):
     return (total, count), label
 
 
+def statusline_tidy_notice(harness, session_id):
+    """The session-tidy result line still waiting for this session, display only."""
+    try:
+        import session_tidy
+        text, _paths = session_tidy.waiting_notice_display(
+            session_tidy.resolve_seat(harness, env={}, sid=session_id), harness, session_id)
+    except Exception:
+        return ""
+    return " ".join(str(text or "").split())[:300]
+
+
 def _route_demands(now=None):
     """Display interest only, in the existing demand marker, never route truth."""
     now = time.time() if now is None else now
@@ -4638,6 +4649,9 @@ def main(argv=None) -> int:
     parser.add_argument("--lock-fd", type=int)
     parser.add_argument("--count", nargs=2, metavar=("HARNESS", "SESSION"))
     parser.add_argument("--statusline", nargs=2, metavar=("HARNESS", "SESSION"))
+    parser.add_argument("--with-tidy-notice", action="store_true",
+                        help="--statusline: add a third line, the session-tidy result "
+                             "still waiting for this session (the one Claude's status line shows)")
     args = parser.parse_args(argv)
     if args.reconnect_cache:
         reconnect_cache_producer(wait_for_commit=True)
@@ -4661,6 +4675,8 @@ def main(argv=None) -> int:
         counts, label = cached_statusline(*args.statusline)
         print(("?" if counts[0] < 0 else str(counts[0])) + " " + str(counts[1]) if counts else "")
         print(label)
+        if args.with_tidy_notice:
+            print(statusline_tidy_notice(*args.statusline))
     elif args.count:
         value = cached_count(*args.count)
         if value is not None:
