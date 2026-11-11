@@ -94,7 +94,7 @@ class StageRule(unittest.TestCase):
         worker = ["worker", [["codex", "hb_codex"], [" (", "dim"], ["gpt-x", "fam_gpt"], ["·", "dim"],
                              ["max", "dead"], [")", "dim"]], [["3m", "dim"]]]
         frame = _opened(_vm(routes=[_route(worker=worker)]), cols=100)
-        self.assertIn("codex·max", "\n".join(frame.text_rows()))
+        self.assertIn("codex max", "\n".join(frame.text_rows()))
 
 
 class GaugeRule(unittest.TestCase):

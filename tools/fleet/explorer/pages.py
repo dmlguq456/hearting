@@ -225,12 +225,11 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     model = tuple(session.get("model") or ())
     grid.put(x + 3, y, "harness:", "label", limit=right)
     cursor = grid.put(x + 16, y, harness, "hb_" + harness, limit=right)
-    if model:
-        effort = session.get("effort")
-        cursor = _segs(grid, cursor, y, [
-            (" (", "dim"), (model[0], model[1] if len(model) > 1 else "dim"), ("·", "dim"),
-            (str(effort), "eff_" + str(effort) if effort in ("medium", "xhigh") else "dim"),
-            (")", "dim")], right)
+    if model or session.get("effort"):
+        # ``claude Opus 5.5 xhigh``: the session row's own MODEL cell words.
+        from .tables import model_cell_parts
+        cursor = _segs(grid, cursor, y, model_cell_parts(
+            harness, model or None, str(session.get("effort") or ""))[1:], right)
     pane = session.get("pane")
     field = [("      pane ", "label"), (str(pane or "·"), "soft" if pane else "dim")]
     link = "  (open ▸)" if pane else ""

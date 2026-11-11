@@ -180,6 +180,18 @@ class ContractProjectionTests(unittest.TestCase):
         for value in ("LAST INPUT", "keep the", "claude Opus 5.5 xhigh", "TITLE"):
             self.assertIn(value, opened)
 
+    def test_session_page_and_route_owner_use_the_model_cell_words(self):
+        vm = build_view_model(self.route_snapshot())
+        session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")
+        route = dict(vm.routes[0], harness="claude", model=["Opus 5.5", "dim"], effort="medium")
+        vm = replace(vm, sessions=(session,), routes=(route,))
+        page = "\n".join(draw(vm, NavState(scope="session:" + str(session["tag"])), 168, 50).text_rows())
+        self.assertIn("claude Opus 5.5 xhigh", page)
+        self.assertNotIn("(Opus 5.5·xhigh)", page)
+        text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
+        self.assertIn("owner claude Opus 5.5 med", text)
+        self.assertNotIn("·medium", text)
+
     def test_worker_only_and_multiple_owners_have_unknown_owner_context(self):
         snapshot = self.route_snapshot(active_context_tokens=500_000, context_window_tokens=1_000_000)
         snapshot["jobs"] = snapshot["jobs"][1:]

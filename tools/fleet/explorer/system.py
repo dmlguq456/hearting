@@ -79,18 +79,20 @@ def job_summary(snapshot):
     counts = liveness_counts(snapshot)
     parts = [f"{word} {counts[key]}" for key, word in _JOB_WORDS]
     answer_waits = _get(snapshot, "answer_waits")
+    from .tables import answer_wait_word     # the statusline's word on Korean screens
+    wait = answer_wait_word()
     if answer_waits is None:
         if counts["blocked"]:
-            parts.insert(2, f"◑답 대기 {counts['blocked']}")
+            parts.insert(2, f"{wait} {counts['blocked']}")
     elif not _get(answer_waits, "complete", False):
-        parts.insert(2, "◑답 대기 ?")
+        parts.insert(2, f"{wait} ?")
     else:
         current = [item for item in (_get(answer_waits, "items", ()) or ())
                    if _get(item, "stale") == "current"]
         gates = sum(_get(item, "source") == "S2" for item in current)
         other_waits = len(current) - gates
         if gates:
-            parts.insert(2, f"◑답 대기 {gates}")
+            parts.insert(2, f"{wait} {gates}")
         if other_waits:
             parts.insert(3 if gates else 2, f"답변 필요 {other_waits}")
     return " · ".join(parts)
@@ -324,10 +326,12 @@ def system_lines(snapshot):
              f"실행 {running} / 동시 {governor_text(snapshot)}"]
     answer_waits = _get(snapshot, "answer_waits")
     if answer_waits is not None:
+        from .tables import answer_wait_word
+        wait = answer_wait_word()
         if not _get(answer_waits, "complete", False):
-            lines.append("답 대기 ? · 관측 미완료")
+            lines.append(f"{wait} ? · 관측 미완료")
         else:
-            lines.append(f"답 대기 {int(_get(answer_waits, 'total', 0) or 0)}")
+            lines.append(f"{wait} {int(_get(answer_waits, 'total', 0) or 0)}")
             if _get(answer_waits, "unattributed", ()):
                 unattributed = set(answer_waits["unattributed"])
                 lines.append(f"귀속 못 한 항목 {len(unattributed)}")

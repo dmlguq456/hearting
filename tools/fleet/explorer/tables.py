@@ -183,6 +183,26 @@ def model_cell_parts(harness, model, effort):
     return parts
 
 
+_EFFORT_FROM_WORD = {"med": "medium"}
+
+
+def _model_cell_facts(segments):
+    """``(harness, model pair, effort)`` from MODEL cell segments, in the cell's own shape or in
+    the older ``harness (model·effort)`` one a recorded view model may still carry."""
+    segments = [(str(text), key) for text, key in segments]
+    harness = next((text for text, key in segments if isinstance(key, str) and key.startswith("hb_")), None)
+    model = effort = None
+    for text, key in segments:
+        word = text.strip()
+        if text == harness or word in ("", "(", ")", "·"):
+            continue
+        if _EFFORT_FROM_WORD.get(word, word) in ("low", "medium", "high", "xhigh", "max", "minimal"):
+            effort = _EFFORT_FROM_WORD.get(word, word)
+        elif model is None:
+            model = (word, key)
+    return harness, model, effort
+
+
 def _put_model_cell(grid, x, y, parts, limit):
     """Draw the MODEL cell; the model name gives way first, then the effort, never the harness."""
     parts = list(parts)
@@ -1404,14 +1424,11 @@ def draw_routes(grid, vm, state, x=34, y=3):
                      limit=x + cols["own"] - gap)
             cursor = x + cols["own"]
             segments = tuple(worker[1] if len(worker) > 1 else ())
-            if cols["narrow"] and label != "resource" and len(segments) > 1 and segments[1][0] == " (":
-                harness = next((str(text) for text, style in segments
-                                if isinstance(style, str) and style.startswith("hb_")), "·")
-                effort = next((str(text) for text, _style in segments
-                               if str(text) in ("low", "medium", "high", "xhigh", "max")), "")
-                effort_key = next((style for text, style in segments
-                                   if str(text) == effort), "dim")
-                segments = ((harness, "hb_" + harness),) + (("·" + effort, effort_key),) if effort else ((harness, "hb_" + harness),)
+            if label != "resource" and segments:
+                harness, model, effort = _model_cell_facts(segments)
+                if harness:
+                    # The session row's MODEL cell words; a narrow table keeps harness and effort.
+                    segments = model_cell_parts(harness, None if cols["narrow"] else model, effort)
             for text, style in segments:
                 if isinstance(style, str) and style.startswith("hb_"):
                     style = {"hb_claude": "h_claude", "hb_codex": "h_codex",
@@ -1921,11 +1938,11 @@ def _wrap(text, width):
 
 
 def _route_harness_width(routes, narrow):
-    """The widest ``harness·effort`` text the ROUTES rows draw in their narrow form."""
+    """The widest ``harness effort`` text the ROUTES rows draw in their narrow form."""
     if not narrow:
         return 0
-    return max((_seg_width(str(route.get("harness") or "·") +
-                           ("·" + str(route.get("effort")) if route.get("effort") else ""))
+    return max((_seg_width(_harness_cell_text({"harness": route.get("harness") or "·",
+                                               "effort": route.get("effort")}))
                 for route in routes), default=0)
 
 
@@ -1968,13 +1985,8 @@ def _route_columns(use, own_need=0, age_need=AGE_W):
 
 def _owner_width(route):
     """Cells of ``_draw_owner``'s wide form (slim: no profile)."""
-    width = _seg_width(str(route.get("harness") or "·"))
-    model, effort = route.get("model"), str(route.get("effort") or "")
-    if model:
-        width += 2 + _seg_width(str((tuple(model) + ("",))[0])) + (1 + _seg_width(effort) if effort else 0) + 1
-    elif effort:
-        width += 1 + _seg_width(effort)
-    return width
+    return sum(_seg_width(text) for text, _key in model_cell_parts(
+        str(route.get("harness") or "·"), route.get("model") or None, str(route.get("effort") or "")))
 
 
 def route_owner_context(route):
@@ -2018,9 +2030,7 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
     model = route.get("model")
     effort = str(route.get("effort") or "")
     if narrow:
-        parts = [(harness, "hb_" + harness)]
-        if effort:
-            parts.append(("·" + effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"))
+        parts = model_cell_parts(harness, None, effort)
         room = max(0, limit - x)
         if room and sum(_seg_width(text) for text, _style in parts) > room:
             # Keep the drawn prefix and make the cut visible: when a segment falls
@@ -2045,17 +2055,8 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
         elif not room:
             parts = []
     else:
-        parts = [(harness, "hb_" + harness)]
-        if model:
-            model_name, model_key = (tuple(model) + ("dim",))[:2]
-            parts += [(" (", "dim"), (str(model_name), model_key)]
-            if effort:
-                parts += [("·", "dim"),
-                          (effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim")]
-            parts.append((")", "dim"))
-        elif effort:
-            # Same form as the narrow branch: no empty `()` when the model is unknown.
-            parts.append(("·" + effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"))
+        # ``claude Opus 5.5 xhigh``: the session row's MODEL cell words.
+        parts = model_cell_parts(harness, model or None, effort)
     profile = route.get("profile")
     if profile and profile != "deep" and not slim:
         parts.append((" " + str(profile), "dim"))

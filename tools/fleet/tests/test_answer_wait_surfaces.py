@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import human_wait_state
 from fleet.explorer.system import job_summary, system_lines
+from fleet.explorer.tables import answer_wait_word
 from fleet.refresh import fleet_answer_wait_view
 from fleet import herdr_projection
 from fleet.render import _interaction_badge
@@ -29,6 +30,16 @@ def _has_hit(vm, state, action, cols=140, rows=45):
 
 
 class AnswerWaitSurfaceTests(unittest.TestCase):
+    def test_status_and_system_lines_use_the_screen_language_wait_word(self):
+        snapshot = {"jobs": [], "answer_waits": {"complete": True, "total": 1,
+                                                 "items": [{"stale": "current", "source": "S2"}]}}
+        for language, word in (("ko", "◑답 대기"), ("en", "◑ to answer")):
+            with self.subTest(language), mock.patch("fleet.config.ui_language", return_value=language):
+                self.assertIn(f"{word} 1", job_summary(snapshot))
+                self.assertIn(f"{word} 1", system_lines(snapshot))
+        with mock.patch("fleet.config.ui_language", return_value="en"):
+            self.assertNotIn("답 대기", job_summary(snapshot) + "".join(system_lines(snapshot)))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name})
@@ -224,9 +235,9 @@ try {
         view = fleet_answer_wait_view(raw)
         snapshot = SimpleNamespace(jobs=[], sessions=[], answer_waits=view, compute_hosts=None)
         self.assertIn("답변 필요 2", job_summary(snapshot))
-        self.assertNotIn("◑답 대기", job_summary(snapshot))
+        self.assertNotIn(answer_wait_word(), job_summary(snapshot))
         lines = system_lines(snapshot)
-        self.assertIn("답 대기 2", lines)
+        self.assertIn(f"{answer_wait_word()} 2", lines)
         self.assertIn("귀속 못 한 항목 1", lines)
         line = next(line for line in lines if "owner 답 대기" in line)
         self.assertIn("Claude", line)
@@ -321,7 +332,7 @@ try {
         snapshot = SimpleNamespace(jobs=[], sessions=[], answer_waits=fleet_answer_wait_view(view),
                                    compute_hosts=None)
         summary = job_summary(snapshot)
-        self.assertIn("◑답 대기 1", summary)
+        self.assertIn(f"{answer_wait_word()} 1", summary)
         self.assertIn("답변 필요 3", summary)
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):
@@ -367,11 +378,11 @@ try {
 
         self.assertEqual(human_wait_state.cached_count("claude", "sid-a", now=101),
                          (-1, 1))
-        self.assertIn("◑답 대기 ?", job_summary(snapshot))
-        self.assertNotIn("◑답 대기 0", job_summary(snapshot))
+        self.assertIn(f"{answer_wait_word()} ?", job_summary(snapshot))
+        self.assertNotIn(f"{answer_wait_word()} 0", job_summary(snapshot))
         lines = system_lines(snapshot)
-        self.assertIn("답 대기 ? · 관측 미완료", lines)
-        self.assertNotIn("답 대기 0", lines)
+        self.assertIn(f"{answer_wait_word()} ? · 관측 미완료", lines)
+        self.assertNotIn(f"{answer_wait_word()} 0", lines)
 
     def test_dispatch_owner_row_uses_the_shared_wait_item_chip(self):
         job = SimpleNamespace(interaction_observations=[{"kind": "decision", "item_id": "S3:a"}])
