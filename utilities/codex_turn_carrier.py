@@ -156,16 +156,28 @@ def read_state(sid: str, tid: str, root: Path | None = None) -> dict:
 
 
 def tool_command(payload: dict) -> str:
-    """The text of the tool call a PostToolUse payload reports ("" when absent)."""
+    """The text a PostToolUse payload's tool call names ("" when absent).
+
+    One reading for every tool shape: a shell ``command``/``cmd`` and a native
+    structured argument (Claude ``Read`` ``file_path`` and the like) both name a
+    handle the same way, so every string value in ``tool_input`` is compared.
+    The text is only matched against exact handles, never stored.
+    """
     tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
-    if isinstance(tool_input, str):
-        return tool_input
-    if not isinstance(tool_input, dict):
-        return ""
-    value = tool_input.get("command") or tool_input.get("cmd") or ""
-    if isinstance(value, list):
-        value = " ".join(str(part) for part in value)
-    return value if isinstance(value, str) else ""
+    values: list[str] = []
+
+    def collect(value, depth=0):
+        if isinstance(value, str):
+            values.append(value)
+        elif depth < 6 and isinstance(value, dict):
+            for item in value.values():
+                collect(item, depth + 1)
+        elif depth < 6 and isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item, depth + 1)
+
+    collect(tool_input)
+    return " ".join(values)
 
 
 def note_tool(sid: str, tid: str, root: Path | None = None, command: str = "") -> None:
@@ -317,13 +329,24 @@ def owed_items(records: list[dict]) -> list[dict]:
 READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
 
 
-def _peer_body_first_line(prompt: str) -> str:
-    """The body's first line; a Claude native envelope's opening tag is not body."""
-    prompt = re.sub(r"^\s*<cross-session-message\b[^>]*>", "", prompt)
-    for line in prompt.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+def _peer_body(text: str) -> str:
+    """The body text without transport wrapping: the runtime's whole-message paste
+    envelope (the grammar ``session_tidy`` already reads) and a Claude native
+    envelope's opening tag. Neither is the message's kind."""
+    import session_tidy
+    body = session_tidy.runtime_prompt_text(text or "")
+    wrapped = session_tidy._PROMPT_PASTE_BLOCK.fullmatch(body.strip())
+    if wrapped:
+        body = wrapped.group("body")
+    return re.sub(r"^\s*<cross-session-message\b[^>]*>", "", body)
+
+
+def _peer_body_first_line(text: str, origin: dict | None = None) -> str:
+    """The body's first line, read the way the receive record reads it
+    (``session_tidy._received_prompt_line``: a verified large message's sealed
+    body, otherwise the unwrapped prompt)."""
+    import session_tidy
+    return session_tidy._received_prompt_line(_peer_body(text), origin or {})
 
 
 def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict | None:
@@ -335,12 +358,11 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
     has no such envelope, and a runtime completion or human answer carries its
     own required action in the receipt the bridge already rendered, so neither
     adds a pass here. A report that only needs reading (its first line starts
-    with ``[report]`` or ``[notice]``) adds none either.
+    with ``[report]`` or ``[notice]``) adds none either. The kind is read
+    from the verified body after origin, never from a transport wrapper's line.
     """
     if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt
                                  and "cross-session-message" not in prompt):
-        return None
-    if peer_body_item(prompt) is None:
         return None
     try:
         import session_tidy
@@ -349,14 +371,18 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
         return None
     if not isinstance(origin, dict) or origin.get("kind") != "peer":
         return None
-    return {"kind": "peer-report", "required_action": "follow-through"}
+    return peer_body_item(prompt, origin)
 
 
-def peer_body_item(text: str) -> dict | None:
+def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
     """The owed item for a verified peer body this turn was shown, or ``None``
     when it only needs reading. Claude shows sealed peer bodies as hook context
     (``peer-message.emit_peer_context``) where Codex gets them as the prompt."""
-    if _peer_body_first_line(text or "").startswith(READ_ONLY_PEER_PREFIXES):
+    try:
+        line = _peer_body_first_line(text or "", origin)
+    except Exception:  # noqa: BLE001 - an unreadable body keeps the pass
+        line = ""
+    if line.startswith(READ_ONLY_PEER_PREFIXES):
         return None
     return {"kind": "peer-report", "required_action": "follow-through"}
 

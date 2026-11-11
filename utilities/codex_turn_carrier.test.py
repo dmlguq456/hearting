@@ -481,5 +481,97 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(module.main(), 0)
 
 
+class EquivalentInputTest(CarrierCase):
+    """One invariant: the same sealed body and the same handle reference give the
+    same follow-through judgment however the harness presents them (PG-44/46)."""
+
+    CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
+    CODEX_SID = "01a1a5b2-1111-7111-8111-111111111111"
+    SENDER = {"harness": "codex", "session_id": "01a1a5b2-2222-7222-8222-222222222222"}
+    PEER_SID = "22222222-2222-4222-8222-222222222222"
+
+    def setUp(self):
+        super().setUp()
+        private = self.root / "peer"
+        (private / "home").mkdir(parents=True)
+        (private / "jobs.log").touch()
+        os.environ.update(HOME=str(private / "home"), XDG_STATE_HOME=str(private / "state"),
+                          XDG_CONFIG_HOME=str(private / "config"), AGENT_HOME=str(ROOT),
+                          AGENT_DISPATCH_JOBS=str(private / "jobs.log"),
+                          AGENT_PEER_LEDGER_ROOT=str(private / "ledger"))
+        spec = importlib.util.spec_from_file_location("carrier_equivalent_peer",
+                                                      ROOT / "utilities" / "peer-message.py")
+        self.peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.peer)
+        # Only the native socket-address lookup is fixed; origin verification, seal and
+        # body reading run the real readers (``session_tidy`` loads its own copy).
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet import session_handle
+        mock.patch.object(session_handle, "session_id_for_address",
+                          return_value=self.PEER_SID).start()
+
+    @staticmethod
+    def paste(text):
+        return '<pasted_content id="p1">\n' + text + '\n</pasted_content id="p1">'
+
+    def representations(self, harness, body):
+        sid = self.CLAUDE_SID if harness == "claude" else self.CODEX_SID
+        text, _ref = self.peer.prepare_peer_message(
+            body, self.SENDER, {"harness": harness, "session_id": sid}, defer=True)
+        rows = [("plain", "prompt", text), ("whole-paste", "prompt", self.paste(text))]
+        if harness == "claude":
+            native = ('<cross-session-message from="uds:/private/peer.sock" '
+                      'from-name="peer-a">' + body + '</cross-session-message>')
+            rows += [("cross-session", "prompt", native),
+                     ("cross-session+paste", "prompt", self.paste(native)),
+                     ("hook-context", "context", text),
+                     ("hook-context+paste", "context", self.paste(text))]
+        return sid, rows
+
+    def continuations(self, sid, tid, items, payload=None):
+        carrier.note_received(sid, tid, [item for item in items if item], root=self.root)
+        if payload is not None:
+            carrier.note_tool(sid, tid, self.root, command=carrier.tool_command(payload))
+        return 1 if carrier.follow_through(sid, tid, self.root) else 0
+
+    def test_same_sealed_body_gets_the_same_judgment_in_every_representation(self):
+        table, broken = [], []
+        for harness in ("claude", "codex"):
+            for marker, expected in (("[report]", 0), ("[notice]", 0), ("", 1)):
+                body = (marker + " Private result." if marker else "Please run the check.")
+                sid, rows = self.representations(harness, body)
+                for index, (label, where, text) in enumerate(rows):
+                    item = (carrier.peer_report_item(text, sid, harness) if where == "prompt"
+                            else carrier.peer_body_item(text))
+                    got = self.continuations(sid, f"{harness}-{marker}-{index}", [item])
+                    table.append((harness, label, marker or "none", got))
+                    if got != expected:
+                        broken.append((harness, label, marker or "none", got))
+        self.assertEqual(len(table), 24)
+        self.assertEqual(broken, [], table)
+
+    def test_same_handle_reference_gets_the_same_judgment_in_every_tool_shape(self):
+        exact, other = "att-eeeeeeeeeeeeeeee", "att-ffffffffffffffff"
+        shapes = (
+            ("Bash command", lambda h: {"tool_name": "Bash", "tool_input": {"command": f"cat /private/{h}/report.md"}}),
+            ("Codex cmd", lambda h: {"tool_name": "exec_command", "tool_input": {"cmd": f"cat /private/{h}/report.md"}}),
+            ("Codex argv", lambda h: {"tool_name": "shell", "tool_input": {"command": ["cat", f"/private/{h}/report.md"]}}),
+            ("Read file_path", lambda h: {"tool_name": "Read", "tool_input": {"file_path": f"/private/{h}/report.md"}}),
+            ("Grep path", lambda h: {"tool_name": "Grep", "tool_input": {"pattern": "FAIL", "path": f"/private/{h}"}}),
+            ("Glob path", lambda h: {"tool_name": "Glob", "tool_input": {"pattern": "*.md", "path": f"/private/{h}"}}),
+        )
+        items = carrier.owed_items([{"delivery_id": "d", "receipt": {"children": [
+            {"attempt_id": exact, "required_action": "inspect-done-failure"}]}}])
+        table, broken = [], []
+        for index, (label, shape) in enumerate(shapes):
+            for handle, expected in ((exact, 0), (other, 1)):
+                got = self.continuations("sid-tool", f"t-{index}-{handle}", items, shape(handle))
+                table.append((label, handle == exact, got))
+                if got != expected:
+                    broken.append((label, handle == exact, got))
+        self.assertEqual(len(table), 12)
+        self.assertEqual(broken, [], table)
+
+
 if __name__ == "__main__":
     unittest.main()
