@@ -262,6 +262,13 @@ class CompletionCloseFactTest(unittest.TestCase):
         self.assertFalse(facts["failure"])
         self.assertFalse(self.close.close_passes(reply, "failure"))
 
+    def test_carrier_counts_only_the_completion_request_item(self):
+        close_text = "attempt-1\nFirst close: one or two sentences\nHB-RECORD-PATH"
+        record = {"last_text": close_text,
+                  "text": "earlier generic instruction mentioning First close: but no event"}
+        self.assertEqual(self.close.completion_carrier(record, "attempt-1"), close_text)
+        self.assertEqual(self.close.completion_carrier(record, "attempt-2"), "")
+
     def test_old_directive_reply_keeps_summary_and_required_sections(self):
         summary = self.close.synthetic_sealed_summary("partial")
         carrier = ("First close: " + self.close.OLD_DIRECTIVE + ".\n" + summary)

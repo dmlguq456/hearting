@@ -39,6 +39,14 @@ def event_tokens_in_carrier(carrier: str) -> list[str]:
     return [token for token in (*EVENT_TOKENS.values(), RECORD_TOKEN) if token in carrier]
 
 
+def completion_carrier(record: dict, attempt: str) -> str:
+    """The newest request item carrying this attempt's completion instruction."""
+    text = record.get("last_text", "")
+    if isinstance(text, str) and attempt in text and "First close:" in text:
+        return text
+    return ""
+
+
 def scripted_reply_from_carrier(carrier: str) -> tuple[str, str]:
     """Build deterministic transport text from the actual request carrier."""
     tokens = event_tokens_in_carrier(carrier)
@@ -91,10 +99,9 @@ class CompletionCloseScenario(CompletionReceiptScenario):
     def script(self, run):
         def answer(record, earlier):
             carrier_request = next((r for r in reversed([*earlier, record])
-                                    if self.attempt in r.get("text", "")
-                                    and "First close:" in r.get("text", "")), None)
+                                    if completion_carrier(r, self.attempt)), None)
             if carrier_request:
-                carrier_text = carrier_request["text"]
+                carrier_text = completion_carrier(carrier_request, self.attempt)
                 shell_already_ran = any(self.NEXT in (r.get("reply", {}).get("shell") or "")
                                         for r in earlier)
                 if not shell_already_ran:
@@ -115,9 +122,8 @@ class CompletionCloseScenario(CompletionReceiptScenario):
         verdict = super().drive(run)
         requests = run.main_requests()
         request = next((r for r in reversed(requests)
-                        if self.attempt in r.get("text", "")
-                        and "First close:" in r.get("text", "")), None)
-        carrier = request.get("text", "") if request else ""
+                        if completion_carrier(r, self.attempt)), None)
+        carrier = completion_carrier(request, self.attempt) if request else ""
         carrier_file = Path(run.output) / run.harness / f"completion-close-{self.event}.carrier.txt"
         carrier_file.parent.mkdir(parents=True, exist_ok=True)
         carrier_file.write_text(carrier, encoding="utf-8")
