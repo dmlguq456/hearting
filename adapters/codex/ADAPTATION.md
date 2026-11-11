@@ -269,8 +269,10 @@ flattening the profile to one model role. Do not project Claude Agent files or
 OpenCode Agent files into Codex.
 
 Activation renders these agents with the shared `utilities/native_agents.py` from the
-`models.conf` the Codex home selects: a render equal to the shipped TOML stays a
-symlink, a differing one is written as an activation-owned regular file, and an
+`models.conf` the Codex home selects and writes each as an activation-owned regular
+file, even when it equals the shipped TOML: Codex 0.163.0 opens a role file without
+following links and refuses a linked one as `agent type is currently not available`
+(its log: `failed to apply role to config: Symbolic link loop (os error 40)`). An
 agent whose model is main-session-only in that config gets no file. A home whose
 `config.toml`, a profile file `<name>.config.toml` that `codex --profile <name>` reads,
 or a `[profiles.*]` table selects a `model_provider` other than Codex's own `openai`
@@ -280,6 +282,32 @@ models are account models that provider does not serve, and Codex refuses such a
 spawn as `agent type is currently not available`. The agent keeps its reasoning
 effort and sandbox and follows the session model (PG-52). Keep your own
 agents under other names.
+
+Sub-agent role default (PG-13). Codex gives a `spawn_agent` call with no `model`
+and an agent whose file names none (the built-in `default`, `worker`, `explorer`,
+and a spawn with no `agent_type`) the parent session's model. Codex reads
+`[agents] default_subagent_model` / `default_subagent_reasoning_effort` for those
+spawns; an explicit spawn `model` and an agent file's own `model` still win
+(https://learn.chatgpt.com/docs/agent-configuration/subagents). Codex checks
+that default against the session's model list and refuses every such spawn
+when it is not there (`Unknown model ... for spawn_agent`), so activation sets
+both to the portable `light` profile of the selected `models.conf` (the tier
+Claude's `hooks/subagent-model-default.sh` injects) only where that list is
+confirmed: the user has not set `default_subagent_model`, every configuration
+of the home (`config.toml`, profile files, `[profiles.*]`) selects Codex's own
+`openai` provider and names a readable `model_catalog_json`, and every such
+catalog lists the model with `supported_in_api: true` (an API-key session drops
+any other model from its spawn list; ChatGPT auth keeps it), a
+`multi_agent_version` other than `disabled`, and the effort among its
+`supported_reasoning_levels`. Every other home keeps the session model. That
+includes the usual home with no catalog: Codex takes its `models_cache.json`
+only within a 300-second TTL and for the running client version and the
+provider/auth identity, which nothing read at activation can confirm, so the
+cache is not evidence; the list built into the binary is not read either.
+Activation owns each of the two keys separately: a key the user changes is left
+as theirs, and a line still holding Hearting's value is removed when the default
+no longer applies and on deactivation. Measured with
+`utilities/harness_behavior_scenarios.py --scenario subagent-model`.
 
 parity caveat: Codex custom agents can carry model/reasoning/sandbox settings,
 but they are not Claude Code Agent frontmatter. Runtime discovery, UI surfacing,
@@ -533,20 +561,12 @@ cover).
 
 ### MCP registration (design)
 
-`preflight.sh mcp` reports `design_mcp_projection=policy-not-adopted-approval-gated`
-rather than `unsupported`: the design MCP server *can* be registered with Codex and
-its tools are discoverable and consume screenshots (runtime-verified — a
-`[mcp_servers.design]` stdio server exposes the six tools, and a `codex exec` run
-read `DESIGN PROBE` text out of a screenshot). The adapter does **not** adopt it as
-the default design surface for two reasons: (1) policy — the owned visual harness +
-converter launcher already cover render/screenshot/console and export without a
-persistent server dependency; (2) a noninteractive `codex exec` under
-`approval_policy = "never"` auto-denies MCP tool calls, so the render→view loop only
-works interactively (TUI approval) or under an approval/trust policy that permits the
-tool.
-
-To register the design MCP server on a machine that wants the MCP path, add this
-entry manually; the normal installer does not register this MCP server:
+`preflight.sh mcp` reports `design_mcp_projection=manual-registration-per-run-approval`:
+the design MCP server *can* be registered with Codex and its tools are discoverable
+and consume screenshots. Registering it stays the user's choice — the owned visual
+harness + converter launcher already cover render/screenshot/console and export
+without a persistent server dependency, so the normal installer does not register
+it. Add this entry to use the MCP path:
 
 ```toml
 [mcp_servers.design]
@@ -554,12 +574,27 @@ command = "node"
 args = ["<agent-home>/tools/design-mcp/server.js"]
 ```
 
-Then run design work in an interactive Codex session (so tool approvals can be
-granted) or set an approval/trust policy for the project that allows the tool
-(see `adapters/codex/config/approval-sandbox.toml`). Actually performing the
-registration is out of scope for the adapter; this section documents the path.
-For headless/export use without a server, prefer `preflight.sh convert
-<pdf|bundle|pptx> <file.html>`.
+`default_tools_approval_mode` (values `auto | prompt | writes | approve`, with a
+per-tool `[mcp_servers.<id>.tools.<tool>] approval_mode` override; config
+reference https://learn.chatgpt.com/docs/config-file/config-reference) decides
+whether a tool call needs approval. Noninteractive `codex exec` runs under
+`approval_policy = "never"`, which rejects every call that needs one ("MCP tool
+call requires approval, but approval policy is never"); only `approve` lets the
+call run there (measured on Codex 0.163.0). The value is read by every Codex host,
+so in `config.toml` it would also remove the approval question of interactive
+sessions (measured on 0.163.0 App Server with `approvalPolicy=on-request`: no
+`mcpServer/elicitation/request` once set). Hearting therefore never writes it to
+the user's config. A noninteractive Codex run Hearting launches with the user's
+home (the loop runner, `loops/lib-runner.sh`) gets it for that run only, as
+`-c mcp_servers.design.default_tools_approval_mode="approve"`
+(`utilities/codex_permission_profile.py` `design_mcp_run_arguments`), and only
+when `config.toml` registers the design server and leaves the key unset. Dispatched
+owners and workers run in a worker home whose `mcp_servers` are all disabled
+(`tools/profile/build-home.py`), so the design server is not available there at
+all. A user's own `codex exec` asks as configured. For headless/export use
+without a server, prefer `preflight.sh convert <pdf|bundle|pptx> <file.html>`;
+the visual harness (`preflight.sh visual-harness <file.html>`) remains the
+fallback.
 
 `codex_setting/utilities` points at `adapters/codex/utilities/`, not the entire
 shared `utilities/` directory. The current allowlist is:

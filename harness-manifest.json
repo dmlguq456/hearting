@@ -594,7 +594,7 @@
    "group": "ops",
    "family": "ops",
    "modes": [],
-   "summary": "Write a handoff card; tidy memory; clear the window.",
+   "summary": "Write a handoff card; tidy memory; compact the same session.",
    "invocation": {
     "class": "model-support",
     "use_when": "Use when context fills, before compact, on handoff to another session, after a large task, or on request.",

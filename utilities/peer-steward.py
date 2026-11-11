@@ -141,14 +141,13 @@ from peer_steward_native import (  # noqa: F401
     _target_from_readiness_view,
 )
 from peer_steward_duties import (  # noqa: F401
-    _acquire_ensure_obligations_lock, _CLEAR_COMMAND, _CLEAR_EXIT, _CLEAR_LEDGER_STATUS,
-    _CLEAR_OBSERVE_ROUNDS, _CLEAR_OBSERVE_SETTLE_MS, _codex_footer_threads,
+    _acquire_ensure_obligations_lock, _CLEAR_EXIT, _CLEAR_LEDGER_STATUS,
     _codex_rollout_exists, _component_has_open_binding, _component_has_role_rows,
     _component_last_activity, _discover_session_notice_duties, _draft_state,
     _external_obligation_signature, _external_obligation_snapshot,
     _external_obligation_snapshot_unchanged, _herdr_lags, _lineage_components,
     _live_recipients, _marker_remainder, _native_trust_reason, _obligation_retry_fingerprint,
-    _open_run_ids, _OPENCODE_HOME_PLACEHOLDER, _opencode_left_text, _peer_history_order,
+    _open_run_ids, _opencode_left_text, _peer_history_order,
     _prefill_live_inboxes, _prefill_recipient_inbox, _prompt_carrier_note, _proven_session,
     _prune_received_peer_history, _publish_lineage_rows_duty, _publish_peer_indexes,
     _publish_run_states, _publish_steward_relations, _purge_retired_archives, _REF_LOCK_NAME,
@@ -8548,12 +8547,15 @@ def _read_screen(target):
     """The visible pane (ANSI) as screen lines, or None when it could not be read.
 
     A shell seat's pane also shows the shell's frame and panel; its draft, form
-    and footer judgments read the native cells instead (one shared source)."""
+    and footer judgments read the native cells instead (one shared source). Every
+    judged key into a shell seat's pane reads here first: while the host says a
+    shell editor holds the outer keys, or gives no answer, there is no screen to
+    type into (None), never the framed pane read again as an empty box."""
     seat = _shell_seat(target)
     if seat is not None:
         import session_shell
         lines = session_shell.native_screen(seat)
-        if lines is not None:
+        if lines != session_shell.PASSTHROUGH:
             return lines
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)
@@ -8705,14 +8707,15 @@ def _codex_interrupt_start_gate(target):
 def _process_session(pane, harness):
     """The session the pane's foreground runtime process is on now, or None.
 
-    Claude uses `sessions/<pid>.json`, rewritten on `/clear`; Codex uses
-    process_identity for the foreground TUI, with a visible footer as an optional
-    mismatch check; OpenCode uses its TUI selection record. Herdr's own `agent_session`
-    follows a `/clear` only when its integration reports it, and has been seen to keep
-    the previous session for good (live panes 2026-10-01), so a second tidy in the same
-    window would otherwise never clear it. Shared Codex callers use CODEX_THREAD_ID;
-    pane_ownership resolves that thread to its foreground TUI. A shell seat's
-    session is its attachment's (the host follows the native start/select hooks)."""
+    Claude uses `sessions/<pid>.json`; Codex uses process_identity for the
+    foreground TUI, with a visible footer as an optional mismatch check; OpenCode uses
+    its TUI selection record. Tidy itself types only `/compact`, which keeps the
+    session, so this is read before the send to confirm the booked session and never
+    awaited afterwards. A person may still type `/clear` or `/new`: Herdr's own
+    `agent_session` follows that only when its integration reports it (live panes
+    2026-10-01), so the process record stays the proof. Shared Codex callers use
+    CODEX_THREAD_ID; pane_ownership resolves that thread to its foreground TUI. A shell
+    seat's session is its attachment's (the host follows the native start/select hooks)."""
     try:
         seat, conflict = _pane_shell_binding_result(pane, harness)
     except Exception:  # noqa: BLE001 - optional reader absence keeps the bare path
@@ -8722,7 +8725,8 @@ def _process_session(pane, harness):
     if seat is not None:
         if seat["harness"] == "codex":
             import session_shell
-            # After /new the attachment keeps the old SID until the next start hook.
+            # After a person's /new the attachment keeps the old SID until the next
+            # start hook; tidy's /compact keeps the thread, so this matches then.
             if not session_shell._codex_current_root(
                     seat["native_pid"], seat["native_start"], seat["sid"]):
                 return None
@@ -8802,7 +8806,7 @@ def _clear_look(target, req):
             return "target-changed" if current else "session-identity-unknown", agent, None
     elif req.get("harness") == "claude" and agent.get("session_id") != req.get("sid"):
         # Codex/OpenCode already used this look's authoritative native judgment.
-        # herdr's pane record can lag a /clear; the process itself is the proof, never a guess.
+        # herdr's pane record can lag a person's /clear; the process itself is the proof, never a guess.
         # An unnamed session (`-`, empty) is not a confirmed match: only the process can vouch for it.
         if _process_session(agent.get("pane") or target, req.get("harness")) != req.get("sid") \
                 and not _herdr_lags(req, agent.get("session_id")):
@@ -8818,111 +8822,6 @@ def _clear_look(target, req):
     if lines is None:
         return "screen-unknown", agent, None
     return _screen_ready(req.get("harness"), lines), agent, lines
-
-
-def _wait_for_home(target, bound_ms):
-    """Event-driven pause for OpenCode: its pane is `done` before, during and after `/new`, so
-    `_settle` would return at once. Waits (bounded) for the home screen's placeholder to show;
-    the answer is not used -- the caller looks at the screen itself."""
-    try:
-        subprocess.run(_herdr_argv("pane", "wait-output", target, "--match", "Ask anything",
-                                   "--source", "visible", "--timeout", str(int(bound_ms))),
-                       capture_output=True, text=True, timeout=bound_ms / 1000.0 + 5)
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
-def _opencode_home(lines):
-    """OpenCode's home screen: the placeholder box (older builds) or, as measured on 1.18.34,
-    nothing at all but the working-directory line. A conversation view always carries the
-    `┃` input bars and a model line, so those never read as home."""
-    plain = [_plain(line).strip() for line in lines]
-    shown = [text for text in plain if text]
-    if any(text.startswith("\u2503") for text in shown):
-        return any(_OPENCODE_HOME_PLACEHOLDER in "".join(text.split()).lower() for text in shown) \
-            and _draft_state("opencode", lines) == "empty"
-    return 0 < len(shown) <= 2 and shown[-1][:1] in ("/", "~")
-
-
-def _seat_knows(req, sid):
-    """True when the booking seat's own ledger has seen session `sid` of the booked harness."""
-    try:
-        import session_tidy as st
-        seat_fields = req.get("seat") or {}
-        seat = st.seat_from_dict(seat_fields)
-        return (str(req.get("harness")), sid) in st.session_summary(seat)
-    except Exception:
-        return True                     # unreadable: never call an unknown id new
-
-
-def _codex_new_thread(target, req, before):
-    """The thread Codex's status line shows now and did not show at the look before the send:
-    exactly one whole id, the cleared one gone, unknown to the seat. Else None."""
-    lines = _read_screen(target)
-    if lines is None:
-        return None
-    shown = _codex_footer_threads(lines)
-    fresh = shown - set(before or ())
-    if len(fresh) != 1 or req.get("sid") in shown:
-        return None
-    (thread,) = fresh
-    return None if _seat_knows(req, thread) else thread
-
-
-def _clear_observe(target, req, request_path, before_threads=()):
-    """The new conversation, seen: its session id (`-` when the harness has none yet), or None.
-
-    Hook-side proof first (the booking's `observed`, written by the new session's start hook),
-    then herdr's own session id for the pane (Claude/Codex), then the screen: Codex's status line
-    naming a new thread (its start hook only runs with the first message), OpenCode's home."""
-    old = req.get("sid")
-    for round_no in range(_CLEAR_OBSERVE_ROUNDS):
-        if req.get("harness") == "codex":
-            menu_lines = _read_screen(target)
-            if menu_lines is not None and _blocking_screen(req.get("harness"), menu_lines):
-                if round_no + 1 < _CLEAR_OBSERVE_ROUNDS:
-                    _run_herdr_wait(target, ["working", "blocked"], _CLEAR_OBSERVE_SETTLE_MS)
-                continue
-        held = _read_json(Path(request_path))
-        seen = (held or {}).get("observed") or {}
-        if seen.get("sid") and seen.get("sid") != old:
-            return str(seen["sid"])
-        state, agent, _code, unavailable = _interpret_payload(_run_herdr_get(target), target)
-        sid = agent.get("session_id")
-        if not unavailable and req.get("harness") in ("claude", "codex"):
-            # The process's own session decides when it can be read; herdr's pane record can lag
-            # a /clear (or keep an older session) and is only the fallback.
-            proven = _process_session(agent.get("pane") or target, req.get("harness"))
-            if proven and _herdr_lags(req, proven):
-                proven = None           # the process check named an older session of this seat
-            if proven:
-                if proven != old:
-                    return str(proven)
-            elif sid not in (None, "-", old) and not _herdr_lags(req, sid):
-                return str(sid)
-        opencode_native = None
-        if not unavailable and req.get("harness") == "opencode":
-            opencode_native = _process_session(agent.get("pane") or target, "opencode")
-            if opencode_native and opencode_native != old:
-                return str(opencode_native)
-        if not unavailable and req.get("harness") == "codex":
-            thread = _codex_new_thread(target, req, before_threads)
-            if thread:
-                return thread
-        if (not unavailable and req.get("harness") == "opencode" and not opencode_native
-                and state in ("idle", "done")):
-            lines = _read_screen(target)
-            if lines is not None and _opencode_home(lines):
-                return "-"
-        if round_no + 1 < _CLEAR_OBSERVE_ROUNDS:
-            if req.get("harness") == "opencode":
-                _wait_for_home(target, _CLEAR_OBSERVE_SETTLE_MS)
-            else:
-                # The pane stays `done` through /clear, so an idle wait would return at once and every
-                # round would pass before the start hook ran or Codex repainted (measured 2026-10-02:
-                # 8 rounds in 187 ms). Waiting for a change gives each round its bound.
-                _run_herdr_wait(target, ["working", "blocked"], _CLEAR_OBSERVE_SETTLE_MS)
-    return None
 
 
 def _native_tidy_command(args, req, *, continuing):
@@ -8951,10 +8850,11 @@ def _native_tidy_command(args, req, *, continuing):
 
 
 def cmd_clear(args):
-    """session-tidy auto-clear: type the harness's own new-conversation command into `target`.
+    """session-tidy: type native `/compact` once into `target` (Claude, Codex and OpenCode).
 
-    The last judgement and the only pane input of the clear flow. `--request` is the seat's
-    booking (`session_tidy_clear.py`); the command is typed only when all of these hold now:
+    The last judgement and the only pane input of a tidy booking; the session, its number and
+    its pending work stay. `--request` is the seat's booking (`session_tidy_clear.py`); the
+    command is typed only when all of these hold now:
 
     * the booking is the current one (nonce), unexpired, no prompt was submitted since the card,
       the card is the booked generation;
@@ -8968,8 +8868,8 @@ def cmd_clear(args):
     landing between that look and the send cannot be ruled out -- hence no trailer, no Enter
     retry, and nothing is ever re-sent after a doubtful result.
 
-    `cleared=true` only with evidence the conversation changed (start hook note, new herdr
-    session id, a new thread id on Codex's status line, OpenCode home); otherwise `unverified`.
+    `cleared=true` only with the same session's compaction boundary in its native history
+    (`compact_confirmed`); otherwise `unverified compact-pending` and the helper waits for it.
     Exit 0 true / 3 skipped / 1 failed / 5 unverified. One ledger row (`kind=notice`,
     `action=clear` in the receipt) per judgement.
     """
@@ -8985,11 +8885,11 @@ def cmd_clear(args):
     if req is None:
         print(f"cleared=skipped reason={why}")
         return _CLEAR_EXIT["skipped"]
-    if req.get("snapshot_state") in ("pending", "deferred"):
-        print("cleared=skipped reason=snapshot-pending")
+    if req.get("snapshot_state") == "deferred":
+        print("cleared=skipped reason=snapshot-pending")    # an idle card not accepted yet
         return _CLEAR_EXIT["skipped"]
     harness, old_sid, target = req.get("harness"), req.get("sid"), args.target
-    command = _CLEAR_COMMAND.get(harness)
+    command = clear.COMPACT_COMMAND if harness in ("claude", "codex", "opencode") else None
     started = time.monotonic()
     new_session, pane = None, (req.get("seat") or {}).get("pane")
 
@@ -9033,10 +8933,6 @@ def cmd_clear(args):
     req, why = clear.claim_clear(args.request, args.nonce, ready=ready)
     if req is None:
         return finish(_look_outcome(why), why, agent)
-    compacting = (req.get("clear_claim") or {}).get("command") == "compact"
-    if compacting:
-        command = clear.COMPACT_COMMAND     # background agents keep running in the same session
-    before = _codex_footer_threads(lines) if harness == "codex" else set()
     req, why = clear.recheck_idle_input(args.request, req)
     if req is None:
         return finish("skipped", why, agent)
@@ -9045,16 +8941,11 @@ def cmd_clear(args):
         return finish("failed", "herdr-invocation-failed", agent)
     if rc != 0:
         return finish("failed", _herdr_error_reason(payload, rc), agent)
-    if compacting:
-        # The session id stays; the helper waits (bounded) for the compaction evidence.
-        if clear.compact_confirmed(_read_json(Path(args.request)) or {}):
-            new_session = old_sid
-            return finish("true", None, agent)
-        return finish("unverified", "compact-pending", agent)
-    new_session = _clear_observe(target, req, args.request, before)
-    if new_session is None:
-        return finish("unverified", "new-session-not-observed", agent)
-    return finish("true", None, agent)
+    # The session id stays; the helper waits (bounded) for the compaction evidence.
+    if clear.compact_confirmed(_read_json(Path(args.request)) or {}):
+        new_session = old_sid
+        return finish("true", None, agent)
+    return finish("unverified", "compact-pending", agent)
 
 
 def cmd_idle_card_request(args):
@@ -9176,14 +9067,12 @@ def _booked_seat(req):
 
 
 def _continue_card_reason(req):
-    """Whether the booked card still waits for the new session. Every harness's prompt hook
-    hands it over with the first message, which is this continue, so only a card some session
-    already took (`card-taken`, final) stops it. Claude's start hook renders no card."""
-    st, seat = _booked_seat(req)
-    card = st.read_latest_card(seat)
-    consumed = st.read_json(st._consumed_path(seat))
-    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
-    return "card-taken" if held and consumed.get("receipts") else None
+    """Whether the booked card still waits for the session's next turn. Every harness's prompt
+    hook hands it over with the first message after the compaction, which is normally this
+    continue; when another automatic turn (a completion or result notice) took it first, the
+    session already resumed with it (`card-taken`, final and quiet)."""
+    import session_tidy_clear as clear
+    return clear.continue_card_reason(req)
 
 
 def _continue_look(target, req):
@@ -9197,11 +9086,12 @@ def _continue_look(target, req):
         return "target-changed"
     if not new or new == "-":
         return "new-session-unknown"
-    if state not in ("idle", "done"):
-        return f"not-idle-{state}"
+    # A card another turn already received is final, working or not: nothing is held for later.
     card = _continue_card_reason(req)
     if card:
         return card
+    if state not in ("idle", "done"):
+        return f"not-idle-{state}"
     info = _retire_pane_info(pane)
     if not isinstance(info, dict):
         return "target-identity-unknown"

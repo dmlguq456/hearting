@@ -3397,18 +3397,25 @@ class NativeAgentRenderTest(unittest.TestCase):
                 self.assertEqual(report["model_config_source"], "user")
                 desired = activation._desired_entries(runtime, "linked", REPO_ROOT, REPO_ROOT, "x", "global")
                 # No agent is rendered; OpenCode's V2 server and TUI plugin entries always are.
+                # Codex agents are files with the shipped bytes: Codex refuses a linked role file.
                 renders = [e for e in desired if e["kind"] == "render"]
-                self.assertEqual([Path(e["dest"]).relative_to(self.home(runtime)).as_posix() for e in renders],
-                                 ["plugins/hearting-guards/index.ts", "plugins/hearting-tui-identity/tui.ts"]
-                                 if runtime == "opencode" else [])
                 agents = [e for e in desired if Path(e["dest"]).parent == self.home(runtime) / "agents"]
+                self.assertEqual(sorted(Path(e["dest"]).relative_to(self.home(runtime)).as_posix() for e in renders),
+                                 ["plugins/hearting-guards/index.ts", "plugins/hearting-tui-identity/tui.ts"]
+                                 if runtime == "opencode" else
+                                 sorted(Path(e["dest"]).relative_to(self.home(runtime)).as_posix() for e in agents)
+                                 if runtime == "codex" else [])
                 self.assertEqual(len(agents), 5)
                 for entry in agents:
                     dest = Path(entry["dest"])
+                    if runtime == "codex":
+                        self.assertFalse(dest.is_symlink(), dest)
+                        self.assertEqual(dest.read_bytes(), Path(entry["source"]).read_bytes())
+                        continue
                     self.assertTrue(dest.is_symlink(), dest)
                     self.assertEqual(dest.resolve(), Path(entry["source"]).resolve())
                 self.assertEqual(report["projection_digest"], activation._projection_digest(desired))
-                if runtime != "opencode":
+                if runtime == "claude":
                     self.assertEqual(report["projection_digest"],
                                      activation._digest_paths(Path(e["source"]) for e in desired))
 
@@ -3422,7 +3429,8 @@ class NativeAgentRenderTest(unittest.TestCase):
                 self.assertTrue(balanced.is_file(), balanced)
                 shipped = next((path for path in (REPO_ROOT / "adapters" / runtime / "agents").rglob(balanced.name)
                                 if path.is_file()), None)
-                if shipped is not None and balanced.read_bytes() == shipped.read_bytes():
+                if shipped is not None and balanced.read_bytes() == shipped.read_bytes() \
+                        and runtime != "codex":  # Codex agents are always files
                     self.assertTrue(balanced.is_symlink(), balanced)
                     self.assertEqual(balanced.resolve(), shipped.resolve())
                 else:
@@ -3486,7 +3494,8 @@ class NativeAgentRenderTest(unittest.TestCase):
     # -- T3b: catalog entries removed from the selected config ---------------
     def test_catalog_entries_missing_from_the_selected_config_leave_no_definition(self):
         activation.activate("codex", "linked", str(REPO_ROOT))
-        self.assertTrue(self.agent("codex", "general-purpose").is_symlink())
+        general = self.agent("codex", "general-purpose")
+        self.assertTrue(general.is_file() and not general.is_symlink())
         self.write_conf("codex", {"CFG_NATIVE_AGENT_CATALOG": "deep:deep light:light"})
         report = activation.refresh("codex")
         self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml", "memory-scout.toml"])
@@ -3506,7 +3515,10 @@ class NativeAgentRenderTest(unittest.TestCase):
             edits, withheld = {}, self.shipped_models("codex", ("CFG_TIER_DEEP_MODEL",))[0]
         self.write_conf("codex", edits)
         activation.activate("codex", "linked", str(REPO_ROOT))
-        self.assertEqual(self.agent("codex", "deep").is_symlink(), how == "shipped-link")
+        deep = self.agent("codex", "deep")
+        self.assertTrue(deep.is_file() and not deep.is_symlink())  # Codex agents are files
+        if how == "shipped-link":
+            self.assertEqual(deep.read_bytes(), (REPO_ROOT / "adapters/codex/agents/deep.toml").read_bytes())
         mine = self.agent("codex", "mine")
         mine.write_text('name = "mine"\n', encoding="utf-8")
         outside = self.root / "outside"
@@ -3547,11 +3559,15 @@ class NativeAgentRenderTest(unittest.TestCase):
         self.assertIn("deep.toml was edited after it was rendered", self.lines(report))
         self.assertFalse(self.agent("codex", "general-purpose").exists())  # unedited: collected
 
-    def test_a_user_edited_rendered_file_is_never_overwritten_by_a_shipped_link(self):
+    def test_a_user_edited_rendered_file_is_never_overwritten_by_the_shipped_render(self):
         deep, edited = self.edited_render_scenario()
-        self.write_conf("codex")  # the user config is back to the shipped one: desired is a link
-        with self.assertRaisesRegex(activation.ActivationError, "destination collision"):
+        # The user config is back to the shipped one: Codex still gets a file (it refuses
+        # a linked role file), now with the shipped bytes; the user's edit must survive.
+        self.write_conf("codex")
+        try:
             activation.refresh("codex")
+        except activation.ActivationError as exc:
+            self.assertIn("destination collision", str(exc))
         self.assertEqual(deep.read_bytes(), edited)
         self.assertFalse(deep.is_symlink())
 

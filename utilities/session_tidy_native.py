@@ -1,7 +1,7 @@
 """Exact native session targets for tidy; no inherited terminal authority.
 
 Claude's official `attach <job-id>` is the transport. The inbox socket only
-carries peer text, so it is never used to execute /clear. No token is saved.
+carries peer text, so it is never used to execute /compact. No token is saved.
 Other runtimes retain their existing verified-pane/manual transport.
 """
 from __future__ import annotations
@@ -264,13 +264,13 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
     try:
         with attachment(target) as (fd, proc):
             view = View(fd)
-            # A new native conversation can publish its idle state shortly
-            # after /clear. These bounded looks never send or reclaim a prompt.
+            # The same native session can publish its idle state shortly
+            # after /compact. These bounded looks never send or reclaim a prompt.
             deadline = time.monotonic() + 10
             while True:
                 current, why = validator(request_path, nonce)
                 if current is None: return result("skipped", why)
-                if current.get("snapshot_state") in ("pending", "deferred"):
+                if current.get("snapshot_state") == "deferred":
                     return result("queued", "snapshot-pending")
                 why = idle_reason(target, sid)
                 if not why and continuing:
@@ -324,9 +324,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                     continue
                 if continuing: clear.release_unsent_continue(claim)
                 return result("skipped", why)
-            compacting = not continuing and (claim.get("clear_claim") or {}).get("command") == "compact"
-            text = clear.followup_text(req) if continuing else (
-                clear.COMPACT_COMMAND if compacting else "/clear")
+            text = clear.followup_text(req) if continuing else clear.COMPACT_COMMAND
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
             if not continuing:
@@ -338,18 +336,16 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             except OSError:
                 return result("unverified", "partial-send")
             if written != len(data): return result("unverified", "partial-send")
-            if compacting:
+            if not continuing:
                 # The session id stays; the helper waits (bounded) for the compaction evidence.
                 return result("unverified", "compact-pending")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 record = live(target)
                 if not record: return result("unverified", "target-changed")
-                if not continuing and record["sessionId"] != sid:
-                    return result("true", new_session=record["sessionId"])
-                if continuing and record["sessionId"] != sid:
+                if record["sessionId"] != sid:
                     return result("unverified", "target-changed")
-                if continuing and st.read_prompt_seq(st.seat_from_dict(req["seat"])) > req["prompt_seq"]:
+                if st.read_prompt_seq(st.seat_from_dict(req["seat"])) > req["prompt_seq"]:
                     return result("true")
                 # Drain the PTY so the attacher never stalls on a full output buffer.
                 if select.select([fd], [], [], 0.1)[0]:

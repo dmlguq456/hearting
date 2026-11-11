@@ -60,6 +60,9 @@ class Format:
     # (selected config, runtime home) -> the config to render for that home; None keeps it.
     # Lets an adapter fit its pins to what that home's runtime can serve (Codex, PG-52).
     runtime_config: Optional[Callable[[Mapping[str, str], Path], Mapping[str, str]]] = None
+    # (config fitted to the home) -> the role default a sub-agent spawned with no
+    # model of its own gets, or None where this home cannot serve it (PG-13).
+    default_subagent: Optional[Callable[[Mapping[str, str]], Optional[dict]]] = None
 
     @property
     def label(self) -> str:
@@ -83,6 +86,33 @@ class Agent:
     reason: str = ""
     body: str = ""
     model: Optional[str] = None
+
+
+# The portable profile a native sub-agent gets when neither the spawn nor its
+# agent definition names a model. Claude realizes it with
+# `hooks/subagent-model-default.sh` (CFG_NATIVE_SUBAGENT=light); Codex with
+# `[agents] default_subagent_model` where the home's model list carries it.
+# OpenCode's built-ins keep the session model: no plugin seam sees the parent's
+# model per spawn (PG-13 limit, core/ADAPTATION.md §10).
+NATIVE_SUBAGENT_PROFILE = "light"
+
+
+def native_subagent_default(adapter: str, cfg: Mapping[str, str]) -> Optional[dict]:
+    """``{"model", "budget"}`` of the native sub-agent role default, or None.
+
+    None when the selected config cannot resolve the profile or names a
+    main-session-only model for it: a sub-agent then keeps the runtime's own
+    behavior instead of a model it must not use.
+    """
+    try:
+        resolved = model_profile.resolve_profile_values(adapter, cfg, NATIVE_SUBAGENT_PROFILE)
+    except model_profile.ModelProfileError:
+        return None
+    model = str(resolved.get("model") or "").strip()
+    if not model or model_config.restricted_model(
+            model, cfg.get("CFG_MAIN_SESSION_ONLY_MODELS", "").split()):
+        return None
+    return {"model": model, "budget": str(resolved.get("budget") or "")}
 
 
 def catalog_tokens(cfg: Mapping[str, str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -172,6 +202,113 @@ def codex_profile_configs(home: Path) -> list[Path]:
     ]
 
 
+def _codex_tables(home: Path) -> list[dict]:
+    """Every session configuration of a Codex home, each already layered over `config.toml`.
+
+    An unreadable file stays in the list as ``None`` so that a reader treats it as unknown.
+    """
+    import tomllib
+
+    def load(path: Path):
+        try:
+            return tomllib.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+
+    top = load(Path(home) / "config.toml")
+    if top is None:
+        return [None]
+    tables = [top]
+    profiles = top.get("profiles")
+    for table in (profiles.values() if isinstance(profiles, dict) else ()):
+        tables.append({**top, **table} if isinstance(table, dict) else None)
+    for path in codex_profile_configs(home):
+        profile = load(path)
+        tables.append({**top, **profile} if isinstance(profile, dict) else None)
+    return tables
+
+
+def codex_model_lists(home: Path) -> list[Optional[Path]]:
+    """The model list each session configuration of a Codex home uses, deduplicated.
+
+    Only a `model_catalog_json` file is followed: it replaces Codex's list for that
+    session and is used as it is. ``None`` marks a configuration whose list this reader
+    cannot confirm: an unreadable file, an invalid value, or no catalog at all. Without a
+    catalog Codex uses `models_cache.json` only while its `fetched_at` is within a 300 s
+    TTL and its `client_version` and opaque provider/auth `identity` match the running
+    client (codex-rs `models-manager`), which no file read at activation can establish,
+    so that cache is never taken as the list a session selects from (PG-13).
+    """
+    home = Path(home)
+    lists: list[Optional[Path]] = []
+    for table in _codex_tables(home):
+        catalog = table.get("model_catalog_json") if table is not None else None
+        if isinstance(catalog, str) and catalog:
+            path = Path(catalog).expanduser()
+            path = path if path.is_absolute() else home / path
+        else:
+            path = None
+        if path not in lists:
+            lists.append(path)
+    return lists
+
+
+def _codex_selectable(models: list) -> dict[str, set]:
+    """``{slug: efforts}`` of a model list that a Codex spawn accepts whatever the auth.
+
+    Codex 0.163.0 drops a model whose `supported_in_api` is not true from the spawn list
+    of an API-key session (`ModelPreset::filter_by_auth`), refuses a model whose
+    `multi_agent_version` is `disabled` under multi-agent v2, and refuses a requested
+    effort that the model's `supported_reasoning_levels` do not name. Only a model that
+    passes all three in every case is kept; a slug listed twice keeps the efforts both
+    entries name.
+    """
+    selectable: dict[str, set] = {}
+    for entry in models:
+        if not isinstance(entry, dict) or not isinstance(entry.get("slug"), str):
+            continue
+        levels = entry.get("supported_reasoning_levels")
+        efforts = {level.get("effort") for level in (levels if isinstance(levels, list) else ())
+                   if isinstance(level, dict) and isinstance(level.get("effort"), str)}
+        if entry.get("supported_in_api") is not True or entry.get("multi_agent_version") == "disabled":
+            efforts = set()
+        slug = entry["slug"]
+        selectable[slug] = efforts if slug not in selectable else selectable[slug] & efforts
+    return {slug: efforts for slug, efforts in selectable.items() if efforts}
+
+
+def codex_listed_models(home: Path) -> Optional[dict]:
+    """``{slug: [efforts]}`` every session of `home` can spawn with, or None.
+
+    A model and effort count only when each model list a session uses is confirmed
+    (`codex_model_lists`) and accepts them there (`_codex_selectable`). None when any
+    list is unconfirmed, absent or unreadable: an unconfirmed list is not a list that
+    serves the model (PG-13). Codex's bundled list inside the binary is not read here.
+    """
+    import json
+
+    listed: Optional[dict] = None
+    for path in codex_model_lists(home):
+        if path is None:
+            return None
+        try:
+            if path.stat().st_size > 16 * 1024 * 1024:
+                return None
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        models = document.get("models") if isinstance(document, dict) else None
+        if not isinstance(models, list):
+            return None
+        entries = _codex_selectable(models)
+        listed = entries if listed is None else {
+            slug: listed[slug] & entries[slug] for slug in listed if slug in entries}
+        listed = {slug: efforts for slug, efforts in listed.items() if efforts}
+    return None if listed is None else {slug: sorted(efforts) for slug, efforts in listed.items()}
+
+
 def runtime_plan(fmt: Format, runtime_home: Path) -> dict:
     """Plan the agents `runtime_home` selects. Reads config and shipped files only."""
     cfg, receipt = model_config.resolve_config(fmt.adapter, runtime=runtime_home, source_root=ROOT)
@@ -211,6 +348,7 @@ def runtime_plan(fmt: Format, runtime_home: Path) -> dict:
     return {
         "schema": SCHEMA,
         "adapter": fmt.adapter,
+        "default_subagent": fmt.default_subagent(cfg) if fmt.default_subagent else None,
         "config": {"source": receipt.source, "reason": receipt.reason, "path": receipt.selected_path},
         "static_names": list(fmt.static_names),
         "agents": rows,

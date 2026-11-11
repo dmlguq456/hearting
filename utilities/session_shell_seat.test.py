@@ -113,12 +113,34 @@ class ShellSeatTest(unittest.TestCase):
     def test_native_screen_replaces_the_framed_pane_for_judgments(self):
         self.publish("claude")
         runs = [[["› ", False], ["placeholder", True]]]
-        with mock.patch.object(session_shell, "control", return_value={"ok": True, "screen": runs}):
+        with mock.patch.object(session_shell, "control",
+                               return_value={"ok": True, "screen": runs, "focused": False}):
             self.assertEqual(fixture.peer._read_screen(self.pane),
                              [[("›", False), (" ", False)] + [(c, True) for c in "placeholder"]])
-        with mock.patch.object(session_shell, "control", return_value={"ok": False}), \
-             mock.patch.object(fixture.peer, "_herdr_argv", return_value=["false"]):
-            self.assertIsNone(fixture.peer._read_screen(self.pane))  # falls back to the pane
+        # Only a raw relay (display unavailable) makes the framed pane the native screen.
+        with mock.patch.object(session_shell, "control",
+                               return_value={"ok": False, "reason": "display-unavailable"}), \
+             mock.patch.object(fixture.peer, "_herdr_argv", return_value=["false"]) as pane:
+            self.assertIsNone(fixture.peer._read_screen(self.pane))
+            pane.assert_called_once()
+
+    def test_a_shell_editor_holding_the_outer_keys_leaves_no_screen_to_type_into(self):
+        # Review [52] P1: settings, the Fleet explorer or a question editor take the pane's
+        # keys before native; the host's own screen answer says so (`focused`). An empty
+        # native box under them is no place for a judged key, and neither is no answer:
+        # the framed pane is never read again as an empty box.
+        self.publish("claude")
+        empty = [[["› ", False]]]
+        for answer in ({"ok": True, "screen": empty, "focused": True},   # settings / Fleet / question
+                       {"ok": True, "screen": empty},                    # owner not stated
+                       {"ok": False, "reason": "attachment-changed"},    # no answer
+                       {"ok": False}):
+            with self.subTest(answer=answer), \
+                 mock.patch.object(session_shell, "control", return_value=answer), \
+                 mock.patch.object(fixture.peer, "_herdr_argv") as pane, \
+                 mock.patch.object(fixture.peer.terminal_surface, "is_tmux_pane", return_value=False):
+                self.assertIsNone(fixture.peer._read_screen(self.pane))
+                pane.assert_not_called()
 
     def test_herdr_unknown_turn_takes_the_shell_lifecycle_state_only_for_the_seat(self):
         self.publish("codex")

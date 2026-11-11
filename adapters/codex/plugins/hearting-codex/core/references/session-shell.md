@@ -27,7 +27,21 @@ attachment changes cannot retarget a retained message. The shell publishes its
 current native selection and process birth through the existing session record.
 An idle wake requires the same live identity, an empty composer, no open form,
 and an unchanged input generation. Human drafts and concurrent typing survive
-the operation. Keyboard bytes remain ordered behind the admitted paste and its
+the operation. A judged key typed into a shell seat's pane (a tidy `/compact`,
+a continue) goes in only while the host's screen answer says the outer keys
+reach native; with settings, the Fleet explorer or a question editor focused,
+or no answer, there is no screen to type into. Only a raw relay reads the pane
+itself. Reading that screen and typing into it ask the same `focused` answer;
+reading a trust reason only reads it and its ingress, and never picks a trust
+answer. A window started on v4.18.5–v4.18.8 runs a host whose `focused` stays
+false with the Fleet explorer open, so there a tidy or continue key can go in
+while the explorer is open; restarting the window brings a host that refuses
+it. A host without the `screen` answer gets no typed key, the same skip, card
+kept, as before. A refused tidy is not retried by a new wait: a manual one
+ends `skipped` with its card kept; an automatic one is judged again only while
+its card request is still pending, and a refusal after the card was accepted
+ends `unverified`/`compact-pending` for that work span (the next idle is
+`not-rearmed`, the card stays). Keyboard bytes remain ordered behind the admitted paste and its
 Enter, and are released once Enter is written even if a lifecycle callback is
 lost. That transport boundary never acknowledges peer consumption.
 The launcher retains the PTY master and original native process outside the

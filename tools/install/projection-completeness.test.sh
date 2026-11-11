@@ -196,7 +196,26 @@ PY
 
   # Kernel helpers (memory-scout) plus the native subagent type catalog;
   # runtime team agents retired 2026-07-22 (재홈) and stay unprojected.
-  test "$(count_dirs "$HOME/.codex/agents")" = "$EXPECTED_AGENTS" || fail "$mode Codex agent count"
+  # Codex agents are activation-owned regular files (Codex 0.163.0 refuses a linked
+  # role file): every shipped agent, by name and bytes, and nothing else of Hearting's.
+  python3 - "$TMP/$mode-activate.json" "$CODEX_HOME/agents" "$EXPECTED_AGENTS" <<'PY' \
+    || fail "$mode Codex agent files"
+import json, sys
+from pathlib import Path
+
+data = json.load(open(sys.argv[1]))
+active = Path(next(row["active_root"] for row in data["runtimes"] if row["runtime"] == "codex"))
+agents, expected = Path(sys.argv[2]), int(sys.argv[3])
+shipped = {path.name: path for path in (active / "adapters/codex/agents").glob("*.toml")}
+assert len(shipped) == expected, (sorted(shipped), expected)
+present = {path.name: path for path in agents.iterdir()}
+assert set(shipped) <= set(present), sorted(set(shipped) - set(present))
+for name, source in shipped.items():
+    dest = present[name]
+    assert dest.is_file() and not dest.is_symlink(), dest
+    assert dest.read_bytes() == source.read_bytes(), dest
+assert not [p for p in present.values() if p.is_symlink()], sorted(present)
+PY
   test "$(count_dirs "$HOME/.claude/agents")" = "$EXPECTED_AGENTS" || fail "$mode Claude agent count"
   test "$(count_dirs "$HOME/.config/opencode/agents")" = "$EXPECTED_AGENTS" || fail "$mode OpenCode agent count"
 
@@ -280,6 +299,26 @@ PY
 }
 
 assert_projection linked
+
+# The source install path (`harness install`, projector) still links each shipped
+# Codex agent; its plan names every one of them, by name, as a link to the source.
+python3 - "$ROOT" "$EXPECTED_AGENTS" <<'PY' || fail "source install Codex agent plan"
+import sys
+from pathlib import Path
+
+root, expected = Path(sys.argv[1]), int(sys.argv[2])
+sys.path.insert(0, str(root / "tools" / "install"))
+import projector
+
+shipped = {path.name for path in (root / "adapters/codex/agents").glob("*.toml")}
+rows = [entry for entry in projector.plan(["codex"])["codex"]
+        if Path(entry.get("dest", "")).parent.name == "agents"]
+assert len(shipped) == expected, (sorted(shipped), expected)
+assert {Path(entry["dest"]).name for entry in rows} == shipped, rows
+for entry in rows:
+    assert entry["action"] == "symlink", entry
+    assert Path(entry["source"]).resolve() == (root / "adapters/codex/agents" / Path(entry["dest"]).name).resolve(), entry
+PY
 
 # Every adapter gets the same user-owned, copy-once model surface. Reapplying a
 # different activation mode must preserve those bytes instead of refreshing
