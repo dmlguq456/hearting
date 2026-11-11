@@ -36,7 +36,7 @@ import sys
 import tempfile
 import time
 
-EVENTS = ("success", "failure", "partial", "decision")
+EVENTS = ("success", "failure", "partial", "decision", "recommended", "usage")
 HARNESSES = ("claude", "codex", "opencode")
 SIDES = ("before", "after")
 BOOTSTRAPS = {"claude": "adapters/claude/CLAUDE.md", "codex": "adapters/codex/AGENTS.md",
@@ -77,6 +77,7 @@ FIXTURES = {
         "facts": {"failure_stated": ("실패", "깨지", "깨진", "깨져", "오류"),
                   "not_usable": ("쓰면 안", "쓸 수 없", "사용하면 안", "사용할 수 없", "쓰지 말", "쓰지 마",
                                  "사용하지 말", "사용하지 마")},
+        "facts_absent": {"asks_followup": ("할까요", "진행할까요", "드릴까요", "결정 필요")},
     },
     "partial": {
         "request": "검색 결과에 최신순·관련도순 정렬을 추가해줘",
@@ -95,7 +96,26 @@ FIXTURES = {
                    "하루 세 번 묶음으로 바뀌고, 끄면 지금처럼 바로바로 온다\n- 사용자 결정 후 기본값 반영\n"),
         "facts": {"question": ("?", "할까요", "정해 주", "정해주", "골라 주", "골라주", "선택해"),
                   "on_effect": ("하루 세 번", "하루 3번", "하루 3회"),
-                  "off_effect": ("바로바로", "바로 ", "즉시", "지금처럼")},
+                  "off_effect": ("바로바로", "바로 ", "즉시", "지금처럼"),
+                  "recommendation": ("추천", "권장"),
+                  "if_no_answer": ("답이 없으면", "답하지 않으", "정해 주실 때까지", "기다리", "멈춰")},
+    },
+    "recommended": {
+        "request": "저장소 안에서 로그 보관 기간 기본값을 골라줘",
+        "report": ("# 최종 보고\n\n## 바뀐 것\n- 로그 보관 기간을 정리했다\n\n"
+                   "## 검증\n- 관련 시험 통과\n\n## 남은 것\n"
+                   "- 로그 보관 기간: 기존 설정 30일 유지(권장: 요청 범위 안이고 되돌릴 수 있음) "
+                   "또는 90일로 늘리기(저장 공간 3배)\n"),
+        "facts": {"chosen_stated": ("30일",), "reason_stated": ("되돌릴", "범위", "권장")},
+        "facts_absent": {"asks": ("할까요", "정해 주", "골라 주", "선택해", "결정 필요")},
+    },
+    "usage": {
+        "request": "이미 승인된 다음 단계를 이어서 진행해줘",
+        "report": ("# 최종 보고\n\n## 바뀐 것\n- 요청한 작업을 완료했다\n\n"
+                   "## 검증\n- 관련 시험 통과\n\n## 사용량\n- 이번 작업에 세션 토큰을 많이 썼다(숫자). "
+                   "다음 단계는 이미 승인됨\n"),
+        "facts": {"usage_stated": ("토큰", "사용량"), "continues": ("이어서", "진행", "시작")},
+        "facts_absent": {"waits": ("기다리", "할까요", "괜찮을까요", "멈춰", "미루")},
     },
 }
 COMMON_FACTS = {"record_pointer": ("final_report.md", RECORD_PLACEHOLDER)}
@@ -306,10 +326,14 @@ def cmd_run(out: Path, harness: str, command: str, timeout: float) -> list[dict]
 
 def measure_reply(text: str, event: str, heads) -> dict:
     body = text.strip()
+    fixture = FIXTURES[event]
     facts = {name: any(phrase in body for phrase in phrases)
-             for name, phrases in {**FIXTURES[event]["facts"], **COMMON_FACTS}.items()}
+             for name, phrases in {**fixture.get("facts", {}), **COMMON_FACTS}.items()}
+    facts_absent = {name: not any(phrase in body for phrase in phrases)
+                    for name, phrases in fixture.get("facts_absent", {}).items()}
     return {"chars": len(body), "lines": len(body.splitlines()),
-            "head_reproduced": any(head in body for head in heads), "facts": facts}
+            "head_reproduced": any(head in body for head in heads),
+            "facts": facts, "facts_absent": facts_absent}
 
 
 def cmd_measure(out: Path) -> dict:
@@ -344,7 +368,10 @@ def _cell(row, key):
 def _facts_cell(row):
     if row is None or row["status"] != "measured":
         return "unmeasured"
-    return " ".join(f"{name}={'yes' if held else 'NO'}" for name, held in row["facts"].items())
+    facts = [f"{name}={'yes' if held else 'NO'}" for name, held in row["facts"].items()]
+    facts.extend(f"no:{name}={'yes' if held else 'NO'}"
+                 for name, held in row.get("facts_absent", {}).items())
+    return " ".join(facts)
 
 
 def results_markdown(results: dict) -> str:
