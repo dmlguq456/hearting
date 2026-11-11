@@ -445,6 +445,7 @@ SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
+_BOLD_FIELD = re.compile(r"^\s*\*\*(?P<title>[^*]+?)\*\*[:：]?\s*(?P<value>.*)$")
 _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # (field, sections of the code-report template by number, words of any other heading). The numbers
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
@@ -522,7 +523,28 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
         if match:
             current = _section_field(match["title"].strip(), numbered=numbered)
             continue
+        bold = _BOLD_FIELD.match(raw)
+        if bold:
+            label = bold["title"].strip().rstrip(":：")
+            current = _section_field(label, numbered=numbered)
+            value = bold["value"].strip()
+            if current and value:
+                sections.setdefault(current, []).append(value)
+            continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if line.startswith("|"):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            normalized_cells = [re.sub(r"[*:]", "", cell).strip().casefold() for cell in cells]
+            if len(normalized_cells) >= 2 and normalized_cells[:2] in (["검사", "결과"], ["check", "result"], ["item", "result"]):
+                continue
+            label = re.sub(r"[*:]", "", cells[0]).strip() if cells else ""
+            field = _section_field(label, numbered=numbered)
+            if field:
+                value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
+                if value:
+                    sections.setdefault(field, []).append(value)
+                current = None
+                continue
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
                 and not any(marker in line for marker in _CARRIER_MARKERS)):
             # A verification section can explicitly say a check was not run.
@@ -533,7 +555,25 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
 
 
 def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
-    return _line(" · ".join(item for item in lines if item), cap)
+    return _line(" · ".join(dict.fromkeys(item for item in lines if item)), cap)
+
+
+_COMMAND_LINE = re.compile(r"^(?:[$>]\s*|`|(?:python(?:3)?|pytest|uv|git|make|npm|npx|cargo|go|./tools/|tools/)|[\w./-]+\.(?:test\.py|test\.sh|py|sh)\b)", re.I)
+_COMMAND_RESULT = re.compile(r"\b(?:pass(?:ed)?|fail(?:ed)?|통과|실패)\b", re.I)
+
+
+def _verified_summary(lines, t):
+    """Keep commands intact in the record; summarize bare command rows for people."""
+    commands = [line for line in lines if _COMMAND_LINE.search(line.strip())]
+    prose = [line for line in lines if line not in commands]
+    if not commands:
+        return _joined(lines) or t("completion.no_checks")
+    outcomes = [match.group(0).lower() for line in commands
+                for match in _COMMAND_RESULT.finditer(line)]
+    failures = sum(value in {"fail", "failed", "실패"} for value in outcomes)
+    passed = sum(value in {"pass", "passed", "통과"} for value in outcomes)
+    summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
+    return _joined([*prose, summary])
 
 
 def _review_degraded(route_file) -> list[str]:
@@ -548,8 +588,17 @@ def _review_degraded(route_file) -> list[str]:
     return [str(node) for node in nodes] if isinstance(nodes, list) else []
 
 
-def _result_line(route, t) -> str:
-    """Completed; for one leg of an approved plan, say that a later leg remains."""
+def _result_line(route, t, remaining=()) -> str:
+    """Report a clean close only when the report has no substantive remaining work."""
+    substantive = [item for item in remaining if item and
+                   re.sub(r"[.!。 ]+$", "", item.strip()).casefold() not in
+                   {"없음", "해당 없음", "없습니다", "none", "n/a", "not applicable"}]
+    failure_words = ("실패", "오류", "에러", "깨짐", "쓰면 안", "사용할 수 없", "못 했", "하지 못",
+                     "미실행", "미확인", "미검증", "중단", "failed", "error", "not usable", "unrun",
+                     "unverified", "unavailable", "blocked")
+    decision_words = ("사용자가 정해야", "사용자 결정", "결정 후", "답을 기다", "must decide", "decision needed")
+    has_failure = any(word in item.casefold() for item in substantive for word in failure_words)
+    has_decision = any(word in item.casefold() for item in substantive for word in decision_words)
     plan = route.get("route_plan")
     if isinstance(plan, dict):
         try:
@@ -559,8 +608,17 @@ def _result_line(route, t) -> str:
         except (OSError, ValueError, KeyError, TypeError):
             legs = index = None
         if legs is not None and index + 1 < legs:
-            return t("completion.result_leg", index=index + 1, legs=legs)
-    return t("completion.result_done")
+            result = t("completion.result_leg", index=index + 1, legs=legs)
+            if has_failure:
+                return result + " · " + t("completion.result_with_remaining")
+            if has_decision:
+                return result + " · " + t("completion.result_decision")
+            return result
+    if has_failure:
+        return t("completion.result_with_remaining")
+    if has_decision:
+        return t("completion.result_decision")
+    return t("completion.result_with_remaining") if substantive else t("completion.result_done")
 
 
 def _elapsed_text(seconds) -> str | None:
@@ -642,7 +700,13 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         original = (t("completion.intent_original", original=_line(intent["original"], 100))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
-    result = _result_line(route, t)
+    try:
+        text = Path(primary).read_text(encoding="utf-8") if primary else ""
+    except (OSError, UnicodeError):
+        text = ""
+    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
+    sections = report_sections(text, numbered=code_report)
+    result = _result_line(route, t, sections.get("remaining") or [])
     if route.get("capability") == "audit" and assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
@@ -652,17 +716,11 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
             lines.append(t("completion.corrections_" + state, count=corrections[state]))
     if cost is not None:
         lines.append(cost_line(cost, t))
-    try:
-        text = Path(primary).read_text(encoding="utf-8") if primary else ""
-    except (OSError, UnicodeError):
-        text = ""
-    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
-    sections = report_sections(text, numbered=code_report)
     degraded = _review_degraded(route_file)
     if sections:
         if sections.get("changed"):
             lines.append(t("completion.changed", items=_joined(sections["changed"])))
-        checks = _joined(sections.get("verified") or []) or t("completion.no_checks")
+        checks = _verified_summary(sections.get("verified") or [], t)
         lines.append(t("completion.checks", items=checks))
         lines.append(t("completion.remaining", items=_joined(sections.get("remaining") or [])
                        or t("completion.no_remaining")))
