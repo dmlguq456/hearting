@@ -453,5 +453,81 @@ console.log("OpenCode token budget V1 messages / V2 session.context paths passed
         print(result.stdout.strip())
 
 
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_opencode_token_budget_never_borrows_an_earlier_usage_or_window(self):
+        # RV-PR1506 P2-1: the latest assistant is chosen first and only its usage
+        # counts. A latest response without usage (OpenCode 2.0.32 allows absent
+        # `tokens`) or with a non-object one is unknown: zero bytes, never the
+        # earlier 160K. A request whose model is unknown clears the remembered window.
+        fixture = self.temp / "harness"
+        (fixture / "core").mkdir(parents=True)
+        (fixture / "core/CORE.md").touch()
+        (fixture / "adapters/opencode/bin").mkdir(parents=True)
+        preflight = fixture / "adapters/opencode/bin/preflight.sh"
+        preflight.write_text("#!/bin/sh\nexit 0\n")
+        preflight.chmod(0o755)
+        (fixture / "utilities").mkdir()
+        for name in ("context_alert.py", "token-budget.py", "session_tidy.py",
+                     "session_card_format.py"):
+            shutil.copy(ROOT / "utilities" / name, fixture / "utilities" / name)
+        (fixture / "tools/fleet").mkdir(parents=True)
+        for name in ("__init__.py", "token_budget.py", "token_accounting.py"):
+            shutil.copy(ROOT / "tools/fleet" / name, fixture / "tools/fleet" / name)
+        (fixture / "capabilities").mkdir()
+        shutil.copy(ROOT / "capabilities/session-tidy.md", fixture / "capabilities/session-tidy.md")
+        plugin_path = ROOT / "adapters/opencode/plugins/hearting-guards.js"
+        script = r"""
+import assert from "node:assert/strict"
+const { AgentHarnessGuards } = await import(process.env.PLUGIN_PATH)
+const results = {}
+for (const version of ["v1", "v2"]) for (const mode of ["latest-high", "latest-missing",
+    "latest-invalid", "window-cleared"]) {
+  const sid = `ses_${version}_${mode.replaceAll("-", "")}`
+  const old = {id: "old", sessionID: sid, role: "assistant", type: "assistant", time: {created: 1},
+    providerID: "fixture", modelID: "m", model: {providerID: "fixture", id: "m"},
+    tokens: {input: 160000, output: 0, cache: {read: 0, write: 0}}}
+  const latest = {...old, id: "latest", time: {created: 2}}
+  if (mode === "latest-missing") delete latest.tokens
+  if (mode === "latest-invalid") latest.tokens = "invalid"
+  const client = {session: {get: async ({path}) => ({data: {id: path.id}}),
+    messages: async () => ({data: [{info: latest}, {info: old}]})}, tui: {}}
+  const ctx = {directory: process.env.HOME, client, ...(version === "v2"
+    ? {nativeHost: "v2", session: {context: async () => ({data: [old, latest]})}} : {})}
+  const plugin = await AgentHarnessGuards(ctx, {initialize: false})
+  await plugin["chat.params"]({sessionID: sid, model: {providerID: "fixture", id: "m",
+    limit: {context: 200000}}}, {})
+  // The latest request's model is unknown: the earlier window must not survive it.
+  if (mode === "window-cleared") await plugin["chat.params"]({sessionID: sid, model: {}}, {})
+  await plugin["chat.message"]({sessionID: sid, messageID: sid + "-turn"},
+    {message: {sessionID: sid, agent: "build"}, parts: [{type: "text", text: "go"}]})
+  const output = {system: []}
+  await plugin["experimental.chat.system.transform"]({sessionID: sid}, output)
+  results[`${version} ${mode}`] = output.system.filter(text => text.startsWith("TOKEN_BUDGET="))
+    .map(text => text.split(":")[0])
+  plugin.dispose()
+}
+assert.deepEqual(results, {
+  "v1 latest-high": ["TOKEN_BUDGET=tight"], "v1 latest-missing": [], "v1 latest-invalid": [],
+  "v1 window-cleared": [],
+  "v2 latest-high": ["TOKEN_BUDGET=tight"], "v2 latest-missing": [], "v2 latest-invalid": [],
+  "v2 window-cleared": []})
+console.log("OpenCode token budget reads only the latest usage and window (V1/V2)")
+"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script], text=True,
+                                capture_output=True, timeout=60, env={**self.env,
+                                "PYTHONDONTWRITEBYTECODE": "1",
+                                "AGENT_HOME": str(fixture), "PLUGIN_PATH": str(plugin_path)})
+        # The plugin's detached turn helpers may still be writing under HOME.
+        last, deadline = None, time.monotonic() + 5
+        while time.monotonic() < deadline:
+            now = sorted(str(path) for path in self.temp.rglob("*"))
+            if now == last:
+                break
+            last = now
+            time.sleep(0.5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        print(result.stdout.strip())
+
+
 if __name__ == "__main__":
     unittest.main()

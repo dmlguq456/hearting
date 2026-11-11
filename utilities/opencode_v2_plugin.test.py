@@ -1565,15 +1565,22 @@ try {
     procMode = null
   }
   // No selection at observation time cannot acquire one during an SDK await.
+  // The one lookup left is the session's own token-budget window (keyed by
+  // session, never a TUI record); it is held open across the reselection so
+  // the late selection is tested against a real await, not a skipped one.
   select(tuis[0], "ses_a")
   lookup = () => ({ location, data: [model()] })
   await primary()
   const prior = fs.readFileSync(target(tuis[0]), "utf8")
   fs.rmSync(file(tuis[0]), { force: true }); fs.rmSync(file(tuis[1]))
   const before = lookups
-  const missing = await primary(); select(tuis[0], "ses_a"); await flush()
-  assert.equal(lookups, before)
+  let releaseMissing
+  lookup = () => new Promise(resolve => { releaseMissing = resolve })
+  const missing = await primary(); select(tuis[0], "ses_a")
+  assert.equal(lookups, before + 1, "only the session token-budget window lookup ran")
+  releaseMissing({ location, data: [model("m", 600000)] }); await flush()
   assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), prior)
+  lookup = () => ({ location, data: [model()] })
   capture("missing selection then reselection keeps prior file but rejects prior request", missing, null)
   for (const invalidate of [
     () => fs.writeFileSync(file(tuis[0]), "x".repeat(1025)),

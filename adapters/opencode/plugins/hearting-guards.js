@@ -221,14 +221,17 @@ function tokenNoticeTurn(sid, output) {
     && !(output?.parts?.length && output.parts.every((part) => part.synthetic || part.ignored))
 }
 
+// One ordinary assistant message of this session, with its own usage or
+// `tokens: null` when that message carries none (OpenCode 2.0.32 allows it).
 function assistantUsage(row, sid) {
   // V1 rows are `{ info, parts }`; V2 `session.context` rows are the message itself.
   const info = row?.info && typeof row.info === "object" ? row.info : row
   const role = info?.role || info?.type
-  if (role !== "assistant" || info.summary || !info.tokens || typeof info.tokens !== "object") return null
+  if (role !== "assistant" || info.summary) return null
   if (info.sessionID && info.sessionID !== sid) return null
   const model = info.model && typeof info.model === "object" ? info.model : {}
-  return { tokens: info.tokens, created: info.time?.created || 0, id: String(info.id || ""),
+  const tokens = info.tokens && typeof info.tokens === "object" && !Array.isArray(info.tokens) ? info.tokens : null
+  return { tokens, created: info.time?.created || 0, id: String(info.id || ""),
     providerID: info.providerID || model.providerID || "", modelID: info.modelID || model.id || "" }
 }
 
@@ -248,8 +251,11 @@ async function latestAssistantUsage(ctx, sid) {
         : await client.session.messages({ path: { id: sid }, query: { limit: 16 }, ...options })
       const rows = v2 ? (result?.error ? null : result?.data ?? result) : sdkResponseData(result)
       if (controller.signal.aborted || !Array.isArray(rows)) return null
-      return rows.map((row) => assistantUsage(row, sid)).filter(Boolean)
-        .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))[0] || null
+      // Pick the latest assistant first, then read only its usage: an earlier
+      // response's usage never stands in for a latest one that has none.
+      const latest = rows.map((row) => assistantUsage(row, sid)).filter(Boolean)
+        .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))[0]
+      return latest?.tokens ? latest : null
     })(), new Promise((resolve) => {
       timer = setTimeout(() => { controller.abort(); resolve(null) }, 500)
     })])
@@ -265,8 +271,14 @@ function contextAlert(sid, latest) {
   return result.status === 0 ? (result.stdout || "").trim() : ""
 }
 
+// The latest request's model and window replace the remembered ones; a request
+// whose model is unknown clears them rather than leaving an older request's.
 function rememberModelWindow(sid, providerID, modelID, context) {
-  if (!sid || typeof providerID !== "string" || !providerID || typeof modelID !== "string" || !modelID) return
+  if (!sid) return
+  if (typeof providerID !== "string" || !providerID || typeof modelID !== "string" || !modelID) {
+    modelWindowBySession.delete(sid)
+    return
+  }
   modelWindowBySession.set(sid, { providerID, modelID,
     context: Number.isSafeInteger(context) && context > 0 ? context : null })
 }
@@ -1442,6 +1454,9 @@ async function setupOpenCodeV2(ctx) {
       contextObservation: "v2-context", selections, contextAt: Date.now(),
       eventSeq: contextObservations.get(sid)?.eventSeq }
     contextObservations.set(sid, observation)
+    // This request's window replaces the last one once its lookup settles; until
+    // then the token budget sees none rather than the previous request's.
+    modelWindowBySession.delete(sid)
     // Invalidate before any await, including a missing/late SDK result. The
     // reader must never borrow the last request's window for this one.
     for (const selected of selections) {
