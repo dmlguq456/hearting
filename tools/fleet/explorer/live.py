@@ -3333,7 +3333,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
             if isinstance(stage, str) and re.fullmatch(r"[A-Za-z0-9_./-]{1,64}", stage):
                 if stage not in stages:
                     stages.append(stage)
-        label = f"⏳ route {counts[tag]}"
+        label = f"route {counts[tag]}"
         if stages:
             label += " · " + ", ".join(stages[:3])
             if len(stages) > 3:

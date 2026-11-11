@@ -1,5 +1,5 @@
 """Question-first session block; values and authority keep their existing owners."""
-from .session_line import status_lines, clip_segments, wrap_segments as wrap_parts
+from .session_line import route_text, status_lines, clip_segments, wrap_segments as wrap_parts
 from .explorer.grid import cell_width
 from .config import ui_text
 
@@ -50,7 +50,7 @@ def question_presentations(items, columns, *, native_wait=None):
 def block_sections(values, *, columns, route="", received=(), human="", work="", gpu=""):
     prefix = [] if values.get("harness") == "claude" else status_lines({**values, "route_label": ""}, columns - 4, wrap_long=columns < 64)
     if route and route != values.get("native_route"):
-        prefix += wrap_parts([("⏳ ", "g_idle"), (route.removeprefix("⏳ "), "g_idle")], columns - 4)
+        prefix += wrap_parts([(route_text(route), "g_idle")], columns - 4)
     tail = []
     if received:
         tail.append([("✉ ", "dim"), (str(received[-1]).removeprefix("✉ "), "loc_repo")])

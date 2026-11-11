@@ -531,7 +531,7 @@ Manual `정리만` / `--no-clear` saves the card and queues memory work while re
 ### Session route waiting
 
 OpenCode 2.0.32's official `prompt.footer.status` TUI slot displays
-`◑답 대기 N` while this session waits for an answer, `⏳ route N · stage` from
+`◑답 대기 N` while this session waits for an answer, `route N · stage` from
 the same current/open route projection as Fleet OVERVIEW, and a waiting
 session-tidy result line, the same three Hearting items Claude's status line
 shows from the same helper. It draws nothing under the session shell, whose

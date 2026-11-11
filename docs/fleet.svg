@@ -55,11 +55,11 @@
 <text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
 <text x="315" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
 <text x="333" y="144" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
-<text x="414" y="144" textLength="153" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ⏳ route 1 ⠏1 │</text>
-<text x="576" y="144" textLength="117" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">◑ to answer 1</text>
-<text x="702" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="720" y="144" textLength="351" lengthAdjust="spacing" fill="#858689" xml:space="preserve">52m ago ✓ Fix the pagination off-by-one</text>
-<text x="1080" y="144" textLength="351" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
+<text x="414" y="144" textLength="126" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ route 1 ⠏1 │</text>
+<text x="549" y="144" textLength="117" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">◑ to answer 1</text>
+<text x="675" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
+<text x="693" y="144" textLength="351" lengthAdjust="spacing" fill="#858689" xml:space="preserve">52m ago ✓ Fix the pagination off-by-one</text>
+<text x="1053" y="144" textLength="378" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
 <text x="9" y="162" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">ROUTES</text>
 <text x="270" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
 <text x="333" y="162" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
@@ -73,7 +73,7 @@
 <text x="693" y="162" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────</text>
 <text x="756" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">46%</text>
 <text x="810" y="162" textLength="117" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Rate limiting</text>
-<text x="936" y="162" textLength="36" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">⏳ 1</text>
+<text x="936" y="162" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="1062" y="162" textLength="279" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› 1m · Keep the rate limit per…</text>
 <text x="1368" y="162" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">1h 12m</text>
 <text x="9" y="180" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">QUESTIONS</text>
@@ -113,7 +113,7 @@
 <text x="252" y="216" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2/2 │</text>
 <text x="315" y="216" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
 <text x="333" y="216" textLength="81" lengthAdjust="spacing" fill="#858689" xml:space="preserve">ml-train/</text>
-<text x="423" y="216" textLength="1008" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ⏳ route 1 ⠏1 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
+<text x="423" y="216" textLength="1008" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ route 1 ⠏1 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
 <text x="9" y="234" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">MEMORY</text>
 <text x="90" y="234" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">MODELS</text>
 <text x="171" y="234" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">SYSTEM</text>
@@ -129,7 +129,7 @@
 <text x="684" y="234" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">──────</text>
 <text x="756" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38%</text>
 <text x="810" y="234" textLength="135" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Checkpoint eval</text>
-<text x="954" y="234" textLength="36" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">⏳ 1</text>
+<text x="954" y="234" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="1062" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">› ·</text>
 <text x="1395" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">54m</text>
 <text x="9" y="252" textLength="288" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ │</text>
@@ -394,7 +394,7 @@
 <text x="954" y="828" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">quit</text>
 <text x="9" y="846" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">hearting ›</text>
 <text x="108" y="846" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">OVERVIEW</text>
-<text x="198" y="846" textLength="351" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions │ ⏳ route 2 │ ◑ to answer 1</text>
+<text x="198" y="846" textLength="324" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions │ route 2 │ ◑ to answer 1</text>
 </g>
 <rect x="0.5" y="0.5" width="1439" height="849" rx="11" fill="none" stroke="#2B2E3C"/>
 </svg>

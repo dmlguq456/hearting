@@ -39,17 +39,20 @@ for(const [width,height] of [[37,21],[80,14]]){
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 for(const width of [37,40,80]){
- const model={model:[{text:'Native selected · high'}],title:'Preserve the approved task',answerable:true,
-  routes:[{title:'Exact route',state:'working',stage:'verify',stages:[{name:'implement'},{name:'verify'}],reason:'Verify result'}]};
- const v=view.render({width,height:width===80?12:30,side:width<80,model,sid:'exact',configuration:{},
+ const model={selected:[{text:'Native selected'},{text:' high'}],session_title:'Preserve the approved task',answerable:true,wait:'◑답 대기 1',route_count:1,
+  routes:[{id:'r',title:'Exact route',state:'working',kind:'working',flow:'implement › verify ●',paint:{glyph:{text:'⠏'},harness:{text:'claude'}}}]};
+ const v=view.render({width,height:width===80?12:30,side:width<80,model,sid:'exact',configuration:{},expandedKeys:['route:r'],
   questions:()=>[[{text:'Where should this result go?'}],[{text:'1 · Current project'}],[{text:'Ctrl+] answer'}]]});
  const text=v.rows.map(r=>r.map(s=>s.text).join(''));
- assert(text.some(s=>s.includes('Native selected')));assert(text.some(s=>s.includes('Exact route')));
- assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes('implement → verify')));
- assert(!text.some(s=>s.includes('Results & connected work')));
+ assert(text.some(s=>s.includes('Native selected high')));assert(text.some(s=>s.includes('Exact route')));
+ assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes('◑답 대기 1')));
+ // An opened route row shows its stages joined by `›`, never `→`.
+ if(width<80)assert(text.some(s=>s.includes('implement › verify ●')),text.join('\n'));
+ assert(!text.some(s=>s.includes('→')));
  assert(text[0].startsWith('┌'));assert(text.at(-1).endsWith('┘'));
  assert(v.rows.every(r=>r.every(s=>s.background===undefined&&s.reverse!==true)));
  assert.equal(v.color,'lvl_y');assert(v.hits.some(h=>h.action==='settings'));
+ assert(v.hits.some(h=>h.action==='route:r'));assert(v.hits.some(h=>h.action==='route'));
  assert(text.every(s=>s.length<=width));
 }
 const direct=view.render({width:40,height:24,side:true,model:{routes:[{title:'One step',state:'idle',stages:[{name:'inline'}]}]},questions:()=>[],configuration:{}});
@@ -102,8 +105,10 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   assert(!text.includes('[object Object]')&&!text.includes('NATIVE ROW'),id+' '+s);
   // An open question comes first: its rows stay and the line waits.
   if(asking){assert.equal(text,none,id+' '+s);continue;}
-  const first=rows.findIndex(l=>l.includes('⚠ [정리]')),end=rows.findIndex(l=>l.includes(states[s].labels.work));
-  assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s);
+  const first=rows.findIndex(l=>l.includes('⚠ [정리]'));
+  // The notice ends at the next group: a blank row, a section rule or the answer wait.
+  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/◑(답| to answer)/.test(l)));
+  assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s+'\n'+text);
   const lines=rows.slice(first,end);
   // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
   assert(lines.length===(width===80?1:3)&&lines.at(-1).includes('…'),id+' '+s+' '+lines.length);
@@ -115,39 +120,220 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
                                  json.dumps(models, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_session_rows_are_always_painted_after_the_question_with_no_details_view(self):
+    def test_top_groups_and_quota_stay_while_a_question_takes_the_rows(self):
+        # Spec 2026-11-11 rule 6: with too few rows the question and the three top
+        # groups stay; messages, opened details and then route rows give way.
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
-const session=[[{text:'📁 project · [23] ● Title'}],[{text:'⎇ topic ↑2 ↓1 🚧 3 dirty · 21:52'}],[{text:'>_ running: pytest'}]];
-const model={model:[{text:'fixture · high'}],summary:[[{text:'context 42% · 5h 23% · 7d 60%'}]],session,
- routes:[{title:'Route',state:'working',stages:[{name:'one'}]}]};
-const tail=[[{text:'✉ peer news'}],[{text:'› last input'}]];
-const paint=(width,height,side,q)=>view.render({width,height,side,model,sid:'exact',configuration:{},sections:{tail},
- questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
+const route=(id,title)=>({id,title,state:'working',kind:'working',elapsed:'42m',flow:'plan ✓ › execute ●',paint:{glyph:{text:'⠏'},harness:{text:'codex'},ctx:{text:'72%'}}});
+const model={head:[{text:'[e9] '},{text:'project'},{text:' (topic 🚧 3)'}],selected:[{text:'fixture'},{text:' high'}],
+ context:[{text:'context '},{text:'━━━━──────'},{text:' 42%'}],wait:'◑답 대기 1',session_title:'SESSION_TITLE',
+ jobs:[{text:'>_'},{text:' running: '},{text:'pytest'}],quota:[{text:'5h 23%'},{text:' │ '},{text:'7d 60%'}],route_count:6,
+ routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),messages:[{way:'←',who:'[e7]',text:'MESSAGE_ONE',at:1},{way:'→',who:'[73]',text:'MESSAGE_TWO',at:2}]};
 const question=[[{text:'Q head'}],[{text:'1 · yes'}],[{text:'2 · no'}],[{text:'Ctrl+] answer'}]];
-for(const [width,height,side] of [[40,30,true],[80,14,false]]){
+const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,sid:'exact',configuration:{},expandedKeys:open,
+ questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
+for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['📁 project','⎇ topic','running: pytest','context 42%','peer news','last input'])
-  assert(idle.some(s=>s.includes(want)),width+' missing '+want);
- assert(!idle.join('\n').includes('Session details'));assert(/^└─+┘$/.test(idle.at(-1)));
- // The summary stays at the bottom; session rows sit directly above it.
- assert(idle.at(-2).includes('context 42%'));assert(idle.at(-3).includes('running'));
- const asked=paint(width,height,side,question);
- for(const row of question)assert(asked.some(s=>s.includes(row[0].text)),'question row lost at '+width);
- assert(asked.some(s=>s.includes('context 42%')));
+ for(const want of ['[e9] project (topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','── route 6','ROUTE_0','ROUTE_4','+1 more','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+  assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
+ assert(!idle.some(s=>s.includes('ROUTE_5')));assert(/^└─+┘$/.test(idle.at(-1)));
+ assert(idle.at(-2).includes('7d 60%'),'quota is the last row');
 }
-// A short bottom panel gives the question exactly the rows it had without
-// session rows; those take only what is left.
-for(const height of [8,10,12,14]){
- const short=paint(80,height,false,question);
- const bare=view.render({width:80,height,side:false,model:{...model,session:[]},sid:'exact',configuration:{},
-  questions:o=>question.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
- const asked=rows=>rows.filter(s=>question.some(q=>s.includes(q[0].text)));
- assert.deepEqual(asked(short),asked(bare));
- assert(short.length<=height);
+for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;height<=24;height+=2){
+ const rows=paint(width,height,side,question,['route:r0']),text=rows.join('\n');
+ assert(rows.length<=height,width+'x'+height);
+ for(const row of question)assert(text.includes(row[0].text),'question row lost at '+width+'x'+height+'\n'+text);
+ for(const want of ['[e9] project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
+ // Messages give way before the opened detail, and the detail before route rows.
+ if(text.includes('MESSAGE_ONE'))assert(text.includes('plan ✓ › execute ●'),text);
+ if(text.includes('plan ✓ › execute ●'))assert(text.includes('ROUTE_4')||text.includes('more'),text);
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
+assert(r.hits.some(h=>h.action.startsWith('message:1:←:')));assert(r.hits.some(h=>h.action==='fleet'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_a_chosen_message_reads_to_its_end_and_is_the_one_chosen(self):
+        # A token wider than a row runs on by cells instead of ending in `…`, and
+        # two messages kept in the same second open their own bodies (RV-PR1517-R2 §2).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const wide=c=>{const n=c.codePointAt(0);return n>=0x300&&n<=0x36f?0:n>0x2e7f?2:1;},cellWidth=s=>[...s].reduce((n,c)=>n+wide(c),0);
+const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,side:width<80,fill:false,model:{messages},cellWidth,questions:()=>[],configuration:{},...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+const keyOf=(messages,i)=>draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:'))[i].action;
+const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
+ for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/messages · |‹ \d+\/\d+ ›/.test(s)));return out;};
+// A row's text without its frame and indent: a body read across rows, end to end.
+const flat=rows=>rows.map(s=>s.slice(1,-1)).join('').replace(/\s/g,'');
+const bodies=[['url','https://example.invalid/'+'a'.repeat(290)+'END_1517','END_1517'],['cjk','한글'.repeat(150)+'끝1517','끝1517'],
+ ['mixed','see '+'x'.repeat(120)+'한'.repeat(60)+' then END_1517','END_1517'],['marks','é'.repeat(150)+'END_1517','END_1517']];
+for(const [name,body,end] of bodies){
+ const messages=[{way:'←',who:'[e7]',text:body,at:1}],key=keyOf(messages,0);
+ assert(draw(messages,40,30).plain.some(s=>s.includes('…')),name+': the folded preview keeps its ellipsis');
+ for(const [width,height] of [[40,30],[80,14],[40,12]]){
+  const open=draw(messages,width,height,{expandedKeys:[key]});
+  for(const s of open.plain)assert(cellWidth(s)<=width,name+' '+width+'\n'+s);
+  assert(!open.plain.some(s=>/[│ ]́/.test(s)),name+': a mark stays with its letter');
+  assert(flat(open.plain).includes(end)||open.hits.some(h=>h.action==='read:'+key),name+' '+width+'x'+height+'\n'+open.plain.join('\n'));
+  const pages=flat(read(messages,key,width,height));
+  assert(pages.includes(body.replace(/\s/g,'')),name+' '+width+'x'+height+' pages lost text\n'+pages);
+ }
+}
+// Same second: each row opens and reads its own body; identical records read the same body.
+const one=(who,tag,at=7,way='→')=>({way,who,text:tag+' '+'word '.repeat(40)+tag+'_END',at});
+for(const [name,messages,want] of [['same-way',[one('a','FIRST'),one('b','SECOND')],['FIRST_END','SECOND_END']],
+ ['other-way',[one('a','FIRST'),one('b','SECOND',7,'←')],['FIRST_END','SECOND_END']],
+ ['identical',[one('a','SAME'),one('a','SAME')],['SAME_END','SAME_END']],
+ ['a-second-apart',[one('a','FIRST'),one('b','SECOND',8)],['FIRST_END','SECOND_END']]]){
+ const keys=[0,1].map(i=>keyOf(messages,i));assert.notEqual(keys[0],keys[1],name);
+ keys.forEach((key,i)=>{
+  const other=want[1-i],page=read(messages,key,40,12).join('\n');
+  assert(page.includes(want[i]),name+' '+i+'\n'+page);if(other!==want[i])assert(!page.includes(other),name+' '+i+'\n'+page);
+  const open=draw(messages,40,40,{expandedKeys:[key]}).plain,rows=open.filter(s=>s.includes('_END'));
+  assert.equal(rows.length,1,name+' '+i+'\n'+open.join('\n'));
+  const link=draw(messages,40,12,{expandedKeys:[key]}).hits.find(h=>h.action.startsWith('read:'));
+  if(link)assert.equal(link.action,'read:'+key,name);
+ });
+}
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_a_chosen_message_stays_chosen_when_the_recent_list_moves(self):
+        # A newer message pushing the first one out never opens the next one in its place
+        # (RV-PR1517-R3 §1 ①): a kept message keeps its key; a message gone opens nothing.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const one=(tag,at,way='→',who='peer')=>({way,who,at,text:tag+' '+'word '.repeat(40)+tag+'_END'});
+const F=one('FIRST',7),S=one('SECOND',7),T=one('THIRD',8),U=one('FOURTH',9),X=one('INSERTED',7),A=one('SAME',7),A2=one('SAME',7);
+const draw=(messages,extra={})=>{const r=view.render({width:40,height:40,side:true,fill:false,model:{messages},questions:()=>[],configuration:{},...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+const keys=messages=>draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action);
+const ends=rows=>['FIRST','SECOND','THIRD','FOURTH','INSERTED','SAME'].filter(t=>rows.some(s=>s.includes(t+'_END')));
+const page=(messages,key)=>{const first=draw(messages,{routeDetail:key,height:10}),out=[];
+ for(let p=0;p<first.routePages;p++)out.push(...draw(messages,{routeDetail:key,routePage:p,height:10}).plain);
+ return {opened:first.plain.some(s=>s.includes('messages · ')),shown:ends(out),detail:first.routeDetail};};
+for(const [name,before,after] of [['front-out',[F,S,T],[S,T,U]],['insert',[F,T,U],[X,F,T]],['identical',[A,A2,T],[A2,T,U]],['none',[F,S,T],[F,S,T]]]){
+ const k=keys(before);
+ before.forEach((m,i)=>{
+  const want=m.text.split(' ')[0],stays=after.includes(m),p=page(after,k[i]),inline=ends(draw(after,{expandedKeys:[k[i]]}).plain);
+  assert.equal(p.opened,stays,name+' '+i);
+  if(stays){assert.deepEqual(p.shown,[want],name+' '+i);assert.deepEqual(inline,[want],name+' '+i);assert.equal(p.detail,k[i]);}
+  else{assert.deepEqual(inline,[],name+' '+i);assert.equal(p.detail,false,name+' '+i);}
+  if(stays)assert.equal(keys(after)[after.indexOf(m)],k[i],name+' '+i);
+ });
+}
+// The panel head's `route N` is whole or left out at any width, never `route 1` for 12.
+for(const n of [1,12,123])for(let width=12;width<=40;width++){
+ const rows=view.render({width,height:12,side:true,model:{routes:[{id:'a',title:'ROW',state:'working',kind:'working',paint:{}}],route_total:n},questions:()=>[],configuration:{}}).rows.map(r=>r.map(p=>p.text).join(''));
+ for(const row of rows)for(const hit of row.matchAll(/\br(?:o|ou|out|oute)?\b( \d+)?/g))assert.equal(hit[0],'route '+n,width+' '+row);
+}
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_shortening_keeps_the_observed_count_message_and_mcp(self):
+        # Only the rows shown shrink: the whole route count, a message's recorded
+        # end and OpenCode's MCP count stay readable (review RV-PR1517 §1).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const route=(id,title)=>({id,title,state:'working',kind:'working',elapsed:'31m',paint:{glyph:{text:'⠏'},harness:{text:'codex'},ctx:{text:'37%'}}});
+const base={head:[{text:'[52] project'}],selected:[{text:'fixture'},{text:' high'}],context:[{text:'context '},{text:'37%'}],
+ jobs:[{text:'>_ running: JOB'}],quota:[{text:'5h 12%'}],session_title:'TITLE'};
+const paint=(model,width,height,extra={})=>{const r=view.render({width,height,side:width<80,model,sid:'s',configuration:{},questions:()=>[],...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+// Twelve current routes, eight kept rows: the head and `+N more` count all twelve.
+const twelve={...base,routes:Array.from({length:8},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:8,route_total:12};
+let r=paint(twelve,40,30);assert(r.plain.some(s=>s.includes('route 12')),r.plain.join('\n'));
+assert(r.plain.some(s=>s.includes('+7 more')),r.plain.join('\n'));
+// Fewer rows: the rows shown plus `+N more` are always the whole count.
+const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
+for(let height=10;height<=22;height++){
+ for(const model of [six,twelve]){
+  r=paint(model,40,height);const shown=r.hits.filter(h=>h.action.startsWith('route:')).length,m=r.plain.join('\n').match(/\+(\d+) more/);
+  if(m)assert.equal(shown+Number(m[1]),model.route_total,height+'\n'+r.plain.join('\n'));
+ }
+}
+// An opened message reads to its recorded end where rows allow, else counts the rest and reads on.
+const long='START '+'word '.repeat(60)+'END_1517';
+const msg={...base,routes:[],route_count:0,messages:[{way:'←',who:'[e7]',text:long,at:1}]};
+const key=paint(msg,40,40).hits.find(h=>h.action.startsWith('message:')).action;
+for(const [width,height] of [[40,30],[80,24]]){
+ r=paint(msg,width,height,{expandedKeys:[key]});assert(r.plain.join('\n').includes('END_1517'),width+'\n'+r.plain.join('\n'));
+}
+r=paint(msg,40,14,{expandedKeys:[key]});const text=r.plain.join('\n');
+assert(!text.includes('END_1517'));const rest=text.match(/\+(\d+) lines ›/);assert(rest,text);
+assert(r.hits.some(h=>h.action==='read:'+key));
+// The pages read the whole message from its start.
+let pages=paint(msg,40,9,{routeDetail:key}),seen=[];
+for(let page=0;page<pages.routePages;page++)seen.push(...paint(msg,40,9,{routeDetail:key,routePage:page}).plain);
+assert(pages.routePages>1);assert(seen.join('\n').includes('START'));assert(seen.join('\n').includes('END_1517'));
+assert(pages.plain.some(s=>s.includes('messages · ')));
+// A message no longer kept falls back to the ordinary panel.
+assert(!paint(msg,40,14,{routeDetail:'message:9:→'}).plain.some(s=>s.includes('messages · ')));
+// The repo's open work row and, on the evidence pages, the route owner and summary stay readable.
+const work={...six,work:[{text:'◌ '},{text:'3 open · WORK_HEADLINE'}]};
+for(const width of [40,80])assert(paint(work,width,30).plain.some(s=>s.includes('3 open · WORK_HEADLINE')),String(width));
+const owned={...six,routes:[{...route('r0','ROUTE_0'),owner:'owner · codex (gpt·high)',visibility:{summary:'SUMMARY_TEXT',lines:[]}}]};
+const detail=paint(owned,40,30,{routeDetail:true}).plain.join('\n');
+assert(detail.includes('owner · codex (gpt·high)')&&detail.includes('SUMMARY_TEXT'),detail);
+// OpenCode's MCP count stays with the model and context at every height.
+const mcp={...six,mcp:[{text:'MCP '},{text:'2/3'}]};
+for(let height=10;height<=22;height++){
+ for(const width of [40,80])assert(paint(mcp,width,height).plain.some(s=>s.includes('MCP 2/3')),width+'x'+height);
+}
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_presentation_keeps_the_producers_whole_route_count_and_mcp(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet import session_panel
+        rows = [{"id": "rt-" + str(i), "title": "ROUTE", "state": "working", "marker": "working"} for i in range(8)]
+        values = {"harness": "opencode", "route_label": "route 12 ⠏12", "mcp": {"total": 3, "connected": 2, "failed": 1}}
+        panel = session_panel.presentation(values, {"route_panels": {"opencode\0s": rows}}, "opencode", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"]), (8, 12))
+        self.assertEqual("".join(text for text, _key in panel["mcp"]), "MCP 2/3")
+        panel = session_panel.presentation({"harness": "codex"}, {"route_panels": {"codex\0s": rows[:2]}}, "codex", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"], panel["mcp"]), (2, None, []))
+        # A label an earlier release left in the shared cache still gives its whole count,
+        # and is drawn without the hourglass it carried.
+        from fleet import session_line
+        old = {"harness": "claude", "route_label": "⏳ route 12 ⠏12"}
+        panel = session_panel.presentation(old, {"route_panels": {"claude\0s": rows}}, "claude", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"], panel["route_label"]), (8, 12, "route 12 ⠏12"))
+        self.assertEqual(session_line.route_badge("⏳ route 12 ⠏12", rows, [("working", False)] * 12), "route 12 ⠏12")
+        self.assertNotIn("⏳", "".join(text for row in session_line.status_lines(old, 80) for text, _key in row))
+
+    def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const p=t=>({text:t});
+const model={route_count:2,routes:[
+ {id:'a',title:'셸 표기 통일',state:'working',kind:'working',elapsed:'42m',flow:'plan ✓ › execute ● › review',tool:'apply_patch',agents:1,
+  paint:{glyph:p('⠏'),harness:p('codex'),model_text:p('gpt-6.1-sol'),effort:p('high'),ctx:p('72%'),gauge:[p('━━━━━━━'),p('───'),p(' '),p('72%')]}},
+ {id:'b',title:'제목만 있는 route 이름이 아주 길어서 잘림',state:'dead',kind:'dead',elapsed:'1h 27m',paint:{glyph:p('✕'),harness:p('claude')}}],
+ messages:[{way:'←',who:'[e7]',text:'#1506 병합 가능 — 추가 필수 수정 없음, CI 15/15. 검토서는 inputs/RV-PR1506-R2-1111.md',at:5}]};
+const paint=(cfg,open=[],width=40)=>view.render({width,height:30,side:width<80,model,configuration:cfg,expandedKeys:open,questions:()=>[]}).rows.map(r=>r.map(s=>s.text).join(''));
+const time=paint({}),byModel=paint({route_line:'model'});
+const row=(rows,title)=>rows.find(s=>s.includes(title.slice(0,5)));
+assert(row(time,'셸 표기').includes('codex 72%')&&row(time,'셸 표기').includes('42m')&&!row(time,'셸 표기').includes('gpt'));
+assert(row(byModel,'셸 표기').includes('codex gpt-6.1-sol 72%')&&!row(byModel,'셸 표기').includes('42m'));
+// A long title is cut first; the glyph, harness and elapsed time keep their cells.
+assert(row(time,'제목만').includes('…')&&row(time,'제목만').includes('claude')&&row(time,'제목만').includes('1h 27m'));
+// Unreported context is left out, never `?`.
+assert(!time.join('\n').includes('?'));
+const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+1,opened.findIndex(s=>s.includes('제목만')));
+assert(detail.some(s=>s.includes('gpt-6.1-sol high')&&s.includes('72%')),detail.join('\n'));
+assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert(detail.some(s=>s.includes('>_ apply_patch · +1 agent')));
+const openedModel=paint({route_line:'model'},['route:a']);
+assert(openedModel.some(s=>s.includes('high')&&s.includes('42m')),openedModel.join('\n'));
+// A message row opens to its whole retained text and closes again.
+const messageKey=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')).action;
+const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
+assert(!paint({}).join('').includes('RV-PR1506-R2-1111.md'));
+// Every row keeps the panel width with two-cell Hangul and emoji.
+for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(const s of rows)assert([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=80);
 '''
         self.node(script, "panel-view.cjs")
 
@@ -161,77 +347,99 @@ assert(!r.hits.some(h=>h.action==='details'));
                   "model": "fixture", "effort": "high", "ctx_pct": 42, "quota_windows": [("5h", 23, None)],
                   "route_label": "⏳ 1 route", "answer_wait": 1, "jobs": "pytest"}
         painted = text(session_status(values, 36))
-        for want in ("Title", "⎇ topic", "↑2", "fresh", "21:52", "running: pytest"):
+        for want in ("(topic", "↑2", "running: pytest"):
             self.assertIn(want, painted)
-        for already in ("fixture", "context", "5h", "route", "◑"):
+        for already in ("fixture", "context", "5h", "route", "◑", "⎇", "21:52"):
             self.assertNotIn(already, painted)
         self.assertNotIn("?", text(session_status({"harness": "claude", "state": "idle"}, 36)))
         self.assertEqual(session_status({"harness": "claude", "state": "idle"}, 36), [])
         # Sessions are told apart by number and title; the panel paints no Codex thread ID.
         sid = "00000000-0000-4000-8000-000000000052"
         codex = text(session_status({**values, "harness": "codex", "native_sid": sid}, 36))
-        self.assertIn("Title", codex)
+        self.assertIn("(topic", codex)
         self.assertNotIn(sid, codex)
         self.assertNotIn(sid[:8], codex)
 
     def test_title_and_jobs_stay_on_screen_while_a_question_takes_the_session_rows(self):
-        # Review [52] missing-field probe: a question at 80x14, its focused
-        # editor, and OpenCode's 35-column sidebar used to drop every session
-        # row, leaving the title and running jobs nowhere on screen.
+        # Review [52] missing-field probe, on the 2026-11-11 layout: a question at
+        # 80x14, its focused editor, and OpenCode's 35-column sidebar keep the
+        # session title, running jobs and branch on screen.
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet.session_panel import presentation
         values = {"harness": "claude", "tag": "[cb]", "state": "idle", "title": "REVIEW1463_TITLE",
                   "branch": "values-fixture*", "cwd": "/x/project", "model": "fixture", "effort": "high",
-                  "ctx_pct": 15, "jobs": "REVIEW1463_JOB",
+                  "ctx_pct": 15, "jobs": "REVIEW1463_JOB", "answer_wait": 1,
                   "git": {"repo": 1, "operation": "none", "ahead": 2, "behind": 1, "extra_worktrees": 3,
                           "observation": "fresh", "observed_label": "21:56:43"}}
-        plain = lambda rows: [[{"text": text} for text, _key in row] for row in rows]
+        plain = lambda rows: [{"text": text} for text, _key in rows]
         models = {}
-        for columns in (80, 35):
-            panel = presentation(values, {}, "claude", "sid", columns)
-            models[columns] = {**{key: plain(panel[key]) for key in ("summary", "session", "brief")},
-                               "model": plain([panel["model"]])[0]}
-        # Review [52] R2: a long title (55 cells with its tag) plus the jobs
-        # needed 75 cells of the 74 an 80-column edge has, and the jobs left.
-        panel = presentation({**values, "title": "REVIEW1463_TITLE_" + "A" * 40}, {}, "claude", "sid", 80)
-        models["long"] = {**{key: plain(panel[key]) for key in ("summary", "session", "brief")},
-                          "model": plain([panel["model"]])[0]}
+        for name, extra in (("short", {}), ("long", {"title": "REVIEW1463_TITLE_" + "A" * 80})):
+            panel = presentation({**values, **extra}, {}, "claude", "sid", 80)
+            models[name] = {**{key: plain(panel[key]) for key in ("head", "selected", "context", "jobs", "quota")},
+                            "wait": panel["wait"], "session_title": panel["session_title"]}
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
 const question=['◑ 질문 1 · 1/1 · 답변 필요','REVIEW1463: 결과를 어디에 둘까요?','1 현재 프로젝트 (추천)','2 다른 폴더','Ctrl+] · 답변 필요','more','more 2'].map(text=>[{text}]);
-const routes=[{title:'REVIEW1463_ROUTE',state:'blocked',stages:[{name:'one-shot',current:true}],visibility:{summary:'검증 ?'}}];
+const routes=[{id:'r',title:'REVIEW1463_ROUTE',state:'blocked',kind:'blocked',paint:{glyph:{text:'◑'}}}];
 const paint=(width,height,side,focused,model,n=question.length)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
- model:{...model,answerable:true,routes},sections:{tail:[[{text:'› last input'}]]},questions:o=>question.slice(0,Math.min(n,o.budget))})
+ model:{...model,answerable:true,routes,route_count:1},questions:o=>question.slice(0,Math.min(n,o.budget))})
  .rows.map(r=>r.map(p=>p.text).join(''));
-const asked=rows=>rows.filter(s=>question.some(q=>s.includes(q[0].text)));
-// A five-row question leaves the focused editor a spare row it never painted.
 for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,true],[80,14,false,true,5],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
- const model=models[width===35?35:80],rows=paint(width,height,side,focused,model,n);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB'])
+ const rows=paint(width,height,side,focused,models.short,n);
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','values-fixture*',models.short.wait,'◑ 질문 1'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
- if(width===80)assert(rows.some(s=>s.includes('values-fixture*')),'branch lost at 80');
- // The question keeps its rows and the panel does not grow for these values.
- const bare=paint(width,height,side,focused,{...model,session:[],brief:[]},n);
- assert.deepEqual(asked(rows),asked(bare));
- if(!rows.some(s=>s.includes('📁 project')))assert.equal(rows.length,bare.length,`${width}x${height} focused=${focused} grew`);
+ assert(rows.length<=height);
 }
-// A long title is shortened so the running jobs keep their place on the edge.
-for(const focused of [false,true]){
- const model=models.long,rows=paint(80,14,false,focused,model),bare=paint(80,14,false,focused,{...model,session:[],brief:[]});
- assert(rows.some(s=>s.includes('REVIEW1463_JOB')),'long title dropped the jobs\n'+rows.join('\n'));
- assert(rows.some(s=>s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));
- assert.deepEqual(asked(rows),asked(bare));assert.equal(rows.length,bare.length);
- assert(/^└─.*─┘$/.test(rows.at(-1))&&[...rows.at(-1)].length===80,rows.at(-1));
-}
-// Running jobs join the branch row at 80, saving the row a separate job row took.
-const idle=view.render({width:80,height:14,side:false,sid:'s',configuration:{},model:{...models[80],routes:[{...routes[0],state:'working'}]},
- questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-assert(idle.some(s=>s.includes('⎇ values-fixture*')&&s.includes('running: REVIEW1463_JOB')),idle.join('\n'));
-assert(/^└─+┘$/.test(idle.at(-1)));
+// A long title is shortened with an ellipsis; the answer wait keeps its place.
+const rows=paint(80,14,false,false,models.long);
+assert(rows.some(s=>s.includes(models.long.wait)&&s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));
+assert(/^└─.*─┘$/.test(rows.at(-1))&&[...rows.at(-1)].length===80,rows.at(-1));
 '''
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"), json.dumps(models)],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_route_line_setting_saves_through_the_existing_path_and_falls_back_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"XDG_CONFIG_HOME": directory}
+            path = shell.policy_path(env)
+            path.parent.mkdir()
+            path.write_text(json.dumps({"enabled": True, "route_line": "sideways"}))
+            path.chmod(0o600)
+            self.assertTrue(shell.policy(env)[0])
+            self.assertEqual(shell.display_policy(env)["route_line"], "time")
+            path.write_text(json.dumps({"enabled": True}))
+            desired = {**shell.DISPLAY_DEFAULTS, "route_line": "model"}
+            self.assertEqual(shell.save_display_policy(desired, env)["route_line"], "model")
+            self.assertEqual(shell.display_policy(env)["route_line"], "model")
+            with self.assertRaises(ValueError):
+                shell.save_display_policy({**desired, "route_line": "both"}, env)
+        script = r'''
+const assert=require('node:assert/strict'),v=require(process.argv[1]);
+const i=v.fields.indexOf('route_line');assert(i>=0);assert.equal(v.defaults.route_line,'time');
+assert.equal(v.change(v.defaults,'route_line',1).route_line,'model');
+const r=v.render({width:40,height:24,side:true,model:{labels:{route_line:'route line'}},settings:{index:i,value:{...v.defaults}},questions:()=>[]});
+assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hits.some(h=>h.action==='setting:'+i+':up'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_sent_messages_come_from_this_sessions_own_ledger_shard(self):
+        import time
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": directory}):
+            sid = "00000000-0000-4000-8000-0000000000e9"
+            shard = shell._peer_message()._ledger_path(sid)
+            shard.parent.mkdir(parents=True)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            rows = [{"ts": stamp, "from": {"session_id": sid}, "to": {"harness": "codex", "session_id": "x", "name": "n"},
+                     "kind": "note", "summary": "SENT_" + str(n)} for n in range(5)]
+            rows.append({"ts": stamp, "from": {"session_id": "other"}, "to": {}, "kind": "note", "summary": "FOREIGN"})
+            shard.write_text("\n".join(json.dumps(row) for row in rows) + "\nnot json\n")
+            sent, watched = shell._sent_peer_messages(sid)
+            self.assertEqual([row["summary"] for row in sent], ["SENT_2", "SENT_3", "SENT_4"])
+            self.assertEqual(watched, [str(shard)])
+            self.assertIs(shell._sent_peer_messages(sid)[0], sent)  # unchanged file: no reparse
+            self.assertEqual(shell._sent_peer_messages("absent-session"), ([], []))
 
     def test_native_model_is_observed_without_session_question_binding(self):
         script = r'''

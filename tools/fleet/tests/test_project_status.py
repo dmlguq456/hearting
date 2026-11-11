@@ -289,7 +289,7 @@ class RenderTest(unittest.TestCase):
         self.assertIn(("3 to decide", "lvl_y"), segments)
         self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("3 to decide", "lvl_y")])
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)),
-                         "⏳ route 2 │ 53m ago ✓ csi bundle")
+                         "route 2 │ 53m ago ✓ csi bundle")
         self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True), [])
         stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)),
@@ -306,7 +306,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(len(changed), 2, changed)                     # exactly the two group rules
         self.assertIn(self.first + "/ │ 백로그를 묶어", shown[changed[0]])
         self.assertIn("3 to decide │ ◑ to answer 2 │ 12m ago ┈", shown[changed[0]])
-        self.assertIn(self.second + "/ │ ⏳ route 2 │ 53m ago ✓ csi bundle ┈", shown[changed[1]])
+        self.assertIn(self.second + "/ │ route 2 │ 53m ago ✓ csi bundle ┈", shown[changed[1]])
 
     def test_repo_page_opens_with_four_status_lines(self):
         state = NavState(scope="repo:" + self.first)

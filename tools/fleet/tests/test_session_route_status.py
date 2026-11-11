@@ -35,7 +35,7 @@ class SessionRouteStatusTests(unittest.TestCase):
                     vm = live.build_view_model(snapshot)
                     counts, opened = live.current_route_counts(vm.routes)
                     labels = live.session_route_status(snapshot)
-                    expected = f"⏳ route {counts['s1']} · frame" if "s1" in opened else None
+                    expected = f"route {counts['s1']} · frame" if "s1" in opened else None
                     self.assertEqual(labels.get("claude\0sid-current"), expected)
                     self.assertEqual(labels.get("claude\0sid-before"), expected)
                     self.assertNotIn("opencode\0sid-current", labels)
@@ -44,9 +44,9 @@ class SessionRouteStatusTests(unittest.TestCase):
         snapshot = self.snapshot(2)
         snapshot["jobs"][1].work_projection._route_view["view"]["nodes"][0]["id"] = "execute"
         self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"],
-                         "⏳ route 2 · frame, execute")
+                         "route 2 · frame, execute")
         snapshot["jobs"][1].work_projection._route_view["view"]["nodes"][0]["id"] = "\x1b[31mPRIVATE\n"
-        self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"], "⏳ route 2 · frame")
+        self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"], "route 2 · frame")
 
     def test_shell_detail_reuses_the_same_interpretation_and_only_actual_stages(self):
         snapshot = self.snapshot(stage="inline")
@@ -172,7 +172,7 @@ class SessionRouteStatusTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(dispatch, "_scan_processes", return_value=[]))
             stack.enter_context(mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"))
             stack.enter_context(mock.patch.object(liveness, "classify", return_value="idle"))
-            expected = {"claude\0sid-native": "⏳ route 1 · execute"}
+            expected = {"claude\0sid-native": "route 1 · execute"}
             for requested in (None, [("claude", "sid-native")]):
                 snapshot = collectors.collect_all(route_sessions=requested, include_report_verification=False)
                 self.assertTrue(snapshot.observations["basic"]["all_new"])

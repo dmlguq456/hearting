@@ -43,7 +43,6 @@ class WrappedDisplayTest(unittest.TestCase):
                 else:self.assertNotIn('context',line)
                 # Every field stays here whenever the panel is not painting it.
                 self.assertIn('Opus',line);self.assertIn('7d 42%',line)
-                self.assertIn('[?]',line)  # The shared formatter, not legacy fallback.
                 # Exactly the painted plain text, for the shell's exact-match blanking.
                 self.assertEqual(record['session_id'],'synthetic-native-session')
                 self.assertEqual('\n'.join(record['lines']),line)
@@ -77,7 +76,8 @@ class WrappedDisplayTest(unittest.TestCase):
             callback={'session_id':'exact','cwd':directory,'context_window':{'used_percentage':37},'model':{'display_name':'Native'}}
             with mock.patch.object(claude_process_identity,'statusline_bindings',return_value=(None,None,'unobserved')),mock.patch('subprocess.Popen') as worker:
                 line=claude_first_statusline(callback,env,str(ROOT/'adapters/claude/statusline.sh'))
-                self.assertIn('Last observed title',line);self.assertIn('37%',line)
+                # The retained Git metadata (`no-git`) paints at once; the title is the panel's.
+                self.assertIn('(no-git)',line);self.assertIn('37%',line)
                 refreshes=lambda:[c for c in worker.call_args_list if c.args[0]==['bash',str(ROOT/'adapters/claude/statusline.sh')]]
                 self.assertEqual(len(refreshes()),1)
                 self.assertEqual(refreshes()[0].kwargs['env']['HEARTING_SHELL_INITIAL_REFRESH'],'1')
@@ -104,7 +104,7 @@ class WrappedDisplayTest(unittest.TestCase):
                 line=claude_first_statusline(callback,env,str(ROOT/'adapters/claude/statusline.sh'))
             self.assertEqual(cached.call_args.kwargs,{'request':False,'project_dir':directory})
             plain=re.sub(r'\x1b\[[0-9;]*m','',line)
-            self.assertIn('feature-x',plain);self.assertIn('fresh',plain);self.assertNotIn('⎇ ?',plain)
+            self.assertIn('(feature-x)',plain);self.assertNotIn('⎇',plain)
             self.assertIn('Native',plain)
             # Labels only: the random folder name may itself contain '5h' or '7d'.
             self.assertNotRegex(plain,r'(^| )(context|5h|7d) ')

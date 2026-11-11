@@ -302,30 +302,21 @@ int main(void) {
         self.assertEqual(tap["proc_start"], registry["procStart"])
         return output
 
-    def test_real_statusline_selects_user_name_last_success_blank_and_cwd_name(self):
-        explicit = self._run_statusline(
-            "statusline-explicit", "explicit-workspace", name="User chosen subject",
-            name_source="user", title="Older successful title")
-        self.assertIn("User chosen subject", explicit)
-        self.assertNotIn("Older successful title", explicit)
-
-        last_success = self._run_statusline(
-            "statusline-last-success", "title-workspace", name="derived-workspace-42",
-            name_source="derived", title="Last successful title")
-        self.assertIn("Last successful title", last_success)
-        self.assertNotIn("derived-workspace-42", last_success)
-
-        no_success = self._run_statusline(
-            "statusline-no-success", "blank-workspace", name="derived-generated-name",
-            name_source="derived")
-        self.assertNotIn("automatic stdin title", no_success)
-        self.assertNotIn("derived-generated-name", no_success)
-
-        cwd_name = "same-name-workspace"
-        same_as_cwd = self._run_statusline(
-            "statusline-same-cwd", cwd_name, name=cwd_name, name_source="user",
-            title="Older title")
-        self.assertGreaterEqual(same_as_cwd.count(cwd_name), 2, same_as_cwd)
+    def test_real_statusline_shows_the_project_and_no_session_title(self):
+        # Spec 2026-11-11 rule 10: Claude's statusline reads `[number] project (git)
+        # │ model …`; the session title belongs to the shell panel and Fleet. The
+        # real native tap and identity checks in _run_statusline still hold.
+        for label, cwd, name, source, title in (
+                ("statusline-explicit", "explicit-workspace", "User chosen subject", "user", "Older successful title"),
+                ("statusline-last-success", "title-workspace", "derived-workspace-42", "derived", "Last successful title"),
+                ("statusline-no-success", "blank-workspace", "derived-generated-name", "derived", None)):
+            output = self._run_statusline(label, cwd, name=name, name_source=source,
+                                          **({"title": title} if title else {}))
+            self.assertIn(cwd, output)
+            for text in (name, title, "automatic stdin title"):
+                if text:
+                    self.assertNotIn(text, output)
+            self.assertNotIn("📁", output)
 
 
 class RuntimeNameJsonAdditiveTest(unittest.TestCase):
