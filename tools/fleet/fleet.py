@@ -475,13 +475,6 @@ def main(argv=None):
     # F-83: SSH/GPU polling has its own slower pump in render. Never put it in
     # the 2-second process snapshot producer or on the curses thread.
     live_collector.compute_hosts_refresh = compute_hosts.collect
-    # The real collector names its watchable inputs, so the live view can stay
-    # quiet between their changes (FLEET_IDLE_REFRESH_INTERVAL=0 keeps periodic).
-    if __package__ in (None, ""):
-        from fleet.native_events import basic_event_sources
-    else:
-        from .native_events import basic_event_sources
-    live_collector.basic_event_sources = basic_event_sources
     live_collector.restart_argv = argv
 
     try:

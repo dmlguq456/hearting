@@ -83,7 +83,6 @@ shared-utility-deferred	opencode_context_window.py
 shared-utility-deferred	opencode_session_runtime.py
 shared-utility-deferred	owner_write_advisory.py
 shared-utility-deferred	pane_ownership.py
-shared-utility-deferred	pass_inputs.py
 shared-utility-deferred	pr-chain.py
 shared-utility-deferred	gpu_execution_sandbox.py
 shared-utility-deferred	prd_readability.py

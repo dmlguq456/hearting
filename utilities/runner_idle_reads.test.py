@@ -290,54 +290,6 @@ class ReadinessProjectionRewrite(unittest.TestCase):
         self.assertFalse(fresh({}, self.projection(101.0), result))
 
 
-class BoundedPassWork(unittest.TestCase):
-    def setUp(self):
-        import importlib.util
-        spec_ = importlib.util.spec_from_file_location(
-            "peer_steward_bounded", Path(__file__).with_name("peer-steward.py"))
-        self.steward = importlib.util.module_from_spec(spec_)
-        spec_.loader.exec_module(self.steward)
-
-    @staticmethod
-    def duty(duty_id, kind):
-        return {"id": duty_id, "intent": {"kind": kind}, "state": "pending"}
-
-    def test_heavy_duties_resume_where_the_last_bounded_pass_stopped(self):
-        duties = [self.duty("b", "registered-batch"), self.duty("m", "message"),
-                  self.duty("a", "steward-check"), self.duty("c", "registered-batch")]
-        order = self.steward._bounded_duty_order
-        self.assertEqual([d["id"] for d in order(duties, {"next": None})], ["b", "m", "a", "c"])
-        self.assertEqual([d["id"] for d in order(duties, {"next": "b"})], ["m", "b", "c", "a"])
-
-    def test_exhausted_budget_defers_heavy_duties_only(self):
-        seen = []
-        duties = [self.duty("a-batch", "registered-batch"), self.duty("b-batch", "registered-batch"),
-                  self.duty("m", "message")]
-        budget = {"seconds": 1e-9, "next": None}
-        token = self.steward._RUNNER_WORK_BUDGET.set(budget)
-        try:
-            with mock.patch.object(self.steward, "_resume_registered_obligation",
-                                   side_effect=lambda duty, *a, **k: seen.append(duty["id"])), \
-                    mock.patch.object(self.steward, "_resume_message_obligation",
-                                      side_effect=lambda duty, *a, **k: seen.append(duty["id"])), \
-                    mock.patch.object(self.steward, "_pass_clock", side_effect=[0.0, 0.0, 5.0, 5.0]):
-                self.steward._reconcile_obligations(mock.Mock(), duties)
-        finally:
-            self.steward._RUNNER_WORK_BUDGET.reset(token)
-        self.assertEqual(seen, ["a-batch", "m"])
-        self.assertEqual(budget["next"], "b-batch")
-
-    def test_classification_carry_over_is_rescanned_first(self):
-        import dispatch_batch_obligations as batch
-        context = batch.OwnerSettlementReadContext()
-        jobs = Path(tempfile.gettempdir()) / "carry-jobs.log"
-        self.assertFalse(context.has_carry_over(jobs))
-        context.carry_over_owner_ids(jobs, ["att-2", "att-3"])
-        self.assertTrue(context.has_carry_over(jobs))
-        self.assertEqual(context.take_carry_over_owner_ids(jobs), ("att-2", "att-3"))
-        self.assertFalse(context.has_carry_over(jobs))
-
-
 class PersistedOwnerProofs(unittest.TestCase):
     def test_restart_reuses_a_proof_until_a_dependency_changes(self):
         import dispatch_batch_obligations as batch

@@ -11,7 +11,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "utilities"))
-from fleet import pass_scope
+from fleet import pass_scope, session_tags
+from fleet.collectors import procscan
+from fleet.model import Session
 
 
 class PassScopeTest(unittest.TestCase):
@@ -68,24 +70,6 @@ class SharedVerdictTest(unittest.TestCase):
                     dispatch._notice_current_in_pass(supervision, record, "d", "g", "r")
         self.assertEqual(supervision.notice_is_current.call_count, 2)
 
-    def test_required_pass_keeps_last_optional_git_and_label_fields(self):
-        from fleet import details
-        from fleet.model import Session
-        from fleet.refresh import LiveSnapshot
-
-        def snap(branch, optional):
-            row = Session(harness="codex", session_id="s", pid=1, cwd="/r")
-            row.branch = branch
-            value = LiveSnapshot(sessions=[row])
-            value.observations = {"optional:memory": {"state": "success"}} if optional else {}
-            return details.DetailSnapshot({}, value)
-
-        kept = details.retain_optional_last_good(snap("main", True), snap(None, False))
-        self.assertEqual(kept.snapshot.sessions[0].branch, "main")
-        # An optional pass that observed no branch is not overridden.
-        cleared = details.retain_optional_last_good(snap("main", True), snap(None, True))
-        self.assertIsNone(cleared.snapshot.sessions[0].branch)
-
 
 class GenerationReuseTest(unittest.TestCase):
     def setUp(self):
@@ -135,6 +119,57 @@ class GenerationReuseTest(unittest.TestCase):
         with mock.patch.object(journal, "read_day") as read:
             journal._read_day_generation(day)
         read.assert_not_called()
+
+
+
+class UnchangedTagSnapshotTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root),
+                                             "FLEET_SESSION_REGISTRY_DIR": str(self.root / "registry"),
+                                             "CLAUDE_CONFIG_DIR": str(self.root / "claude")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch("fleet.collectors.herdr.list_agents", return_value=[])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_identical_census_keeps_the_file_and_marks_only_its_generation(self):
+        session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
+                          pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
+        session_tags.assign([session])
+        path = session_tags._path()
+        before_bytes, before = path.read_bytes(), os.stat(path)
+        time.sleep(0.01)
+        session_tags.assign([session])
+        after = os.stat(path)
+        self.assertEqual(path.read_bytes(), before_bytes)
+        self.assertEqual(after.st_ino, before.st_ino)
+        self.assertGreater(after.st_mtime_ns, before.st_mtime_ns)
+        self.assertFalse(list(path.parent.glob(".tag-assignments-*")))
+        tag = session_tags.assigned_tag("codex", "sid-unchanged")
+        self.assertIsNotNone(tag)
+        # A real change still rewrites the snapshot.
+        other = Session(harness="opencode", session_id="sid-new", started_at=11,
+                        pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
+        session_tags.assign([session, other])
+        rows = json.loads(path.read_text())["assignments"]
+        self.assertEqual({row["session_id"] for row in rows}, {"sid-unchanged", "sid-new"})
+        self.assertEqual(session_tags.assigned_tag("codex", "sid-unchanged"), tag)
+
+    def test_a_failed_generation_mark_falls_back_to_the_rewrite(self):
+        session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
+                          pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
+        session_tags.assign([session])
+        path = session_tags._path()
+        before = os.stat(path)
+        with mock.patch.object(session_tags.os, "utime", side_effect=PermissionError("fixture")):
+            session_tags.assign([session])
+        after = os.stat(path)
+        self.assertNotEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns),
+                            "the reaffirmation must still mark a newer generation")
 
 
 if __name__ == "__main__":

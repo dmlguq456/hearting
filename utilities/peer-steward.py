@@ -37,7 +37,6 @@ callers that go through this module. `split_module_fixture.patch_split` and
 """
 import argparse
 import contextlib
-import contextvars
 import datetime
 import errno
 import functools
@@ -6922,35 +6921,10 @@ def _reconcile_external_obligations(store, *, service_current=None, snapshot=Non
             pass
 
 
-_HEAVY_DUTY_KINDS = frozenset({"registered-batch", "steward-check"})
-_RUNNER_WORK_BUDGET = contextvars.ContextVar("peer_steward_runner_work_budget", default=None)
-_pass_clock = time.perf_counter  # bound at import: fixtures replace ``time`` itself
-
-
-def _bounded_duty_order(duties, rotation):
-    """Heavy duties start after the last one a bounded pass reached."""
-    if rotation is None or not rotation.get("next"):
-        return list(duties)
-    heavy = sorted((duty for duty in duties
-                    if (duty.get("intent") or {}).get("kind") in _HEAVY_DUTY_KINDS),
-                   key=lambda duty: duty.get("id", ""))
-    light = [duty for duty in duties
-             if (duty.get("intent") or {}).get("kind") not in _HEAVY_DUTY_KINDS]
-    start = next((index for index, duty in enumerate(heavy)
-                  if duty.get("id", "") >= rotation["next"]), 0)
-    return light + heavy[start:] + heavy[:start]
-
-
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
                            notice_selection=None, runner_incarnation=None,
                            settlement_context=None):
-    """Advance only the accepted duties owned by this runner.
-
-    The long-lived runner's ``_RUNNER_WORK_BUDGET`` (``{"seconds": s}``) bounds the
-    wall time spent on registered-batch and steward-check duties in one pass;
-    the rest are resumed first on the next pass. Each duty's outcome is the
-    same, only reached a pass later, and the loop still reaches its wait.
-    """
+    """Advance only the accepted duties owned by this runner."""
     if duties is None:
         duties = _runner_duties(store, store.list())
     retry_state = {} if retry_state is None else retry_state
@@ -6977,22 +6951,11 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                     store.update(duty["id"], observer_error=cause)
                 except Exception:
                     pass
-    work_budget = _RUNNER_WORK_BUDGET.get()
-    deadline = (_pass_clock() + work_budget["seconds"]
-                if work_budget and work_budget.get("seconds") else None)
-    if work_budget is not None:
-        duties = _bounded_duty_order(duties, work_budget)
-        work_budget["next"] = None
     for duty in duties:
         duty_id = duty.get("id", "")
         kind = (duty.get("intent") or {}).get("kind")
         if kind in notice_kinds:
             retry_state.pop(duty_id, None)
-            continue
-        if (deadline is not None and kind in _HEAVY_DUTY_KINDS
-                and _pass_clock() >= deadline):
-            if work_budget.get("next") is None:
-                work_budget["next"] = duty_id
             continue
         fingerprint = _obligation_retry_fingerprint(duty)
         # These duties observe authority outside their own bytes: registry rows
@@ -7760,16 +7723,9 @@ def _release_freed_memory(*, min_interval=5.0):
     peer_obligations.release_freed_memory(min_interval=min_interval)
 
 
-# Wall seconds one runner pass spends on heavy historical duty work (owner
-# redrives, steward checks) and on the owner classification walk; the rest
-# continues on the next pass so the loop keeps reaching its bounded wait.
-RUNNER_PASS_WORK_SECONDS = 120.0
-
-
 def _runner_settlement_context(store):
     """The runner's owner-settlement context, with proofs kept across restarts."""
     context = dispatch_batch_obligations.OwnerSettlementReadContext()
-    context.classify_budget_seconds = RUNNER_PASS_WORK_SECONDS
     try:
         path = store.root.parent / "runner-duties" / "settled-owners.json"
         context.proof_path = path
@@ -7882,7 +7838,6 @@ def cmd_obligation_runner(args):
     notice_selection = {"state_root": str(store.root.parents[1].resolve()),
                         "runner_incarnation": runner_incarnation, "last_group": None}
     settlement_context = _runner_settlement_context(store)
-    duty_work_budget = {"seconds": RUNNER_PASS_WORK_SECONDS, "next": None}
     retired_for_exec = []
 
     def retire_for_service_exec():
@@ -7946,14 +7901,12 @@ def cmd_obligation_runner(args):
                 duties.append(duty)
         duties = _runner_duties(store, duties)
         observation_context = ObservationContext()
-        budget_token = _RUNNER_WORK_BUDGET.set(duty_work_budget)
         with _shared_revision_pass():
             _reconcile_obligations(store, duties, read_context=read_context,
                                    retry_state=duty_retry_state,
                                    notice_selection=notice_selection,
                                    runner_incarnation=runner_incarnation,
                                    settlement_context=settlement_context)
-        _RUNNER_WORK_BUDGET.reset(budget_token)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
@@ -8045,10 +7998,7 @@ def cmd_obligation_runner(args):
         # Keep the same owner and bounded wait even before legacy duty recovery.
         signature = (notice_discovery_observed,
                      _runner_duty_signature(current_duties), external_signature)
-        backlog = bool(duty_work_budget.get("next")
-                       or getattr(settlement_context, "_carry_over", None))
-        if previous_signature is None or signature != previous_signature or backlog:
-            # A budget-bounded pass left work for the next one: continue soon.
+        if previous_signature is None or signature != previous_signature:
             delay = 1.0
         else:
             active_readiness = any(
