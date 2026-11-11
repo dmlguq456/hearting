@@ -63,7 +63,7 @@ def _install_native_seats(test, rows, tags=None):
             return None, "fleet-tag-not-found"
         return {"harness": seat[0], "session_id": seat[1]}, None
 
-    def presence(harness, sid):
+    def presence(harness, sid, **_kwargs):
         return "present" if any((row["harness"], row["sid"]) == (harness, sid)
                                 for row in live()) else "absent"
 

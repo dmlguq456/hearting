@@ -5535,20 +5535,16 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     elif row.get("state") in {"queued", "unverified"}:
         # Accepted or ambiguous: never resent. The one-hour sender notice still applies.
         _ensure_sender_delay_notice_if_due(row)
+        recorded = duty.get("observation") or {}
+        if recorded.get("ref") == ref and recorded.get("transport_state") == row["state"]:
+            return  # The recorded acceptance evidence is unchanged; nothing is rewritten.
     # Otherwise Claude/OpenCode outside a shell consume their rows at their native callback.
-    try:
-        current = read_pending()
-    except (OSError, ValueError):
-        current = None
-    if current and current.get("state") == "received":
-        checkpoint(state="complete", result="received", delivery="acknowledged", cleanup="complete",
-                   observation={"ref": ref, "reason": "exact-peer-ref"})
-        return
-    latest = current or row
-    age = max(0.0, time.time() - float(latest.get("created") or time.time()))
+    # An exact receive is acknowledged by the next pass's received branch, so this
+    # pass does not read the row again.
+    age = max(0.0, time.time() - float(row.get("created") or time.time()))
     if age >= _FLUSH_STUCK_HOURS * 3600:
-        _ensure_sender_delay_notice(latest)
-    checkpoint(state="pending", observation={"ref": ref, "state": latest.get("state"),
+        _ensure_sender_delay_notice(row)
+    checkpoint(state="pending", observation={"ref": ref, "state": row.get("state"),
                                              "reason": reason})
 
 

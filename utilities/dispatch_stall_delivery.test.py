@@ -18,6 +18,8 @@ SPEC = importlib.util.spec_from_file_location("peer_steward_stall_fixture",
                                               ROOT / "utilities/peer-steward.py")
 peer_steward = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(peer_steward)
+import peer_session_fixture  # noqa: E402  (the mocked `agent list` is the live-session table)
+peer_session_fixture.install(peer_steward)
 
 import dispatch_contract
 import dispatch_pending_delivery as pending

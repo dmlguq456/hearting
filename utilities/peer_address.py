@@ -148,8 +148,11 @@ def _registry_name(harness, sid):
     return name if isinstance(name, str) and name and name != "-" else None
 
 
-def presence(harness, sid):
-    """``present`` / ``absent`` / ``unknown`` for one native session, from Hearting records."""
+def presence(harness, sid, *, sessions=None):
+    """``present`` / ``absent`` / ``unknown`` for one native session, from Hearting records.
+
+    ``sessions`` is one already-read ``native_sessions()`` table (a courier pass reads it
+    once for every row)."""
     if harness not in HARNESSES or not isinstance(sid, str) or not _SID.fullmatch(sid):
         return "unknown"
     try:
@@ -159,16 +162,17 @@ def presence(harness, sid):
             return "present"
         if reason == "attachment-ambiguous":
             return "unknown"
+        if sessions is None:
+            sessions = native_sessions()
+        if any(row["harness"] == harness and row["sid"] == sid for row in sessions):
+            return "present"
         if harness == "codex":
             _tools_path()
             from fleet.collectors import codex
             if codex.process_for_thread(sid):
                 return "present"
-        sessions = native_sessions()
     except Exception:
         return "unknown"
-    if any(row["harness"] == harness and row["sid"] == sid for row in sessions):
-        return "present"
     # Not observed live. Callers that act on absence (expiry) still prove the
     # recorded process's death themselves; absence here only withholds delivery.
     return "absent"
