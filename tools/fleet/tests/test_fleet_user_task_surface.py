@@ -332,6 +332,40 @@ class ContractProjectionTests(unittest.TestCase):
         text = "\n".join(draw(vm, NavState(view="ROUTES"), 220, 60).text_rows())
         self.assertIn("50%", text)
 
+    def test_a_route_its_supervisor_closed_is_neither_resumed_nor_counted(self):
+        """``capability-route close`` leaves ``closed_at`` in the outcome sidecar; a closed
+        route whose owner ended without a passed gate offers no resume and is no stopped leg."""
+        from tools.fleet.explorer import live
+        from tools.fleet.explorer.tables import route_counts
+        from tools.fleet import route as routemod
+        snapshot = self.selected_worker_snapshot()
+        for job in snapshot["jobs"]:
+            job.liveness = "dead"
+        backing = snapshot["jobs"][0].work_projection._route_view
+        backing["view"] = routemod._record_view(backing["record"], "rt-exact", snapshot["jobs"], {}, 1000)
+        before = build_view_model(snapshot).routes[0]
+        self.assertEqual(before["state"], "dead")
+        self.assertTrue(before["resume"])
+        self.assertEqual(route_counts([before]), (1, 0, 1))
+        bounded = live.route_visibility.bounded
+
+        def closed(desc, *args, **kwargs):
+            value = dict(bounded(desc, *args, **kwargs))
+            codes = dict(value.get("codes") or {})
+            codes["verification"] = dict(codes.get("verification") or {},
+                                         closed_at="2026-11-11T01:14:00Z")
+            value["codes"] = codes
+            return value
+        with mock.patch.object(live.route_visibility, "bounded", closed):
+            route = build_view_model(snapshot).routes[0]
+        self.assertTrue(route["closed"])
+        self.assertIsNone(route["resume"])
+        self.assertEqual(route_counts([route]), (0, 0, 0))
+        text = "\n".join(draw(replace(build_view_model(snapshot), routes=(route,)),
+                               NavState(view="ROUTES"), 168, 40).text_rows())
+        self.assertNotIn("resume", text)
+        self.assertIn("0 open · 0 stopped", text)
+
     def test_folded_session_shows_only_current_route_count(self):
         vm = build_view_model(self.route_snapshot())
         for cols in (140, 168, 180):
