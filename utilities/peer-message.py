@@ -2144,15 +2144,43 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None):
+                         prepared=None, namespace=None):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
-    caller can keep its courier even when a later read of that row fails."""
+    caller can keep its courier even when a later read of that row fails.
+    ``namespace`` is the Herdr socket a window ``original_target`` was read on (default:
+    this environment's own, as ``peer_address.resolve`` reads it). A window request
+    belongs to the namespace it was first made on: a row from another namespace, or an
+    unbound one that never recorded its namespace, is not this call's retry."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
+    address_namespace = None
+    if original_target is not None:
+        import peer_address
+        if peer_address.is_herdr_pane_address(original_target):
+            address_namespace = namespace or peer_address.caller_endpoint(
+                server=None if server in (None, "default") else server)["socket"]
+
+    def same_namespace(row):
+        if address_namespace is None:
+            return True
+        recorded = row.get("namespace")
+        if recorded is None:
+            # Rows sealed before the row carried it keep it on their duty.
+            from peer_obligations import ObligationStore
+            duty = ObligationStore().get("message-" + row["ref"]) or {}
+            intent = duty.get("intent") or {}
+            if intent.get("ref") == row["ref"]:
+                recorded = (intent.get("identity") or {}).get("namespace")
+        if recorded is not None:
+            return recorded == address_namespace
+        # An unknown first namespace is never this one where the address would bind
+        # the request; a request already pinned to its exact session binds nothing.
+        target = row.get("to") or {}
+        return not (_unresolved_target(target) and not row.get("bound_to"))
 
     def address_evidence(row):
         target = row.get("to") or {}
@@ -2197,7 +2225,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         addresses, recorded = address_evidence(row)
         if server is not None and recorded != server:
             return False  # Missing endpoint evidence is not the default endpoint.
-        if original_target is not None and original_target in addresses:
+        if (original_target is not None and original_target in addresses
+                and same_namespace(row)):
             return True
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
@@ -2306,6 +2335,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             pending["server"] = server
         if original_target is not None:
             pending["original_target"] = original_target
+        if address_namespace is not None:
+            pending["namespace"] = address_namespace
         if handoff is not None:
             pending["handoff"] = handoff
         if producer_binding is not None:

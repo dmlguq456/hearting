@@ -277,6 +277,11 @@ def is_pane_address(target):
             and target.split(":", 1)[0] not in HARNESSES))
 
 
+def is_herdr_pane_address(target):
+    """A Herdr window address (``w1:p1``): it names a window only in one Herdr namespace."""
+    return is_pane_address(target) and _TMUX_PANE.fullmatch(target) is None
+
+
 def resolve(target, *, server=None, environ=None, namespace=None):
     """``(identity, reason)``: identity is ``{harness, session_id[, pane]}`` or None.
 

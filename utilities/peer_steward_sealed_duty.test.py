@@ -147,6 +147,82 @@ class SealedMessageDutyTest(FIXTURE._TmpRootMixin, unittest.TestCase):
         self.assertEqual(self.store.get(duty["id"])["observation"]["reason"],
                          "target-pane-unresolved")
 
+    def two_namespaces(self):
+        """Server "hb" under configuration A and B: same window number, B's is a Claude."""
+        a, b = self.tmp_root / "a", self.tmp_root / "b"
+        sock = {key: str(root / "herdr" / "sessions" / "hb" / "herdr.sock")
+                for key, root in (("a", a), ("b", b))}
+        native_b = {"harness": "claude", "sid": RECIPIENT_SID, "pid": 0, "binding": None,
+                    "env": {"HERDR_PANE_ID": "w1:p1", "HERDR_SESSION": "hb",
+                            "HERDR_SOCKET_PATH": sock["b"], "XDG_CONFIG_HOME": str(b)}}
+        os.environ.update(AGENT_HERDR_SESSION="hb", XDG_CONFIG_HOME=str(a))
+        old_server = steward._HERDR_SESSION
+        steward._HERDR_SESSION = "hb"
+        self.addCleanup(setattr, steward, "_HERDR_SESSION", old_server)
+        return {"a": str(a), "b": str(b)}, sock, native_b
+
+    def cli(self, body, sessions):
+        args = steward.build_parser().parse_args(["prompt", "w1:p1", body])
+        out = io.StringIO()
+        with mock.patch.object(peer_address, "native_sessions", return_value=sessions), \
+                mock.patch.object(steward, "_current_session_identity",
+                                  return_value=(SENDER["session_id"], "codex")), \
+                mock.patch.object(steward, "_current_shell_binding",
+                                  return_value=(None, "attachment-missing")), \
+                contextlib.redirect_stdout(out):
+            steward.cmd_prompt(args)
+        return out.getvalue().rsplit("ref=", 1)[1].split()[0], out.getvalue()
+
+    def test_an_old_window_duty_without_a_namespace_is_never_raised_to_the_runner_one(self):
+        config, _sock, native_b = self.two_namespaces()
+        pm = steward.peer_message
+        # The structure the code before namespaces left behind: no namespace on row or duty.
+        _text, ref = pm.prepare_peer_message(
+            "old window request", SENDER, {"harness": "unknown", "session_id": None, "name": "w1:p1"},
+            defer=True, receipt="target-pane-unresolved", original_target="w1:p1", server="hb")
+        row = {k: v for k, v in pm._read_pending(ref).items() if k != "namespace"}
+        pm._save_pending(dict(row, created=time.time() - steward._FLUSH_STUCK_HOURS * 3600 - 30))
+        duty = self.store.create(
+            steward._message_obligation_id(ref), "message",
+            {"server": "hb", "pane": "", "harness": "", "session_id": ""},
+            {"ref": ref, "body_digest": row["body_sha256"], "target": "w1:p1",
+             "from": row["from"], "to": row["to"], "refs": [], "delay_notice_for": ""})
+        os.environ["XDG_CONFIG_HOME"] = config["b"]
+        with mock.patch.object(peer_address, "native_sessions", return_value=[native_b]):
+            steward._resume_message_obligation(self.store.get(duty["id"]), self.store)
+        self.assertIsNone(pm._read_pending(ref).get("bound_to"))
+        self.assertEqual(self.store.get(duty["id"])["state"], "unknown")
+        self.assertEqual(self.store.get(duty["id"])["observation"]["reason"],
+                         "target-namespace-unrecorded")
+        self.assertIsNotNone(self.store.get("delay-" + ref))
+        # The same body from B's CLI is B's own new request, not the old ref's recovery.
+        new_ref, _out = self.cli("old window request", [native_b])
+        self.assertNotEqual(new_ref, ref)
+        self.assertIsNone(pm._read_pending(ref).get("bound_to"))
+        self.assertEqual(pm._read_pending(new_ref)["to"]["session_id"], RECIPIENT_SID)
+
+    def test_a_window_ref_from_one_namespace_is_never_reused_by_another(self):
+        config, sock, native_b = self.two_namespaces()
+        pm = steward.peer_message
+        ref, out = self.cli("only for A", [native_b])
+        self.assertIn("reason=target-pane-unresolved", out)
+        # A's own CLI repeating it is still the same request.
+        self.assertEqual(self.cli("only for A", [native_b])[0], ref)
+        os.environ["XDG_CONFIG_HOME"] = config["b"]
+        b_ref, out = self.cli("only for A", [native_b])
+        self.assertNotEqual(b_ref, ref, out)
+        self.assertIsNone(pm._read_pending(ref).get("bound_to"))
+        self.assertEqual(pm._read_pending(b_ref)["to"]["session_id"], RECIPIENT_SID)
+        self.assertEqual(pm._read_pending(ref).get("namespace"), sock["a"])
+        self.assertEqual(pm._read_pending(b_ref).get("namespace"), sock["b"])
+        # Back in A with a session now in A's window: the A ref binds there.
+        os.environ["XDG_CONFIG_HOME"] = config["a"]
+        sid_a = "00000000-0000-4000-8000-000000000092"
+        native_a = dict(native_b, sid=sid_a, env=dict(native_b["env"], HERDR_SOCKET_PATH=sock["a"],
+                                                      XDG_CONFIG_HOME=config["a"]))
+        self.assertEqual(self.cli("only for A", [native_a, native_b])[0], ref)
+        self.assertEqual(pm._read_pending(ref)["bound_to"]["session_id"], sid_a)
+
 
 class InboxRecipientsTest(FIXTURE._TmpRootMixin, unittest.TestCase):
     def test_inbox_upkeep_finds_live_sessions_from_hearting_records_without_herdr(self):

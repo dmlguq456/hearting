@@ -5470,9 +5470,16 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
             checkpoint(state="unknown", observation={"ref": ref, "reason": row["receipt"]})
             return
         import peer_address
-        current, error = peer_address.resolve((row.get("to") or {}).get("name"),
-                                              server=globals()["_HERDR_SESSION"],
-                                              namespace=globals()["_PEER_NAMESPACE"])
+        name = (row.get("to") or {}).get("name")
+        namespace = globals()["_PEER_NAMESPACE"] or row.get("namespace")
+        if peer_address.is_herdr_pane_address(name) and not namespace:
+            # An older window request never recorded where it was made; the
+            # runner's own Herdr namespace is no evidence of it. It stays refused.
+            _ensure_sender_delay_notice_if_due(row)
+            checkpoint(state="unknown", observation={"ref": ref, "reason": "target-namespace-unrecorded"})
+            return
+        current, error = peer_address.resolve(name, server=globals()["_HERDR_SESSION"],
+                                              namespace=namespace)
         if not current or not peer_message.usable_session_id(current.get("session_id")):
             _ensure_sender_delay_notice_if_due(row)
             checkpoint(state="unknown", observation={"ref": ref, "reason": error or "target-identity-unverified"})
@@ -7713,7 +7720,8 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             defer=True, refs=args.ref, receipt="native-pending", with_trailer=not args.no_trailer,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
-            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared)
+            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
+            namespace=_PEER_NAMESPACE)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -7821,7 +7829,8 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
             {"harness": "unknown", "session_id": None, "name": args.target},
             defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
             producer_binding=producer_binding, handoff=handoff,
-            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared)
+            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
+            namespace=_PEER_NAMESPACE)
         if on_prepared is not None:
             on_prepared(ref)
         row = peer_message._read_pending(ref)
