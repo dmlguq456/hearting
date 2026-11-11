@@ -1919,7 +1919,8 @@ def expire_notice_past_ttl(path: Path, *, actor: str, now: float | None = None) 
     The same declared actor and record lock as ``expire_if_due``. A question
     answer is the person's own reply and is never expired by age; a claimed or
     otherwise rewritten record restarts its window. Returns expired, fresh, or
-    skipped (not an open notice, answer, unreadable).
+    skipped (not an open notice, answer, unreadable). A receipt that is not a
+    readable notice mapping is kept as it is: it is neither aged out nor raised.
     """
     if actor != EXPIRY_ACTOR:
         raise PendingDeliveryError("pending-delivery-expiry-actor-invalid", actor)
@@ -1931,10 +1932,10 @@ def expire_notice_past_ttl(path: Path, *, actor: str, now: float | None = None) 
             modified = path.stat().st_mtime
         except (PendingDeliveryError, OSError):
             return "skipped"
-        receipt = None if not isinstance(value, dict) else value.get("receipt")
-        if (not isinstance(value, dict) or value.get("state") not in OPEN_STATES
+        receipt = value.get("receipt") if isinstance(value, dict) else None
+        if (not isinstance(receipt, dict) or value.get("state") not in OPEN_STATES
                 or value.get("route_node") != "notice"
-                or (isinstance(receipt, dict) and "answer_binding" in receipt)):
+                or "answer_binding" in receipt):
             return "skipped"
         if now - modified < NOTICE_TTL_SECONDS:
             return "fresh"

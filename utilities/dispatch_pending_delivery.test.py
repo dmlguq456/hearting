@@ -11,6 +11,7 @@ requirement applies to every new SD-111 test file regardless.
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 import stat
@@ -1478,6 +1479,23 @@ class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(self._state(completion)[0], "pending")
         # Already terminal: a second sweep changes nothing.
         self.assertEqual(join.reconcile_pending_delivery(self.root / "jobs.log")["expired"], 0)
+
+    def test_an_unreadable_receipt_is_kept_not_aged_out(self):
+        # A notice whose receipt is not a mapping cannot be read as a notice:
+        # the TTL keeps it as it is instead of expiring it or raising.
+        path = self._notice("6", age_days=8)
+        value = json.loads(path.read_text("utf-8"))
+        before = path.read_bytes()
+        for receipt in (True, 7, "notice", [], None):
+            # The record lock is not under test (its own read validates);
+            # only the TTL's judgment of the record it read is.
+            with unittest.mock.patch.object(PD, "_record_reference_lock",
+                                            side_effect=lambda _p: contextlib.nullcontext()), \
+                 unittest.mock.patch.object(PD, "_read_unlocked",
+                                            return_value=dict(value, receipt=receipt)):
+                self.assertEqual(
+                    PD.expire_notice_past_ttl(path, actor="dispatch-reconcile"), "skipped")
+        self.assertEqual(path.read_bytes(), before)
 
     def test_only_the_declared_actor_expires(self):
         stale = self._notice("5", age_days=8)

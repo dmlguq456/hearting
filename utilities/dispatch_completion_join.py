@@ -877,9 +877,11 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
             if owner_metadata is not None:
                 expiry = expire_pending_for_dead_recipient(
                     jobs, owner_metadata, record, attempt_id=owner_attempt_id)
-            if expiry != "expired" and record.get("route_node") == "notice":
+            if owner_metadata is None and record.get("route_node") == "notice":
                 # A notice for a gone session usually has no owning attempt row
-                # to prove its recipient dead; the declared TTL ends it.
+                # to prove its recipient dead; the declared TTL ends it. When a
+                # row exists, the dead-recipient rule above alone decides: a
+                # live, handed-over or unclear recipient is never aged out.
                 try:
                     if pending_delivery.expire_notice_past_ttl(
                             record_file, actor="dispatch-reconcile") == "expired":

@@ -5178,6 +5178,32 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
         ]))
         return f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}"
 
+    def test_notice_ttl_never_ages_out_a_notice_its_row_still_protects(self):
+        # A closed row's notice whose exact parent (this process, same birth)
+        # is alive: the dead-recipient rule keeps it pending, and an old mtime
+        # alone must not expire it (review F1, PR #1529).
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            attempt = "att-reconcile-live-ttl"
+            birth = D.process_start_ticks(os.getpid())
+            row = self._row(attempt, ancestry=(os.getpid(), birth)).replace(
+                "route_node=execute", "route_node=notice")
+            jobs.write_text(row + "\n", encoding="utf-8")
+            self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+            self.assertTrue(JOIN.materialize_after_terminal_close(jobs, attempt))
+            pd = JOIN.pending_delivery
+            owner = JOIN.current_attempt_row(jobs, attempt)
+            sid, delivery = owner.metadata["parent_sid"], owner.metadata["delivery_id"]
+            record = pd.read(jobs.parent, sid, delivery)
+            self.assertEqual(record["route_node"], "notice")
+            old = time.time() - 8 * 86400
+            os.utime(pd.record_path(jobs.parent, sid, delivery), (old, old))
+            self.assertEqual(JOIN.expire_pending_for_dead_recipient(
+                jobs, owner.metadata, record, attempt_id=attempt), "pending")
+            result = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(result["expired"], 0)
+            self.assertEqual(pd.read(jobs.parent, sid, delivery)["state"], "pending")
+
     def test_materializes_a_row_intent_stamped_but_not_yet_materialized(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
