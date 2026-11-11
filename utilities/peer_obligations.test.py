@@ -1871,8 +1871,9 @@ class ObligationStoreTest(unittest.TestCase):
 
         Terminal groups always went first and a gone recipient's group only
         recorded ``recipient-unavailable``, so a progress-class notice for a
-        live session was never selected. Groups already found unavailable now
-        take every other pass; the fresh group is the first one sent.
+        live session was never selected. A group found unavailable sent nothing,
+        so the same pass goes on to the next live group; found-gone groups then
+        take every other pass, and the fresh group is the first one sent.
         """
         from types import SimpleNamespace
 
@@ -1897,12 +1898,6 @@ class ObligationStoreTest(unittest.TestCase):
                 "claude", "sid-z-live", key="notice:fresh", subject="answer", text="fresh",
                 jobs=jobs))
             store = obligations.ObligationStore(case_root)
-            for duty in store.list(kinds={"session-notice"}):
-                if duty["intent"]["identity"]["storage_sid"] in gone:
-                    # An earlier runner already found these recipients gone.
-                    store.update(duty["id"], observation={
-                        "recipient_sid": duty["intent"]["identity"]["storage_sid"],
-                        "reason": "recipient-unavailable"})
             inventory = {"result": {"agents": [{"agent": "claude",
                 "agent_session": {"value": "sid-z-live"}, "pane_id": "pane-z-live"}]}}
             sent = []
@@ -1925,8 +1920,14 @@ class ObligationStoreTest(unittest.TestCase):
                 peer_steward._reconcile_obligations(
                     store, store.list(kinds={"session-notice"}), notice_selection=selection,
                     runner_incarnation="runner-gone-backlog")
+                # One pass found the three never-tried gone recipients and still
+                # reached the live group (one census per group, no send to them).
                 self.assertEqual(sent, [("claude", "sid-z-live")])
+                self.assertEqual(census.call_count, 4)
                 self.assertEqual(selection["last_group"], ("claude", "sid-z-live"))
+                for duty in store.list(kinds={"session-notice"}):
+                    if duty["intent"]["identity"]["storage_sid"] in gone:
+                        self.assertEqual(duty["observation"]["reason"], "recipient-unavailable")
                 # The gone groups keep their every-other-pass turn and stay open.
                 for _pass in range(2):
                     peer_steward._reconcile_obligations(
@@ -2064,7 +2065,12 @@ class ObligationStoreTest(unittest.TestCase):
                                      {"harness": "claude", "session_id": "sid-z-live"})
                     self.assertEqual(selection["state_root"], str(case_root.resolve()))
                     self.assertEqual(selection["runner_incarnation"], "runner-" + case)
-                    self.assertEqual(selection["last_group"], ("claude", "sid-a-blocked"))
+                    # A recipient found unavailable sent nothing: the same pass
+                    # goes on to the next live group, so the third pass is z's.
+                    swept = case in {"pane-unavailable", "invalid-pane"}
+                    self.assertEqual(selection["last_group"],
+                                     ("claude", "sid-z-live") if swept
+                                     else ("claude", "sid-a-blocked"))
                     self.assertEqual(store.get(front_duty["id"])["state"], "pending")
                     self.assertEqual(store.get(back_duty["id"])["observation"]["transfer_ref"],
                                      "back-transfer-" + case)

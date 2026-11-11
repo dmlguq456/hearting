@@ -6997,11 +6997,27 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                 retry_state.pop(duty_id, None)
 
 
+# A live-tier group that ends with its recipient unavailable sent nothing; the
+# same pass tries the next one, at most this many times. Without this, a backlog
+# of never-tried groups for gone sessions was found out one group per pass.
+NOTICE_UNAVAILABLE_SWEEP_LIMIT = 8
+
+
 def _resume_session_notice_obligations(duties, store, *, read_context=None,
                                        selection=None, runner_incarnation=None):
     try:
-        return _resume_session_notice_pass(duties, store, read_context=read_context,
-            selection=selection, runner_incarnation=runner_incarnation)
+        for _sweep in range(NOTICE_UNAVAILABLE_SWEEP_LIMIT):
+            if selection is not None:
+                selection.pop("last_outcome", None)
+            result = _resume_session_notice_pass(duties, store, read_context=read_context,
+                selection=selection, runner_incarnation=runner_incarnation)
+            if (selection is None or selection.get("last_outcome") != "recipient-unavailable"
+                    or selection.get("last_pick_tier") != "live"):
+                return result
+            # The found-gone group is now parked; stay on the live tier.
+            selection["parked_turn"] = False
+            duties = [store.get(duty["id"]) or duty for duty in duties]
+        return result
     finally:
         # Source completion may have recovered from an earlier failed write.
         # Queue its decision after carrier and source/selected locks are gone.
@@ -7155,6 +7171,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     if selection is not None:
         selection[cursor_name] = group_key
         selection["last_group"] = group_key
+        selection["last_pick_tier"] = "parked" if parked_turn else "live"
         selection["parked_turn"] = bool(parked_keys) and not parked_turn
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
@@ -7250,6 +7267,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     store.update(item[0]["id"], observer_error="recipient-unavailable",
                                  observation={**(item[0].get("observation") or {}),
                                               "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
+                if selection is not None:
+                    selection["last_outcome"] = "recipient-unavailable"
                 return
             target = matches[0].get("pane_id")
             if not isinstance(target, str) or not target or target == "-":
@@ -7257,6 +7276,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     store.update(item[0]["id"], observer_error="recipient-unavailable",
                                  observation={**(item[0].get("observation") or {}),
                                               "recipient_sid": recipient_sid, "reason": "recipient-unavailable"})
+                if selection is not None:
+                    selection["last_outcome"] = "recipient-unavailable"
                 return
             if _resolve_target(target)[:2] != (harness, recipient_sid):
                 return
