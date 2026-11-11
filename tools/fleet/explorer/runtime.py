@@ -29,6 +29,71 @@ _COMPLETE_STATES = frozenset({"complete", "completed", "success", "ok", "observe
 _OBSERVED_STATES = frozenset({"complete", "completed", "success", "ok", "observed", "absent"})
 
 
+def focus_command(pane, env=None):
+    """How ``pane`` is brought forward for the person: ``("herdr", socket, pane)``,
+    ``("tmux", [argv, ...])`` or ``None`` when nothing here can reach it.
+
+    A Herdr pane id (``w1:p3``) goes to the Herdr server's own ``pane.focus`` request on the
+    socket Herdr gave this pane; a tmux pane id (``%12``) is selected in its window and client.
+    """
+    env = os.environ if env is None else env
+    pane = str(pane or "").strip()
+    if not pane or pane == "·" or env.get("FLEET_DEMO"):
+        return None
+    if pane.startswith("%"):
+        if not env.get("TMUX"):
+            return None
+        return ("tmux", [["tmux", "select-window", "-t", pane], ["tmux", "select-pane", "-t", pane],
+                         ["tmux", "switch-client", "-t", pane]])
+    socket_path = env.get("HERDR_SOCKET_PATH")
+    if socket_path:
+        return ("herdr", socket_path, pane)
+    return None
+
+
+def _herdr_focus(socket_path, pane, timeout=3.0):
+    """One ``pane.focus`` request; True when Herdr answered with a result."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.settimeout(timeout)
+            stream.connect(socket_path)
+            stream.sendall((json.dumps({"id": "fleet:pane.focus", "method": "pane.focus",
+                                        "params": {"pane_id": pane}}) + "\n").encode())
+            reply = b""
+            while not reply.endswith(b"\n") and len(reply) < 65536:
+                chunk = stream.recv(65536)
+                if not chunk:
+                    break
+                reply += chunk
+        return "result" in json.loads(reply.decode("utf-8", "replace") or "{}")
+    except (OSError, ValueError):
+        return False
+
+
+def focus_pane(pane, env=None, runner=None):
+    """Bring the pane forward without holding the screen thread; returns whether it was asked."""
+    plan = focus_command(pane, env)
+    if not plan:
+        return False
+
+    def run():
+        if plan[0] == "herdr":
+            (runner or _herdr_focus)(plan[1], plan[2])
+            return
+        import subprocess
+        for command in plan[1]:
+            try:
+                (runner or subprocess.run)(command, capture_output=True, text=True, timeout=5,
+                                           check=False)
+            except (OSError, subprocess.SubprocessError):
+                return
+    if runner is not None:
+        run()
+    else:
+        threading.Thread(target=run, name="fleet-focus-pane", daemon=True).start()
+    return True
+
+
 class ExplorerRuntime:
     """Behaviour-preserving runtime hooks for the explorer."""
 
@@ -919,7 +984,7 @@ class ExplorerRuntime:
                 "message": (message + note)[:240], "error": None, "models": refreshed}
 
     def apply_effects(self, effects, vm):
-        """Apply accepted ordering and validated MODELS effects."""
+        """Apply accepted ordering, pane focus and validated MODELS effects."""
         from . import order
         ordering = getattr(vm, "ordering", None)
         saved = ({"repos": list(ordering.get("repo_keys", ())),
@@ -933,6 +998,9 @@ class ExplorerRuntime:
                 continue
             if effect and effect[0] == "alloc.apply":
                 result = self._apply_allocation_action(effect, vm)
+                continue
+            if effect and effect[0] == "focus" and len(effect) > 2:
+                focus_pane(effect[2])
                 continue
             if not effect or effect[0] != "reorder" or len(effect) < 5:
                 continue

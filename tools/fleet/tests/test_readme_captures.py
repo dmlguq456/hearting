@@ -68,7 +68,10 @@ class ReadmeDemoRows(unittest.TestCase):
                 frame = self.frames[name]
                 self.assertEqual((frame.cols, frame.rows), (cols, rows))
                 text = "\n".join(frame.text_rows())
-                self.assertIsNone(HANGUL.search(text), "Korean text on a README screen")
+                # ``◑답 대기 N`` is the one fixed word the person chose to keep as it is (E9 spec
+                # rule 3); every other Korean letter on a README screen is a leak.
+                self.assertIsNone(HANGUL.search(text.replace("◑답 대기", "")),
+                                  "Korean text on a README screen")
                 self.assertIsNone(PRIVATE.search(text), "a private name on a README screen")
 
     def test_header_carries_the_current_version_and_no_unavailable_usage(self):
@@ -84,7 +87,7 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertIn("opencode", text["overview"])
         self.assertIn("answer needed", text["overview"])
         self.assertIn("plan ✓ › execute ●", text["overview"])
-        self.assertIn("WAITING  1 question", text["questions"])
+        self.assertIn("◑답 대기 1", text["questions"])
         self.assertIn("GPU", text["resources"])
         self.assertIn("1 link", text["session"])
         self.assertIn("owner raw", text["output"])

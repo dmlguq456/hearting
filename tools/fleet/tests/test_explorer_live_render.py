@@ -112,11 +112,18 @@ class CommandRule(unittest.TestCase):
 
 
 class HeaderRule(unittest.TestCase):
-    def test_answered_head_counts_the_first_repos_own_rows(self):
+    def test_answered_head_counts_the_listed_rows_and_names_projects_only_when_mixed(self):
         answered = (("repo-a", (("10:00", "one"), ("10:01", "two"))), ("repo-b", (("09:00", "three"),)))
         system = dict(_mapping()["system"], answered_total=3)
-        frame = _frame(_vm(answered=answered, system=system), "QUESTIONS")
-        self.assertIn("repo-a 2 · 3 decision records in all projects", "\n".join(frame.text_rows()))
+        text = "\n".join(_frame(_vm(answered=answered, system=system), "QUESTIONS").text_rows())
+        self.assertIn("── answered today 3 ─", text)
+        self.assertNotIn("in all projects", text)
+        self.assertRegex(text, r"✓ 10:00  repo-a\s+one")
+        self.assertRegex(text, r"✓ 09:00  repo-b\s+three")
+        system = dict(system, answered_total=7)
+        text = "\n".join(_frame(_vm(answered=answered[:1], system=system), "QUESTIONS").text_rows())
+        self.assertIn("── answered today 2 (7 in all projects) ─", text)
+        self.assertRegex(text, r"✓ 10:00  one")
 
 
 class CutRule(unittest.TestCase):

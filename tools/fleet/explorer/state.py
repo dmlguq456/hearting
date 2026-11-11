@@ -209,6 +209,18 @@ def _question_schema_items(detail):
 
 
 OLDER_WAITS_FOLD = "qolder:QUESTIONS"
+QUESTION_OPEN_FOLD = "qopen:QUESTIONS"
+
+
+def question_open_tag(state):
+    """The one wait unfolded in place: the pressed row, else the selected one; ``-`` folds all."""
+    opened_for = getattr(state, "opened_for", None)
+    if not callable(opened_for):
+        return ""
+    opened = opened_for(QUESTION_OPEN_FOLD, "")
+    if opened == "-":
+        return ""
+    return opened or opened_for("qsel:QUESTIONS", "")
 
 
 def older_waits_shown(state):
@@ -668,6 +680,7 @@ def _question_selection(state, ref):
     folds = state.fold_map()
     selected = str(ref.get("id") or "")
     folds["qsel:QUESTIONS"] = selected
+    folds[QUESTION_OPEN_FOLD] = selected
     previous = _question_overlay(state)
     if (folds.get("qsel:QUESTIONS") == state.opened_for("qsel:QUESTIONS")
             and previous.get("ref") == ref and previous.get("state") in
@@ -890,6 +903,20 @@ def _reduce(state, event, frame=None):
             folds[slot] = "" if folds.get(slot, "") == identity else identity
             opened = folds[slot] if slot == "sopen:OVERVIEW" else state.opened
             return replace(state, opened=opened, folds=tuple(sorted(folds.items()))), ()
+        if action[0] == "question.open" and len(action) > 1:
+            # One press unfolds the wait in place (and reads its selected request); the
+            # same press on the unfolded row folds it again.
+            tag = str(action[1])
+            ref = action[2] if len(action) > 2 else None
+            folds = state.fold_map()
+            if question_open_tag(state) == tag:
+                folds[QUESTION_OPEN_FOLD] = "-"
+                return replace(state, folds=tuple(sorted(folds.items()))), ()
+            folds[QUESTION_OPEN_FOLD] = tag
+            state = replace(state, folds=tuple(sorted(folds.items())))
+            if isinstance(ref, Mapping) and ref.get("id"):
+                return _question_selection(state, ref)
+            return state, ()
         if action[0] == "question.older.toggle":
             folds = state.fold_map()
             folds[OLDER_WAITS_FOLD] = "" if folds.get(OLDER_WAITS_FOLD) == "closed" else "closed"
@@ -1143,6 +1170,27 @@ def _reduce(state, event, frame=None):
             return _question_selection(state, refs[(index + step) % len(refs)])
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
+        if (isinstance(key, str) and len(key) == 1 and key in "123456789"
+                and not overlay.get("editing")):
+            # A number picks that choice of the first question still waiting for one,
+            # exactly as pressing its line does.
+            detail = overlay.get("detail")
+            answers = ((_question_draft_response(overlay) or {}).get("answers", {}))
+            specs = [item for item in question_items(detail)
+                     if isinstance(item.get("choices", item.get("options")), (list, tuple))
+                     and item.get("choices", item.get("options"))]
+            target = next((item for item in specs if not question_values_valid(
+                detail, item["id"], answers.get(item["id"], ()))), specs[0] if specs else None)
+            if target is None:
+                return state, ()
+            values = [value for value in (_question_choice_value(choice) for choice in
+                                          target.get("choices", target.get("options")))
+                      if value]
+            index = int(key) - 1
+            if index >= len(values):
+                return state, ()
+            return _reduce(state, {"type": "click",
+                                   "action": ("question.choice", target["id"], values[index])}, frame)
         if key in ("escape", "esc") and overlay.get("editing"):
             overlay = dict(overlay)
             overlay.update(editing=False, status="Editing paused; draft retained.")
