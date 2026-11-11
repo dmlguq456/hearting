@@ -180,6 +180,38 @@ class ContractProjectionTests(unittest.TestCase):
         for value in ("LAST INPUT", "keep the", "claude Opus 5.5 xhigh", "TITLE"):
             self.assertIn(value, opened)
 
+    def test_unfolded_lines_give_long_values_whole_at_80(self):
+        # What the folded row shortened is not shortened again where it unfolds: it wraps.
+        model, tool = "custom-local-instruct-32b-v2", "mcp__fixture_docs__search_documents"
+        title = "긴 제목 Long route title 🚀 fixture value"
+        vm = build_view_model(self.route_snapshot())
+        route = dict(vm.routes[0], title=title, harness="opencode", model=[model, "dim"],
+                     effort="high", doer={"harness": "opencode", "model": [model, "dim"],
+                                          "effort": "high", "context": None, "window": None,
+                                          "tokens": 250_136, "tool": tool, "agents": 3})
+        session = dict(vm.sessions[0], harness="opencode", model=[model, "dim"],
+                       effort="high", title=title)
+        vm = replace(vm, routes=(route,), sessions=(session,))
+
+        def flat(rows):
+            # The page body from column 34 (the side tree is left of it), joined across rows.
+            return "".join("".join(line[34:].split()) for line in rows)
+
+        unfolded = unfolded_rows(draw(vm, OPENED, 80, 60))
+        lines = [line for line in unfolded if "└ wo" in line or "╔" in line]
+        lines = unfolded[:unfolded.index(lines[0])]           # the kind and left-out lines
+        self.assertIn(model, "\n".join(lines))
+        for value in (title, "owner opencode " + model + " high",
+                      "opencode " + model + " high", ">_ " + tool + " · +3 agent"):
+            self.assertIn("".join(value.split()), flat(lines))
+        self.assertFalse([line for line in lines if "…" in line])
+        tag = str(session["tag"])
+        opened = draw(vm, NavState(opened=tag), 80, 60).text_rows()
+        self.assertIn(model, "\n".join(opened))
+        model_at = next(y for y, line in enumerate(opened) if "MODEL  opencode" in line)
+        self.assertIn("opencode" + model + "high", flat(opened[model_at:model_at + 3]))
+        self.assertFalse([line for line in opened[model_at:model_at + 3] if "…" in line])
+
     def test_session_page_and_route_owner_use_the_model_cell_words(self):
         vm = build_view_model(self.route_snapshot())
         session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")
