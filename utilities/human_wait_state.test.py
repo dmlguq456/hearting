@@ -3500,8 +3500,12 @@ class MessageCompletionTests(unittest.TestCase):
             again = self.f.submit(envelope, "retry", "different-action")
         self.assertEqual(again["action_id"], "fixture-action")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
+        # The normal courier recovers the retained notice once through the
+        # recipient's session-shell host (the shared fixture's stand-in).
         calls, _ref, pending = self.f.courier(signal)
         self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["state"], "queued")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.f.consume(signal, pending["text"])
         self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
