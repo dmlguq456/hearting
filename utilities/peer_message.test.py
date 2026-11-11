@@ -722,12 +722,30 @@ class F100cSenderAndStewardTest(unittest.TestCase):
 
     def test_trailer_drops_a_derived_label_that_only_repeats_the_tag(self):
         # BC-SMALL-SURFACE-1112 #4: `claude [57] 2026-11-57` read as a date; SID and ref stay.
+        # RV-PR1533-1112: only Fleet's `nameSource == "derived"` record drops a name; a
+        # user-set `release-57` has the same shape and stays (the `derived_tag` contract).
+        sessions = self.root / "cfg" / "sessions"
+        sessions.mkdir(parents=True)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.root / "cfg")
+
+        def trailer(name, source):
+            (sessions / "1.json").write_text(json.dumps(
+                {"sessionId": "sid-a", "name": name, "nameSource": source}))
+            with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
+                return peer_message.peer_trailer("claude", "sid-a", name,
+                                                 transfer_ref="a" * 32, pane_id="w1:p3")
+
+        self.assertEqual(trailer("2026-11-57", "derived"),
+                         "(peer-from: claude [57] ; pane=w1:p3 ; sid=sid-a ; ref=" + "a" * 32 + ")")
+        self.assertIn("(peer-from: claude [57] release-notes ; pane=w1:p3", trailer("release-notes", "user"))
+        user_set = trailer("release-57", "user")
+        self.assertIn("(peer-from: claude [57] release-57 ; pane=w1:p3 ; sid=sid-a", user_set)
+        self.assertEqual(peer_message.parse_peer_trailer(user_set)["name"], "release-57")
+        # No registry record is no provenance: the name stays.
+        (sessions / "1.json").unlink()
         with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
-            derived = peer_message.peer_trailer("claude", "sid-a", "2026-11-57",
-                                                transfer_ref="a" * 32, pane_id="w1:p3")
-            chosen = peer_message.peer_trailer("claude", "sid-a", "release-notes", pane_id="w1:p3")
-        self.assertEqual(derived, "(peer-from: claude [57] ; pane=w1:p3 ; sid=sid-a ; ref=" + "a" * 32 + ")")
-        self.assertIn("(peer-from: claude [57] release-notes ; pane=w1:p3", chosen)
+            self.assertIn("claude [57] 2026-11-57 ;",
+                          peer_message.peer_trailer("claude", "sid-a", "2026-11-57", pane_id="w1:p3"))
 
     def _marker_keys_on_disk(self):
         return {(h, d.get("session_id")) for h, _p, d in

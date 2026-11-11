@@ -107,6 +107,19 @@ def peer_alias(harness, session_id):
     return f"[{tag}]" if isinstance(tag, str) and re.fullmatch(r"[0-9a-f]{2}", tag) else "[?]"
 
 
+def _derived_name_of(harness, session_id, name):
+    """True only when Fleet's registry says ``name`` is this session's derived label."""
+    if str(harness or "").lower() != "claude" or not usable_session_id(session_id):
+        return False
+    handle = _session_handle()
+    if handle is None:
+        return False
+    try:
+        return handle.session_id_for_derived_name(name) == session_id
+    except Exception:
+        return False
+
+
 def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
     """Human display; the bracket token keeps display identity off the legacy path."""
     def clean(value):
@@ -119,7 +132,10 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
         display_name = display_name.replace(str(session_id), parts[1])
     # A harness-derived `<folder>-<xx>` label only repeats the tag (and a dated folder
     # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]` and the pane.
-    if parts[1] != "[?]" and display_name.endswith("-" + parts[1][1:-1]):
+    # The shape alone is not provenance: a user-set `release-57` stays (Fleet's
+    # `nameSource == "derived"` reader decides, as `derived_tag` requires).
+    if (parts[1] != "[?]" and display_name.endswith("-" + parts[1][1:-1])
+            and _derived_name_of(harness, session_id, display_name)):
         display_name = ""
     if display_name:
         parts.append(display_name)
