@@ -155,15 +155,23 @@ a task. Select a session to open its page, or expand its row in OVERVIEW.
 
 ### Optional session panel
 
-`hearting session shell enable` enables a common status area and a bottom block
-for new Claude, Codex and OpenCode terminals. It is off by default;
+New installations enable a common status area and a HEARTING work panel
+for new Claude, Codex and OpenCode terminals. Updates preserve existing choices,
+including older installations without a shell policy. `hearting session shell
+enable` enables it explicitly;
 `hearting session shell status` reports the choice and `hearting session shell
 disable` restores native launch behavior. Existing sessions keep running.
 
-Claude draws the shared status fields in its own native statusline rows; its
-block starts with routes and questions. Codex and OpenCode keep the status area
-in the block. The block opens with routes, questions, received peer
-messages, repo work and your last input. Press **Ctrl+]** to focus it: answer
+Claude shows the same status area inside the panel as Codex and OpenCode; while
+the panel shows it, Claude's own statusline row below becomes a notice row that
+stays empty unless you owe an answer, a warning applies or news just arrived.
+The full statusline returns whenever the panel is hidden.
+The panel's four colored edges separate Hearting's current work, actual route
+flow and questions from the native conversation. Its background stays neutral.
+Below the route and any question, the panel always shows the rest of the
+statusline: folder, title, branch and Git state, usage and running jobs, then
+messages and your last input, as rows allow. Click a route for its stages and
+result. Press **Ctrl+]** to focus it: answer
 an existing question, inspect routes/peers/work, or open Fleet with **f**.
 Escape or **Ctrl+]** returns to native typing; ordinary keys stay native until
 you focus the block. The question-first bottom shows the current question and
@@ -177,18 +185,27 @@ Fleet can open that exact session's panel too. Peer wake works
 without Herdr; Codex keeps its native queue. Native context remains as a fallback
 where independent telemetry cannot provide it. Herdr, cmux and tmux remain optional.
 
-Wrapped Codex preserves its native shared-daemon startup. The unchanged managed
-footer can yield duplicate paint to the common area, including the exact thread ID.
+Wrapped Codex preserves its native shared-daemon startup. The shell hides the
+footer's thread ID (it stays on the inner screen for identification; a Codex
+window without the shell still shows it), and the rest of that row can yield
+duplicate paint to the common area.
 Custom, clipped or uncertain rows remain visible. Answers retain the existing
 queue and consumption receipts; an unproved native target stays pending.
 
-The optional side placement uses the same block and editor. In the existing
-`~/.config/hearting/session-shell.json`, keep `"enabled": true` and add
-`"layout": "side"` (default `"bottom"`), optionally `"side_width": 40` and
-`"side_min_columns": 132`. This applies to new wrapped terminals. A narrower
-window uses bottom and returns to side when widened. Once OpenCode's own sidebar
-is observed, that attachment keeps bottom to avoid competing panels. Enabling or
-disabling the shell preserves these placement preferences.
+**⚙ Settings** previews placement, panel position (right or left), width,
+narrow-window behavior, auxiliary detail, theme (terminal, light terminal or
+monochrome) and shade (none, light or medium); the defaults keep the original
+look. Use the value arrows or keyboard arrows, then Apply; Cancel restores
+the previous view, and Defaults previews the defaults. Drag the side boundary
+to resize and save it. Only the existing Hearting `session-shell.json` is saved,
+with a byte-for-byte backup; native model and permission settings are untouched.
+The default is side at sufficient width (40 columns, minimum terminal width 100),
+with a bounded 14-row bottom at narrow widths, including 80 columns. These values
+are configurable. Existing explicit layout choices are retained. OpenCode uses
+the same panel and settings; its own sidebar is hidden in the shell window
+(OpenCode's toggle still opens it), with Context in its footer and its MCP
+server count in the panel. Installation affects new wrapped terminals;
+existing running hosts are not replaced.
 
 Codex context keeps the latest server-reported usage. A separate `compaction
 imminent` label appears only when the exact session's current native diagnostic

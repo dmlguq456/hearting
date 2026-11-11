@@ -1071,16 +1071,23 @@ ENDPOINT_EVIDENCE_ROWS = []
 SIDLESS_EVIDENCE_ROWS = []
 
 
+STEWARD_TEST_FILES = ("peer_steward.test.py", "peer_steward_prompt.test.py", "peer_steward_retire.test.py")
+
+
 def _selected_regressions():
     hook_tests = _load("lifecycle_rewake_tests", ROOT / "hooks" / "dispatch_owner_rewake.test.py")
-    steward_tests = _load("lifecycle_peer_steward_tests", HERE / "peer_steward.test.py")
+    # peer_steward.test.py is split into three files; a case may live in any of them.
+    steward_tests = tuple(_load("lifecycle_" + name.replace(".", "_"), HERE / name)
+                          for name in STEWARD_TEST_FILES)
 
-    def locate(module, method):
-        for value in vars(module).values():
-            if (isinstance(value, type) and issubclass(value, unittest.TestCase)
-                    and callable(getattr(value, method, None))):
-                return value(method)
-        raise LookupError(f"test case not found: {module.__name__}.{method}")
+    def locate(modules, method):
+        modules = modules if isinstance(modules, tuple) else (modules,)
+        for module in modules:
+            for value in vars(module).values():
+                if (isinstance(value, type) and issubclass(value, unittest.TestCase)
+                        and callable(getattr(value, method, None))):
+                    return value(method)
+        raise LookupError(f"test case not found: {modules[0].__name__}.{method}")
 
     cases = [
         (hook_tests, "test_wait_is_one_process_until_exact_attempt_is_ready"),
@@ -1161,7 +1168,7 @@ def main(argv=None):
         "source_sha256": {
             "utilities/shared_readiness.py": _sha256(HERE / "shared_readiness.py"),
             "utilities/peer-steward.py": _sha256(HERE / "peer-steward.py"),
-            "utilities/peer_steward.test.py": _sha256(HERE / "peer_steward.test.py"),
+            **{"utilities/" + name: _sha256(HERE / name) for name in STEWARD_TEST_FILES},
             "utilities/shared_readiness_lifecycle.test.py": _sha256(Path(__file__)),
         },
         "selected_regressions": selected,

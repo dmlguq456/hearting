@@ -321,9 +321,11 @@ decision marker and `PermissionRequest(*)` publishes a permission marker;
 `SessionEnd` clear only the exact session. The hook stores no question,
 choices, command, arguments, reason, model output, or tool payload, emits no
 stdout, and is a no-op for registered workers and native subagents. Herdr's
-separate hook remains optional corroboration and is not edited. Claude's native
-`PostToolUseFailure` has no verified Codex counterpart, so the adaptation
-boundary records that event as an explicit non-parity exception.
+separate hook remains optional corroboration and is not edited. Codex has no
+`PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
+exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
+same wait clear and index-lock hint there, so the adaptation boundary keeps the
+event name itself as an explicit exception.
 
 Utility scripts are a whole-layer collapse (2026-07-22): `claude_setting/utilities`
 points at `adapters/claude/utilities`, which is itself ONE symlink to the shared
@@ -381,7 +383,12 @@ example in `settings.json` `env`) turns the gate off.
 `Stop` runs `hooks/turn-change-record.py end`; both start the detached shared
 step `utilities/turn_change_record.py` with the payload `session_id` and `cwd`
 and return silently (`core/HOOKS.md`). Claude runs no `Stop` after a user
-interrupt, so an interrupted turn is not compared. The native plugin channel
+interrupt, so an interrupted turn is not compared: the hooks reference says
+`Stop` "Does not run if the stoppage occurred due to a user interrupt", lists
+no interrupt event, and a cancelled running tool fires no `PostToolUseFailure`
+(https://code.claude.com/docs/en/hooks#stop, #posttoolusefailure; checked
+2026-11-11). This is a runtime limit (PG-36); Codex (`Interrupt`) and OpenCode
+(`session.execution.interrupted`) record such a turn. The native plugin channel
 does not carry it, for the gate's reason above.
 
 ## Model Mapping

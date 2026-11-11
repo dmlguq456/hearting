@@ -566,19 +566,26 @@ class ReleasedTaskPromptTest(unittest.TestCase):
         record = self.root / ".runtime/intent" / f"{route_id}.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": "work_intent_original_v1", "route_id": route_id,
-                                      "original": "의도 확인은 중요해"}))
+                                      "original": "무관한 옛 사용자 발화"}))
+        original_bytes = record.read_bytes()
         binding = SimpleNamespace(route_id=route_id, route_file=str(route_file))
         fresh_jobs = self.root / "fresh-preview" / "jobs.log"
-        if True:  # the raised-but-unreleased journal above: no frame-review release on this route
-            for args in (self.args(route_id=route_id, route_file=str(route_file)),
-                         self.args(worker_type="owner", route_id=None, owner_route_binding=binding),
-                         self.args(route_id=route_id, route_file=str(route_file), jobs=fresh_jobs)):
-                with self.subTest(worker_type=args.worker_type):
-                    context = WB.released_task_prompt(args)
-                    self.assertTrue(context.startswith("Intent at the start of this work"))
-                    self.assertIn("\"의도 확인은 중요해\"", context)
-                    self.assertIn("- Intent: Seal the intent once.", context)
-                    self.assertIn("- Not doing: new gates", context)
+        if True:  # raised but unreleased; no frame-review release on this route
+            task = route["work_request"]["text"]
+            for quoted in (False, True):
+                route["work_request"]["text"] = task + ('\n사용자: "의도 확인은 중요해"\n' if quoted else '')
+                route_file.write_text(json.dumps(route))
+                for args in (self.args(route_id=route_id, route_file=str(route_file)),
+                             self.args(worker_type="owner", route_id=None, owner_route_binding=binding),
+                             self.args(route_id=route_id, route_file=str(route_file), jobs=fresh_jobs)):
+                    with self.subTest(worker_type=args.worker_type, quoted=quoted):
+                        context = WB.released_task_prompt(args)
+                        self.assertTrue(context.startswith("Intent at the start of this work"))
+                        self.assertNotIn("무관한 옛 사용자 발화", context)
+                        self.assertEqual('"의도 확인은 중요해"' in context, quoted)
+                        self.assertIn("- Intent: Seal the intent once.", context)
+                        self.assertIn("- Not doing: new gates", context)
+                        self.assertEqual(record.read_bytes(), original_bytes)
             self.assertEqual(WB.released_task_prompt(self.args(route_file=str(route_file), route_id="rt-other")), "")
             self.assertEqual(WB.released_task_prompt(self.args(worker_type="frame", route_file=str(route_file))), "")
         self.write_journal(self.raised, self.released)

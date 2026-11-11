@@ -963,8 +963,12 @@ def turn_token_usage(args, turn_ordinal: int, transport: str, result: Any) -> di
 def classify_runtime_result(args, result, process_exit):
     runtime = getattr(args, "runtime_harness", "claude")
     if runtime == "claude":
-        return classify_claude_result(result, process_exit)
-    return classify_session_result(result, process_exit, runtime=runtime)
+        terminal = classify_claude_result(result, process_exit)
+    else:
+        terminal = classify_session_result(result, process_exit, runtime=runtime)
+    from dispatch_supervisor_terminal import completed_owner_assessment
+    return completed_owner_assessment(terminal, result.get("result"), jobs=getattr(args, "jobs", None),
+                                      attempt_id=getattr(args, "parent_attempt_id", None))
 
 
 _PERMISSION_ADAPTERS = {}

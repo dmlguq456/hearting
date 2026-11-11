@@ -703,6 +703,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
+    select=None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -716,6 +717,9 @@ def sweep_deliver(
     session's own turn -- an injection into ``additionalContext`` is
     synchronous with the recipient's next inference, unlike the async rewake
     carrier, so acking there is the recipient consuming the token.
+
+    ``select``, when given, is a predicate on an addressed record: a record it
+    rejects is not claimed here and stays with its existing carriers.
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -830,6 +834,8 @@ def sweep_deliver(
             # must not turn an answer into an ordinary runtime prompt or ACK.
             continue
         if current.get("delivery_id") in visited_batch_ids:
+            continue
+        if select is not None and not select(current):
             continue
         if claimed and over_budget():
             break
@@ -1357,6 +1363,322 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
             f"- {line}" for _delivery_id, line in sorted(lines))
                       + "".join("\n" + follow for follow in followups))
     return "\n\n".join(blocks)
+
+
+# Native inline limit on one hook context string, measured 2026-11-10 (PG-47).
+# Claude Code (hooks reference, "JSON output"): additionalContext is capped at
+# 10,000 characters; past it the text goes to a file and Claude sees the path
+# and a 2,000-character preview, and is not asked to read the file (a burst of
+# 20 notices: 15.2 KB, 18 never seen). Codex (codex-rs/hooks/src/output_spill.rs
+# DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT = 2_500 approximate tokens of 4 bytes): past
+# it the middle is elided and saved to a file (the same burst: 3,894 tokens,
+# 7 never seen). Each budget keeps a small margin under its limit.
+CLAUDE_CONTEXT_CHARS = 9_500
+CODEX_CONTEXT_BYTES = 9_600
+OVERFLOW_DIRNAME = "delivery-text"
+OVERFLOW_HEADER = ("Hearting delivery too large to show inline. Its full text is in the file "
+                   "below; read that file now before acting on this delivery.")
+
+
+def utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _render_keys(batches) -> dict[int, tuple]:
+    """Each record's place in the text :func:`delivery_context` renders for ``batches``.
+
+    The same order the renderer uses: gates by delivery id, then notices (by
+    receipt text and delivery id; three or more successful compute runs of one
+    key as one summary after them), then completions by delivery id. Keyed by
+    ``id(record)``.
+    """
+    groups: dict[tuple, list[tuple[dict, dict]]] = {}
+    keys: dict[int, tuple] = {}
+    for _root, records in batches:
+        for record in records:
+            delivery_id = str(record.get("delivery_id", ""))
+            receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+            if is_human_gate_record(record):
+                keys[id(record)] = (0, delivery_id)
+            elif receipt.get("kind") == "notice":
+                run = _compute_run_notice(record)
+                if run and run["exit"] == 0:
+                    key = tuple(str(part) for part in (
+                        receipt.get("subject"), run["host"], run["label"],
+                        receipt.get("required_action")))
+                    groups.setdefault(key, []).append((run, record))
+                keys[id(record)] = (1, 0, str(receipt.get("text", "")), delivery_id)
+            else:
+                keys[id(record)] = (2, delivery_id)
+    for key, members in groups.items():
+        if len(members) < 3:
+            continue
+        members.sort(key=lambda item: (str(item[0]["stamp"]), str(item[0]["run_id"]),
+                                       str(item[1].get("delivery_id", ""))))
+        latest = str(members[-1][0]["run_id"])
+        for position, (_run, record) in enumerate(members):
+            keys[id(record)] = (1, 1, key, latest, position)
+    return keys
+
+
+def _units(batches) -> list[tuple[Path, list[dict]]]:
+    """Split claimed batches into the units that are rendered and ACKed together.
+
+    Members of one sealed batch share their group claim owner, so a unit never
+    splits a batch; every other record is its own unit. Units come in the order
+    the whole text renders them (:func:`_render_keys`, a unit at its first
+    member), so a split delivers the same sequence as one whole rendering.
+    """
+    units: list[tuple[Path, list[dict]]] = []
+    index: dict[tuple, int] = {}
+    for root, records in batches:
+        for record in records:
+            owner = record.get("claim_owner")
+            key = ((str(root), str(owner)) if isinstance(owner, str) and owner
+                   else (str(root), "delivery", str(record.get("delivery_id"))))
+            if key in index:
+                units[index[key]][1].append(record)
+            else:
+                index[key] = len(units)
+                units.append((root, [record]))
+    try:
+        keys = _render_keys(batches)
+        units.sort(key=lambda unit: min(keys[id(record)] for record in unit[1]))
+    except (KeyError, TypeError, ValueError):  # an unorderable record keeps arrival order
+        pass
+    return units
+
+
+def _batches(units) -> list[tuple[Path, list[dict]]]:
+    merged: list[tuple[Path, list[dict]]] = []
+    for root, records in units:
+        if merged and merged[-1][0] == root:
+            merged[-1][1].extend(records)
+        else:
+            merged.append((root, list(records)))
+    return merged
+
+
+def overflow_pointer(text: str, root: Path, max_size: int, *, measure=len,
+                     keep_last_lines: int = 0) -> str:
+    """A text over the inline limit as a head excerpt plus the path of its whole copy.
+
+    The receipt markers stay inline, so the recipient still sees what it is
+    consuming; the body it cannot see inline is one ``Read`` away instead of
+    silently cut by the runtime. Without a writable copy the whole text is
+    returned unchanged (the runtime's own spill is then the only fallback).
+    """
+    try:
+        directory = Path(root) / OVERFLOW_DIRNAME
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = directory / (hashlib.sha256(text.encode("utf-8")).hexdigest()[:32] + ".txt")
+        if not path.exists():
+            temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+            temporary.write_text(text, encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+    except OSError:
+        return text
+    lines = text.splitlines()
+    markers = [line for line in lines if line.startswith("HEARTING_RECEIPT_V1 ")]
+    if keep_last_lines > 0:
+        markers.extend(line for line in lines[-keep_last_lines:] if line not in markers)
+    tail = f"\n[... {len(text)} characters in all; full text: {path}]\n" + "\n".join(markers)
+    head_budget = max(0, max_size - measure(OVERFLOW_HEADER + "\n") - measure(tail))
+    head = text[:head_budget]
+    while head and measure(head) > head_budget:
+        head = head[:max(0, len(head) - max(1, (measure(head) - head_budget) // 3 + 1))]
+    return OVERFLOW_HEADER + "\n" + head + tail
+
+
+def fit(batches, render, max_size: int, *, measure=len):
+    """Choose the leading units whose full rendering fits ``max_size``.
+
+    Returns ``(text, chosen_batches, rest_batches)``. The text is never cut:
+    only what it contains whole is ACKed, and the rest stays pending for the
+    next boundary. The first unit is always chosen so a single large receipt
+    still moves; :func:`fit_inline` handles that unit for a hard native limit.
+    """
+    units = _units(batches)
+    if not units:
+        return "", [], []
+    whole = render(_batches(units))
+    if measure(whole) <= max_size or len(units) == 1:
+        return whole, _batches(units), []
+    best_n, best_text = 1, render(_batches(units[:1]))
+    lo, hi = 2, len(units) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        text = render(_batches(units[:mid]))
+        if measure(text) <= max_size:
+            best_n, best_text, lo = mid, text, mid + 1
+        else:
+            hi = mid - 1
+    return best_text, _batches(units[:best_n]), _batches(units[best_n:])
+
+
+def fit_inline(batches, max_size: int, *, measure=len, render=None):
+    """``fit`` for a native hook context with a hard inline limit.
+
+    Same choice as :func:`fit`; a first unit that alone is over the limit is
+    shown as :func:`overflow_pointer` so nothing is ACKed while cut. When that
+    whole copy cannot be saved, or the pointer text is still over the limit,
+    the unit is not returned for ACK: it goes to ``rest`` (pending) and the
+    units after it are fitted in its place.
+    """
+    render = render or delivery_context
+    text, chosen, rest = fit(batches, render, max_size, measure=measure)
+    if not text or measure(text) <= max_size or not chosen:
+        return text, chosen, rest
+    root = chosen[0][0]
+    pointer = overflow_pointer(text, root, max_size, measure=measure)
+    if pointer != text and measure(pointer) <= max_size:
+        return pointer, chosen, rest
+    units = _units(chosen + rest)
+    if len(units) < 2:
+        return "", [], _batches(units)
+    text, chosen, rest = fit_inline(_batches(units[1:]), max_size, measure=measure,
+                                    render=render)
+    return text, chosen, _batches(units[:1]) + rest
+
+
+def release_claims(session_id: str, batches, recipient_kind: str, *, reason: str) -> None:
+    """Return this process's own sweep claims on records it did not ACK.
+
+    A tool boundary comes far more often than a prompt, so a boundary carrier
+    hands back at once what it claimed but will not ACK (or did not fit whole)
+    instead of holding other carriers off for the claim lease. A distinct
+    reason per release keeps the courier retry delay at its base, so the next
+    boundary claims them again at once.
+    """
+    owner_prefix = f"session-sweep:{recipient_kind}:{os.getpid()}:"
+    for root, records in batches:
+        for record in records:
+            delivery_id = record.get("delivery_id")
+            storage = record.get(STORAGE_KEY) or session_id
+            if not isinstance(delivery_id, str) or not delivery_id:
+                continue
+            try:
+                fresh = pending_delivery.read(root, storage, delivery_id)
+                owner = (fresh or {}).get("claim_owner")
+                if (fresh is None or fresh.get("state") != "claimed"
+                        or not isinstance(owner, str) or not owner.startswith(owner_prefix)):
+                    continue
+                pending_delivery.release_claim(
+                    root, storage, delivery_id, claim_owner=owner,
+                    failure_reason=f"{reason}:{time.time_ns()}",
+                    expected_identity=pending_delivery.received_ack_identity(
+                        fresh, storage, delivery_id))
+            except Exception:  # noqa: BLE001 - an unreleased claim only waits for its lease
+                continue
+
+
+# The send source a Claude Stop `block` reason leaves on each record it showed.
+CLAUDE_STOP_SEND_SOURCE = "claude-stop-block"
+# A handed-back record is claimable again after the courier retry base delay.
+STOP_RELEASE_SETTLE_SECONDS = pending_delivery.COURIER_RETRY_BASE_SECONDS
+
+
+def claude_hook_evidence(payload, session_id: str):
+    """This session's native Claude receipts at a hook call, or ``None`` (unknown).
+
+    Reads the transcript the hook payload names through the same verified
+    reader the prompt sweep uses; nothing else (a later call, a tool run,
+    another hook's block) counts as a receipt.
+    """
+    if not isinstance(payload, dict):
+        return None
+    transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
+    cwd = payload.get("cwd")
+    if not isinstance(transcript_path, str) or not isinstance(cwd, str):
+        return None
+    from dispatch_recipient_receipt import claude_transcript_evidence
+    return claude_transcript_evidence(
+        transcript_path=transcript_path, session_id=session_id, cwd=cwd,
+        expected_cwd=os.getcwd(),
+        runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
+
+
+def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
+    """Keep what a flushed Stop `block` reason showed open until it is taken.
+
+    Claude Code may override a block and end the turn (its consecutive-Stop
+    cap), so printing the reason is not the model reading it. Each shown record
+    stays this process's open claim as ``sent-ambiguous`` with the Stop as its
+    send source; :func:`settle_stop_sends` ACKs it once the session's native
+    record holds its receipt, or hands it back at a new prompt. A record that cannot be held
+    is handed back pending now (shown twice rather than marked unseen received).
+    """
+    owner_prefix = f"session-sweep:{recipient_kind}:{os.getpid()}:"
+    for root, records in batches:
+        for record in records:
+            delivery_id = record.get("delivery_id")
+            storage = record.get(STORAGE_KEY) or session_id
+            if not isinstance(delivery_id, str) or not delivery_id:
+                continue
+            try:
+                fresh = pending_delivery.read(root, storage, delivery_id)
+                owner = (fresh or {}).get("claim_owner")
+                if (fresh is None or fresh.get("state") != "claimed"
+                        or not isinstance(owner, str) or not owner.startswith(owner_prefix)):
+                    continue
+                identity = pending_delivery.received_ack_identity(fresh, storage, delivery_id)
+                event_id = hashlib.sha256((delivery_id + "\0" + owner).encode("utf-8")).hexdigest()
+                pending_delivery.record_send(root, storage, delivery_id, source=CLAUDE_STOP_SEND_SOURCE,
+                                             event_id=event_id, expected_identity=identity)
+                pending_delivery.mark_sent_ambiguous(root, storage, delivery_id, claim_owner=owner,
+                                                     expected_identity=identity)
+            except Exception:  # noqa: BLE001 - not held: hand it back pending
+                release_claims(session_id, [(root, [record])], recipient_kind,
+                               reason="claude-stop-hold-failed")
+
+
+def settle_stop_sends(session_id: str, roots, recipient_kind: str, evidence, *,
+                      new_prompt: bool = False, deadline_ns: int | None = None) -> int:
+    """Settle the records an earlier Stop `block` showed; returns how many.
+
+    A record is ACKed only when its exact receipt is in ``evidence``, this
+    session's native Claude record read at this boundary: its body reached the
+    conversation. A record not found there stays held within the turn and is
+    looked for again at the next boundary; at a new prompt (``new_prompt``) it
+    is handed back pending so this boundary shows it again.
+    """
+    from dispatch_recipient_receipt import settle_native_receipt
+    settled = released = 0
+    for root in dict.fromkeys(roots):
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            break
+        if not Path(root).is_dir():
+            continue
+        try:
+            records, _count = addressed_records(Path(root), recipient_kind, session_id,
+                                                deadline_ns=deadline_ns)
+        except Exception:  # noqa: BLE001 - left for the lease
+            continue
+        for record in records:
+            timeline = record.get(pending_delivery.TIMESTAMP_PROVENANCE_FIELD) or {}
+            if (record.get("state") != "sent-ambiguous"
+                    or timeline.get("last_send_source") != CLAUDE_STOP_SEND_SOURCE):
+                continue
+            storage = record.get(STORAGE_KEY) or session_id
+            delivery_id = record["delivery_id"]
+            try:
+                if settle_native_receipt(root, storage, "claude", session_id, record, evidence,
+                                         acked_by=f"native-receipt:claude:{session_id}")["received"]:
+                    settled += 1
+                elif new_prompt:
+                    pending_delivery.release_claim(
+                        root, storage, delivery_id, claim_owner=record.get("claim_owner"),
+                        failure_reason=f"claude-stop-not-received:{time.time_ns()}",
+                        expected_identity=pending_delivery.received_ack_identity(
+                            record, storage, delivery_id))
+                    released += 1
+            except (pending_delivery.PendingDeliveryError, KeyError, OSError):
+                continue
+    if released:
+        # Wait out the retry base delay once so this same boundary shows them.
+        time.sleep(STOP_RELEASE_SETTLE_SECONDS)
+    return settled + released
 
 
 def _opencode_expected_message(text: str, identities: list[tuple[str, dict]]) -> dict:

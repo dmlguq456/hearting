@@ -22,7 +22,7 @@ successor `start`: the shared gate rechecks the live owner and exact resource ev
 records the stage completion and once-only successor claim. No separate close or proof step
 is needed. A replacement owner consumes the earlier resource result via route lineage.
 
-Synthesize one owner artifact. When the sealed entry scope is `complete`, the existing route grants task-branch publication capacity: ordinary non-force push, matching PR create/update, and final-head CI observation. Use that capacity only when
+Synthesize one owner artifact. When the sealed entry scope is `complete` or the route seals none (only `report` withholds it), the existing route grants task-branch publication capacity: ordinary non-force push, matching PR create/update, and final-head CI observation. Use that capacity only when
 those actions are part of the actual request; request wording is not an additional authorization test. Write the PR description to
 `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md`; it is the `--body-file` for
 create/update. Read the branch's PR before creating one. Keep any CI correction within the approved scope and send it
@@ -41,6 +41,13 @@ one optional `campaign-goal` JSON fence with `campaign_id`, `verdict: "satisfied
 optional `reason` (a JSON primary uses the `campaign_goal` key); without it nothing closes,
 and no child PASS, scoped completion, sealed cycle, or past satisfied state implies the
 goal.
+
+For an `audit` assignment, completing the review is distinct from approving its
+subject. Keep any negative disposition and findings in the report; the existing
+final handoff's completion verdict describes whether the assigned audit was
+performed. An audit that cannot finish remains BLOCKED or FAIL; native execution
+errors remain failures. Empty or ambiguous reports never establish completed
+review work. No new report template or user recovery step is required.
 
 Use a branch-backed route worktree, even for spec-only work. A detached HEAD cannot launch
 children: run `git switch -c <new-branch>` at the existing HEAD before dispatching; never

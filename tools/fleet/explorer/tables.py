@@ -659,6 +659,8 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     else:
         repo_w = min(repo_w, max(0, min(room // 2, room - 24)))
     own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
+    # The routed owner's harness, model and effort, as the ROUTES HARNESS column reads
+    # them, whenever the title keeps its room; otherwise the harness alone, as before.
     state = "working" if route.get("activity") == "running" else route.get("state")
     if route.get("owner_waits"):
         state = "idle"                    # the owner waits on its worker; the worker line spins
@@ -676,19 +678,30 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
         grid.put(x + 1, y, tag_text, "steward" if steward else "soft", limit=x + 1 + tag_width)
         grid.put(x + 1 + tag_width, y, "]", "dim")
         x += tag_width + 2 + GAP
+    owner_x = x
     if own:
-        owner = str(route.get("harness") or "·")
-        grid.put(x, y, owner, "hb_" + owner, limit=x + 8)
         x += 8 + GAP
     title_width = min(48, max(6, int((x1 - x - AGE_W - GAP) * .45)))
     title_width = min(title_width, max(0, x1 - _seg_width(age) - GAP - x))
+    if own:
+        # The routed owner's harness, model and effort, as the ROUTES HARNESS column reads
+        # them. The room comes from the title, never from the stage rail; a title that would
+        # fall under 16 cells keeps the harness alone, as before.
+        extra = max(0, _owner_width(route) - 8)
+        if extra and title_width - extra >= 16:
+            _draw_owner(grid, owner_x, y, route, False, True, owner_x + 8 + extra)
+            x += extra
+            title_width -= extra
+        else:
+            owner = str(route.get("harness") or "·")
+            grid.put(owner_x, y, owner, "hb_" + owner, limit=owner_x + 8)
     grid.put(x, y, _clip(str(route.get("title") or "·"), title_width), "soft")
     x += title_width + GAP
     _draw_route_progress(grid, x, x1 - AGE_W - GAP, y, route)
     grid.put(x1 - _seg_width(age), y, age, "dim")
 
 
-def _draw_route_progress(grid, x, end, y, route):
+def _draw_route_progress(grid, x, end, y, route, card=True):
     if route.get("state") == "stale" and x < end:
         # Still marked in flight, but nothing of it runs: said in words before its stages.
         x = grid.put(x, y, "no response ", "lvl_y", limit=end)
@@ -709,7 +722,9 @@ def _draw_route_progress(grid, x, end, y, route):
                           "failed": "✕"}.get(str(stages[-1].get("st") or ""), "·")
             cursor = grid.put(cursor, y, "  (" + stage_name + " " + stage_mark + ")", "dim",
                               limit=end)
-        grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
+        cursor = grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
+        if card:
+            _put_route_card(grid, cursor, end, y, route)
         return
     legs = tuple(route.get("legs") or ())
     stages = tuple(route.get("stages") or ())
@@ -752,7 +767,17 @@ def _draw_route_progress(grid, x, end, y, route):
         cursor = grid.put(cursor, y, opening, "dim", limit=end)
         cursor = _put_segments(grid, cursor, y, stage_rail, end)
         cursor = grid.put(cursor, y, ")", "dim", limit=end)
-    _put_segments(grid, cursor, y, after, end)
+    cursor = _put_segments(grid, cursor, y, after, end)
+    if card:
+        _put_route_card(grid, cursor, end, y, route)
+
+
+def _put_route_card(grid, cursor, end, y, route):
+    """How the route was chosen and what verified it, only where the row has room."""
+    visibility = route.get("visibility")
+    card = str(visibility.get("card") or "") if isinstance(visibility, Mapping) else ""
+    if card and end - cursor >= _seg_width(card) + 2:
+        grid.put(cursor, y, "  " + card, "dim", limit=end)
 
 
 def _seg_width(text):
@@ -1041,7 +1066,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 else:
                     pct, window = None, None
                 _draw_context_gauge(grid, x + cols["ctx"], y, pct, window)
-            _draw_route_progress(grid, x + cols["prog"], age_edge - gap, y, route)
+            # The route's card goes on its worker line below, where the column has room.
+            _draw_route_progress(grid, x + cols["prog"], age_edge - gap, y, route, card=False)
             grid.put(age_edge, y, age, "dim")
             if is_open:
                 _tint_row(grid, y, x - 1, right, 236)
@@ -1067,7 +1093,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
             cursor = grid.put(route_start, y, "└ ", "dim", limit=route_end)
             cursor = grid.put(cursor, y, _clip(label, max(0, route_end - cursor)),
                               "title_dim", limit=route_end)
-            if unit:
+            if unit and not (label == "owner" and unit == "_kernel/owner"):
                 grid.put(cursor, y, _clip(" · " + str(unit), route_end - cursor), "dim")
             worker_running = route.get("activity") == "running" and any(
                 "running" in str(text) for text, _style in (worker[2] if len(worker) > 2 else ()))
@@ -1113,6 +1139,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 grid.put(cursor, y, text, style, limit=worker_progress_end)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
+            _put_route_card(grid, cursor, worker_progress_end, y, route)
             if inline_context:
                 if slim:
                     grid.put(context_x, y, context_text, "dim", limit=progress_end)
@@ -1705,6 +1732,17 @@ def _route_columns(use, own_need=0, age_need=AGE_W):
     return {"narrow": narrow, "slim": slim, "st": 3, "title": title,
             "title_w": title_w, "kind": kind_x, "own": own_x, "own_w": own_w,
             "ctx": ctx_x, "prog": prog_x, "tiny": False, "gap": GAP, "age_w": AGE_W + 1}
+
+
+def _owner_width(route):
+    """Cells of ``_draw_owner``'s wide form (slim: no profile)."""
+    width = _seg_width(str(route.get("harness") or "·"))
+    model, effort = route.get("model"), str(route.get("effort") or "")
+    if model:
+        width += 2 + _seg_width(str((tuple(model) + ("",))[0])) + (1 + _seg_width(effort) if effort else 0) + 1
+    elif effort:
+        width += 1 + _seg_width(effort)
+    return width
 
 
 def _draw_owner(grid, x, y, route, narrow, slim, limit):

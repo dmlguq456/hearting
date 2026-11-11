@@ -413,6 +413,38 @@ def native_queue_prompt_receipts(sid: str, *, read_context=None):
     return batches, [context] if context else []
 
 
+def fit_prompt_receipts(sid: str, batches, other_parts: list[str], *, rendered=()):
+    """The receipts text that fits, whole, beside the rest of this hook's context.
+
+    Codex shows one hook context of at most about 2,500 tokens inline and
+    elides the middle of a longer one (PG-47), so only the leading records
+    whose text fits in what the other parts leave are rendered and ACKed; the
+    rest are handed back pending for the next boundary. Returns
+    ``(text, kept_batches)``; ``rendered`` is the whole text already rendered.
+    """
+    try:
+        from dispatch_session_sweep import (CODEX_CONTEXT_BYTES, fit_inline, release_claims,
+                                            utf8_len)
+        others = "\n".join(part.strip() for part in other_parts if part.strip())
+        # Only what the other parts leave; no floor, so a full context holds
+        # every receipt back pending rather than push the whole past the limit.
+        budget = CODEX_CONTEXT_BYTES - utf8_len(others) - 1
+        whole = "\n".join(part.strip() for part in rendered if part.strip())
+        if whole and utf8_len(whole) <= budget:
+            return whole, batches
+        if budget <= 0:
+            release_claims(sid, batches, "codex-native-queue",
+                           reason="codex-prompt-context-over-limit")
+            return "", []
+        text, kept, rest = fit_inline(batches, budget, measure=utf8_len)
+        if rest:
+            release_claims(sid, rest, "codex-native-queue", reason="codex-prompt-context-over-limit")
+        return text, kept
+    except Exception:
+        # Nothing shown is ACKed; the claims return at their lease.
+        return "", []
+
+
 def native_receiving_turn(payload: dict[str, Any], thread_id: str) -> dict[str, str] | None:
     """Bind the hook to a turn ID that Codex itself exposes and confirms.
 
@@ -523,6 +555,12 @@ def main() -> int:
     except Exception:
         pass
     try:
+        # The daemon keeps this thread after its TUI exits; clear the wait on that exit.
+        from codex_tui_exit import launch as watch_tui_exit
+        watch_tui_exit(interaction_sid or "")
+    except Exception:
+        pass
+    try:
         from herdr_session_projection import project
         project(payload, interaction_sid or "", worker=False)
     except Exception:
@@ -567,7 +605,7 @@ def main() -> int:
     batches = []
     ackable = set()
     try:
-        batches, parts = native_queue_prompt_receipts(sid, read_context=discovery_context)
+        batches, receipt_parts = native_queue_prompt_receipts(sid, read_context=discovery_context)
         from dispatch_session_sweep import retain_receiving_turn
         ackable = retain_receiving_turn(
             batches, interaction_sid,
@@ -575,7 +613,8 @@ def main() -> int:
             request_context=current_prompt,
         )
     except Exception:
-        parts = []
+        receipt_parts = []
+    parts = []
     if ("peer-from:" in current_prompt or "runtime-from:" in current_prompt
             or "cross-session-message" in current_prompt):
         import importlib.util
@@ -590,6 +629,10 @@ def main() -> int:
     parts.extend(probe_parts)
     if context_notice:
         parts.append(context_notice)
+    if batches or receipt_parts:
+        receipts, batches = fit_prompt_receipts(sid, batches, parts, rendered=receipt_parts)
+        if receipts:
+            parts.insert(0, receipts)
     emit_context("UserPromptSubmit", parts,
                  system_message="\n".join(human_notices + ([context_notice] if context_notice else [])))
     # Commit candidate/card consumption only after the context above actually
@@ -613,13 +656,32 @@ def main() -> int:
             pass
     # Commit acknowledgement only after successful synchronous hook rendering.
     from dispatch_session_sweep import ack_delivered
+    received = []
     for root, records in batches:
         retained = [record for record in records
                     if (str(root), record.get("delivery_id")) in ackable]
         if retained:
             ack_delivered(root, interaction_sid, retained,
                           acked_by="codex-native-prompt:" + interaction_sid)
+            received.extend(retained)
+    note_turn_received(interaction_sid, first_string(payload, "turn_id"), received, current_prompt)
     return 0
+
+
+def note_turn_received(sid: str, native_turn: str, records: list, prompt: str) -> None:
+    """Tell the in-turn carrier what this turn received, for its one Stop follow-through."""
+    if not sid or not native_turn:
+        return
+    try:
+        import codex_turn_carrier as carrier
+        items = carrier.owed_items(records)
+        peer = carrier.peer_report_item(prompt, sid)
+        if peer:
+            items.append(peer)
+        carrier.note_received(sid, native_turn, items,
+                              rendered=[str(record.get("delivery_id")) for record in records])
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

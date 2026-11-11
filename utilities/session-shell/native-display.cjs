@@ -6,59 +6,155 @@ function observe(harness, lines, sid) {
   if(harness==='claude') {
     const at=lines.findLastIndex(line=>line.includes('📁 ')&&line.includes('⎇ '));
     if(at>=0) {
+      // The panel paints Claude's whole status area; this row owns no field.
+      // Its exact callback values are still display evidence for the header.
       const status=lines.slice(at,at+3).map(s=>s.trim()).join(' · ');
-      const route=status.match(/⏳ route \d+(?: · (?!◑|⏵)[^·]+)*/)?.[0]?.trim();
-      const wait=status.match(/◑ (\d+)\b/);
-      if(route||wait)return {native_route:route,native_wait:wait?Number(wait[1]):undefined,sid};
+      const selected=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%\s*·\s*([^·]+?)\s*·\s*(?:5h|7d)\b/);
+      const context=status.match(/context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%/);
+      const choice=selected?.[2].trim().match(/^(.+?)(?:\s+(low|medium|high|xhigh|max|ultra))?$/);
+      const model=selected&&!/…|\.\.\.|^(?:\d+[hd]|weekly)\b/i.test(choice[1])?{model:choice[1],effort:choice[2]||''}:{};
+      if(context&&valid(+context[1]))return {sid,percent:+context[1],...model};
     }
   }
   if(harness==='codex')for(const line of lines.slice(-4)) {
     const m=line.match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\s*·.*?Context\s+(\d+(?:\.\d+)?)% used(?:\s*·|\s*$)/i);
-    if(m&&(!sid||m[1]===sid)&&valid(Number(m[2])))return {percent:Number(m[2]),sid:m[1]};
+    if(m&&(!sid||m[1]===sid)&&valid(Number(m[2]))){
+      const chosen=line.match(/Context\s+[\d.]+% used\s*·\s*([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)(?=\s*·|\s*$)/);
+      return {percent:Number(m[2]),sid:m[1],...(chosen?{model:chosen[1],effort:chosen[2]}:{})};
+    }
+  }
+  if(harness==='codex'){
+    // Before a thread exists, native omits the ID/title fields from its managed
+    // footer. The selected model is still present beside the native help row.
+    for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++){
+      if(!/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1])||!/^ {2}\S/.test(lines[y]))continue;
+      const seen=lines[y].match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0];
+      if(seen&&sid&&seen!==sid)continue;
+      const selected=lines[y].match(/(?:^ {2}| · )([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)(?=\s*·|\s*$)/);
+      if(selected){const context=lines[y].match(/Context (\d+(?:\.\d+)?)% used/);return {model:selected[1],effort:selected[2],...(seen?{sid:seen}:{}),...(context&&valid(+context[1])?{percent:+context[1]}:{})};}
+    }
+    for(const line of lines.slice(-4)){
+      const footer=line.match(/^ {2}([\w./:-]+)\s+(low|medium|high|xhigh|max|ultra)\s+·\s+(?:\/|~)/);
+      if(footer)return {model:footer[1],effort:footer[2]};
+    }
+    const rows=lines.slice(0,12),at=rows.findIndex(s=>/OpenAI Codex\s*\(v[\d.]+\)/.test(s));
+    if(!sid&&at>=0)for(const line of rows.slice(at+1,at+5)){
+      const chosen=line.match(/^\s*[│ ]\s*model:\s+([\w./:-]+)(?:\s+(low|medium|high|xhigh|max|ultra))?(?:\s+\/model|\s*│?\s*$)/);
+      if(chosen)return {model:chosen[1],effort:chosen[2]||''};
+    }
+  }
+  if(harness==='claude'&&!sid){
+    const at=lines.slice(0,10).findIndex(line=>/Claude Code v\d/.test(line));
+    if(at>=0)for(const line of lines.slice(at+1,at+3)){
+      const choice=line.match(/\s{2}([A-Za-z0-9][^·│]{0,96}?)\s+·\s+(?:API Usage Billing|Claude (?:Max|Pro)|Team|Enterprise)/);
+      if(choice){const effort=lines.slice(-8).map(s=>s.match(/● (low|medium|high|max) · \/effort/)).find(Boolean);return {model:choice[1].trim(),effort:effort?.[1]||''};}
+    }
   }
   if(harness==='opencode') {
+    for(const line of lines.slice(-3)){
+      const percent=line.match(/\s+\d[\d,.]*[KkMm]?\s+\((\d+(?:\.\d+)?)%\)\s+ctrl\+p commands\b/);
+      if(percent&&valid(Number(percent[1])))return {percent:Number(percent[1]),sid,owned:['context']};
+    }
     const width=Math.max(0,...lines.map(s=>s.length));
     for(let i=0;i+2<lines.length;i++) {
       const at=lines[i].search(/Context\s*$/);
       if(at<Math.max(20,width/2))continue;
       const tokens=lines[i+1].slice(at).trim(),m=lines[i+2].slice(at).trim().match(/^(\d+(?:\.\d+)?)% used$/);
-      if(/^\d[\d,]* tokens$/.test(tokens)&&m&&valid(Number(m[1])))return {percent:Number(m[1]),sid};
+      if(/^\d[\d,]* tokens$/.test(tokens)&&m&&valid(Number(m[1])))return {percent:Number(m[1]),sid,owned:['context']};
     }
   }
   return null;
 }
+// Rows whose text equals the statusline output Claude's callback recorded for
+// this exact session. Only Claude's statusline area counts: the rows directly
+// under the lowest input box (a rule, a `❯` prompt row, a rule). A screen
+// without that box, such as the Ctrl+O transcript, conceals nothing, and only a
+// complete contiguous match counts; the previous record covers the paint in flight.
+function claudeStatusRows(lines,sid,record) {
+  if(!sid||!record||record.session_id!==sid)return new Set();
+  const rule=s=>/^─{8,}$/.test(String(s).trim());
+  let bottom=-1;
+  for(let y=lines.length-2;y>=1&&bottom<0;y--)if(rule(lines[y])){
+    let top=y-1;while(top>=0&&!rule(lines[top]))top--;
+    if(top>=0&&top<y-1&&/^❯/.test(String(lines[top+1])))bottom=y;
+    else return new Set();
+  }
+  if(bottom<0)return new Set();
+  // Cell spacing after wide glyphs and emoji presentation selectors are
+  // terminal rendering, not text; every visible character must still match.
+  const norm=s=>String(s).replace(/[\s\uFE0F]+/g,'');
+  const same=(row,want)=>{
+    const a=norm(row),b=norm(want);if(!a||!b)return false;if(a===b)return true;
+    // Claude clips a line wider than its row with an ellipsis.
+    return a.length>=12&&/…$/.test(a)&&b.startsWith(a.slice(0,-1).trimEnd());
+  };
+  const y=bottom+1;
+  for(const want of [record.lines,record.previous]){
+    if(!Array.isArray(want)||!want.length||want.length>6||!want.every(s=>typeof s==='string'&&norm(s)))continue;
+    if(y+want.length<=lines.length&&want.every((line,i)=>same(lines[y+i],line)))return new Set(want.map((_l,i)=>y+i));
+  }
+  return new Set();
+}
 function firstLine(value) {return [{text:'context '+value.percent+'%',dim:true}];}
-function hiddenFooterRows(harness,lines,sid,plan,painted=[]) {
-  const found=[];
+// Codex's managed footer row. The shell owns its first `thread-id` field: an
+// ID-only row is blanked, and otherwise only the leading `  <id> · ` cells are,
+// while the value stays on the inner screen for identification. The whole row
+// yields only when every other field equals what the common area painted.
+function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
+  const none={rows:new Set(),cells:new Map()};
   if(harness!=='codex'||!sid||plan?.sid!==sid||!Array.isArray(plan.fields)
-     ||!Array.isArray(plan.lines)||!plan.lines.length
-     ||!plan.lines.every((line,i)=>line.trimEnd()===painted[i]?.trimEnd()))return new Set();
+     ||plan.config?.items?.[0]!=='thread-id'||JSON.stringify(plan.fields[0])!==JSON.stringify([sid]))return none;
   try {
     const s=fs.lstatSync(plan.config.path,{bigint:true});
     const generation=[s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
     if(!s.isFile()||s.uid!==BigInt(process.getuid())||s.mode&0o022n
-       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return new Set();
-  }catch{return new Set();}
+       ||JSON.stringify(generation)!==JSON.stringify(plan.config.stamp))return none;
+  }catch{return none;}
+  let shown=Array.isArray(plan.lines)&&plan.lines.length>0&&plan.common!==false;
+  if(shown&&plan.presentation==='session-panel'){
+    if(!Array.isArray(plan.detail_lines)||!plan.detail_lines.length
+       ||JSON.stringify(plan.detail_lines)!==JSON.stringify(details)
+       ||!plan.lines.every(line=>painted.some(row=>row.trim()===line.trim())))shown=false;
+  }else if(shown&&!painted.some((_row,offset)=>plan.lines.every((line,i)=>line.trimEnd()===painted[offset+i]?.trimEnd())))shown=false;
   const expected=plan.fields.filter(field=>Array.isArray(field)&&field.length);
-  const exact=/^ +([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) · .+$/;
+  const id=sid.replace(/[^0-9a-f-]/gi,'');
+  if(id!==sid||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sid))return none;
+  // Codex marks a working thread with a spinner after the ID, and an untitled
+  // thread's `thread-title` field repeats its ID. Both belong to the ID cells.
+  // A narrow footer clipped right after them (`·…`) carries nothing else.
+  const cell=id+'(?: [\\u2800-\\u28ff])?';
+  const only=new RegExp('^ +'+cell+'(?: · '+cell+')?(?: ·…| …|…)?\\s*$'),leading=new RegExp('^( +'+cell+' · (?:'+cell+' · )?).+$');
+  const found=[];
   for(let y=Math.max(0,lines.length-4);y+1<lines.length;y++) {
-    const match=lines[y].match(exact);
+    // The help row anchors the footer; while a draft is typed Codex drops
+    // `? for shortcuts`, and the composer row just above anchors it instead.
+    const help=/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]);
+    if(!help&&!lines.slice(Math.max(0,y-3),y).some(row=>/^›/.test(row)))continue;
+    if(only.test(lines[y])){found.push({y});continue;}
+    const match=lines[y].match(leading);
+    if(!match)continue;
     const fields=lines[y].trim().split(' · ').map(text=>text.replace(/\s+/g,' '));
-    if(match&&match[1]===sid&&fields.length===expected.length
-       &&fields.every((value,i)=>expected[i].includes(value))
-       &&/(?:^|\s)\? for shortcuts(?:\s|$)/.test(lines[y+1]))found.push(y);
+    const whole=shown&&fields.length===expected.length&&fields.every((value,i)=>expected[i].includes(value));
+    found.push(whole?{y}:{y,cells:match[1].length});
   }
-  return new Set(found.length===1?found:[]);
+  if(found.length!==1)return none;
+  const [row]=found;
+  return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
-function layout({cols,rows,expanded=true,configuration={},nativeSidebar=false}) {
+function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+function layout({cols,rows,expanded=true,configuration={}}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=configuration.side_width,minimum=configuration.side_min_columns;
-  const side=expanded&&!nativeSidebar&&configuration.layout==='side'
+  const side=expanded&&configuration.layout==='side'
     &&Number.isInteger(width)&&width>=32&&width<=80
     &&Number.isInteger(minimum)&&minimum>=80&&minimum<=1000
-    &&cols>=minimum&&cols-width-2>=60&&rows>=8;
-  return {side,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
-    panelColumn:side?cols-width:0,panelRow:side?2:null};
+    &&cols>=minimum&&cols-width-2>=48&&rows>=8;
+  // The one placement rule for every harness: a side panel sits right (the
+  // default) or left of the native area, two blank cells apart. Only the
+  // shell's own panel moves; the native area keeps its own column count.
+  const left=side&&configuration.position==='left';
+  return {side,left,panelCols:side?width:cols,nativeCols:side?cols-width-2:cols,
+    panelColumn:side&&!left?cols-width:0,nativeColumn:left?width+2:0,panelRow:side?0:null};
 }
 function blockHeight({harness,count,detail=0,limit,loaded=true}) {
   const summary=count||(!loaded&&harness!=='claude'?1:0);
@@ -104,4 +200,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,observe,firstLine,hiddenFooterRows,blockHeight,titleSequence,publisher};
+module.exports={layout,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};

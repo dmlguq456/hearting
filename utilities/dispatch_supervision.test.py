@@ -32,6 +32,105 @@ def row(attempt, *, status="open", **metadata):
     return f"2026-09-11T00:00:00Z\t{status}\t/r\t/w\ttest\t" + ",".join(f"{k}={v}" for k,v in meta.items()) + "\n"
 
 
+class SupervisorExitedSettlementTest(unittest.TestCase):
+    """2026-11-10: six PASS owners whose supervisor exit reached the parent as "needs attention"
+    minutes before their own completion (att-37f6788f, att-dc522c7d, att-6070b0f5, att-466d33ea)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / "jobs.log"
+
+    def receipt(self, *attempts):
+        return {"schema_version": 1, "kind": supervision.KIND, "state": "attention",
+                "owner_attempt_id": attempts[0], "monitored_attempt_ids": list(attempts),
+                "recipient_thread_id": "parent", "sealed_batch_id": "", "job_registry": str(self.jobs),
+                "reason": "supervisor-exited", "obligation_revision": "",
+                "responsible": "supervision-controller", "required_action": "inspect-recovery",
+                "pending_delivery_id": "delivery-x"}
+
+    def render(self, rows, process_state, reason="supervisor-exited"):
+        from types import SimpleNamespace
+        self.jobs.write_text("".join(row(aid, status=status, **{k: v for k, v in meta.items() if k != "attempt_id"})
+                                     for aid, (status, meta) in rows.items()))
+        receipt = {**self.receipt(*sorted(rows)), "reason": reason, "owner_attempt_id": next(iter(rows))}
+        with patch_split(contract, "observed_attempt_liveness",
+                         return_value=SimpleNamespace(process_state=process_state, process_reason="attempt-descendant-live")), \
+             mock.patch("codex_dispatch_terminal.terminal_envelope_observed", return_value=False):
+            return supervision.render_text(receipt)
+
+    def owner(self, harness, **extra):
+        return {**CURRENT, "parent_attempt_id": "-", "worker_type": "owner", "harness": harness,
+                "workflow_completion": "runtime-v1", "failure_class": "pass", "note": "completed-supervisor",
+                "parent_sid": "parent", **extra}
+
+    def test_a_pass_owner_still_settling_is_not_called_a_blockage_in_any_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):   # completion not delivered yet, nothing running
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "quiescent")
+                self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
+                self.assertIn("att-owner finished with PASS", text)
+                self.assertIn("Do not report this to the user as blocked", text)
+                self.assertIn("dispatch-registry.py reconcile --jobs", text)
+                self.assertNotIn("Explain the blockage", text)
+
+    def test_a_pass_owner_with_a_running_process_is_neither_blocked_nor_called_settlement(self):
+        """RV-PR1444-1110 F1: a live tagged descendant may be work the worker started, not a helper."""
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "live")
+                self.assertIn("not a blockage, and not finished either", text)
+                self.assertIn("Do not report the work as finished while it runs", text)
+                for claim in ("only Hearting's own settlement", "do not restart, retry, cancel",
+                              "Explain the blockage"):
+                    self.assertNotIn(claim, text)
+
+    def test_a_real_running_descendant_is_named_by_pid_before_any_residue_seal(self):
+        """No liveness mock: a real process tagged with the attempt keeps the notice from settling."""
+        self.jobs.write_text(row("att-owner", status="done", **{k: v for k, v in self.owner("claude").items()}))
+        receipt = self.receipt("att-owner")
+        work = subprocess.Popen(["sleep", "60"], env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-owner"},
+                                start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while supervision.settling_after_pass(receipt) != [("att-owner", "wait")] and time.monotonic() < deadline:
+                time.sleep(0.05)
+            text = supervision.render_text(receipt)
+            self.assertIn("not a blockage, and not finished either", text)
+            self.assertIn(f"pid {work.pid}", text)
+            self.assertNotIn("only Hearting's own settlement", text)
+            self.assertNotIn("Explain the blockage", text)
+        finally:
+            work.kill()
+            work.wait()
+
+    def test_a_real_stop_or_unknown_evidence_keeps_the_attention_notice(self):
+        cases = {
+            "blocked-owner": ("done", {"failure_class": "blocked", "note": "dead-worker-blocked"}, "quiescent"),
+            "died-without-result": ("done", {"failure_class": "fail", "note": "dead-runtime"}, "quiescent"),
+            "no-verdict": ("done", {"failure_class": "", "note": "dead-silent"}, "quiescent"),
+            "row-still-open": ("open", {}, "quiescent"),
+            "process-unverifiable": ("done", {}, "unverifiable"),
+            "evidence-conflict": ("done", {"terminal_conflict": "1", "conflicting_failure_class": "fail"}, "quiescent"),
+        }
+        for name, (status, extra, process) in cases.items():
+            with self.subTest(case=name):
+                text = self.render({"att-owner": (status, self.owner("codex", attempt_id="att-owner", **extra))}, process)
+                self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
+                self.assertIn("Explain the blockage", text)
+
+    def test_one_unsettled_attempt_or_another_reason_keeps_the_attention_notice(self):
+        rows = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner")),
+                "att-child": ("done", {**self.owner("claude", attempt_id="att-child", failure_class="fail",
+                                                   note="dead-runtime"), "parent_attempt_id": "att-owner"})}
+        self.assertIn("Explain the blockage", self.render(rows, "quiescent"))
+        only = {"att-owner": ("done", self.owner("claude", attempt_id="att-owner"))}
+        closure = self.render(only, "quiescent", reason="closure-blocked")   # keeps its own wording
+        self.assertNotIn("settlement in progress", closure)
+        self.assertIn("Explain this to the user", closure)
+        self.assertEqual(supervision.settling_after_pass({**self.receipt("att-gone")}), [])   # unreadable row
+
+
 class ResponsibilityTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1282,6 +1381,105 @@ class ConfirmedExecutionNoticeTest(unittest.TestCase):
         observation = supervision.update_attempt_stall_observation(
             self.jobs, "att-owner", persist=False)
         self.assertEqual((observation["state"], observation["reason"]), ("stalled", "execution-absent"))
+
+
+class StallNoticeRunningToolTest(unittest.TestCase):
+    """2026-11-11 00:02: the notice for att-a9d2c7d7 read like a hang while its owner waited
+    on its own `sleep 1500; grep ITER ...` measurement window."""
+
+    CLAUDE = ("source /dev/null 2>/dev/null || true && eval 'sleep 60; grep ITER '\"'\"'log'\"'\"''"
+              " < /dev/null && pwd -P >| /dev/null")
+
+    def runtime(self, harness, script):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name) / harness
+        runtime.write_text("#!" + sys.executable + "\nimport subprocess,sys,time\n"
+                           "subprocess.Popen(['sleep','60'])\n"  # a long-lived non-shell child
+                           + (f"subprocess.Popen(['bash','-c',{script!r}])\n" if script else "")
+                           + "time.sleep(0.3); print('ready',flush=True); time.sleep(60)\n")
+        runtime.chmod(0o755)
+        aid = "att-tool-" + harness
+        process = subprocess.Popen([str(runtime)], stdout=subprocess.PIPE, text=True, start_new_session=True,
+                                   env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                        "AGENT_DISPATCH_ATTEMPT_ID": aid})
+        def reap():
+            try:
+                os.killpg(process.pid, 9)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            process.stdout.close()
+        self.addCleanup(reap)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        return {**CURRENT, "attempt_id": aid, "harness": harness, "worker_type": "owner",
+                **contract.process_launch_identity(process.pid)}
+
+    def notice(self, metadata, wire=False):
+        receipt = {"schema_version": 1, "kind": supervision.KIND, "state": "attention",
+            "owner_attempt_id": metadata["attempt_id"], "monitored_attempt_ids": [metadata["attempt_id"]],
+            "recipient_thread_id": "parent", "sealed_batch_id": "", "job_registry": "/dev/null",
+            "reason": "attempt-stalled", "obligation_revision": "revision",
+            "responsible": "supervision-controller", "required_action": "inspect-recovery",
+            "pending_delivery_id": "delivery-stall"}
+        observation = {"state": "stalled", "reason": "no-comparable-progress",
+                       "quiet_windows": 5, "last_progress_at": time.time() - 1544}
+        with mock.patch.object(supervision, "_rows", return_value={metadata["attempt_id"]: ("open", metadata)}), \
+             mock.patch.object(supervision, "update_attempt_stall_observation", return_value=observation), \
+             mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
+             mock.patch("dispatch_replacement._plain_retry_successor", return_value=False), \
+             mock.patch("route_parent_close.row_requested", return_value=False):
+            if wire:
+                return supervision.context(receipt, "delivery-stall")["additionalContext"][
+                    "hearting-supervision"]["value"]
+            return supervision.render_text(receipt)
+
+    def test_live_tool_command_is_named_with_its_start_time_on_every_harness(self):
+        for harness, script in (("claude", self.CLAUDE), ("codex", "sleep 60; grep ITER log"),
+                                ("opencode", "sleep 60; grep ITER log")):
+            with self.subTest(harness=harness):
+                text = self.notice(self.runtime(harness, script))
+                self.assertIn("no comparable progress for 5 watchdog windows", text)
+                self.assertRegex(text, r"; a tool command started \d\d:\d\d is still running: sleep\.")
+                self.assertNotIn("ITER", text)
+
+    def test_only_the_program_name_reaches_the_parent_never_arguments(self):
+        # The name is the kernel's for the shell's live child; the command text is never read.
+        secret = "RV1492_FAKE_API_TOKEN_7b"
+        for script in ("sleep 60; : --api-key " + secret,
+                       "API_TOKEN=" + secret + " sleep 60; :",
+                       "sleep 60 && : " + secret + "; : " + secret,
+                       "sleep 60; : ' eval " + secret + " '",  # PR #1492 R2: eval inside a quoted argument
+                       "cd / && sleep 60; : " + secret):
+            with self.subTest(script=script):
+                metadata = self.runtime("codex", script)
+                for text in (self.notice(metadata), self.notice(metadata, wire=True)):
+                    self.assertNotIn(secret, text)
+                    self.assertRegex(text, r"is still running: sleep\.")
+        # A single command the shell execs leaves no shell to read: the existing text, no value.
+        metadata = self.runtime("codex", "API_TOKEN=" + secret + " sleep 60")
+        for text in (self.notice(metadata), self.notice(metadata, wire=True)):
+            self.assertNotIn(secret, text)
+        self.assertFalse(hasattr(supervision, "_program_name"))
+        self.assertFalse(hasattr(supervision, "_shell_command_text"))
+
+    def test_a_shell_running_only_builtins_keeps_the_existing_text(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fifo = Path(tmp.name) / "wait"
+        os.mkfifo(fifo)
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                text = self.notice(self.runtime(harness, f"read -t 60 x <> {fifo}; :"))
+                self.assertIn("watchdog windows; last comparable progress", text)
+                self.assertNotIn("tool command", text)
+
+    def test_no_running_tool_or_no_runtime_keeps_the_existing_text(self):
+        text = self.notice(self.runtime("claude", None))
+        self.assertIn("watchdog windows; last comparable progress", text)
+        self.assertNotIn("tool command", text)
+        gone = {**CURRENT, "attempt_id": "att-gone", "harness": "codex", "pid": "999999999", "pid_start": "1"}
+        self.assertNotIn("tool command", self.notice(gone))
 
 
 if __name__ == "__main__":

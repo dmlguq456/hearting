@@ -824,8 +824,11 @@ def resolve_seat(harness: Optional[str], cwd=None, env=None, sid: Optional[str] 
         from terminal_surface import is_tmux_pane
         endpoint = "" if is_tmux_pane(pane) else _endpoint_scope(env if live_caller else {})
         key = _digest("pane", endpoint, pane) if endpoint else _digest("pane", pane)
-        return session_seat(Seat("pane", key, pane, harness or "", "", endpoint=endpoint),
-                            harness or "", sid or "")
+        # The endpoint's own socket travels with the seat: the detached tidy helper drops every
+        # HERDR_* name, and a session-shell window's attachment join compares this socket.
+        socket = str(env.get("HERDR_SOCKET_PATH") or "").strip() if endpoint else ""
+        return session_seat(Seat("pane", key, pane, harness or "", "", endpoint=endpoint,
+                                 socket_path=socket), harness or "", sid or "")
     from session_tidy_native import caller_target
     native = caller_target(harness, env)
     if native:
@@ -1345,6 +1348,21 @@ def _confirmed_clear_predecessor(seat: Seat, harness: str, sid: str) -> Optional
     if handover.chain_end(harness, predecessor["sid"]) != (sid, "successor"):
         return None
     return predecessor
+
+
+def _continue_seat_number(seat: Seat, harness: str, sid: str) -> None:
+    """The session this seat provably continues hands its display number on.
+
+    Only the confirmed clear predecessor counts; without it the shared
+    allocator gives a new number as before."""
+    predecessor = _confirmed_clear_predecessor(seat, harness, sid)
+    if not predecessor or predecessor.get("harness") != harness:
+        return
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.session_tags import inherit
+    inherit(harness, predecessor["sid"], sid, pane_id=seat.pane or None)
 
 
 def prompt_state(seat: Seat) -> Optional[dict]:
@@ -3263,6 +3281,52 @@ def pending_notices(seat: Seat, harness: str, sid: str, *, now: Optional[float] 
     return out
 
 
+def _notice_groups(seat: Seat, harness: str, sid: str, *, now: float,
+                   summary: Optional[dict] = None) -> tuple[list, list[dict]]:
+    """The result lines this session's next hook shows: its own and its exact predecessor's."""
+    predecessor_seat = None
+    if _native_session_key(harness, sid):
+        predecessor = confirmed_predecessor_identity(seat, harness, sid)
+        if predecessor:
+            predecessor_seat = session_seat(seat, predecessor["harness"], predecessor["sid"])
+    sessions = summary if summary is not None else session_summary(seat)
+    groups = [(seat, pending_notices(seat, harness, sid, now=now, summary=sessions))]
+    if predecessor_seat:
+        current_notice_state = read_json(_notices_path(seat))
+        received_ids = set((current_notice_state or {}).get("lineage_received", [])) \
+            if isinstance(current_notice_state, dict) else set()
+        groups.append((predecessor_seat, [item for item in pending_notices(
+            predecessor_seat, harness, sid, now=now, summary=sessions)
+            if item.get("id") not in received_ids]))
+    groups = [(origin, [n for n in group if not str(n.get("id", "")).startswith("idle:")])
+              for origin, group in groups]
+    notices, seen = [], set()
+    for _origin, group in groups:
+        for item in group:
+            if item.get("id") not in seen:
+                notices.append(item)
+                seen.add(item.get("id"))
+    return groups, notices
+
+
+def waiting_notice_display(seat: Seat, harness: str, sid: str, *,
+                           now: Optional[float] = None) -> tuple[str, list[str]]:
+    """Read-only: the newest result line still waiting for this session's next hook.
+
+    A cleared window's next hook is the person's next input, so the shell panel and
+    the status line paint this line meanwhile (2026-11-10: a failed continue stayed
+    unseen for ~55 minutes). Returns the line and the files to watch; reading it
+    delivers nothing and settles nothing -- the hook still shows it to the session.
+    """
+    seat = session_seat(seat, harness, sid)
+    try:
+        groups, notices = _notice_groups(seat, harness, sid, now=now_epoch() if now is None else now)
+    except Exception:
+        return "", []
+    paths = list(dict.fromkeys(str(_notices_path(origin)) for origin, _group in groups))
+    return (str(notices[-1].get("text") or "") if notices else ""), paths
+
+
 def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[str, str]) -> bool:
     """Whether this session began after the author's last recorded activity."""
     author = sessions.get(author_key)
@@ -3655,6 +3719,10 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     # Keep the shared writer's confirmed edge in this exact native ledger
                     # as well as its physical seat ledger for current seat-scoped readers.
                     _append_ledger_entry(physical_seat(seat), handed)
+        if (seat.kind in ("pane", "native")
+                and ((event == "start" and source == "clear") or handed or appended)):
+            with contextlib.suppress(BaseException):    # a hook never fails for the seat number
+                _continue_seat_number(seat, harness, sid)
         if (_closed is not None and seat.kind in ("pane", "native")
                 and ((event == "start" and source == "clear")
                      or (harness == "opencode" and event == "prompt" and (handed or appended)))):
@@ -3687,24 +3755,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             predecessor = confirmed_predecessor_identity(seat, harness, sid)
             if predecessor:
                 predecessor_seat = session_seat(seat, predecessor["harness"], predecessor["sid"])
-        notice_groups = [(seat, pending_notices(seat, harness, sid, now=now, summary=sessions))]
-        if predecessor_seat:
-            current_notice_state = read_json(_notices_path(seat))
-            received_ids = set((current_notice_state or {}).get("lineage_received", [])) \
-                if isinstance(current_notice_state, dict) else set()
-            prior_notices = [item for item in pending_notices(
-                predecessor_seat, harness, sid, now=now, summary=sessions)
-                if item.get("id") not in received_ids]
-            notice_groups.append((predecessor_seat, prior_notices))
-        notice_groups = [(origin, [n for n in group if not str(n.get("id", "")).startswith("idle:")])
-                         for origin, group in notice_groups]
-        notices = []
-        notice_ids = set()
-        for _source_seat, group in notice_groups:
-            for item in group:
-                if item.get("id") not in notice_ids:
-                    notices.append(item)
-                    notice_ids.add(item.get("id"))
+        notice_groups, notices = _notice_groups(seat, harness, sid, now=now, summary=sessions)
         notice_block = ""
         if notices:
             t = _ui_translator()

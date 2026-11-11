@@ -39,6 +39,27 @@ def resolve_queue_socket(environ: Mapping[str, str] | None = None) -> Path:
     return home / "app-server-control" / "app-server-control.sock"
 
 
+def queue_endpoint_present(environ: Mapping[str, str] | None = None) -> bool | None:
+    """Whether this Codex home's App Server queue socket exists.
+
+    True: a socket is there. False: nothing is there, so no native queue can
+    carry a record. None: the path cannot be judged (invalid or unreadable).
+    """
+    import stat
+    try:
+        endpoint = resolve_queue_socket(environ)
+        try:
+            from codex_queue_delivery import resolve_endpoint
+            endpoint = resolve_endpoint(endpoint)
+        except Exception:  # noqa: BLE001 - a missing endpoint is checked below
+            pass
+        return stat.S_ISSOCK(os.stat(endpoint).st_mode)
+    except FileNotFoundError:
+        return False
+    except (OSError, ManagedDispatchError):
+        return None
+
+
 def _timeout(environ: Mapping[str, str]) -> int:
     raw = environ.get("AGENT_CODEX_QUEUE_COMPLETION_TIMEOUT", "86400")
     try:

@@ -2,8 +2,25 @@
 """SD-122 peer-message ledger recorder.
 
 Two subcommands, dispatched by argv[1]:
-  post-tool  -- PostToolUse hook. Records one peer_message_v1 for each
-                SendMessage tool call.
+  post-tool  -- PostToolUse / PostToolUseFailure hook. Records one
+                peer_message_v1 for each SendMessage tool call (not a failed
+                one), and hands the running turn the records
+                owed to this session (a completion receipt, a due steward
+                check, a report notice) through the same shared sweep as the
+                prompt carrier, as Codex's in-turn carrier does at the same
+                boundary. A record the asyncRewake hook already claimed or
+                ACKed stays with it; whichever carrier claims first shows it.
+  stop       -- Stop hook. Records still owed to this session when the turn
+                would end (the rest a prompt boundary could not show whole)
+                continue the same turn through Claude's documented
+                ``{"decision": "block", "reason": ...}``, as Codex's in-turn
+                carrier does at its Stop. Only what the reason shows whole is
+                held, so each continuation removes what it showed and the
+                turn ends once nothing more is owed. Claude Code can override
+                a block and end the turn (its consecutive-Stop cap), so a
+                shown record is ACKed only at the next call that proves the
+                continuation ran (Stop with ``stop_hook_active``, or a tool
+                boundary); a new prompt hands it back pending instead.
   prompt     -- UserPromptSubmit hook. Records one `notice` peer_message_v1
                 when the injected prompt carries a cross-session message, and
                 sweeps up to five un-acked detached-watch receipts into
@@ -40,6 +57,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+# The owed-record share of a tool boundary: records wait one more boundary rather
+# than make a tool call slow. Codex's in-turn carrier uses the same bound.
+_RECORD_SHARE_S = 1.5
+# Claude caps hook additionalContext; a notice that does not fit whole stays
+# pending for the next boundary (the shared whole-record selection).
+_RECORD_MAX_CHARS = 8000
+_CLAUDE_RECIPIENT_KIND = "claude-parent-runtime"
 
 
 def _process_started():
@@ -208,6 +234,111 @@ def handle_post_tool(payload):
 
 _CROSS_SESSION_RE = re.compile(r"<cross-session-message\s+from=\"([^\"]*)\"")
 _CROSS_SESSION_NAME_RE = re.compile(r"<cross-session-message\s[^>]*?from-name=\"([^\"]*)\"")
+
+
+def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
+    """Claim this session's owed records for the running turn: ``(text, batches)``.
+
+    The same records and claim as the prompt sweep (``dispatch-session-sweep.py``):
+    a completion that closed during the tool call reaches this turn instead of
+    waiting for the next prompt. ``deadline`` is ``time.monotonic()``. Only
+    records whose text fits ``max_chars`` whole are returned for ACK (one over
+    it alone as its head plus a whole copy's path, or, without that copy,
+    left pending); the rest are handed back pending.
+    """
+    if not session_id or time.monotonic() >= deadline:
+        return "", []
+    if str(_UTILITIES_DIR) not in sys.path:
+        sys.path.insert(0, str(_UTILITIES_DIR))
+    from dispatch_contract import dispatch_state_roots, resolve_agent_home
+    from dispatch_notice_state import NoticeReadContext
+    from dispatch_session_sweep import fit_inline, release_claims, sweep_deliver
+    deadline_ns = time.monotonic_ns() + int(max(0.0, deadline - time.monotonic()) * 1e9)
+    context = NoticeReadContext()
+    batches = []
+
+    for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home())):
+        if time.monotonic_ns() >= deadline_ns:
+            break
+        if not Path(root).is_dir():
+            continue  # a missing fallback root holds nothing; touching it would create it
+        try:
+            records, _count = sweep_deliver(root, _CLAUDE_RECIPIENT_KIND, session_id,
+                                           notice_context=context, deadline_ns=deadline_ns)
+        except Exception:  # noqa: BLE001 - left for the prompt sweep
+            continue
+        if records:
+            batches.append((root, records))
+    if not batches:
+        return "", []
+    text, chosen, over = fit_inline(batches, max_chars)
+    release_claims(session_id, over, _CLAUDE_RECIPIENT_KIND,
+                   reason="claude-tool-boundary-unshown")
+    return text, chosen
+
+
+_STOP_HEADER = "[hearting] Arrived before this turn ended:"
+
+
+def handle_stop(payload, out):
+    """Continue the turn once more with the records owed to this session, if any.
+
+    Same claim, fit and settlement as a tool boundary; nothing is owed, nothing
+    is printed and the turn ends. A record not shown whole stays pending.
+    """
+    session_id = payload.get("session_id")
+    if not session_id or str(payload.get("agent_id") or "").strip():
+        return
+    if str(_UTILITIES_DIR) not in sys.path:
+        sys.path.insert(0, str(_UTILITIES_DIR))
+    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, hold_stop_sends
+    # An earlier block's records are ACKed only from the native transcript.
+    settle_stop_records(payload)
+    text, batches = tool_boundary_records(
+        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2)
+    try:
+        if text:
+            out.write(json.dumps({"decision": "block", "reason": _STOP_HEADER + "\n\n" + text},
+                                 ensure_ascii=False) + "\n")
+            out.flush()
+    finally:
+        if batches:
+            if out.flushed:
+                # Printed is not read: Claude Code may override this block and
+                # end the turn. Settled at the next call (above, or a tool boundary).
+                hold_stop_sends(session_id, batches, _CLAUDE_RECIPIENT_KIND)
+            else:
+                settle_tool_boundary_records(session_id, batches, False)
+
+
+def settle_stop_records(payload):
+    """ACK what an earlier Stop block showed once the session's transcript holds it."""
+    with contextlib.suppress(Exception):
+        if str(_UTILITIES_DIR) not in sys.path:
+            sys.path.insert(0, str(_UTILITIES_DIR))
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        from dispatch_session_sweep import claude_hook_evidence, settle_stop_sends
+        remaining = _deadline() - time.monotonic()
+        if remaining <= 0:
+            return
+        session_id = payload.get("session_id")
+        settle_stop_sends(session_id, dispatch_state_roots(resolve_agent_home()),
+                          _CLAUDE_RECIPIENT_KIND, claude_hook_evidence(payload, session_id),
+                          deadline_ns=time.monotonic_ns() + int(remaining * 1e9))
+
+
+def settle_tool_boundary_records(session_id, batches, shown):
+    """ACK what the flushed context showed; hand anything else back pending."""
+    if str(_UTILITIES_DIR) not in sys.path:
+        sys.path.insert(0, str(_UTILITIES_DIR))
+    from dispatch_session_sweep import ack_delivered, release_claims
+    if not shown:
+        release_claims(session_id, batches, _CLAUDE_RECIPIENT_KIND,
+                       reason="claude-tool-boundary-unshown")
+        return
+    for root, records in batches:
+        with contextlib.suppress(Exception):
+            ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")
 
 
 def handle_prompt(payload):
@@ -429,8 +560,13 @@ def main(exit_guard=False):
     if exit_guard:
         _exit_after_flush(out)
     if mode == "post-tool":
+        # Registered on PostToolUse and PostToolUseFailure (PG-48): a failed
+        # tool's end is a boundary too, but a failed SendMessage sent nothing.
+        failed = payload.get("hook_event_name") == "PostToolUseFailure"
+        event = "PostToolUseFailure" if failed else "PostToolUse"
         try:
-            handle_post_tool(payload)
+            if not failed:
+                handle_post_tool(payload)
         finally:
             mod = _peer_message_module()
             # PostToolUse runs inside subagents too, but its session_id names the
@@ -438,9 +574,29 @@ def main(exit_guard=False):
             # that conversation's next receiving hook. SendMessage recording above
             # remains active for subagent calls.
             if mod and not str(payload.get("agent_id") or "").strip():
-                mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                      "PostToolUse", native_delivery=True,
-                                      deadline=_deadline(), stream=out)
+                session_id = payload.get("session_id")
+                owed = []
+                settle_stop_records(payload)
+
+                def owed_context():
+                    # After the exact peer-body claims, within what they left.
+                    try:
+                        text, batches = tool_boundary_records(
+                            session_id, min(_deadline(), time.monotonic() + _RECORD_SHARE_S))
+                    except Exception:  # noqa: BLE001 - the prompt sweep still carries them
+                        return ""
+                    owed.extend(batches)
+                    return text
+
+                try:
+                    mod.emit_peer_context({"harness": "claude", "session_id": session_id},
+                                          event, extra_context=owed_context,
+                                          native_delivery=True, deadline=_deadline(), stream=out)
+                finally:
+                    if owed:
+                        settle_tool_boundary_records(session_id, owed, out.flushed)
+    elif mode == "stop":
+        handle_stop(payload, out)
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:
         # the sweep must never be able to swallow it.

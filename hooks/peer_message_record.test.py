@@ -505,6 +505,69 @@ class PostToolTest(_BaseTest):
         self.assertEqual(proc2.returncode, 0)
 
 
+class ToolBoundaryNoticeTest(_BaseTest):
+    """Claude's PostToolUse hands the running turn its ordinary notices, as Codex does."""
+
+    SID = "4f1c2b8e-0000-4000-8000-00000000c1a0"
+
+    def _notice(self, key="tool-boundary", text="TOOL_BOUNDARY_NOTICE_TOKEN"):
+        import session_notice
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(session_notice, "_retain", return_value=None):
+            record = session_notice.notify("claude", self.SID, key=key, subject="report",
+                                           text=text, required_action="read-notice",
+                                           jobs=self.jobs_path)
+        self.assertIsNotNone(record)
+        return record
+
+    def _state(self, record):
+        return pending_delivery.read(self.tmp_root, self.SID, record["delivery_id"])["state"]
+
+    def test_a_notice_reaches_the_running_turn_and_is_acked(self):
+        record = self._notice()
+        proc = self._run("post-tool", {"session_id": self.SID, "tool_name": "Bash",
+                                       "hook_event_name": "PostToolUse", "cwd": str(self.tmp_root)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        output = json.loads(proc.stdout.decode().strip().splitlines()[-1])
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        self.assertIn("TOOL_BOUNDARY_NOTICE_TOKEN", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self._state(record), "acked")
+        again = self._run("post-tool", {"session_id": self.SID, "tool_name": "Bash",
+                                        "hook_event_name": "PostToolUse"})
+        self.assertNotIn(b"TOOL_BOUNDARY_NOTICE_TOKEN", again.stdout)
+
+    def test_a_completion_closed_during_the_tool_reaches_the_same_turn(self):
+        attempt, parent = "att-" + "c" * 32, "att-" + "d" * 32
+        receipt = {"schema_version": 2, "state": "delivered", "parent_attempt_id": parent,
+                   "job_registry": str(self.jobs_path), "delivery_classification": "attention",
+                   "children": [{"attempt_id": attempt, "status": "done", "readiness": "ready",
+                                 "reason": "terminal-failure-or-unclosed",
+                                 "required_action": "inspect-done-failure", "harness": "claude",
+                                 "delivery_classification": "attention"}]}
+        delivery_id = "delivery-" + "c" * 32
+        pending_delivery.create(
+            root=self.tmp_root, recipient_kind="claude-parent-runtime", recipient_key=self.SID,
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt], parent_attempt_id=parent, route_id="rt-fixture",
+            route_node="execute", receipt=receipt,
+            receipt_digest=pending_delivery._canonical_receipt_digest(receipt),
+            row_revisions={attempt: "deadbeef"})
+        proc = self._run("post-tool", {"session_id": self.SID, "tool_name": "Bash",
+                                       "hook_event_name": "PostToolUse"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        output = json.loads(proc.stdout.decode().strip().splitlines()[-1])
+        self.assertIn(attempt, output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(pending_delivery.read(self.tmp_root, self.SID, delivery_id)["state"],
+                         "acked")
+
+    def test_a_subagent_tool_leaves_the_notice_for_the_main_conversation(self):
+        record = self._notice(key="subagent")
+        proc = self._run("post-tool", {"session_id": self.SID, "tool_name": "Bash",
+                                       "agent_id": "sub-1", "hook_event_name": "PostToolUse"})
+        self.assertNotIn(b"TOOL_BOUNDARY_NOTICE_TOKEN", proc.stdout)
+        self.assertEqual(self._state(record), "pending")
+
+
 class PromptTest(_BaseTest):
     def test_prompt_with_cross_session_marker_writes_notice(self):
         payload = {
@@ -531,7 +594,7 @@ class PromptTest(_BaseTest):
         }
         proc = self._run("prompt", payload)
         context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("answer once", context)
+        self.assertIn("acknowledgement alone is not completion", context)
 
     def test_prompt_guidance_receives_exact_claude_payload_identity(self):
         from types import SimpleNamespace
@@ -872,7 +935,7 @@ class F100cTrailerAndNameTest(_BaseTest):
         self.assertEqual(rec["from"]["session_id"], "thread-9")
         self.assertEqual(rec["from"]["name"], "f100-codex")
         self.assertEqual(rec["summary"], "herdr steer received")
-        self.assertIn(b"answer once", result.stdout)
+        self.assertIn(b"acknowledgement alone is not completion", result.stdout)
 
     def test_plain_prompt_still_writes_nothing(self):
         self._run("prompt", {"session_id": "sid-recv", "cwd": "/tmp/proj", "prompt": "peer-from: x"})

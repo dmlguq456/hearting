@@ -228,6 +228,16 @@
         ]
       },
       {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 peer-message-record.py post-tool",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -291,6 +301,16 @@
       }
     ],
     "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" python3 peer-message-record.py stop",
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "*",
         "hooks": [
@@ -366,6 +386,15 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash mem-recall-inject.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" sh capability-grounding-marker.sh",
             "timeout": 10
           }
         ]

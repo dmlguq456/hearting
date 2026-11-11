@@ -19,6 +19,8 @@ shared-utility-deferred	artifact_metadata_amendment.py
 shared-utility-deferred	artifact_nofollow.py
 shared-utility-deferred	artifact_restore_sealed.py
 shared-utility-deferred	artifact_root_alias.py
+shared-utility-deferred	artifact_spec_current.py
+shared-utility-deferred	artifact_spec_storage.py
 shared-utility-deferred	artifact_viewer.py
 shared-utility-deferred	artifact_workflow_group_review.py
 shared-utility-deferred	atomic_publish.py
@@ -52,6 +54,15 @@ shared-utility-deferred	execution-access-diagnose.py
 shared-utility-deferred	execution_access.py
 shared-utility-deferred	execution_access_diagnose.py
 shared-utility-deferred	governor_identity.py
+shared-utility-deferred	harness_behavior_cases_a.py
+shared-utility-deferred	harness_behavior_cases_b.py
+shared-utility-deferred	harness_behavior_cases_c.py
+shared-utility-deferred	harness_behavior_cases_codex_hooks.py
+shared-utility-deferred	harness_behavior_cases_d.py
+shared-utility-deferred	harness_behavior_cases_e.py
+shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
+shared-utility-deferred	harness_behavior_cases_tidy.py
+shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
 shared-utility-deferred	herdr_observation.py
@@ -67,6 +78,7 @@ shared-utility-deferred	opencode_session_runtime.py
 shared-utility-deferred	owner_write_advisory.py
 shared-utility-deferred	pane_ownership.py
 shared-utility-deferred	pass_inputs.py
+shared-utility-deferred	pr-chain.py
 shared-utility-deferred	gpu_execution_sandbox.py
 shared-utility-deferred	prd_readability.py
 shared-utility-deferred	prior-art.py
@@ -90,6 +102,7 @@ shared-utility-deferred	route_presence_gate.py
 shared-utility-deferred	turn_change_record.py
 shared-utility-deferred	frame_native_answer.py
 shared-utility-deferred	git_index_lock.py
+shared-utility-deferred	codex_tui_exit.py
 shared-utility-deferred	spec_merge.py
 shared-utility-deferred	ship-parent-deploy.py
 shared-utility-deferred	ship_parent_deploy.py
@@ -181,6 +194,7 @@ utility-deferred	codex_managed_dispatch.py
 utility-deferred	codex_parent_completion_replay.py
 utility-deferred	codex_queue_delivery.py
 utility-deferred	codex_queue_dispatch.py
+utility-deferred	codex_turn_carrier.py
 utility-deferred	commit_policy.py
 utility-deferred	compose-route.py
 utility-deferred	compose_route.test.py
@@ -231,6 +245,7 @@ utility-deferred	dispatch_degradation.py
 utility-deferred	dispatch_log_retention.py
 utility-deferred	dispatch_observation_log.py
 utility-deferred	dispatch_harvest.test.py
+utility-deferred	dispatch_headless_main.py
 utility-deferred	dispatch_launch_tuple.py
 utility-deferred	dispatch_launch_evidence.py
 utility-deferred	dispatch_lifecycle.py
@@ -410,7 +425,6 @@ tool-deferred	i18n
 tool-deferred	improvement
 tool-deferred	install
 tool-deferred	installed-layout-triggers.tsv
-tool-deferred	integrations
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
@@ -459,3 +473,4 @@ utility-deferred	artifact_journal.py
 utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
+tool-deferred	check_utility_census.test.py

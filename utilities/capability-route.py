@@ -2410,6 +2410,18 @@ def main():
         location=_result_location_line(route)
         if location:
             print(location,file=sys.stderr)
+        # The finished branch's PR names its next chain step (review request, fix, publish)
+        # from GitHub's current state; read-only, best effort, silent without a GitHub remote.
+        try:
+            import importlib.util as _ilu
+            _spec=_ilu.spec_from_file_location("pr_chain", Path(__file__).with_name("pr-chain.py"))
+            _chain=_ilu.module_from_spec(_spec); _spec.loader.exec_module(_chain)
+            chain=("" if route.get("source_commit") in (None,"","unversioned")
+                   else _chain.finish_line(route.get("cwd"),capability=route.get("capability")))
+        except Exception:
+            chain=""
+        if chain:
+            print(chain,file=sys.stderr)
     else:
         if a.command=="close":
             a.route=_close_route_argument(a)
@@ -2511,6 +2523,9 @@ def main():
                 outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True)
             else:
                 created=True
+                if outcome.get("state")=="cancelled" and outcome.get("owner_attempt_id"):
+                    # The close stopped this route's running owner; its worktree is left as it was.
+                    print("stopped_owner="+outcome["owner_attempt_id"],file=sys.stderr)
                 from work_start import pin_handoff_continuation
                 outcome=pin_handoff_continuation(route, a.route, route_parent_close.jobs_path(),
                                                 {**outcome,"summary":a.summary or outcome.get("summary")})
@@ -2638,7 +2653,11 @@ def main():
                         if node.get("kind") == "resource-runner":
                             result["next_action"] = (
                                 "use the resource node's existing start path; a completed compute-hosts "
-                                "candidate may be supplied with --compute-run <run-id>")
+                                "candidate may be supplied with --compute-run <run-id>; a route-bound "
+                                "exit-0 run whose receipt names only a leftover `running` row is adopted "
+                                "and that row is settled; a finished run this route's owner launched "
+                                "directly (route provenance, no resource row) is adopted with its "
+                                "evidence recorded")
                         print(json.dumps(result, sort_keys=True))
                         return
                     if not jobs or not attempt_id:

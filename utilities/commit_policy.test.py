@@ -217,6 +217,20 @@ class CommitPolicyTest(unittest.TestCase):
         route["entry_execution_scope"] = "report"
         write_route()
         self.assertIsNone(commit_policy.task_publish_scope(args))
+        # A direct compose seals no entry scope: nothing declared a stop
+        # before publication, so the owner keeps the same capacity on every
+        # harness (Codex owners otherwise lose their sandbox network).
+        del route["entry_scope_contract_version"], route["entry_execution_scope"]
+        write_route()
+        unscoped = commit_policy.task_publish_scope(args)
+        self.assertEqual((unscoped["branch"], unscoped["base"]), ("fx", "main"))
+        for version, marker in ((1, None), (None, "complete"), (2, "complete"), (1, "partial")):
+            with self.subTest(version=version, marker=marker):
+                route["entry_scope_contract_version"] = version
+                route["entry_execution_scope"] = marker
+                write_route()
+                self.assertIsNone(commit_policy.task_publish_scope(args))
+        route["entry_scope_contract_version"] = 1
         route["entry_execution_scope"] = "complete"
         for wording in (
             "Create a pull request and verify automated checks.",
@@ -234,6 +248,61 @@ class CommitPolicyTest(unittest.TestCase):
         route["capability"] = "autopilot-ship"
         write_route()
         self.assertIsNone(commit_policy.task_publish_scope(args))
+
+    def test_codex_launcher_network_projection_is_the_owner_rule(self):
+        # RV-PR1474 P2-1, regressed on the real launcher projection: a depth-1
+        # owner has network whatever its capability or entry scope; a depth-2
+        # worker, a read-only owner and an owner mid-merge do not.
+        import importlib.util
+        from route_identity import route_hash, route_id_from_hash
+        spec = importlib.util.spec_from_file_location(
+            "codex_network_projection", ROOT / "adapters/codex/bin/dispatch-headless.py")
+        codex = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codex)
+        origin = Path(self._tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "-C", str(self.primary), "remote", "add", "origin", str(origin)], check=True)
+        output_dir = self.primary / "cycle" / "artifacts"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        route_file = Path(self._tmp.name) / "network-route.json"
+        rows = []
+        for capability, scope, depth, worker, sandbox in (
+            ("autopilot-code", "report", 1, "owner", "workspace-write"),
+            ("autopilot-code", "complete", 1, "owner", "workspace-write"),
+            ("audit", None, 1, "owner", "workspace-write"),
+            ("audit", None, 2, "stage", "workspace-write"),
+            ("audit", None, 1, "owner", "read-only"),
+            # A publication scope adds no network of its own.
+            ("autopilot-code", "complete", 1, "owner", "read-only"),
+        ):
+            route = {"schema_version": 2, "capability": capability,
+                     "requested_intensity": "quick", "effective_intensity": "quick",
+                     "cwd": str(self.linked), "artifact_root": str(self.primary),
+                     "slug": "network-projection"}
+            if scope:
+                route.update(entry_scope_contract_version=1, entry_execution_scope=scope)
+            digest = route_hash(route)
+            route.update(route_hash=digest, route_id=route_id_from_hash(digest))
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            args = SimpleNamespace(worktree=str(self.linked), route_file=str(route_file),
+                                   artifact_output_dir=str(output_dir), dispatch_depth=depth,
+                                   worker_type=worker, intensity="quick", sandbox=sandbox,
+                                   gpu_execution_scope=False, owner_route_binding=None,
+                                   route_id=None, route_hash=None)
+            rows.append(codex.nested_headless_network_enabled(args))
+            if scope == "complete":
+                self.assertTrue(commit_policy.runtime_permission_projection(args)["task_publish_scope"])
+        git_dir = commit_policy.worktree_git_dirs(self.linked)[0]
+        (git_dir / "MERGE_HEAD").write_text("fixture\n", encoding="utf-8")
+        try:
+            merge = SimpleNamespace(worktree=str(self.linked), dispatch_depth=1, worker_type="owner",
+                                    intensity="quick", sandbox="workspace-write",
+                                    gpu_execution_scope=False)
+            rows.append(codex.nested_headless_network_enabled(merge))
+            self.assertEqual(codex.effective_runtime_sandbox(merge), "read-only")
+        finally:
+            (git_dir / "MERGE_HEAD").unlink(missing_ok=True)
+        self.assertEqual(rows, [True, True, True, False, False, False, False])
 
     def test_unreadable_git_state_keeps_the_projection_fail_closed(self):
         owner = self.args("owner", dispatch_depth=1)

@@ -221,7 +221,58 @@ def assign_observed(harness, sid, *, pane_id=None, pid=None, proc_start=None):
     return assigned_tag(harness, sid)
 
 
-def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None):
+def inherit(harness, predecessor, successor, *, pane_id=None):
+    """Give a recorded same-seat successor its predecessor's number.
+
+    Callers pass only an edge Hearting already confirmed (a tidy clear or seat
+    handover in one harness). Without a predecessor row nothing is inherited and
+    normal allocation applies.
+    """
+    if (harness not in {"claude", "codex", "opencode"} or not isinstance(predecessor, str)
+            or not isinstance(successor, str) or not predecessor or not successor
+            or predecessor == successor):
+        return None
+    try:
+        if (harness, predecessor) not in _read(_path()):
+            return assigned_tag(harness, successor)  # nothing to continue, or already done
+    except (OSError, ValueError, TypeError):
+        return None
+    row = {"harness": harness, "session_id": successor, "started_at": _started(harness, successor)}
+    if pane_id is not None:
+        row["pane_id"] = pane_id
+    _assign({(harness, successor): row}, None, observed_only=True,
+            lineage={(harness, successor): (harness, predecessor)})
+    return assigned_tag(harness, successor)
+
+
+def _continuations(live, observed, lineage):
+    """Successor -> predecessors whose seat number it continues.
+
+    Two records count: an explicit confirmed lineage edge, and one native process
+    (same PID and start time) in the same pane now reporting a new session id
+    while its earlier id is no longer observed. Anything less keeps a new number.
+    """
+    edges = {}
+    for successor, predecessor in (lineage or {}).items():
+        if successor in live and predecessor in live and predecessor not in observed \
+                and successor[0] == predecessor[0]:
+            edges.setdefault(successor, set()).add(predecessor)
+    groups = {}
+    for key, row in live.items():
+        pid, start, pane = row.get("pid"), row.get("proc_start"), row.get("pane_id")
+        if pid and start is not None and pane:
+            groups.setdefault((key[0], str(pid), str(start), pane), []).append(key)
+    for members in groups.values():
+        current = [key for key in members if key in observed]
+        earlier = [key for key in members if key not in observed]
+        # One process can serve several sessions only as a shared server; then
+        # no single successor is evident and nothing is inherited.
+        if len(current) == 1 and earlier:
+            edges.setdefault(current[0], set()).update(earlier)
+    return edges
+
+
+def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None):
     """Reserve against the latest snapshot and persist atomically under one lock."""
     from .session_handle import minted_tag
     observed = set(live)
@@ -274,6 +325,22 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     row["tag"] = previous["tag"]
                 elif not _HEX.fullmatch(str(row.get("tag") or "")):
                     row["tag"] = minted_tag(row["session_id"])
+            # The same seat keeps its number: the successor takes the number of
+            # the earliest session it continues, and those ended ids retire.
+            for successor, predecessors in _continuations(live, observed, lineage).items():
+                if successor not in live:
+                    continue
+                chain = [live[key] for key in predecessors if key in live]
+                if not chain:
+                    continue
+                first = min(chain + [live[successor]], key=_order)
+                row = live[successor]
+                for field in ("tag", "first_seen", "started_at"):
+                    row[field] = first[field]
+                if row.get("pane_id") is None and chain[0].get("pane_id") is not None:
+                    row["pane_id"] = chain[0]["pane_id"]
+                for key in predecessors:
+                    live.pop(key, None)
             taken = set()
             movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
             # Reserve every surviving old number before placing newcomers or a

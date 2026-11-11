@@ -3240,6 +3240,16 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         self.assertTrue(value["complete"])
         self.assertEqual(value["route_status"], {})
 
+    def test_optional_panel_detail_roundtrips_but_cannot_crowd_out_wait_truth(self):
+        panels = {"claude\0sid-a": [{"title": "Current work", "stages": [{"name": "inline", "st": "active"}]}]}
+        result = {"items": [], "complete": True, "observed_at": time.time(), "route_panels": panels}
+        self.assertTrue(state.publish_cache(result))
+        self.assertEqual(state.cached_view(request=False)["route_panels"], panels)
+        self.assertTrue(state.publish_cache({**result, "route_panels": {"claude\0sid-a": "x" * state._CACHE_MAX_BYTES}}))
+        view = state.cached_view(request=False)
+        self.assertTrue(view["complete"])
+        self.assertEqual(view["route_panels"], {})
+
 
 class ProducerInputReuseTests(unittest.TestCase):
     """A producer re-publishes its last pass while nothing that pass read changed."""

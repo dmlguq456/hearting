@@ -386,8 +386,8 @@ fi
 
 dir=$(basename "$S_CWD")
 
-# A wrapped Claude uses its reserved native rows for the same common formatter
-# as the block. Existing producers and unwrapped output remain available.
+# A wrapped Claude paints every field with the same common formatter as the panel.
+# The shell blanks this exact output only while its visible panel paints them.
 if [ -n "${HEARTING_SHELL_SOCKET:-}" ]; then
   line_helper="$AGENT_HOME/tools/fleet/session_line.py"
   [ -f "$line_helper" ] || line_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/session_line.py"
@@ -460,6 +460,17 @@ if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
       segs_arr+=("${RED}◑답 대기 ${wait_total}${RST}")
     fi
     [ -z "$route_label" ] || segs_arr+=("${YEL}${route_label}${RST}")
+    # A session-tidy result line (a continue that was not sent) otherwise waits for the
+    # next hook, which in a cleared window is the person's next input. Display only.
+    tidy_notice=$(python3 - "$(dirname "$wait_helper")" "$S_SID" <<'PY' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import session_tidy
+text, _paths = session_tidy.waiting_notice_display(
+    session_tidy.resolve_seat("claude", env={}, sid=sys.argv[2]), "claude", sys.argv[2])
+print(" ".join(text.split())[:300])
+PY
+    )
   fi
 fi
 
@@ -500,6 +511,8 @@ out=""; sep=" ${DIM}│${RST} "
 for s in "${segs_arr[@]}"; do [ -z "$out" ] && out="$s" || out="${out}${sep}${s}"; done
 [ -n "${jobs_lbl:-}" ] && out="${out}
 ${GRN}>_${RST}${DIM} running:${RST} ${jobs_lbl}"
+[ -n "${tidy_notice:-}" ] && out="${out}
+${YEL}⚠ ${tidy_notice}${RST}"
 printf '%s' "$out" > "$SL_STATE_HOME/.statusline-last-out.txt" 2>/dev/null || true  # 디버그 — 실제 렌더 시점 출력 사본
 printf '%s\n' "$out"
 exit 0  # 마지막 && list 가 비어있는 jobs_lbl 로 exit 1 → statusline 미표시 (2026-06-11 점검에서 발견)

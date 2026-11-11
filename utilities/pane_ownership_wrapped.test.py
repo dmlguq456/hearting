@@ -157,14 +157,25 @@ class WrappedTidyTest(unittest.TestCase):
                 self.assertEqual(f.peer._clear_look(self.pane, req)[0], 'draft')
             send.assert_not_called()
 
-    def test_unavailable_physical_binding_keeps_native_card_storage(self):
+    def test_new_thread_before_its_rollout_keeps_its_shell_seat(self):
+        # At a new thread's start hook Codex has no rollout yet; the attachment
+        # naming the caller's own thread is still its seat (PG-9 tidy card).
         with mock.patch('fleet.collectors.codex.session_id_of_process', return_value=''):
             seat = st.resolve_seat('codex', self.home.name, sid=self.sid)
         native = st.session_seat(seat, 'codex', self.sid)
         st.write_card(native, 'codex', self.sid, '# Synthetic continuity\nKeep the pending task.\n')
         self.assertEqual(st.read_latest_card(native)['body'], '# Synthetic continuity\nKeep the pending task.')
         self.assertEqual(st.session_identity(native), ('codex', self.sid))
-        self.assertFalse(native.pane)
+        self.assertEqual(native.pane, self.pane)
+
+    def test_a_proven_different_thread_or_unselected_daemon_root_is_no_seat(self):
+        with mock.patch('fleet.collectors.codex.session_id_of_process',
+                        return_value='01000000-0000-7000-8000-0000000000ff'):
+            self.assertFalse(st.resolve_seat('codex', self.home.name, sid=self.sid).pane)
+        with mock.patch.object(po, '_caller_runtime', return_value=(self.record, True)), \
+             mock.patch('fleet.collectors.codex.session_id_of_process', return_value=''):
+            self.assertEqual(po._shell_seat_pane(self.pane, 'codex', self.sid, None,
+                                                 executable='/fixture/herdr'), "")
 
 
 if __name__ == '__main__':

@@ -14,7 +14,9 @@ kept outside the repo) these are published assets, so the default output is ``do
 ``tools/render-fleet-svg.py`` draws the same OVERVIEW as ``docs/fleet.svg``.
 """
 import argparse
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -40,7 +42,9 @@ FRAME_MS = 2600
 
 def isolate():
     """No home, config, locale or clock of the machine reaches the frame."""
-    os.environ["HOME"] = tempfile.mkdtemp(prefix="fleet-readme-home-")
+    home = tempfile.mkdtemp(prefix="fleet-readme-home-")
+    atexit.register(shutil.rmtree, home, True)
+    os.environ["HOME"] = home
     for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
                  "FLEET_DEMO", "HEARTING_HOME", "AGENT_HOME"):
         os.environ.pop(name, None)

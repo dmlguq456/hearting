@@ -1,4 +1,4 @@
-"""Opt-in installation only touches a private prefix and its exact profile block."""
+"""Create-once installation only touches a private prefix and its exact profile block."""
 from pathlib import Path
 import importlib.util
 import json
@@ -40,6 +40,60 @@ class SessionShellInstallTest(unittest.TestCase):
         self.assertFalse(install._client().policy_path().exists())
         self.assertEqual(self.profile.read_bytes(), before)
 
+    def test_new_install_default_enables_every_launcher_and_one_step_disable(self):
+        before = self.profile.read_bytes()
+        self.assertEqual(install.ensure(default_enabled=True)["status"], "enabled")
+        self.assertTrue(install._client().policy()[0])
+        for harness in install.HARNESSES:
+            self.assertTrue((install._bin() / harness).is_file())
+        install.set_enabled(False)
+        disabled = install._client().policy_path().read_bytes()
+        self.assertEqual(install.ensure(default_enabled=True)["status"], "disabled")
+        self.assertEqual(install._client().policy_path().read_bytes(), disabled)
+        self.assertEqual(self.profile.read_bytes(), before)
+
+    def test_new_default_preserves_present_policy_bytes_and_layout(self):
+        policy = install._client().policy_path()
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        for payload, enabled in ((b'{"enabled":false,"layout":"side"}\n', False),
+                                 (b'{ "enabled": true, "side_width": 48 }\n', True),
+                                 (b'invalid user content\n', False)):
+            with self.subTest(payload=payload):
+                policy.write_bytes(payload); policy.chmod(0o600)
+                stamp = policy.stat().st_mtime_ns
+                result = install.ensure(default_enabled=True)
+                self.assertEqual(result["status"], "enabled" if enabled else "disabled")
+                self.assertEqual(policy.read_bytes(), payload)
+                self.assertEqual(policy.stat().st_mtime_ns, stamp)
+
+    def test_new_default_dry_run_and_failed_assets_do_not_publish_policy(self):
+        before = self.profile.read_bytes()
+        self.assertEqual(install.ensure(default_enabled=True, dry_run=True)["status"], "planned")
+        self.assertFalse(install._client().policy_path().exists())
+        self.assertFalse(install._bin().exists())
+        with patch.object(install, "prepare_assets", side_effect=ValueError("unavailable assets")):
+            with self.assertRaises(ValueError):
+                install.ensure(default_enabled=True)
+        self.assertEqual(self.profile.read_bytes(), before)
+        self.assertFalse(install._client().policy_path().exists())
+
+    def test_install_detection_preserves_older_absent_policy_and_managed_state(self):
+        import installer
+        self.assertTrue(installer._new_global_install("global"))
+        self.assertFalse(installer._new_global_install("project"))
+        for harness in install.HARNESSES:
+            for record in (installer.paths.harness_state_dir(harness, "global") / "activation.json",
+                           installer.manifest._manifest_path(harness, "global")):
+                record.parent.mkdir(parents=True, exist_ok=True)
+                record.write_text("{}")
+                self.assertFalse(installer._new_global_install("global"))
+                # destructive-ok: reason=remove this test's own fixture record before the next one; boundary=one record file under this test's temporary HOME
+                record.unlink()
+        state = installer.distribution.state_path()
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        self.assertFalse(installer._new_global_install("global"))
+
     def test_enable_and_disable_keep_native_files_and_restore_profile(self):
         before = self.profile.read_bytes()
         natives = {p: p.read_bytes() for p in self.native.iterdir()}
@@ -57,9 +111,17 @@ class SessionShellInstallTest(unittest.TestCase):
         policy=install._client().policy_path();policy.parent.mkdir(parents=True,exist_ok=True)
         policy.write_text(json.dumps({'enabled':False,'layout':'side','side_width':48,'side_min_columns':150}));policy.chmod(0o600)
         install.set_enabled(True)
-        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150})
+        self.assertEqual(install._client().display_policy(),{'layout':'side','side_width':48,'side_min_columns':150,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none'})
         install.set_enabled(False)
         self.assertEqual(json.loads(policy.read_text())['side_width'],48)
+        # A stored appearance choice (position, theme, shade) survives both toggles.
+        chosen={'position':'left','theme':'mono','shade':'medium'}
+        policy.write_text(json.dumps({**json.loads(policy.read_text()),**chosen}))
+        for enabled in (True,False):
+            install.set_enabled(enabled)
+            stored=json.loads(policy.read_text())
+            self.assertEqual({key:stored[key] for key in chosen},chosen)
+            self.assertEqual({key:install._client().display_policy()[key] for key in chosen},chosen)
 
     def test_enable_and_disable_restore_a_profile_without_its_own_final_lf(self):
         before = b"alias keep='printf keep'"

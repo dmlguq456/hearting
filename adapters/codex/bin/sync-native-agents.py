@@ -111,6 +111,54 @@ Prefer one airtight answer over broad partial coverage.
 }
 
 
+# A pin is written only where the runtime home's provider serves it. The shipped
+# models are account models of Codex's own provider; on another provider Codex
+# cannot resolve the pinned model's metadata, refuses the spawn ("agent type is
+# currently not available") and the parent sees only that tool error (PG-52).
+# There the agent keeps its effort and sandbox and follows the session model.
+UNPINNED_KEY = "_CODEX_AGENT_MODEL_UNPINNED"
+ACCOUNT_PROVIDERS = frozenset({"openai"})
+
+
+def selectable_providers(runtime_home: Path) -> frozenset[str]:
+    """Every `model_provider` a session of this home can select.
+
+    One set of agent files serves every session of the home, so the providers of
+    all its configurations count: the top-level `config.toml`, each profile file
+    `<name>.config.toml` that `codex --profile <name>` selects (Codex 0.134+;
+    a file whose name Codex refuses as a profile is never selected), and the
+    older `[profiles.*]` tables. An unset or unreadable provider is "openai".
+    A provider given only on the command line (`-c model_provider=...`) is not
+    in these files and is not seen.
+    """
+    import tomllib
+    home = Path(runtime_home)
+    providers = set()
+    for path in (home / "config.toml", *native_agents.codex_profile_configs(home)):
+        try:
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            config = {}
+        tables = [config]
+        profiles = config.get("profiles")
+        if isinstance(profiles, dict):
+            tables += [table for table in profiles.values() if isinstance(table, dict)]
+        for table in tables:
+            provider = table.get("model_provider")
+            providers.add(provider if isinstance(provider, str) and provider else "openai")
+    return frozenset(providers or {"openai"})
+
+
+def runtime_config(cfg: Mapping[str, str], runtime_home: Path) -> Mapping[str, str]:
+    if selectable_providers(runtime_home) <= ACCOUNT_PROVIDERS:
+        return cfg
+    return {**cfg, UNPINNED_KEY: "1"}
+
+
+def model_line(model: str, cfg: Mapping[str, str]) -> str:
+    return "" if cfg.get(UNPINNED_KEY) else f'model = "{toml_string(model)}"\n'
+
+
 def toml_string(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -129,14 +177,14 @@ def codex_config(profile: str, cfg: Optional[Mapping[str, str]] = None) -> tuple
 
 def render_kernel_agent(name: str, spec: dict[str, str], cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str]:
     model, reasoning, sandbox = codex_config(name, cfg)
+    pinned = None if (cfg or {}).get(UNPINNED_KEY) else model
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
-model = "{toml_string(model)}"
-model_reasoning_effort = "{toml_string(reasoning)}"
+{model_line(model, cfg or {})}model_reasoning_effort = "{toml_string(reasoning)}"
 sandbox_mode = "{toml_string(sandbox)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-''', model
+''', pinned
 
 
 def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tuple[str, str]:
@@ -144,14 +192,14 @@ def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tup
     if spec is None:
         raise native_agents.RenderError(f"catalog names an agent with no Codex spec: {name}")
     resolved = resolve_profile_values("codex", cfg, profile)
+    pinned = None if cfg.get(UNPINNED_KEY) else resolved["model"]
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
-model = "{toml_string(resolved["model"])}"
-model_reasoning_effort = "{toml_string(resolved["budget"])}"
+{model_line(resolved["model"], cfg)}model_reasoning_effort = "{toml_string(resolved["budget"])}"
 sandbox_mode = "{toml_string(CATALOG_SANDBOX)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-''', resolved["model"]
+''', pinned
 
 
 def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
@@ -171,6 +219,7 @@ FORMAT = native_agents.Format(
     dest_name=lambda name: f"{name}.toml",
     render=render,
     collect_glob="*.toml",
+    runtime_config=runtime_config,
 )
 
 

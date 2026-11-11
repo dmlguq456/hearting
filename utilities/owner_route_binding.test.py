@@ -190,7 +190,10 @@ class OwnerRouteBindingTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             with self.subTest(adapter=adapter):
                 self.assertIn("WRAPPER_COMMON.append_job", text)
-                self.assertIn('"AGENT_ROUTE_NODE": args.route_node or ""', text)
+                self.assertIn("DISPATCH_MAIN.worker_environment(", text)
+        # The worker environment is built once for the three wrappers.
+        shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+        self.assertIn('"AGENT_ROUTE_NODE": args.route_node or ""', shared)
 
 
 class OwnerRouteAdvanceTest(unittest.TestCase):
@@ -263,6 +266,45 @@ class OwnerRouteAdvanceTest(unittest.TestCase):
                 )
             self.assertEqual(status, "owner-route-advance-current")
             self.assertEqual(current.route_id, "rt-r1")
+
+    def test_a_state_directory_behind_a_dangling_link_is_not_absence(self):
+        # PR #1492 R3: the absence walk starts at the filesystem root, so a dangling link above
+        # the record directories (here the jobs directory itself) is a read error, while the
+        # same directory really missing is absence and a link with a target reads as before.
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            state.mkdir()
+            jobs = str(state / "jobs.tsv")
+            r0_path, r0 = self._route(td, "rt-r0", 0)
+            r1_path, r1 = self._route(td, "rt-r1", 1, "rt-r0", "sha256:rt-r0")
+            anchor = self._binding(r0_path, r0)
+            rows = [self._child_row(td, r1_path, r1)]
+            with patch_split(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+                M.publish_owner_route_advance(jobs, owner_attempt_id="att-1", source=anchor,
+                                              target=self._binding(r1_path, r1),
+                                              from_generation=0, to_generation=1)
+                retained = Path(td) / "retained"
+                state.rename(retained)
+                for form in ("live-link", "dangling-link", "missing"):
+                    with self.subTest(form=form):
+                        if form == "live-link":
+                            state.symlink_to(retained)
+                        elif form == "dangling-link":
+                            state.symlink_to(Path(td) / "not-present")
+                        resolve = lambda: M.resolve_owner_route_advance(
+                            jobs, owner_attempt_id="att-1", anchor=anchor,
+                            anchor_generation=0, registry_rows=rows)
+                        if form == "dangling-link":
+                            with self.assertRaisesRegex(M.OwnerRouteBindingError,
+                                                        "owner-route-advance-record-invalid"):
+                                resolve()
+                        else:
+                            current, status = resolve()
+                            self.assertEqual((current.route_id, status), {
+                                "live-link": ("rt-r1", "owner-route-advance-current"),
+                                "missing": ("rt-r0", "owner-route-advance-absent")}[form])
+                        if state.is_symlink():
+                            state.unlink()
 
     def test_multi_hop_resolution(self):
         with tempfile.TemporaryDirectory() as td:

@@ -56,7 +56,11 @@ def main():
             if index + 1 < len(sys.argv) and sys.argv[index + 1] in {"claude", "codex", "opencode"}:
                 harness = sys.argv[index + 1]
         if action == "clear":
-            if harness == "opencode" and payload.get("request_id") is None:
+            # OpenCode clears a question or permission by its exact request id; the
+            # plugin sends scope=session only for a wait without one (tool finished,
+            # turn ended).
+            if (harness == "opencode" and payload.get("request_id") is None
+                    and payload.get("scope") != "session"):
                 return 0
             interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"))
             return 0
@@ -66,6 +70,11 @@ def main():
         if kind_index + 1 >= len(sys.argv):
             return 0
         kind = sys.argv[kind_index + 1]
+        if (harness == "claude" and kind == "permission"
+                and payload.get("tool_name") == "AskUserQuestion"):
+            # Claude also raises PermissionRequest for its question tool; the
+            # PreToolUse decision wait already describes it, so keep that.
+            return 0
         source = {
             "decision": "claude-asktool",
             "permission": "claude-permission",

@@ -16,7 +16,8 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import exec_child_is_wait
+from ..model import current_attempt_rank, exec_child_is_wait
+from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -533,8 +534,12 @@ def _is_frame_leg(node):
             or _text(_get(anchor, "route_node")) in FRAME_NODES)
 
 
-def _worker_segments(node, resources, state_text=None):
-    """``[label, harness segments, state segments]`` of the route's worker, or None."""
+def _worker_segments(node, resources, state_text=None, owner=None):
+    """``[label, harness segments, state segments]`` of the route's worker, or None.
+
+    ``owner`` is the route's depth-1 owner attempt when it runs this very node (a
+    one-shot route): the line then reads ``owner`` with the owner's own model, never
+    ``worker``, which names only a depth-2 attempt the owner launched."""
     if node is None:
         return None
     harness = _text(node.get("harness"))
@@ -551,8 +556,9 @@ def _worker_segments(node, resources, state_text=None):
     if harness is None:
         return None
     segs = [[harness, "hb_" + harness]]
-    pair = _model_pair(node.get("model"))
-    effort = _effort(node.get("effort"))
+    pair = _model_pair(node.get("model")) or (
+        _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+    effort = _effort(node.get("effort")) or (_effort(_get(owner, "effort")) if owner is not None else None)
     if pair:
         segs += [[" (", _SEG_DIM], [pair[0], pair[1]]]
         if effort:
@@ -562,14 +568,30 @@ def _worker_segments(node, resources, state_text=None):
     if state_text:
         state.append([state_text, _SEG_DIM])
     elif elapsed:
-        state.append([(f"running {elapsed}" if running else f"{elapsed} · worker ended"), _SEG_DIM])
+        role = "owner" if owner is not None else "worker"
+        state.append([(f"running {elapsed}" if running else f"{elapsed} · {role} ended"), _SEG_DIM])
+    if owner is not None:
+        return ["owner", segs, state]
     return ["frame" if _is_frame_leg(node) else "worker", segs, state]
 
 
 def _owner_jobs(jobs):
+    """The route's depth-1 owner attempts. A one-shot route's owner runs its single
+    ``one-shot`` node itself, so it carries that node id with ``worker_type=owner``;
+    a frame leg's depth-1 attempt (``worker_type=frame``) is never the owner."""
     return [job for job in jobs
             if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
-            and not _get(job, "route_node")]
+            and (not _get(job, "route_node") or _get(job, "worker_type") == "owner"
+                 or _get(job, "route_node") == "one-shot")]
+
+
+def _runs_node(owner, node):
+    """True when the route's owner attempt is the one running ``node`` (one-shot)."""
+    if owner is None or node is None or not _get(owner, "route_node"):
+        return False
+    attempt = _text(node.get("attempt_id")) or _text(_get(node.get("job"), "attempt_id"))
+    return (_get(owner, "route_node") == node.get("id")
+            and (attempt is None or attempt == _text(_get(owner, "attempt_id"))))
 
 
 def _owner_job(jobs):
@@ -977,7 +999,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 worker_node = earlier[-1]
                 state_text = f"{_dur(worker_node.get('elapsed_min')) or ''} ⊸ · next " \
                              f"{shown_node.get('id')} · owner ended".strip()
-        worker = _worker_segments(worker_node, run_children, state_text)
+        worker = _worker_segments(worker_node, run_children, state_text,
+                                  owner if _runs_node(owner, worker_node) else None)
         dead = state in ("dead", "stale")
         owner_model = None if dead else (
             _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
@@ -1094,6 +1117,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        if record:
+            # Display only: shape and its basis, stages, verification and next step, read
+            # from this route's own record, Fleet's view and its outcome sidecar.
+            # A solo route's owner is its one-shot node's own attempt, not a separate row.
+            depth_one = [job for job in owner_jobs
+                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+            shown_owner = owner if owner is not None else (
+                max(depth_one, key=current_attempt_rank) if depth_one else None)
+            route["visibility"] = route_visibility.bounded(route_visibility.describe(
+                record, view, owner=route_visibility.owner_from_job(shown_owner)))
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -2247,48 +2280,8 @@ def _memory_records(journal, accepted_detail):
     return [[repo, [row for _stamp, row in rows]] for repo, rows in sorted(journal.items())]
 
 
-def _refers_to_route(route_id, references):
-    if not route_id:
-        return False
-    for reference in references or ():
-        text = str(reference)
-        if text == route_id or re.search(r"(?<![A-Za-z0-9])" + re.escape(route_id) +
-                                         r"(?![A-Za-z0-9])", text):
-            return True
-    return False
-
-
-_OPEN_RECORD_TYPES = frozenset(("unresolved-obligation", "backlog", "task", "todo", "obligation"))
-_OPEN_MARKER_WORDS = ("백로그", "진행", "미확인", "부분 설치", "미해결", "수리")
-_HEADLINE_MARKER = re.compile(r"^\s*\[([^\]]{1,40})\]")
-OPEN_STAGES = ("doing", "waiting", "open")
-
-
-def _open_stage(record, routes):
-    """How far a possibly-open record got: ``doing``, ``waiting``, ``open`` or None (not open work).
-
-    Only what the record and the routes already say is used: its headline marker
-    (``[진행 중]``, ``[설치 완료·실사용 미확인]``, ``[해결 확인]`` …) and an exact route link.
-    An obligation or backlog record with neither stays open on record, never "in progress".
-    """
-    match = _HEADLINE_MARKER.match(_text(record.get("headline")) or "")
-    marker = match.group(1) if match else ""
-    if "해결" in marker and "미해결" not in marker:
-        return None
-    tags = {str(tag).strip("[]\"' ").casefold() for tag in record.get("tags") or ()}
-    if not (str(record.get("type") or "").casefold() in _OPEN_RECORD_TYPES or "backlog" in tags
-            or any(word in marker for word in _OPEN_MARKER_WORDS)):
-        return None
-    refs = tuple(record.get("links") or ()) + tuple(record.get("artifact_refs") or ())
-    linked = [route for route in routes if _refers_to_route(str(route.get("id") or ""), refs)]
-    if "진행" in marker or any(route.get("state") in ("working", "blocked") or
-                              any(stage.get("st") == "active" for stage in route.get("stages") or ())
-                              for route in linked):
-        return "doing"
-    if "미확인" in marker or "부분 설치" in marker or any(
-            route.get("state") == "done" and route.get("outcome") == "success" for route in linked):
-        return "waiting"
-    return "open"
+# One classifier shared with the session block (fleet/session_work.py).
+from ..collectors.memory import OPEN_STAGES, open_stage as _open_stage  # noqa: E402
 
 
 def _headline_text(text):
@@ -3107,7 +3100,35 @@ def current_route_counts(routes):
     return counts, opened
 
 
-def session_route_status(snapshot, now=None):
+def _owner_text(route):
+    """``codex (GPT-5.5·high)``: the route owner exactly as Fleet's HARNESS column reads it."""
+    harness = _text(route.get("harness"))
+    if not harness:
+        return ""
+    pair, effort = route.get("model"), _text(route.get("effort"))
+    name = _text(pair[0]) if isinstance(pair, (list, tuple)) and pair else None
+    if name:
+        return f"{harness} ({name}{'·' + effort if effort else ''})"[:160]
+    return (harness + ("·" + effort if effort else ""))[:160]
+
+
+def _worker_pieces(worker):
+    """Fleet's route body line ``[label, harness segments, state segments]`` as flat text pieces:
+    ``owner codex (GPT-5.5·high) · running 5m`` / ``worker codex · running 3m``."""
+    if not isinstance(worker, (list, tuple)) or not worker:
+        return []
+    pieces = [[str(worker[0])[:16], "dim"]]
+    segments = worker[1] if len(worker) > 1 and isinstance(worker[1], (list, tuple)) else ()
+    states = worker[2] if len(worker) > 2 and isinstance(worker[2], (list, tuple)) else ()
+    texts = [str(part[0]) for part in segments if isinstance(part, (list, tuple)) and part]
+    if texts:
+        pieces.append([" " + "".join(texts)[:120], "dim"])
+    for index, part in enumerate(part for part in states if isinstance(part, (list, tuple)) and part):
+        pieces.append([(" · " if index == 0 else " ") + str(part[0])[:120], "dim"])
+    return pieces[:8]
+
+
+def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
@@ -3136,7 +3157,45 @@ def session_route_status(snapshot, now=None):
         harness = _get(session, "harness")
         for sid in index[tag]["ids"]:
             result[str(harness) + "\0" + sid] = label
-    return result
+    if not include_details:
+        return result
+    # Reuse this very interpretation for the shell. No second collection or
+    # authority store: bounded display fields in the existing projection.
+    details = {}
+    for tag, info in index.items():
+        selected = [r for r in routes if r.get("session_tag") == tag and r.get("current") is True]
+        recent = sorted((r for r in routes if r.get("session_tag") == tag and not r.get("current")
+                         and r.get("state") == "done" and r.get("outcome") and r.get("result_at") is not None),
+                        key=lambda r: r["result_at"], reverse=True)
+        selected += recent[:2]
+        records = []
+        for route in selected[:8]:
+            row = {key: str(route.get(key) or "")[:320] for key in
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
+            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
+                              "st": str(stage.get("st") or "")[:24]}
+                             for stage in (route.get("stages") or ())[:16]]
+            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+            if type(route.get("result_at")) in (int, float):
+                row["result_at"] = route["result_at"]
+            row["worker"] = _worker_pieces(route.get("worker"))
+            row["owner"] = _owner_text(route)
+            visibility = route.get("visibility")
+            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                                     "next": str(visibility.get("next") or "")[:120],
+                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                               for line in (visibility.get("lines") or ())[:14]
+                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
+                # Already bounded by the shared reader. Keep its codes intact;
+                # presentation translates them, never reinterprets report prose.
+                codes = visibility.get("codes")
+                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+                    row["visibility"]["codes"] = codes
+            records.append(row)
+        for sid in info["ids"]:
+            details[str(_get(info["session"], "harness")) + "\0" + sid] = records
+    return result, details
 
 
 def session_index(snapshot, now=None):

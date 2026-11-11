@@ -103,6 +103,18 @@ def viewer_url(root, target, port=PORT):
         root = os.path.realpath(root)
         rel = os.path.relpath(os.path.abspath(target), root)
         parts = [] if rel == '.' else rel.split(os.sep)
+        if any(part in HIDDEN for part in parts): return None
+        from artifact_spec_storage import revision_address, read_inventory
+        from artifact_spec_current import address as current_address
+        address = current_address(root, rel) or revision_address(root, root + '/' + rel)
+        if address is not None:
+            inventory = read_inventory(root, address[0], address[1])
+            names = {row['path'] for row in inventory['files']}
+            logical = address[2]
+            directory = not logical or any(name.startswith(logical + '/') for name in names)
+            if logical not in names and not directory: return None
+            if not _probe(root, port): return None
+            return f'http://127.0.0.1:{port}' + _encoded(parts) + ('/' if directory and parts else '')
         root_fd = open_root(root)
         try:
             fd = open_relative(root_fd, parts)
@@ -196,34 +208,37 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         super().send_error(code, message, explain)
 
-    def _directory(self, fd, parts, query):
+    def _directory(self, fd, parts, query, logical_entries=None):
         try:
             args = parse_qs(query, keep_blank_values=True)
             offset = max(0, int(args.get('offset', ['0'])[0]))
         except (ValueError, OverflowError): offset = 0
-        entries = []
-        with os.scandir(fd) as iterator:
-            for entry in iterator:
-                if entry.name in HIDDEN: continue
-                try:
-                    mode = entry.stat(follow_symlinks=False).st_mode
-                    if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)): continue
-                    if parts[:1] == ['campaigns'] and len(parts) == 2 and entry.name == 'cycles' and stat.S_ISDIR(mode):
-                        try:
-                            legacy_fd = open_relative(fd, ['cycles'])
+        if logical_entries is not None:
+            entries = logical_entries
+        else:
+            entries = []
+            with os.scandir(fd) as iterator:
+                for entry in iterator:
+                    if entry.name in HIDDEN: continue
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)): continue
+                        if parts[:1] == ['campaigns'] and len(parts) == 2 and entry.name == 'cycles' and stat.S_ISDIR(mode):
                             try:
-                                with os.scandir(legacy_fd) as legacy:
-                                    for cycle in legacy:
-                                        if cycle.name in HIDDEN: continue
-                                        try:
-                                            if stat.S_ISDIR(cycle.stat(follow_symlinks=False).st_mode):
-                                                entries.append((cycle.name, True, 'cycles/' + quote(cycle.name, safe='')))
-                                        except OSError: continue
-                            finally: os.close(legacy_fd)
-                        except OSError: pass
-                    else:
-                        entries.append((entry.name, stat.S_ISDIR(mode), quote(entry.name, safe='')))
-                except OSError: continue
+                                legacy_fd = open_relative(fd, ['cycles'])
+                                try:
+                                    with os.scandir(legacy_fd) as legacy:
+                                        for cycle in legacy:
+                                            if cycle.name in HIDDEN: continue
+                                            try:
+                                                if stat.S_ISDIR(cycle.stat(follow_symlinks=False).st_mode):
+                                                    entries.append((cycle.name, True, 'cycles/' + quote(cycle.name, safe='')))
+                                            except OSError: continue
+                                finally: os.close(legacy_fd)
+                            except OSError: pass
+                        else:
+                            entries.append((entry.name, stat.S_ISDIR(mode), quote(entry.name, safe='')))
+                    except OSError: continue
         entries.sort(key=lambda x: (not x[1], x[0].casefold(), x[0], x[2]))
         lines = ['<!doctype html><meta charset="utf-8"><title>Artifacts</title><h1>Artifacts</h1><ul>']
         if parts: lines.append('<li><a href="../">../</a></li>')
@@ -236,8 +251,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if offset+PAGE_SIZE < len(entries): lines.append(f'<a href="?offset={offset+PAGE_SIZE}">{html.escape(self.server.t("viewer.next"))}</a>')
         self._respond('\n'.join(lines).encode())
 
-    def _file(self, fd, parts, query):
-        size = os.fstat(fd).st_size
+    def _file(self, fd, parts, query, payload=None):
+        size = len(payload) if payload is not None else os.fstat(fd).st_size
         name = parts[-1].lower()
         raw = parse_qs(query).get('raw') == ['1']
         markdown = name.endswith(('.md', '.markdown')) and not raw
@@ -247,11 +262,11 @@ class ViewerHandler(BaseHTTPRequestHandler):
             else:
                 chunks = []
                 remaining = MAX_MARKDOWN+1
-                while remaining:
+                while remaining and payload is None:
                     chunk = os.read(fd, min(CHUNK, remaining))
                     if not chunk: break
                     chunks.append(chunk); remaining -= len(chunk)
-                data = b''.join(chunks)
+                data = payload if payload is not None else b''.join(chunks)
                 if len(data) > MAX_MARKDOWN:
                     content = '<p>' + html.escape(self.server.t('viewer.too_large')) + '</p>'
                 else:
@@ -277,6 +292,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Security-Policy', 'sandbox allow-scripts allow-popups')
         self.end_headers()
         if self.command == 'HEAD': return
+        if payload is not None:
+            self.wfile.write(payload[start:end+1]); return
         os.lseek(fd, start, os.SEEK_SET)
         remaining = max(0, end-start+1)
         while remaining:
@@ -294,6 +311,43 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if parts == ['__hearting_viewer__'] and not trailing:
             data = json.dumps({'protocol': PROTOCOL, 'root_key': root_key(self.server.root)}, separators=(',', ':')).encode()
             self._respond(data, 'application/json', sandbox=False); return
+        # Logical addresses remain browsable even when their bytes are held
+        # by an earlier immutable revision. Requested hidden paths were already
+        # refused by parse_target; source bytes use the common verified reader.
+        from artifact_spec_storage import revision_address, read_inventory, read_file, StorageError
+        from artifact_spec_current import address as current_address, read_file as current_file
+        try:
+            current = current_address(self.server.root, '/'.join(parts))
+        except (OSError, ValueError, RuntimeError):
+            self._error(404); return
+        address = current or revision_address(self.server.root, Path(self.server.root).joinpath(*parts))
+        if address is not None and address[2] != 'revision.json':
+            try:
+                reference, revision, logical = address
+                inventory = read_inventory(self.server.root, reference, revision)
+                names = {row['path'] for row in inventory['files']}
+                if logical in names:
+                    if trailing: self._error(404); return
+                    file = current_file(self.server.root, reference, revision, logical) if current else None
+                    if file is None: file = read_file(self.server.root, reference, revision, logical)
+                    self._file(None, parts, query, payload=file.data); return
+                prefix = logical + '/' if logical else ''
+                children = {}
+                for name in names:
+                    if not name.startswith(prefix): continue
+                    child, sep, _ = name[len(prefix):].partition('/')
+                    if child and child not in HIDDEN:
+                        children[child] = children.get(child, False) or bool(sep)
+                if not children and logical: self._error(404); return
+                if not trailing:
+                    location = _encoded(parts) + '/' + (('?' + query) if query else '')
+                    self.send_response(301); self.send_header('Location', location)
+                    self.send_header('Content-Length', '0'); self.end_headers(); return
+                self._directory(None, parts, query,
+                    [(name, directory, quote(name, safe='')) for name, directory in children.items()])
+                return
+            except (OSError, ValueError, StorageError):
+                self._error(404); return
         try:
             fd = open_relative(self.server.root_fd, parts)
         except OSError:

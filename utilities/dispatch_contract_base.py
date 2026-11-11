@@ -318,18 +318,46 @@ _FOREGROUND_FIXED_FAILURES = FOREGROUND_FAILURES - {"none"}
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 
 
+def codex_owner_network_posture(
+    *, dispatch_depth: int, worker_type: str, sandbox: str,
+    gpu_resource_owner: bool = False, observation_only: bool = False,
+) -> bool:
+    """The one rule for a Codex launch's general (non-loopback) network grant.
+
+    On: a dispatch-depth-1 owner in the `workspace-write` sandbox (or a GPU
+    resource owner in `danger-full-access`), whatever its capability (audit
+    included), intensity or entry scope, the posture a Claude or OpenCode
+    depth-1 owner process has (PG-51). A `report` scope is kept by the owner
+    instruction on all three harnesses.
+    Off: every dispatch-depth-2 (or other non-owner) worker, a `read-only`
+    sandbox, and the observation-only fence while the worktree is mid-merge,
+    rebase or cherry-pick or its Git state is unknown.
+    Nothing else widens it: a task publication scope adds no network of its own.
+    Approved-test localhost is decided by
+    `verification_runtime.local_network_projection`.
+    """
+    return (
+        dispatch_depth == 1
+        and worker_type == "owner"
+        and (sandbox == "workspace-write"
+             or (gpu_resource_owner and sandbox == "danger-full-access"))
+        and not observation_only
+    )
+
+
 def codex_standard_owner_network_enabled(
     *, dispatch_depth: int, worker_type: str, intensity: str, sandbox: str,
     gpu_resource_owner: bool = False,
 ) -> bool:
-    """General (non-loopback) network grant; approved-test localhost is decided by `verification_runtime.local_network_projection`."""
+    """The route's stable network capacity, before the Git-state fence.
 
-    return (
-        dispatch_depth == 1
-        and worker_type == "owner"
-        and intensity in STANDARD_PLUS_INTENSITIES
-        and (sandbox == "workspace-write"
-             or (gpu_resource_owner and sandbox == "danger-full-access"))
+    Kept under this name for its existing callers; ``intensity`` no longer
+    narrows it (`codex_owner_network_posture`).
+    """
+    del intensity
+    return codex_owner_network_posture(
+        dispatch_depth=dispatch_depth, worker_type=worker_type, sandbox=sandbox,
+        gpu_resource_owner=gpu_resource_owner,
     )
 
 
@@ -1201,6 +1229,10 @@ def launch_repository_identity(path: str | Path, route_file: str | Path | None) 
 
 
 ATTEMPT_DESCENDANT_ENV = "AGENT_DISPATCH_ATTEMPT_ID"
+# Hearting's own detached settlement (the turn-end checkpoint) drops the descendant
+# tag but keeps the owner it writes for under this separate name, so the owner's
+# cleanup-scope guard still applies at its entry without counting it as live work.
+CLEANUP_OWNER_ENV = "AGENT_CLEANUP_OWNER_ATTEMPT_ID"
 
 
 def governance_environment(environ=None):
@@ -1386,6 +1418,11 @@ def route_state_next_action(reason: str, detail: str, route_file: str | None,
         return (
             f"rerun dependency node {target} to publish fresh completion evidence "
             "after its upstream revision, then retry this launch"
+        )
+    if reason == "completion-review-subject-unknown":
+        return (
+            f"rerun review node {target} with its existing start to publish a PASS "
+            "bound to the current inputs, then retry this launch"
         )
     if reason == "review-round-budget-exhausted":
         return "close the node via owner-closure (review) or report the FAIL and open an SD-116 continuation (test)"

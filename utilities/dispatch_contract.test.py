@@ -687,13 +687,34 @@ class DispatchContractTest(unittest.TestCase):
    dispatch_depth=1, worker_type="owner", intensity="standard",
    sandbox="workspace-write"))
   for changed in (
-   {"dispatch_depth":2}, {"worker_type":"stage"}, {"intensity":"quick"},
+   {"dispatch_depth":2}, {"worker_type":"stage"},
    {"sandbox":"danger-full-access"},
   ):
    values={"dispatch_depth":1, "worker_type":"owner", "intensity":"standard",
            "sandbox":"workspace-write"}
    values.update(changed)
    self.assertFalse(D.codex_standard_owner_network_enabled(**values), changed)
+  # PG-51: a quick (and so also a report-scope) owner has the same network posture.
+  for intensity in ("direct", "quick", "standard", "thorough"):
+   self.assertTrue(D.codex_standard_owner_network_enabled(
+    dispatch_depth=1, worker_type="owner", intensity=intensity,
+    sandbox="workspace-write"), intensity)
+
+ def test_codex_owner_network_posture_is_exactly_the_declared_set(self):
+  # PG-51 / RV-PR1474 P2-1: on for a depth-1 owner (any capability, intensity or
+  # entry scope; those are not inputs), off for depth-2 and other workers, a
+  # read-only sandbox and the observation-only Git fence. No other path widens it.
+  import itertools
+  granted=set()
+  for depth, worker, sandbox, gpu, fence in itertools.product(
+   (0,1,2), ("owner","stage","review","support","frame"),
+   ("read-only","workspace-write","danger-full-access"), (False,True), (False,True)):
+   if D.codex_owner_network_posture(dispatch_depth=depth, worker_type=worker,
+     sandbox=sandbox, gpu_resource_owner=gpu, observation_only=fence):
+    granted.add((depth, worker, sandbox, gpu, fence))
+  self.assertEqual(granted, {
+   (1,"owner","workspace-write",False,False), (1,"owner","workspace-write",True,False),
+   (1,"owner","danger-full-access",True,False)})
 
  def test_recovery_metadata_round_trips_through_annotate_and_close(self):
   with tempfile.TemporaryDirectory() as td:
@@ -3484,7 +3505,9 @@ class DispatchContractTest(unittest.TestCase):
   root=P.parent.parent
   for harness in D.WRAPPER_PARENT_HARNESSES:
    source=(root/"adapters"/harness/"bin"/"dispatch-headless.py").read_text(encoding="utf-8")
-   export=re.search(r'"AGENT_DISPATCH_CURRENT_SANDBOX":\s*([^,\n]+)',source)
+   # The wrapper passes its value to the shared worker environment
+   # (dispatch_headless_main.worker_environment), which exports it.
+   export=re.search(r'\bcurrent_sandbox=([^,\n]+)',source)
    self.assertIsNotNone(export,harness)
    value=export.group(1).strip()
    with self.subTest(harness=harness):

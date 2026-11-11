@@ -3617,8 +3617,9 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
 
 
 def _ordinary_receiver_guidance():
-    return ("Peer request: answer once (notices need no reply); for delayed work send one short receipt, "
-            "then continue in the registered continuation.")
+    return ("Peer request: do the requested work now; an acknowledgement alone is not completion. "
+            "Reply once with the result (notices need no reply). If part must wait, say so in one line "
+            "and keep working on it in this turn or the registered continuation.")
 
 
 def _exact_receiver_evidence(ref, transfer, pending, recipient, *, roots=None):
@@ -4110,12 +4111,62 @@ def retry_pending_codex(recipient, *, deadline=None):
 _LATE_CLAIM_WINDOW_S = 1.0
 
 
+# A hook boundary whose flushed additionalContext is the recipient's own
+# consumption (SD-113): Claude adds PostToolUseFailure context beside the error.
+_NATIVE_BOUNDARY_EVENTS = frozenset({"UserPromptSubmit", "PostToolUse", "PostToolUseFailure"})
+
+
+def _fit_claude_context(claims, context):
+    """Keep one Claude hook context within the native inline limit (PG-47).
+
+    Claude Code shows at most about 10,000 characters of one hook context and
+    puts the rest in a file it does not ask the model to read, so a body that
+    would land past the limit is released back to pending for the next
+    boundary instead of being recorded received unseen. A single body over
+    the limit by itself is shown as its head plus the path of a whole copy,
+    keeping its trailer inline; when that copy cannot be saved or the context
+    is still over the limit, the body is released pending as well.
+    ``claims`` and ``context`` change in place.
+    """
+    if len("\n\n".join(context)) <= 9_000:  # below every limit: no import on the hot path
+        return
+    from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, overflow_pointer
+    while len(claims) > 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
+        row = claims.pop()
+        release_pending_herdr_claim(row)
+        try:
+            context.remove(row["text"])
+        except ValueError:
+            pass
+    if len(claims) == 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
+        row = claims[0]
+        try:
+            index = context.index(row["text"])
+        except ValueError:
+            return
+        others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
+        shown = overflow_pointer(row["text"], _pending_dir().parent,
+                                 max(1_000, CLAUDE_CONTEXT_CHARS - others), keep_last_lines=1)
+        if shown == row["text"] or others + len(shown) > CLAUDE_CONTEXT_CHARS:
+            # No whole copy, or no room for the pointer: nothing is received cut.
+            claims.pop()
+            release_pending_herdr_claim(row)
+            del context[index]
+            return
+        context[index] = shown
+        row["shown_text"] = shown
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
-    """Use an existing native context boundary, settling only exact Claude delivery.
+    """Use an existing native context boundary, settling only exact native delivery.
 
-    Only Claude needs body delivery here; the other runtimes retain their native
-    queues. Claims serialize this with pane/native sends. The Claude hook passes
+    Claude delivers bodies here at every boundary. OpenCode delivers them only at
+    its native post-tool boundary (the plugin appends the text to the finished
+    tool result, as Claude's PostToolUse additionalContext does), so a report that
+    arrives while the session is working reaches the model during that work; its
+    idle courier still owns delivery between turns. Codex retains its native
+    queue. Claims serialize this with pane/native sends. A hook passes
     native_delivery only from its UserPromptSubmit/PostToolUse boundary; after a
     successful flush that boundary is recipient consumption under SD-113. Exact
     receive validation and its existing writer still own the receipt/obligation
@@ -4150,7 +4201,9 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     if recipient["harness"] == "codex":
         retry_pending_codex(recipient, deadline=deadline)
     rows = list(_pending_rows(recipient=recipient, sender=recipient, deadline=deadline))
-    if recipient["harness"] == "claude":
+    body_boundary = recipient["harness"] == "claude" or (
+        recipient["harness"] == "opencode" and native_delivery and event == "PostToolUse")
+    if body_boundary:
         for row in rows:
             if len(claims) >= claim_limit() or expired():
                 break
@@ -4165,7 +4218,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
-            native_boundary = bool(native_delivery and event in {"UserPromptSubmit", "PostToolUse"})
+            native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
             try:
                 claimed = reserve_pending_herdr(
                     row["ref"], recipient, receipt="hook-context-inflight",
@@ -4215,6 +4268,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         context.append(extra_context)
     if not context:
         return
+    if recipient["harness"] == "claude" and claims:
+        _fit_claude_context(claims, context)
     begun = []
     for row in claims:
         writing = begin_pending_write(row, recipient=recipient,
@@ -4224,7 +4279,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         else:
             release_pending_herdr_claim(row)
             try:
-                context.remove(row["text"])
+                context.remove(row.get("shown_text", row["text"]))
             except ValueError:
                 pass
     claims = begun
@@ -4236,10 +4291,12 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     print(json.dumps(output, ensure_ascii=False), file=stream)
     stream.flush()
     for row in claims:
-        native_boundary = bool(native_delivery and event in {"UserPromptSubmit", "PostToolUse"})
+        native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
         if native_boundary and not row.get("no_trailer"):
             try:
-                receive_peer_message(row["text"], recipient, summary_text="Claude native context received")
+                receive_peer_message(row["text"], recipient, summary_text=(
+                    "Claude native context received" if recipient["harness"] == "claude"
+                    else "OpenCode native tool context received"))
             except (OSError, ValueError, KeyError, TypeError):
                 pass
             # Exact validation or durable receipt failure leaves the same
@@ -4259,7 +4316,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
 
 
 # `context` is the OpenCode tool-output boundary, whose plugin kills the child
-# 1.5 s after spawning it; stop claiming 1.0 s after this process started.
+# 2.5 s after spawning it (then still reads what it flushed); stop claiming 1.0 s
+# after this process started.
 _CONTEXT_CLI_BUDGET_S = 1.0
 
 
@@ -4282,7 +4340,13 @@ def process_started_monotonic():
 
 
 def cmd_context(args):
+    # `--event PostToolUse --native-delivery` is the OpenCode plugin's post-tool
+    # boundary: it appends the printed additionalContext to the finished tool
+    # result, so the stdout flush is the same consumption point as Claude's hook.
+    event = getattr(args, "event", None)
+    native = bool(getattr(args, "native_delivery", False)) and event == "PostToolUse"
     emit_peer_context({"harness": args.to_harness, "session_id": args.to_session_id},
+                      event if native else None, native_delivery=native,
                       deadline=process_started_monotonic() + _CONTEXT_CLI_BUDGET_S)
     return 0
 
@@ -5294,6 +5358,8 @@ def main(argv=None):
     p_context = sub.add_parser("context")
     p_context.add_argument("--to-harness", required=True)
     p_context.add_argument("--to-session-id", required=True)
+    p_context.add_argument("--event", choices=("PostToolUse",))
+    p_context.add_argument("--native-delivery", action="store_true")
     p_context.set_defaults(func=cmd_context)
 
     p_pending = sub.add_parser("pending")

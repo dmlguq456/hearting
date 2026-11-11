@@ -32,6 +32,11 @@ _LOCK_ERROR_TEXT = re.compile(
     r"unable to create ['\"](?P<path>[^\r\n]*?index\.lock)['\"]:\s*file exists\b",
     re.IGNORECASE,
 )
+# With no exit status, accept only Git's own error line, not the text quoted anywhere.
+_GIT_LOCK_ERROR_LINE = re.compile(
+    r"^(?:fatal|error): unable to create ['\"](?P<path>[^\r\n]*?index\.lock)['\"]:\s*file exists\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _SHELL_META = set(";&|<>$()\n\r") | {chr(96)}
 _GIT_ENV_PATHS = {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -549,20 +554,31 @@ def _fallback_worktree_context(cwd: str, env: dict[str, str] | None = None):
     return ["git", "-C", selected, "status"], selected, {}
 
 
-def _shell_failure_candidate(command: str, cwd: str, exit_code: int,
-                             output: str, parse_command, env: dict[str, str] | None = None):
-    """Cheaply recognize a structured, supported index-lock failure candidate."""
+def _shell_failure_candidate(command: str, cwd: str, exit_code: int | None,
+                             output: str, parse_command, env: dict[str, str] | None = None,
+                             *, status_unreported: bool = False):
+    """Cheaply recognize a structured, supported index-lock failure candidate.
+
+    ``status_unreported`` is a harness that reports no exit status at all (Codex's
+    PostToolUse ``tool_response`` is the command output alone); Git's own lock
+    error text is then the only failure evidence, and the diagnosis says so.
+    Every other caller still needs a real non-zero exit code.
+    """
     if (not isinstance(command, str) or len(command) > 64 * 1024
             or not isinstance(cwd, str) or len(cwd) > 16 * 1024 or not os.path.isabs(cwd)
-            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
-            or exit_code <= 0 or exit_code > 128
+            or (not (status_unreported and exit_code is None)
+                and (not isinstance(exit_code, int) or isinstance(exit_code, bool)
+                     or exit_code <= 0 or exit_code > 128))
             or not isinstance(output, str) or len(output) > 1_000_000):
         return None
-    match = _LOCK_ERROR_TEXT.search(output)
+    no_status = status_unreported and exit_code is None
+    # Without an exit status, ordinary output (`cat build.log`, `git log`) can quote the
+    # lock text, so only a real Git command's own error line counts as a failure.
+    match = (_GIT_LOCK_ERROR_LINE if no_status else _LOCK_ERROR_TEXT).search(output)
     parsed = parse_command(command, cwd)
     if not match:
         return None
-    if parsed is None:
+    if parsed is None and not no_status:
         parsed = _fallback_worktree_context(cwd, env)
     if parsed is None:
         return None
@@ -577,10 +593,11 @@ def codex_command_candidate(command: str, cwd: str, exit_code: int,
     ) is not None
 
 
-def _diagnose_shell_failure(command: str, cwd: str, exit_code: int, output: str,
+def _diagnose_shell_failure(command: str, cwd: str, exit_code: int | None, output: str,
                             *, output_source: str, parse_command,
-                            env: dict[str, str] | None = None):
-    candidate = _shell_failure_candidate(command, cwd, exit_code, output, parse_command, env)
+                            env: dict[str, str] | None = None, status_unreported: bool = False):
+    candidate = _shell_failure_candidate(command, cwd, exit_code, output, parse_command, env,
+                                         status_unreported=status_unreported)
     if candidate is None:
         return None
     (argv, effective_cwd, command_env), reported_path = candidate
@@ -695,12 +712,26 @@ def _hook_fields(payload: dict, harness: str):
 
 
 def diagnose_hook_payload(payload: dict, harness: str) -> dict | None:
+    if (harness == "codex" and payload.get("hook_event_name") == "PostToolUse"
+            and payload.get("tool_name") == "Bash"
+            and isinstance(payload.get("tool_response"), str)):
+        # Codex runs PostToolUse after a Bash command that exits non-zero too, but its
+        # tool_response is the model-facing output text with no exit status
+        # (https://learn.chatgpt.com/docs/hooks#posttooluse).
+        inputs = payload.get("tool_input")
+        return _diagnose_shell_failure(
+            inputs.get("command") if isinstance(inputs, dict) else None,
+            payload.get("cwd"), None, payload["tool_response"],
+            output_source="Codex PostToolUse output (no exit status reported)",
+            parse_command=_codex_command_argv, status_unreported=True,
+        )
     if harness == "opencode":
         name = payload.get("tool_name")
         inputs = payload.get("tool_input")
         response = payload.get("tool_response")
         cwd = payload.get("cwd")
-        if (not isinstance(name, str) or name.lower() != "bash"
+        # OpenCode 1 names its shell tool `bash`, OpenCode 2 `shell`.
+        if (not isinstance(name, str) or name.lower() not in {"bash", "shell"}
                 or not isinstance(inputs, dict) or not isinstance(response, dict)):
             return None
         return diagnose_opencode_command(

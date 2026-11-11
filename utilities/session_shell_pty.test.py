@@ -20,6 +20,7 @@ sid=sys.argv[1]
 def event(kind,identity=sid):
     raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
     request={'op':'event','event':kind,'harness':'claude','sid':identity,
+        'native_model':'NATIVE_SELECTED_MODEL',
         'pid':os.getpid(),'start':start,'token':os.environ['HEARTING_SHELL_TOKEN'],
         'seq':time.monotonic_ns()//1000}
     registry=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/str(os.getpid())
@@ -86,7 +87,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=cfg.scenario==='side-columns'?new (require('@xterm/headless').Terminal)({cols:180,rows:40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -122,12 +123,13 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(!fs.readFileSync('/proc/'+child.pid+'/environ').includes(Buffer.from('HERDR_AGENT=claude\0')))throw Error('foreground initial exec environment has no native hint');
  }
  const ack=Number(raw.match(/ACK_MS=([0-9.]+)/)[1]);
+ if(cfg.scenario==='startup-model')await waitFor(/NATIVE_SELECTED_MODEL/);
  if(barrier!==undefined){fs.writeSync(barrier,Buffer.from('1'));fs.closeSync(barrier);barrier=undefined;}
  await existing(cfg.hostPidFile);const hostPID=Number(fs.readFileSync(cfg.hostPidFile,'utf8'));
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/› [·?]/);
+ await waitFor(/No current route/);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -174,12 +176,21 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('side-unicode\r').toString('base64')});await waitFor(/🙂/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const line=sideTerm.buffer.active.getLine(2);
-   if(line.getCell(142).getChars()!=='›'||[140,141].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
+   if(line.getCell(140).getChars()!=='│'||[138,139].some(x=>line.getCell(x).getChars().trim()))throw Error('side panel moved with native Unicode width');
+ }
+ if(cfg.scenario==='side-left'){
+   // The same panel at the left: native keeps its column count and moves right.
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
+   await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
+   const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
+   if(!row(0).startsWith('┌')||!row(0).includes('HEARTING')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
+   if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
+   if(/HEARTING/.test(row(0).slice(42)))throw Error('panel painted twice');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
    child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_80x(?:1[4-9]|2[0-4])/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_80x(?:1[2-9]|2[0-4])/);
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
  }
@@ -204,8 +215,28 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_ACTION\r').toString('base64')});await waitFor(/DONE_AFTER_ACTION/);
  }
  const displayLag=[];
+ if(cfg.scenario==='route-pages'){
+   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
+   value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
+     id:'rt-detail',title:'ROUTE_PAGE',state:'working',worker_stage:'inline',stages:[{name:'inline',st:'active'}],
+     visibility:{codes:{schema:'route_visibility_codes_v1',shape:'direct',next:{kind:'closed'},verification:{gate:'unproven'},quoted:Array.from({length:8},(_,i)=>['test','EVIDENCE_'+i+' '+'bounded detail '.repeat(5)])}}}];
+   fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
+   await waitFor(/ROUTE_PAGE/);
+   await new Promise(resolve=>sideTerm.write('',resolve));
+   let point;
+   for(let y=0;y<sideTerm.rows;y++){
+     const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
+     if(!line?.translateToString().includes('ROUTE_PAGE'))continue;
+     for(let x=0;x<sideTerm.cols;x++)if(line.getCell(x)?.getChars()==='⏳')point={x:x+1,y:y+1};
+   }
+   if(!point)throw Error('route detail target absent');
+   await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${point.x};${point.y}M\x1b[<0;${point.x};${point.y}m`).toString('base64')});
+   await waitFor(/PgUp\/PgDn/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~').toString('base64')});await waitFor(/‹ 2\//);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_DETAIL\r').toString('base64')});await waitFor(/DONE_AFTER_DETAIL/);
+ }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/› [·?]/);
+ if(cfg.scenario==='display')await waitFor(/No current route/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='⏳ route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
@@ -270,7 +301,7 @@ class SessionShellPTYTest(unittest.TestCase):
         cache.mkdir(mode=0o700,parents=True,exist_ok=True);cache.chmod(0o700)
         key='claude\0'+sid;now=time.time()
         (cache/'projection.json').write_text(json.dumps({'schema_version':3,'observed_at':now,'items':[],
-            'by_session':{},'total':0,'older':0,'complete':True,'route_status':{key:''},'route_sessions':{key:now}}))
+            'by_session':{},'total':0,'older':0,'complete':True,'route_panels':{key:[]},'route_status':{key:''},'route_sessions':{key:now}}))
         (cache/'projection.json').chmod(0o600)
         backend=sys.executable;barrier=None
         if blocked_backend:
@@ -299,8 +330,9 @@ class SessionShellPTYTest(unittest.TestCase):
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
-        if scenario in {'side-layout','side-columns'}:
+        if scenario in {'side-layout','side-columns','side-left'}:
             config.update(columns=180,rows=40)
+        if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
             fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
@@ -313,7 +345,8 @@ class SessionShellPTYTest(unittest.TestCase):
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
-        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132}) if scenario in {'side-layout','side-columns'} else '{"enabled":true}')
+        policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -340,6 +373,9 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_side_layout_resizes_the_same_native_pty_and_falls_back_when_narrow(self):
         self.run_loop('side-layout')
 
+    def test_a_left_panel_keeps_the_native_columns_and_moves_native_right(self):
+        self.run_loop('side-left')
+
     def test_foreground_exec_hint_and_native_title_survive_the_real_pty_loop(self):
         self.assertTrue(self.run_loop('herdr')['status']['ok'])
 
@@ -364,6 +400,14 @@ class SessionShellPTYTest(unittest.TestCase):
 
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
+        self.assertLess(result['ack_ms'],250)
+
+    def test_route_detail_pages_keep_navigation_out_of_native_input(self):
+        result=self.run_loop('route-pages')
+        self.assertTrue(result['status']['alive'])
+
+    def test_native_model_paints_before_the_optional_backend_is_released(self):
+        result=self.run_loop('startup-model',blocked_backend=True)
         self.assertLess(result['ack_ms'],250)
 
     def test_enter_and_following_draft_in_one_chunk_stays_nonempty(self):

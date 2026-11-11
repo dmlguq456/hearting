@@ -231,14 +231,30 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         self.assertIn("--verify-shards", aggregate)
         self.assertIn("actions/download-artifact@", aggregate)
 
-    def test_eight_shards_run_in_parallel_within_the_old_time_budget(self):
+    def test_expensive_jobs_select_their_own_scope_and_start_at_once(self):
+        # Waiting for adaptation-boundary cost about a minute per run. Each
+        # expensive job asks ci_scope.py itself and gates every working step.
+        for name in ("install-lifecycle", "dispatch-pid-namespace", "full-suite-shard"):
+            with self.subTest(job=name):
+                job = job_block(self.checks, name)
+                self.assertNotIn("    needs:", job)
+                self.assertNotIn("\n    if:", job)
+                self.assertIn("      actions: read\n", job)
+                steps = job.split("    steps:\n", 1)[1].split("\n      - name:")
+                self.assertIn("Check out the source", steps[0])
+                self.assertIn("Select checks for the changed files", steps[1])
+                self.assertIn("id: scope", steps[1])
+                self.assertIn("GH_TOKEN: ${{ github.token }}", steps[1])
+                self.assertIn('python3 tools/release/ci_scope.py >> "$GITHUB_OUTPUT"', steps[1])
+                for step in steps[2:]:
+                    self.assertIn("steps.scope.outputs.full_tests == 'true'", step)
+
+    def test_ten_shards_run_in_parallel_within_the_old_time_budget(self):
         shard = job_block(self.checks, "full-suite-shard")
-        self.assertIn("    needs: adaptation-boundary\n", shard)
-        self.assertIn("    if: needs.adaptation-boundary.outputs.full_tests == 'true'\n", shard)
         self.assertIn("      fail-fast: false\n", shard)
-        self.assertIn("        shard: [1, 2, 3, 4, 5, 6, 7, 8]\n", shard)
+        self.assertIn("        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n", shard)
         self.assertIn("    timeout-minutes: 40\n", shard)
-        for option in ("--shard ${{ matrix.shard }}/8", "--suite-list", "--retries 1", "--xpass-nonfatal",
+        for option in ("--shard ${{ matrix.shard }}/10", "--suite-list", "--retries 1", "--xpass-nonfatal",
                        "--strict-leak-sweep", "--diagnostics-dir", "--seed-baseline"):
             self.assertIn(option, shard)
         self.assertIn("bash tools/release/install-ci-fixtures.sh ripgrep strace", shard)
@@ -246,8 +262,8 @@ class ChecksWorkflowContractTest(unittest.TestCase):
     def test_shard_uploads_preserve_each_attempt_and_its_whole_payload(self):
         shard = job_block(self.checks, "full-suite-shard")
         upload = shard.split("- name: Upload shard report", 1)[1]
-        self.assertIn("if: always()", upload)
-        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-8-attempt-${{ github.run_attempt }}\n", upload)
+        self.assertIn("if: always() && steps.scope.outputs.full_tests == 'true'", upload)
+        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-10-attempt-${{ github.run_attempt }}\n", upload)
         self.assertIn("path: ${{ runner.temp }}/shard-out\n", upload)
         self.assertIn("if-no-files-found: ignore", upload)
         self.assertNotIn("overwrite:", upload)
@@ -256,8 +272,8 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         aggregate = job_block(self.checks, "full-test-suite")
         download = aggregate.split("- name: Download the shard reports", 1)[1].split("\n      - name:", 1)[0]
         pattern = re.search(r"(?m)^          pattern: (.+)$", download).group(1)
-        for name in ("run-tests-report-shard-1-of-8", "run-tests-report-shard-2-of-8-attempt-9",
-                     "run-tests-report-shard-2-of-8-attempt-10"):
+        for name in ("run-tests-report-shard-1-of-10", "run-tests-report-shard-2-of-10-attempt-9",
+                     "run-tests-report-shard-10-of-10-attempt-10"):
             self.assertTrue(fnmatch.fnmatchcase(name, pattern), name)
         self.assertIn("path: ${{ runner.temp }}/shards\n", download)
         self.assertIn("merge-multiple: false", download)
@@ -294,11 +310,16 @@ class ChecksWorkflowContractTest(unittest.TestCase):
             self.assertIn(needed, condition)
         self.assertNotIn("always()", condition)
 
-    def test_only_the_scope_job_may_read_actions(self):
-        self.assertIn("      actions: read\n", job_block(self.checks, "adaptation-boundary"))
-        self.assertEqual(self.checks.count("actions: read"), 1)
+    def test_only_the_scope_selecting_jobs_may_read_actions(self):
+        scoped = ("adaptation-boundary", "install-lifecycle", "dispatch-pid-namespace", "full-suite-shard")
+        for name in scoped:
+            job = job_block(self.checks, name)
+            self.assertIn("      actions: read\n", job, name)
+            self.assertIn("      contents: read\n", job, name)
+            self.assertIn("GH_TOKEN: ${{ github.token }}", job, name)
+            self.assertIn("tools/release/ci_scope.py", job, name)
+        self.assertEqual(self.checks.count("actions: read"), len(scoped))
         self.assertRegex(self.checks, r"(?m)^permissions:\n  contents: read\n")
-        self.assertIn("GH_TOKEN: ${{ github.token }}", job_block(self.checks, "adaptation-boundary"))
 
     def test_release_grants_the_called_checks_what_they_read_and_nothing_to_publish(self):
         validation = job_block(self.release, "validation")

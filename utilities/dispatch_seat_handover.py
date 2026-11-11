@@ -2946,6 +2946,15 @@ def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source:
 # The card line: the verified route and the existing resume command
 # ---------------------------------------------------------------------------
 
+def _ids_only(references, total: int) -> str:
+    """The handover line without a resume command: the routes it can name and the rest's count."""
+    omitted = total - len(references)
+    if not references:
+        return f"[이어받은 진행 작업] route {total}개 (재개 명령이 한 줄에 들어가지 않음)"
+    return (f"[이어받은 진행 작업] route={', '.join(references)}"
+            + (f" 외 {omitted}개" if omitted else "") + " (재개 명령이 한 줄에 들어가지 않음)")
+
+
 def resume_line(seat, harness: str, sid: str) -> str:
     """One line for the successor's card: the routes it took over and the existing resume command.
     Only attempts the ledger shows handed to ``sid`` and the registry still shows open count."""
@@ -2982,15 +2991,57 @@ def resume_line(seat, harness: str, sid: str) -> str:
                         _delivery_open(jobs, meta) and _route_open(jobs, meta))):
                     continue
                 shown.setdefault((jobs, route_identity(meta)[0]), meta.get("route_file", ""))
-        parts = []
-        for (jobs, route), route_file in list(shown.items())[:2]:
+        # The resume command differs only by its route, so it is written once per registry
+        # and every route taken over is listed; what the line cannot hold is counted.
+        from parent_next_directive import resume_command, route_reference
+        groups: dict = {}
+        for (jobs, route), route_file in shown.items():
             if route_file:
-                from parent_next_directive import resume_command
+                reference = route_reference(route_file)
                 command = resume_command(route_file, jobs, agent_home=ROOT)
-                parts.append(f"route={route} 이어서: {command}")
-        if not parts:
+                template = command.replace(" --route " + shlex.quote(reference), " --route <route>", 1)
+                groups.setdefault(template, []).append((route, reference, command))
+        total = sum(len(items) for items in groups.values())
+        if not total:
             return ""
-        text = "[이어받은 진행 작업] " + " | ".join(parts)
-        return _st()._cut_bytes(text, LINE_MAX_BYTES)[0]
+
+        def render(selected):
+            parts = []
+            for template, items in selected:
+                if len(items) == 1:
+                    parts.append(f"route={items[0][0]} 이어서: {items[0][2]}")
+                else:
+                    parts.append(f"route={', '.join(item[1] for item in items)} 이어서: {template}")
+            omitted = total - sum(len(items) for _template, items in selected)
+            return ("[이어받은 진행 작업] " + " | ".join(parts)
+                    + (f" 외 {omitted}개" if omitted else ""))
+
+        def fits(text):
+            return len(text.encode("utf-8")) <= LINE_MAX_BYTES
+
+        # The count of what is left out is measured with every trial, so it is never cut;
+        # listed routes give way first, and a command that cannot fit whole is not shown.
+        selected: list = []
+        full = False
+        for template, items in groups.items():
+            for item in items:
+                trial = [(t, list(i)) for t, i in selected]
+                if trial and trial[-1][0] == template:
+                    trial[-1][1].append(item)
+                else:
+                    trial.append((template, [item]))
+                if not fits(render(trial)):
+                    full = True
+                    break
+                selected = trial
+            if full:
+                break
+        if selected:
+            return render(selected)
+        references = [item[1] for items in groups.values() for item in items]
+        listed = 0
+        while listed < total and fits(_ids_only(references[:listed + 1], total)):
+            listed += 1
+        return _ids_only(references[:listed], total)
     except Exception:  # noqa: BLE001
         return ""

@@ -861,6 +861,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__peer-message-record.py__PostToolUseFailure",
+      "name": "peer-message-record.py post-tool",
+      "mono": "peer-message-record.py",
+      "event": "PostToolUseFailure",
+      "hard_block": false
+    },
+    {
       "slug": "hook__worker-state-compact.py__PreCompact",
       "name": "worker-state-compact.py compact-before",
       "mono": "worker-state-compact.py",
@@ -966,6 +973,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__peer-message-record.py__Stop",
+      "name": "peer-message-record.py stop",
+      "mono": "peer-message-record.py",
+      "event": "Stop",
+      "hard_block": false
+    },
+    {
       "slug": "hook__session-tidy-idle.py__Stop",
       "name": "session-tidy-idle.py",
       "mono": "session-tidy-idle.py",
@@ -977,6 +991,13 @@
       "name": "turn-change-record.py end",
       "mono": "turn-change-record.py",
       "event": "Stop",
+      "hard_block": false
+    },
+    {
+      "slug": "hook__capability-grounding-marker__UserPromptSubmit",
+      "name": "capability-grounding-marker",
+      "mono": "capability-grounding-marker",
+      "event": "UserPromptSubmit",
       "hard_block": false
     },
     {

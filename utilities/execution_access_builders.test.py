@@ -1002,10 +1002,14 @@ class ExecutionAccessBuilderTest(unittest.TestCase):
         for module in (self.codex, self.claude, self.opencode):
             source = Path(module.__file__).read_text(encoding="utf-8")
             bind_at = source.index("args.execution_access_grant = route_authority.bind_launch_access")
-            append_at = source.index("args.attempt_claimed = append_job", bind_at)
-            spawn_at = source.index("spawn_claimed_attempt", append_at)
+            append_at = source.index("DISPATCH_MAIN.claim_registered_attempt(", bind_at)
+            spawn_at = source.index("DISPATCH_MAIN.launch_claimed_attempt(", append_at)
             self.assertLess(bind_at, append_at)
             self.assertLess(append_at, spawn_at)
+        shared = (Path(self.codex.__file__).resolve().parents[3]
+                  / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+        self.assertIn("args.attempt_claimed = h.append_job", shared)
+        self.assertIn("h.spawn_claimed_attempt(", shared)
 
         self.request_file.write_text("{", encoding="utf-8")
         spawn_count = 0

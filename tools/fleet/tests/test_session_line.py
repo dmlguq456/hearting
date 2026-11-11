@@ -37,6 +37,15 @@ class CommonSessionLineTest(unittest.TestCase):
         text = "".join(part for part, _key in line_segments(known, 240))
         self.assertIn("context ────────── 0%", text); self.assertIn("7d 0%", text); self.assertNotIn("◑", text)
 
+    def test_claude_native_row_leaves_out_readings_not_reported_yet(self):
+        sample = {**self.sample(), "ctx_pct": None, "weekly_pct": None,
+                  "quota_windows": [("5h", 12, None), ("7d", None, None)]}
+        text = "".join(part for part, _key in line_segments(sample, 240, reported_only=True))
+        self.assertNotIn("context", text); self.assertNotIn("7d", text); self.assertIn("5h 12%", text)
+        known = {**sample, "ctx_pct": 0}
+        text = "".join(part for part, _key in line_segments(known, 240, reported_only=True))
+        self.assertIn("context ────────── 0%", text)
+
     def test_fleet_model_effort_and_state_keys_reach_the_terminal_palette(self):
         segments = line_segments(self.sample(), 240)
         keys = {key for _text, key in segments}
