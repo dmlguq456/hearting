@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 import sys
 import time
 
@@ -87,6 +88,37 @@ def _list_inprocess(module):
                          ensure_ascii=False, sort_keys=True), ""
 
 
+_INPROCESS_RUNNING = threading.Event()
+
+
+def _list_inprocess_bounded(module, timeout):
+    """The in-process listing under the subprocess path's own deadline.
+
+    A listing that outlives it reports the same timeout diagnostic; until that
+    thread ends, later polls use the subprocess (which can be killed) instead.
+    """
+    if _INPROCESS_RUNNING.is_set():
+        return None
+    _INPROCESS_RUNNING.set()
+    outcome = []
+
+    def run():
+        try:
+            try:
+                outcome.append(_list_inprocess(module))
+            except Exception as exc:  # the CLI would exit 1 with this traceback
+                outcome.append((1, "", "%s: %s" % (type(exc).__name__, exc)))
+        finally:
+            _INPROCESS_RUNNING.clear()
+
+    worker = threading.Thread(target=run, name="fleet-compute-hosts", daemon=True)
+    worker.start()
+    worker.join(max(0.1, timeout))
+    if not outcome:
+        raise subprocess.TimeoutExpired("compute-hosts list", timeout)
+    return outcome[0]
+
+
 def _config_path():
     override = os.environ.get("COMPUTE_HOSTS_CONFIG")
     if override:
@@ -145,12 +177,10 @@ def collect(timeout=COLLECT_TIMEOUT):
     observed_at = time.time()
     module = _inprocess_module(argv)
     try:
-        if module is not None:
-            try:
-                code, stdout, stderr = _list_inprocess(module)
-            except Exception as exc:  # the CLI would exit 1 with this traceback
-                code, stdout, stderr = 1, "", "%s: %s" % (type(exc).__name__, exc)
-            result = subprocess.CompletedProcess(argv, code, stdout, stderr)
+        listed = (None if module is None
+                  else _list_inprocess_bounded(module, deadline - time.monotonic()))
+        if listed is not None:
+            result = subprocess.CompletedProcess(argv, *listed)
         else:
             result = subprocess.run(
                 argv + ["list", "--json"], stdin=subprocess.DEVNULL, text=True, capture_output=True,

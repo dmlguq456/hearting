@@ -117,6 +117,71 @@ class BasicEventsTest(unittest.TestCase):
         self.events.stop()
         self.assertFalse(self.events.watching)
 
+    def test_a_failed_watch_registration_is_not_watching(self):
+        import ctypes
+        import selectors
+        watched = self.root / "waits.json"
+        watched.write_text("{}")
+        libc = ctypes.CDLL(None, use_errno=True)
+        proxy = SimpleNamespace(inotify_init1=libc.inotify_init1,
+                                inotify_add_watch=mock.Mock(return_value=-1))
+        selector = selectors.DefaultSelector()
+        try:
+            with mock.patch.object(native_events.ctypes, "CDLL", return_value=proxy):
+                fd, watches = self.events._rebuild(selector, ((str(watched),), (), ()))
+            self.assertIsNotNone(fd)
+            self.assertEqual(watches, {})
+            self.assertFalse(self.events.watching)
+            cadence = native_events.IdleCadence(30.0)
+            cadence.started(0.0)
+            self.assertTrue(cadence.due(2.0, watching=self.events.watching))
+        finally:
+            for key in list(selector.get_map().values()):
+                selector.unregister(key.fd)
+                os.close(key.fd)
+            selector.close()
+
+    def test_a_truncated_source_list_is_not_watching(self):
+        watched = self.root / "jobs.log"
+        watched.write_text("")
+        self.events.configure([str(watched)], complete=False)
+        self.assertTrue(wait_for(self.events.ready.is_set))
+        self.assertFalse(self.events.watching)
+        self.events.configure([str(watched)])
+        self.assertTrue(wait_for(lambda: self.events.ready.is_set() and self.events.watching))
+
+    def test_a_known_route_closing_by_its_sidecar_marks_a_change(self):
+        route_file = self.root / "rt-private.json"
+        route_file.write_text(json.dumps({"route_id": "rt-private"}))
+        pid = os.getpid()
+        row = SimpleNamespace(pid=pid, proc_start=procscan.read_proc_start(pid),
+                              route_file=str(route_file), route_id="rt-private")
+        structural, _content = native_events.basic_event_sources(
+            SimpleNamespace(sessions=[row], jobs=[], resources=[]))
+        self.assertIn(str(route_file), structural[0])
+        sidecar = self.root / "rt-private.outcome.json"
+        self.assertIn(str(sidecar), structural[0])
+        self.events.configure(*structural)
+        self.assertTrue(wait_for(lambda: self.events.ready.is_set() and self.events.watching))
+        self.events.take_changed()
+        sidecar.write_text(json.dumps({"route_id": "rt-private", "terminal_gate_proven": True}))
+        self.assertTrue(wait_for(self.events.take_changed))
+
+    def test_more_rows_than_the_source_limit_are_not_a_full_watch(self):
+        pid = os.getpid()
+        start = procscan.read_proc_start(pid)
+        rows = [SimpleNamespace(pid=pid, proc_start=start, log_path=f"/t/{index}.log")
+                for index in range(native_events._SOURCE_LIMIT + 1)]
+        structural, content = native_events.basic_event_sources(
+            SimpleNamespace(sessions=rows, jobs=[], resources=[]))
+        self.assertIs(structural[-1], False)
+        self.assertIs(content[-1], False)
+        self.assertEqual(len(structural), 4)
+        small, small_content = native_events.basic_event_sources(
+            SimpleNamespace(sessions=rows[:2], jobs=[], resources=[]))
+        self.assertEqual(len(small), 3)
+        self.assertEqual(len(small_content), 3)
+
 
 class ProcessBirthsTest(unittest.TestCase):
     def test_a_new_harness_like_process_marks_once(self):
@@ -222,6 +287,18 @@ class UnchangedTagSnapshotTest(unittest.TestCase):
         rows = json.loads(path.read_text())["assignments"]
         self.assertEqual({row["session_id"] for row in rows}, {"sid-unchanged", "sid-new"})
         self.assertEqual(session_tags.assigned_tag("codex", "sid-unchanged"), tag)
+
+    def test_a_failed_generation_mark_falls_back_to_the_rewrite(self):
+        session = Session(harness="codex", session_id="sid-unchanged", started_at=10,
+                          pid=os.getpid(), proc_start=procscan.read_proc_start(os.getpid()))
+        session_tags.assign([session])
+        path = session_tags._path()
+        before = os.stat(path)
+        with mock.patch.object(session_tags.os, "utime", side_effect=PermissionError("fixture")):
+            session_tags.assign([session])
+        after = os.stat(path)
+        self.assertNotEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns),
+                            "the reaffirmation must still mark a newer generation")
 
 
 if __name__ == "__main__":

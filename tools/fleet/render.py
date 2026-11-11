@@ -6716,7 +6716,13 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 basic_events.configure(*structural)
                 content_events.configure(*content)
             except Exception:
-                pass
+                # The previous watch set no longer covers this pass's rows:
+                # keep the normal cadence until a later pass configures one.
+                for events in (basic_events, content_events):
+                    try:
+                        events.configure((), (), (), complete=False)
+                    except Exception:
+                        events.watching = False
         # Publication makes these rows immutable to the detail worker. Every
         # basic tick stays cheap even while that worker is delayed on NAS.
         latest_basic[0] = snapshot

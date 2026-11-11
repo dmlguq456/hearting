@@ -3350,6 +3350,37 @@ class ProducerInputReuseTests(unittest.TestCase):
         tap.write_text(json.dumps({"session_id": "sid-a", "pid": 2, "cost": {"total_duration_ms": 60001}}))
         self.assertTrue(inputs.changed())
 
+    def test_a_wait_written_while_a_pass_reads_reaches_the_next_tick(self):
+        """Signal names belong to the read they guard, not to a later listing."""
+        state.state_root().mkdir(parents=True, exist_ok=True)
+
+        def read(**_kwargs):
+            signals = state.read_signals(now=self.now[0])
+            self.reads.append(len(signals))
+            if len(self.reads) == 1:
+                # Another session asks between this read and the end of the pass.
+                code = ("import human_wait_state as s; v = s.signal_value('claude', 'sid-new', "
+                        "'seat-new', '[답변 필요] choice', now=%r); assert v and s.write_signal(v)"
+                        % self.now[0])
+                subprocess.run([sys.executable, "-c", code], check=True, env={
+                    **os.environ, "PYTHONPATH": os.path.dirname(os.path.abspath(__file__))})
+            items = [{"id": signal["id"], "source": "S4", "kind": "decision",
+                      "since": signal["since"], "stale": False,
+                      "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+                     for signal in signals]
+            return {"items": items, "complete": True, "observed_at": self.now[0],
+                    "health": [], "by_session": {}}
+
+        with mock.patch.object(observation, "read_answer_waits", side_effect=read), \
+             mock.patch.object(state, "_request_producer"):
+            self.assertEqual(self._tick()["total"], 0)
+            value = self._tick()
+            self.assertEqual(self.reads, [0, 1])
+            self.assertEqual(value["total"], 1)
+            # Both displays read the same cache in the same tick.
+            self.assertEqual(state.cached_fleet_view(now=self.now[0], request=False)["total"], 1)
+            self.assertEqual(state.cached_statusline("claude", "sid-new")[0], (1, 1))
+
     def test_incomplete_observation_is_never_reused(self):
         self.items = []
         with mock.patch.object(observation, "read_answer_waits",

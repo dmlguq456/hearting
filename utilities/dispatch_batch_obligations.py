@@ -791,6 +791,9 @@ class _DigestMatch:
 _PASS_CLOCK = time.perf_counter  # bound at import: fixtures replace ``time`` itself
 
 
+_UNOBSERVED = object()
+
+
 class OwnerSettlementReadContext:
     """Reuse exact settled-owner observations while rechecking their dependencies."""
 
@@ -1068,15 +1071,39 @@ class OwnerSettlementReadContext:
         self._metrics["settled_cache_hits"] += 1
         return True
 
-    def remember_settled_owner(self, jobs: Path, status: str, raw: str,
-                               metadata: dict, related_rows, dependencies) -> bool | None:
-        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
-        paths = tuple(dict.fromkeys(
+    @staticmethod
+    def _dependency_keys(dependencies):
+        return tuple(dict.fromkeys(
             os.path.abspath(os.path.expanduser(os.fspath(path)))
             for path in dependencies))
+
+    def observe_dependencies(self, dependencies):
+        """Generations of a proof's dependencies taken before its settlement read.
+
+        ``remember_settled_owner(observed=...)`` compares them with the
+        generations after watch installation, so a write during the read itself
+        invalidates the proof instead of being recorded as its basis.
+        """
+        if not dependencies:
+            return None
         try:
-            before_registration = self._current_generations(
-                paths, self._pass_file_generations)
+            return self._current_generations(self._dependency_keys(dependencies))
+        except OSError:
+            return None
+
+    def remember_settled_owner(self, jobs: Path, status: str, raw: str,
+                               metadata: dict, related_rows, dependencies,
+                               observed=_UNOBSERVED) -> bool | None:
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        paths = self._dependency_keys(dependencies)
+        try:
+            if observed is _UNOBSERVED:
+                before_registration = self._current_generations(
+                    paths, self._pass_file_generations)
+            elif observed is None:
+                raise OSError("dependency generations were not observed before the read")
+            else:
+                before_registration = tuple(observed)
         except OSError:
             self.forget_owner(jobs, metadata.get("attempt_id", ""))
             return None
@@ -1098,16 +1125,25 @@ class OwnerSettlementReadContext:
             self._metrics["dependency_invalidations"] += 1
             self.forget_owner(jobs, metadata.get("attempt_id", ""))
             return False
-        self._settled[key] = ((status, raw), self._fingerprint_rows(related_rows),
-                              paths, generations, aliases)
+        self._adopt_settled(key, ((status, raw), self._fingerprint_rows(related_rows),
+                                  paths, generations, aliases))
         self._settled_version += 1
-        self._queue_settled_dependency_check(key)
-        for alias in aliases:
-            self._route_owners.setdefault((key[0], alias), set()).add(key[1])
         if len(self._settled) > 4096:
             oldest = next(iter(self._settled))
             self.forget_owner(Path(oldest[0]), oldest[1])
         return True
+
+    def _adopt_settled(self, key, entry):
+        """The one path a settled proof joins: dependency checks and route aliases.
+
+        A proof taken in this process and one restored from a previous runner
+        both pass through here, so either is reselected when its dependencies
+        change, independent of later registry changes.
+        """
+        self._settled[key] = entry
+        self._queue_settled_dependency_check(key)
+        for alias in entry[4]:
+            self._route_owners.setdefault((key[0], alias), set()).add(key[1])
 
     def _queue_settled_dependency_check(self, key):
         if key in self._dependency_queued:
@@ -1177,9 +1213,10 @@ class OwnerSettlementReadContext:
     def load_settled_proofs(self, path) -> int:
         """Load settled-owner proofs a previous runner recorded.
 
-        Each proof is still checked on use exactly like a proof taken in this
-        process: the owner row, its related rows and every dependency's stat
-        generation must be unchanged, otherwise it is dropped and re-proved.
+        Each proof joins the same dependency watch and rotating check as a
+        proof taken in this process and is still checked on use: the owner
+        row, its related rows and every dependency's stat generation must be
+        unchanged, otherwise it is dropped and re-proved.
         """
         try:
             with open(path, "rb") as handle:
@@ -1209,9 +1246,12 @@ class OwnerSettlementReadContext:
             key = (str(root), str(attempt))
             if key in self._settled or len(self._settled) >= 4096:
                 continue
-            self._settled[key] = (row_match, related, paths, generations, aliases)
-            for alias in aliases:
-                self._route_owners.setdefault((key[0], alias), set()).add(key[1])
+            # Watch before first use: the first pass after a restart compares
+            # every restored generation with a fresh stat (no owner cursor is
+            # restored), and a later change marks the watch or the rotating
+            # stat check exactly as for a proof taken in this process.
+            self._register_dependency_watch(key, paths)
+            self._adopt_settled(key, (row_match, related, paths, generations, aliases))
             loaded += 1
         self._saved_version = self._settled_version
         return loaded
@@ -1809,8 +1849,14 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                 context.remember_active_owner(jobs, candidate)
             else:
                 try:
+                    observed = dependencies = None
                     if context is not None:
                         context.record_historical_check()
+                        # The proof's basis belongs to the read it guards:
+                        # dependency generations are taken before that read.
+                        dependencies = _owner_settlement_dependency_paths(
+                            jobs, fields[1], meta)
+                        observed = context.observe_dependencies(dependencies)
                     state = owner_completion_state(jobs, fields[1], meta).state
                     if state == "not-applicable":
                         if context is not None:
@@ -1821,11 +1867,10 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                     if state not in {"pending", "unknown"}:
                         if context is not None:
                             context.forget_unsettled_owner(jobs, attempt_id)
-                            dependencies = _owner_settlement_dependency_paths(
-                                jobs, fields[1], meta)
                             if dependencies:
                                 remembered = context.remember_settled_owner(
-                                    jobs, fields[1], raw, meta, related_rows, dependencies)
+                                    jobs, fields[1], raw, meta, related_rows, dependencies,
+                                    observed=observed)
                                 if remembered is not True:
                                     # An invalidated or unavailable snapshot cannot
                                     # prove settlement; keep the row on its normal

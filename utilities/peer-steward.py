@@ -7747,15 +7747,6 @@ def _runner_settlement_context(store):
     return context
 
 
-def _steward_relations_pass():
-    """One runner pass resolves steward relations once across its duties."""
-    try:
-        from dispatch_seat_handover import steward_relations_pass
-    except Exception:  # noqa: BLE001 - without it each duty resolves as before
-        return contextlib.nullcontext()
-    return steward_relations_pass()
-
-
 def _shared_revision_pass():
     """One runner pass proves each immutable shared spec revision it reads once."""
     try:
@@ -7924,7 +7915,7 @@ def cmd_obligation_runner(args):
         duties = _runner_duties(store, duties)
         observation_context = ObservationContext()
         budget_token = _RUNNER_WORK_BUDGET.set(duty_work_budget)
-        with _shared_revision_pass(), _steward_relations_pass():
+        with _shared_revision_pass():
             _reconcile_obligations(store, duties, read_context=read_context,
                                    retry_state=duty_retry_state,
                                    notice_selection=notice_selection,

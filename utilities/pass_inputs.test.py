@@ -63,7 +63,9 @@ class PassInputsTests(unittest.TestCase):
         with pass_inputs.record() as inputs:
             output.exists()
             os.listdir(self.root)
-            output.write_text("1")
+            temp = self.root / ".projection.tmp"
+            temp.write_text("1")
+            os.replace(temp, output)
         self.assertFalse(inputs.changed())
         self._later()
         with pass_inputs.own_writes(inputs):
@@ -73,6 +75,67 @@ class PassInputsTests(unittest.TestCase):
         self.assertFalse(inputs.changed())
         self._later()
         output.write_text("3")   # someone else's write still counts
+        self.assertTrue(inputs.changed())
+
+    def test_a_foreign_change_before_an_own_write_is_not_adopted(self):
+        output = self.root / "projection.json"
+        with pass_inputs.record() as inputs:
+            os.listdir(self.root)
+            self._later()
+            subprocess.run([sys.executable, "-c",  # another process, mid-pass
+                            "import sys; open(sys.argv[1], 'w').write(sys.argv[2])",
+                            str(self.root / "foreign.json"), "{}"], check=True)
+            self._later()
+            temp = self.root / ".projection.tmp"
+            temp.write_text("1")
+            os.replace(temp, output)
+        self.assertTrue(inputs.changed(), "the listing must not absorb a foreign entry")
+
+    def test_an_own_temporary_file_written_through_its_descriptor_is_not_a_change(self):
+        output = self.root / "projection.json"
+        with pass_inputs.record() as inputs:
+            os.listdir(self.root)
+            fd, temp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
+            os.lstat(temp)                 # e.g. a symlink guard on the staged file
+            os.write(fd, b"1")
+            os.close(fd)
+            os.replace(temp, output)
+        self.assertTrue(inputs.complete)
+        self.assertFalse(inputs.changed())
+
+    def test_a_foreign_rewrite_before_an_own_rewrite_of_a_read_file_is_not_adopted(self):
+        with pass_inputs.record() as inputs:
+            self.source.read_text()
+            self.source.write_text('{"own": 1}')      # its own rewrite is adopted
+        self.assertFalse(inputs.changed())
+        with pass_inputs.record() as inputs:
+            self.source.read_text()
+            self._later()
+            subprocess.run([sys.executable, "-c",   # another process, mid-pass
+                            "import sys; open(sys.argv[1], 'w').write(sys.argv[2])",
+                            str(self.source), '{"x": 2}'], check=True)
+            self.source.write_text('{"own": 3}')
+        self.assertTrue(inputs.changed(), "the foreign rewrite must not be absorbed")
+
+    def test_dir_fd_and_relative_reads_are_recorded(self):
+        listed_file = self.listed / "entry.json"
+        listed_file.write_text("{}")
+        directory = os.open(self.listed, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, directory)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.root)
+        with pass_inputs.record() as inputs:
+            os.stat("entry.json", dir_fd=directory)
+            os.close(os.open("entry.json", os.O_RDONLY, dir_fd=directory))
+            os.listdir(directory)
+            Path("source.json").read_text()
+        self.assertTrue(inputs.complete)
+        self.assertIn(str(listed_file), inputs.paths)
+        self.assertIn(str(self.source), inputs.paths)
+        self.assertFalse(inputs.changed())
+        self._later()
+        listed_file.write_text('{"changed": 1}')
         self.assertTrue(inputs.changed())
 
     def test_directory_only_stat_by_a_path_walk_ignores_its_entries(self):

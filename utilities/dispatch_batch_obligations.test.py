@@ -1820,5 +1820,78 @@ class DeliveryDutyLifetimeTest(unittest.TestCase):
         self.assertEqual(seen, [812])
 
 
+class RestoredOwnerProofTest(unittest.TestCase):
+    """A proof restored after a runner restart is reselected when its basis changes."""
+
+    setUp = BatchObligationTest.setUp
+    _runtime_owner_row = BatchObligationTest._runtime_owner_row
+
+    def _passes_after_restart(self, *, watched):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        proofs = self.base / "runner-duties" / "settled-owners.json"
+        before = obligations.OwnerSettlementReadContext()
+        restarted = obligations.OwnerSettlementReadContext()
+        for context in (before, restarted):
+            context._dependency_watcher_fallback = not watched
+            self.addCleanup(context.close)
+        state = lambda *_args: COMPLETE if dependency.read_text() == "sealed" else PENDING
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            obligations._resume_owner_settlements(self.jobs, context=before)
+            self.assertTrue(before.save_settled_proofs(proofs))
+            self.assertEqual(restarted.load_settled_proofs(proofs), 1)
+            # The normal first pass after the restart: the registry is unchanged.
+            obligations._resume_owner_settlements(self.jobs, context=restarted)
+            self.assertEqual(settle.call_count, 0)
+            dependency.write_text("changed", encoding="utf-8")
+            outputs = [obligations._resume_owner_settlements(self.jobs, context=restarted)
+                       for _ in range(3)]
+            return settle.call_count, outputs
+
+    def test_a_dependency_written_during_the_settlement_read_is_not_its_basis(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+        context._dependency_watcher_fallback = True
+        self.addCleanup(context.close)
+        reads = []
+
+        def state(*_args):
+            reads.append(dependency.read_text())
+            if len(reads) == 1:
+                # Rewritten after this read observed it, before the proof is stored.
+                os.utime(dependency, ns=(1, 1))
+            return COMPLETE
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertEqual(context._settled, {}, "a proof must not adopt a mid-read change")
+            first_pass_reads = len(reads)
+            obligations._resume_owner_settlements(self.jobs, context=context)
+        self.assertGreater(len(reads), first_pass_reads, "the next pass observes the owner again")
+        self.assertEqual(len(context._settled), 1)
+
+    def _assert_reselected(self, watched):
+        settled, outputs = self._passes_after_restart(watched=watched)
+        self.assertGreater(settled, 0, "the restored proof's change must reach a pass")
+        self.assertTrue(any(outputs), outputs)
+
+    def test_dependency_change_after_restart_reselects_the_owner_by_stat_rotation(self):
+        self._assert_reselected(watched=False)
+
+    def test_dependency_change_after_restart_reselects_the_owner_by_watch(self):
+        self._assert_reselected(watched=True)
+
+
 if __name__ == "__main__":
     unittest.main()

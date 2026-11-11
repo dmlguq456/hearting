@@ -30,9 +30,12 @@ class NativeDisplayEvents:
         self._reset = threading.Event()
         self._stopped = threading.Event()
         self.ready = threading.Event()
-        # True only while a kernel watch set is installed. A consumer that
-        # stretches its cadence on silence must not do so without one.
+        # True only while every requested source is watched: the source list
+        # was not truncated and each directory and process watch registered.
+        # A consumer that stretches its cadence on silence must not do so
+        # while any source is unwatched.
         self.watching = False
+        self._complete = True
         self._sources = None
         self._thread = None
         self._read = self._write = None
@@ -48,13 +51,17 @@ class NativeDisplayEvents:
                 os.close(fd)
             self.ready.set()
 
-    def configure(self, paths, patterns=(), processes=()):
+    def configure(self, paths, patterns=(), processes=(), complete=True):
+        """Watch these sources; ``complete=False`` marks a truncated list."""
         sources = (tuple(sorted(set(paths))), tuple(sorted(set(patterns))),
                    tuple(sorted(set(processes))))
         with self._lock:
-            if self._stopped.is_set() or sources == self._sources:
+            if self._stopped.is_set() or (sources == self._sources
+                                          and bool(complete) == self._complete):
                 return
             self._sources = sources
+            self._complete = bool(complete)
+            self.watching = False
             if self._read is None:
                 return
             self.ready.clear()
@@ -115,7 +122,7 @@ class NativeDisplayEvents:
                 return
 
     @staticmethod
-    def _directories(paths, patterns):
+    def _directories(paths, patterns, unresolved=None):
         wanted = [(str(Path(path).parent), Path(path).name, False) for path in paths]
         wanted.extend((directory, prefix, True) for directory, prefix in patterns)
         result = {}
@@ -129,6 +136,8 @@ class NativeDisplayEvents:
                     name, prefix = requested.relative_to(parent).parts[0], False
                 result.setdefault(str(parent), set()).add((name, prefix, parent != requested))
             except (OSError, ValueError, IndexError):
+                if unresolved is not None:
+                    unresolved.append(directory)
                 continue
         return result
 
@@ -139,6 +148,9 @@ class NativeDisplayEvents:
                 os.close(key.fd)
         paths, patterns, processes = sources
         watched, event_fd = {}, None
+        with self._lock:
+            complete = self._complete
+        unwatched = []
         try:
             libc = ctypes.CDLL(None, use_errno=True)
             init = libc.inotify_init1
@@ -150,10 +162,14 @@ class NativeDisplayEvents:
             if event_fd < 0:
                 raise OSError('inotify unavailable')
             selector.register(event_fd, selectors.EVENT_READ, 'files')
-            for directory, names in self._directories(paths, patterns).items():
+            for directory, names in self._directories(paths, patterns, unwatched).items():
                 wd = add(event_fd, os.fsencode(directory), _MASK)
                 if wd >= 0:
                     watched.setdefault(wd, set()).update(names)
+                else:
+                    # Watch limit, permission or a vanished directory: these
+                    # names would stay silent, so the normal cadence stays.
+                    unwatched.append(directory)
         except (AttributeError, OSError, ValueError):
             if event_fd is not None and event_fd >= 0:
                 try:
@@ -162,18 +178,21 @@ class NativeDisplayEvents:
                     pass
                 os.close(event_fd)
             event_fd = None
-        self.watching = event_fd is not None
         for pid, birth in processes:
             fd = None
             try:
                 fd = os.pidfd_open(pid)
                 if read_proc_start(pid) != birth:
                     os.close(fd)
-                    continue
+                    continue  # already exited or replaced: the change set below covers it
                 selector.register(fd, selectors.EVENT_READ, 'process')
+            except ProcessLookupError:
+                continue      # already exited: the change set below covers it
             except (AttributeError, OSError, ValueError):
                 if fd is not None:
                     os.close(fd)
+                unwatched.append(pid)
+        self.watching = event_fd is not None and complete and not unwatched
         # A write between the preceding read and watch installation is covered
         # by one post-registration read, without a registration-gap timer.
         self._dirty.set()
@@ -213,7 +232,7 @@ class NativeDisplayEvents:
         try:
             selector = selectors.DefaultSelector()
             selector.register(self._read, selectors.EVENT_READ, 'control')
-            sources = None
+            sources = configured = None
             event_fd, watched = None, {}
             while not self._stopped.is_set():
                 # No timeout: only source events, process exit or configuration
@@ -225,9 +244,10 @@ class NativeDisplayEvents:
                     if key.data == 'control':
                         self._drain(self._read)
                         with self._lock:
-                            requested = self._sources
-                        if requested != sources:
-                            sources = requested
+                            requested = (self._sources, self._complete)
+                        if requested != configured:
+                            configured = requested
+                            sources = requested[0]
                             event_fd, watched = self._rebuild(selector, sources)
                             break  # the remaining events refer to retired descriptors
                     elif key.data == 'process':
@@ -361,9 +381,17 @@ def _proc_identity(pid, birth):
     return pid, actual
 
 
-def _limited(paths, patterns, processes):
-    return (tuple(sorted(paths))[:_SOURCE_LIMIT], tuple(sorted(patterns))[:_SOURCE_LIMIT],
-            tuple(sorted(processes))[:_SOURCE_LIMIT])
+def _limited(paths, patterns, processes, complete=True):
+    """Sources bounded to ``_SOURCE_LIMIT`` each; a cut list carries ``False``.
+
+    The trailing flag is ``NativeDisplayEvents.configure``'s ``complete``: a
+    truncated list is not a full watch, so its consumer keeps the normal
+    cadence instead of waiting for events that cannot arrive.
+    """
+    parts = (tuple(sorted(paths)), tuple(sorted(patterns)), tuple(sorted(processes)))
+    if complete and all(len(part) <= _SOURCE_LIMIT for part in parts):
+        return parts
+    return tuple(part[:_SOURCE_LIMIT] for part in parts) + (False,)
 
 
 def basic_event_sources(snapshot, display_sources=None):
@@ -425,8 +453,15 @@ def basic_event_sources(snapshot, display_sources=None):
     except Exception:
         pass
     rows = []
+    complete = True
     for name in ("sessions", "jobs", "resources"):
-        rows.extend(tuple(getattr(snapshot, name, None) or ())[:_SOURCE_LIMIT])
+        listed = tuple(getattr(snapshot, name, None) or ())
+        complete = complete and len(listed) <= _SOURCE_LIMIT
+        rows.extend(listed[:_SOURCE_LIMIT])
+    try:
+        from .route import _outcome_path
+    except Exception:
+        _outcome_path = None
     for row in rows:
         identity = _proc_identity(getattr(row, "pid", None),
                                   getattr(row, "proc_start", None) or getattr(row, "starttime", None))
@@ -440,8 +475,17 @@ def basic_event_sources(snapshot, display_sources=None):
             value = getattr(row, attribute, None)
             if isinstance(value, (str, os.PathLike)) and str(value):
                 target.add(str(value))
+        # A direct or inline route closes through its outcome sidecar alone,
+        # without a jobs row change; the route and its sidecar are structural.
+        for attribute in ("route_file", "owner_route_file"):
+            value = getattr(row, attribute, None)
+            if isinstance(value, (str, os.PathLike)) and str(value):
+                paths.add(str(value))
+                if _outcome_path is not None:
+                    paths.add(_outcome_path(str(value)))
     content -= paths
-    return _limited(paths, patterns, processes), _limited(content, (), ())
+    return (_limited(paths, patterns, processes, complete),
+            _limited(content, (), (), complete))
 
 
 _HARNESS_COMMS = frozenset(("claude", "codex", "opencode", "node"))

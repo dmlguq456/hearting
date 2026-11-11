@@ -34,6 +34,7 @@ _lstat = os.lstat
 _stat_fn = os.stat
 _io_open = io.open
 _listdir = os.listdir
+_readlink = os.readlink
 
 
 def _meta_signature(meta):
@@ -91,7 +92,9 @@ def _absolute(path):
         text = os.fsdecode(os.fspath(path))
     except (TypeError, ValueError):
         return None
-    if (not text.startswith("/") or text in _EXCLUDED_ROOTS or text.startswith(_EXCLUDED_PREFIXES)
+    if not text.startswith("/"):
+        text = os.path.abspath(text)   # the observer's working directory does not move
+    if (text in _EXCLUDED_ROOTS or text.startswith(_EXCLUDED_PREFIXES)
             or text.endswith("-shm")):
         # A SQLite ``-shm`` file is the WAL's shared-memory index; readers touch it.
         return None
@@ -99,6 +102,28 @@ def _absolute(path):
 
 
 _UNSET = object()
+
+
+def _at(path, dir_fd):
+    """Absolute spelling of ``path`` opened relative to ``dir_fd``, or None."""
+    try:
+        if dir_fd is None:
+            return path
+        if path is None or isinstance(path, int):
+            return None
+        text = os.fsdecode(os.fspath(path))
+        if text.startswith("/"):
+            return text
+        return os.path.join(_readlink("/proc/self/fd/%d" % dir_fd), text)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _fd_path(fd):
+    try:
+        return _readlink("/proc/self/fd/%d" % fd)
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 class ReadSet:
@@ -119,6 +144,15 @@ class ReadSet:
         self._spellings = {}
         self.pids = {}
         self.written = set()
+        # Generation of each read input right after this pass's own last write
+        # to it (or to an entry of it, for a directory). A write first checks
+        # that nothing else changed the input since that point.
+        self._expected = {}
+        # Paths this pass writes itself. Each was checked unchanged since its
+        # read when the first own write began; from then on it is this pass's
+        # output, whose later content writes go through descriptors this
+        # module does not see, and its final generation is adopted.
+        self._own = set()
         self.complete = True
 
     def _generation(self, path, meta=_UNSET):
@@ -152,6 +186,7 @@ class ReadSet:
                 self._spellings[raw] = None
             return
         if write:
+            self._before_write(text)
             self.written.add(text)
             return
         if raw is not None:
@@ -174,12 +209,41 @@ class ReadSet:
         if isinstance(pid, int) and pid > 0 and pid not in self.pids:
             self.pids[pid] = _process_start(pid)
 
+    def _before_write(self, text):
+        for candidate in (text, os.path.dirname(text)):
+            if candidate in self._own:
+                continue
+            recorded = self._expected.get(candidate, self.paths.get(candidate, _UNSET))
+            if recorded is not _UNSET and not self._same(candidate, recorded):
+                # Changed by someone else since it was read or last written
+                # here; re-stamping after this write would hide that change.
+                self.complete = False
+        self._own.add(text)
+
+    def _after_write(self, text):
+        for candidate in (text, os.path.dirname(text)):
+            if candidate in self.paths and candidate not in self._own:
+                self._expected[candidate] = self._generation(candidate)
+
     def _restamp_written(self):
-        written, self.written = self.written, set()
-        for text in written:
-            for candidate in (text, os.path.dirname(text)):
-                if candidate in self.paths:
-                    self.paths[candidate] = self._generation(candidate)
+        """Adopt this pass's own writes as the new generation of the inputs they touched.
+
+        Each own write was chained to the generation left by the previous one,
+        so only a generation this pass produced itself is adopted. A later
+        foreign change, or content still being written through an open handle,
+        leaves the inputs changed (the next tick runs a full pass).
+        """
+        self.written = set()
+        expected, self._expected = self._expected, {}
+        for candidate, generation in expected.items():
+            if self._same(candidate, generation):
+                self.paths[candidate] = generation
+            else:
+                self.complete = False
+        own, self._own = self._own, set()
+        for candidate in own:
+            if candidate in self.paths:
+                self.paths[candidate] = self._generation(candidate)
 
     def _same(self, path, recorded):
         current = self._generation(path)
@@ -210,6 +274,22 @@ def _note(path, write):
         _writes._note(path, write=True)
 
 
+def _wrote(path):
+    """Right after an own write returned: remember the generation it left."""
+    target = _active if _active is not None else _writes
+    if target is None or getattr(_guard, "busy", False):
+        return
+    text = _absolute(path)
+    if text is not None and text not in target.ignore:
+        target._after_write(text)
+
+
+def _unresolved():
+    """A read this module cannot attribute to a path: the pass is not provably unchanged."""
+    if _active is not None:
+        _active.complete = False
+
+
 def _write_mode(mode, flags):
     if isinstance(mode, str) and any(char in mode for char in "wax+"):
         return True
@@ -218,9 +298,14 @@ def _write_mode(mode, flags):
 
 def _wrap_open(original):
     def open(file, mode="r", *args, **kwargs):
-        if _active is not None or _writes is not None:
-            _note(file, _write_mode(mode, None))
-        return original(file, mode, *args, **kwargs)
+        if _active is None and _writes is None:
+            return original(file, mode, *args, **kwargs)
+        write = _write_mode(mode, None)
+        _note(file, write)
+        handle = original(file, mode, *args, **kwargs)
+        if write:
+            _wrote(file)
+        return handle
     open.__wrapped__ = original
     open.__doc__ = original.__doc__
     return open
@@ -228,9 +313,19 @@ def _wrap_open(original):
 
 def _wrap_os_open(original):
     def open(path, flags, *args, **kwargs):
-        if (_active is not None or _writes is not None) and kwargs.get("dir_fd") is None:
-            _note(path, _write_mode(None, flags))
-        return original(path, flags, *args, **kwargs)
+        if _active is None and _writes is None:
+            return original(path, flags, *args, **kwargs)
+        target = _at(path, kwargs.get("dir_fd"))
+        write = _write_mode(None, flags)
+        if target is None:
+            if not write:
+                _unresolved()
+            return original(path, flags, *args, **kwargs)
+        _note(target, write)
+        fd = original(path, flags, *args, **kwargs)
+        if write:
+            _wrote(target)
+        return fd
     open.__wrapped__ = original
     open.__doc__ = original.__doc__
     return open
@@ -240,7 +335,11 @@ def _wrap_listing(original):
     def listing(path=".", *args, **kwargs):
         target = _active
         if target is not None:
-            target._note(path)
+            spelled = _fd_path(path) if isinstance(path, int) else path
+            if spelled is None:
+                target.complete = False
+            else:
+                target._note(spelled)
         return original(path, *args, **kwargs)
     listing.__wrapped__ = original
     listing.__doc__ = original.__doc__
@@ -250,8 +349,24 @@ def _wrap_listing(original):
 def _wrap_stat(original, follows):
     def stat_path(path, *args, **kwargs):
         target = _active
-        if target is None or args or kwargs.get("dir_fd") is not None:
+        if target is None:
             return original(path, *args, **kwargs)
+        if args or isinstance(path, int):
+            target.complete = False   # an fd or positional form names no path here
+            return original(path, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            resolved = _at(path, kwargs["dir_fd"])
+            if resolved is None:
+                target.complete = False
+                return original(path, *args, **kwargs)
+            follow = follows and kwargs.get("follow_symlinks", True)
+            try:
+                meta = original(path, *args, **kwargs)
+            except OSError:
+                target._note(resolved, loose=True, meta=None, follow=follow)
+                raise
+            target._note(resolved, loose=True, meta=meta, follow=follow)
+            return meta
         follow = follows and kwargs.get("follow_symlinks", True)
         # The pass's own stat result is the generation; no second syscall.
         try:
@@ -268,11 +383,19 @@ def _wrap_stat(original, follows):
 
 def _wrap_mutation(original, *positions):
     def mutate(*args, **kwargs):
-        if _active is not None or _writes is not None:
-            for index in positions:
-                if index < len(args):
-                    _note(args[index], True)
-        return original(*args, **kwargs)
+        if (_active is None and _writes is None) or any(
+                key.endswith("dir_fd") and value is not None for key, value in kwargs.items()):
+            # An fd-relative mutation is not attributed: a read input it touches
+            # stays changed, so the next tick runs a full pass.
+            return original(*args, **kwargs)
+        for index in positions:
+            if index < len(args):
+                _note(args[index], True)
+        result = original(*args, **kwargs)
+        for index in positions:
+            if index < len(args):
+                _wrote(args[index])
+        return result
     mutate.__wrapped__ = original
     mutate.__doc__ = original.__doc__
     return mutate

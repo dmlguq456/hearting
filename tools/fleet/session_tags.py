@@ -363,16 +363,19 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     taken.add(tag)
             rows = [row for row in live.values() if row.get("tag")]
             current = {(row["harness"], row["session_id"]): row for row in rows}
+            reaffirmed = False
             if (stamp is not None and _content(old) == _content(current)):
                 # Same assignments: keep the file and its readers untouched.
                 # A real reaffirmation still marks a newer generation so a
-                # concurrent stale census cannot retire the observed rows.
+                # concurrent stale census cannot retire the observed rows;
+                # when that mark fails, the normal rewrite below records it.
+                reaffirmed = True
                 if observed & current.keys():
                     try:
                         os.utime(path)
                     except OSError:
-                        pass
-            elif not path.exists() or old != current:
+                        reaffirmed = False
+            if not reaffirmed and (not path.exists() or old != current):
                 fd, temp = tempfile.mkstemp(prefix=".tag-assignments-", dir=path.parent)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as output:

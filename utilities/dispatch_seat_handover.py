@@ -1134,48 +1134,7 @@ def _marker_relation(harness: str, sid: str, marker: dict, evidence: list[dict],
     }
 
 
-# One runner pass resolves steward relations once and reuses them across its
-# duties (every steward-check duty otherwise resolves them several times).
-# Runner-only, like `trust_unchanged_ledgers`; this process's own role writes
-# clear it, and the next pass resolves afresh (a marker another session writes
-# during the pass is seen by the next pass, as any pinned pass observation).
-_RELATIONS_PASS = contextvars.ContextVar("dispatch_seat_handover_relations_pass", default=None)
-
-
-@contextlib.contextmanager
-def steward_relations_pass():
-    """Share resolved steward relations within one read pass (nested scopes reuse it)."""
-    if _RELATIONS_PASS.get() is not None:
-        yield
-        return
-    token = _RELATIONS_PASS.set({})
-    try:
-        yield
-    finally:
-        _RELATIONS_PASS.reset(token)
-
-
-def invalidate_steward_relations_pass() -> None:
-    """A role write in this pass: the next relation read resolves afresh."""
-    memo = _RELATIONS_PASS.get()
-    if memo is not None:
-        memo.clear()
-
-
 def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str] = None, *,
-                               seat_key: Optional[str] = None, include_released: bool = False) -> list[dict]:
-    memo = _RELATIONS_PASS.get()
-    if memo is None:
-        return _resolved_steward_relations(harness, sid, seat_key=seat_key,
-                                           include_released=include_released)
-    key = (harness, sid, seat_key, bool(include_released))
-    if key not in memo:
-        memo[key] = _resolved_steward_relations(harness, sid, seat_key=seat_key,
-                                                include_released=include_released)
-    return copy.deepcopy(memo[key])
-
-
-def _resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str] = None, *,
                                 seat_key: Optional[str] = None, include_released: bool = False) -> list[dict]:
     """Resolve valid original role evidence to its confirmed current same-seat holder.
 
@@ -1706,7 +1665,6 @@ def _append_transition_row(seat, row: dict) -> None:
     discards a torn tail left by an older append writer. A failed staged write/fsync never
     changes the canonical ledger, so a retry still sees the predecessor as holder.
     """
-    invalidate_steward_relations_pass()
     st = _st()
     path = st._ledger_path(seat)
     st.ensure_dir(path.parent)

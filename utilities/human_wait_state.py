@@ -4362,15 +4362,20 @@ def _refresh_cache() -> bool:
     import pass_inputs
     pass_inputs.install()
     census = _process_census()
+    # Signal names are compared instead of tracked, so they must belong to the
+    # observation the pass made: take them before it reads, and reuse nothing
+    # when a signal appeared or left while it was reading.
+    signals = _signal_names()
     try:
         with pass_inputs.record(ignore=_volatile_inputs(), describe=_describe_input) as inputs:
             ok, result, routes_ok = _refresh_pass()
     finally:
         _release_memory()
     complete = (ok and routes_ok and inputs.complete and census is not None
+                and _signal_names() == signals
                 and isinstance(result, dict) and result.get("complete") is True)
     _last_pass = ({"result": result, "inputs": inputs, "census": census,
-                   "signals": _signal_names(), "at": time.time(),
+                   "signals": signals, "at": time.time(),
                    "demand_keys": frozenset(result.get("route_sessions") or ())}
                   if complete else None)
     return ok
@@ -4512,6 +4517,8 @@ def _signal_names():
         return tuple(sorted(entry.name for entry in os.scandir(state_root())
                             if entry.name.endswith(".json")
                             and entry.name not in ("projection.json", "fleet.json")))
+    except FileNotFoundError:
+        return ()   # no state directory yet: no signal, as for an empty one
     except OSError:
         return None
 
