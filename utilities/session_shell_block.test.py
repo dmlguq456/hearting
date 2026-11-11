@@ -86,6 +86,34 @@ console.log('PASS');"""
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
+    def test_page_keys_read_a_long_question_from_its_first_row_and_keep_the_choice(self):
+        # PR #1532 R2: PgUp/PgDn read the body to its first and last rows; the page stays
+        # where reading left it, the highlighted choice stays, and ↑↓/numbers follow the choice.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let sent=[];
+const c=create({changed(){},answer:async v=>{sent.push(v);return {state:'submitted'};},action(){}});
+const body=Array.from({length:12},(_,i)=>[{text:'BODY_LINE_'+i}]);
+c.update([{id:'q',revision:'r1',answerable:true,request_state:'open',questions:[{id:'a',question:'LONG',choices:['A','B'],
+ display:{head:[{text:'Q_HEAD'}],body,options:[[{text:'1 '},{text:'A'}],[{text:'2 '},{text:'B'}]]}}]}]);c.enter();
+const draw=()=>c.detail({budget:7,columns:40}).map(r=>r.map(x=>x.text).join(''));
+const has=(rows,s)=>rows.some(x=>x.includes(s));
+assert(has(draw(),'› A'));
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));
+let rows=draw();assert(has(rows,'BODY_LINE_0'),rows.join('\n'));
+assert(has(draw(),'BODY_LINE_0'),'the page stays on a later paint');
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[6~'));
+rows=draw();assert(has(rows,'› A')&&has(rows,'2 B'),rows.join('\n'));
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));
+// ↓ moves the choice and brings it back onto the page; a number does the same.
+c.input(Buffer.from('\x1b[B'));rows=draw();assert(has(rows,'› B'),rows.join('\n'));
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));c.input(Buffer.from('1'));rows=draw();assert(has(rows,'› A'),rows.join('\n'));
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));c.input(Buffer.from('\r'));
+setImmediate(()=>{assert.deepEqual(sent,[{question_id:'q',revision:'r1',answers:{a:['A']}}]);console.log('PASS');});"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
     def test_split_controls_drafts_and_replaced_questions_never_retarget_native_input(self):
         code=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

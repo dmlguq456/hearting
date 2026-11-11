@@ -2,7 +2,7 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 module.exports=function({changed,answer,action}) {
-  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0;
+  let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
   let labels={},styles={},help='';
   const entries=new Map();
@@ -44,21 +44,21 @@ module.exports=function({changed,answer,action}) {
     }
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
-    if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;}
+    if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;follow=true;}
     else if(found>=0){index=found;frozen=undefined;stale=false;}
     else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length)){
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
-    }else{frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;}
+    }else{frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;}
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
     changed();
   }
-  function enter(){focused=true;scroll=0;changed();}
-  function leave(){focused=false;resetParser();scroll=0;changed();}
+  function enter(){focused=true;scroll=0;follow=true;changed();}
+  function leave(){focused=false;resetParser();scroll=0;follow=true;changed();}
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
-    frozen=undefined;stale=false;scroll=0;resetParser();changed();
+    frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
   }
   function terminalState(row){return row.item.request_state||state(row.item).state||'open';}
   function active(row){return !stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
@@ -114,9 +114,11 @@ module.exports=function({changed,answer,action}) {
     const footer=tail.slice(-tailLimit),space=Math.max(0,limit-1-footer.length);
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
     const page=Math.max(1,space-1);
-    // The highlighted choice stays on the page while ↑↓ move it.
+    // The highlighted choice comes onto the page when it changes (↑↓, a number);
+    // PgUp/PgDn then read the body from its first row to its last, and the page
+    // stays where the reading left it until the choice changes again.
     const lit=choosing(row)?body.length+marked.findIndex(parts=>parts[0]?.text==='›'):-1;
-    if(lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
+    if(follow&&lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
     // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
     const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):text('more','more · focus and ↑↓ to read');
@@ -175,7 +177,7 @@ module.exports=function({changed,answer,action}) {
     if(local.typing[id]){if(c>=' '&&Buffer.byteLength((local.drafts[id]||'')+c)<=4096)local.drafts[id]=(local.drafts[id]||'')+c;return;}
     if(c==='t'){local.typing[id]=true;return;}
     if(/^[1-9]$/.test(c)&&choices(row).length){
-      const choice=choices(row)[Number(c)-1];if(choice!==undefined){local.answers[id]=[value(choice)];local.cursor[id]=Number(c)-1;local.notice='';}return;
+      const choice=choices(row)[Number(c)-1];if(choice!==undefined){local.answers[id]=[value(choice)];local.cursor[id]=Number(c)-1;local.notice='';follow=true;}return;
     }
     if('rwf'.includes(c)&&choices(row).length){action(c);return;}
     if(!choices(row).length&&c>=' '){local.typing[id]=true;local.drafts[id]=c;}
@@ -195,8 +197,8 @@ module.exports=function({changed,answer,action}) {
           if(!pasting){
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
             if(escape==='\x1b[Z')move(-1);
-            else if((up||down)&&choosing(row)){const local=state(row.item),n=choices(row).length;const at=cursorOf(row);local.cursor[row.question.id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));scroll=0;}
-            else if(up||escape==='\x1b[5~')scroll-=escape.includes('5')?4:1;else if(down||escape==='\x1b[6~')scroll+=escape.includes('6')?4:1;
+            else if((up||down)&&choosing(row)){const local=state(row.item),n=choices(row).length;const at=cursorOf(row);local.cursor[row.question.id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));scroll=0;follow=true;}
+            else if(up||escape==='\x1b[5~'){scroll-=escape.includes('5')?4:1;follow=false;}else if(down||escape==='\x1b[6~'){scroll+=escape.includes('6')?4:1;follow=false;}
           }
           escape='';
         }else if(escape.length>64)escape='';

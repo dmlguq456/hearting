@@ -461,7 +461,7 @@ const paint=(extra={})=>view.render({width:40,height:60,side:true,model,configur
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
 const all=rows(paint()).join('\n'),flat=all.replace(/[│ \n]+/g,' ');
 for(const word of ['kind autopilot-code(dev·std)','owner claude (Opus 5.5·high) balanced-deep 31%','✓ plan · PASS · codex gpt-fixture high · 12m · done 22:34 · plan/code · gate ✓',
- '● execute R2 · codex gpt-fixture high · 72% · >_ apply_patch · +1 agent · 30m · dev/backend','NOTE_R2','└ execute · 2 claude Sonnet 5.5 12%',
+ '● execute R2 · codex gpt-fixture high · 72% · 30m · dev/backend','autopilot-code(dev·std) · owner claude (Opus 5.5·high) balanced-deep 31% >_ apply_patch · +1 agent','NOTE_R2','└ execute · 2 claude Sonnet 5.5 12%',
  '· review · pending · review/code','42m · 2 legs · staged · test ✓','next resume · execute','✕ execute','worker claude · failed 3m','resume execute'])
  assert(flat.includes(word),word+'\n'+all);
 for(const s of rows(paint()))assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
@@ -610,6 +610,58 @@ v=d.observe('claude',['📁 repo · ⎇ main · context ━━━━────
 assert.equal(v.model,'Opus');assert.equal(v.effort,'high');
 '''
         self.node(script, "native-display.cjs")
+
+    def test_parallel_stages_never_take_each_others_tool_and_the_beat_follows_the_painted_rows(self):
+        # PR #1532 R2: the feed has one tool and sub-agent count for the route (its
+        # doer), so it stands once on its own row as Fleet draws it, never on every
+        # running stage. The beat runs only while a spinning or blinking part is painted.
+        script = r"""
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const p=t=>({text:t});
+const route={id:'a',title:'ROUTE_A',kind:'working',tool:'apply_patch',agents:1,kind_text:'code(dev·std)',
+ stages:[{name:'execute',mark:'●',current:true,harness:'codex',model:'gpt-fixture',effort:'high'},
+  {name:'review',mark:'●',current:true,harness:'claude',model:'claude-sonnet-5-5',effort:'med'}],
+ workers:[{stage:'execute',harness:'codex',model:'gpt-fixture',ctx:'72%'},{stage:'review',harness:'claude',model:'Sonnet 5.5',ctx:'12%'}],
+ paint:{glyph:p('⠏')}};
+const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
+const all=rows(view.render({width:80,height:40,side:false,model:{routes:[route],route_count:1},state:'idle',expandedKeys:['route:a'],questions:()=>[]}));
+const stageRows=all.filter(s=>/[●] (execute|review)/.test(s));
+assert.equal(stageRows.length,2,all.join('\n'));
+for(const s of stageRows)assert(!s.includes('apply_patch')&&!s.includes('agent'),s);
+assert.equal(all.filter(s=>s.includes('>_ apply_patch · +1 agent')).length,1,all.join('\n'));
+// A working route the height (a question) dropped from the panel: nothing turns.
+const q=[[p('Q_HEAD')],[p('BODY')],[p('1 YES')],[p('2 NO')],[p('choose')],[p('back')]];
+for(const [width,height,side] of [[40,12,true],[80,12,false]]){
+ const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
+ assert(!rows(r).join('\n').includes('route 1'),rows(r).join('\n'));
+ assert.deepEqual(r.spins,[]);assert.equal(r.animated,false,width+'x'+height);
+}
+// The same route with room to show it: its mark spins and the beat runs.
+const shown=view.render({width:40,height:30,side:true,state:'idle',model:{routes:[route],route_count:1},questions:o=>q.slice(0,o.budget)});
+assert(rows(shown).join('\n').includes('route 1'));assert.equal(shown.animated,true);assert(shown.spins.length>0);
+"""
+        self.node(script, "panel-view.cjs")
+
+    def test_lines_take_their_role_color_on_a_known_face_without_a_shade(self):
+        # Spec rule 22: frame 244/243, route 245/243, messages 242/245, question 174/131 on a
+        # known face whether or not it is shaded; the body and background stay the terminal's.
+        script = r"""
+const assert=require('node:assert/strict'),v=require(process.argv[1]);
+const rows=[[{text:'body',foreground:253},{text:'frame',role:'frame',foreground:186},{text:'route',role:'route'},
+ {text:'messages',role:'messages',dim:true},{text:'q',role:'accent-line'}]];
+const want={dark:[244,245,242,174],light:[243,243,245,131]};
+for(const background of ['dark','light'])for(const theme of ['terminal','light']){
+ const face=theme==='light'?'light':background,out=v.appearance(rows,{theme,shade:'none'},{colors:256,background})[0];
+ assert.deepEqual(out.slice(1).map(x=>x.foreground),want[face],background+'/'+theme);
+ assert(out.every(x=>x.background===undefined&&!x.dim),background+'/'+theme);
+}
+// An unknown face keeps the terminal's own lines; mono keeps no hue; NO_COLOR returns the rows.
+const unknown=v.appearance(rows,{theme:'terminal',shade:'none'},{colors:256,background:''})[0];
+assert.deepEqual(unknown.slice(1,4).map(x=>x.foreground),[186,null,null]);
+assert(v.appearance(rows,{theme:'mono',shade:'none'},{colors:256,background:'dark'})[0].slice(1,4).every(x=>x.foreground===null));
+assert.equal(v.appearance(rows,{shade:'none'},{noColor:true,background:'dark'}),rows);
+"""
+        self.node(script, "panel-view.cjs")
 
     def node(self, script, name):
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell" / name)],

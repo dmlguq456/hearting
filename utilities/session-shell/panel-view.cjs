@@ -49,6 +49,10 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // g_work_off, waiting g_blocked) on every face; the state colors above are
     // the route and stage marks' (running 150 / idle 186).
     else if(role==='session'&&theme!=='mono'&&(shade||known==='light'))dim=false;
+    // Spec rule 22: on a known face each line takes its role's color with or
+    // without a shade (frame 244/243, route 245/243, messages 242/245); an
+    // unknown face keeps the terminal's own, mono keeps no hue.
+    else if(LINES.has(role)&&known&&theme!=='mono'){foreground=F[role];dim=false;}
     if(shade){
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
@@ -138,11 +142,14 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // dark, from the same clock as the 100 ms spinner frame.
   const beat=Math.floor(Math.trunc(frame)/10)%2===0;
   const spinGlyph={text:SPIN[Math.abs(Math.trunc(frame))%SPIN.length],spin:true};
-  // What runs here blinks or spins: the host keeps its beat only while one is painted.
-  let animated=false;
+  // What runs here blinks or spins: the host keeps its beat only while one is
+  // painted. A blinking part carries `beat`, a spinning one `spin`; the beat is
+  // read from the rows this paint finally shows, so a route the height dropped
+  // keeps nothing turning.
+  const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
   const live=r=>r?.kind==='working';
   // A route's glyph: a working route spins on the frame like Fleet's route mark.
-  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r)){animated=true;return {...g,...spinGlyph,role:'state:working'};}return {...g,role:'state:'+(r.kind||'idle')};};
+  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind||'idle')};};
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
   // Spec rule 21: an opened route carries what Fleet's ROUTES row unfolds, from
   // the values Fleet already read: kind and owner, each stage with its doer
@@ -155,20 +162,22 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const kind=join([r.kind_text?[text('kind '),text(r.kind_text,'loc_repo')]:[],
       owner?[text('owner '),text(owner),...(r.profile?[text(' '+r.profile)]:[]),...(r.owner_ctx?[text(' '),text(r.owner_ctx,'loc_repo')]:[])]:[]]);
     if(kind.length)items.push(kind);
+    // The feed carries one open tool and sub-agent count for the route (its
+    // doer), not one per stage: like Fleet's ROUTES row (`└ >_ tool · +n agent`)
+    // it stands once on its own row and never on a stage it may not belong to.
+    const doing=join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]);
+    if(doing.length&&(stages.length||live(r)))items.push(doing);
     const used=new Set();
     stages.forEach((stage,i)=>{
       const mark=stage.mark||'';
-      if(stage.current){animated=true;}
-      const markPart=mark==='●'?text('●',beat?'g_work':'g_work_off'):mark==='✓'?text('✓','lvl_g'):mark==='✕'?text('✕','g_dead'):text('·');
-      const name=text(stage.name||'·',stage.current?(beat?'g_work':'g_work_off'):mark==='✕'?'g_dead':'loc_repo');
+      const markPart=mark==='●'?pulse('●'):mark==='✓'?text('✓','lvl_g'):mark==='✕'?text('✕','g_dead'):text('·');
+      const name=stage.current?pulse(stage.name||'·'):text(stage.name||'·',mark==='✕'?'g_dead':'loc_repo');
       const mine=workers.filter(w=>w.stage===stage.name);mine.forEach(w=>used.add(w));
       const first=mine[0]||{};
       const doer=[stage.harness||first.harness,stage.model||first.model,stage.effort].filter(Boolean).join(' ');
-      // The doer's open tool and sub-agents belong to the stage it works on.
-      const doing=stage.current?[r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]:[];
       const verdict=stage.verdict&&stage.verdict!=='running'?[text(stage.verdict,/^(PASS|done)$/i.test(stage.verdict)?'lvl_g':/^(FAIL|BLOCKED)/i.test(stage.verdict)?'g_dead':'dim')]:[];
       const row=join([[markPart,text(' '),name,...(stage.round>1?[text(' R'+stage.round,stage.round>=3?'g_idle':'dim')]:[])],
-        verdict,doer?[text(doer)]:[],first.ctx?[text(first.ctx,'loc_repo')]:[],...doing,stage.elapsed?[text(stage.elapsed)]:[],
+        verdict,doer?[text(doer)]:[],first.ctx?[text(first.ctx,'loc_repo')]:[],stage.elapsed?[text(stage.elapsed)]:[],
         stage.when?[text(stage.when)]:[],stage.unit?[text(stage.unit)]:[],stage.gate?[text('gate ✓','lvl_g')]:[]]);
       items.push(row);
       // What the stage's box says beside them: its output, a rounds note, a quoted line.
@@ -179,8 +188,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     for(const w of workers)if(!used.has(w))items.push([text('└ '+w.stage+' '),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]);
     // An older feed row carries only the stage line (`plan ✓ › execute ● › review`).
     if(!stages.length&&r.flow)items.push([text(r.flow)]);
-    // No stage record: the doer's tool and sub-agents stand alone.
-    if(!stages.length&&live(r)&&(r.tool||r.agents))items.push(join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]));
     const how=join([r.age?[text(r.age)]:[],r.legs?[text(r.legs+' leg'+(r.legs===1?'':'s'))]:[],r.visibility?.summary?[text(r.visibility.summary)]:[]]);
     if(how.length)items.push(how);
     if(r.visibility?.next)items.push([text('next ','dim'),text(r.visibility.next)]);
@@ -471,8 +478,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
     const label=clean(model.route_label||'').trim();
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
-    const running=shown.some(live);if(running)animated=true;
-    const routeTitle=shown.length?[text('route '+total,running?(beat?'g_work':'g_work_off'):'g_idle')]:label?[text(label,'g_idle')]:null;
+    const running=shown.some(live);
+    const routeTitle=shown.length?[running?pulse('route '+total):text('route '+total,'g_idle')]:label?[text(label,'g_idle')]:null;
     const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-optional.size-gitRows.size;
@@ -569,7 +576,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // right. `HEARTING` names the settings screen alone. An unknown state is left blank.
   const own=settings?null:LIVE[state];
   const frameText=v=>({...text(v,color),role:'frame'});
-  if(own&&own[0]==='spin')animated=true;
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
     own?[frameText(' '),{...text(own[0]==='spin'?spinGlyph.text:own[0],own[2]),...(own[0]==='spin'?{spin:true}:{}),role:'session'},
       {...text(' '+own[1]+' ',own[2]),role:state==='idle'?'secondary':'session'}]:[];
@@ -586,6 +592,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
   // The rows whose spinner cells turn between paints (the host swaps only those cells).
   const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
+  const animated=rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,groups,animated:animated&&!settings,spins};
