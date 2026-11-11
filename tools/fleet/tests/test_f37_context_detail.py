@@ -586,35 +586,37 @@ class ClaudeStreamSessionTest(unittest.TestCase):
                                              "maxOutputTokens": 128000}}}])
         return running, finished
 
-    def test_running_first_turn_takes_the_window_its_model_reported_on_this_runtime(self):
-        dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear()
-        self.addCleanup(dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear)
+    def test_a_running_turn_never_takes_another_attempts_window(self):
+        # Same model, same Claude Code version: the other attempt's window is still not this
+        # attempt's (CLAUDE_CODE_DISABLE_1M_CONTEXT alone splits 1M and 200K), so the running
+        # first turn keeps its exact token count and no percent.
         running, finished = self._first_turn_and_finished_turn()
         for job in (running, finished):
             dispatch_collector._enrich_claude_stream_session(job)
-        self.assertIsNone(running.context_window_tokens)      # before: tokens only
-        dispatch_collector._fill_claude_observed_windows([running, finished])
+        self.assertEqual(finished.context_window_tokens, 1000000)
         self.assertEqual(running.active_context_tokens, 250136)
-        self.assertEqual(running.context_window_tokens, 1000000)
-        self.assertEqual(running._context_window_source, "claude-result-model-usage")
-        # An unverified runtime has no applied trigger, so the native gauge gives the percent.
+        self.assertIsNone(running.context_window_tokens)
         self.assertIsNone(running.ctx_pct)
-        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
+        self.assertEqual(render._native_context_gauge(running), (None, None))
+        # A later pass without the finished attempt keeps nothing from it either.
+        later = self._job("att-later-first-turn")
+        self._write_log(later, [self._init("sid-later", version="9.9.9"),
+                                self._assistant("sid-later", "claude-fable-5", 250136)])
+        dispatch_collector._enrich_claude_stream_session(later)
+        self.assertIsNone(later.context_window_tokens)
+        self.assertEqual(render._native_context_gauge(later), (None, None))
+        self.assertFalse(hasattr(dispatch_collector, "_CLAUDE_OBSERVED_WINDOWS"))
 
-    def test_no_report_for_the_same_model_and_version_keeps_the_window_unknown(self):
-        for name, model, version in (("model", "claude-opus-5-5", "9.9.9"),
-                                     ("version", "claude-fable-5", "2.1.299")):
-            with self.subTest(name):
-                dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear()
-                self.addCleanup(dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear)
-                dispatch_collector._CLAUDE_STREAM_CACHE.clear()
-                running, finished = self._first_turn_and_finished_turn(model, version)
-                for job in (running, finished):
-                    dispatch_collector._enrich_claude_stream_session(job)
-                dispatch_collector._fill_claude_observed_windows([running, finished])
-                self.assertEqual(running.active_context_tokens, 250136)
-                self.assertIsNone(running.context_window_tokens)
-                self.assertEqual(render._native_context_gauge(running), (None, None))
+    def test_a_running_turn_shows_its_percent_once_its_own_result_reports_the_window(self):
+        running, _finished = self._first_turn_and_finished_turn()
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136),
+                                  {"type": "result", "session_id": "sid-run",
+                                   "modelUsage": {"claude-fable-5": {"contextWindow": 1000000,
+                                                                     "maxOutputTokens": 128000}}}])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 1000000)
+        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
 
     def test_small_configured_window_applies_without_a_terminal_window(self):
         job = self._job()
