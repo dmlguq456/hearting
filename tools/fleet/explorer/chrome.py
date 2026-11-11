@@ -584,7 +584,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             older_text = older_waits_text(waits)
             records = total if total is not None else len(questions)
             suffix = "" if waits.get("state") == "complete" else " · observation " + str(waits.get("state"))
-            status = f"{waiting} waiting{older_text} · {count_word(records, 'decision record')} today{suffix}"
+            status = f"{answer_wait_word()} {waiting}{older_text} · {count_word(records, 'decision record')} today{suffix}"
         elif state.view == "HISTORY":
             seats = tuple(vm.seats or ())
             status = (f"{count_word(len(seats), 'seat')} · "

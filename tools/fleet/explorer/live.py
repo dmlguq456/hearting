@@ -341,6 +341,58 @@ def _delivery_panes(snapshot):
     return found
 
 
+def herdr_pane_server():
+    """``herdr:<endpoint>``: the Herdr server whose panes Fleet's collectors observe."""
+    try:
+        from .focus import utility
+        return "herdr:" + str(utility("herdr_observation").endpoint_name())
+    except Exception:
+        return "herdr:default"
+
+
+def _session_pane(session, delivery_panes):
+    """``{"pane", "pane_server"}``: the session's pane and the server it was observed on.
+
+    Herdr's pane census (identity evidence) is read on Fleet's Herdr endpoint and the tmux
+    census on the tmux server Fleet reads. A pane known only from a delivered message has
+    no known server, so pressing it moves nothing rather than a same-numbered pane elsewhere.
+    """
+    own = _text(_get(session, "herdr_pane", "pane", "pane_id"))
+    if own:
+        server = _text(_get(session, "pane_server")) or None
+        return {"pane": own, "pane_server": server, "pane_from": "census" if server else None}
+    evidence = _text(_get(_get(session, "session_identity_evidence"), "pane"))
+    if evidence:
+        return {"pane": evidence, "pane_server": herdr_pane_server(), "pane_from": "census"}
+    tmux = _text(_get(session, "tmux_pane"))
+    if tmux:
+        return {"pane": tmux, "pane_server": "tmux:" + (_text(_get(session, "tmux_server")) or ""),
+                "pane_from": "census"}
+    delivered = delivery_panes.get(_text(_get(session, "session_id", "sid", "id")) or "")
+    return {"pane": delivered, "pane_server": None, "pane_from": "peer" if delivered else None}
+
+
+def settle_panes(rows, seen, questions=()):
+    """The one rule for every session's ``(pane, pane_server)`` pair, shared by every publication.
+
+    1. a pair the collectors' census gave (``pane_from == "census"``) stays;
+    2. otherwise a pane the current pane map or pane read observed for the same bound
+       session (``seen``: ``{tag: pane}``) takes Fleet's Herdr server;
+    3. otherwise a pane known only from a peer delivery keeps no server, so it moves nothing.
+
+    A question then opens the same pair as its session (``session_tag``/``open_tag``).
+    """
+    by_tag = {row["tag"]: row for row in rows}
+    for tag, pane in seen.items():
+        row = by_tag.get(tag)
+        if row is not None and pane and row.get("pane_from") != "census":
+            row["pane"], row["pane_server"], row["pane_from"] = pane, herdr_pane_server(), "seen"
+    for question in questions:
+        owner = by_tag.get(question.get("session_tag") or question.get("open_tag") or question.get("tag") or "")
+        if owner and owner.get("pane"):
+            question["pane"], question["pane_server"] = owner["pane"], owner.get("pane_server")
+
+
 def _last_input(display, now):
     """Presentation of a decided frontier, with a fresh age and no text classification."""
     from ..prompt_line import last_input
@@ -403,9 +455,7 @@ def _session_records(snapshot, now, resolver):
             "ask": _ask_kind(session) if state == "blocked" else None,
             "age": age, "repo": repo, "repo_id": repo,
             "branch": _text(_get(session, "branch")),
-            "pane": _text(_get(session, "herdr_pane", "pane", "pane_id")) or
-                    _text(_get(_get(session, "session_identity_evidence"), "pane")) or
-                    delivery_panes.get(_text(_get(session, "session_id", "sid", "id")) or ""),
+            **_session_pane(session, delivery_panes),
             "generation": None, "last_clear": None,
             "running": _running(session), "gpu": None, "pane_meta": None, "pane_lines": [],
         }
@@ -1494,6 +1544,7 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "session_tag": session["tag"] if session else None,
             "open_tag": session["tag"] if session else None,
             "pane": session["pane"] if session else None,
+            "pane_server": session.get("pane_server") if session else None,
             "marker": "◌" if owner_state == "none" else "◑" if source == "S2" else "●",
             "node": _text(item.get("node")),
             "since_at": _clock_or_date(item.get("since"), now),
@@ -2881,9 +2932,8 @@ def selected_detail(model, detail, *, peer_model=None):
     by_tag = {row["tag"]: row for row in rows}
     for current_tag in touched:
         by_tag[current_tag]["generation"] = by_tag[current_tag]["last_clear"] = None
-    for ref, current_tag in tag_of.items():
-        if current_tag in by_tag and ref.partition(":")[2] in panes:
-            by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
+    seen = {current_tag: panes[ref.partition(":")[2]] for ref, current_tag in tag_of.items()
+            if current_tag in by_tag and ref.partition(":")[2] in panes}
     if ENDED_SEATS in seats:
         old_seats = [seat for seat in old_seats if not ended_seat(seat)]
     for seat in seat_rows:
@@ -2900,6 +2950,8 @@ def selected_detail(model, detail, *, peer_model=None):
         by_tag[tag]["pane_lines"] = []
     if pane_read:
         current_tag, read = pane_read
+        if _text(read.get("pane")):
+            seen.setdefault(current_tag, _text(read.get("pane")))
         by_tag[current_tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
         by_tag[current_tag]["pane_meta"] = "visible screen"
     health_results = dict(detail.results)
@@ -2916,7 +2968,9 @@ def selected_detail(model, detail, *, peer_model=None):
             feed = list(other_events) + _registry_events(focus, tag)
             feed.sort(key=lambda item: -item[0])
             events = tuple(freeze(event) for _epoch, event in feed[:5])
-    return model.with_updates(sessions=rows,
+    questions = [dict(question) for question in model.questions or ()]
+    settle_panes(rows, seen, questions)
+    return model.with_updates(sessions=rows, questions=tuple(freeze(row) for row in questions),
                    seats=tuple(freeze(row) for row in old_seats + seat_rows),
                    generations=freeze(new_generations), cards=freeze(new_cards),
                    dialogue=freeze(old_dialogue), attempts=freeze(raw) if raw is not None else model.attempts,
@@ -3383,10 +3437,11 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         by_repo.setdefault(row["repo_id"], []).append(row)
     session_rows = [row for repo in repos for row in stewards_first(by_repo.get(repo["id"], ()))]
     focus, _seats, detail_config, panes = _detail_parts(accepted_detail)
-    for row in session_rows:                          # a pane id the herdr read found for this session
-        if not row.get("pane"):
-            info = session_index[row["tag"]]
-            row["pane"] = next((panes[i] for i in info["ids"] if i in panes), None)
+    seen = {}                                         # panes the current herdr map found per session
+    for row in session_rows:
+        found = next((panes[i] for i in session_index[row["tag"]]["ids"] if i in panes), None)
+        if found:
+            seen[row["tag"]] = found
     seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
         session_rows, session_index, accepted_detail, clock, resolver)
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
@@ -3407,12 +3462,11 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
             row["last_clear"] = when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
     if pane_read:
         tag, read = pane_read
-        by_tag[tag]["pane"] = by_tag[tag]["pane"] or _text(read.get("pane"))
+        if _text(read.get("pane")):
+            seen.setdefault(tag, _text(read.get("pane")))
         by_tag[tag]["pane_meta"] = "visible screen" + (f" · {_clock(read['at'])}" if _clock(read.get("at")) else "")
         by_tag[tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
-    for question in questions:
-        if not question.get("pane"):
-            question["pane"] = by_tag.get(question["tag"], {}).get("pane")
+    settle_panes(session_rows, seen, questions)
     tag_of_sid = {info["sid"]: tag for tag, info in session_index.items() if info["sid"]}
     tag_of_cwd = {}
     for tag, info in session_index.items():

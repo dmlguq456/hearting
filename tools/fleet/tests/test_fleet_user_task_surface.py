@@ -621,7 +621,7 @@ class NativeResponseIntegrationTests(unittest.TestCase):
                 return results
 
             self.assertNotIn("PRIVATE-ORIGINAL-PROMPT", "\n".join(draw(vm, state, 180, 70).text_rows()))
-            click(("question.select",))
+            click(("question.open",))
             detail = render._EXPLORER_STATE.question_overlay["detail"]
             self.assertEqual(detail["request_id"], request_id)
             self.assertIs(type(detail["request_id"]), type(request_id))
@@ -715,7 +715,7 @@ class OpenCodeHTTPIntegrationTests(unittest.TestCase):
                     result = ExplorerRuntime.execute_question_action(effect)
                     render._explorer_accept_question_result({"effect": effect, "result": result})
                 return effects, result
-            click(("question.select",))
+            click(("question.open",))
             self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "open")
             if permission:
                 self.assertEqual(click(("question.decision", "defer")), ((), None))

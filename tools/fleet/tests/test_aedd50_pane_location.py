@@ -166,6 +166,9 @@ class TmuxLocationTest(unittest.TestCase):
         self.assertEqual((steward.pane_location, steward.multiplexer, steward.pane_corner),
                          ("work:0.1", "tmux", False))
         self.assertEqual((worker.pane_location, worker.pane_corner), ("work:0.0", None))
+        # The pane id is kept with the server it was read on, for the open-pane press.
+        self.assertEqual((steward.tmux_pane, steward.tmux_server), (self.right, self.socket))
+        self.assertEqual((worker.tmux_pane, worker.tmux_server), (self.left, self.socket))
         self.assertIsNone(elsewhere.pane_location)
         self.assertIsNone(in_herdr.pane_location)
         # Read only: no pane moved, resized or took focus.

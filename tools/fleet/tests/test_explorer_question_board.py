@@ -90,8 +90,9 @@ class OneCount(unittest.TestCase):
         self.assertIn("◑ to answer 3", overview[-1])
         self.assertNotIn("9 question", "\n".join(overview))
         board = _text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)
-        self.assertIn("WAITING  3 questions · older waits 6", "\n".join(board))
-        self.assertIn("3 waiting · older waits 6", board[-1])
+        self.assertIn("── ◑ to answer 3 ─", "\n".join(board))
+        self.assertIn("older waits 6", "\n".join(board))
+        self.assertIn("◑ to answer 3 · older waits 6", board[-1])
 
     def test_an_unobserved_board_is_never_counted_as_zero_on_the_first_screen(self):
         vm = build_view_model({"sessions": [], "resources": [], "jobs": [],
@@ -108,12 +109,13 @@ class EachRow(unittest.TestCase):
         text = "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS")))
         self.assertNotIn(PRIVATE, text)
         self.assertIn("[b6]", text)
-        self.assertIn("claude (opus·xhigh)", text)
-        self.assertIn("frame plan review · v4 jobslog readers", text)
-        self.assertIn("route:    v4 jobslog readers · rt-454aff269a3d2452", text)
-        self.assertRegex(text, r"since:    \d\d:\d\d · waiting 26m")
-        self.assertIn("QUESTION", text)
-        self.assertIn("blocked owner 5h 0m", text)        # KIND fits whole in a wide row
+        # One line per wait: who answers, the session's MODEL words, what is asked, how long.
+        row = next(line for line in text.splitlines() if "[b6]" in line)
+        self.assertIn("claude opus xhigh │ frame plan review · v4 jobslog readers", row)
+        self.assertRegex(row, r"26m\s*│?\s*$")
+        self.assertRegex(next(line for line in text.splitlines() if "[34]" in line), r"5h 0m")
+        for gone in ("KIND", "WAITING  ", "route:", "since:", "pane:", "answer:"):
+            self.assertNotIn(gone, text)
 
     def test_successor_and_ownerless_waits_say_who_can_answer(self):
         questions, summary, vm = _board()
@@ -126,11 +128,17 @@ class EachRow(unittest.TestCase):
         text = "\n".join(_text(vm, NavState(view="QUESTIONS", title="QUESTIONS")))
         self.assertIn("older waits 2 (no session to take it 1)", text)
         self.assertIn("taken over · blocked work needs direction", text)
-        self.assertIn("owner:    [34] taken over · originally session sid-old", text)
         self.assertIn("◌ [··]", text)
         self.assertIn("no session to take it · blocked work needs direction", text)
-        self.assertIn("no session to take it · original session ended (01a186b9)", text)
-        self.assertIn("owner:    session sid-gone · not in the Fleet list", text)
+
+        def unfolded(tag):
+            state, _ = reduce(NavState(view="QUESTIONS", title="QUESTIONS"),
+                              {"type": "click", "action": ("question.open", tag, None)})
+            return "\n".join(_text(vm, state))
+        self.assertIn("[34] taken over · originally session sid-old", unfolded("S3:att-successor"))
+        self.assertIn("original session ended (01a186b9)", unfolded("S3:att-ownerless"))
+        self.assertIn("session sid-gone · not in the Fleet list",
+                      unfolded("S2:rt-old:run-authorization:1"))
 
 
     def test_a_successor_in_another_seat_names_the_original_seat(self):
@@ -148,9 +156,10 @@ class OlderWaits(unittest.TestCase):
         state = NavState(view="QUESTIONS", title="QUESTIONS")
         frame = draw(vm, state, 168, 60, beat=1)
         rows = frame.text_rows()
-        heading = next(y for y, row in enumerate(rows) if "OLDER WAITS · 2" in row)
-        self.assertIn("not closed automatically", rows[heading])
-        self.assertIn("[ hide ]", rows[heading])
+        heading = next(y for y, row in enumerate(rows) if "── older waits 2" in row)
+        self.assertIn("hide", rows[heading])
+        self.assertTrue(any(hit.y == heading and hit.action == ("question.older.toggle",)
+                            for hit in frame.hits))
         older = next(y for y, row in enumerate(rows) if "run-authorization gate check" in row)
         self.assertGreater(older, heading)
         age_x = rows[older].index("27d 0h")
@@ -158,9 +167,7 @@ class OlderWaits(unittest.TestCase):
         folded, _ = reduce(state, {"type": "click", "action": ("question.older.toggle",)})
         text = "\n".join(_text(vm, folded))
         self.assertNotIn("run-authorization", text)
-        self.assertIn("OLDER WAITS · 2", text)
-        self.assertIn("[ show ]", text)
-        self.assertIn("older waits 2", text)
+        self.assertIn("── older waits 2 (no session to take it 1)  show", text)
 
 
 class NoResponseRoutes(unittest.TestCase):

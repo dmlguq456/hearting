@@ -23,6 +23,12 @@ from fleet import herdr_projection
 from fleet.render import _interaction_badge
 
 
+def _has_hit(vm, state, action, cols=140, rows=45):
+    """Whether the painted QUESTIONS screen offers ``action`` to a press."""
+    from fleet.explorer.frame import draw
+    return any(hit.action == tuple(action) for hit in draw(vm, state, cols, rows).hits)
+
+
 class AnswerWaitSurfaceTests(unittest.TestCase):
     def test_status_and_system_lines_use_the_screen_language_wait_word(self):
         snapshot = {"jobs": [], "answer_waits": {"complete": True, "total": 1,
@@ -465,7 +471,7 @@ try {
                             for item in records))
         frame = draw(vm, NavState(view="QUESTIONS"), 140, 45)
         text = "\n".join(frame.text_rows())
-        self.assertIn("2 questions", text)
+        self.assertIn("◑ to answer 2", text)
         self.assertIn("older waits 1", text)
         self.assertNotIn(private, text)
         self.assertNotIn("PRIVATE-CHOICE-SENTINEL", text)
@@ -481,10 +487,13 @@ try {
                                                 "health": [{"source": "cache", "state": "failed"}]}})
         self.assertEqual(vm.system["answer_waits"]["state"], "failed")
         self.assertIsNone(vm.system["answer_waits"]["total"])
-        text = "\n".join(draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows())
-        self.assertIn("? question", text)
-        self.assertNotIn("0 questions", text)
-        self.assertIn("? waiting", text)
+        for lang, word in (("English", "◑ to answer"), ("Korean", "◑답 대기")):
+            with self.subTest(lang=lang), mock.patch.dict("os.environ", {"FLEET_NOW_LANG": lang}):
+                rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
+                text = "\n".join(rows)
+                self.assertIn(f"── {word} ?", text)
+                self.assertNotIn(f"{word} 0", text)
+                self.assertIn(f"{word} ? ·", rows[-1])
 
 
 class FleetQuestionActionTests(unittest.TestCase):
@@ -547,10 +556,9 @@ class FleetQuestionActionTests(unittest.TestCase):
 
         text = "\n".join(draw(vm, state, 140, 45).text_rows())
 
-        self.assertIn("No verified direct response; check the native prompt.", text)
-        self.assertIn("select to view and answer · native fallback if unsupported", text)
-        self.assertNotIn("submit answer", text)
-        self.assertNotIn("[ approve ]", text)
+        self.assertIn("answer in its pane", text)
+        self.assertFalse(_has_hit(vm, state, ("question.submit",)))
+        self.assertNotIn("approve", text)
 
     def test_choice_and_free_text_build_the_exact_structured_response(self):
         from fleet.explorer.state import reduce
@@ -596,7 +604,7 @@ class FleetQuestionActionTests(unittest.TestCase):
             system={"answer_waits": {"state": "complete", "total": 1, "older": 0}})
         text = "\n".join(draw(vm, self.state(option_only), 140, 45).text_rows())
         self.assertIn("Route A", text)
-        self.assertNotIn("press e or click to type", text)
+        self.assertNotIn("> …", text)
         blocked, effects = reduce(self.state(option_only), {"type": "click",
                                                             "action": ("question.edit", "question-q1")})
         self.assertEqual(effects, ())
@@ -607,7 +615,7 @@ class FleetQuestionActionTests(unittest.TestCase):
             "choices": [{"value": "route-a", "label": "Route A"}],
             "is_other": True}]})
         text = "\n".join(draw(vm, self.state(other_allowed), 140, 45).text_rows())
-        self.assertIn("press e or click to type", text)
+        self.assertIn("> …", text)
         editing, effects = reduce(self.state(other_allowed), {"type": "click",
                                                                "action": ("question.edit", "question-q1")})
         self.assertEqual(effects, ())
@@ -635,16 +643,16 @@ class FleetQuestionActionTests(unittest.TestCase):
             system={"answer_waits": {"state": "complete", "total": 1, "older": 0}})
         start = self.state(multiselect)
         text = "\n".join(draw(vm, start, 140, 45).text_rows())
-        self.assertIn("[ ] Alpha", text)
-        self.assertIn("[ ] Beta", text)
+        self.assertIn("○ 1  Alpha", text)
+        self.assertIn("○ 2  Beta", text)
         first, effects = reduce(start, {"type": "click", "action":
                                         ("question.choice", "choice", "a")})
         self.assertEqual(effects[0][0], "questions.draft")
         self.assertEqual(first.question_overlay["draft"]["answers"]["choice"], ["a"])
         self.assertFalse(question_values_valid(multiselect, "choice", ["a"]))
         text = "\n".join(draw(vm, first, 140, 45).text_rows())
-        self.assertIn("[x] Alpha", text)
-        self.assertNotIn("[ submit answer ]", text)
+        self.assertIn("● 1  Alpha", text)
+        self.assertFalse(_has_hit(vm, first, ("question.submit",)))
         incomplete, effects = reduce(first, {"type": "click", "action": ("question.submit",)})
         self.assertEqual(effects, ())
 
@@ -666,8 +674,7 @@ class FleetQuestionActionTests(unittest.TestCase):
                                               ("question.choice", "choice", "a")})
         self.assertEqual(effects[0][0], "questions.draft")
         self.assertEqual(complete.question_overlay["draft"]["answers"]["choice"], ["b", "a"])
-        text = "\n".join(draw(vm, complete, 140, 45).text_rows())
-        self.assertIn("[ submit answer ]", text)
+        self.assertTrue(_has_hit(vm, complete, ("question.submit",)))
         submitted, effects = reduce(complete, {"type": "click", "action":
                                                ("question.submit",)})
         self.assertEqual(effects[0][0], "questions.submit")
@@ -745,9 +752,9 @@ class FleetQuestionActionTests(unittest.TestCase):
                                               "item/commandExecution/requestApproval"}}
         limited["actions"] = ["reject", "defer"]
         text = "\n".join(draw(vm, self.state(limited), 140, 45).text_rows())
-        self.assertNotIn("[ approve ]", text)
-        self.assertIn("[ reject ]", text)
-        self.assertIn("[ defer ]", text)
+        self.assertFalse(_has_hit(vm, self.state(limited), ("question.decision", "approve")))
+        self.assertTrue(_has_hit(vm, self.state(limited), ("question.decision", "reject")))
+        self.assertTrue(_has_hit(vm, self.state(limited), ("question.decision", "defer")))
         self.assertNotIn("acceptForSession", text)
         self.assertNotIn("applyNetworkPolicyAmendment", text)
         _state, effects = reduce(self.state(limited), {"type": "click",
@@ -901,8 +908,7 @@ class FleetQuestionActionTests(unittest.TestCase):
                                                         "older": 0}})
         text = "\n".join(draw(vm, state, 140, 55).text_rows())
         self.assertIn("/workspace/output", text)
-        details = " ".join(row.split("detail:", 1)[1].strip()
-                           for row in text.splitlines() if "detail:" in row)
+        details = " ".join(row.strip() for row in text.splitlines())
         self.assertIn('"enabled": true', details)
         self.assertIn("Request turn permissions", text)
         self.assertNotIn("internal-thread-only", text)
@@ -2058,7 +2064,7 @@ class FleetOpenCodeFormsIntegrationTests(unittest.TestCase):
         hit, grid = self._rendered_submit_hit(state, vm)
         self.assertIsNotNone(hit, "the rendered QUESTIONS grid must expose explicit Submit")
         rendered = "\n".join(grid.rows_text())
-        self.assertIn("submit answer", rendered)
+        self.assertRegex(rendered, r"\bsubmit\b")
         self.assertNotIn("HIDDEN-PRIVATE-TITLE", rendered)
         self.assertNotIn("HIDDEN-PRIVATE-CHOICE", rendered)
         submitted, effects = reduce(state, {"type": "click", "action": hit.action})
@@ -2520,7 +2526,7 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
         self.assertTrue(body)
         panel = "\n".join(draw(vm, state, 140, 45).text_rows())
         self.assertIn(body, panel)
-        self.assertIn("select to view and answer", panel)
+        self.assertIn("> …", panel)
 
         draft_text = "Keep the exact route and retry safely"
         state, saved = self._save_typed_draft(state, draft_text)
@@ -2529,7 +2535,7 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
                                    "Private draft saved; submit explicitly to send.")
         panel = "\n".join(draw(vm, state, 140, 45).text_rows())
         self.assertIn(draft_text, panel)
-        self.assertIn("[ submit answer ]", panel)
+        self.assertTrue(_has_hit(vm, state, ("question.submit",)))
         exported = json.dumps(vm.to_mapping(), ensure_ascii=False, default=str)
         fleet_cache = human_wait_state._fleet_cache_path().read_text(encoding="utf-8")
         self.assertNotIn(body, exported)
@@ -2654,8 +2660,8 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
             self.assertTrue(display_detail)
             panel = "\n".join(draw(vm, state, 140, 45).text_rows())
             self.assertIn(display_detail, panel)
-            self.assertIn("No verified direct response; check the native prompt.", panel)
-            self.assertNotIn("[ submit answer ]", panel)
+            self.assertIn("answer in its pane", panel)
+            self.assertFalse(_has_hit(vm, state, ("question.submit",)))
 
             draft_text = "Private " + source + " response draft"
             if question_body:
@@ -3103,8 +3109,7 @@ class FleetS2WorkflowResponseTests(unittest.TestCase):
         panel = "\n".join(draw(vm, state, 140, 55).text_rows())
         self.assertIn("Which parts should change?", panel)
         self.assertIn("Both", panel)
-        self.assertIn("target: verify", panel)
-        self.assertIn("submit answers to proceed", panel)
+        self.assertRegex(panel, r"\bsubmit\b")
 
         state, effect = self._question_response(envelope)
         draft = state.question_overlay["draft"]
@@ -3143,7 +3148,8 @@ class FleetS2WorkflowResponseTests(unittest.TestCase):
         state, envelope, _ = self._read_in_ui(row)
         self.assertTrue(envelope["support"]["supported"], envelope)
         panel = "\n".join(draw(vm, state, 120, 35).text_rows())
-        self.assertIn("choose proceed, revise, or stop", panel)
+        for decision in ("proceed", "revise", "stop"):
+            self.assertIn(decision, panel)
         state, effects = reduce(state, {"type": "click", "action": ("question.submit",)})
         self.assertEqual(effects, ())
         state, effects = reduce(state, {"type": "click", "action": ("question.decision", "defer")})

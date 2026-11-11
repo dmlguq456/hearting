@@ -20,7 +20,8 @@ CASES = {
     "session-page-f5": NavState(scope="session:f5"),
     "route-page-f5": NavState(scope="route:f5"),
     "ROUTES-open-f5": NavState(view="ROUTES", title="ROUTES", folds=(("ropen:ROUTES", "f5"),)),
-    "QUESTIONS-fold-bb": NavState(view="QUESTIONS", title="QUESTIONS", folds=(("qshut:QUESTIONS", "bb"),)),
+    # The bb wait unfolded in place (``question.open``); the state keeps its historical name.
+    "QUESTIONS-fold-bb": NavState(view="QUESTIONS", title="QUESTIONS", folds=(("qopen:QUESTIONS", "bb"),)),
     "PEERS-pick-f5": NavState(view="PEERS", title="PEERS", folds=(("pfocus:PEERS", "f5"),)),
     "HISTORY-open-0c": NavState(view="HISTORY", title="HISTORY", folds=(("hopen:HISTORY", "0c"),)),
     "HISTORY-open-0c-card": NavState(view="HISTORY", title="HISTORY", folds=(("hopen:HISTORY", "0c"),)),

@@ -754,12 +754,16 @@ def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_wh
         lead = [(marker, "lvl_y" if marker == "◑" else "blocked"),
                 (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
-        from .pages import _segs
-        cursor = _segs(grid, x_val, y, lead, right)
+        from .pages import _fit, _segs
         pane = question.get("pane")
-        if question.get("open_tag") and pane:
+        link = "(open ▸)" if question.get("open_tag") and pane else ""
+        if link and x_val + sum(_seg_width(text) for text, _k in lead) + 2 + _seg_width(link) > right:
+            link = "▸"                     # narrow: the question text gives way, the link stays whole
+        room = right - x_val - (2 + _seg_width(link) if link else 0)
+        cursor = _segs(grid, x_val, y, _fit(lead, room) if link else lead, right)
+        if link:
             cursor = grid.put(cursor, y, "  ", "branch_s", limit=right)
-            open_x = grid.put(cursor, y, "(open ▸)", "hearting", limit=right)
+            open_x = grid.put(cursor, y, link, "hearting", limit=right)
             if open_x <= right:
                 grid.add_hit(y, cursor, open_x, ("pane", tag, str(pane)))
     else:
@@ -1536,11 +1540,14 @@ def draw_routes(grid, vm, state, x=34, y=3):
 
 
 
-_OLDER_NOTE = "not closed automatically · leaves when answered or the work ends"
 # What each wait asks, in plain words, from its source alone: the shared cache is body-free and a
 # list row never carries the question text (that is read only for the selected row).
 _QUESTION_ABOUT = {"S1-approval": "permission approval", "S1-question": "question window answer",
                    "S3": "blocked work needs direction", "S4": "marked question"}
+# One or two words for a selected request that is not waiting for a choice on this screen.
+_QUESTION_STATE_WORD = {"loading": "loading…", "submitted": "sent", "received": "received",
+                        "applied": "answered", "cancelled": "cancelled", "expired": "expired"}
+_NATIVE_ONLY = "answer in its pane"
 
 
 def question_about(question):
@@ -1556,7 +1563,7 @@ def question_about(question):
 
 
 def _question_line(question):
-    """The QUESTION cell: what the wait asks and its route, after why no session can take it."""
+    """The question cell: what the wait asks and its route, after why no session can take it."""
     parts = []
     owner_state = question.get("owner_state")
     if owner_state == "none":
@@ -1569,455 +1576,393 @@ def _question_line(question):
     return parts
 
 
-def _question_detail(question):
-    """Who, when and which route, for an unfolded wait: ``(label, text, style)`` lines."""
-    lines = []
-    route_id = question.get("route_id")
-    if route_id:
-        title = question.get("route_title")
-        lines.append(("route:", f"{title} · {route_id}" if title else str(route_id), "soft"))
-    if question.get("since_at"):
-        lines.append(("since:", f"{question['since_at']} · waiting {question.get('wait') or '·'}",
-                      "soft"))
-    owner_state = question.get("owner_state")
-    session_tag = question.get("session_tag")
+def _question_owner_note(question):
+    """Who can still take an unfolded wait, when it is not simply its listed session."""
+    owner_state, session_tag = question.get("owner_state"), question.get("session_tag")
     owner_sid = question.get("owner_sid")
     if owner_state == "successor":
         registered = question.get("registered")
-        lines.append(("owner:", f"[{session_tag or '··'}] taken over"
-                      + (f" · originally {registered}" if registered else ""), "soft"))
-    elif owner_state == "none":
-        lines.append(("owner:", "no session to take it · original session ended"
-                      + (f" ({owner_sid})" if owner_sid else ""), "lvl_y"))
-    elif not session_tag:
-        lines.append(("owner:", f"session {owner_sid} · not in the Fleet list" if owner_sid
-                      else "no record of who takes it", "dim"))
-    return tuple(lines)
+        return (f"[{session_tag or '··'}] taken over"
+                + (f" · originally {registered}" if registered else ""), "dim")
+    if owner_state == "none":
+        return ("original session ended" + (f" ({owner_sid})" if owner_sid else ""), "lvl_y")
+    if "session_tag" in question and not session_tag:
+        return ((f"session {owner_sid} · not in the Fleet list" if owner_sid
+                 else "no record of who takes it"), "dim")
+    return None
+
+
+def _question_model(question):
+    """``claude Fable 5.2 xhigh``: the session row's MODEL cell words (``model_cell_parts``)."""
+    return model_cell_parts(question.get("h"), question.get("m"), str(question.get("e") or ""))
+
+
+def _question_rule(grid, x, right, y, parts):
+    """``── ◑답 대기 2 ──────`` (``answer_wait_word``): a titled separator line, no box."""
+    if not parts:
+        grid.put(x, y, "─" * max(0, right - x), "line", limit=right)
+        return
+    grid.put(x, y, "── ", "line")
+    cursor = x + 3
+    for text, key in parts:
+        cursor = grid.put(cursor, y, text, key, limit=right)
+    if parts:
+        cursor = grid.put(cursor, y, " ", "branch_s", limit=right)
+    grid.put(cursor, y, "─" * max(0, right - cursor), "line", limit=right)
+
+
+def _question_text(spec, envelope):
+    prompt = (spec.get("question") or spec.get("prompt") or spec.get("header")
+              or spec.get("title") or spec.get("text") or envelope.get("question_id") or "")
+    if hasattr(prompt, "get"):
+        prompt = (prompt.get("text") or prompt.get("question") or prompt.get("gate")
+                  or envelope.get("question_id") or "")
+    return str(prompt or "")
+
+
+def _question_choices(spec):
+    """``(value, label)`` for each choice, in native order; a value is what is sent."""
+    result = []
+    choices = spec.get("choices", spec.get("options", ()))
+    for choice in choices if isinstance(choices, (list, tuple)) else ():
+        if isinstance(choice, Mapping):
+            value = choice.get("value")
+            if value is None:
+                value = choice.get("label", choice.get("text"))
+            label = choice.get("label") or choice.get("text") or value
+        else:
+            value = label = choice
+        if isinstance(value, str) and value:
+            result.append((value, label if isinstance(label, str) else value))
+    return result
+
+
+def _question_actions(grid, x, right, y, items):
+    """``submit │ open pane``: one line of pressable words, each its own hit."""
+    cursor = x
+    for index, (text, key, action) in enumerate(items):
+        if index:
+            cursor = grid.put(cursor, y, " │ ", "dim", limit=right)
+        start = cursor
+        cursor = grid.put(cursor, y, text, key, limit=right)
+        if action and cursor > start:
+            grid.add_hit(y, start - (1 if index else 0), cursor + 1, action)
+    return cursor
+
+
+def _question_body(grid, question, private, state, x, right, bottom, y, open_item):
+    """The unfolded wait in place: full question, choices, typed answer, then the action line."""
+    indent = x + 4
+    width = max(1, right - indent)
+
+    def line(text, key="soft"):
+        nonlocal y
+        if y < bottom:
+            grid.put(indent, y, text, key, limit=right)
+            y += 1
+
+    note = _question_owner_note(question)
+    if private is None:
+        if note:
+            line(*note)
+        if "session_tag" not in question and question.get("title") is not None:
+            for value in (question.get("title"), question.get("now")):
+                for wrapped in _wrap(str(value or ""), width) if value else ():
+                    line(wrapped, "soft")
+        items = [(_NATIVE_ONLY, "dim", None)]
+        if open_item:
+            items.append(open_item)
+        if y < bottom:
+            _question_actions(grid, indent, right, y, items)
+            y += 1
+        return y
+    from .state import (question_action_supported, question_answer_supported,
+                        question_choice_click_allowed, question_decisions,
+                        question_draft_supported, question_free_text_available, question_items,
+                        question_multiple_select, question_values_valid, _question_text_draft)
+    detail = private.get("detail")
+    envelope = detail if hasattr(detail, "get") else {}
+    specs = question_items(envelope)
+    kind = str(envelope.get("kind") or "").lower()
+    approval = ("approval" in kind or "permission" in kind or
+                any(word in kind for word in ("commandexecution", "filechange")))
+    request_state = str(private.get("state") or envelope.get("state") or "unknown")
+    request_state = request_state if envelope.get("state") == request_state else (
+        "loading" if private.get("state") == "loading" else "unknown")
+    private_detail = envelope.get("detail") if envelope.get("state") != "unknown" else None
+    if approval or not specs:
+        # What an approval asks for (or a request without a schema): its own words, line by line.
+        lines = []
+        if isinstance(private_detail, Mapping):
+            for name, value in list(private_detail.items())[:12]:
+                if str(name).replace("_", "").casefold() in {
+                        "availabledecisions", "threadid", "turnid", "itemid", "requestid",
+                        "sessionid", "questionid", "isblocking", "autoresolutionms", "questions",
+                        "choices", "responsemode", "decision", "gate", "target"}:
+                    continue
+                if isinstance(value, (list, tuple, Mapping)):
+                    import json
+                    value = json.dumps(value if not isinstance(value, Mapping) else dict(value),
+                                       ensure_ascii=False, sort_keys=isinstance(value, Mapping))
+                if name in ("question", "prompt", "text"):
+                    lines.extend(str(value).splitlines() or [""])
+                else:
+                    lines.append(f"{str(name).replace('_', ' ')}: {value}")
+        elif isinstance(private_detail, (str, int, float)):
+            lines.extend(str(private_detail).splitlines())
+        for text in lines:
+            for wrapped in _wrap(text, width):
+                line(wrapped)
+    can_draft = question_draft_supported(envelope) and request_state == "open"
+    can_answer = question_answer_supported(envelope)
+    draft = private.get("draft")
+    answers = draft.get("answers", {}) if hasattr(draft, "get") else {}
+    complete = True
+    native_only = False
+    for spec in () if approval else specs:
+        qid = spec["id"]
+        for text in _question_text(spec, envelope).splitlines() or [""]:
+            for wrapped in _wrap(text, width):
+                line(wrapped)
+        values = answers.get(qid, ()) if hasattr(answers, "get") else ()
+        values = tuple(values) if isinstance(values, (list, tuple)) else ()
+        choices = _question_choices(spec)
+        secret = bool(spec.get("is_secret") or spec.get("isSecret"))
+        for number, (value, label) in enumerate(choices, 1):
+            if y >= bottom:
+                break
+            chosen = value in values
+            selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
+            mark = ("●" if chosen else "○") if (selectable or chosen) else " "
+            cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
+            cursor = grid.put(cursor + 1, y, f"{number}  ", "dim" if not selectable else "soft",
+                              limit=right)
+            cursor = grid.put(cursor, y, _clip(str(label), max(1, right - cursor)),
+                              "soft" if selectable or chosen else "dim", limit=right)
+            if spec.get("recommended") == number - 1:
+                grid.put(cursor, y, " (recommended)", "dim", limit=right)
+            if selectable:
+                # The whole line answers: wherever on it the person presses.
+                grid.add_hit(y, x, right, ("question.choice", qid, value))
+            y += 1
+        if not question_values_valid(envelope, qid, values):
+            complete = False
+        free = question_free_text_available(envelope, qid, values)
+        if free and y < bottom:
+            editing = private.get("editing") and (private.get("editing_question_id") or qid) == qid
+            choice_values = {value for value, _label in choices}
+            typed = (_question_text_draft(private, qid) if editing else
+                     " · ".join(str(value) for value in values if value not in choice_values))
+            if secret:
+                typed = "•" * min(len(typed), 32)
+            cursor = grid.put(indent, y, "> ", "hearting" if can_draft else "dim", limit=right)
+            if typed:
+                cursor = grid.put(cursor, y, _clip(typed, max(1, right - cursor - 1)), "soft",
+                                  limit=right)
+            elif not editing:
+                cursor = grid.put(cursor, y, "…", "dim", limit=right)
+            if editing:
+                grid.put(cursor, y, "▏", "hearting", limit=right)
+            if can_draft:
+                grid.add_hit(y, x, right, ("question.edit", qid))
+            y += 1
+        elif not choices:
+            native_only = True
+    if note:
+        line(*note)
+    if y >= bottom:
+        return y
+    items = []
+    if request_state == "open" and approval:
+        decisions = question_decisions(envelope) if question_action_supported(envelope) else ()
+        for decision in decisions:
+            items.append((decision, "hearting" if decision != "defer" else "soft",
+                          ("question.decision", decision)))
+        if not decisions:
+            items.append((_NATIVE_ONLY, "dim", None))
+    elif request_state == "open" and (specs or can_answer) and can_answer and not native_only:
+        ready = complete and not private.get("pending")
+        items.append(("submit", "hearting" if ready else "dim",
+                      ("question.submit",) if ready else None))
+    elif request_state in _QUESTION_STATE_WORD:
+        items.append((_QUESTION_STATE_WORD[request_state], "dim", None))
+    else:
+        items.append((_NATIVE_ONLY, "dim", None))
+    if private.get("pending") and items and items[0][0] != "sending…":
+        items[0] = ("sending…", "dim", None)
+    if open_item:
+        items.append(open_item)
+    _question_actions(grid, indent, right, y, items)
+    return y + 1
 
 
 def draw_questions(grid, vm, state, x=34, y=3):
+    """QUESTIONS: one line per wait; pressing it unfolds the question in place (C5)."""
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
-    from .chrome import older_waits_text
+    from .grid import put_fit
     from .state import older_waits_shown
     all_questions = tuple(vm.questions or ())
     current_questions = tuple(item for item in all_questions if not item.get("older"))
     older_questions = tuple(item for item in all_questions if item.get("older"))
     older_open = older_waits_shown(state)
-    questions = current_questions + (older_questions if older_open else ())
     system = vm.system if hasattr(vm.system, "get") else {}
     waits = system.get("answer_waits") if hasattr(system, "get") else None
     if not hasattr(waits, "get"):
         waits = {"state": "complete", "total": len(current_questions), "older": len(older_questions)}
     known = waits.get("state") == "complete"
     total = waits.get("total") if known else None
-    older_count = len(older_questions)
-    grid.put(x, y, "── ", "line")
-    cursor = grid.put(x + 3, y, "WAITING", "sect")
-    cursor = grid.put(cursor, y, "  " + (str(total) if total is not None else "?") + " question" +
-                      ("s" if total != 1 else ""), "dim")
-    if older_waits_text(waits):
-        cursor = grid.put(cursor, y, older_waits_text(waits), "dim", limit=right)
-    elif not known:
-        cursor = grid.put(cursor, y, " · observation " + str(waits.get("state")), "dim")
-    grid.put(cursor, y, " ", "branch_s")
-    grid.put(cursor + 1, y, "─" * max(0, right - cursor - 1), "line", limit=right)
+    word = answer_wait_word()
+    heading = [(word[:1], "lvl_y"),
+               (word[1:] + " " + (str(total) if total is not None else "?"), "sect")]
+    if not known:
+        heading.append((" · observation " + str(waits.get("state")), "dim"))
+    _question_rule(grid, x, right, y, heading)
     y += 1
-    narrow = use < 100
-    kind_x = 10 + (13 if narrow else 25) + 2
-    wait_x = kind_x + (11 if narrow else 14)          # wide rows fit ``blocked owner`` whole
-    project_x = None if narrow else wait_x + 10
-    session_x = wait_x + 10 + (0 if narrow else 14)
-    columns = [(3, "ID"), (10, "HARNESS"), (kind_x, "KIND"), (wait_x, "WAITING")]
-    if project_x is not None:
-        columns.append((project_x, "PROJECT"))
-    columns.append((session_x, "QUESTION"))
-    grid.fill(x, right, y, " ", tint=234)
-    for off, name in columns:
-        grid.put(x + off, y, name, "head", tint=234, limit=right)
-    y += 1
-    closed = state.opened_for("qshut:" + state.view, "")
+    from .state import question_open_tag
+    opened = question_open_tag(state)
     selected = state.opened_for("qsel:QUESTIONS", "")
     overlay = getattr(state, "question_overlay", None)
     overlay = overlay if hasattr(overlay, "get") else {}
-    older_heading_drawn = False
-    for question in questions:
-        if y >= bottom:
-            grid.put(right - 18, bottom, "↓ more below", "dim", limit=right)
-            return
-        if question.get("older") and not older_heading_drawn:
-            toggle = "[ hide ]"
-            cursor = grid.put(x + 3, y, f"OLDER WAITS · {older_count}", "sect", limit=right)
-            grid.put(cursor, y, _clip("  " + _OLDER_NOTE, right - len(toggle) - 1 - cursor), "dim",
-                     limit=right - len(toggle) - 1)
-            end = grid.put(right - len(toggle), y, toggle, "hearting", limit=right)
-            grid.add_hit(y, right - len(toggle), end, ("question.older.toggle",))
-            grid.add_hit(y, x, right, ("question.older.toggle",))
-            y += 1
-            older_heading_drawn = True
-            if y >= bottom:
-                return
+    shown = current_questions + (older_questions if older_open else ())
+    tag_w = max((_seg_width(_clip(str(q.get("session_tag") or ("··" if "session_tag" in q else
+                                                                  q.get("tag") or "·")), 5))
+                 for q in shown), default=2)
+    tag_x, model_x = x + 2, x + 2 + tag_w + 4
+    model_w = min(max((_seg_width("".join(t for t, _k in _question_model(q))) for q in shown),
+                      default=0), max(8, use // 3))
+    projects = {str(q.get("project")) for q in shown if q.get("project")}
+    project_w = (min(max(_seg_width(p) for p in projects), 14) if len(projects) > 1 else 0)
+    text_x = model_x + model_w + 3 + (project_w + 3 if project_w else 0)
+
+    def row(question):
+        nonlocal y
         tag = str(question.get("tag") or "·")
-        # The bracket names who answers: the answering session's tag, ``··`` while none is listed.
         shown_tag = (str(question.get("session_tag")) if question.get("session_tag")
                      else "··" if "session_tag" in question else tag)
-        tag_text = _clip(shown_tag, 5)
-        tag_x = x + 4
-        is_open = closed != tag
-        current_ref = question.get("ref")
-        can_select = (isinstance(current_ref, Mapping)
-                      and all(current_ref.get(key) for key in ("id", "harness", "session_id")))
-        grid.add_hit(y, x, x + 2 if can_select else right,
-                     ("fold", "qshut:" + state.view, tag))
-        if can_select:
-            grid.add_hit(y, x + 2, right, ("question.select", tag, current_ref))
+        is_open = opened == tag
+        ref = question.get("ref")
+        bound = (isinstance(ref, Mapping)
+                 and all(ref.get(key) for key in ("id", "harness", "session_id")))
+        grid.add_hit(y, x - 1, right, ("question.open", tag, ref if bound else None))
         if is_open:
             grid.fill(x - 1, right, y, " ", tint=236)
-            grid.put(x, y, "▶", "soft")
         marker = str(question.get("marker") or "●")
-        grid.put(x + 1, y, marker, "lvl_y" if marker == "◑" else "dim" if marker == "◌" else "blocked")
-        grid.put(x + 3, y, "[", "dim")
-        grid.put(tag_x, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag
-                 else "dim", limit=tag_x + _seg_width(tag_text))
-        grid.put(tag_x + _seg_width(tag_text), y, "]", "dim", limit=x + 10)
-        harness = str(question.get("h") or "·")
-        grid.put(x + 10, y, harness, "hb_" + harness)
-        if narrow:
-            effort = str(question.get("e") or "")
-            grid.put(x + 10 + len(harness), y, "·" + effort, "eff_" + effort)
-        else:
-            model = question.get("m") or ("·", "dim")
-            cursor = grid.put(x + 10 + len(harness), y, " (", "dim")
-            model_key = model[1] if len(model) > 1 else "dim"
-            cursor = grid.put(cursor, y, str(model[0]), model_key)
-            cursor = grid.put(cursor, y, "·", "dim")
-            effort = str(question.get("e") or "")
-            cursor = grid.put(cursor, y, effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim")
-            grid.put(cursor, y, ")", "dim")
-        grid.put(x + kind_x, y, _clip(str(question.get("kind") or "·"), wait_x - kind_x - 1), "blocked")
+        marker = "◌" if marker == "◌" else "◑"
+        grid.put(x, y, marker, "dim" if marker == "◌" else "lvl_y")
+        tag_text = _clip(shown_tag, 5)
+        grid.put(tag_x, y, "[", "dim")
+        grid.put(tag_x + 1, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag
+                 else "dim", limit=tag_x + 1 + _seg_width(tag_text))
+        grid.put(tag_x + 1 + _seg_width(tag_text), y, "]", "dim")
+        _put_model_cell(grid, model_x, y, _question_model(question), model_x + model_w)
+        cursor = model_x + model_w + 1
+        grid.put(cursor, y, "│", "dim")
+        if project_w:
+            grid.put(cursor + 2, y, _clip(str(question.get("project") or ""), project_w), "soft")
+            grid.put(cursor + 3 + project_w, y, "│", "dim")
+        wait = str(question.get("wait") or "")
+        wait_x = right - _seg_width(wait) - 1
         # An older wait keeps its age in sight (yellow); it is listed, never closed by age.
-        grid.put(x + wait_x, y, str(question.get("wait") or "·"),
-                 "lvl_y" if question.get("fold") == "older" else "soft")
-        if project_x is not None:
-            grid.put(x + project_x, y, str(question.get("project") or "·"), "soft")
-        if "session_tag" not in question and question.get("title") is not None:
-            # A title-carrying reference record names its session there.
-            grid.put(x + session_x, y, _clip(str(question["title"]), use - session_x),
-                     "hb_" + harness)
+        grid.put(wait_x, y, wait, "lvl_y" if question.get("fold") == "older" else "dim")
+        private = None
+        detail = overlay.get("detail") if tag == selected else None
+        current_ref, overlay_ref = question.get("ref"), overlay.get("ref")
+        if (tag == selected and hasattr(current_ref, "get") and hasattr(overlay_ref, "get")
+                and overlay_ref.get("id") == question.get("id")
+                and all(current_ref.get(key) == overlay_ref.get(key)
+                        for key in ("harness", "session_id", "request_id", "turn_id",
+                                    "route_id", "question_id"))):
+            private = overlay
+        first = None
+        if private is not None and hasattr(detail, "get") and detail.get("state") != "unknown":
+            from .state import question_items
+            specs = question_items(detail)
+            first = (_question_text(specs[0], detail) if specs else
+                     detail.get("detail") if isinstance(detail.get("detail"), str) else None)
+            if isinstance(detail.get("detail"), Mapping) and not specs:
+                first = detail["detail"].get("operation") or detail["detail"].get("question")
+            first = str(first).strip().splitlines()[0] if first and str(first).strip() else None
+        limit = max(text_x, wait_x - 2)
+        if first:
+            parts = [(first, "soft")]
+        elif "session_tag" not in question and question.get("title") is not None:
+            parts = [(str(question["title"]), "hb_" + str(question.get("h") or "·"))]
         else:
-            from .grid import put_fit
-            put_fit(grid, x + session_x, y, _question_line(question), limit=x + use)
-        if tag == selected:
-            grid.put(x, y, "◆", "hearting")
+            parts = _question_line(question)
+        put_fit(grid, text_x, y, parts, limit=limit)
         if is_open:
             _tint_row(grid, y, x - 1, right, 236)
         y += 1
         if not is_open:
-            continue
-        if "session_tag" not in question and question.get("title") is not None:
-            detail_fields = (("title:", question.get("title"), "hb_" + harness),
-                             *(([("project:", question.get("project"), "soft")] if narrow else [])),
-                             ("now:", question.get("now"), "soft"))
-        else:
-            detail_fields = (*_question_detail(question),
-                             *(([("project:", question.get("project"), "soft")] if narrow else [])))
-        for label, value, style in detail_fields:
-            grid.put(x + 10, y, label, "label")
-            for line in _wrap(str(value or "·"), max(1, use - 20)):
-                grid.put(x + 20, y, line, style, limit=right)
-                y += 1
-        pane = str(question.get("pane") or "·")
-        grid.put(x + 10, y, "pane:", "label")
-        pane_start = x + 20
-        grid.put(pane_start, y, pane, "soft", limit=right)
-        open_tag = str(question.get("open_tag") or "")
-        legacy_fixture = "session_tag" not in question and question.get("title") is not None
-        if legacy_fixture:
-            pane_hit_start = pane_start + len(pane) + 2
-            grid.add_hit(y, pane_hit_start, pane_hit_start + len("(open ▸)"),
-                         ("pane", tag, pane))
-            cursor = grid.put(pane_start + len(pane), y, "  ", "branch_s", limit=x + use)
-            grid.put(cursor, y, "(open ▸)", "hearting", limit=x + use)
-        elif open_tag and pane != "·":
-            pane_hit_start = x + 20 + len(pane) + 2
-            grid.add_hit(y, pane_hit_start, pane_hit_start + len("(open ▸)"),
-                         ("pane", open_tag, pane))
-            cursor = grid.put(pane_start + len(pane), y, "  ", "branch_s", limit=x + use)
-            grid.put(cursor, y, "(open ▸)", "hearting", limit=x + use)
-        else:
-            grid.put(pane_start + len(pane), y, "  no current pane", "dim", limit=x + use)
+            return
+        pane = question.get("pane")
+        legacy = "session_tag" not in question and question.get("title") is not None
+        target = question.get("open_tag") or (tag if legacy else None)
+        open_item = (("open pane", "hearting", ("pane", str(target), str(pane)))
+                     if target and pane else None)
+        y = _question_body(grid, question, private, state, x, right, bottom, y, open_item)
+
+    for question in current_questions:
+        if y >= bottom:
+            grid.put(right - 13, bottom, "↓ more below", "dim", limit=right)
+            return
+        row(question)
+    if older_questions:
+        if y >= bottom:
+            grid.put(right - 13, bottom, "↓ more below", "dim", limit=right)
+            return
+        note = ""
+        ownerless = waits.get("ownerless")
+        if isinstance(ownerless, int) and not isinstance(ownerless, bool) and ownerless > 0:
+            note = f" (no session to take it {ownerless})"
+        _question_rule(grid, x, right, y, [("older waits " + str(len(older_questions)), "sect"),
+                                            (note, "dim"),
+                                            ("  " + ("hide" if older_open else "show"), "hearting")])
+        grid.add_hit(y, x - 1, right, ("question.older.toggle",))
         y += 1
-        grid.put(x + 10, y, "answer:", "label")
-        grid.put(x + 20, y, "⏎", "hearting")
-        guide = (" select to view and answer · native fallback if unsupported" if can_select
-                 else " go to its pane and answer there")
-        grid.put(x + 21, y, guide, "dim", limit=x + use)
-        y += 1
-        current_ref = question.get("ref")
-        overlay_ref = overlay.get("ref")
-        same_request = (hasattr(current_ref, "get") and hasattr(overlay_ref, "get")
-                        and overlay_ref.get("id") == question.get("id")
-                        and all(current_ref.get(key) == overlay_ref.get(key)
-                                for key in ("harness", "session_id", "request_id", "turn_id",
-                                            "route_id", "question_id")))
-        private = overlay if tag == selected and same_request else None
-        if private:
-            detail = private.get("detail")
-            envelope = detail if hasattr(detail, "get") else {}
-            from .state import question_items
-            question_specs = question_items(envelope)
-            kind = str(envelope.get("kind") or "").lower()
-            approval = ("approval" in kind or "permission" in kind or
-                        any(word in kind for word in ("commandexecution", "filechange")))
-            native_ref = envelope.get("native_ref")
-            opencode_v2_form = (envelope.get("harness") == "opencode"
-                                and isinstance(native_ref, Mapping)
-                                and native_ref.get("transport") == "opencode-http-v2")
-            private_detail = envelope.get("detail") if envelope.get("state") != "unknown" else None
-            content_x = x + (10 if narrow else 20)
-            if (question_specs or opencode_v2_form) and not approval:
-                detail_lines = []
-            elif isinstance(private_detail, dict) or hasattr(private_detail, "items"):
-                detail_lines = []
-                for name, value in list(private_detail.items())[:12]:
-                    if str(name).replace("_", "").casefold() in {
-                            "availabledecisions", "threadid", "turnid", "itemid", "requestid",
-                            "sessionid", "questionid", "isblocking", "autoresolutionms"}:
-                        continue
-                    label = str(name).replace("_", " ") + ": "
-                    if isinstance(value, (str, int, float)):
-                        detail_lines.append(label + str(value))
-                    elif isinstance(value, (list, tuple)):
-                        import json
-                        detail_lines.append(label + json.dumps(value, ensure_ascii=False))
-                    elif isinstance(value, Mapping):
-                        import json
-                        detail_lines.append(label + json.dumps(dict(value), ensure_ascii=False,
-                                                               sort_keys=True))
-            elif isinstance(private_detail, (str, int, float)):
-                detail_lines = [str(private_detail)]
-            else:
-                detail_lines = []
-            for line in detail_lines:
-                for wrapped in _wrap(line, max(1, right - content_x)):
-                    if y >= bottom:
-                        break
-                    if not narrow:
-                        grid.put(x + 10, y, "detail:", "label")
-                    grid.put(content_x, y, wrapped, "soft", limit=right)
-                    y += 1
-            if envelope.get("source") == "S2" and isinstance(private_detail, Mapping):
-                target = private_detail.get("target")
-                if isinstance(target, Mapping):
-                    parts = ["gate: " + str(target.get("gate") or envelope.get("question_id") or "")]
-                    if target.get("node"):
-                        parts.append("target: " + str(target["node"]))
-                    if private_detail.get("response_mode") == "frame-interview":
-                        parts.append("submit answers to proceed")
-                    else:
-                        parts.append("choose proceed, revise, or stop")
-                    for wrapped in _wrap(" · ".join(parts), max(1, right - content_x)):
-                        if y >= bottom:
-                            break
-                        grid.put(content_x, y, wrapped, "soft", limit=right)
-                        y += 1
-            status = str(private.get("status") or private.get("state") or "")
-            support = envelope.get("support")
-            if (support is False or
-                    isinstance(support, Mapping) and support.get("supported") is False):
-                status = "No verified direct response; check the native prompt."
-            if status and y < bottom:
-                if narrow:
-                    grid.put(x + 10, y, _clip("status: " + status, max(1, right - x - 10)),
-                             "lvl_y" if private.get("state") in ("unknown", "expired", "cancelled")
-                             else "dim", limit=right)
-                else:
-                    grid.put(x + 10, y, "status:", "label")
-                    grid.put(x + 20, y, _clip(status, max(1, use - 20)),
-                             "lvl_y" if private.get("state") in ("unknown", "expired", "cancelled")
-                             else "dim", limit=right)
-                y += 1
-            request_state = str(private.get("state") or envelope.get("state") or "unknown")
-            request_state = (request_state if envelope.get("state") == request_state else "unknown")
-            from .state import (question_action_supported, question_answer_supported,
-                                question_draft_supported,
-                                question_choice_click_allowed, question_decisions,
-                                question_free_text_available, question_multiple_select,
-                                question_values_valid)
-            supported = question_action_supported(envelope)
-            can_answer = question_answer_supported(envelope)
-            if request_state == "open" and supported and approval and y < bottom:
-                for decision in question_decisions(envelope):
-                    cursor = x + 10
-                    label = "[ " + decision + " ]"
-                    end = grid.put(cursor, y, label, "hearting" if decision != "defer" else "dim",
-                                   limit=right)
-                    if end > cursor:
-                        grid.add_hit(y, cursor, end, ("question.decision", decision))
-                    y += 1
-                    if y >= bottom:
-                        break
-            elif not approval and (question_specs or can_answer):
-                draft = private.get("draft")
-                answers = draft.get("answers", {}) if hasattr(draft, "get") else {}
-                can_draft = question_draft_supported(envelope)
-                complete = True
-                for index, question_spec in enumerate(question_specs, 1):
-                    qid = question_spec["id"]
-                    prompt = (question_spec.get("question") or question_spec.get("prompt")
-                              or question_spec.get("header") or question_spec.get("title")
-                              or question_spec.get("text") or envelope.get("question_id")
-                              or "Question")
-                    if hasattr(prompt, "get"):
-                        prompt = (prompt.get("text") or prompt.get("question")
-                                  or prompt.get("gate") or envelope.get("question_id")
-                                  or "Question")
-                    prompt_lines = _wrap(str(prompt), max(1, right - (x + 20)))
-                    if y < bottom:
-                        grid.put(x + 10, y, f"Q{index}:", "label")
-                        grid.put(x + 20, y, prompt_lines[0] if prompt_lines else "Question",
-                                 "soft", limit=right)
-                        y += 1
-                    for extra_line in prompt_lines[1:]:
-                        if y >= bottom:
-                            break
-                        grid.put(x + 20, y, extra_line, "soft", limit=right)
-                        y += 1
-                    choices = question_spec.get("choices", question_spec.get("options", ()))
-                    values = answers.get(qid, ()) if hasattr(answers, "get") else ()
-                    values = tuple(values) if isinstance(values, (list, tuple)) else ()
-                    multi_select = question_multiple_select(envelope, qid)
-                    choice_labels = {}
-                    for choice_index, choice in enumerate(choices if isinstance(choices, (list, tuple)) else ()):
-                        if isinstance(choice, Mapping):
-                            value = choice.get("value")
-                            if value is None:
-                                value = choice.get("label", choice.get("text"))
-                            label = choice.get("label") or choice.get("text") or value
-                        else:
-                            value = label = choice
-                        if not isinstance(value, str) or not value:
-                            continue
-                        choice_labels[value] = label if isinstance(label, str) else value
-                        if y >= bottom:
-                            break
-                        cursor = x + 20
-                        selected_choice = value in values
-                        if question_spec.get("recommended") == choice_index:
-                            label = str(label) + " (recommended)"
-                        shown = ("[" + ("x" if selected_choice else " ") + "] "
-                                 + str(label if isinstance(label, str) else value)
-                                 if multi_select else
-                                 "[ " + str(label if isinstance(label, str) else value) + " ]")
-                        selectable = (can_draft and request_state == "open"
-                                      and question_choice_click_allowed(
-                                          envelope, qid, value, values))
-                        end = grid.put(cursor, y, shown,
-                                       "hearting" if selectable else
-                                       "soft" if selected_choice else "dim",
-                                       limit=right)
-                        if selectable and end > cursor:
-                            grid.add_hit(y, cursor, end, ("question.choice", qid, value))
-                        y += 1
-                    answer_text = " · ".join(str(value) for value in values) if values else ""
-                    display_answer = " · ".join(choice_labels.get(value, value)
-                                                for value in values)
-                    if question_spec.get("is_secret") or question_spec.get("isSecret"):
-                        answer_text = "•" * min(len(answer_text), 32)
-                        display_answer = "•" * min(len(display_answer), 32)
-                    if not question_values_valid(envelope, qid, values):
-                        complete = False
-                    if (y < bottom and question_free_text_available(envelope, qid, values)):
-                        label = "answer: " + (answer_text or "press e or click to type")
-                        end = grid.put(x + 10, y, _clip(label, max(0, right - x - 10)),
-                                       "soft", limit=right)
-                        if can_draft and request_state == "open":
-                            grid.add_hit(y, x + 10, max(x + 11, end),
-                                         ("question.edit", qid))
-                        y += 1
-                    elif display_answer and y < bottom:
-                        grid.put(x + 10, y, _clip("selected: " + display_answer,
-                                                  max(0, right - x - 10)), "soft", limit=right)
-                        y += 1
-                no_native_input = any(
-                    not question_free_text_available(envelope, item["id"],
-                        answers.get(item["id"], ()) if hasattr(answers, "get") else ())
-                    and not (item.get("choices", item.get("options")))
-                    for item in question_specs)
-                if no_native_input and y < bottom:
-                    fallback = ("Multiple question response is unavailable; use the native prompt."
-                                if len(question_specs) > 1 else
-                                "No native answer input is available; use the native prompt.")
-                    grid.put(x + 10, y, fallback, "dim", limit=right)
-                    y += 1
-                elif (complete and can_answer and request_state == "open"
-                      and not private.get("pending") and y < bottom):
-                    response_mode = (envelope.get("detail", {}).get("response_mode")
-                                     if isinstance(envelope.get("detail"), Mapping) else None)
-                    if envelope.get("source") == "S2":
-                        label = ("[ submit answers and proceed ]" if response_mode == "frame-interview"
-                                 else "[ submit gate decision ]")
-                    else:
-                        label = "[ submit answer ]"
-                    end = grid.put(x + 10, y, label, "hearting", limit=right)
-                    grid.add_hit(y, x + 10, end, ("question.submit",))
-                    y += 1
-            elif request_state == "open" and approval and y < bottom:
-                grid.put(x + 10, y, "Approval response unavailable; use the native prompt.",
-                         "dim", limit=right)
-                y += 1
-            if y < bottom and private.get("editing"):
-                grid.put(x + 10, y, "typing · Enter submits · Esc pauses", "dim", limit=right)
-                y += 1
-    if older_count > 0 and not older_heading_drawn:
-        label = f"OLDER WAITS · {older_count}"
-        toggle = "[ show ]" if not older_open else "[ hide ]"
-        cursor = grid.put(x + 3, y, label, "sect", limit=right)
-        grid.put(cursor, y, _clip("  " + _OLDER_NOTE, right - len(toggle) - 1 - cursor), "dim",
-                 limit=right - len(toggle) - 1)
-        end = grid.put(right - len(toggle), y, toggle, "hearting", limit=right)
-        grid.add_hit(y, right - len(toggle), end, ("question.older.toggle",))
-        y += 1
-    y += 1
+        for question in older_questions if older_open else ():
+            if y >= bottom:
+                grid.put(right - 13, bottom, "↓ more below", "dim", limit=right)
+                return
+            row(question)
+    if y >= bottom:
+        return
     answered = tuple(vm.answered or ())
-    grid.put(x, y, "── ", "line")
-    cursor = grid.put(x + 3, y, "ANSWERED TODAY", "sect")
-    answered_count = len(answered[0][1]) if answered else 0     # the first repo's own rows, as its name before it
-    first_repo = repo_label(answered[0][0]) if answered else "·"
+    listed = sum(len(rows) for _repo, rows in answered)
     total = (vm.system or {}).get("answered_total") if hasattr(vm.system, "get") else None
-    total_text = str(total) if total is not None else str(sum(len(rows) for _, rows in answered))
-    cursor = grid.put(cursor, y, f"  {first_repo + ' ' if first_repo else ''}{answered_count} · {total_text} decision records in all projects", "dim", limit=grid.cols)
-    grid.put(cursor, y, " ", "branch_s")
-    for xx in range(cursor + 1, right):
-        grid.put(xx, y, "─", "line")
+    heading = [("answered today " + str(listed), "sect")]
+    if isinstance(total, int) and not isinstance(total, bool) and total != listed:
+        heading.append((f" ({total} in all projects)", "dim"))
+    _question_rule(grid, x, right, y, heading)
     y += 1
-    grid.fill(x, right, y, " ", tint=234)
-    for off, label in ((3, "TIME"), (10, "PROJECT"), (24, "QUESTION")):
-        grid.put(x + off, y, label, "head", tint=234, limit=right)
-    y += 1
+    several = len(answered) > 1
+    text_at = x + 9 + (16 if several else 0)
     for repo, records in answered:
         for index, record in enumerate(records):
             if y >= bottom:
                 return
             at, text = record[:2]
             ident = f"{repo}:{index}"
-            lines = _wrap_cells(str(text), max(1, use - 24))
+            lines = _wrap_cells(str(text), max(1, right - text_at))
             is_open = state.opened_for("aopen:" + state.view) == ident and len(lines) > 1
             if len(lines) > 1:
-                grid.add_hit(y, x, right, ("fold", "aopen:" + state.view, ident))
-            if is_open:
-                grid.put(x, y, "▶", "soft")
-            grid.put(x + 1, y, "✓", "done")
-            grid.put(x + 3, y, str(at), "dim")
-            if index == 0:
-                grid.put(x + 10, y, repo_label(repo), "soft")
+                grid.add_hit(y, x - 1, right, ("fold", "aopen:" + state.view, ident))
+            grid.put(x, y, "✓", "done")
+            grid.put(x + 2, y, str(at), "dim")
+            if several:
+                grid.put(x + 9, y, _clip(repo_label(repo), 14), "soft")
             first_row = y
-            visible = lines if is_open else [(_clip(str(text), max(0, use - 24)))]
-            for line in visible:
-                grid.put(x + 24, y, line, "title_dim", limit=right)
+            visible = lines if is_open else [_clip(str(text), max(0, right - text_at))]
+            for text_line in visible:
+                if y >= bottom:
+                    return
+                grid.put(text_at, y, text_line, "title_dim", limit=right)
                 y += 1
             if is_open:
                 _tint_row(grid, first_row, x - 1, right, 236)
+    if y < bottom:
+        _question_rule(grid, x, right, y, [])
 
 
 def _wrap(text, width):

@@ -115,6 +115,8 @@ def _explorer_key_name(ch, searching=False):
     plain = {ord("/"): "/", ord("e"): "e", ord("E"): "e", ord("F"): "F", ord("f"): "F",
              ord("u"): "u",
              ord("k"): "up", ord("j"): "down"}
+    if isinstance(ch, int) and ord("1") <= ch <= ord("9"):
+        return chr(ch)          # QUESTIONS: pick that numbered choice
     return plain.get(ch)
 
 
