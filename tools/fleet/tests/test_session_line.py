@@ -149,6 +149,11 @@ class CommonSessionLineTest(unittest.TestCase):
         # Without its rows the count stays alone; a missing label stays empty.
         self.assertEqual(session_line.route_badge("⏳ route 3 · execute", None), "⏳ route 3")
         self.assertEqual(session_line.route_badge("", panels["claude\0s"]), "")
+        # Past the panel's eight kept rows the pass's own markers of every current route count.
+        markers = [("working", False)] * 7 + [("idle", False)] * 3 + [("dead", False), ("dead", True)]
+        self.assertEqual(session_line.route_badge("⏳ route 12", panels["claude\0s"][:2], markers),
+                         "⏳ route 12 ⠏7 ●3 ✕1")
+        self.assertEqual(session_line.route_badge("⏳ route 12", panels["claude\0s"]), "⏳ route 12")
 
     def test_messages_are_the_latest_three_peer_rows_either_way(self):
         from tools.fleet.session_line import peer_message_rows

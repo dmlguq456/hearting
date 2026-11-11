@@ -70,6 +70,11 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const status=failed?(first.reason||t('unknown','Checking state')):asking?t('answer','Your answer needed'):first?.state==='working'?t('working','Working'):done?t('ready','Result ready'):'';
   const cfg={...defaults,...configuration};
   let routePages=1;
+  // A message too long to open in place is read here, on the route detail's pages.
+  const messageKey=m=>'message:'+m.at+':'+m.way,messageParts=m=>[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
+  const reading=typeof routeDetail==='string'&&routeDetail.startsWith('message:')?
+    (Array.isArray(model.messages)?model.messages:[]).find(m=>messageKey(m)===routeDetail):undefined;
+  if(typeof routeDetail==='string'&&!reading)routeDetail=false;
   if(settings){
     add(line(t('settings_title','Hearting shell settings'),'loc_repo'));
     const start=Math.max(0,settings.index-Math.max(0,height-7));
@@ -90,10 +95,14 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     if(settings.error)add(line(t('save_failed','Could not save'),'lvl_r'));
     else add(line('Tab ↑↓ · ←/→ · Enter · Esc'));
   }else if(routeDetail){
-    add(line(t('routes','route')+' · '+t('back','Back'),'loc_repo'),'route');
+    add(line((reading?'messages':t('routes','route'))+' · '+t('back','Back'),'loc_repo'),'route');
     const start=content.length;
-    for(const route of routes){
+    if(reading)wrap(messageParts(reading),Infinity);
+    else for(const route of routes){
       wrap(line(route.title||t('checking','Checking'),'loc_repo'),2);
+      // The route's owner and its evidence summary, as the earlier route heading carried them.
+      if(route.owner)wrap(line(route.owner),2);
+      if(route.visibility?.summary)wrap(line(route.visibility.summary),2);
       for(const stage of route.stages||[])wrap(line((stage.name||stage.id)+' · '+stage.state),2);
       if(route.stage_more)add(line('+'+route.stage_more+' · Fleet'));
       wrap(line(route.reason||route.state_label||route.state),3);
@@ -128,7 +137,9 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const nativeModel=native.model&&(native.model!==model.model_value||!painted(model.selected).length);
     const selected=nativeModel?[text(native.model,'loc_repo'),...(native.effort?[text(' '+native.effort)]:[])]:
       painted(model.selected).length?model.selected:line(t('checking','Checking'));
-    const head=painted(model.head),contextParts=painted(model.context),jobs=painted(model.jobs),quota=painted(model.quota);
+    const head=painted(model.head),jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
+    // OpenCode's MCP count stays beside the model and context (its native sidebar is hidden).
+    const contextParts=mcp.length?joined([painted(model.context),mcp]):painted(model.context);
     const waitParts=model.wait?[text(model.wait,'g_blocked')]:[];
     const title=model.session_title||model.title||'';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
@@ -139,12 +150,15 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       top.push(selected);
       if(contextParts.length)top.push(contextParts);
       if(jobs.length){const from=top.length;put(top,jobs,2);for(let i=from;i<top.length;i++)optional.add(i);}
+      if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }else{
       const first=joined([head,selected,contextParts]);
       if(size(first)<=inner)top.push(first);
       else{put(top,joined([head,selected]),1);put(top,contextParts,1);}
       // Running jobs join that row when they fit; otherwise they take a row that can give way.
       if(jobs.length){if(size(top.at(-1))+3+size(jobs)<=inner)top[top.length-1]=joined([top.at(-1),jobs]);else{optional.add(top.length);top.push(cut(jobs,inner));}}
+      // The repo's open work gives way with the running jobs.
+      if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }
     if(model.warning)top.push(line(model.warning,'lvl_r'));
     if(tidy&&!asking){
@@ -161,7 +175,9 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const rows=height-2;
     // Routes: the current ones the statusline counts, one row each.
     const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
-    const listed=shown.slice(0,5),more=shown.length-listed.length;
+    // The whole count is the producer's; the panel keeps only some rows of it.
+    const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
+    const listed=shown.slice(0,5),more=shown.length?total-listed.length:0;
     const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
     const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
@@ -211,13 +227,26 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     if(more>0)routeRows.push({parts:line('+'+more+' more'),action:'fleet'});
     const messages=painted(model.messages).slice(-3),messageRows=[];
     for(const m of messages){
-      const key='message:'+m.at+':'+m.way,parts=[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
-      if(open.has(key)){const out=[];wrap(parts,side?6:3,undefined,out);out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key}));}
+      const key=messageKey(m),parts=messageParts(m);
+      // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
+      if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
       else messageRows.push({parts:cut(parts,inner),action:key});
     }
+    let messageLimit=Math.max(0,...messageRows.map(x=>x.body?messageRows.filter(y=>y.body===x.body).length:0));
+    const visibleMessages=()=>{
+      const out=[];
+      for(const row of messageRows){
+        if(!row.body){out.push(row);continue;}
+        const group=messageRows.filter(y=>y.body===row.body),index=group.indexOf(row);
+        if(group.length<=messageLimit)out.push(row);
+        else if(index<messageLimit-1)out.push(row);
+        else if(index===messageLimit-1)out.push({parts:[text('  '),text('+'+(group.length-index)+' lines ›','loc_repo')],action:'read:'+row.body});
+      }
+      return out;
+    };
     // No rows yet: the producer's own label stands alone; a known empty list says `route 0`.
     const label=clean(model.route_label||'').trim();
-    const routeHead=shown.length?{parts:rule([text('⏳ route '+shown.length,'g_idle')]),action:'route'}:
+    const routeHead=shown.length?{parts:rule([text('⏳ route '+total,'g_idle')]),action:'route'}:
       label?{parts:rule([text(label,'g_idle')]),action:'route'}:model.routes_known?{parts:rule([text('route 0')])}:null;
     const messageHead=messageRows.length?{parts:rule([text('messages')])}:null;
     // A press in the panel opens a route's question; the editor keeps its budget.
@@ -234,11 +263,12 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     let keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeHead,keepOptional=true,keepQuota=quota.length>0;
     const need=()=>{
       const r=keepRoutes?1+Math.min(routeLimit,routeRows.length)+(keepDetails?detailRows.length:0):0;
-      const m=keepMessages&&messageHead?messageRows.length+1:0;
+      const m=keepMessages&&messageHead?visibleMessages().length+1:0;
       return core+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+box.length+r+m+((r||m)?1:0)+(keepQuota?1:0);
     };
     const budget=rows;
     if(need()>budget)keepSpacers=false;
+    while(need()>budget&&messageLimit>2)messageLimit--;
     if(need()>budget)keepMessages=false;
     if(need()>budget)keepDetails=false;
     while(need()>budget&&routeLimit>1)routeLimit--;
@@ -252,10 +282,10 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     if(keepRoutes){
       section.push(routeHead);
       const kept=routeRows.slice(0,routeLimit);
-      if(kept.length<routeRows.length){const hidden=shown.length-kept.filter(x=>x.action!=='fleet').length;kept[kept.length-1]={parts:line('+'+hidden+' more'),action:'fleet'};}
+      if(kept.length<routeRows.length){kept[kept.length-1]={parts:line(''),action:'fleet'};const hidden=total-kept.filter(x=>x.action!=='fleet').length;kept[kept.length-1].parts=line('+'+hidden+' more');}
       for(const item of kept){section.push(item);if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)section.push(d);}
     }
-    if(keepMessages&&messageHead){section.push(messageHead,...messageRows);}
+    if(keepMessages&&messageHead){section.push(messageHead,...visibleMessages());}
     if(section.length)section.push({parts:rule([])});
     const room=Math.max(0,budget-order.length-(keepQuota?1:0));
     for(const item of [...order,...section.slice(0,room)])add(item.parts,item.action);

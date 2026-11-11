@@ -155,6 +155,69 @@ assert(r.hits.some(h=>h.action==='message:1:←'));assert(r.hits.some(h=>h.actio
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_shortening_keeps_the_observed_count_message_and_mcp(self):
+        # Only the rows shown shrink: the whole route count, a message's recorded
+        # end and OpenCode's MCP count stay readable (review RV-PR1517 §1).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const route=(id,title)=>({id,title,state:'working',kind:'working',elapsed:'31m',paint:{glyph:{text:'⠏'},harness:{text:'codex'},ctx:{text:'37%'}}});
+const base={head:[{text:'[52] project'}],selected:[{text:'fixture'},{text:' high'}],context:[{text:'context '},{text:'37%'}],
+ jobs:[{text:'>_ running: JOB'}],quota:[{text:'5h 12%'}],session_title:'TITLE'};
+const paint=(model,width,height,extra={})=>{const r=view.render({width,height,side:width<80,model,sid:'s',configuration:{},questions:()=>[],...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+// Twelve current routes, eight kept rows: the head and `+N more` count all twelve.
+const twelve={...base,routes:Array.from({length:8},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:8,route_total:12};
+let r=paint(twelve,40,30);assert(r.plain.some(s=>s.includes('⏳ route 12')),r.plain.join('\n'));
+assert(r.plain.some(s=>s.includes('+7 more')),r.plain.join('\n'));
+// Fewer rows: the rows shown plus `+N more` are always the whole count.
+const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
+for(let height=10;height<=22;height++){
+ for(const model of [six,twelve]){
+  r=paint(model,40,height);const shown=r.hits.filter(h=>h.action.startsWith('route:')).length,m=r.plain.join('\n').match(/\+(\d+) more/);
+  if(m)assert.equal(shown+Number(m[1]),model.route_total,height+'\n'+r.plain.join('\n'));
+ }
+}
+// An opened message reads to its recorded end where rows allow, else counts the rest and reads on.
+const long='START '+'word '.repeat(60)+'END_1517';
+const msg={...base,routes:[],route_count:0,messages:[{way:'←',who:'[e7]',text:long,at:1}]};
+for(const [width,height] of [[40,30],[80,24]]){
+ r=paint(msg,width,height,{expandedKeys:['message:1:←']});assert(r.plain.join('\n').includes('END_1517'),width+'\n'+r.plain.join('\n'));
+}
+r=paint(msg,40,14,{expandedKeys:['message:1:←']});const text=r.plain.join('\n');
+assert(!text.includes('END_1517'));const rest=text.match(/\+(\d+) lines ›/);assert(rest,text);
+assert(r.hits.some(h=>h.action==='read:message:1:←'));
+// The pages read the whole message from its start.
+let pages=paint(msg,40,9,{routeDetail:'message:1:←'}),seen=[];
+for(let page=0;page<pages.routePages;page++)seen.push(...paint(msg,40,9,{routeDetail:'message:1:←',routePage:page}).plain);
+assert(pages.routePages>1);assert(seen.join('\n').includes('START'));assert(seen.join('\n').includes('END_1517'));
+assert(pages.plain.some(s=>s.includes('messages · ')));
+// A message no longer kept falls back to the ordinary panel.
+assert(!paint(msg,40,14,{routeDetail:'message:9:→'}).plain.some(s=>s.includes('messages · ')));
+// The repo's open work row and, on the evidence pages, the route owner and summary stay readable.
+const work={...six,work:[{text:'◌ '},{text:'3 open · WORK_HEADLINE'}]};
+for(const width of [40,80])assert(paint(work,width,30).plain.some(s=>s.includes('3 open · WORK_HEADLINE')),String(width));
+const owned={...six,routes:[{...route('r0','ROUTE_0'),owner:'owner · codex (gpt·high)',visibility:{summary:'SUMMARY_TEXT',lines:[]}}]};
+const detail=paint(owned,40,30,{routeDetail:true}).plain.join('\n');
+assert(detail.includes('owner · codex (gpt·high)')&&detail.includes('SUMMARY_TEXT'),detail);
+// OpenCode's MCP count stays with the model and context at every height.
+const mcp={...six,mcp:[{text:'MCP '},{text:'2/3'}]};
+for(let height=10;height<=22;height++){
+ for(const width of [40,80])assert(paint(mcp,width,height).plain.some(s=>s.includes('MCP 2/3')),width+'x'+height);
+}
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_presentation_keeps_the_producers_whole_route_count_and_mcp(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet import session_panel
+        rows = [{"id": "rt-" + str(i), "title": "ROUTE", "state": "working", "marker": "working"} for i in range(8)]
+        values = {"harness": "opencode", "route_label": "⏳ route 12 ⠏12", "mcp": {"total": 3, "connected": 2, "failed": 1}}
+        panel = session_panel.presentation(values, {"route_panels": {"opencode\0s": rows}}, "opencode", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"]), (8, 12))
+        self.assertEqual("".join(text for text, _key in panel["mcp"]), "MCP 2/3")
+        panel = session_panel.presentation({"harness": "codex"}, {"route_panels": {"codex\0s": rows[:2]}}, "codex", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"], panel["mcp"]), (2, None, []))
+
     def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

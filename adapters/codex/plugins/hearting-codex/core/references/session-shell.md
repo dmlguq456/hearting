@@ -104,7 +104,8 @@ project (git)`, with Git (branch and dirty mark, `🚧 N`, ahead/behind and the
 existing merge warnings) dim in parentheses and no folder or branch glyph;
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the line above at the bottom);
-running jobs; `◑답 대기 N` and the session's title; any question; the route
+running jobs and the repo's open work (`◌ N open · headline`, giving way with
+the jobs); `◑답 대기 N` and the session's title; any question; the route
 section; the messages section; and `5h … │ 7d …` last. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `Settings`, `messages`, stage names, `5h`/`7d`); only real content and
@@ -147,23 +148,35 @@ layout fits model, effort, a five-cell gauge, the current tool or stage and the
 elapsed time on the row whatever the setting. Pressing a row opens it in place
 (model, effort and gauge, `plan ✓ › execute ● › review` when there are several
 stages, `>_ tool` while working, `+N agent`) and pressing it again folds it.
-More than five routes end in `+N more`, which opens Fleet. These values come
+More than five routes end in `+N more`, which opens Fleet. The count is the
+producer's whole current-route count, not the rows the cache keeps (at most
+eight) or the rows shown: the heading says `⏳ route N` for all N, and the rows
+shown plus `+N more` always add up to N, also when rows run short and the last
+kept row turns into `+N more`. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
 Fleet's own route records from that pass and adds each row's marker and the
 values of who does the work now (the working worker of the shown stage, else
 the owner: harness, display model, effort, context, tool, active sub-agents)
 plus an absolute start time, and counts running, waiting and stopped routes
-into the statusline label (`⏳ route 3 ⠏2 ✕1`) by Fleet's own rule; a route
+into the statusline label (`⏳ route 3 ⠏2 ✕1`) by Fleet's own rule, over every
+current route of that pass rather than the kept rows; a route
 its supervisor closed is in neither count. Context is Fleet's own gauge
 percent, else tokens over a known window, else the exact token count
 (`250K`); a stopped job shows none. The judgment lives in one place
 (`tools/fleet/session_line.py`) and uses Fleet's shared functions once they
 exist. The display is as fresh as that cache. Pressing the
-section's heading opens the existing read-only route evidence pages.
+section's heading opens the existing read-only route evidence pages, which
+also carry each route's owner and evidence summary.
 The messages section shows the latest three peer messages, one row each (`←`
 received from the exact session's retained received inputs, `→` sent from this
 session's own ledger shard and its 200-character summary), cut with `…`;
-pressing a row shows its whole retained text in place. Nothing new is stored.
+pressing a row shows its whole retained text in place. Two limits differ: the
+source keeps a received input's first 384 characters and a sent message's
+200-character summary, never the whole payload; the screen never cuts that
+retained text further. An opened message uses the rows it needs; when rows run
+short its last row counts the rest (`+N lines ›`) and a press reads the whole
+retained text on the route evidence pages (`‹ 1/N ›`, PgUp/PgDn, Esc back).
+Nothing new is stored.
 A press on a route or message row is display only: it opens or folds the row
 and leaves focus, `empty` and the native input frontier as they were.
 Put each answer choice on
@@ -224,8 +237,9 @@ to the started shell's native child), so two right rails never appear; an
 explicit `session.sidebar` in that variable wins, and OpenCode's own toggle
 still opens its sidebar on demand. Context stays in OpenCode's footer, and the
 plugin reports the MCP server counts its sidebar listed as a display-only
-observation, painted in the compact status row as `MCP connected/total`
-(red while one has failed or needs authentication). No Hearting section is
+observation, painted with the model and context group as `MCP
+connected/total` (red while one has failed or needs authentication), at every
+panel height. No Hearting section is
 drawn inside OpenCode's sidebar. Panel placement never changes question authority.
 
 The current question,

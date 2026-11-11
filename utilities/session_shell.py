@@ -854,7 +854,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "selected", "context", "quota", "jobs"):
+    for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -866,6 +866,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
         row["paint"] = paint
+    # The repo's open work, as the earlier panel's tail row read it.
+    panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
     panel["messages"] = peer_message_rows(received, sent, assigned_tag)
@@ -1047,7 +1049,7 @@ def _backend_operation(request: dict) -> dict:
             panel["status"] = []
             panel["summary"] = []
             panel["session"] = panel["brief"] = []
-            for name in ("head", "selected", "context", "quota", "jobs"):
+            for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
                 panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)

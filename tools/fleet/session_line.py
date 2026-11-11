@@ -578,21 +578,25 @@ def route_glyph(marker):
 _GLYPH_STATES = frozenset(("working", "idle", "blocked", "dead", "done", "stale"))
 
 
-def route_badge(label, panels):
+def route_badge(label, panels, markers=None):
     """``⏳ route 3 ⠏2 ✕1``: the route count with Fleet's running/waiting/stopped counts.
 
     ``label`` is the producer's own ``⏳ route N`` reading; its first N panel
-    rows are those current routes. Without their markers the count stays alone.
+    rows are those current routes. ``markers`` are the (marker, closed) pairs of
+    all N current routes from the same pass, so a count past the panel's kept
+    rows is still tallied. Without every marker the count stays alone.
     """
     import re
     match = re.match(r"⏳ route (\d+)", label or "")
     if not match:
         return label or ""
     count = int(match.group(1))
-    rows = [row for row in (panels or ())[:count] if isinstance(row, dict) and row.get("marker")]
-    if len(rows) != count:
+    if markers is None or len(markers) != count:
+        rows = [row for row in (panels or ())[:count] if isinstance(row, dict) and row.get("marker")]
+        markers = [(row["marker"], bool(row.get("closed"))) for row in rows]
+    if len(markers) != count:
         return "⏳ route " + str(count)
-    tally = route_tally((row["marker"], bool(row.get("closed"))) for row in rows)
+    tally = route_tally(markers)
     return " ".join(["⏳ route " + str(count)] + [glyph + str(tally[name]) for name, glyph in _TALLY if tally[name]])
 
 
@@ -727,8 +731,20 @@ def session_route_status(snapshot, now=None, *, include_details=False):
     try:
         routes = {route.get("id"): route for route in (captured[-1] if captured else ()) if isinstance(route, dict)}
         route_details(snapshot, panels, routes, now)
-        # The statusline reads only this label: count the states here, once.
-        labels = {key: route_badge(label, panels.get(key)) for key, label in labels.items()}
+        # The statusline reads only this label: count the states here, once, over
+        # every current route of the session (the panel keeps at most eight rows).
+        by_tag = {}
+        for route in routes.values():
+            if route.get("current") is True and route.get("session_tag"):
+                by_tag.setdefault(route["session_tag"], []).append((route_marker(route), route_closed(route)))
+
+        def markers(key):
+            for row in panels.get(key) or ():
+                route = routes.get(row.get("id")) if isinstance(row, dict) else None
+                if isinstance(route, dict) and route.get("session_tag"):
+                    return by_tag.get(route["session_tag"])
+            return None
+        labels = {key: route_badge(label, panels.get(key), markers(key)) for key, label in labels.items()}
     except Exception:
         pass  # Optional display values never cost the labels.
     return labels, panels

@@ -612,6 +612,8 @@ function panelAction(action){
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
   if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();}
+  // A message longer than its rows reads on, from its start, on the detail pages.
+  if(action.startsWith('read:message:')){routeDetail=action.slice(5);routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
   if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){

@@ -337,11 +337,19 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
     gauge = gauge_parts(values.get("ctx_pct"))
     count = values.get("answer_wait")
-    current = len([1 for _ in routes])
+    # The producer's count is the session's whole current-route count; the panel
+    # keeps at most eight rows, so the kept current rows are counted apart from it.
+    current, total = len(routes), None
     import re
     match = re.match(r"⏳ route (\d+)", values.get("route_label") or "")
     if match:
-        current = min(len(routes), int(match.group(1)))
+        total = int(match.group(1))
+        current = min(len(routes), total)
+    mcp = values.get("mcp")
+    # OpenCode's hidden native sidebar listed these servers; keep the count.
+    mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
+                                    "lvl_r" if mcp.get("failed") else "lvl_g")]
+                 if isinstance(mcp, dict) and mcp.get("total") else [])
     return {"head": session_head(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
@@ -349,7 +357,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],
             "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
                     if values.get("jobs") else [],
-            "quota": quota_row(values), "route_count": current,
+            "quota": quota_row(values), "route_count": current, "route_total": total, "mcp": mcp_parts,
             "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
