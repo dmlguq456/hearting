@@ -144,6 +144,44 @@ class NativeDisplayTests(unittest.TestCase):
         with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=OSError):
             self.assertIsNone(self.reader.read(self.snapshot)[0][1]['context'])
 
+    def test_a_kept_value_does_not_mark_its_unread_generation_as_read(self):
+        self.write(47); self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 47)
+        self.write(63)  # a valid new generation; nothing writes the feed again
+        original, calls = fast.NativeDisplayReader._read, []
+        def fail_once(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError('one read error')
+            return original(*args)
+        with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=fail_once):
+            self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 47)
+            self.reader.invalidate()
+            self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 63)
+            self.assertEqual(len(calls), 2)
+            # Once that generation was read, unchanged inputs read nothing more.
+            self.reader.invalidate(); self.reader.read(self.snapshot)
+            self.assertEqual(len(calls), 2)
+        # Errors that keep recurring keep the value without blanking it.
+        self.write(71)
+        with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=OSError):
+            for _ in range(3):
+                self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 63)
+        self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 71)
+
+    def test_a_read_that_overlapped_a_replacement_reads_the_settled_generation_next(self):
+        self.write(47); self.reader.read(self.snapshot)
+        original, replaced = os.read, []
+        def read(fd, size):
+            data = original(fd, size)
+            if size == 4097 and not replaced:
+                self.write(63); replaced.append(True)
+            return data
+        self.write(52)
+        with mock.patch.object(fast.os, 'read', side_effect=read):
+            self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 47)
+        self.assertTrue(replaced)
+        self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 63)
+
     def test_departed_rows_do_not_accumulate_in_the_display_reader(self):
         self.write();self.reader.read(self.snapshot)
         self.assertEqual(self.reader.read(LiveSnapshot()),())

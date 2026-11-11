@@ -23,6 +23,7 @@ from .collectors.procscan import read_proc_start
 
 _LIMIT = 512
 _CELLS = ("model", "effort", "context", "window", "context_detail")
+_UNREAD = (object(),) * 6  # source signatures of a generation no read observed
 
 
 def _get(value, name, default=None):
@@ -183,11 +184,14 @@ class NativeDisplayReader:
                 # display. The next pass sees the new generation and reads it.
                 # A rejected or other-session source, and process, SID or
                 # attachment changes (explicit empty cells), still replace it.
-                if (fields is None and previous is not None and previous[2] is not None
-                        and previous[0][6:] == signature[6:]
-                        and (unsettled or tuple(_signature(path) for path in paths) != signature[:6])):
+                unread = fields is None and (
+                    unsettled or tuple(_signature(path) for path in paths) != signature[:6])
+                if (unread and previous is not None and previous[2] is not None
+                        and previous[0][6:] == signature[6:]):
                     fields = previous[2]
-                entry = signature, base, fields
+                # Keeping a value is not reading this generation: an unread one
+                # never becomes the cached key, so the next pass reads it again.
+                entry = (_UNREAD + signature[6:] if unread else signature), base, fields
             entries[identity] = entry
             if entry[2] is not None:
                 result.append((identity, entry[2]))
