@@ -2225,6 +2225,11 @@ _CLAUDE_STREAM_HEAD_BYTES = 64 * 1024
 _CLAUDE_SUPERVISOR_HEAD_BYTES = 64 * 1024
 _CLAUDE_SUBAGENT_SCAN_BYTES = 8 * 1024 * 1024
 _CLAUDE_STREAM_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
+# (model id, Claude Code version) -> the model's context window, as the runtime itself reported
+# it in a `result` row's `modelUsage[model]` (`contextWindow`, `maxOutputTokens`). A conflicting
+# report for the same key leaves the key unknown (window 0). Filled only from attempt streams this collector already read.
+_CLAUDE_OBSERVED_WINDOWS = {}
+_CLAUDE_OBSERVED_WINDOW_LIMIT = 64
 _CODEX_ATTEMPT_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _OPENCODE_ATTEMPT_CACHE = {}    # path -> ((mtime_ns, size, dev, ino), parsed)
 # Every registry attempt is re-observed each tick, so the FIFO bound must exceed the
@@ -2564,6 +2569,41 @@ def _claude_attempt_policy(metadata, *, runtime_version, model_id, raw_window, m
         max_output_tokens=max_output)
 
 
+def _fill_claude_observed_windows(jobs):
+    """Give a running Claude attempt its model's window once the runtime has reported it.
+
+    Claude Code reports a model's context window only in the `result` row that ends a turn,
+    so a first turn still in progress has its exact token count but no window. The window
+    of the same model id under the same Claude Code version, read from a finished turn's
+    `result` row in an attempt stream this pass already parsed, is the runtime's own report
+    for that model; nothing is estimated, and an attempt without such a report keeps no
+    window (its row then shows the token count). The compaction policy is recomputed from
+    the same launch inputs with that window, as a finished turn would have."""
+    for job in jobs:
+        if (getattr(job, "harness", None) != "claude"
+                or not getattr(job, "_dispatch_context_owned", False)
+                or getattr(job, "context_window_tokens", None) is not None
+                or getattr(job, "active_context_tokens", None) is None):
+            continue
+        key = getattr(job, "_claude_window_key", None)
+        window, max_output = _CLAUDE_OBSERVED_WINDOWS.get(key, (0, None)) if key is not None else (0, None)
+        if not window:
+            continue
+        job.context_window_tokens = window
+        job._context_window_source = "claude-result-model-usage"
+        policy = getattr(job, "context_policy", None)
+        if not isinstance(policy, dict) or policy.get("state") == "applied":
+            continue
+        metadata = getattr(job, "_registry_metadata", None) or {}
+        policy = _claude_attempt_policy(
+            metadata, runtime_version=key[1], model_id=key[0], raw_window=window,
+            max_output=max_output, session_id=policy.get("session_id"), attempt_id=job.attempt_id)
+        job.context_policy = policy
+        job.context_display_window_tokens = (
+            policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
+        job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
+
+
 def _enrich_claude_stream_session(job, fast_first=False):
     """Attach exact child identity, context/exec, and native sub-agents.
 
@@ -2614,6 +2654,15 @@ def _enrich_claude_stream_session(job, fast_first=False):
     job._dispatch_context_owned = True
     active_context_tokens = parsed.get("active_context_tokens")
     context_window_tokens = parsed.get("context_window_tokens")
+    window_key = (parsed.get("model"), parsed.get("runtime_version"))
+    job._claude_window_key = window_key if all(isinstance(item, str) for item in window_key) else None
+    if job._claude_window_key is not None and type(context_window_tokens) is int and context_window_tokens > 0:
+        known = _CLAUDE_OBSERVED_WINDOWS.get(job._claude_window_key)
+        observed = (context_window_tokens, parsed.get("max_output_tokens"))
+        _CLAUDE_OBSERVED_WINDOWS[job._claude_window_key] = (
+            observed if known in (None, observed) else (0, None))
+        if len(_CLAUDE_OBSERVED_WINDOWS) > _CLAUDE_OBSERVED_WINDOW_LIMIT:
+            _CLAUDE_OBSERVED_WINDOWS.pop(next(iter(_CLAUDE_OBSERVED_WINDOWS)))
     telemetry = telemetry_from_explicit(
         adapter="claude", session_id=parsed.get("session_id"),
         active_context_tokens=active_context_tokens,
@@ -5882,6 +5931,7 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
             _enrich_codex_attempt_session(j, **fast_kw)
             _enrich_opencode_attempt_session(j, **fast_kw)
             _enrich_attempt_summary(j, **fast_kw)
+        _fill_claude_observed_windows(jobs)
         # Attach execution before the single classifier pass. The governed
         # leader and the tool's app-server can be different processes.
         _attach_execution_evidence(jobs, session_rows)

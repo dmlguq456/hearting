@@ -115,12 +115,25 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
         self.assertEqual(effects, ())
         self.assertNotIn("open pane", "\n".join(draw(vm, state, 140, 45).text_rows()))
 
+    def test_the_title_and_model_words_are_the_session_rows_own(self):
+        # The title follows the screen language through ``answer_wait_word``; the MODEL cell
+        # is ``model_cell_parts`` (``medium`` → ``med``), the same words a session row draws.
+        from unittest import mock
+        for lang, word in (("English", "◑ to answer 2"), ("Korean", "◑답 대기 2")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                rows = draw(_vm(2), NavState(view="QUESTIONS"), 140, 45).text_rows()
+                self.assertTrue(any(f"── {word} ─" in row for row in rows), rows)
+        vm = ExplorerViewModel(questions=(_row(0, h="claude", m=("Fable 5.2", "fam_fable"),
+                                                e="medium"),))
+        rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
+        self.assertTrue(any("claude Fable 5.2 med" in row for row in rows), rows)
+
     def test_zero_one_and_five_waits_each_get_one_pressable_line(self):
         for count in (0, 1, 5):
             with self.subTest(count=count):
                 frame = draw(_vm(count), NavState(view="QUESTIONS"), 80, 45)
                 rows = frame.text_rows()
-                self.assertTrue(any(f"◑답 대기 {count}" in row for row in rows))
+                self.assertTrue(any(f"── ◑ to answer {count} ─" in row for row in rows))
                 opens = [h for h in frame.hits if h.action[:1] == ("question.open",)]
                 self.assertEqual(len(opens), count)
                 for index in range(count):

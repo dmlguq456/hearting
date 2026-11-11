@@ -30,8 +30,14 @@ def _vm(**changes):
     return ExplorerViewModel.from_mapping(values)
 
 
-def _frame(vm, view="OVERVIEW", cols=140, rows=60, scope="-"):
-    return draw(vm, NavState(view=view, title=view, scope=scope), cols, rows, beat=1)
+def _frame(vm, view="OVERVIEW", cols=140, rows=60, scope="-", opened=None):
+    folds = (("ropen:" + view, opened),) if opened else ()
+    return draw(vm, NavState(view=view, title=view, scope=scope, folds=folds), cols, rows, beat=1)
+
+
+def _opened(vm, cols=140):
+    """ROUTES with the only route unfolded: its worker and kind lines are drawn under its row."""
+    return _frame(vm, "ROUTES", cols=cols, opened=vm.routes[0]["id"])
 
 
 def _find(frame, text, line=""):
@@ -63,11 +69,11 @@ class StageRule(unittest.TestCase):
                     activity="running", state="working")
         self.assertEqual(_stage_hue({"stages": stages}, "delta-step"), "y")
         self.assertEqual(_stage_hue({"stages": stages}, "not-a-stage"), "g")
-        running = _frame(_vm(routes=[_route(**base)]), "ROUTES")
+        running = _opened(_vm(routes=[_route(**base)]))
         self.assertEqual(_key(running, "delta-step", "└ worker"), "g_idle")        # (yellow, normal weight) while it runs
         self.assertEqual(_key(running, "running 3m", "└ worker"), "stg3_on")       # (yellow, bold)
         parked = dict(base, worker=["worker", [["codex", "hb_codex"]], [["3m · worker ended", "dim"]]])
-        self.assertEqual(_key(_frame(_vm(routes=[_route(**parked)]), "ROUTES"), "delta-step", "└ worker"), "lvl_y_dim")
+        self.assertEqual(_key(_opened(_vm(routes=[_route(**parked)])), "delta-step", "└ worker"), "lvl_y_dim")
 
     def test_every_stage_index_has_a_hue(self):
         items = _stage_items([{"name": f"s{index}", "st": "active"} for index in range(6)])
@@ -87,7 +93,7 @@ class StageRule(unittest.TestCase):
     def test_worker_effort_max_is_kept_in_the_folded_cell(self):
         worker = ["worker", [["codex", "hb_codex"], [" (", "dim"], ["gpt-x", "fam_gpt"], ["·", "dim"],
                              ["max", "dead"], [")", "dim"]], [["3m", "dim"]]]
-        frame = _frame(_vm(routes=[_route(worker=worker)]), "ROUTES", cols=100)
+        frame = _opened(_vm(routes=[_route(worker=worker)]), cols=100)
         self.assertIn("codex·max", "\n".join(frame.text_rows()))
 
 
@@ -131,10 +137,11 @@ class CutRule(unittest.TestCase):
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
                 rows = _frame(_vm(), "ROUTES", cols=cols).text_rows()
-                header = next(row[34:] for row in rows if "ID" in row and "ROUTE" in row
-                              and "HARNESS" in row)
-                labels = ("ID", "ROUTE", "KIND", "HARNESS",
-                          *(("PROGRESS",) if "PROGRESS" in header else ()), "AGE")
+                header = next(row[34:] for row in rows if "ID" in row and "MODEL" in row
+                              and "AGE" in row)
+                labels = tuple(label for label in ("ID", "MODEL", "CONTEXT", "ROUTE", "PROGRESS", "AGE")
+                               if label in header)
+                self.assertEqual(labels[:3] + labels[-1:], ("ID", "MODEL", "CONTEXT", "AGE"))
                 positions = [header.index(label) for label in labels]
                 self.assertEqual(positions, sorted(positions))
                 for position, label in zip(positions, labels):
@@ -144,16 +151,17 @@ class CutRule(unittest.TestCase):
 
     def test_route_kind_uses_the_cell_before_age_instead_of_dropping_its_last_glyph(self):
         route = _route(capability="lab", mode="eval", intensity="standard", age="22h 32m")
-        rows = _frame(_vm(routes=[route], repos=[]), "ROUTES", cols=80).text_rows()
-        line = next(row for row in rows if "lab(eval" in row)
-        kind = line.index("lab(eval")
+        rows = _opened(_vm(routes=[route], repos=[]), cols=80).text_rows()
+        # The one-line row keeps its whole elapsed time; KIND is on the unfolded kind line.
+        line = next(row for row in rows if "22h 32m" in row)
         age = line.index("22h 32m")
-        self.assertEqual(line[kind:kind + 8], "lab(eval")
-        self.assertLess(kind + 8, age)
         self.assertEqual(line[age:age + 7], "22h 32m")
-        # The repo rule sits above the rows; ID starts the column set.
         owner = str(route.get("harness"))
         self.assertIn(owner[:5], line)
+        kind_line = next(row for row in rows if "lab(eval" in row)
+        kind = kind_line.index("lab(eval")
+        self.assertEqual(kind_line[kind:kind + 8], "lab(eval")
+        self.assertIn("└ kind", kind_line)
 
     def test_system_field_lines_are_cut_at_the_pane_edge_without_an_ellipsis(self):
         system = dict(_mapping()["system"], install={"version": "v1.2.3", "managed": True, "pinned": True,

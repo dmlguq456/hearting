@@ -460,7 +460,7 @@ try {
                             for item in records))
         frame = draw(vm, NavState(view="QUESTIONS"), 140, 45)
         text = "\n".join(frame.text_rows())
-        self.assertIn("◑답 대기 2", text)
+        self.assertIn("◑ to answer 2", text)
         self.assertIn("older waits 1", text)
         self.assertNotIn(private, text)
         self.assertNotIn("PRIVATE-CHOICE-SENTINEL", text)
@@ -476,10 +476,13 @@ try {
                                                 "health": [{"source": "cache", "state": "failed"}]}})
         self.assertEqual(vm.system["answer_waits"]["state"], "failed")
         self.assertIsNone(vm.system["answer_waits"]["total"])
-        text = "\n".join(draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows())
-        self.assertIn("◑답 대기 ?", text)
-        self.assertNotIn("답 대기 0", text)
-        self.assertIn("? waiting", text)
+        for lang, word in (("English", "◑ to answer"), ("Korean", "◑답 대기")):
+            with self.subTest(lang=lang), mock.patch.dict("os.environ", {"FLEET_NOW_LANG": lang}):
+                rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
+                text = "\n".join(rows)
+                self.assertIn(f"── {word} ?", text)
+                self.assertNotIn(f"{word} 0", text)
+                self.assertIn(f"{word} ? ·", rows[-1])
 
 
 class FleetQuestionActionTests(unittest.TestCase):

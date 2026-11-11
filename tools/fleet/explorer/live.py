@@ -897,6 +897,36 @@ def _display_nodes(nodes, frame_displays):
     return out
 
 
+def _context_tokens(job):
+    """Exact active-context tokens of one attempt, or None (never derived from a percent)."""
+    value = _get(job, "active_context_tokens")
+    return value if type(value) is int and value >= 0 else None
+
+
+def _route_doer(worker, owner, dead):
+    """Who does the route's work now, for its one-line row: harness, model, effort, context
+    (percent, window, or the exact token count when no window is known), the open tool and
+    the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
+    attempt (a one-shot route's owner is its worker). A dead route keeps the harness only."""
+    job = worker if worker is not None else owner
+    if job is None:
+        return None
+    harness = _text(_get(job, "harness"))
+    if dead:
+        return {"harness": harness, "model": None, "effort": None, "context": None,
+                "window": None, "tokens": None, "tool": None, "agents": 0}
+    pct, window = _context_gauge(job)
+    tool = _get(job, "exec_tool")
+    tool_name = _text(tool.get("name")) if isinstance(tool, Mapping) else None
+    live = _get(job, "liveness") == "working"
+    agents = sum(1 for item in (_get(job, "subagents") or ())
+                 if _get(item, "active") is True)
+    return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+            "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            "tokens": _context_tokens(job) if pct is None else None,
+            "tool": tool_name if live else None, "agents": agents if live else 0}
+
+
 def _route_records(snapshot, session_rows, session_index, resolver, now):
     collected = _collect_routes(snapshot)
     resources = _records(_get(snapshot, "resources", default=()))
@@ -1025,6 +1055,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # Each attempt uses the same applied-policy/native gauge as a session.
         owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
         worker_contexts = []
+        context_jobs = []
         selected_worker = _selected_worker_job(worker_node, jobs)
         worker_context_index = None
         for job in jobs:
@@ -1060,6 +1091,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             pct, window = _context_gauge(job) if attempt else (None, None)
             if job is selected_worker:
                 worker_context_index = len(worker_contexts)
+            context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
                                     "model": _model_pair(_get(job, "resolved_model", "model")),
                                     "context": pct, "window": window})
@@ -1117,6 +1149,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        doer_job = (selected_worker if worker_context_index is not None
+                    else context_jobs[0] if len(context_jobs) == 1 else None)
+        doer = _route_doer(doer_job, owner, dead)
+        if doer is not None:
+            route["doer"] = doer
         if record:
             # Display only: shape and its basis, stages, verification and next step, read
             # from this route's own record, Fleet's view and its outcome sidecar.
@@ -1127,6 +1164,14 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 max(depth_one, key=current_attempt_rank) if depth_one else None)
             route["visibility"] = route_visibility.bounded(route_visibility.describe(
                 record, view, owner=route_visibility.owner_from_job(shown_owner)))
+            # A route its supervisor closed (``capability-route close``, the outcome sidecar's
+            # ``closed_at``) is over even when its owner ended without a passed gate: it is
+            # neither a stopped leg to count nor one to resume.
+            codes = route["visibility"].get("codes") if isinstance(route["visibility"], Mapping) else None
+            verification = codes.get("verification") if isinstance(codes, Mapping) else None
+            if isinstance(verification, Mapping) and verification.get("closed_at"):
+                route["closed"] = True
+                route["resume"] = None
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -1312,6 +1357,11 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        if open_routes:
+            by_state = route_state_counts(route for route in routes if route["repo"] == name)
+            status.update({"routes_running": by_state["running"],
+                           "routes_waiting": by_state["waiting"],
+                           "routes_stopped": by_state["stopped"]})
         if doc is None:
             status["changed"] = repo.get("age")
         else:
@@ -3086,6 +3136,36 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
                                   "lines": list(entry.get("lines") or ())}
         dialogue = {"logs": logs, "generation_text": dict((dialogue or {}).get("generation_text", {}))}
     return seat_rows, generations, cards, dialogue, pane_read, raw
+
+
+def route_marker_state(route):
+    """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
+    ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
+
+    A route whose worker still runs reads as working; an owner that only waits on its
+    worker reads as waiting, the worker's own line being the one that spins."""
+    if route.get("owner_waits"):
+        return "idle"
+    if route.get("activity") == "running":
+        return "working"
+    state = str(route.get("state") or "")
+    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+
+
+def route_state_counts(routes):
+    """``{"running", "waiting", "stopped"}`` over current routes, by the shared marker state."""
+    counts = {"running": 0, "waiting": 0, "stopped": 0}
+    for route in routes:
+        if route.get("current") is not True:
+            continue
+        state = route_marker_state(route)
+        if state == "working":
+            counts["running"] += 1
+        elif state in ("idle", "blocked"):
+            counts["waiting"] += 1
+        elif state == "dead":
+            counts["stopped"] += 1
+    return counts
 
 
 def current_route_counts(routes):
