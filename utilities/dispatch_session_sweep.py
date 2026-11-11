@@ -28,6 +28,7 @@ import re
 import stat
 import sys
 import time
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
@@ -1921,6 +1922,135 @@ def ack_delivered(root: Path, session_id: str, records: list[dict], *, acked_by:
         except Exception:  # noqa: BLE001 - queue retirement never changes ACK outcome.
             pass
     return acked
+
+
+# A plain `/clear` starts another session in the same runtime and pane. The completion record of
+# work the earlier session started stays stored under that session, and no handover makes the new
+# one its recipient. This notice tells the new session once that such a completion exists; it grants
+# no task, and the record then expires as `recipient-session-replaced`.
+REPLACED_NOTICE_PREFIX = "previous_session_completion:"
+REPLACED_SESSION_LOOKBACK = 8
+REPLACED_SCOPE_ENTRIES = 64
+
+
+class ReplacedSessionNotice(NamedTuple):
+    root: Path
+    jobs: Path
+    metadata: dict
+    record: dict
+    line: str
+    binding: tuple
+
+
+def _notice_value(value, limit: int = 96) -> str:
+    text = re.sub(r"[^A-Za-z0-9._:/@+-]", "_", str(value or "")) or "-"
+    return text[:limit]
+
+
+def _replaced_notice_line(record: dict, row, previous_sid: str) -> str:
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    classification = receipt.get("delivery_classification")
+    if not classification:
+        classification = next((child.get("delivery_classification")
+                               for child in receipt.get("children") or []
+                               if isinstance(child, dict) and child.get("attempt_id") == row.attempt_id), "")
+    return (f"{REPLACED_NOTICE_PREFIX} route_id={_notice_value(record.get('route_id'))} "
+            f"route_node={_notice_value(record.get('route_node'))} "
+            f"attempt_id={_notice_value(row.attempt_id)} status={_notice_value(row.status)} "
+            f"classification={_notice_value(classification)} "
+            f"previous_session={_notice_value(previous_sid, 8)} "
+            "(notice only; this session holds no task from it)")
+
+
+def replaced_session_notices(roots, session_id: str, *, env=None, deadline_ns: int | None = None,
+                             limit: int = 3) -> list[ReplacedSessionNotice]:
+    """Completions of an earlier session of this pane that this runtime can no longer deliver.
+
+    Read-only. The earlier sessions are the other Claude sessions the pane's seat ledger lists;
+    nothing is written to the ledger or to any lineage. A record qualifies only when it is still
+    open, addressed to such a session, and exactly the completion its owner row names (digest,
+    delivery id and intent), the row records this very runtime (`runtime_ancestry_binding` of this
+    process), and no handover moved the recipient. Anything else, including a pane-less terminal,
+    yields nothing."""
+    import dispatch_contract_process as process
+    import dispatch_seat_handover as handover
+    import session_tidy
+
+    def spent() -> bool:
+        return deadline_ns is not None and time.monotonic_ns() >= deadline_ns
+
+    if spent():
+        return []
+    seat = handover.pane_seat(os.environ if env is None else env, "claude", session_id)
+    if seat is None:
+        return []
+    with session_tidy.seat_ledger_readonly_scope():
+        summary = session_tidy.session_summary(session_tidy.physical_seat(seat))
+    earlier = sorted((row for (name, sid), row in summary.items()
+                      if name == "claude" and sid and sid != session_id),
+                     key=lambda row: row.get("last_seen", 0), reverse=True)[:REPLACED_SESSION_LOOKBACK]
+    binding = None
+    found: list[ReplacedSessionNotice] = []
+    unique_roots = tuple(dict.fromkeys(Path(root) for root in roots if Path(root).is_dir()))
+    for earlier_row in earlier:
+        previous_sid = str(earlier_row["sid"])
+        for root in unique_roots:
+            for _key, delivery_id in _scope_entries_newest_first(Path(root), previous_sid)[:REPLACED_SCOPE_ENTRIES]:
+                if spent() or len(found) >= limit:
+                    return found
+                try:
+                    record = pending_delivery.read(Path(root), previous_sid, delivery_id)
+                    if (not isinstance(record, dict) or record.get("state") not in pending_delivery.OPEN_STATES
+                            or record.get("recipient_kind") != "claude-parent-runtime"):
+                        continue
+                    attempts = record.get("attempt_ids") or []
+                    jobs = record_jobs(Path(root), record)
+                    if len(attempts) != 1 or jobs is None:
+                        continue
+                    # Loaded only once an open completion of an earlier session exists: the common
+                    # prompt has none, and this module is the heavier import.
+                    from dispatch_completion_join import current_attempt_row
+                    row = current_attempt_row(jobs, attempts[0])
+                    meta = row.metadata if row is not None else {}
+                    if (row is None or row.status != "done" or meta.get("parent_sid") != previous_sid
+                            or meta.get("delivery_intent") != "1"
+                            or meta.get("delivery_id") != record.get("delivery_id")
+                            or meta.get("delivery_receipt_digest") != record.get("receipt_digest")):
+                        continue
+                    if binding is None:
+                        binding = process.runtime_ancestry_binding(os.getpid()) or ()
+                    owner_runtime = (meta.get("parent_runtime_pid", ""), meta.get("parent_runtime_pid_start", ""),
+                                     meta.get("parent_runtime_ns", ""))
+                    if (len(binding) != 3 or not all(owner_runtime)
+                            or owner_runtime != tuple(str(part) for part in binding)):
+                        continue
+                    if handover.effective_parent(meta, jobs) != previous_sid:
+                        continue
+                    found.append(ReplacedSessionNotice(
+                        Path(root), jobs, dict(meta), record,
+                        _replaced_notice_line(record, row, previous_sid), tuple(binding)))
+                except Exception:  # noqa: BLE001 - one unreadable record never blocks the prompt
+                    continue
+    return found
+
+
+def settle_replaced_session_notices(items) -> int:
+    """Expire the exact records whose notice was shown; returns how many expired.
+
+    Called after the notice was rendered and flushed. An expiry that is refused (the runtime or
+    recipient changed meanwhile) leaves the record open, so a later prompt shows it again."""
+    from dispatch_completion_join import expire_pending_for_replaced_recipient
+
+    expired = 0
+    for item in items:
+        try:
+            result = expire_pending_for_replaced_recipient(
+                item.jobs, item.metadata, item.record, attempt_id=item.metadata["attempt_id"],
+                runtime_binding=item.binding)
+        except Exception:  # noqa: BLE001
+            continue
+        expired += result == "expired"
+    return expired
 
 
 def sweep(

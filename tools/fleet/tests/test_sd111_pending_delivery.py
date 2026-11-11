@@ -437,6 +437,19 @@ class PendingDeliveryCountsTest(unittest.TestCase):
         successor = self._count_with_graph("dead-A", "live-C", live={("claude", "live-C")})
         self.assertEqual(successor["no_recipient"], 0)
 
+    def test_clear_orphaned_completion_stays_visible_as_pending_delivery(self):
+        # #1410: after a plain `/clear` the completion stays stored under the earlier session with
+        # no handover. Whatever the census sees, it is counted as a pending delivery and rendered.
+        from fleet import render
+
+        gone = self._count_with_graph("clear-A", "clear-A", live={("claude", "clear-B")})
+        self.assertEqual((gone["pending"], gone["no_recipient"]), (1, 1))
+        seen = self._count_with_graph("clear-A", "clear-A", live={("claude", "clear-A")})
+        self.assertEqual((seen["pending"], seen["no_recipient"]), (1, 0))
+        for counts in (gone, seen):
+            line = render._delivery_pending_rows(counts)[0][0][0]
+            self.assertIn("delivery pending: 1 · awaiting recipient", line)
+
     def test_live_untidied_storage_is_excluded(self):
         untidied = self._count_with_graph("live-A", "live-A", live={("claude", "live-A")})
         self.assertEqual(untidied["no_recipient"], 0)

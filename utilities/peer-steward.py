@@ -5987,6 +5987,22 @@ def _resume_ordinary_notice_obligation(duty, store):
     _resume_session_notice_obligations([duty], store)
 
 
+def _registered_runtime_disposition(metadata):
+    """`live`, `dead` or `unresolved` for the parent runtime an owner row names; None without PID/start."""
+    try:
+        pid = int(metadata.get("parent_runtime_pid", ""))
+    except (TypeError, ValueError):
+        return None
+    start = metadata.get("parent_runtime_pid_start", "")
+    if pid <= 0 or not start:
+        return None
+    from dispatch_contract import process_identity_disposition
+    try:
+        return process_identity_disposition(pid, start)
+    except (ValueError, OSError):
+        return None
+
+
 def _resume_registered_obligation(duty, store, *, read_context=None,
                                   settlement_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
@@ -6218,10 +6234,30 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                         return
                     closed = _closed_registered_route_outcome(final_row, jobs)
                     if closed is not None:
-                        store.update(duty["id"], state="complete", delivery="not-required",
-                            cleanup="complete", observation={**observation, "reason": "route-closed",
-                                **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
-                        return
+                        # A closed route alone does not settle a completion that is still open:
+                        # a plain `/clear` leaves the registered parent runtime alive under a new
+                        # session id, and the record would otherwise vanish unseen. Only a runtime
+                        # with no PID/start evidence, or one this host cannot observe, keeps the
+                        # route-closed settlement. A dead runtime expires the record below first.
+                        # Only the owner's completion record is held open: a supervision or gate
+                        # notice (`notice_id`) has no hook that shows or expires it, so it keeps
+                        # settling as route-closed.
+                        open_record = (not notice_id and isinstance(record, dict)
+                                       and record.get("state") in pending.OPEN_STATES)
+                        runtime = _registered_runtime_disposition(final_row.metadata) if open_record else None
+                        if open_record and runtime == "live":
+                            store.update(duty["id"], observation={**observation,
+                                "reason": "completion-undelivered", **closed,
+                                "recipient_sid": recipient_sid,
+                                "recipient_pid": final_row.metadata.get("parent_runtime_pid", ""),
+                                "recipient_pid_start": final_row.metadata.get(
+                                    "parent_runtime_pid_start", "")}, skip_unchanged=True)
+                            return
+                        if not (open_record and runtime == "dead"):
+                            store.update(duty["id"], state="complete", delivery="not-required",
+                                cleanup="complete", observation={**observation, "reason": "route-closed",
+                                    **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
+                            return
                 if isinstance(record, dict):
                     from dispatch_completion_join import expire_pending_for_dead_recipient
                     expiry = expire_pending_for_dead_recipient(

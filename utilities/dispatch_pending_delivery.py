@@ -91,6 +91,7 @@ OPEN_STATES = frozenset({"pending", "claimed", "sent-ambiguous"})
 
 EXPIRY_REASONS = frozenset({
     "recipient-session-gone",
+    "recipient-session-replaced",
     "pending-delivery-ttl-exceeded",
     "receipt-row-superseded",
 })

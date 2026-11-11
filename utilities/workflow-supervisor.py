@@ -4665,6 +4665,41 @@ def _closed_terminal_projection(route, route_file, gates, node_states, claims):
     )
 
 
+def owner_completion_delivery(route, route_file, jobs_path):
+    """Where each owner completion record of this route stands, read only.
+
+    One entry per latest depth-1 owner row that asked for delivery: its record's state, why it is
+    not delivered (`undelivered` while the record is open and the route is closed; the expiry
+    reason once expired) and the recipient session's first eight characters. None when the
+    registry or a record cannot be read; status never fails for it."""
+    try:
+        latest = {}
+        for row in _registry_rows(jobs_path):
+            meta = row["meta"]
+            if (meta.get("attempt_id") and meta.get("dispatch_depth") == "1"
+                    and meta.get("worker_type") == "owner" and meta.get("delivery_intent") == "1"
+                    and route["route_id"] in (meta.get("owner_route_id"), meta.get("route_id"))):
+                latest[meta["attempt_id"]] = meta
+        closed = route_module().outcome_path(route_file).is_file()
+        result = []
+        for attempt_id, meta in latest.items():
+            record = PENDING.read(Path(jobs_path).resolve().parent, meta.get("parent_sid", ""),
+                                  meta.get("delivery_id", ""))
+            if not isinstance(record, dict):
+                continue
+            state = record.get("state")
+            if state in PENDING.OPEN_STATES:
+                reason = "undelivered" if closed else "-"
+            else:
+                reason = record.get("expiry_reason") or "-"
+            result.append({"attempt_id": attempt_id, "delivery_id": record.get("delivery_id"),
+                           "state": state, "reason": reason,
+                           "recipient": str(meta.get("parent_sid", ""))[:8]})
+        return result
+    except (OSError, ValueError, KeyError, TypeError, SupervisorError, PENDING.PendingDeliveryError):
+        return None
+
+
 def cmd_status(args):
     jobs = getattr(args, "jobs", None)
     try:
@@ -4724,6 +4759,9 @@ def cmd_status(args):
         "resource_children": resource_children(route, ledger),
         **ledger_metadata(jobs, ledger),
     }
+    payload["owner_completion_delivery"] = (
+        owner_completion_delivery(route, route_file, payload["jobs_path"])
+        if payload["jobs_path"] else None)
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
@@ -4739,6 +4777,9 @@ def cmd_status(args):
                   f"class={child.get('resource_class')} log={child.get('log_path')}")
         if payload["failure_reason"]:
             print(f"failure    {payload['failure_reason']}")
+        for item in payload["owner_completion_delivery"] or []:
+            if item["state"] in PENDING.OPEN_STATES or item["state"] == "expired":
+                print(f"delivery   {item['attempt_id']} {item['state']} {item['reason']}")
     return 0
 
 

@@ -4353,5 +4353,287 @@ class NativeReceivingTurnRetentionTest(unittest.TestCase):
                              {(str(root), "delivery-notice")})
 
 
+class ReplacedSessionNoticeTest(IsolatedRootMixin, unittest.TestCase):
+    """#1410: a plain `/clear` leaves the earlier session's completion with no recipient.
+
+    The seat ledger is written by the real SessionStart writer (`session_tidy.run_hook`), so the
+    sessions the notice reads are the ones a real `/clear` leaves; only the process ancestry
+    walk and the herdr pane proof are fixed."""
+
+    PANE = "fixture:clear-pane"
+    CARRIER = "claude-parent-runtime"
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_contract_process as process
+        import pane_ownership
+        self.process = process
+        _visibility, start, _state = process._proc_observation(os.getpid())
+        self.triple = (str(os.getpid()), str(start), process.process_namespace_identity(os.getpid()))
+        self.assertTrue(all(self.triple), self.triple)
+        self.jobs = self.root / "jobs.log"
+        # A user's own prompt hook runs in a plain environment, not in a worker's.
+        plain = {key: os.environ[key] for key in (
+            "HOME", "XDG_STATE_HOME", "HARNESS_STATE_ROOT", "AGENT_DISPATCH_JOBS",
+            "AGENT_PEER_LEDGER_ROOT", "AGENT_HOME", "PATH") if key in os.environ}
+        self.enterContext(mock.patch.dict(os.environ, {**plain, "HERDR_PANE_ID": self.PANE}, clear=True))
+        self.enterContext(mock.patch.object(
+            pane_ownership, "verified_pane", side_effect=lambda value, *a, **kw: value or ""))
+        self.enterContext(mock.patch.object(process, "runtime_ancestry_binding",
+                                            return_value=self.triple))
+        self.enterContext(mock.patch.object(peer_obligations, "request_dispatch_reconciliation"))
+
+    def _completion(self, attempt="att-clear-owner", sid="sess-A", **changes):
+        """A finished registered worker whose completion record sits open under `sid`."""
+        import dispatch_completion_join as join
+        import dispatch_contract as D
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.chmod(0o700)
+        route_hash = "sha256:" + "a" * 64
+        metadata = {
+            "attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
+            "execution_surface": "registered-headless", "registered_worker": "1",
+            "fallback_hop": "same-harness-headless", "attempt_id": attempt,
+            "parent_attempt_id": "att-clear-parent", "worker_type": "owner", "harness": "claude",
+            "parent_sid": sid, "parent_harness": "claude", "parent_completion_delivery": self.CARRIER,
+            "route_id": "rt-" + "a" * 16, "route_hash": route_hash, "route_node": "execute",
+            "artifact_root": str(self.root / "artifacts"),
+            "parent_runtime_pid": self.triple[0], "parent_runtime_pid_start": self.triple[1],
+            "parent_runtime_ns": self.triple[2],
+        }
+        metadata.update(changes)
+        pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(f"2026-10-23T00:00:00Z\topen\t{self.root}\t{self.root}\texecute\t{pipe}\n")
+        self.assertTrue(D.close_attempt_row(self.jobs, attempt, "fixture-complete"))
+        self.assertIsNotNone(join.materialize_after_terminal_close(self.jobs, attempt))
+        row = join.current_attempt_row(self.jobs, attempt)
+        record = PD.read(self.root, sid, row.metadata["delivery_id"])
+        self.assertEqual((record["state"], record["recipient_kind"]), ("pending", self.CARRIER))
+        return row.metadata, record
+
+    def _start(self, sid, source):
+        import session_tidy
+        session_tidy.run_hook("claude", "start", sid, source=source, cwd=str(self.root),
+                              env=dict(os.environ), render_context=False)
+
+    def _ledger(self, sid="sess-B"):
+        import dispatch_seat_handover as handover
+        import session_tidy
+        seat = handover.pane_seat(os.environ, "claude", sid)
+        self.assertIsNotNone(seat)
+        return session_tidy.physical_seat(seat)
+
+    def _prompt(self, sid, event="UserPromptSubmit", chars=None, prompt_id=None):
+        out = io.StringIO()
+        payload = {"session_id": sid, "hook_event_name": event}
+        if prompt_id:
+            payload["prompt_id"] = prompt_id
+        extra = [mock.patch.object(HOOK, "CLAUDE_CONTEXT_CHARS", chars)] if chars else []
+        with contextlib.ExitStack() as stack:
+            for patcher in extra:
+                stack.enter_context(patcher)
+            stack.enter_context(mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT))
+            stack.enter_context(patch_split(HOOK, "dispatch_state_roots", return_value=(self.root,)))
+            stack.enter_context(mock.patch.object(HOOK, "request_obligation_reconciliation"))
+            stack.enter_context(mock.patch.object(
+                sys, "stdin", io.StringIO(json.dumps(payload))))
+            stack.enter_context(mock.patch.object(sys, "stdout", out))
+            self.assertEqual(HOOK.main(), 0)
+        text = out.getvalue()
+        return json.loads(text)["hookSpecificOutput"]["additionalContext"] if text else ""
+
+    def _carrier(self):
+        """The follow-through carrier with its per-turn state under this test's root."""
+        import codex_turn_carrier as carrier
+        self.enterContext(mock.patch.object(carrier, "_roots", return_value=[self.root]))
+        return carrier
+
+    def _state(self, record):
+        current = PD.read(self.root, "sess-A", record["delivery_id"])
+        return current["state"], current.get("expiry_reason")
+
+    def test_next_prompt_in_the_same_runtime_shows_one_notice_then_the_record_expires(self):
+        import dispatch_seat_handover as handover
+        import session_tidy
+        meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        ledger = self._ledger()
+        # What a plain `/clear` leaves in the seat ledger: both sessions on one pane seat, no
+        # handover and no lineage from A to B.
+        self.assertEqual(sorted(sid for _name, sid in session_tidy.session_summary(ledger)),
+                         ["sess-A", "sess-B"])
+        self.assertIsNone(handover.read_snapshot(ledger.key))
+        self.assertEqual(handover.effective_parent(meta, self.jobs), "sess-A")
+        before = session_tidy._read_ledger_lines(ledger)
+
+        context = self._prompt("sess-B")
+        notices = [line for line in context.splitlines()
+                   if line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)]
+        self.assertEqual(len(notices), 1, context)
+        self.assertIn("route_id=" + meta["route_id"], notices[0])
+        self.assertIn("attempt_id=att-clear-owner", notices[0])
+        self.assertIn("previous_session=sess-A", notices[0])
+        for word in ("required_action", "resume_command", "parent_next", "correction_command"):
+            self.assertNotIn(word, notices[0])
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+        # Nothing was written to the ledger or to any lineage, and the notice is not repeated.
+        self.assertEqual(session_tidy._read_ledger_lines(ledger), before)
+        self.assertIsNone(handover.read_snapshot(ledger.key))
+        self.assertEqual(self._prompt("sess-B"), "")
+
+    def test_a_failure_while_collecting_notices_leaves_the_context_without_any_notice_line(self):
+        _meta, record = self._completion()
+        _own_meta, own = self._completion("att-clear-own", "sess-B")
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        real = SWEEP.replaced_session_notices([self.root], "sess-B")
+        self.assertEqual(len(real), 1)
+
+        def yields_one_then_fails(*_args, **_kwargs):
+            yield real[0]
+            raise RuntimeError("collection failed")
+
+        with mock.patch.object(HOOK, "replaced_session_notices", side_effect=yields_one_then_fails):
+            context = self._prompt("sess-B")
+        # The prompt is not blocked and the ordinary delivery is kept, but no half-collected notice
+        # line is attached and nothing is settled for it.
+        self.assertIn("attempt_id=att-clear-own", context)
+        self.assertNotIn(SWEEP.REPLACED_NOTICE_PREFIX, context)
+        self.assertEqual(PD.read(self.root, "sess-B", own["delivery_id"])["state"], "acked")
+        self.assertEqual(self._state(record), ("pending", None))
+
+    def test_a_root_listed_twice_gives_one_notice(self):
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        notices = SWEEP.replaced_session_notices([self.root, self.root], "sess-B")
+        self.assertEqual([item.record["delivery_id"] for item in notices], [record["delivery_id"]])
+        self.assertEqual(SWEEP.settle_replaced_session_notices(notices), 1)
+        self.assertEqual(SWEEP.replaced_session_notices([self.root], "sess-B"), [])
+
+    def test_a_notice_is_added_to_the_prompt_context_that_is_already_there(self):
+        _meta, record = self._completion()
+        own_meta, own = self._completion("att-clear-own", "sess-B")
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        context = self._prompt("sess-B")
+        self.assertIn("attempt_id=att-clear-own", context)
+        self.assertEqual(sum(line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)
+                             for line in context.splitlines()), 1)
+        self.assertEqual(PD.read(self.root, "sess-B", own["delivery_id"])["state"], "acked")
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def test_follow_through_state_gets_only_the_ordinary_record_when_a_notice_is_shown_with_it(self):
+        # #1512 (PG-44): the prompt tells the follow-through state what it showed. A notice line is
+        # information with nothing to act on, so it is neither an owed item nor a rendered record.
+        carrier = self._carrier()
+        _meta, record = self._completion()
+        _own_meta, own = self._completion("att-clear-own", "sess-B")
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        with mock.patch.object(carrier, "note_received", wraps=carrier.note_received) as noted:
+            context = self._prompt("sess-B", prompt_id="turn-1")
+        self.assertIn("attempt_id=att-clear-own", context)
+        self.assertIn(SWEEP.REPLACED_NOTICE_PREFIX, context)
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+        noted.assert_called_once()
+        args, kwargs = noted.call_args
+        self.assertEqual(args[:2], ("sess-B", "turn-1"))
+        self.assertEqual(kwargs["rendered"], [own["delivery_id"]])
+        self.assertEqual([item.get("attempt_id") for item in args[2]], ["att-clear-own"])
+        state = carrier.read_state("sess-B", "turn-1", self.root)
+        self.assertEqual(state["rendered"], [own["delivery_id"]])
+        self.assertEqual([item.get("attempt_id") for item in state["owed"]], ["att-clear-own"])
+        self.assertNotIn(record["delivery_id"], json.dumps(state))
+        self.assertNotIn("att-clear-owner", json.dumps(state))
+
+    def test_follow_through_state_is_untouched_when_the_prompt_shows_only_a_notice(self):
+        # A prompt that shows only the notice keeps the follow-through state exactly as a prompt
+        # with nothing to show does (the hook returned before it recorded anything): no state is
+        # started for the turn and the Stop pass has nothing to continue.
+        carrier = self._carrier()
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        with mock.patch.object(carrier, "note_received", wraps=carrier.note_received) as noted:
+            context = self._prompt("sess-B", prompt_id="turn-1")
+        self.assertEqual([line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)
+                          for line in context.splitlines()], [True])
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+        noted.assert_not_called()
+        self.assertFalse(carrier._state_path("sess-B", self.root).exists())
+        self.assertEqual(carrier.read_state("sess-B", "turn-1", self.root), {})
+        self.assertEqual(carrier.follow_through("sess-B", "turn-1", self.root), "")
+        # The same prompt with nothing at all to show also leaves no state.
+        self.assertEqual(self._prompt("sess-B", prompt_id="turn-2"), "")
+        self.assertFalse(carrier._state_path("sess-B", self.root).exists())
+
+    def test_the_notice_waits_for_the_next_prompt_when_it_does_not_fit_whole(self):
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        self.assertEqual(self._prompt("sess-B", chars=20), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        self.assertIn(SWEEP.REPLACED_NOTICE_PREFIX, self._prompt("sess-B"))
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+    def test_no_notice_unless_the_exact_runtime_and_original_parent_still_hold(self):
+        import dispatch_seat_handover as handover
+        _meta, record = self._completion()
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        # (a) Another runtime: any one part of the recorded binding differing is enough.
+        for index in range(3):
+            other = list(self.triple)
+            other[index] = other[index] + "0"
+            with self.subTest(binding=index), mock.patch.object(
+                    self.process, "runtime_ancestry_binding", return_value=tuple(other)):
+                self.assertEqual(self._prompt("sess-B"), "")
+                self.assertEqual(self._state(record), ("pending", None))
+        with mock.patch.object(self.process, "runtime_ancestry_binding", return_value=None):
+            self.assertEqual(self._prompt("sess-B"), "")
+        # (b) A handover made another session the recipient: the ordinary delivery owns it.
+        with mock.patch.object(handover, "effective_parent", return_value="sess-B"):
+            self.assertEqual(self._prompt("sess-B"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        # (c) A session start only observes; nothing is shown or expired.
+        self.assertEqual(self._prompt("sess-B", event="SessionStart"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        # (d) A pane-less terminal has no seat to read.
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": ""}):
+            self.assertEqual(self._prompt("sess-B"), "")
+        self.assertEqual(self._state(record), ("pending", None))
+        # (e) An exhausted pass budget leaves it for the next prompt.
+        self.assertEqual(SWEEP.replaced_session_notices([self.root], "sess-B", deadline_ns=0), [])
+        self.assertEqual(self._state(record), ("pending", None))
+        # (f) The session that holds the record is served by the ordinary delivery, with no
+        # notice line of its own.
+        context = self._prompt("sess-A")
+        self.assertNotIn(SWEEP.REPLACED_NOTICE_PREFIX, context)
+        self.assertEqual(self._state(record), ("acked", None))
+
+    def test_a_gate_or_supervision_record_is_not_a_completion_to_replace(self):
+        _meta, record = self._completion()
+        receipt = {"kind": "human-gate", "route_id": "rt-" + "a" * 16, "gate": "spec",
+                   "owner_attempt_id": "att-clear-owner", "artifact_path": "/x"}
+        gate = PD.create(
+            self.root, recipient_kind=self.CARRIER, recipient_key="sess-A",
+            delivery_id="delivery-" + "c" * 32, session_generation="",
+            session_generation_supported="0", attempt_ids=["att-clear-owner"],
+            parent_attempt_id="att-clear-parent", route_id="rt-" + "a" * 16, route_node="execute",
+            receipt=receipt, receipt_digest=PD._canonical_receipt_digest(receipt),
+            row_revisions={"att-clear-owner": "revision-gate"})
+        self._start("sess-A", "startup")
+        self._start("sess-B", "clear")
+        context = self._prompt("sess-B")
+        self.assertEqual(sum(line.startswith(SWEEP.REPLACED_NOTICE_PREFIX)
+                             for line in context.splitlines()), 1)
+        self.assertEqual(PD.read(self.root, "sess-A", gate["delivery_id"])["state"], "pending")
+        self.assertEqual(self._state(record), ("expired", "recipient-session-replaced"))
+
+
 if __name__ == "__main__":
     unittest.main()

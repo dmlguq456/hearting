@@ -6615,9 +6615,11 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
 
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
-    def _completed_delivery(self, root, attempt, pid, start):
+    def _completed_delivery(self, root, attempt, pid, start, ns=None):
         jobs = root / "jobs.log"
         row = ReconcilePendingDeliveryTest()._row(attempt, ancestry=(str(pid), str(start)))
+        if ns is not None:
+            row += f",parent_runtime_ns={ns}"
         jobs.write_text(row + "\n", encoding="utf-8")
         self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
         self.assertIsNotNone(JOIN.materialize_after_terminal_close(jobs, attempt))
@@ -6677,6 +6679,60 @@ class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
                 reread = JOIN.pending_delivery.read(
                     jobs.parent, metadata["parent_sid"], record["delivery_id"])
                 self.assertEqual(reread["state"], "pending")
+
+    def test_replaced_recipient_expiry_requires_the_exact_live_runtime_and_original_parent(self):
+        # #1410: the session was replaced inside a live runtime, so the dead-recipient rule does
+        # not apply. Only the next session of that very runtime, with the original parent still
+        # the effective recipient, may expire the exact record.
+        helper = getattr(JOIN, "expire_pending_for_replaced_recipient", None)
+        self.assertTrue(callable(helper), "replaced-recipient expiry helper is missing")
+        import dispatch_seat_handover as handover
+        pid, start = os.getpid(), D.process_start_ticks(os.getpid())
+        ns = D.process_namespace_identity(pid)
+        binding = (str(pid), str(start), ns)
+        cases = (
+            ("exact", pid, start, ns, binding, "expired"),
+            ("other-pid", pid, start, ns, (str(pid + 1), str(start), ns), "pending"),
+            ("other-start", pid, start, ns, (str(pid), str(start) + "0", ns), "pending"),
+            ("other-namespace", pid, start, ns, (str(pid), str(start), ns + "0"), "pending"),
+            ("binding-missing-part", pid, start, ns, (str(pid), str(start), ""), "pending"),
+            ("row-without-namespace", pid, start, None, binding, "pending"),
+            ("dead-runtime", 999999999, "123456789", ns, ("999999999", "123456789", ns), "pending"),
+            ("wrong-digest", pid, start, ns, binding, "skipped"),
+            ("wrong-row-revision", pid, start, ns, binding, "skipped"),
+            ("changed-lineage", pid, start, ns, binding, "protected"),
+        )
+        for label, row_pid, row_start, row_ns, bound, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                jobs, metadata, record = self._completed_delivery(
+                    Path(tmp), "att-replaced-" + label, row_pid, row_start, row_ns)
+                candidate = json.loads(json.dumps(record))
+                patches = []
+                if label == "wrong-digest":
+                    candidate["recipient_digest"] = "0" * 64
+                elif label == "wrong-row-revision":
+                    candidate["row_revisions"][candidate["attempt_ids"][0]] = "foreign-revision"
+                elif label == "changed-lineage":
+                    patches.append(mock.patch.object(
+                        handover, "effective_parent", return_value="successor-session"))
+                with contextlib.ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    result = helper(jobs, metadata, candidate, attempt_id="att-replaced-" + label,
+                                    runtime_binding=bound)
+                self.assertEqual(result, expected)
+                reread = JOIN.pending_delivery.read(
+                    jobs.parent, metadata["parent_sid"], record["delivery_id"])
+                if expected == "expired":
+                    self.assertEqual((reread["state"], reread["expiry_reason"]),
+                                     ("expired", "recipient-session-replaced"))
+                else:
+                    self.assertEqual(reread["state"], "pending")
+        # The dead-recipient rule keeps its own reason and does not expire a live runtime.
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, metadata, record = self._completed_delivery(Path(tmp), "att-replaced-dead-rule", pid, start, ns)
+            self.assertEqual(JOIN.expire_pending_for_dead_recipient(
+                jobs, metadata, record, attempt_id="att-replaced-dead-rule"), "pending")
 
     def test_periodic_sweep_calls_the_shared_single_record_rule(self):
         helper = getattr(JOIN, "expire_pending_for_dead_recipient", None)
