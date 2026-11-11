@@ -63,8 +63,10 @@ shared-utility-deferred	harness_behavior_cases_design_mcp.py
 shared-utility-deferred	harness_behavior_cases_e.py
 shared-utility-deferred	harness_behavior_cases_followthrough.py
 shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
+shared-utility-deferred	harness_behavior_cases_status_footer.py
 shared-utility-deferred	harness_behavior_cases_subagent_model.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
+shared-utility-deferred	harness_behavior_cases_token_budget.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
