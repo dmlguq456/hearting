@@ -160,6 +160,11 @@ PARENT_SESSION_STATE_SCHEMA_VERSION = 1
 STATE_PHASES = frozenset({"parked", "deliverable", "running-turn", "recovery", "terminal"})
 MAX_STATE_BYTES = 16384
 MAX_BATCH_ATTEMPTS = 4
+# A child unverifiable this long (per child, continuously) asks for supervision;
+# one that ended normally and only awaits its post-exit receipt gets the longer
+# settling ceiling first.
+UNVERIFIABLE_NOTICE_SECONDS = 30
+SETTLING_NOTICE_SECONDS = 600
 SESSION_PARENT_DELIVERY = "codex-stop-hook"
 MANAGED_SESSION_PARENT_DELIVERY = "codex-managed-gateway"
 CODEX_QUEUE_PARENT_DELIVERY = "codex-native-queue"
@@ -4021,7 +4026,7 @@ def _join_snapshot(
         "started": time.monotonic(), "last_recovery": {}, "last_settlement": {},
         "settlement_backoff": {}, "recovery_results": {},
         "last_observation": float("-inf"), "last_signature": "",
-        "observation_error": "", "unverifiable_since": {},
+        "observation_error": "", "unverifiable_since": {}, "settling_attempt_ids": set(),
         "notified_attempt_ids": set(),
         "last_notice_attempt": float("-inf"), "blocked_notice_published": False,
         "last_blocked_notice_attempt": float("-inf"), "registry_generation": None,
@@ -4035,6 +4040,7 @@ def _join_snapshot(
     last_signature = state["last_signature"]
     observation_error = state["observation_error"]
     unverifiable_since = state["unverifiable_since"]
+    settling_attempt_ids = state.setdefault("settling_attempt_ids", set())
     notified_attempt_ids = state["notified_attempt_ids"]
     last_notice_attempt = state["last_notice_attempt"]
     blocked_notice_published = state["blocked_notice_published"]
@@ -4077,12 +4083,11 @@ def _join_snapshot(
                     "reason": "cancelled-by-parent" if settled else "termination-pending",
                     "required_action": "advance-completed" if settled else "complete-open"})
                 continue
+            finished = terminal_envelope_observed(row.metadata.get("log_file"))
             observed = observed_attempt_liveness(
                 row.status,
                 row.metadata,
-                terminal_envelope=terminal_envelope_observed(
-                    row.metadata.get("log_file")
-                ),
+                terminal_envelope=finished,
                 # A join is itself a terminal gate.  Namespace-local workers
                 # must therefore carry the wrapper-issued portable post-exit
                 # receipt before any liveness fallback may make them ready,
@@ -4104,8 +4109,19 @@ def _join_snapshot(
             readiness, reason = choice.state, choice.reason
             if reason == "process-unverifiable":
                 unverifiable_since.setdefault(row.attempt_id, time.monotonic())
+                # A worker that ended normally and only awaits its post-exit
+                # receipt is settling, not stuck: the receipt waits on a clean
+                # host process scan, which other sessions' short-lived
+                # unreadable processes can delay for minutes. Notice it only
+                # past the settling ceiling.
+                if (observed.process_reason == "post-exit-receipt-incomplete"
+                        and (finished or row.status == "done")):
+                    settling_attempt_ids.add(row.attempt_id)
+                else:
+                    settling_attempt_ids.discard(row.attempt_id)
             else:
                 unverifiable_since.pop(row.attempt_id, None)
+                settling_attempt_ids.discard(row.attempt_id)
             pending = pending or choice.state == "pending"
             closure_eligible[row.attempt_id] = choice.census["closure_eligible"]
             if choice.census["settle"]:
@@ -4157,6 +4173,7 @@ def _join_snapshot(
         current_attempt_ids = {child["attempt_id"] for child in children}
         for attempt_id in set(unverifiable_since) - current_attempt_ids:
             unverifiable_since.pop(attempt_id, None)
+        settling_attempt_ids &= current_attempt_ids
         if recovered:
             # Re-read the canonical rows and all process evidence. The helper's
             # exit code or JSON alone never makes a child ready.
@@ -4201,7 +4218,9 @@ def _join_snapshot(
         eligible = {
             child["attempt_id"] for child in children
             if child["reason"] == "process-unverifiable"
-            and now - unverifiable_since[child["attempt_id"]] >= 30
+            and now - unverifiable_since[child["attempt_id"]] >= (
+                SETTLING_NOTICE_SECONDS if child["attempt_id"] in settling_attempt_ids
+                else UNVERIFIABLE_NOTICE_SECONDS)
         }
         signature = json.dumps({"children": children, "eligible": sorted(eligible)}, sort_keys=True)
         if observation_jobs is not None and (signature != last_signature
