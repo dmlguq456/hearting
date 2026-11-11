@@ -355,6 +355,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             "claim_owner": "retained-rewake:" + dispatch_index,
         }
         self.message_duties = []
+        self.window_observed_pending = 0
         for index in range(188):
             if index < 112:
                 state, receipt = "queued", "hook-context-emitted"
@@ -372,6 +373,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             elif state == "pending":
                 observation = {"ref": ref, "reason": "target-identity-changed",
                                "observed_pane": f"synthetic-pane-{index:03d}"}
+                self.window_observed_pending += 1
             else:
                 observation = None
             if observation is not None:
@@ -928,14 +930,21 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 if monitoring[0] and phase[0] == "runner":
                     counts["registered_cpu_seconds"] += time.process_time() - cpu_started
 
-        def fake_native_provider(target):
+        event_sid = self._session_id("recipient", 193)
+
+        def fixture_codex_queue(ref, **_kwargs):
+            if monitoring[0] and phase[0] == "runner":
+                counts["codex_queue_offers"] = counts.get("codex_queue_offers", 0) + 1
+            return {"status": "pending", "reason": "fixture-queue-unavailable"}
+
+        def fake_native_provider(harness, sid):
+            # The courier's one native lookup per message row: the recipient's shell
+            # attachment. None of these synthetic sessions has one (or a live thread).
             if monitoring[0] and phase[0] == "runner":
                 counts["native_lookups"] += 1
-                if event and target == event["target"] and "processed_at" not in event:
+                if event and sid == event_sid and "processed_at" not in event:
                     event["processed_at"] = time.monotonic()
-            return ("unknown", {"harness": "opencode", "session_id": "synthetic-changed-session",
-                                "name": target, "pane": f"synthetic-pane-{target[-3:]}"},
-                    0, "target-identity-changed")
+            return None, "attachment-unavailable"
 
         def checked_path_read_text(path, *args, **kwargs):
             target = Path(path).resolve(strict=False)
@@ -1133,7 +1142,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                                       side_effect=checked_resume_registered),
                     mock.patch.object(peer_steward.herdr_observation, "pane_census",
                                       return_value=None),
-                    mock.patch.object(peer_steward, "_retire_target",
+                    mock.patch.object(peer_steward, "_current_shell_binding",
                                       side_effect=fake_native_provider),
                     mock.patch.object(Path, "read_text", checked_path_read_text),
                     mock.patch.object(os, "open", side_effect=checked_os_open),
@@ -1142,8 +1151,10 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                     mock.patch.object(os, "kill", side_effect=checked_kill),
                     mock.patch.object(peer_steward.select, "select", side_effect=controlled_select),
                     mock.patch.object(peer_steward.time, "sleep", side_effect=controlled_sleep),
+                    # A pending Codex row is offered to its exact thread queue; this
+                    # fixture's queue takes nothing, so the row stays pending.
                     mock.patch.object(peer_message, "deliver_pending_codex",
-                                      side_effect=AssertionError("fixture attempted a native send")),
+                                      side_effect=fixture_codex_queue),
                     mock.patch.object(peer_steward, "cmd_prompt",
                                       side_effect=AssertionError("fixture attempted a prompt send")),
                     mock.patch.object(peer_obligations, "acknowledge_registered_delivery",
@@ -1214,7 +1225,10 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         self.assertEqual(discovered_active_ids, expected_cold_active_ids,
                          "cold discovery must match fixture membership and the case-required "
                          "retire followups")
-        expected_cold_json_records = len(expected_cold_active_ids)
+        # Each pending message whose recorded observation came from the former window
+        # check (target-identity-changed) is rewritten once to its native wait reason;
+        # that one checkpoint rereads its duty. Steady passes rewrite nothing.
+        expected_cold_json_records = len(expected_cold_active_ids) + self.window_observed_pending
         self.assertEqual(cold["store"]["json_reads"], expected_cold_json_records,
                          (len(expected_cold_active_ids), cold["store"]))
         self.assertEqual(cold["store"]["json_parses"], expected_cold_json_records)
@@ -1242,9 +1256,11 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         self.assertEqual(counts["jobs_file_reads"], 0,
                          "registry content is read through the fd generation reader")
         self.assertEqual(counts["write_atomic_without_dir_fd"], 0)
+        # The one-time rewrite of former window-check observations (see above) is
+        # the only cold checkpoint besides the first resolved retire followups.
         self.assertEqual(
             cold["counts"]["obligation_writes"]
-            - cold["counts"]["retire_followup_completion_writes"], 0,
+            - cold["counts"]["retire_followup_completion_writes"], self.window_observed_pending,
             "the first resolved retire followups are counted separately from unchanged duties",
         )
         self.assertEqual(
@@ -1256,13 +1272,15 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             "steady unchanged duties must not checkpoint",
         )
         self.assertEqual(
-            counts["obligation_writes"] - counts["retire_followup_completion_writes"], 1,
+            counts["obligation_writes"] - counts["retire_followup_completion_writes"],
+            1 + self.window_observed_pending,
                          "only the changed duty may checkpoint after the measurement windows")
         self.assertEqual(counts["input_obligation_writes"], 1)
         self.assertEqual(counts["input_pending_writes"], 1)
         self.assertEqual(counts["input_transfer_writes"], 1)
         self.assertEqual(
-            counts["store_update_calls"] - counts["retire_followup_completion_writes"], 1)
+            counts["store_update_calls"] - counts["retire_followup_completion_writes"],
+            1 + self.window_observed_pending)
         self.assertTrue(discovered_roots)
         self.assertTrue(write_targets)
         self.assertTrue(all(Path(path).resolve(strict=False).is_relative_to(fixture_root)
@@ -1298,9 +1316,11 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         input_latency = event["processed_at"] - event["created_at"]
         self.assertLessEqual(input_latency, event["trigger_delay"] + 2.0)
         self.assertLessEqual(event["trigger_delay"], 15.0)
-        self.assertEqual(self.store.get(event["duty_id"])["state"], "unknown")
+        # The new message was offered to its exact Codex thread queue, which took
+        # nothing: it stays pending for that session (no window lookup).
+        self.assertEqual(self.store.get(event["duty_id"])["state"], "pending")
         self.assertEqual(self.store.get(event["duty_id"])["observation"]["reason"],
-                         "target-identity-changed")
+                         "awaiting-native-receiver")
         self.assertEqual(hashlib.sha256(self.jobs.read_bytes()).hexdigest(), initial_jobs_digest,
                          "authority input changes must leave jobs.log unchanged")
         if recurring_negative:
@@ -1350,8 +1370,13 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                              f"record={record_retire_events}; locks={lock_events}")
             self.assertEqual(counts["record_retire_calls"], 2)
             self.assertEqual(counts["handover_authority_calls"], 2)
-        self.assertTrue(all(self.store.get(duty_id)["state"] == "unknown"
+        # Accepted/ambiguous and row-missing duties stay unknown; the pending rows now
+        # wait on their exact native carrier (pending), never completed or cancelled.
+        self.assertTrue(all(self.store.get(duty_id)["state"] in {"unknown", "pending"}
                             for duty_id, _ref, _target in self.message_duties))
+        self.assertEqual(sum(self.store.get(duty_id)["state"] == "pending"
+                             for duty_id, _ref, _target in self.message_duties),
+                         self.window_observed_pending)
         expected_final_active_ids = expected_recovered_active_ids | {event["duty_id"]}
         for index, duty_id in enumerate(self.completed_retire_ids):
             completed_followup = not recurring_negative or index == 0

@@ -61,6 +61,8 @@ sys.path.insert(0, str(_HERE))
 import fixture_processes  # noqa: E402
 import claude_process_identity  # noqa: E402
 terminal_surface = peer_steward.terminal_surface
+import peer_session_fixture  # noqa: E402
+peer_session_fixture.install(peer_steward)
 
 
 def _register_completion_fixture(jobs, attempt, metadata):
@@ -227,43 +229,50 @@ def _idle_shell_run(argv, **kwargs):
 
 
 class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
-    def test_message_uses_saved_server_for_readiness_and_transport_and_restores_on_error(self):
+    def test_message_uses_saved_server_for_resolution_and_transport_and_restores_on_error(self):
+        import peer_address
+        import session_shell
         store = peer_steward.peer_obligations.ObligationStore()
         ident = {"server": "secondary", "pane": "w1:p9", "harness": "claude",
                  "session_id": "sid-peer"}
         duty = store.create("message-server", "message", ident,
                             {"target": "peer", "ref": "r" * 32})
-        row = {"state": "pending", "to": {**ident, "name": "peer"}, "created": time.time()}
+        row = {"state": "pending", "to": {"harness": None, "session_id": None, "name": "peer"},
+               "created": time.time()}
+        recipient = {"harness": "claude", "session_id": "sid-peer"}
         calls = []
 
-        def target(_target):
-            calls.append(("resolve", peer_steward._HERDR_SESSION))
-            return "idle", ident, 0, None
+        def resolve(target, *, server=None, **_kw):
+            calls.append(("resolve", target, server, peer_steward._HERDR_SESSION))
+            return {"harness": "claude", "session_id": "sid-peer"}, None
 
-        def ready(*a, **kw):
-            calls.append(("readiness", peer_steward._HERDR_SESSION))
-            return SimpleNamespace(state="ready", reason="native-idle")
+        def bind(ref, bound):
+            calls.append(("bind", bound))
+            return dict(row, bound_to=dict(bound))
 
-        def flush(*a, **kw):
-            calls.append(("flush", peer_steward._HERDR_SESSION))
-            row["state"] = "received"
+        def deliver(ref, harness, sid):
+            calls.append(("deliver", harness, sid, peer_steward._HERDR_SESSION))
+            return {"reason": "recipient-busy"}
 
         peer_steward._HERDR_SESSION = "caller"
         with mock.patch.object(peer_steward.peer_message, "_read_pending", side_effect=lambda ref: row), \
-             mock.patch.object(peer_steward, "_retire_target", side_effect=target), \
-             mock.patch.object(peer_steward, "_prompt_current_candidate", return_value=(
-                 {"state": "idle", "harness": "claude", "session_id": "sid-peer",
-                  "pane": "w1:p9", "_identity": ident,
-                  "_native_session_id": "sid-peer"}, None)), \
-             mock.patch.object(peer_steward, "_pane_readiness", side_effect=ready), \
-             mock.patch.object(peer_steward, "_flush_pending_for_target", side_effect=flush):
+             mock.patch.object(peer_address, "resolve", side_effect=resolve), \
+             mock.patch.object(peer_steward.peer_message, "bind_unresolved_pending_recipient",
+                               side_effect=bind), \
+             mock.patch.object(peer_steward.peer_message, "pending_delivery_recipient",
+                               return_value=recipient), \
+             mock.patch.object(session_shell, "exact_binding",
+                               return_value=({"harness": "claude", "sid": "sid-peer"}, None)), \
+             mock.patch.object(session_shell, "deliver_pending", side_effect=deliver):
             peer_steward._resume_message_obligation(duty, store)
-            self.assertEqual(calls, [(stage, "secondary") for stage in ("resolve", "readiness")])
+            self.assertEqual(calls, [("resolve", "peer", "secondary", "secondary"),
+                                     ("bind", recipient),
+                                     ("deliver", "claude", "sid-peer", "secondary")])
             self.assertEqual(store.get(duty["id"])["state"], "pending")
+            self.assertEqual(store.get(duty["id"])["observation"]["reason"], "recipient-busy")
             self.assertEqual(row["state"], "pending")
             self.assertEqual(peer_steward._HERDR_SESSION, "caller")
-            row["state"] = "pending"
-            with mock.patch.object(peer_steward, "_pane_readiness", side_effect=RuntimeError("probe")):
+            with mock.patch.object(session_shell, "deliver_pending", side_effect=RuntimeError("probe")):
                 with self.assertRaises(RuntimeError):
                     peer_steward._resume_message_obligation(duty, store)
             self.assertEqual(peer_steward._HERDR_SESSION, "caller")

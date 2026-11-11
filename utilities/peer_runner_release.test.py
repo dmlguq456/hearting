@@ -78,7 +78,9 @@ class ReleaseTransitionTest(unittest.TestCase):
         shutil.copytree(ROOT / "utilities", root / "utilities",
                         ignore=shutil.ignore_patterns("*.test.py", "*.test.sh", "__pycache__", "*.pyc"))
         # The shared card format is runtime data from the portable contract.
-        for relative in ("tools/install", "core", "capabilities"):
+        # Fleet records (session registry, shell attachments) resolve the
+        # recipient's native session, as in an installed release.
+        for relative in ("tools/install", "tools/fleet", "core", "capabilities"):
             shutil.copytree(ROOT / relative, root / relative,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (root / "RELEASE_VERSION").write_text(version + "\n", encoding="utf-8")
