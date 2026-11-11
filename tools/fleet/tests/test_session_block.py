@@ -29,7 +29,9 @@ class SessionBlockTest(unittest.TestCase):
         for percentage,key in ((0,'lvl_g'),(49,'lvl_g'),(50,'lvl_y'),(79,'lvl_y'),(80,'lvl_r')):
             parts=session_line.line_segments({**self.values(),'ctx_pct':percentage},300)
             text=''.join(text for text,_ in parts)
-            self.assertIn('📁',text);self.assertIn('⎇',text);self.assertTrue('━' in text or '─' in text)
+            # Spec 2026-11-11: `[number] project (git)`, no folder or branch glyph.
+            self.assertIn('[52] project (topic*)',text);self.assertNotIn('📁',text);self.assertNotIn('⎇',text)
+            self.assertTrue('━' in text or '─' in text)
             self.assertIn(key,[style for text,style in parts if '%' in text])
 
     def test_question_rows_get_space_before_other_sections_and_empty_sections_hide(self):
@@ -59,7 +61,7 @@ class SessionBlockTest(unittest.TestCase):
             text='\n'.join(''.join(t for t,_ in row) for row in block_lines(
                 {**self.values(),'harness':harness},columns=180,rows=50,route='⏳ route 1 · draft',human='› 1m · hello'))
             self.assertEqual('context ' in text,harness!='claude')
-            self.assertEqual('📁 ' in text,harness!='claude')
+            self.assertEqual('[52] project' in text,harness!='claude')
             self.assertIn('route 1',text);self.assertIn('› 1m · hello',text)
 
     def test_context_is_one_ten_cell_colored_group(self):

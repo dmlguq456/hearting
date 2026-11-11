@@ -91,7 +91,7 @@ class SessionShellTest(unittest.TestCase):
     def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
         path=shell.policy_path();path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
-        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none'})
+        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time'})
         path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
         self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
         for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
@@ -225,7 +225,8 @@ class SessionShellTest(unittest.TestCase):
             with mock.patch.object(shell.os, "getppid", return_value=os.getpid()):
                 result = shell._backend_operation({"op": "projection", "binding": row, "columns": 240, "state": "idle"})
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
-        fields = ("hearting", "Common title", "feature", "context ━━━━────── 37%", "opus", "7d 60%", "⏳ route 2", "◑ 2")
+        # Spec 2026-11-11 rule 10: the session title is the panel's, not the line's.
+        fields = ("[52] hearting", "(feature)", "claude-opus high", "context ━━━━────── 37%", "◑답 대기 2", "⏳ route 2", "7d 60%")
         for field in fields:
             self.assertIn(field, text)
         self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))
@@ -239,8 +240,8 @@ class SessionShellTest(unittest.TestCase):
                 mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "none"}):
             result = shell.panel_projection("claude", "test-native-session")
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
-        self.assertIn("◑ ?", text)
-        self.assertNotIn("◑ 0", result["footer"])
+        self.assertIn("◑답 대기 ?", text)
+        self.assertNotIn("◑답 대기 0", result["footer"])
 
     def test_readiness_requires_the_exact_native_idle_record_and_known_empty_screen(self):
         from fleet import session_registry

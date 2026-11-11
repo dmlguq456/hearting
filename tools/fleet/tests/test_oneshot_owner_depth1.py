@@ -101,28 +101,41 @@ class OneShotOwnerTests(unittest.TestCase):
         self.assertIn("└ worker", page[staged + 1])
 
     def test_shell_panel_reads_the_same_owner_for_every_harness(self):
+        # Spec 2026-11-11: one row per route with Fleet's own owner values, added
+        # by the shared line helper from the same snapshot the producer reads.
+        from tools.fleet.session_line import session_route_status as shell_route_status
         script = r'''
 const v=require(process.argv[1]),m=JSON.parse(process.argv[2]);
 const out=[];for(const side of [true,false]){const r=v.render({width:side?44:120,height:side?30:8,side,model:m,
- sid:'sid-main',questions:()=>[],configuration:{}});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
+ sid:'sid-main',questions:()=>[],configuration:{},expandedKeys:['route:rt-solo']});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
 console.log(JSON.stringify(out));'''
         for harness in ("claude", "codex", "opencode"):
-            _labels, panels = session_route_status(_snapshot(harness), now=2000.0, include_details=True)
-            presented = session_panel.presentation({"model": "x", "effort": "high"}, {"route_panels": panels},
-                                                   harness, "sid-main", 60)
+            # Wall clock: the row keeps an absolute start time and the panel ages it.
+            labels, panels = shell_route_status(_snapshot(harness), include_details=True)
+            # Fleet's own judgment: the staged route's owner waits on its worker (●).
+            self.assertEqual(set(labels.values()), {"⏳ route 2 ⠏1 ●1"})
+            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "⏳ route 2 ⠏1 ●1"},
+                                                   {"route_panels": panels}, harness, "sid-main", 60)
             solo = next(route for route in presented["routes"] if route["id"] == "rt-solo")
             self.assertEqual(solo["owner"], "owner · codex (Opus 5.5·high)")
-            self.assertEqual(solo["owner_line"], "")                  # its body line already says owner
-            self.assertEqual(solo["reason"], "owner codex (Opus 5.5·high) · running 5m")
+            self.assertEqual((solo["harness"], solo["model_text"], solo["effort"]), ("codex", "Opus 5.5", "high"))
+            self.assertEqual(solo["elapsed"], "5m")
             staged = next(route for route in presented["routes"] if route["id"] == "rt-staged")
             self.assertEqual(staged["owner_line"], "owner · claude (Opus 5.5·high)")
-            self.assertEqual(staged["reason"], "worker codex · running 3m")
+            self.assertEqual(staged["harness"], "codex")              # the live worker of the shown stage
+            self.assertIn("code-execute ●", staged["flow"])
+            for route in presented["routes"]:
+                route["paint"] = {name: {"text": route[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
+                                  if route.get(name)}
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            self.assertIn("owner codex (Opus 5.5·high)", side)
+            # The title row repeats the first route's title; its route row adds harness and time.
+            rows = [line for line in side.splitlines() if "Fixture solo route" in line]
+            self.assertTrue(any("codex" in line and "5m" in line for line in rows), side)
+            self.assertIn("Opus 5.5 high", side)                      # the opened row
+            self.assertIn("codex Opus 5.5 high", bottom)
             self.assertNotIn("hb_", side + bottom)
-            self.assertIn("owner · codex (Opus 5.5·high)", bottom)
             self.assertEqual(len(bottom.splitlines()), 8)             # the bottom panel does not grow
 
     def test_one_shot_summary_names_its_completion_gate_instead_of_staying_unknown(self):

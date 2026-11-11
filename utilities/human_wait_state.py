@@ -4367,7 +4367,9 @@ def _refresh_cache() -> bool:
                 # Share registry generations with the answer-wait pass, and interpret
                 # only the native sessions the displays actually requested.
                 from tools.fleet.collectors import collect_all
-                from tools.fleet.explorer.live import session_route_status
+                # The shared line helper adds each route row's job values from this
+                # same snapshot and counts their states in the label.
+                from tools.fleet.session_line import session_route_status
                 requested = [tuple(key.split("\0", 1)) for key in demands]
                 snapshot = collect_all(harness_filter={h for h, _ in requested},
                                        route_sessions=requested, include_report_verification=False)

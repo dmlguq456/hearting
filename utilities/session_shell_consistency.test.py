@@ -86,7 +86,7 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         blocked = [{'state': 'attention', 'state_label': 'Needs attention', 'title': 'shell'}]
         done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': now - 10}]
         self.assertEqual(notice_line(calm, [], [], {}, now), [], 'nothing means an empty line')
-        self.assertIn('1 · Ctrl+]', text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
+        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
         self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [], display, now)))
         self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [], display, now)))
         self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [], display, now)))
@@ -203,7 +203,7 @@ for(const token of ['1234567','SUCCESS','[same','head]'])assert(rows.some(row=>r
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 const id='00000000-0000-4000-8000-000000000052';
 for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of ['start','idle','question','focus','draft','restored']){
- const model={model:[{text:'fixture'}],model_value:'fixture',effort_value:'',routes_known:state!=='start',
+ const model={model:[{text:'fixture'}],model_value:'fixture',effort_value:'',routes_known:true,
    status:[[{text:'Full detail '+id}]],summary:[[{text:'shared telemetry'}]],
    routes:state==='start'?[]:[{title:'Current task',state:'working',stages:[{name:'inline',state:'active'}],visibility:{summary:'solo · test? · review? · CI?'}}]};
  const question=['question','focus','draft','restored'].includes(state);
@@ -212,10 +212,11 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const rows=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
  assert.deepEqual(rows[1],rows[0],state+' codex');assert.deepEqual(rows[2],rows[0],state+' opencode');
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
- assert(text.includes('fixture · ?'),state+' missing effort placeholder');
- assert(text.includes('Current work'),state+' missing work section');
+ // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
+ assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
  if(question){assert(text.includes('│ Choose the destination'),state+' inner padding');}
- if(state!=='start')assert(text.includes('solo · test?'),state+' verification summary missing');
+ if(state!=='start')assert(text.includes('⏳ route 1')&&text.includes('Current task'),state+' route row missing');
+ else assert(text.includes('── route 0 '),state+' known-empty route list');
 }
 '''
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],

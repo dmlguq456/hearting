@@ -172,11 +172,12 @@ PY
   )
   read -r display_pid tap_pid tap_start tap_policy <<< "$identity" || true
 fi
-S_SESSION_DISPLAY=""
+S_SESSION_DISPLAY=""; S_SESSION_TAG=""; S_SESSION_PROJECT=""
 session_helper="$AGENT_HOME/tools/fleet/session_handle.py"
 [ -f "$session_helper" ] || session_helper="$(dirname "$AGENT_HOME")/tools/fleet/session_handle.py"
 if [ -n "$S_SID" ] && [ -f "$session_helper" ]; then
-  S_SESSION_DISPLAY=$(python3 - "$session_helper" "$S_SID" "$display_pid" "$S_CWD" <<'PY' 2>/dev/null || true
+  # Lines: the session number Fleet already assigned (read only), the project, the title.
+  session_display=$(python3 - "$session_helper" "$S_SID" "$display_pid" "$S_CWD" <<'PY' 2>/dev/null || true
 import importlib.util, sys
 try:
     spec = importlib.util.spec_from_file_location("fleet_session_handle", sys.argv[1])
@@ -191,6 +192,19 @@ try:
     tools_dir = os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1])))
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
+    try:
+        from fleet.session_tags import assigned_tag
+        tag = str(assigned_tag("claude", sid) or "").strip("[]")
+    except Exception:
+        tag = ""
+    print(tag if all(c.isalnum() or c in "-_" for c in tag) else "")
+    # Second line: Fleet's project name for this folder (a worktree reads as its repo).
+    try:
+        from fleet.model import project_of
+        project = mod.sanitize_title(project_of(cwd)) if cwd else ""
+    except Exception:
+        project = ""
+    print(mod.clip_cells(project, 48) if project and project != "(unknown)" else "")
     from fleet.titles import last_title
     title = last_title(sid, harness="claude")
     name = mod.current_session_subject(inputs.get("runtime_name"), title)
@@ -208,6 +222,11 @@ except Exception:
     pass
 PY
   )
+  S_SESSION_TAG="${session_display%%$'\n'*}"
+  case "$session_display" in *$'\n'*)
+    rest="${session_display#*$'\n'}"; S_SESSION_PROJECT="${rest%%$'\n'*}"
+    case "$rest" in *$'\n'*) S_SESSION_DISPLAY="${rest#*$'\n'}" ;; esac ;;
+  esac
 fi
 
 # §5 per-session statusline tap (agent-fleet-dashboard) — 멀티세션 대시보드(tools/fleet)가
@@ -414,19 +433,26 @@ pcol(){ if [ "${1:-0}" -ge 80 ] 2>/dev/null; then printf '%s' "$RED"; elif [ "${
 
 # --- 세그먼트 배열 → 세로선(│) 파티션으로 join ---
 segs_arr=()
-segs_arr+=("📁 ${CYAN}${dir}${RST}")
- [ -n "$S_SESSION_DISPLAY" ] && segs_arr+=("${DIM}${S_SESSION_DISPLAY}${RST}")
+# [세션 번호] 프로젝트 (git): the same order and words as the shell panel (spec 2026-11-11).
+git_text=""
 if [ "$git_repo" = 0 ]; then
-  segs_arr+=("${DIM}⎇ no-git · ${git_observed_label}${RST}")
+  git_text="no-git"
 else
-  bseg="${DIM}⎇${RST}${YEL}${branch}${RST}"
-  [ -n "$gflag" ] && bseg="${bseg} ${RED}${gflag}${RST}"
+  git_text="${branch}"; [ "$branch" = unknown ] && git_text=""
+  [ -n "$git_text" ] && [ "$git_dirty" = 1 ] && git_text="${git_text}*"
+  [ -n "$gflag" ] && git_text="${git_text} ${gflag}"
+  [ "${git_ahead:-0}" -gt 0 ] 2>/dev/null && git_text="${git_text} ↑${git_ahead}"
+  [ "${git_behind:-0}" -gt 0 ] 2>/dev/null && git_text="${git_text} ↓${git_behind}"
   wt="$git_extra_worktrees"
-  if [ "$wt" = unknown ]; then bseg="${bseg} ${DIM}🚧 ?${RST}"
-  elif [ "$wt" -gt 0 ] 2>/dev/null; then bseg="${bseg} ${YEL}🚧 ${wt}${RST}"; fi
-  bseg="${bseg} ${DIM}${git_observation} · ${git_observed_label}${RST}"
-  segs_arr+=("$bseg")
+  if [ "$wt" = unknown ]; then git_text="${git_text} 🚧 ?"
+  elif [ "$wt" -gt 0 ] 2>/dev/null; then git_text="${git_text} 🚧 ${wt}"; fi
 fi
+hseg="${CYAN}${S_SESSION_PROJECT:-$dir}${RST}"
+[ -n "$S_SESSION_TAG" ] && hseg="[${S_SESSION_TAG}] ${hseg}"
+git_text="${git_text# }"
+[ -n "$git_text" ] && hseg="${hseg} ${DIM}(${git_text})${RST}"
+segs_arr+=("$hseg")
+cseg=""; wseg=""; rseg=""; mseg=""
 jobs_lbl="$git_jobs"
 
 # context gauge — mid-line ━/─ (fleet design): filled in the level color, empty track dim
@@ -436,7 +462,7 @@ if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
   fbar=""; i=0
   while [ "$i" -lt "$filled" ]; do fbar="${fbar}━"; i=$((i+1)); done
   ebar=""; while [ "$i" -lt "$segs" ]; do ebar="${ebar}─"; i=$((i+1)); done
-  segs_arr+=("${DIM}context${RST} ${cc}${fbar}${RST}${DIM}${ebar}${RST} ${cc}${S_CTX}%${RST}")
+  cseg="${DIM}context${RST} ${cc}${fbar}${RST}${DIM}${ebar}${RST} ${cc}${S_CTX}%${RST}"
 fi
 
 # Fast, cached answer-wait and session route badges. The detached refresh owns all registry/route
@@ -457,9 +483,9 @@ if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
     if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
       wait_total="$1"
       [ "$wait_total" = "-1" ] && wait_total="?"
-      segs_arr+=("${RED}◑답 대기 ${wait_total}${RST}")
+      wseg="${RED}◑답 대기 ${wait_total}${RST}"
     fi
-    [ -z "$route_label" ] || segs_arr+=("${YEL}${route_label}${RST}")
+    [ -z "$route_label" ] || rseg="${YEL}${route_label}${RST}"
     # A session-tidy result line (a continue that was not sent) otherwise waits for the
     # next hook, which in a cleared window is the person's next input. Display only.
     tidy_notice=$(python3 - "$(dirname "$wait_helper")" "$S_SID" <<'PY' 2>/dev/null || true
@@ -495,7 +521,7 @@ if [ -n "$S_EFFORT" ]; then
   eff_disp=" ${ecol}${etxt}${RST}"
 fi
 # model in its model-family color (fleet 동일 — per-model 구분), dotless effort
-segs_arr+=("$(mcol "$S_MODEL")${S_MODEL}${RST}${eff_disp}")
+mseg="$(mcol "$S_MODEL")${S_MODEL}${RST}${eff_disp}"
 u=""
 [ -n "$S_5H" ] && { u="${u} ${DIM}5h${RST} $(pcol "$S_5H")${S_5H}%${RST}"; [ -n "$S_5H_RST" ] && u="${u}${DIM}(↻ ${S_5H_RST})${RST}"; }
 [ -n "$S_7D" ] && { u="${u} ${DIM}7d${RST} $(pcol "$S_7D")${S_7D}%${RST}"; [ -n "$S_7D_RST" ] && u="${u}${DIM}(↻ ${S_7D_RST})${RST}"; }
@@ -504,7 +530,8 @@ for ms in $S_MS; do
   lbl="${ms%%:*}"; pv="${ms##*:}"
   [ -n "$lbl" ] && [ "$pv" -ge 0 ] 2>/dev/null && u="${u} $(mcol "$lbl")${lbl}${RST} $(pcol "$pv")${pv}%${RST}"
 done
-[ -n "$u" ] && segs_arr+=("${u# }")
+# [tag] project (git) │ model effort │ context │ ◑답 대기 │ ⏳ route │ 5h 7d
+for s in "$mseg" "$cseg" "$wseg" "$rseg" "${u# }"; do [ -n "$s" ] && segs_arr+=("$s"); done
 
 # join with 세로선 파티션
 out=""; sep=" ${DIM}│${RST} "

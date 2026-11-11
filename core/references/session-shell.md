@@ -98,21 +98,26 @@ Text and glyphs accompany state colors in every theme. Native permission UI rema
 neither work complete nor failed. Unknown evidence stays unknown.
 The same facts and available panel dimensions use the same content order and
 editing controls in all three harnesses, including startup and restoration.
-Keep the observed model/effort at the top (an unavailable effort is `?`) and
-compact session information at the bottom, never opportunistically in the
-middle. There is no separate session-details view: below the route and any
-question, the panel always paints the rest of the statusline (folder, title,
-branch with dirty, ahead/behind, worktrees and Git
-observation, quota resets and running jobs), then peer news and the last
-input, each only in rows left after the question, and an item without a value
-is left out. Running jobs join the last session row when they fit. While a
-question leaves too few rows for every session row, the title, running jobs
-and branch, in that order, are packed into rows the panel already paints (a
-filled side panel's rows, or its spacer row) and then into the panel's bottom
-edge, so they never leave the screen; the question keeps the rows it had and a
-bottom panel does not grow for them. Claude's exact statusline callback remains the source of its
-values; the panel shows them in the same header, compact status and session
-rows as the other harnesses.
+The panel follows the 2026-11-11 unified layout (the C3 draft the person
+chose). From the top: the header (`HEARTING ─── ⚙ Settings`); `[number]
+project (git)`, with Git (branch and dirty mark, `🚧 N`, ahead/behind and the
+existing merge warnings) dim in parentheses and no folder or branch glyph;
+model and effort, then `context` with its gauge and percent (two rows beside
+the native area, one `│`-separated row with the line above at the bottom);
+running jobs; `◑답 대기 N` and the session's title; any question; the route
+section; the messages section; and `5h … │ 7d …` last. Groups are divided by
+`│`, stages joined by `›`. Fixed words are English (`context`, `route`,
+`Settings`, `messages`, stage names, `5h`/`7d`); only real content and
+language-dependent text is Korean, and `◑답 대기 N` keeps its existing words.
+The panel paints no clock and no last-input row. A value that was not
+observed is left out, never painted as `?` or an estimate. When rows run
+short, the question and the top groups stay; spacer rows, then messages, then
+opened details, then route rows give way (and, only for a question's rows, the
+route section, running jobs and 5h/7d). Variable-width text (titles, message
+bodies) is cut with `…` before fixed-shape values (percent, glyphs, elapsed
+time), in two-cell Hangul and emoji as well. Claude's exact statusline callback
+remains the source of its values; the panel shows them in the same groups as
+the other harnesses.
 Fields already painted in a native-owned status area are omitted from the compact duplicate.
 Physical exceptions are explicit: Claude's reserved native status row and
 OpenCode's native Context/footer and native scroll gutter.
@@ -128,13 +133,31 @@ or route binding; configured defaults never masquerade as observed selection.
 An official startup callback's active-model field may travel with its existing
 birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
-Show confirmed current work, its actual route name/flow/state and next action,
-then the person's question and results. A direct route has only its own stages.
-The route's depth-1 owner reads as Fleet's route row does (`owner · codex
-(GPT-5.5·high)`); a one-shot owner runs its node itself, so its line says
-`owner`, while `worker` names only a depth-2 attempt the owner launched. The
-route summary ends with its completion gate (`gate✓`) as Fleet's card marks it.
-Clicking a route opens its existing read-only detail. Put each answer choice on
+The route section has no box: a titled rule (`── ⏳ route N ──`) above and a
+rule below, shared with the messages section when both show. Each current
+route (the ones the statusline counts) is one folded row: Fleet's state glyph
+and judgment (`⠏` working, `●` waiting, `◑` blocked, `✕` stopped, `✓` done),
+title, harness, context percent and elapsed time (`route line` = `time`, the
+default) or title, harness, model and context percent (`model`). The bottom
+layout fits model, effort, a five-cell gauge, the current tool or stage and the
+elapsed time on the row whatever the setting. Pressing a row opens it in place
+(model, effort and gauge, `plan ✓ › execute ● › review` when there are several
+stages, `>_ tool` while working, `+N agent`) and pressing it again folds it.
+More than five routes end in `+N more`, which opens Fleet. These values come
+from the answer-wait producer's existing pass: the shared line helper adds each
+route row's job values (harness, display model, effort, context, tool, active
+sub-agents and an absolute start time) from that same snapshot, and counts
+the route states into the statusline label (`⏳ route 3 ⠏2 ✕1`). A job's
+context is its `ctx_pct`, else its tokens over its window when both are
+known, else left out. The display is as fresh as that cache. Pressing the
+section's heading opens the existing read-only route evidence pages.
+The messages section shows the latest three peer messages, one row each (`←`
+received from the exact session's retained received inputs, `→` sent from this
+session's own ledger shard and its 200-character summary), cut with `…`;
+pressing a row shows its whole retained text in place. Nothing new is stored.
+A press on a route or message row is display only: it opens or folds the row
+and leaves focus, `empty` and the native input frontier as they were.
+Put each answer choice on
 its own line, wrapping within that choice; do not reserve a standalone
 session/age row. Hide an empty result section. Use the
 existing operator language setting and catalog. No last prompt is guessed
@@ -160,7 +183,8 @@ the only place Hearting reads it.
 
 The header's settings change only Hearting's existing session-shell policy:
 side/bottom layout, panel position (right, the default, or left), side width,
-narrow-window behavior, auxiliary detail, theme and shade. One placement rule
+narrow-window behavior, auxiliary detail, theme, shade and `route line`
+(`time`, the default, or `model`). One placement rule
 serves every harness. Themes are `terminal` (the default: the shared palette),
 `light` (darker hues for a light terminal) and `mono` (no hue; weight, glyphs
 and words remain). Shade is `none` (the default), `light` or `medium`: the
@@ -168,7 +192,7 @@ panel's own background, painted with an explicit text color so it reads on
 either terminal background, in 256-color terminals and never under `NO_COLOR`.
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
-default without disabling the shell.
+default without disabling the shell, and so does an unknown `route line`.
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.
@@ -225,11 +249,12 @@ Fleet's absence does not prevent an existing peer runner from
 waking a shell. Shell display and input transport add no model instructions.
 
 
-The approved common line orders folder, session title, branch, context percent,
-model/effort, weekly quota (`7d 60%`), open routes and answer waits. Narrow layouts
-shorten words before numeric values, routes and waits. The expanded panel uses
-Fleet's existing LAST INPUT presentation (`› 1m · first line`, `› ·`, `› ?`)
-for the common `prompt_display` result. Its title and guidance use Fleet's
+The common line (the collapsed panel row and Claude's statusline, inside and
+outside the shell) reads `[e9] hearting (main 🚧 3) │ Fable 5.2 xhigh │ context
+━━━━━━──── 58% │ ◑답 대기 1 │ ⏳ route 3 ⠏2 ✕1 │ 5h 12%(↻ 2h) 7d 66%(↻ 5d)`;
+Claude's second (`>_ running:`) and third (tidy notice) rows are unchanged.
+Narrow layouts shorten words before numeric values, routes and waits (the
+answer wait shortens to `◑ N`). Its title and guidance use Fleet's
 shared message catalog and language preference. Fleet owns the values, palette, glyph meanings, separators and
 unknown-value rules. Native display callbacks and exact-session telemetry are
 valid sources for these display values, including Claude's statusline JSON.
@@ -255,8 +280,9 @@ panel never shortens it. Its first callback at session start reads the same
 shared Git observation as later callbacks, so folder, branch and model show
 before the first input; context and quota readings Claude has not reported yet
 (it sends them after its first response) are left out, as the native statusline
-did, rather than shown as `?`. Only while the panel actually paints its model,
-compact status and session rows for the callback's exact session does the shell blank Claude's
+did, rather than shown as `?`. Only while the panel actually paints the groups
+that row carries (number, project and Git, context, the answer wait, the route
+count, 5h/7d and running jobs) for the callback's exact session does the shell blank Claude's
 statusline area, the rows directly under the input box, when their text equals
 the callback's latest recorded output. A screen without that input box, such
 as the Ctrl+O transcript, keeps every row. Claude has no supported way to

@@ -88,6 +88,9 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
+// Route and message rows opened in place by a press. Display only: a press
+// here is not typing, so it moves neither the input epoch nor `empty`.
+const panelOpen=new Set();
 let displaySequence=0,nativeMcp;
 function binding() {
   // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
@@ -238,7 +241,7 @@ function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max
 function panelContent(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   panelHits=view.hits;routePageCount=view.routePages;return view.rows;
@@ -473,13 +476,16 @@ async function projection() {
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
-// the same session's model, compact status and session rows (folder, title,
-// branch, Git, jobs). Any other state, including a panel too short for all of
-// them, shows it.
+// the same session's groups that row carries: number, project and Git, context,
+// the answer wait, the route count, 5h/7d and running jobs. Any other state,
+// including a panel too short for all of them, shows it.
 function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
-  const rows=[...(panelModel.summary||[]),...(panelModel.session||[])].map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
-  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
+  const joined=parts=>(Array.isArray(parts)?parts:[]).map(part=>String(part.text)).join('').trim();
+  const rows=[joined(panelModel.head),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
+    String(panelModel.wait||''),panelModel.route_count?'⏳ route '+panelModel.route_count:''].filter(Boolean);
+  const squeeze=s=>s.replace(/\s+/g,'');
+  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>squeeze(row).includes(squeeze(text))));
 }
 // The blanked Claude row carries the panel's one-line notice (empty by default),
 // at the native statusline's own two-cell indent.
@@ -594,6 +600,10 @@ async function applySettings(){
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
+  if(/^(?:route|message):/.test(action)&&!settings){
+    if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
+    queueLayout();return;
+  }
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
@@ -761,7 +771,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }

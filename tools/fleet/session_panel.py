@@ -167,9 +167,8 @@ def notice_line(values, routes, questions, display, now):
     waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
                   and (item.get("request_state") or "open") == "open")
     if waiting:
-        return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"),
-                (ui_text("fleet.session_panel.answer") + " " + str(waiting), "lvl_y"),
-                (" · Ctrl+]", "dim")]
+        from .session_line import WAIT_LABEL
+        return [(WAIT_LABEL + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
@@ -206,6 +205,82 @@ def notice_line(values, routes, questions, display, now):
     return max(news, key=lambda item: item[0])[1] if news else []
 
 
+def route_row(row, now=None):
+    """A route row's painted values (spec rules 5-7); an unreported value is left out."""
+    import time
+    from .session_line import (route_glyph, route_state, effort_label, gauge_parts, elapsed_text,
+                               stage_glyph, _number)
+    now = time.time() if now is None else now
+    glyph, key = route_glyph(row.get("state"))
+    shown = {"glyph": glyph, "glyph_key": key, "kind": route_state(row.get("state"))}
+    harness = sanitize_title(str(row.get("harness") or ""))[:32]
+    if harness:
+        shown.update(harness=harness, harness_key="hb_" + harness)
+    model = row.get("model")
+    if model:
+        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model))
+    effort = effort_label(row.get("effort"))
+    if effort:
+        shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
+    percent = row.get("ctx_pct")
+    if _percent(percent) != "?":
+        shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
+                     gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+    minutes = None
+    if _number(row.get("since")) is not None:
+        minutes = max(0.0, (now - row["since"]) / 60)
+    elif _number(row.get("elapsed_min")) is not None:
+        minutes = row["elapsed_min"]
+    if minutes is not None:
+        shown["elapsed"] = elapsed_text(minutes)
+    tool = sanitize_title(str(row.get("tool") or ""))[:48]
+    if tool and shown["kind"] == "working":
+        shown["tool"] = tool
+    if type(row.get("agents")) is int and row["agents"] > 0:
+        shown["agents"] = row["agents"]
+    stages = [node for node in (row.get("stages") or ()) if isinstance(node, dict)][:16]
+    if len(stages) > 1:
+        flow = []
+        for node in stages:
+            name = sanitize_title(str(node.get("name") or ""))[:64]
+            mark = stage_glyph(node.get("st"))
+            flow.append(name + (" " + mark if mark else ""))
+        shown["flow"] = " › ".join(flow)
+        current = next((i for i, node in enumerate(stages) if stage_glyph(node.get("st")) in {"●", "✕"}), None)
+        if current is not None:
+            shown["step"] = (sanitize_title(str(stages[current].get("name") or ""))[:32] + " "
+                             + stage_glyph(stages[current].get("st")) + " " + str(current + 1) + "/" + str(len(stages)))
+    return shown
+
+
+def session_head(values):
+    """``[e9] hearting (main 🚧 3)``: the session number, project and dim Git."""
+    from .session_line import line_segments
+    return line_segments(values, 10000, complete=True, fields={"folder"})
+
+
+def quota_row(values):
+    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+    from .session_line import _remaining, _text
+    parts = []
+    windows = [window for window in values.get("quota_windows") or () if _percent(window[1]) != "?"]
+    if not windows and _percent(values.get("weekly_pct")) != "?":
+        windows = [("7d", values["weekly_pct"], None)]
+    for label, used, reset in windows:
+        if parts:
+            parts.append((" │ ", "dim"))
+        parts += [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
+        left = _remaining(reset)
+        if left:
+            parts.append(("(↻ " + left + ")", "dim"))
+    for label, used in values.get("model_quotas") or ():
+        if _percent(used) != "?":
+            if parts:
+                parts.append((" │ ", "dim"))
+            parts += [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]
+    return parts
+
+
 def presentation(values, view, harness, sid, columns, *, native_owned=()):
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
@@ -226,7 +301,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         owner_text = "owner · " + owner if owner else ""
         runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
-        routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
+        routes.append({**route_row(row), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
@@ -244,7 +319,28 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
-    return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
+    # Fixed words are English in every language (spec rule 3).
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line")
+    from .session_line import effort_label, gauge_parts, WAIT_LABEL
+    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    if effort_label(values.get("effort")):
+        selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
+    gauge = gauge_parts(values.get("ctx_pct"))
+    count = values.get("answer_wait")
+    current = len([1 for _ in routes])
+    import re
+    match = re.match(r"⏳ route (\d+)", values.get("route_label") or "")
+    if match:
+        current = min(len(routes), int(match.group(1)))
+    return {"head": session_head(values), "selected": selected,
+            "context": [("context ", "dim"), *gauge] if gauge else [],
+            "wait": WAIT_LABEL + " " + (str(count) if count is not None else "?")
+                    if count is None or type(count) is int and count > 0 else "",
+            "session_title": sanitize_title(str(values.get("title") or ""))[:320],
+            "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
+                    if values.get("jobs") else [],
+            "quota": quota_row(values), "route_count": current,
+            "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
             "route_label": values.get("route_label") or "",

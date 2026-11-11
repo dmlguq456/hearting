@@ -93,7 +93,7 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             # a moving HEAD that changes meaning as soon as we commit.
             statusline = ROOT / "adapters/claude/statusline.sh"
             cold = render(statusline, "cold", 1)
-            self.assertIn("unknown", cold)
+            self.assertIn("🚧 ?", cold)  # Git not observed yet stays unknown, never no-git.
             with mock.patch.dict(os.environ, env):
                 request = gitinfo._display_request(str(repo))
                 deadline = time.monotonic() + 10

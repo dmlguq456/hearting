@@ -7,7 +7,11 @@ from .model import project_of
 from .render_cells import _clean_model, _effort_text, _EFF_SHORT, _glyph, _model_key, _half_up, _LIVE_GLYPH, _eff_key
 from .session_handle import sanitize_title
 
-SEPARATOR = " · "
+SEPARATOR = " │ "
+# The answer-wait words the native statusline always used; a person has not
+# chosen an English form, so they stay as they are (spec rule 3).
+WAIT_LABEL = "◑답 대기"
+QUOTA_GROUPS = frozenset({"quota", "model_quota"})
 
 
 def _text(value, fallback="?"):
@@ -36,12 +40,51 @@ def _remaining(reset):
     return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
-    """Shorten words before losing a known count; never invent an unknown value.
+def _git_text(values):
+    """``main 🚧 3`` and its existing Git warnings, for the dim parentheses."""
+    git = values.get("git") or {}
+    branch = _text(values.get("branch"), "")
+    parts = [clip_cells(branch, 32)] if branch else []
+    if git and git.get("repo") != 0:
+        operation = git.get("operation")
+        flag = "⚠️" + operation if operation in {"merge", "rebase", "cherry-pick"} else (
+            "💀merged" if operation == "none" and (git.get("merged") == 1 or git.get("branch_done") == 1) else "")
+        if operation is None or operation == "unknown":
+            flag = "⚠️?"
+        if flag:
+            parts.append(flag)
+        for key, glyph in (("ahead", "↑"), ("behind", "↓")):
+            if type(git.get(key)) is int and git[key] > 0:
+                parts.append(glyph + str(git[key]))
+        wt = git.get("extra_worktrees")
+        if wt is None:
+            parts.append("🚧 ?")
+        elif type(wt) is int and wt > 0:
+            parts.append("🚧 " + str(wt))
+    return " ".join(parts)
 
+
+def gauge_parts(percent, *, cells=10):
+    """``━━━━──── 42%`` in the level color, or [] for an unobserved value."""
+    if _percent(percent) == "?":
+        return []
+    level = _level(percent)
+    filled = max(0, min(cells, _half_up(percent * cells / 100)))
+    return [("━" * filled, level), ("─" * (cells - filled), "dim"), (" ", "dim"), (_percent(percent), level)]
+
+
+def effort_label(effort):
+    text = _effort_text(effort)
+    return "med" if text == "medium" else text
+
+
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
+    """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ ⏳ route N │ 5h … 7d …``.
+
+    Shorten words before losing a known count; never invent an unknown value.
     ``fields`` keeps only the named groups that carry a value, for a surface
-    which already paints the others (the shell panel's model row and status
-    summary); an absent value is left out rather than painted as ``?``.
+    which already paints the others; an absent value is left out rather than
+    painted as ``?``.
 
     ``reported_only`` leaves out the context and quota readings the native
     callback has not reported yet (Claude sends them only after its first
@@ -52,70 +95,58 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     may supply the session values; it never establishes input readiness.
     """
     columns = max(1, int(columns))
-    harness = values.get("harness")
-    glyph, state_key = _glyph(values.get("state", "unknown"))
-    tag = _text(values.get("tag"), "?").strip("[]")
-    prefix = [("[" + tag + "] ", "tag"), (glyph + " ", state_key)]
-    effort = _effort_text(values.get("effort"))
-    suffix = [(" ", "dim"), (effort, _eff_key(values.get("effort"), False))] if effort else []
     groups = []
 
-    def words(name, text, key, maximum, priority, before=(), after=(), minimum=1):
+    def words(name, text, key, maximum, priority, before=(), after=(), minimum=1, short=None):
         if fields is not None and (name not in fields or text is None or text == ""):
             return
         text = _text(text)
         groups.append({"name": name, "text": text, "key": key, "budget": min(maximum, cell_width(text)),
                        "minimum": min(minimum, cell_width(text)), "priority": priority,
-                       "before": list(before), "after": list(after)})
+                       "before": list(before), "after": list(after), "short": short})
 
-    def fixed(name, text, key):
-        words(name, text, key, cell_width(text), 99, minimum=cell_width(text))
+    def fixed(name, text, key, short=None):
+        words(name, text, key, cell_width(text), 99, minimum=cell_width(text), short=short)
 
-    words("folder", project_of(values.get("cwd")) if values.get("cwd") else None, "loc_repo", 64 if complete else 24, 2,
-          before=[("📁 ", "dim")])
-    words("title", values.get("title"), "hb_" + str(harness), 48 if complete else 40, 0, prefix)
+    tag = _text(values.get("tag"), "").strip("[]")
+    project = project_of(values.get("cwd")) if values.get("cwd") else None
+    git = _git_text(values)
+    if values.get("git") and (values["git"] or {}).get("repo") == 0:
+        git = "no-git"
+    after = [(" (" + git + ")", "dim")] if git else []
+    if project:
+        words("folder", project, "loc_repo", 64 if complete else 24, 2,
+              before=[("[" + tag + "] ", "tag")] if tag else [], after=after)
+    elif tag and (fields is None or "folder" in fields):
+        groups.append({"name": "folder", "text": "[" + tag + "]", "key": "tag", "budget": cell_width(tag) + 2,
+                       "minimum": cell_width(tag) + 2, "priority": 99, "before": [], "after": after, "short": None})
     if values.get("native_sid"):
         words("thread", values["native_sid"], "dim", 256, 0)
-    git = values.get("git") or {}
-    branch_after = []
-    if git and git.get("repo") != 0:
-        operation = git.get("operation")
-        flag = "⚠️" + operation if operation in {"merge", "rebase", "cherry-pick"} else (
-            "💀merged" if operation == "none" and (git.get("merged") == 1 or git.get("branch_done") == 1) else "")
-        if operation is None or operation == "unknown":
-            flag = "⚠️?"
-        if flag:
-            branch_after.append((" " + flag, "lvl_r"))
-        for key, glyph in (("ahead", "↑"), ("behind", "↓")):
-            if type(git.get(key)) is int and git[key] > 0:
-                branch_after.append((" " + glyph + str(git[key]), "branch_s"))
-        wt = git.get("extra_worktrees")
-        if wt is None:
-            branch_after.append((" 🚧 ?", "dim"))
-        elif wt > 0:
-            branch_after.append((" 🚧 " + str(wt), "branch_s"))
-        branch_after.append((" " + str(git.get("observation") or "unknown"), "dim"))
-    if git:
-        branch_after.append((SEPARATOR + str(git.get("observed_label") or "?"), "dim"))
-    words("branch", values.get("branch"), "branch_s", 64 if complete else 24, 1,
-          before=[("⎇ ", "dim")], after=branch_after)
+    effort = effort_label(values.get("effort"))
+    suffix = [(" ", "dim"), (effort, _eff_key(values.get("effort"), False))] if effort else []
+    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
     percent = values.get("ctx_pct")
-    level = _level(percent)
-    gauge = []
     unreported = reported_only and _percent(percent) == "?"
-    if _percent(percent) != "?":
-        filled = max(0, min(10, _half_up(percent / 10)))
-        gauge = [("━" * filled, level), ("─" * (10 - filled), "dim"), (" ", "dim")]
     if not unreported:
-        words("context", _percent(percent), level if _percent(percent) != "?" else "dim",
-              cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge], minimum=cell_width(_percent(percent)))
+        gauge = gauge_parts(percent)
+        words("context", _percent(percent), _level(percent) if gauge else "dim",
+              cell_width(_percent(percent)), 99, before=[("context ", "dim"), *gauge[:3]],
+              minimum=cell_width(_percent(percent)))
     from .token_budget import compaction_imminent
     if compaction_imminent(values.get("compaction_pressure")):
         from .config import ui_text
         warning = ui_text("fleet.context.compaction_imminent")
         words("compaction", warning, "lvl_r", cell_width(warning), 99,
               minimum=cell_width(warning))
-    words("model", _clean_model(values.get("model")), _model_key(values.get("model")), 48 if complete else 24, 4, after=suffix)
+    count = values.get("answer_wait")
+    if count is None or isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        number = str(count) if count is not None else "?"
+        fixed("wait", WAIT_LABEL + " " + number, "g_blocked", short=_LIVE_GLYPH["blocked"] + " " + number)
+    route = _text(values.get("route_label"), "")
+    if route:
+        count = route.split(" ", 2)
+        count = " ".join(count[:3]) if route.startswith("⏳ route ") else route
+        words("route", route, "g_idle", 256, 3, minimum=cell_width(count))
     windows = values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]
     if reported_only:
         windows = [window for window in windows if _percent(window[1]) != "?"]
@@ -127,14 +158,6 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     for label, used in values.get("model_quotas") or ():
         words("model_quota", _percent(used), _level(used), 8, 99,
               before=[(_text(label) + " ", _model_key(label))], minimum=8)
-    route = _text(values.get("route_label"), "")
-    if route:
-        count = route.split(SEPARATOR, 1)[0]
-        words("route", route, "g_idle", 256, 3,
-              minimum=cell_width(count) + (1 if count != route else 0))
-    count = values.get("answer_wait")
-    if count is None or isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        fixed("wait", _LIVE_GLYPH["blocked"] + " " + (str(count) if count is not None else "?"), "g_blocked")
 
     separator = SEPARATOR
 
@@ -142,7 +165,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         output = []
         for index, group in enumerate(groups):
             if index:
-                output.append((separator, "dim"))
+                joined = group["name"] in QUOTA_GROUPS and groups[index - 1]["name"] in QUOTA_GROUPS
+                output.append((" " if joined else separator, "dim"))
             output.extend(group["before"])
             output.append((clip_cells(group["text"], group["budget"]), group["key"]))
             output.extend(group["after"])
@@ -156,7 +180,10 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         group["budget"] -= min(extra, group["budget"] - group["minimum"])
     if size() > columns:
         separator = " "
-    for name in ("title", "branch", "folder", "model"):
+    for group in groups:
+        if size() > columns and group.get("short"):
+            group["text"] = group["short"]; group["budget"] = cell_width(group["short"])
+    for name in ("thread", "folder", "model"):
         if size() <= columns:
             break
         groups[:] = [group for group in groups if group["name"] != name]
@@ -478,3 +505,190 @@ def context_detail_lines(detail):
         (ui_text("fleet.context.limit"), (number(pressure.get("limit_tokens")) + " · " + str(pressure.get("scope"))) if observed else "?"),
         (ui_text("fleet.context.observed"), time.strftime("%H:%M:%S", time.localtime(pressure["observed_at"])) if observed else "?"),
     ]
+
+
+# -- routes: one row per route, from the shared answer-wait cache ------------------------
+# The cache producer already interprets each displayed session's routes once
+# (``explorer.live.session_route_status``). These helpers add the few values a
+# route row shows from the jobs of that very snapshot: no second collection,
+# timer or process. Display only; none of this is liveness or input authority.
+
+ROUTE_GLYPHS = (("working", "⠏"), ("idle", "●"), ("blocked", "◑"), ("dead", "✕"), ("done", "✓"))
+_ROUTE_STATE = {"stale": "dead", "failed": "dead", "attention": "dead", "degraded": "dead"}
+
+
+def route_state(state):
+    """The Fleet state a route row is drawn with: working, idle, blocked, dead or done."""
+    state = str(state or "")
+    state = _ROUTE_STATE.get(state, state)
+    return state if state in dict(ROUTE_GLYPHS) else "idle"
+
+
+def route_glyph(state):
+    """Fleet's glyph and color key for a route row (the spinner frame while working)."""
+    return _glyph(route_state(state))
+
+
+def route_badge(label, panels):
+    """``⏳ route 3 ⠏2 ✕1``: the route count with how many are in each state.
+
+    ``label`` is the producer's own ``⏳ route N`` reading; its first N panel
+    rows are those current routes. Without panel rows the count stays alone.
+    """
+    import re
+    match = re.match(r"⏳ route (\d+)", label or "")
+    if not match:
+        return label or ""
+    count = int(match.group(1))
+    rows = [row for row in (panels or ())[:count] if isinstance(row, dict)]
+    if len(rows) != count:
+        return "⏳ route " + str(count)
+    states = [route_state(row.get("state")) for row in rows]
+    tally = [glyph + str(states.count(state)) for state, glyph in ROUTE_GLYPHS if states.count(state)]
+    return " ".join(["⏳ route " + str(count), *tally])
+
+
+def _number(value):
+    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+
+
+def job_context_percent(job, get):
+    """``ctx_pct`` when known, else tokens over the window when both are known, else None."""
+    if get(job, "liveness") in ("stale", "dead"):
+        return None
+    percent = _number(get(job, "ctx_pct"))
+    if percent is not None:
+        return min(100.0, percent)
+    tokens, window = _number(get(job, "active_context_tokens")), _number(get(job, "context_window_tokens"))
+    if tokens is not None and window:
+        return min(100.0, tokens * 100.0 / window)
+    return None
+
+
+def _route_job(row, jobs, get, owner_jobs):
+    """The job a route row describes: the live worker of the shown stage, else the owner."""
+    live = [job for job in jobs if get(job, "liveness") in ("working", "idle", "blocked")]
+    stage = row.get("worker_stage")
+    owners = owner_jobs(jobs)
+    workers = [job for job in live if job not in owners and stage and get(job, "route_node") == stage]
+    if len(workers) == 1:
+        return workers[0]
+    if len(owners) == 1:
+        return owners[0]
+    return live[0] if len(live) == 1 else None
+
+
+def route_details(snapshot, panels, now=None):
+    """Add harness, model, effort, context, tool, agents and start time to panel rows.
+
+    Rows are changed in place. A value the jobs did not report is left out.
+    The start time is absolute so a re-published pass still ages correctly.
+    """
+    from .explorer import live
+    now = time.time() if now is None else now
+    get = live._get
+    collected = live._collect_routes(snapshot)
+    seen = set()
+    for rows in (panels or {}).values():
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, dict) or id(row) in seen:
+                continue
+            seen.add(id(row))
+            slot = collected.get(row.get("id"))
+            if not slot:
+                continue
+            jobs = list(slot.get("jobs") or ())
+            job = _route_job(row, jobs, get, live._owner_jobs)
+            elapsed = [_number(get(item, "elapsed_min")) for item in jobs]
+            elapsed = [value for value in elapsed if value is not None]
+            running = any(get(item, "liveness") in ("working", "idle", "blocked") for item in jobs)
+            if elapsed:
+                if running:
+                    row["since"] = round(now - max(elapsed) * 60, 1)
+                else:
+                    row["elapsed_min"] = round(max(elapsed), 1)
+            if job is None:
+                continue
+            for key in ("harness", "effort"):
+                text = get(job, key)
+                if isinstance(text, str) and 0 < len(text) <= 64:
+                    row[key] = text
+            model = get(job, "resolved_model", "model")
+            if isinstance(model, str) and 0 < len(model) <= 128:
+                # Fleet's own display name for a runtime model id (``Opus 5.5``).
+                pair = live._model_pair(model)
+                row["model"] = pair[0] if pair else model
+            percent = job_context_percent(job, get)
+            if percent is not None:
+                row["ctx_pct"] = round(percent, 1)
+            if get(job, "liveness") == "working":
+                tool = get(job, "exec_tool")
+                name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
+                if isinstance(name, str) and 0 < len(name) <= 64:
+                    row["tool"] = name
+            agents = get(job, "subagents") or ()
+            active = sum(1 for agent in agents if get(agent, "active") is True) if isinstance(agents, (list, tuple)) else 0
+            if active:
+                row["agents"] = active
+    return panels
+
+
+def session_route_status(snapshot, now=None, *, include_details=False):
+    """Fleet's question-free route labels, with the row values the shell panel paints."""
+    from .explorer.live import session_route_status as labels_and_panels
+    result = labels_and_panels(snapshot, now, include_details=include_details)
+    if include_details:
+        labels, panels = result
+        try:
+            route_details(snapshot, panels, now)
+            # The statusline reads only this label: count the states here, once.
+            labels = {key: route_badge(label, panels.get(key)) for key, label in labels.items()}
+        except Exception:
+            pass  # Optional display values never cost the labels.
+        return labels, panels
+    return result
+
+
+def elapsed_text(minutes):
+    """``42m``, ``1h 27m`` or ``2d 3h``; empty for an unknown value."""
+    if _number(minutes) is None:
+        return ""
+    minutes = int(minutes + 0.5)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def stage_glyph(state):
+    return {"active": "●", "running": "●", "working": "●", "reconciling": "●", "recovering": "●",
+            "done": "✓", "completed": "✓", "failed": "✕", "dead": "✕"}.get(str(state or ""), "")
+
+
+# -- messages: what this session and other sessions sent each other -----------------------
+
+def peer_message_rows(received, sent, tag_of, limit=3):
+    """The latest ``limit`` peer messages, oldest first: ``{"way", "who", "text", "at"}``.
+
+    ``received`` are the exact session's retained received inputs (source
+    ``peer``); ``sent`` are its own ledger records. Bodies are what those
+    records already keep; nothing is fetched or reconstructed here.
+    """
+    rows = []
+    for row in received or ():
+        if not isinstance(row, dict) or row.get("source") != "peer":
+            continue
+        tag = tag_of(row.get("sender_harness"), row.get("sender_session_id"))
+        who = "[" + tag.strip("[]") + "]" if tag else _text(row.get("sender"), "peer")
+        rows.append({"way": "←", "who": who, "text": _text(row.get("text"), ""), "at": row.get("at") or 0})
+    for record in sent or ():
+        target = record.get("to") if isinstance(record.get("to"), dict) else {}
+        tag = tag_of(target.get("harness"), target.get("session_id"))
+        who = "[" + tag.strip("[]") + "]" if tag else _text(target.get("name"), "peer")
+        rows.append({"way": "→", "who": who, "text": _text(record.get("summary"), ""), "at": record.get("at") or 0})
+    rows = [row for row in rows if row["text"]]
+    rows.sort(key=lambda row: row["at"])
+    return rows[-limit:]

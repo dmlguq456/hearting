@@ -43,16 +43,19 @@ def _private_json(path: Path, limit: int):
 
 DISPLAY_DEFAULTS = {"layout": "side", "side_width": 40, "side_min_columns": 100,
                     "narrow": "bottom", "auxiliary": "summary", "bottom_rows": 14,
-                    "position": "right", "theme": "terminal", "shade": "none"}
+                    "position": "right", "theme": "terminal", "shade": "none", "route_line": "time"}
 # Appearance choices. An unknown value falls back to its default on its own and
 # never disables the shell, so a hand-edited or newer value cannot cost the panel.
 APPEARANCE = {"position": ("right", "left"), "theme": ("terminal", "light", "mono"),
               "shade": ("none", "light", "medium")}
+# What a folded route row carries besides its title, harness and context:
+# its elapsed time or its model (spec rule 7). Same per-key fallback.
+CHOICES = {**APPEARANCE, "route_line": ("time", "model")}
 
 
 def _appearance(value):
     return {key: value.get(key) if value.get(key) in choices else choices[0]
-            for key, choices in APPEARANCE.items()}
+            for key, choices in CHOICES.items()}
 
 
 def _validate_configuration(value):
@@ -99,7 +102,7 @@ def save_display_policy(settings, environ=None):
         raise ValueError("invalid shell settings")
     path = policy_path(environ)
     before = _private_json(path, MAX_RECORD_BYTES)
-    if _appearance(settings) != {key: settings[key] for key in APPEARANCE}:
+    if _appearance(settings) != {key: settings[key] for key in CHOICES}:
         raise ValueError("invalid shell appearance")
     value = _validate_configuration({**before, **settings})
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/install"))
@@ -690,6 +693,72 @@ def session_questions(harness, sid, *, view=None, retained=()):
     return result
 
 
+def _panel_common_rows(panel, columns):
+    """The rows the panel paints for the values Codex's footer repeats, as painted.
+
+    The host yields duplicate footer paint only while every one of these rows is
+    on screen exactly; a wrapped or joined row simply keeps the footer visible.
+    """
+    from fleet.explorer.grid import cell_width
+    text = lambda name: "".join(part["text"] for part in panel.get(name) or ()).strip()
+    head, selected, context, quota = text("head"), text("selected"), text("context"), text("quota")
+    if columns >= 64:
+        first = " │ ".join(part for part in (head, selected, context) if part)
+        rows = [first] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context]
+    else:
+        rows = [head, selected, context]
+    return [row for row in rows + [quota] if row]
+
+
+_SENT_CACHE: dict = {}
+
+
+def _sent_peer_messages(sid, limit=3):
+    """This session's own sent peer records (``to`` and ``summary``), newest last.
+
+    One bounded tail read of the existing ledger shard this session writes,
+    reparsed only when the file changes; nothing else is opened. The record
+    keeps a 200-character summary, not the whole body.
+    """
+    try:
+        peer = _peer_message()
+        shard = peer._ledger_path(sid)
+        info = shard.stat()
+    except Exception:
+        return [], []
+    key = (str(shard), info.st_ino, info.st_size, info.st_mtime_ns)
+    held = _SENT_CACHE.get(sid)
+    if held and held[0] == key:
+        return held[1], [str(shard)]
+    rows = []
+    try:
+        with shard.open("rb") as stream:
+            stream.seek(max(0, info.st_size - 32768))
+            raw = stream.read(32768).decode("utf-8", "replace").splitlines()
+        for line in raw[1:] if info.st_size > 32768 else raw:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            source = record.get("from") if isinstance(record, dict) else None
+            if (not isinstance(source, dict) or source.get("session_id") != sid
+                    or not isinstance(record.get("summary"), str) or not isinstance(record.get("ts"), str)):
+                continue
+            try:
+                from datetime import datetime
+                at = datetime.fromisoformat(record["ts"].replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            rows.append({"to": record.get("to") if isinstance(record.get("to"), dict) else {},
+                         "summary": record["summary"][:400], "at": at})
+    except OSError:
+        return [], [str(shard)]
+    rows = rows[-limit:]
+    _SENT_CACHE.clear()
+    _SENT_CACHE[sid] = (key, rows)
+    return rows, [str(shard)]
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
@@ -709,6 +778,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.session_view import observe
     from fleet.session_work import observe as observe_work, open_count
     from fleet.session_panel import presentation
+    from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
     view = human_wait_state.cached_view(request=False) or {}
     seat = session_tidy.resolve_seat(harness, env={}, sid=sid)
@@ -784,16 +854,31 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
+    for name in ("head", "selected", "context", "quota", "jobs"):
+        panel[name] = styled(panel[name])
+    for row in panel["routes"]:
+        paint = {}
+        for name, key in (("glyph", "glyph_key"), ("harness", "harness_key"), ("model_text", "model_key"),
+                          ("effort", "effort_key"), ("ctx", "ctx_key")):
+            if row.get(name):
+                paint[name] = styled([(row[name], row.get(key) or "dim")])[0]
+        for name in ("gauge", "gauge5"):
+            if row.get(name):
+                paint[name] = styled([tuple(part) for part in row[name]])
+        row["paint"] = paint
+    sent, sent_paths = _sent_peer_messages(sid)
+    watched.extend(sent_paths)
+    panel["messages"] = peer_message_rows(received, sent, assigned_tag)
     if harness == "claude":
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r")}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
                                                        status_lines(values, columns - 4, wrap_long=columns < 64), lines, padding="  ",
-                                                       panel_lines=["".join(p["text"] for p in row) for row in [panel["model"], *panel["summary"], *panel["session"]]],
+                                                       panel_lines=_panel_common_rows(panel, columns),
                                                        detail_lines=["".join(p["text"] for p in row) for row in panel["status"]])
         if config_path:
             watched.append(config_path)
@@ -961,6 +1046,10 @@ def _backend_operation(request: dict) -> dict:
             panel["model"] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in panel["model"]]
             panel["status"] = []
             panel["summary"] = []
+            panel["session"] = panel["brief"] = []
+            for name in ("head", "selected", "context", "quota", "jobs"):
+                panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
+                               for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                                for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
             panel.update(colors=colors, no_color=no_color)
