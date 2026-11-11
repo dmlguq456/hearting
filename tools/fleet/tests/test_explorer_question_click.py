@@ -350,6 +350,95 @@ class APaneKeepsTheServerItWasObservedOn(unittest.TestCase):
         self.assertEqual(delivered, {"pane": "w1:p9", "pane_server": None})
 
 
+def _pane_cell(source, current_map, *, merged=False):
+    """``build_view_model`` for one session and its question, the session's pane learnt from
+    ``source`` and, with ``current_map``, also seen as ``w1:p2`` by a current pane read."""
+    import copy
+    from unittest import mock
+    from tools.fleet.explorer import live
+    from tools.fleet.explorer.types import ExplorerDetail, FocusKey, FocusRequest, FocusResult, Health
+    from tools.fleet.model import Session
+    sid = "fixture-map-sid"
+    extra = {"census-herdr": {"session_identity_evidence": {"pane": "w1:p5"}},
+             "census-tmux": {"tmux_pane": "%3", "tmux_server": "/tmp/fixture/b"}}.get(source, {})
+    session = Session("codex", 424242, session_id=sid, session_tag="aa", proc_start="fixture-birth",
+                      cwd="/tmp/fixture", liveness="blocked", **extra)
+    snapshot = {"sessions": [session], "jobs": [], "answer_waits": {
+        "complete": True, "total": 1, "older": 0,
+        "items": [{"id": "S1:fixture-question", "source": "S1-question", "kind": "decision",
+                   "harness": "codex", "session_id": sid, "since": 1000, "stale": "current",
+                   "attribution": "exact"}]}}
+    if source == "peer":
+        snapshot["peer_messages"] = {"records": [{"ts": "2026-11-11T00:00:00Z",
+                                                  "to": {"session_id": sid, "pane": "w1:p2"}}]}
+    accepted = None
+    if current_map:
+        key = FocusKey("codex", sid)
+        request = FocusRequest(key, 1, 1, wants=("panes",),
+                               bindings=tuple(live.detail_bindings(copy.deepcopy(snapshot)).items()))
+        accepted = ExplorerDetail(panes={sid: "w1:p2"}, results={"panes": FocusResult(
+            key, 1, 1, health=Health("success", 1001), request=request)})
+    with mock.patch.object(live, "herdr_pane_server", return_value="herdr:work"):
+        if merged:                                    # the read arrives after the complete model
+            return live.selected_detail(live.build_view_model(snapshot, now=1002), accepted)
+        return live.build_view_model(snapshot, accepted_detail=accepted, now=1002)
+
+
+def _open_pane_requests(vm, state, cols=140):
+    """Press every drawn ``open pane`` and count the focus requests each reaches, by server."""
+    from tools.fleet.explorer.runtime import pane_target
+    frame = draw(vm, state, cols, 45)
+    hits = [h for h in frame.hits if h.action[:1] == ("pane",)]
+    asked = []
+    for hit in hits:
+        _state, effects = _press(state, frame, hit.x0, hit.y)
+        for effect in effects:
+            pane, server = pane_target(vm, *effect[1:])
+            focus_pane(pane, server, {}, runner=lambda *a, **_k: asked.append((pane, server)),
+                       resolve=lambda endpoint, _env: f"/run/{endpoint}.sock")
+    # A tmux focus is three commands to one server; count it once.
+    return len(hits), sorted(set(asked))
+
+
+class ASessionAndItsQuestionOpenTheSamePane(unittest.TestCase):
+    """Every pane source × current pane read: the session row and its question hold one pair."""
+
+    EXPECTED = {
+        ("none", False): (None, None),
+        ("none", True): ("w1:p2", "herdr:work"),
+        ("peer", False): ("w1:p2", None),          # known only from a message: moves nothing
+        ("peer", True): ("w1:p2", "herdr:work"),
+        ("census-herdr", False): ("w1:p5", "herdr:work"),
+        ("census-herdr", True): ("w1:p5", "herdr:work"),
+        ("census-tmux", False): ("%3", "tmux:/tmp/fixture/b"),
+        ("census-tmux", True): ("%3", "tmux:/tmp/fixture/b"),
+    }
+
+    def test_build_view_model_draw_and_press_agree_for_each_cell(self):
+        for (source, current_map), (pane, server) in self.EXPECTED.items():
+            with self.subTest(source=source, current_map=current_map):
+                vm = _pane_cell(source, current_map)
+                row, question = vm.sessions[0], vm.questions[0]
+                self.assertEqual((row.get("pane"), row.get("pane_server")), (pane, server))
+                self.assertEqual((question.get("pane"), question.get("pane_server")), (pane, server))
+                for state in (NavState(view="QUESTIONS", folds=(("qopen:QUESTIONS", question["tag"]),)),
+                              NavState(scope="session:aa")):
+                    hits, asked = _open_pane_requests(vm, state)
+                    self.assertEqual(hits, 1 if pane else 0, state)
+                    self.assertEqual(asked, [(pane, server)] if server else [], state)
+
+    def test_a_pane_read_merged_into_the_shown_model_reaches_its_question(self):
+        for source in ("none", "peer"):
+            with self.subTest(source=source):
+                vm = _pane_cell(source, True, merged=True)
+                pair = ("w1:p2", "herdr:work")
+                self.assertEqual((vm.sessions[0].get("pane"), vm.sessions[0].get("pane_server")), pair)
+                question = vm.questions[0]
+                self.assertEqual((question.get("pane"), question.get("pane_server")), pair)
+                state = NavState(view="QUESTIONS", folds=(("qopen:QUESTIONS", question["tag"]),))
+                self.assertEqual(_open_pane_requests(vm, state), (1, [pair]))
+
+
 class AnOpenPaneWayRemainsWhenNarrow(unittest.TestCase):
     """Every session with a pane keeps a pressable link and an Enter that names its pane."""
 
