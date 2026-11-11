@@ -4320,6 +4320,104 @@ class OpenCodeV2ReadTest(TidyCase):
                                 self.assertEqual((chunk.error, chunk.eof, chunk.unit, chunk.text),
                                                  ("", True, "seq" if new == "v2" else "rowid", expected))
 
+    def test_a_normal_chunk_never_mixes_generations_or_drops_rows_after_its_cursor(self):
+        # Review [e7] R3: a cursor means something only in the unit that issued it. Whatever the
+        # moment of a generation change inside one chunk, a normal result (a chunk without
+        # error, an ``available`` conversation) keeps one generation and every row of it after
+        # the cursor in that generation; any other outcome must be an error or ``partial``.
+        import re
+        import conversation_reader
+        import opencode_runtime
+        self.load(upgraded=True)
+        sid = "ses_fixtureinvariant0000001"
+        old_rows, line = list(range(1, 81)), re.compile(r"\[user\] (OLD|NEW)-(\d{3})")
+
+        def put(con, generation, cursors, tag, pad=0):
+            for t in ("part", "message", "session_message"):     # one session's rows only
+                con.execute("DELETE FROM %s" % t)
+            for i in cursors:
+                text = "%s-%03d" % (tag, i) + ("X" * pad if i <= 10 else "")
+                if generation == "v1":
+                    con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                                ("msg_iv%03d" % i, sid, json.dumps({"role": "user"})))
+                    con.execute("INSERT INTO part(rowid, id, message_id, session_id, time_created, time_updated,"
+                                " data) VALUES (?, ?, ?, ?, 1, 1, ?)",
+                                (i, "prt_iv%03d" % i, "msg_iv%03d" % i, sid,
+                                 json.dumps({"type": "text", "text": text})))
+                else:
+                    con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                                ("msg_v2iv%03d" % i, sid, i, json.dumps({"text": text})))
+
+        def broken(tags, nums, unit, start, eof, cursor_to, units, rows, whole):
+            """Why a normal result breaks the invariant, or '' when it holds."""
+            if len(set(tags)) > 1:
+                return "mixed generations"
+            tag = tags[0] if tags else ("OLD" if unit == units["OLD"] else "NEW")
+            if unit is not None and unit != units[tag]:
+                return "rows of one generation under the other's unit"
+            after = start if tag == "OLD" else 0        # the caller's cursor is the old unit's
+            want = [i for i in rows[tag] if after < i and (whole or i <= cursor_to)]
+            if nums != want or (eof and want != [i for i in rows[tag] if after < i]):
+                return "rows missing after the cursor"
+            return ""
+
+        original, cells = opencode_runtime.read_session_parts, []
+        for timing in ("after-first-page", "after-later-page", "before-retry"):
+            for start in (0, 10):
+                for old, new in (("v1", "v2"), ("v2", "v1")):
+                    for new_rows in ((4, 5), (4, 5, 25, 30)):
+                        for public in (False, True):
+                            with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as con, con:
+                                put(con, old, old_rows, "OLD", pad=1000 if start else 0)
+                            units = {"OLD": "rowid" if old == "v1" else "seq",
+                                     "NEW": "rowid" if new == "v1" else "seq"}
+                            rows = {"OLD": old_rows, "NEW": list(new_rows)}
+                            with self.library():
+                                sizes = [r[2] for r in tt._opencode_session(self.iso.opencode_db, sid, 0)[1]]
+                            # The public reader starts at 0; its first chunk ends at ``start``.
+                            limit = sum(sizes[:start]) if start else 1 << 20
+                            seen = {"count": None, "switched": False}
+
+                            def reader(*args, **kwargs):
+                                if seen["count"] is None and kwargs.get("after_cursor") == start:
+                                    seen["count"] = 0                       # the chunk under test begins
+                                snapshot = original(*args, **kwargs)
+                                if seen["count"] is not None and not seen["switched"]:
+                                    seen["count"] += 1
+                                    if seen["count"] == (1 if timing == "after-first-page" else 2):
+                                        with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as w, w:
+                                            put(w, new, new_rows, "NEW")
+                                        seen["switched"] = True
+                                        if timing == "before-retry":        # this page itself is refused
+                                            snapshot = {"state": "unreadable", "reason": "database-busy"}
+                                return snapshot
+
+                            read = tt.read_chunk
+                            with self.library(), mock.patch.object(tt.time, "sleep"), \
+                                    mock.patch.object(opencode_runtime, "read_session_parts", side_effect=reader), \
+                                    mock.patch.object(tt, "read_chunk",
+                                                      side_effect=lambda *a, **kw: read(*a, **kw, limit_bytes=limit)):
+                                if public:
+                                    view = conversation_reader.read_conversation(
+                                        {"harness": "opencode", "sid": sid,
+                                         "transcript": {"path": str(self.iso.opencode_db), "status": "available"}})
+                                    outcome, normal, text = view.status, view.status == "available", view.text
+                                    args = (None, 0, True, 0, True)
+                                else:
+                                    chunk = read("opencode", self.iso.opencode_db, start, sid, 1 << 20)
+                                    outcome, normal, text = chunk.error or "normal", not chunk.error, chunk.text
+                                    args = (chunk.unit, start, chunk.eof, chunk.cursor_to, False)
+                            found = line.findall(text)
+                            unit, begin, eof, cursor_to, whole = args
+                            reason = broken([t for t, _ in found], [int(n) for _, n in found], unit, begin,
+                                            eof, cursor_to, units, rows, whole) if normal else ""
+                            cells.append((timing, start, old + ">" + new, new_rows,
+                                          "public" if public else "read_chunk", outcome, reason))
+                            self.assertTrue(seen["switched"], cells[-1])      # the change did happen
+        self.cells = cells                              # the whole table, for a report
+        self.assertEqual(len(cells), 48)
+        self.assertEqual([c for c in cells if c[-1]], [])
+
 
 class OpenCodeReadRetryTest(unittest.TestCase):
     """A snapshot of the shared OpenCode database is refused now and then; the read is tried again."""

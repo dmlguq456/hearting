@@ -1002,24 +1002,32 @@ def _digest_opencode(rows, chunk: Chunk) -> None:
     chunk.text = "\n".join(texts)
 
 
-def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> Chunk:
+def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int,
+                   cursor_unit: Optional[list] = None) -> Chunk:
     chunk = Chunk("opencode", str(db_path), cursor, cursor)
     if not session_id:
         chunk.error = "no session id"
         return chunk
     # Read only the rows this budget can take: small pages through the shared reader's row
     # limit, doubling while the budget lasts, so a long session is not decoded per chunk.
-    used, last, taken, exhausted, unit, page = 0, int(cursor), [], True, None, OPENCODE_CHUNK_PAGE
+    # A nonzero cursor means something only in the unit (generation) that issued it, so every
+    # page of every attempt must stay in the unit the first page saw; ``cursor_unit`` carries it
+    # across the retries of one chunk. Cursor 0 belongs to no unit and reads any one from the start.
+    held = cursor_unit if cursor_unit is not None and cursor else []
+    used, last, taken, exhausted, page = 0, int(cursor), [], True, OPENCODE_CHUNK_PAGE
+    unit = held[0] if held else None
     while True:
         page_unit, rows, error = _opencode_session(db_path, session_id, last, page)
         if unit is not None and page_unit != unit:
-            # The generation changed between pages (an empty page included): the cursor no
-            # longer names this session, so the read fails and is retried like an ambiguous one.
+            # The generation changed (an empty page included): the cursor no longer names this
+            # session, so the read fails like an ambiguous one (only a cursor-0 retry reads the new one).
             error = "unreadable: session-generation-ambiguous"
         if error:
             chunk.error = error
             return chunk
-        unit = unit or page_unit
+        if unit is None:
+            unit = page_unit
+            held.append(unit)
         stopped = False
         for row in rows:
             if used and used + row[2] > limit:
@@ -1048,7 +1056,8 @@ def read_chunk(harness: str, source, cursor: int = 0, sid: Optional[str] = None,
     limit = max(1, int(limit_bytes))
     cursor = max(0, int(cursor or 0))
     if harness == "opencode":
-        return _opencode_retry(lambda: _read_opencode(Path(source), sid or "", cursor, limit))
+        cursor_unit: list = []          # the unit the first page saw, kept for every retry
+        return _opencode_retry(lambda: _read_opencode(Path(source), sid or "", cursor, limit, cursor_unit))
     if harness in ("claude", "codex"):
         return _read_jsonl(harness, Path(source), cursor, limit)
     return Chunk(harness, str(source), cursor, cursor, error="unknown harness")
