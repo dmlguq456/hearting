@@ -1132,9 +1132,11 @@ def classified_receipt(
             instruction = "No harvest command is required; the registered owner completed."
             summary = _sealed_summary(row, launch.attempt_id)
             if summary:
-                instruction += ("\nFirst close: show this runtime summary to the person first, as written; "
-                                "then add what it does not show of changes/why, before/after, checks "
-                                "run/reused/skipped/unrun, commit/PR/deployment/serving, limits.\n" + summary)
+                instruction += ("\nFirst close: give the result in one or two sentences, preserve any "
+                                "important remaining failure, unfinished work, or user-impacting limit, "
+                                "ask for at most one decision the person must make, and point to the "
+                                "detailed record. Keep the runtime summary below as agent context and "
+                                "record; do not reproduce it for the person.\n" + summary)
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate

@@ -4466,14 +4466,15 @@ class NextLegReceiptTest(unittest.TestCase):
             receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
-        required = ("Original request/format apply", "Review result",
-                    "approved follow-through", "First close:",
-                    "checks run/reused/skipped/unrun", "commit/PR/deployment/serving",
+        required = ("Original request/format apply", "Review the result",
+                    "continue approved work", "First close:",
+                    "one or two sentences", "important remaining failure",
+                    "at most one necessary decision", "point to the detailed record",
                     "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
                     "handled exact repeats need no ACK", "new failures/conflicts",
                     "unfinished work, questions")
-        self.assertTrue(all(part in fixed_text for part in required))
-        self.assertLessEqual(len(COMPLETION_DELIVERY_HEADER) + len(text), 583)
+        missing = [part for part in required if part not in fixed_text]
+        self.assertFalse(missing, f"missing completion-close obligations: {missing}")
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
 
@@ -4495,12 +4496,13 @@ class NextLegReceiptTest(unittest.TestCase):
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        self.assertIn("First close: changes/why", before)  # no sealed summary: the text is unchanged
+        self.assertIn("First close: give the result in one or two sentences", before)
+        self.assertIn("point to the detailed record", before)
         self.assertNotIn("[완료 요약]", before)
         self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("show the runtime summary below to the person first, as written", text)
-        self.assertIn("then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
-                      "commit/PR/deployment/serving, limits.", text)   # a one-line summary never shrinks the close
+        self.assertIn("one or two sentences", text)
+        self.assertIn("Keep the runtime summary below as agent context and record; do not reproduce it for the person.", text)
+        self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
         self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),

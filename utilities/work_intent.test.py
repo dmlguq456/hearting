@@ -668,8 +668,9 @@ class ClaudeWakeSummaryTest(unittest.TestCase):
             reader.assert_called_once_with(row.metadata, "att-owner")
             self.assertIn("the registered owner completed.", message)
             self.assertEqual(summary in message, bool(sealed))
-            self.assertEqual("show this runtime summary to the person" in message, bool(sealed))
-            self.assertEqual("checks run/reused/skipped/unrun" in message, bool(sealed))  # the checklist stays
+            self.assertEqual("one or two sentences" in message, bool(sealed))
+            self.assertEqual("Keep the runtime summary below as agent context" in message, bool(sealed))
+            self.assertNotIn("show this runtime summary to the person", message)
             self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
 
 

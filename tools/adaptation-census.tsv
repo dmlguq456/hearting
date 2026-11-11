@@ -479,3 +479,4 @@ utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
 tool-deferred	check_utility_census.test.py
+shared-utility-deferred	harness_behavior_cases_completion_close.py

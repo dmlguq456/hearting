@@ -93,6 +93,12 @@ _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER = (
     "and direct user questions. "
     "Do not start Monitor, dispatch-wait, or a polling loop."
 )
+_FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review result; do approved follow-through or existing "
+    "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
+    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
 _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -117,6 +123,11 @@ def _previous_native_body(text, *, legacy=False):
     if legacy:
         text = text.replace(SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
                             _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
+        text = text.replace(SWEEP._PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX,
+                            _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
+    else:
+        text = text.replace(SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
+                            _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
     return text
 
 
@@ -3259,8 +3270,12 @@ console.log(JSON.stringify({prompts, logs}));
                                      _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER, 1).replace(
                                          SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
                                          _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
+            previous_short = previous.replace(
+                SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
+                _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
             for version, body in (("current", current),
-                                  ("previous-short", previous), ("legacy-long", legacy)):
+                                  ("previous-short", previous_short),
+                                  ("legacy-long", legacy)):
                 with self.subTest(version=version):
                     messages = [{"info": {"sessionID": self.SID, "role": "user"},
                                  "parts": [{"type": "text", "text": body}]}]

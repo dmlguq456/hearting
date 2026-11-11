@@ -1054,10 +1054,18 @@ _LEGACY_COMPLETION_DELIVERY_HEADER = (
     "and direct user questions. "
     "Do not start Monitor, dispatch-wait, or a polling loop."
 )
-_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX = (
+_PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX = (
     "Original request/format apply. Review result; do approved follow-through or existing "
     "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
     "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: result in one or two sentences, important remaining failures, "
+    "unfinished work or user-impacting limits, at most one necessary decision, and one pointer to "
+    "the detailed record. Keep the runtime summary as agent context and record; do not reproduce it "
+    "for the person. Preserve unknowns and requested output. No harvest/restart/manual finalize. "
     "Receipt/ACK isn't execution; handled exact repeats need no ACK."
 )
 _LEGACY_RUNTIME_V1_FOLLOWUP = (
@@ -1097,6 +1105,18 @@ def _previous_opencode_delivery_body(text: str, *, legacy_completion: bool = Fal
     return "\n\n".join(blocks)
 
 
+def _previous_runtime_v1_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
+    """Reconstruct the immediately previous short runtime-v1 body byte-for-byte."""
+    previous = _previous_opencode_delivery_body(text)
+    for root, record in zip(roots, records):
+        follow = _followup(root, record)
+        if follow.startswith(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):
+            replacement = _PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX + follow[
+                len(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):]
+            previous = previous.replace(follow, replacement, 1)
+    return previous
+
+
 def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
     """Render the exact previous full body for receipt recovery only."""
     legacy = _previous_opencode_delivery_body(text, legacy_completion=True)
@@ -1105,6 +1125,10 @@ def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list
         if follow.startswith(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):
             replacement = _LEGACY_RUNTIME_V1_FOLLOWUP + follow[
                 len(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):]
+            legacy = legacy.replace(follow, replacement, 1)
+        elif follow.startswith(_PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX):
+            replacement = _LEGACY_RUNTIME_V1_FOLLOWUP + follow[
+                len(_PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX):]
             legacy = legacy.replace(follow, replacement, 1)
     return legacy
 
@@ -1852,7 +1876,9 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         for root, record in selected:
             grouped_selected.setdefault(root, []).append(record)
         rendered = delivery_context(list(grouped_selected.items()))
-        previous_rendered = _previous_opencode_delivery_body(rendered)
+        previous_rendered = _previous_runtime_v1_completion_body(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected]) if rendered else ""
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
