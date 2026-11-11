@@ -31,13 +31,13 @@ the operation. A judged key typed into a shell seat's pane (a tidy `/compact`,
 a continue) goes in only while the host's screen answer says the outer keys
 reach native; with settings, the Fleet explorer or a question editor focused,
 or no answer, there is no screen to type into. Only a raw relay reads the pane
-itself. Reading that screen (a trust reason, a dialog, a draft) needs nothing
-more. Typing into the empty box it shows also needs the host's `status`: a
-host whose `focused` covers the Fleet explorer says `focus_covers_fleet`; a
-host started earlier and still running does not, so its input-wait answer
-(`empty`, which has always left every shell editor out) must agree too. A host
-without the `screen` answer gets no typed key, the same skip, card kept, as its
-panel already caused. A refused tidy is not retried by a new wait: a manual one
+itself. Reading that screen and typing into it ask the same `focused` answer;
+reading a trust reason only reads it and its ingress, and never picks a trust
+answer. A window started on v4.18.5–v4.18.8 runs a host whose `focused` stays
+false with the Fleet explorer open, so there a tidy or continue key can go in
+while the explorer is open; restarting the window brings a host that refuses
+it. A host without the `screen` answer gets no typed key, the same skip, card
+kept, as before. A refused tidy is not retried by a new wait: a manual one
 ends `skipped` with its card kept; an automatic one is judged again only while
 its card request is still pending, and a refusal after the card was accepted
 ends `unverified`/`compact-pending` for that work span (the next idle is
