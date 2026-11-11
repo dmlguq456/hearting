@@ -98,8 +98,8 @@ class BlinkAssertions(unittest.TestCase):
             self.assertFalse(render._HUE_OF[dim][1] & render._A_BOLD, (y, x, dim))
 
 
-# ``⏳`` is two cells wide; the grid's continuation cell reads as ``\0`` in the joined line.
-ROUTE_TAIL = "⏳" + ("\0" if __import__("tools.fleet.explorer.grid", fromlist=["cell_width"]).cell_width("⏳") == 2 else "") + " 1"
+# The folded session's route count, in the statusline word.
+ROUTE_TAIL = "route 1"
 
 
 class SessionRouteCountTests(BlinkAssertions):
@@ -119,9 +119,9 @@ class SessionRouteCountTests(BlinkAssertions):
                         # Include wide-character continuation cells when locating
                         # the suffix after a clipped CJK title.
                         lines = ["".join(cell[0] or "\0" for cell in row) for row in on.cells]
-                        # The folded session's title tail is ``⏳ N`` (the statusline word).
+                        # The folded session's title tail is ``route N`` (the statusline word).
                         badge = [(y, line.index(ROUTE_TAIL)) for y, line in enumerate(lines)
-                                 if ROUTE_TAIL in line]
+                                 if ROUTE_TAIL in line and "[c1]" in line]
                         if not current:
                             self.assertFalse(badge)
                             self.assert_structure(on, off)
@@ -145,9 +145,29 @@ class SessionRouteCountTests(BlinkAssertions):
                         adjusted = replace(on, cells=tuple(tuple(row) for row in masked))
                         self.assert_structure(adjusted, off)
                         expanded = draw(vm, NavState(opened="c1"), cols, 45, beat=1)
-                        self.assertNotIn(ROUTE_TAIL, "\n".join(
-                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells))
+                        self.assertNotIn(ROUTE_TAIL, "\n".join(line for line in (
+                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells) if "[c1]" in line))
 
+
+    def test_a_narrow_table_shows_the_whole_route_count_or_none_of_it(self):
+        # A folded row's `route N` is never cut to a shorter number or a part of the word
+        # (RV-PR1517-R3 §1 ②): the title and MODEL give way first, else the tail is left out.
+        base = blink_view_model()
+        sessions = tuple(dict(row, title="XXXX XXXX " * 8) for row in base.sessions)
+        first = dict(base.routes[0], current=True, state="working")
+        for count in (1, 12, 123):
+            vm = replace(base, sessions=sessions,
+                         routes=tuple(dict(first, id="r%d" % i) for i in range(count)))
+            whole = "route %d" % count
+            for cols in [*range(60, 100), 100, 140]:
+                with self.subTest(count=count, cols=cols):
+                    rows = [row.rstrip() for row in draw(vm, NavState(), cols, 45, beat=1).text_rows()
+                            if "[c1]" in row]
+                    tail = re.sub(r"X+|…|\(.*?\)", "", re.search(r"%(.*?)\d+h \d+m$", rows[0]).group(1)).strip()
+                    self.assertIn(tail, ("", whole), rows[0])
+                    # From 69 columns (and down to 67-69 by count) the whole count shows.
+                    if cols >= 69 or cols >= 66 + len(str(count)):
+                        self.assertEqual(tail, whole, rows[0])
 
 class StagePhaseTests(BlinkAssertions):
     def test_stage_boxes_pulse_only_active_names_and_dot_all_hues(self):

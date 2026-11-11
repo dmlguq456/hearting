@@ -87,5 +87,73 @@ class PendingActivityTest(unittest.TestCase):
         self.assertIs(live.current_session_activity(model, candidate, new), model)
 
 
+
+class ReadyUnobservedCellsTest(unittest.TestCase):
+    """A ready required source is not an observation of model/context/title."""
+
+    def observed(self, generation, state="idle", *, birth="fixture-birth", model="fixture-model",
+                 context=43, title="fixture title"):
+        snapshot = observation(generation, state, complete=True, birth=birth)
+        row = snapshot.sessions[0]
+        row.model, row.effort, row.ctx_pct, row.title = model, "high" if model else None, context, title
+        return snapshot
+
+    def test_completed_source_does_not_publish_unobserved_cells_as_empty(self):
+        runtime = ExplorerRuntime()
+        runtime.configure_persistence({"codex"}, strict_readiness=True)
+        screen = _Screen(45, 150)
+        with ExitStack() as stack:
+            for name, value in {
+                "_EXPLORER_ENABLED": True, "_EXPLORER_STATE": NavState(),
+                "_EXPLORER_MODEL": None, "_EXPLORER_PUBLISHED_MODEL": None,
+                "_EXPLORER_RETAINED": (None, None),
+                "_EXPLORER_REPLAY_ACTIVE": False, "_EXPLORER_SHOWN": False,
+                "_EXPLORER_COMPOSE_MODEL": None, "_EXPLORER_COMPOSE_SNAPSHOT": None,
+                "_EXPLORER_COMPOSE_DETAIL": None, "_EXPLORER_COMPOSE_GENERATION": None,
+                "_EXPLORER_RESULT": None, "_EXPLORER_RUNTIME": runtime,
+                "_EXPLORER_NATIVE_DISPLAY": NativeDisplayLayer(),
+                "_EXPLORER_ORDER": [], "_EXPLORER_SIZE": None,
+                "_EXPLORER_PAINT_CACHE": None, "_EXPLORER_DRAW_CACHE": None,
+            }.items():
+                stack.enter_context(patch_split(render, name, value))
+            persist = stack.enter_context(mock.patch.object(runtime, "persist_complete_async"))
+            stack.enter_context(mock.patch.object(render, "_key_attr", return_value=0))
+            stack.enter_context(mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}))
+
+            def draw(snapshot, generation):
+                with patch_split(render, "_EXPLORER_GENERATION", generation), \
+                     mock.patch.object(render.time, "time", return_value=1000 + generation):
+                    render._draw(screen, snapshot.sessions, [], "all", 0, snapshot=snapshot)
+                self.assertTrue(render._EXPLORER_READINESS["ready"])
+                return render._EXPLORER_MODEL.sessions[0]
+
+            first = draw(self.observed("g1"), 1)
+            self.assertTrue(first["model"] and first["context"] and first["title"])
+            # Same process, nothing observed for the display cells; activity still advances.
+            kept = draw(self.observed("g2", "working", model=None, context=None, title=None), 2)
+            self.assertEqual((kept["model"], kept["effort"], kept["context"], kept["title"]),
+                             (first["model"], first["effort"], first["context"], first["title"]))
+            self.assertEqual(kept["state"], "working")
+            self.assertIs(persist.call_args[0][0], render._EXPLORER_PUBLISHED_MODEL)
+            # A value that is actually observed replaces the kept one.
+            changed = draw(self.observed("g3", model="other-model", context=71, title=None), 3)
+            self.assertEqual((changed["model"][0], changed["context"], changed["title"]),
+                             ("other-model", 71, first["title"]))
+            # A reused PID (new process birth) never receives the earlier cells.
+            reused = draw(self.observed("g4", birth="new-birth", model=None, context=None, title=None), 4)
+            self.assertEqual((reused["model"], reused["context"], reused["title"]), (None, None, None))
+
+    def test_kept_cells_do_not_block_a_native_value_for_the_unobserved_base(self):
+        published = live.build_view_model(self.observed("g1"), now=1)
+        candidate = live.build_view_model(self.observed("g2", model=None, context=None, title=None), now=2)
+        shown = live.retain_unobserved_cells(candidate, published)
+        self.assertEqual(shown.sessions[0]["context"], published.sessions[0]["context"])
+        binding = candidate.source_records["_detail_bindings"]
+        ref, = binding
+        layer = NativeDisplayLayer()
+        layer.update(((tuple(binding[ref][:4]), {"context": 88, "_base": {"context": None}}),))
+        self.assertEqual(layer.apply(shown).sessions[0]["context"], 88)
+        self.assertIs(live.retain_unobserved_cells(published, published), published)
+
 if __name__ == "__main__":
     unittest.main()

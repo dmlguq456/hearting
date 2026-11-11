@@ -128,10 +128,10 @@ class ExplorerWorkingBeatPtyTest(unittest.TestCase):
                         if count:
                             targets[(y, count.start(1))] = ("count", count.group(1), set())
                         if "[live]" in text or "[closed]" in text:
-                            x = text.find("⏳ 1")          # the folded session's route count
+                            x = text.find("route 1")          # the folded session's route count
                             if x >= 0:
                                 kind = "live" if "[live]" in text else "closed"
-                                targets[(y, x)] = (kind, "⏳ 1", set())
+                                targets[(y, x)] = (kind, "route 1", set())
                     if {value[0] for value in targets.values()} == {"count", "live", "closed"}:
                         break
                     time.sleep(0.05)

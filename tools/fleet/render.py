@@ -2800,6 +2800,7 @@ _EXPLORER_GENERATION = 0
 _EXPLORER_READINESS = {"ready": True}
 _EXPLORER_SHOWN = False      # a complete frame was drawn: later pending sources never blank the screen again
 _EXPLORER_PUBLISHED_MODEL = None
+_EXPLORER_RETAINED = (None, None)  # (composed candidate, its publication with kept cells)
 _EXPLORER_REPLAY_ACTIVE = False
 _EXPLORER_DETAIL_CONTINUATION = None
 _EXPLORER_REMOTE_OBSERVATION = None
@@ -6180,7 +6181,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     global _HIT_SNAPSHOT_ID, _CURRENT_BODY_H, _CURRENT_BODY_TOP, _CURRENT_BODY_COUNT
     global _LAYOUT_META, _EXPLORER_SHOWN
     global _EXPLORER_MODEL, _EXPLORER_PUBLISHED_MODEL, _EXPLORER_REPLAY_ACTIVE
-    global _EXPLORER_DETAIL_CONTINUATION, _EXPLORER_STATE
+    global _EXPLORER_DETAIL_CONTINUATION, _EXPLORER_STATE, _EXPLORER_RETAINED
 
     _TOGGLE_ROWS, _TOGGLE_SPANS = {}, {}
     _CLICK_ROWS, _CLICK_SPANS = {}, {}
@@ -6216,13 +6217,21 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
             complete = runtime.publication_ready(readiness)
             if complete:
                 _EXPLORER_REPLAY_ACTIVE = False
-                _EXPLORER_PUBLISHED_MODEL = candidate_model
-                _EXPLORER_MODEL = _explorer_native_display(candidate_model)
+                # Ready required sources are not observations of every display
+                # cell: a same-process row keeps what it showed until a value
+                # is actually observed (unchanged inputs reuse the result).
+                if (_EXPLORER_RETAINED[0] is not candidate_model
+                        or _EXPLORER_RETAINED[1] is not _EXPLORER_PUBLISHED_MODEL):
+                    from .explorer.live import retain_unobserved_cells
+                    published = retain_unobserved_cells(candidate_model, _EXPLORER_PUBLISHED_MODEL)
+                    _EXPLORER_RETAINED = (candidate_model, published)
+                _EXPLORER_PUBLISHED_MODEL = _EXPLORER_RETAINED[1]
+                _EXPLORER_MODEL = _explorer_native_display(_EXPLORER_PUBLISHED_MODEL)
                 _EXPLORER_SHOWN = True
                 runtime.mark_published(readiness)
                 frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
                 if runtime.all_new(readiness):
-                    runtime.persist_complete_async(candidate_model, readiness,
+                    runtime.persist_complete_async(_EXPLORER_PUBLISHED_MODEL, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
             elif _EXPLORER_PUBLISHED_MODEL is not None:
                 from .explorer.live import selected_detail, current_claude_usage, current_session_activity

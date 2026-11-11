@@ -6,17 +6,41 @@ from tools.fleet.palette import style_components
 
 
 class CommonSessionLineTest(unittest.TestCase):
+    def setUp(self):
+        # Korean screen words for the fixed assertions; the English form is checked below.
+        from unittest import mock
+        patch = mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})
+        patch.start(); self.addCleanup(patch.stop)
+
+    def test_answer_wait_words_follow_the_screen_language(self):
+        from unittest import mock
+        for language, words in (("Korean", "◑답 대기 3"), ("English", "◑ to answer 3")):
+            with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": language}):
+                text = "".join(part for part, _key in line_segments(self.sample(), 240))
+                self.assertIn(words, text)
+                self.assertIn("context ", text); self.assertIn("route 2", text)
+
+    def test_time_left_and_elapsed_use_fleets_spaced_form(self):
+        import time
+        from tools.fleet.session_line import _remaining, elapsed_text
+        self.assertEqual(elapsed_text(45), "45m"); self.assertEqual(elapsed_text(200), "3h 20m")
+        self.assertEqual(elapsed_text(3 * 1440), "3d 0h")
+        self.assertEqual(_remaining(time.time() + 200 * 60 + 30), "3h 20m")
+        self.assertEqual(_remaining(time.time() - 5), "")
     def sample(self):
         return {"harness": "codex", "tag": "52", "state": "idle", "cwd": "/synthetic/hearting",
                 "title": "Synthetic session", "branch": "feature", "ctx_pct": 37,
                 "model": "sol", "effort": "xhigh", "weekly_pct": 60,
-                "route_label": "⏳ route 2 · impl-review, plan-check", "answer_wait": 3}
+                "route_label": "route 2 · impl-review, plan-check", "answer_wait": 3}
 
     def test_wide_line_uses_the_approved_order_and_weekly_quota(self):
         text = "".join(part for part, _key in line_segments(self.sample(), 240))
-        fields = ("hearting", "Synthetic session", "feature", "context ━━━━────── 37%", "sol", "7d 60%", "⏳ route 2", "◑ 3")
+        # Spec 2026-11-11 rule 10: [number] project (git) │ model effort │ context │ wait │ route │ quota.
+        fields = ("[52] hearting", "(feature)", "sol xhigh", "context ━━━━────── 37%", "◑답 대기 3", "route 2", "7d 60%")
         positions = [text.index(field) for field in fields]
         self.assertEqual(positions, sorted(positions))
+        self.assertIn(" │ ", text); self.assertNotIn(" · ", text.replace("route 2 · impl-review", ""))
+        self.assertNotIn("📁", text); self.assertNotIn("⎇", text); self.assertNotIn("Synthetic session", text)
         self.assertNotIn("› 나", text)
 
     def test_narrow_cjk_names_leave_percentages_and_action_counts_intact(self):
@@ -26,13 +50,14 @@ class CommonSessionLineTest(unittest.TestCase):
             with self.subTest(width=width):
                 text = "".join(part for part, _key in line_segments(sample, width))
                 self.assertLessEqual(cell_width(text), width)
-                for value in ("37%", "7d 60%", "⏳ route 2", "◑ 3"):
+                for value in ("37%", "7d 60%", "route 2"):
                     self.assertIn(value, text)
+                self.assertTrue("◑답 대기 3" in text or "◑ 3" in text, text)
 
     def test_unknown_is_not_zero_and_known_zero_stays_zero(self):
         sample = {**self.sample(), "ctx_pct": None, "weekly_pct": None, "answer_wait": None}
         text = "".join(part for part, _key in line_segments(sample, 240))
-        self.assertIn("context ?", text); self.assertIn("7d ?", text); self.assertIn("◑ ?", text)
+        self.assertIn("context ?", text); self.assertIn("7d ?", text); self.assertIn("◑답 대기 ?", text)
         known = {**sample, "ctx_pct": 0, "weekly_pct": 0, "answer_wait": 0}
         text = "".join(part for part, _key in line_segments(known, 240))
         self.assertIn("context ────────── 0%", text); self.assertIn("7d 0%", text); self.assertNotIn("◑", text)
@@ -66,7 +91,81 @@ class CommonSessionLineTest(unittest.TestCase):
         lines=status_lines(values,36,wrap_long=True)
         self.assertTrue(all(cell_width(''.join(text for text,_ in line))<=36 for line in lines))
         compact=''.join(text for line in lines for text,_ in line).replace(' ','')
-        for field in ('↑3','↓2','🚧4','12:34:56','42%','5h31%','7d60%',values['native_sid']):
+        for field in ('↑3','↓2','🚧4','42%','5h31%','7d60%',values['native_sid']):
             self.assertIn(field,compact)
+        # The observation clock is not painted (spec 2026-11-11 section 3).
+        self.assertNotIn('12:34:56',compact)
+
+    def test_route_rows_take_their_values_from_the_same_snapshot_jobs(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from tools.fleet import session_line
+        from tools.fleet.explorer import live
+        job = lambda **kw: SimpleNamespace(key=kw.get("attempt_id"), **kw)
+        jobs = {
+            "rt-a": [job(attempt_id="o", depth=1, worker_type="owner", liveness="idle", harness="claude", model="opus",
+                         elapsed_min=87.0),
+                     job(attempt_id="w", depth=2, route_node="execute", liveness="working", harness="codex",
+                         resolved_model="gpt-fixture", effort="high", active_context_tokens=72_000,
+                         context_window_tokens=100_000, exec_tool={"name": "apply_patch"},
+                         subagents=[{"active": True}, {"active": False}], elapsed_min=42.0)],
+            # A Claude headless worker reports tokens but no window: no percent is made up.
+            "rt-b": [job(attempt_id="o2", depth=1, worker_type="owner", route_node="one-shot", liveness="working",
+                         harness="claude", model="opus", effort="medium", active_context_tokens=250_136,
+                         exec_tool={"name": "Bash"}, elapsed_min=5.0)],
+            "rt-c": [job(attempt_id="o3", depth=1, worker_type="owner", liveness="dead", harness="claude",
+                         ctx_pct=12, elapsed_min=54.0)],
+        }
+        jobs["rt-d"] = [job(attempt_id="o4", depth=1, worker_type="owner", liveness="dead", harness="codex",
+                            elapsed_min=30.0)]
+        collected = {rid: {"jobs": rows} for rid, rows in jobs.items()}
+        # Fleet's own route records (``_route_records``), as the producer observes them.
+        closed = {"codes": {"schema": "route_visibility_codes_v1", "verification": {"closed_at": "2026-11-11T00:00:00Z"}}}
+        routes = {"rt-a": {"id": "rt-a", "state": "working", "activity": "running", "owner_waits": True, "current": True,
+                           "worker_stage": "execute"},
+                  "rt-b": {"id": "rt-b", "state": "working", "activity": "running", "current": True, "worker_stage": "one-shot"},
+                  "rt-c": {"id": "rt-c", "state": "dead", "activity": "ended", "current": True, "worker_stage": "execute"},
+                  "rt-d": {"id": "rt-d", "state": "dead", "activity": "ended", "current": True, "visibility": closed}}
+        panels = {"claude\0s": [{"id": rid, "state": route["state"], "worker_stage": route.get("worker_stage")}
+                                for rid, route in routes.items()]}
+        with mock.patch.object(live, "_collect_routes", return_value=collected):
+            session_line.route_details(object(), panels, routes, now=10_000.0)
+        a, b, c, d = panels["claude\0s"]
+        # MODEL and CONTEXT are the working worker's, else the owner's (Fleet's choice).
+        # The percent is Fleet's own CONTEXT gauge for that job (the same number Fleet draws).
+        fleet_percent = live._context_gauge(jobs["rt-a"][1])[0]
+        self.assertIsNotNone(fleet_percent)
+        self.assertEqual((a["harness"], a["model"], a["effort"], a["ctx_pct"], a["tool"], a["agents"]),
+                         ("codex", "gpt-fixture", "high", round(fleet_percent, 1), "apply_patch", 1))
+        self.assertEqual(a["since"], 10_000.0 - 87 * 60)   # absolute: a re-published pass still ages
+        # No window known: the exact token count, never a made-up percent.
+        self.assertNotIn("ctx_pct", b); self.assertEqual(b["ctx_tokens"], 250_136); self.assertEqual(b["tool"], "Bash")
+        self.assertNotIn("ctx_pct", c); self.assertNotIn("tool", c); self.assertEqual(c["elapsed_min"], 54.0)
+        self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
+        self.assertTrue(d["closed"])
+        # Fleet's judgment: an owner waiting on its worker is ●, a closed route is in no count.
+        self.assertEqual(session_line.route_badge("route 4 · execute", panels["claude\0s"]), "route 4 ⠏1 ●1 ✕1")
+        self.assertEqual(session_line.token_text(250_136), "250K")
+        # Without its rows the count stays alone; a missing label stays empty.
+        self.assertEqual(session_line.route_badge("route 3 · execute", None), "route 3")
+        self.assertEqual(session_line.route_badge("", panels["claude\0s"]), "")
+        # Past the panel's eight kept rows the pass's own markers of every current route count.
+        markers = [("working", False)] * 7 + [("idle", False)] * 3 + [("dead", False), ("dead", True)]
+        self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"][:2], markers),
+                         "route 12 ⠏7 ●3 ✕1")
+        self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"]), "route 12")
+
+    def test_messages_are_the_latest_three_peer_rows_either_way(self):
+        from tools.fleet.session_line import peer_message_rows
+        received = [{"source": "peer", "sender": "[e7] x", "sender_harness": "claude", "sender_session_id": "e7",
+                     "text": "first", "at": 1},
+                    {"source": "notification", "text": "not a peer message", "at": 2},
+                    {"source": "peer", "sender": "someone", "text": "third", "at": 4}]
+        sent = [{"to": {"harness": "codex", "session_id": "s73", "name": "x"}, "summary": "second", "at": 3},
+                {"to": {"name": "named"}, "summary": "fourth", "at": 5}]
+        tags = {("claude", "e7"): "e7", ("codex", "s73"): "73"}
+        rows = peer_message_rows(received, sent, lambda h, s: tags.get((h, s)))
+        self.assertEqual([(r["way"], r["who"], r["text"]) for r in rows],
+                         [("→", "[73]", "second"), ("←", "someone", "third"), ("→", "named", "fourth")])
 
 if __name__ == "__main__": unittest.main()

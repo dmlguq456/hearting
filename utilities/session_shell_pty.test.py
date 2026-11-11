@@ -129,7 +129,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/No current route/);
+ await waitFor(/── route 0 /);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -211,7 +211,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='action-display'||cfg.scenario==='answer-display'){
    await rpc(cfg.inlet,{batch:Buffer.from(cfg.scenario==='answer-display'?'\x1d1\r':'\x1dw').toString('base64')});
    await existing(cfg.actionReady);
-   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='⏳ route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/DURING_ACTION/);
    const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);
@@ -243,27 +243,50 @@ function existing(file){return new Promise((resolve,reject)=>{
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
    value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
      id:'rt-detail',title:'ROUTE_PAGE',state:'working',worker_stage:'inline',stages:[{name:'inline',st:'active'}],
+     harness:'codex',model:'gpt-fixture',effort:'high',ctx_pct:40,agents:2,
      visibility:{codes:{schema:'route_visibility_codes_v1',shape:'direct',next:{kind:'closed'},verification:{gate:'unproven'},quoted:Array.from({length:8},(_,i)=>['test','EVIDENCE_'+i+' '+'bounded detail '.repeat(5)])}}}];
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/ROUTE_PAGE/);
    await new Promise(resolve=>sideTerm.write('',resolve));
+   // A press on a route row opens it in place and closes it again. Display only:
+   // like any outer input it invalidates the in-flight observation, then `empty`
+   // and focus settle back to what they were (PG-50 class); no native draft.
+   const pinnedRoute=JSON.parse(fs.readFileSync(file,'utf8'));
+   const before=await rpc(pinnedRoute.socket,{...pinnedRoute,op:'status'});
+   let row;
+   for(let y=0;y<sideTerm.rows;y++){
+     const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
+     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('── route'))row={x:x+2,y:y+1};
+   }
+   if(!row)throw Error('route row absent');
+   for(const marker of [/\+2 agent/,/ROUTE_PAGE/]){
+     await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${row.x};${row.y}M\x1b[<0;${row.x};${row.y}m`).toString('base64')});
+     await waitFor(marker);
+     let after;
+     for(let n=0;n<40;n++){after=await rpc(pinnedRoute.socket,{...pinnedRoute,op:'status'});if(after.empty===before.empty)break;await new Promise(resolve=>setTimeout(resolve,50));}
+     for(const key of ['empty','focused','state'])if(after[key]!==before[key])throw Error('a route row press changed '+key+' '+JSON.stringify([before,after]));
+   }
    let point;
+   for(let n=0;n<60&&!point;n++){
+   await new Promise(resolve=>setTimeout(resolve,50));await new Promise(resolve=>sideTerm.write('',resolve));
    for(let y=0;y<sideTerm.rows;y++){
      const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
-     if(!line?.translateToString().includes('ROUTE_PAGE'))continue;
-     for(let x=0;x<sideTerm.cols;x++)if(line.getCell(x)?.getChars()==='⏳')point={x:x+1,y:y+1};
+     // The route section's heading opens the evidence pages; its rows open in place.
+     if(!line?.translateToString().includes('── route 1'))continue;
+     let s='';for(let x=0;x<sideTerm.cols;x++){const c=line.getCell(x);if(!c||!c.getWidth())continue;s+=c.getChars()||' ';if(s.endsWith('── r'))point={x:x+1,y:y+1};}
    }
-   if(!point)throw Error('route detail target absent');
+   }
+   if(!point)throw Error('route detail target absent\n'+Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()).join('\n'));
    await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${point.x};${point.y}M\x1b[<0;${point.x};${point.y}m`).toString('base64')});
    await waitFor(/PgUp\/PgDn/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~').toString('base64')});await waitFor(/‹ 2\//);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_DETAIL\r').toString('base64')});await waitFor(/DONE_AFTER_DETAIL/);
  }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/No current route/);
+ if(cfg.scenario==='display')await waitFor(/── route 0 /);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
-   const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='⏳ route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }

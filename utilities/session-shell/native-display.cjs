@@ -4,8 +4,20 @@ const fs=require('node:fs');
 function observe(harness, lines, sid) {
   const valid=n=>Number.isFinite(n)&&n>=0&&n<=100;
   if(harness==='claude') {
-    const at=lines.findLastIndex(line=>line.includes('📁 ')&&line.includes('⎇ '));
-    if(at>=0) {
+    // The shared row: `[e9] project (git) │ Model effort │ context ━━── N% │ …`
+    // (an older release painted `📁 project · ⎇ branch · context … · Model effort`).
+    const at=lines.findLastIndex(line=>/ │ context\s+[━─█░]+\s+\d/.test(line));
+    if(at>=0){
+      const status=lines.slice(at,at+3).map(s=>s.trim()).join(' │ ');
+      const found=status.match(/(?:^|│)\s*([^│]*?)\s*│\s*context\s+[━─█░]+\s+(\d+(?:\.\d+)?)%/);
+      const choice=found?.[1].match(/^(.+?)(?:\s+(low|med|medium|high|xhigh|max|ultra))?$/);
+      const named=choice&&!/…|\.\.\.|^\[|\)$/.test(choice[1]);
+      const effort=choice?.[2]==='med'?'medium':choice?.[2]||'';
+      if(found&&valid(+found[2]))return {sid,percent:+found[2],...(named?{model:choice[1],effort}:{})};
+    }
+    const older=lines.findLastIndex(line=>line.includes('📁 ')&&line.includes('⎇ '));
+    if(older>=0) {
+      const at=older;
       // The panel paints Claude's whole status area; this row owns no field.
       // Its exact callback values are still display evidence for the header.
       const status=lines.slice(at,at+3).map(s=>s.trim()).join(' · ');

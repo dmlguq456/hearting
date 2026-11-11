@@ -27,6 +27,7 @@ consumers such as ``utilities/peer-steward.py``). It therefore never imports
 ``fleet.session_handle`` is imported lazily, inside ``apply_to_session``, and
 only for the Claude branch.
 """
+import errno
 import json
 import os
 import re
@@ -54,6 +55,14 @@ ALIAS_SUPPORT = {"claude": "proc-argv",
                  "opencode": "not-implemented"}
 
 _MAX_BYTES = 64 * 1024
+# Absent or refused (symlink, socket, permission) is something a read observed.
+_SETTLED_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENXIO,
+                             errno.EACCES, errno.EPERM))
+
+
+def unread_error(error):
+    """True when an OSError means the source was not read, not that it is absent."""
+    return isinstance(error, OSError) and error.errno not in _SETTLED_ERRNOS
 
 
 class PassiveReadCache:
@@ -198,8 +207,12 @@ def registry_path(harness, pid, *, home=None):
     return os.path.join(_dir_for(harness, home=home), "%d.json" % int(pid))
 
 
-def read(harness, pid, *, home=None, validation_cache=None):
-    """dict with every FIELDS key present (absent → None), or None on any failure."""
+def read(harness, pid, *, home=None, validation_cache=None, raise_unread=False):
+    """dict with every FIELDS key present (absent → None), or None on any failure.
+
+    With ``raise_unread`` an I/O failure that is not absence (``unread_error``)
+    raises instead, so a caller can keep what it showed rather than read None.
+    """
     _check_harness(harness)
     path = registry_path(harness, pid, home=home)
     try:
@@ -216,7 +229,9 @@ def read(harness, pid, *, home=None, validation_cache=None):
                 return held
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
-    except Exception:
+    except Exception as error:
+        if raise_unread and unread_error(error):
+            raise
         return None
     if not isinstance(payload, dict):
         return None

@@ -1,7 +1,7 @@
 """Bounded shell presentation of Fleet-owned facts, never input authority."""
 import re
 from .config import ui_text
-from .session_line import status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
+from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
 from .token_budget import compaction_imminent
 
@@ -167,9 +167,8 @@ def notice_line(values, routes, questions, display, now):
     waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
                   and (item.get("request_state") or "open") == "open")
     if waiting:
-        return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"),
-                (ui_text("fleet.session_panel.answer") + " " + str(waiting), "lvl_y"),
-                (" · Ctrl+]", "dim")]
+        from .session_line import answer_wait_word
+        return [(answer_wait_word() + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
@@ -206,6 +205,92 @@ def notice_line(values, routes, questions, display, now):
     return max(news, key=lambda item: item[0])[1] if news else []
 
 
+def route_row(row, now=None):
+    """A route row's painted values (spec rules 5-7); an unreported value is left out."""
+    import time
+    from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
+                               stage_glyph, token_text, _number)
+    now = time.time() if now is None else now
+    # The producer's Fleet marker; an older cache row has only its state.
+    marker = row.get("marker")
+    if marker not in ("working", "idle", "blocked", "dead", "done", "stale"):
+        state = str(row.get("state") or "")
+        marker = {"failed": "dead", "attention": "dead", "degraded": "dead"}.get(state, state)
+        marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
+    glyph, key = route_glyph(marker)
+    shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
+    harness = sanitize_title(str(row.get("harness") or ""))[:32]
+    if harness:
+        shown.update(harness=harness, harness_key="hb_" + harness)
+    model = row.get("model")
+    if model:
+        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model))
+    effort = effort_label(row.get("effort"))
+    if effort:
+        shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
+    percent = row.get("ctx_pct")
+    if _percent(percent) != "?":
+        shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
+                     gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+    elif token_text(row.get("ctx_tokens")):
+        # No window known: the exact token count, as Fleet writes it, never a made-up percent.
+        tokens = token_text(row["ctx_tokens"])
+        shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
+    minutes = None
+    if _number(row.get("since")) is not None:
+        minutes = max(0.0, (now - row["since"]) / 60)
+    elif _number(row.get("elapsed_min")) is not None:
+        minutes = row["elapsed_min"]
+    if minutes is not None:
+        shown["elapsed"] = elapsed_text(minutes)
+    tool = sanitize_title(str(row.get("tool") or ""))[:48]
+    if tool and shown["kind"] == "working":
+        shown["tool"] = tool
+    if type(row.get("agents")) is int and row["agents"] > 0:
+        shown["agents"] = row["agents"]
+    stages = [node for node in (row.get("stages") or ()) if isinstance(node, dict)][:16]
+    if len(stages) > 1:
+        flow = []
+        for node in stages:
+            name = sanitize_title(str(node.get("name") or ""))[:64]
+            mark = stage_glyph(node.get("st"))
+            flow.append(name + (" " + mark if mark else ""))
+        shown["flow"] = " › ".join(flow)
+        current = next((i for i, node in enumerate(stages) if stage_glyph(node.get("st")) in {"●", "✕"}), None)
+        if current is not None:
+            shown["step"] = (sanitize_title(str(stages[current].get("name") or ""))[:32] + " "
+                             + stage_glyph(stages[current].get("st")) + " " + str(current + 1) + "/" + str(len(stages)))
+    return shown
+
+
+def session_head(values):
+    """``[e9] hearting (main 🚧 3)``: the session number, project and dim Git."""
+    from .session_line import line_segments
+    return line_segments(values, 10000, complete=True, fields={"folder"})
+
+
+def quota_row(values):
+    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+    from .session_line import _remaining, _text
+    parts = []
+    windows = [window for window in values.get("quota_windows") or () if _percent(window[1]) != "?"]
+    if not windows and _percent(values.get("weekly_pct")) != "?":
+        windows = [("7d", values["weekly_pct"], None)]
+    for label, used, reset in windows:
+        if parts:
+            parts.append((" │ ", "dim"))
+        parts += [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
+        left = _remaining(reset)
+        if left:
+            parts.append(("(↻ " + left + ")", "dim"))
+    for label, used in values.get("model_quotas") or ():
+        if _percent(used) != "?":
+            if parts:
+                parts.append((" │ ", "dim"))
+            parts += [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]
+    return parts
+
+
 def presentation(values, view, harness, sid, columns, *, native_owned=()):
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
@@ -226,7 +311,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         owner_text = "owner · " + owner if owner else ""
         runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
-        routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
+        routes.append({**route_row(row), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
@@ -244,10 +329,39 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
-    return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
+    # Fixed words are English in every language (spec rule 3).
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line")
+    from .session_line import effort_label, gauge_parts, answer_wait_word
+    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    if effort_label(values.get("effort")):
+        selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
+    gauge = gauge_parts(values.get("ctx_pct"))
+    count = values.get("answer_wait")
+    # The producer's count is the session's whole current-route count; the panel
+    # keeps at most eight rows, so the kept current rows are counted apart from it.
+    current, total = len(routes), None
+    from .session_line import ROUTE_LABEL
+    match = ROUTE_LABEL.match(values.get("route_label") or "")
+    if match:
+        total = int(match.group(1))
+        current = min(len(routes), total)
+    mcp = values.get("mcp")
+    # OpenCode's hidden native sidebar listed these servers; keep the count.
+    mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
+                                    "lvl_r" if mcp.get("failed") else "lvl_g")]
+                 if isinstance(mcp, dict) and mcp.get("total") else [])
+    return {"head": session_head(values), "selected": selected,
+            "context": [("context ", "dim"), *gauge] if gauge else [],
+            "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
+                    if count is None or type(count) is int and count > 0 else "",
+            "session_title": sanitize_title(str(values.get("title") or ""))[:320],
+            "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
+                    if values.get("jobs") else [],
+            "quota": quota_row(values), "route_count": current, "route_total": total, "mcp": mcp_parts,
+            "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
-            "route_label": values.get("route_label") or "",
+            "route_label": route_text(values.get("route_label") or ""),
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
             "session": session_status(values, max(20, columns - 4)),
