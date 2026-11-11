@@ -103,7 +103,10 @@ function claudeStatusRows(lines,sid,record) {
   const y=bottom+1;
   for(const want of [record.lines,record.previous]){
     if(!Array.isArray(want)||!want.length||want.length>6||!want.every(s=>typeof s==='string'&&norm(s)))continue;
-    if(y+want.length<=lines.length&&want.every((line,i)=>same(lines[y+i],line)))return new Set(want.map((_l,i)=>y+i));
+    // A native screen too short for the whole record ends on its first rows: those
+    // rows, running to the screen's last line, are the recorded ones and yield too.
+    const shown=Math.min(want.length,lines.length-y);
+    if(shown>0&&want.slice(0,shown).every((line,i)=>same(lines[y+i],line)))return new Set(want.slice(0,shown).map((_l,i)=>y+i));
   }
   return new Set();
 }

@@ -31,6 +31,39 @@ b.input(Buffer.from('2\r'));await new Promise(setImmediate);assert.deepEqual(sen
 b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,1);
 })();''')
 
+    def test_arrows_move_the_highlighted_choice_and_enter_sends_it_once(self):
+        # Spec rule 18 (2026-11-11 night): ↑↓ and Enter as in Claude's own question;
+        # the arrow-picked value is the number-picked value, sent once.
+        self.node(r'''
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+(async()=>{
+const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one','two','three'],...extra}]});
+const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='›').map(row=>row.slice(2).map(p=>p.text).join(''));
+for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\r','two'],['\r','one'],['\x1b[A\x1b[A\r','one'],['\x1b[B\x1b[B\x1b[B\x1b[B\r','three']]){
+ let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
+ b.update([item('id')]);b.enter();
+ if(keys==='\r')assert.deepEqual(lit(b),['1 one'.slice(2)],'the first choice starts highlighted');
+ b.input(Buffer.from(keys));await new Promise(setImmediate);
+ assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:[want]}}],JSON.stringify(keys));
+ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,1,'sent once');
+}
+// The recommended choice is where the highlight starts; the hint names the keys.
+{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update([item('rec',{recommended:2})]);b.enter();
+ assert.deepEqual(lit(b),['three']);b.input(Buffer.from('\x1b[A'));assert.deepEqual(lit(b),['two']);
+ assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send · t text')));}
+// Without focus the arrows and Enter are the conversation's: every byte goes back.
+{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);
+ const rest=b.input(Buffer.from('\x1b[B\r'));assert.equal(rest.toString(),'\x1b[B\r');await new Promise(setImmediate);assert.equal(sent.length,0);}
+// `t` still types an answer, and arrows do not move a choice while typing.
+{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);b.enter();
+ b.input(Buffer.from('tmine\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:['mine']}}]);}
+// A decision highlights nothing until ↑↓ or a number picks one; then Enter sends it.
+{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
+ b.update([{id:'d',revision:'r',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Approve?'}]}]);b.enter();
+ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.length,0);
+ b.input(Buffer.from('\x1b[B\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'d',revision:'r',decision:'reject'}]);}
+})().catch(e=>{console.error(e);process.exit(1);});''')
+
     def test_decision_enter_cannot_submit_before_an_explicit_selection(self):
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
@@ -128,7 +161,7 @@ for(const selected of [false,true]){
  const hints=rows.filter(row=>row.includes('Esc/')||row.includes('choose')||row.includes('Enter send'));
  assert.ok(hints.every(row=>[...row].reduce((n,c)=>n+(c.charCodeAt(0)<128?1:2),0)<=36),'focus guidance must fit the panel');
  assert.ok(hints.join(' ').includes('Esc/Ctrl+] back'));
- assert.ok(hints.join(' ').includes(selected?'Enter send':'1–9 choose'));
+ assert.ok(hints.join(' ').includes('↑↓ choose · Enter send'));
 }
 """)
 
