@@ -13,6 +13,7 @@ CTX_TRACK = 10             # the gauge of a 1M window, as the Claude statusline 
 CTX_NARROW_TRACK = 5       # a narrow table keeps a half-length gauge before its percent
 CTX_NARROW_W = CTX_NARROW_TRACK + 1 + 4
 AGE_W = 6
+TITLE_MIN = 8              # a folded row always keeps this much of what it is (its title)
 TOOL_W = 14                # ``>_ apply_patch``: the open tool on a route row
 # The words the Claude statusline and the session shell use for the same values (규격 2026-11-11).
 ROUTE_WORD = "⏳ route"
@@ -138,19 +139,22 @@ def _context_key(pct):
     return "g_blocked" if pct >= 80 else "g_idle" if pct >= 50 else "done"
 
 
-def _draw_context_gauge(grid, x, y, pct, window, tokens=None, narrow=False):
+def _draw_context_gauge(grid, x, y, pct, window, tokens=None, narrow=False, bare=False):
     """The shared CONTEXT cell: a gauge and ``NNN%``; the exact token count when only the count is known.
 
     The track is ten cells for a 1M window and proportionally shorter for a smaller measured
     one. Nothing is estimated: without a percent and a count the cell keeps its ``·``."""
     track = CTX_NARROW_TRACK if narrow else CTX_TRACK
-    value_x = x + track + 1
+    value_x = x if bare else x + track + 1
     if pct is None:
         text = token_count_text(tokens)
         grid.put(value_x, y, (text or "·").rjust(4), "dim")
         return
     pct = int(pct)
     key = _context_key(pct)
+    if bare:                      # the tightest row keeps the value and drops the gauge
+        grid.put(value_x, y, f"{pct:3d}%", key if pct >= 50 else "dim")
+        return
     width = min(track, max(1, round(track * float(window or 1))))
     filled = gauge_cells(width, pct)
     grid.put(x, y, "━" * filled, key)
@@ -208,11 +212,11 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
     c = _overview_columns(use, _overview_harness_width(vm.sessions))
     harn_end = _overview_harness_end(use, c)
-    for offset, label in ((IND + 3, "ID"), (c["h"], "MODEL"), (c["ctx"], "CONTEXT"),
+    for offset, label in ((IND + 3, "ID"), (c["h"], "MODEL"), (c["ctx"], "CTX" if c["bare"] else "CONTEXT"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()),
                           *(([(c["now"], ui_text("fleet.input.label"))] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
-        if label == "MODEL" and harn_end is None:
+        if label == "MODEL" and harn_end is None or label == "CTX" and not c.get("ctx_w", 1):
             continue                      # a table this narrow has no room for the harness cell
         grid.put(x + offset, y, label, "head", tint=234, limit=right)
     y += 1
@@ -299,7 +303,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
             if session.get("steward") and x + IND + 9 <= id_end:
                 grid.put(x + IND + 8, y, "⚑", "steward")
             harness = str(session.get("harness") or "other")
-            harn_limit = x + c["ctx"] - GAP
+            harn_limit = x + c["ctx"] - c["gap"]
             if harn_end is not None:
                 harn_limit = min(harn_limit, x + harn_end)
                 _put_model_cell(grid, x + c["h"], y,
@@ -307,8 +311,9 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                                                  str(session.get("effort") or "")),
                                 harn_limit)
             context = session.get("context")
-            _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"),
-                                narrow=c["narrow"])
+            if c.get("ctx_w", 1):
+                _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"),
+                                    narrow=c["narrow"], bare=c["bare"])
             if c["title_w"]:
                 title = str(session.get("title") or "·")
                 # The checkout follows the title in parentheses (12 cells at most); the title gives way
@@ -382,7 +387,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 y += 1
             if state.opened == tag:
                 _tint_row(grid, row_y, x - 1, right, 236)
-                y = _session_unfold(grid, vm, x, use, y, session, c)
+                y = _session_unfold(grid, vm, x, use, y, session, c, input_shown=session_table)
             if y >= grid.rows - 5:
                 if sticky:
                     pin(None, tail_height, lambda target, top: _draw_overview_tail(
@@ -613,11 +618,30 @@ def _wrap_cells(text, width):
     return rows + [current]
 
 
-def _session_unfold(grid, vm, x, use, y, session, c):
-    """Under an unfolded session row: NOW in full, each route on a line, its question."""
+def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False):
+    """Under an unfolded session row: NOW in full, each route on a line, its question.
+
+    A narrow row that left out LAST INPUT gives it here; the tightest row, which keeps only the
+    start of its title, gives the title (and checkout) in full too."""
     tag = str(session.get("tag"))
     right = x + use + 1
     x_lab, x_val = x + c["h"], x + c["h"] + 7
+    if c["bare"] or not c["title_w"]:
+        branch = session.get("branch")
+        title = str(session.get("title") or "·") + (
+            " (%s)" % branch if branch not in (None, "") else "")
+        grid.put(x_lab, y, "TITLE", "label")
+        for line in _wrap_cells(title, x + use - x_val):
+            grid.put(x_val, y, line, "soft")
+            y += 1
+    if c["now"] is None:
+        if not input_shown:
+            label = ui_text("fleet.input.label")
+            input_x = max(x_val, x_lab + _seg_width(label) + 2)
+            grid.put(x_lab, y, label, "label", limit=right)
+            grid.put(input_x, y, _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                                       max(0, right - input_x)), "soft", limit=right)
+            y += 1
     grid.put(x_lab, y, "NOW", "label")
     now = session.get("now")
     for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
@@ -725,16 +749,9 @@ def route_doer_cells(route):
                  else [("·", "dim")])
         context = (doer.get("context"), doer.get("window"), doer.get("tokens"))
         return parts, context, doer.get("tool"), int(doer.get("agents") or 0)
-    gauge = route.get("owner_gauge")
-    pct, window = (tuple(gauge) + (None, None))[:2] if isinstance(gauge, (list, tuple)) else (None, None)
-    context = route.get("owner_context")
-    if pct is None and isinstance(context, (list, tuple)) and len(context) == 2:
-        tokens, size = context
-        if type(tokens) is int and type(size) is int and size > 0:
-            pct, window = round(100 * tokens / size), size / 1_000_000
     parts = (model_cell_parts(route["harness"], route.get("model"), route.get("effort"))
              if route.get("harness") else [("·", "dim")])
-    return parts, (pct, window, None), None, 0
+    return parts, route_owner_context(route), None, 0
 
 
 def route_row_columns(use, routes, session_need=0):
@@ -758,7 +775,9 @@ def route_title_width(routes, c, repo_w=0, use=None):
     wanted = max((_seg_width(str(route.get("title") or "·")) for route in routes), default=1)
     wanted += (repo_w + 1) if repo_w else 0
     width = min(48, wanted)
-    if use is not None:
+    if use is not None and c.get("bare"):
+        width = min(width, c["title_w"])          # no rail fits beside the tightest title
+    elif use is not None:
         after = use - c["title"] - AGE_W - GAP
         reserve = max(16, after // 2) if any(_route_has_progress(route) for route in routes) else 0
         width = min(width, max(8, after - (GAP + reserve if reserve else 0)))
@@ -801,11 +820,12 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
     harn_end = _overview_harness_end(use, c)
     if harn_end is not None:
-        _put_model_cell(grid, x + c["h"], y, parts, min(x + c["ctx"] - GAP, x + harn_end))
-    _draw_context_gauge(grid, x + c["ctx"], y, pct, window, tokens, narrow=c["narrow"])
+        _put_model_cell(grid, x + c["h"], y, parts, min(x + c["ctx"] - c["gap"], x + harn_end))
+    if c.get("ctx_w", 1):
+        _draw_context_gauge(grid, x + c["ctx"], y, pct, window, tokens, narrow=c["narrow"], bare=c["bare"])
     cursor = x + c["title"]
     title_w = c["title_w"] if title_w is None else title_w
-    room = max(0, min(title_w, age_x - GAP - cursor))
+    room = max(0, min(title_w, age_x - c["gap"] - cursor))
     if room:
         repo_text = repo_rule_label(route.get("repo")) if show_repo else ""
         title_need = min(8, _seg_width(str(route.get("title") or "·")))
@@ -1112,15 +1132,31 @@ def _overview_columns(use, harn_need=0):
     now = use - (title + title_w + GAP) - AGE_W - GAP >= 16
     if not now:
         title_w = use - title - AGE_W - GAP
-    if title_w < 6:
+    if title_w >= TITLE_MIN:
+        return {"h": h, "title": title, "title_w": title_w, "ctx": ctx, "gap": GAP, "bare": False,
+                "harn_w": harn_w, "narrow": narrow, "now": title + title_w + GAP if now else None}
+    # Too narrow for the full cells: the margins, the gauge (its value stays) and the model's
+    # optional words (model, effort) give way before the title, which keeps what the row is.
+    gap = 1
+    h = IND + 3 + 6 + gap
+    harn_w = max(0, min(8, max(5, harn_need), use - h - 4 - AGE_W - 3 * gap - TITLE_MIN))
+    if harn_w < 5:
+        harn_w = 0                # not even a harness word fits: MODEL is left out
+    ctx = h + harn_w + (gap if harn_w else 0)
+    title = ctx + 4 + gap
+    title_w = use - title - gap - AGE_W
+    if title_w < 4:
         title_w = 0               # no honest room for a title: the column is left out
-    return {"h": h, "title": title, "title_w": title_w, "ctx": ctx,
-            "narrow": narrow, "now": title + title_w + GAP if now else None}
+    return {"h": h, "title": title, "title_w": title_w, "ctx": ctx, "gap": gap, "bare": True,
+            "harn_w": harn_w, "narrow": True, "now": None,
+            "ctx_w": 4 if ctx + 4 + gap <= use - AGE_W else 0}
 
 
 def _overview_harness_end(use, c):
     """Column where the HARNESS cell must stop (before AGE), or None when under 5 cells remain."""
-    end = use - AGE_W - GAP
+    if c.get("harn_w") == 0:
+        return None
+    end = use - AGE_W - c.get("gap", GAP)
     return end if end - c["h"] >= 5 else None
 
 
@@ -1188,7 +1224,8 @@ def draw_routes(grid, vm, state, x=34, y=3):
     row_cols = route_row_columns(use, routes)
     row_title_w = route_title_width(routes, row_cols, use=use)
     grid.fill(x, right, y, " ", tint=234)
-    headers = [(IND + 3, "ID"), (row_cols["h"], "MODEL"), (row_cols["ctx"], "CONTEXT")]
+    headers = [(IND + 3, "ID"), (row_cols["h"], "MODEL"),
+               (row_cols["ctx"], "CTX" if row_cols["bare"] else "CONTEXT")]
     if row_cols["title_w"]:
         headers.append((row_cols["title"], "ROUTE"))
         headers.append((row_cols["title"] + row_title_w + GAP, "PROGRESS"))
@@ -1255,7 +1292,9 @@ def draw_routes(grid, vm, state, x=34, y=3):
             for text, style in kind_parts:
                 cursor = grid.put(cursor, y, text, style, limit=right)
             cursor = grid.put(cursor, y, "  owner ", "dim", limit=right)
-            _draw_owner(grid, cursor, y, route, cols["narrow"], slim, right)
+            cursor = _draw_owner(grid, cursor, y, route, cols["narrow"], slim, right)
+            # The folded row shows the live doer's context; the owner's own stays here.
+            _draw_owner_context(grid, cursor + 2, y, route, right)
             _tint_row(grid, y, x - 1, right, 236)
             y += 1
             if link:
@@ -1930,6 +1969,33 @@ def _owner_width(route):
     return width
 
 
+def route_owner_context(route):
+    """``(pct, window, tokens)`` of the route's owner attempt: its gauge, else its exact token count."""
+    gauge = route.get("owner_gauge")
+    pct, window = (tuple(gauge) + (None, None))[:2] if isinstance(gauge, (list, tuple)) else (None, None)
+    context = route.get("owner_context")
+    tokens = None
+    if pct is None and isinstance(context, (list, tuple)) and len(context) == 2:
+        tokens, size = context
+        if type(tokens) is int and type(size) is int and size > 0:
+            pct, window, tokens = round(100 * tokens / size), size / 1_000_000, None
+    return pct, window, tokens
+
+
+def _draw_owner_context(grid, x, y, route, right):
+    """``context ━━━──── 77%`` (or ``context 250K``) after the owner on an unfolded route."""
+    pct, window, tokens = route_owner_context(route)
+    if pct is None and token_count_text(tokens) is None:
+        return
+    x = grid.put(x, y, "context ", "dim", limit=right)
+    if pct is None:
+        grid.put(x, y, token_count_text(tokens), "dim", limit=right)
+    elif right - x >= CTX_W:
+        _draw_context_gauge(grid, x, y, pct, window)
+    else:
+        grid.put(x, y, f"{int(pct)}%", _context_key(int(pct)) if pct >= 50 else "dim", limit=right)
+
+
 def _draw_owner(grid, x, y, route, narrow, slim, limit):
     harness = str(route.get("harness") or "·")
     model = route.get("model")
@@ -1979,3 +2045,4 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
     cursor = x
     for text, style in parts:
         cursor = grid.put(cursor, y, text, style, limit=limit)
+    return cursor

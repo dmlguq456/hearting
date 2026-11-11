@@ -1054,6 +1054,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # Navigation ancestry never authorizes metrics from the parent session.
         # Each attempt uses the same applied-policy/native gauge as a session.
         owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
+        owner_tokens = (_context_tokens(owner) if owner is not None and owner_gauge[0] is None
+                        and _get(owner, "liveness", "status", "state", "st") not in ("stale", "dead")
+                        else None)
         worker_contexts = []
         context_jobs = []
         selected_worker = _selected_worker_job(worker_node, jobs)
@@ -1143,7 +1146,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
-            "owner_context": None, "owner_gauge": list(owner_gauge),
+            # Without a gauge, the owner's exact token count (no window: nothing is estimated).
+            "owner_context": ([owner_tokens, None] if owner_tokens is not None else None),
+            "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
             "current": current, "owner_waits": owner_waits,
         }

@@ -130,6 +130,35 @@ class ContractProjectionTests(unittest.TestCase):
                 for pct in expected:
                     self.assertIn(f"{pct}%", text)
 
+    def test_unfolded_route_keeps_the_owner_context_beside_its_workers(self):
+        # The folded row shows who works now; the owner's own context stays in the unfolded detail.
+        for values, owner_text in (({"active_context_tokens": 770_000,
+                                     "context_window_tokens": 1_000_000}, "77%"),
+                                   ({"active_context_tokens": 250_136}, "250K")):
+            with self.subTest(owner_text):
+                vm = build_view_model(self.route_snapshot(**values))
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
+                owner_line = next(line for line in text.splitlines() if "owner " in line)
+                self.assertIn("context", owner_line)
+                self.assertIn(owner_text, owner_line)
+                for pct in ("20%", "30%"):
+                    self.assertIn(pct, text)
+
+    def test_routes_that_differ_only_by_title_stay_distinct_at_every_width(self):
+        vm = build_view_model(self.route_snapshot())
+        base = vm.routes[0]
+        twins = (dict(base, id="rt-alpha", title="ALPHA 독립 검토"),
+                 dict(base, id="rt-bravo", title="BRAVO 출판 작업"))
+        vm = replace(vm, routes=twins)
+        for width in (80, 100, 120):
+            with self.subTest(width=width):
+                rows = draw(vm, NavState(view="ROUTES"), width, 40).text_rows()
+                alpha = [line for line in rows if "ALPHA" in line]
+                bravo = [line for line in rows if "BRAVO" in line]
+                self.assertEqual((len(alpha), len(bravo)), (1, 1))
+                self.assertNotEqual(alpha[0], bravo[0])
+                self.assertIn("claude", alpha[0])
+
     def test_worker_only_and_multiple_owners_have_unknown_owner_context(self):
         snapshot = self.route_snapshot(active_context_tokens=500_000, context_window_tokens=1_000_000)
         snapshot["jobs"] = snapshot["jobs"][1:]

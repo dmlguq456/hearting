@@ -132,9 +132,12 @@ class CutRule(unittest.TestCase):
                 rows = _frame(_vm(), "ROUTES", cols=cols).text_rows()
                 header = next(row[34:] for row in rows if "ID" in row and "MODEL" in row
                               and "AGE" in row)
-                labels = tuple(label for label in ("ID", "MODEL", "CONTEXT", "ROUTE", "PROGRESS", "AGE")
+                labels = tuple(label for label in ("ID", "MODEL", "CONTEXT", "CTX", "ROUTE", "PROGRESS", "AGE")
                                if label in header)
-                self.assertEqual(labels[:3] + labels[-1:], ("ID", "MODEL", "CONTEXT", "AGE"))
+                # The tightest row keeps the context value under a short CTX label and its ROUTE title.
+                context = "CTX" if cols < 100 else "CONTEXT"
+                self.assertEqual(labels[:3] + labels[-1:], ("ID", "MODEL", context, "AGE"))
+                self.assertIn("ROUTE", labels)
                 positions = [header.index(label) for label in labels]
                 self.assertEqual(positions, sorted(positions))
                 for position, label in zip(positions, labels):
