@@ -3238,14 +3238,26 @@ guard/CLI outcomes with bounded metadata only. A returned publisher command, inc
 exit 0, is an attempt observation; it does not prove identity publication or receipt.
 Neither environment/pane labels nor a queued/persisted message prove receipt.
 
-**Runtime table** (herdr-unified). Peer transfers use private sealed refs; transport
-acceptance and actual receipt are separate facts:
+**Runtime table** (Hearting-native: no terminal multiplexer is asked). Peer
+transfers use private sealed refs; transport acceptance and actual receipt are
+separate facts. `peer-steward.py prompt` resolves its address from Hearting's own
+records (`utilities/peer_address.py`): `harness:<session id>` is itself; `[xx]`/`xx`
+is the confirmed Fleet number; a name is the session's registry name, unique among
+live sessions; a window address (`wB:pB3`, tmux `%N@<socket>`) is the pane value a
+live native session process received from its window, on the same terminal server
+only. An address these records cannot resolve gets a named refusal and a retained
+pending row; nothing is guessed.
 
 | Runtime | Transport and acceptance | Exact native receipt | Wake and limits |
 |---|---|---|---|
-| Claude | `peer-steward.py prompt` stores/reuses a ref bound to sender, recipient session and body digest; existing hook context carries the sealed message. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | An already armed exact owner/watch `asyncRewake` hook wakes on exit 2. Ordinary notices use the existing guarded PTY courier only after exact SID/PID/start/namespace, idle state and an empty composer are proven. Draft, question, approval, busy or unknown stays pending for the next supported opportunity or native callback. |
-| Codex | The freshly proven exact thread/client queue accepts one sealed ref and returns its `client_message_id`; a legitimate TUI process restart may continue the same exact thread. | The exact message in the bound thread history confirms consumption. | Uses the existing queue and hook path; no transcript inference. |
-| OpenCode | The exact selected root SID uses the same guarded PTY input as Claude. The plugin's idle callback may also take its own pending row through the current client; the existing `rpc_claim` lets exactly one side send. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | On a verified idle root the runner repeats the Claude guard; `promptAsync` continues the plugin-persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
+| Claude | The prompt stores/reuses a ref bound to sender, recipient session and body digest. With a session-shell attachment the host takes it (`status` → `inject`) only while its own screen shows an idle, empty, unfocused input; otherwise the existing hook context carries it, mid-turn included. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | An already armed exact owner/watch `asyncRewake` hook wakes on exit 2. Draft, question, approval, busy or unknown stays pending for the shell host's next idle input or the next native callback. |
+| Codex | The exact thread queue accepts one sealed ref and returns its `client_message_id`; an active turn takes it as a steer. An interrupted thread restarts only from its shell host's idle, empty, unfocused input. | The exact message in the bound thread history confirms consumption. | Uses the existing queue and hook path; no transcript inference. Without a shell attachment an interrupted thread stays queued. |
+| OpenCode | With a session-shell attachment the host takes it as for Claude. The plugin's idle callback may also take its own pending row through the current client; the existing `rpc_claim` lets exactly one side send. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | `promptAsync` continues the plugin-persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
+
+A Claude or OpenCode window outside the session shell receives no typed input
+from Hearting: its pending row is read at that session's next native callback
+(Claude's hook context, OpenCode's plugin). The session shell is the install
+default (2026-11-10), so this is the rare case; it is not a new fallback path.
 
 Queue acceptance never means delivery or consumption. A pending retry of the same
 sender/recipient/body reuses its ref; a changed body or recipient session gets a
@@ -3258,26 +3270,27 @@ and [async limitations](https://code.claude.com/docs/en/hooks#limitations) disti
 ordinary async output on the next turn from `asyncRewake` exit 2, which wakes even
 an idle session and supplies stderr (or stdout when stderr is empty) as a system
 reminder. The latter still has a timeout. This official armed-hook behavior does
-not grant an arbitrary external wake API. The local guarded PTY courier and the
+not grant an arbitrary external wake API. The session-shell host input and the
 next-callback fallback are separate realizations; queue acceptance, exact receipt
 and an actual steward check remain separate observations.
 
-For SID-bound native Codex delivery, a new foreground PID/start remains the same
-recipient when a fresh current-native observation proves the same exact thread SID
-in the pinned pane. The queue submission still uses that immutable recipient SID
-and sealed ref. A changed pane or SID, conflicting claim, or unknown current proof
-does not authorize submission. Original PID/start binding remains required for
-pane-bound sidless first input, Claude PTY input, retirement, and other
-process-owned side effects; it is not a permanent extra gate on exact-thread queue
-continuation.
+For SID-bound native Codex delivery the queue submission uses the immutable
+recipient SID and sealed ref; a new foreground PID/start of the same exact thread
+remains the same recipient. A known shell attachment that names another session
+for the thread's own process, or a shell attachment whose inner native process is
+proven on another session, is a changed identity and submits nothing. Peer
+delivery types into no window, so there is no sid-less first input: a window with
+no session yet is refused as `target-session-unresolved`.
 
 Sender-delay duties retain their logical body digest and match their minted
 transfer through its source digest and delay refs. Each runner checkpoint
 observes the disposition of its own duty.
 
-The obligation runner may cancel delivery only after an exact, complete endpoint
-observation proves that the original recipient is gone, or the original
-pane-bound process lifetime is proven dead. The cancellation closes that
+The message courier no longer cancels delivery from a terminal-window census;
+until a Hearting-record replacement lands (the watch/check step of the same
+change) an undeliverable row stays pending under its one carrier with the
+existing one-hour sender notice. Where cancellation applies, it follows an exact
+observation that the original recipient is gone. The cancellation closes that
 delivery attempt; it does not claim receipt or success, and it preserves the
 transfer and its evidence. Missing or unreadable rows, incomplete observations,
 unresolved identities, live claims, and still-live original recipients remain
@@ -3322,9 +3335,8 @@ source-verified retention window, while pending work and exact late receipts
 remain recoverable.
 
 Identity on the ledger (F-100c): every steward record carries `to.session_id` resolved
-through `herdr agent get` (Claude UUID, Codex thread id; herdr reports no id for
-OpenCode) and `from.name` (the sender's registry name, Claude
-only today). Fleet keeps sent/recv counts and exact directional peer identity in
+from Hearting's records (`peer_address`) and `from.name` (the sender's registry
+name). Fleet keeps sent/recv counts and exact directional peer identity in
 the existing session L1/L2: a short on-board tag (or harness-qualified short SID)
 is shown with `→`/`←`, and opposite directions for the same complete
 `(harness, full session_id)` combine as `↔`. No peer row is added; names, repository, kind,
@@ -3499,52 +3511,39 @@ no-trailer ref through their native carrier. Both address only the exact new SID
 send once and keep pending refs until exact native receipt. Neither invents a wake
 or falls back to an inherited pane prompt.
 
-For `peer-steward.py prompt`, an exact Fleet display name, its `[xx]` Fleet tag,
-and an explicit pane address may resolve to the same recipient only when each
-identifies one current pane on the selected herdr endpoint and the existing
-native identity readers prove that pane's current harness and session ID. A
-wrapped terminal may supply that proof through its existing birth-bound native
-attachment, joined to the selected endpoint's current foreground owner. Resolve
-this before treating an absent native process in the outer pane as SID-less;
-the native process may run on the wrapper's inner PTY. Reuse the same attachment
-join at delivery, without inferring identity from titles or screen content.
-The attachment's inner native PID also participates in the existing native
-identity check at both joins: a different independently PROVEN SID is a conflict.
-Unknown native evidence retains the existing policy, without requiring a new
-proof for every attachment.
-An unavailable optional attachment reader leaves the existing native process
-identity checks in charge.
-An explicit `codex:<full SID>` address also uses that proof before an attachment
-is published. The existing exact-thread carrier rechecks the same current root
-and process birth at submission; a conflicting attachment, multiple roots or
-unknown selection stays unverified, without physical input or interrupted restart.
-Fleet may locate an inner native process from its observed foreground ancestry
-on the selected endpoint before vendor session metadata appears. That location
-is display evidence only and does not supply a session ID or input authority.
-Retained SID-less messages still need their original process proof; discovery
-does not grant retroactive authority to a message that lacks it.
-A name or tag is a search key, including when it comes from a historical seat or
-registry alias; it does not prove current identity. Resolution keeps the
-selected endpoint, canonical pane, harness, and current session ID together
-through readiness, identity rechecks, native delivery, deferred resume, and the
-ledger. The original address remains a bounded diagnostic label. A bare two-hex
-Fleet number (`e8`) is first a name; only when that name search completes with
-no match does it resolve as the `[e8]` tag.
+For `peer-steward.py prompt`, a registry name, its `[xx]` Fleet tag, a window
+address and `harness:<session id>` may resolve to the same recipient only through
+Hearting's records (`peer_address`); no Herdr or tmux answer is read. A window
+address matches the `HERDR_PANE_ID` (tmux: `TMUX_PANE` and its server socket) in a
+live native session process's own environment, on the caller's server or the
+retained message's recorded server and Herdr namespace (its socket; without a
+socket value, that server's socket under the environment's own Herdr
+configuration folder); another server's or namespace's window with the same
+number is no match (named refusal `target-pane-unresolved`). A window request keeps
+the namespace it was first made on: preparation, ref reuse, and the courier read the
+same record, so the same body from another namespace is that namespace's new request,
+and an older unbound request without a recorded one stays refused
+(`target-namespace-unrecorded`) with the sender's delay notice. A shell attachment is
+birth-bound proof of its native process; its inner native PID still takes part
+in the native identity check, and a different independently PROVEN SID is a
+conflict (`target-identity-changed`). An explicit `codex:<full SID>` address uses
+the thread's current root proof when no attachment exists; the exact-thread
+carrier rechecks it at submission. A name or tag is a search key; it does not
+prove current identity. A bare two-hex Fleet number (`e8`) is first a name; only
+when that name search completes with no match does it resolve as the `[e8]` tag.
 
-Prompt resolution distinguishes a complete no-match (`not-found`), multiple
-current matches or a name/tag collision (`ambiguous`), and observations that
-are missing, partial, malformed, or conflicting (`observation-unavailable` or
-`identity-unverified`). Failure diagnostics retain every known candidate pane.
-A duplicate session ID in two panes is two candidates. Unavailable resolution retains
-the original body, refs and address in one unsent pending message. The existing
-message runner resolves that address until it can fix one exact native endpoint;
-Ambiguous or conflicting identities keep the original intent unbound. A
-consistent complete census and native address can admit an exact native queue
-without permitting physical pane input. Successful resolution does not relax
-the existing exact SID/PID-birth, native state, registered-work, composer,
-form, or receive-evidence checks. A name or tag match does not expand the
-pane-only sidless first-input path, and a queued carrier result remains
-distinct from exact receiver evidence.
+Prompt resolution distinguishes a complete no-match (`target-name-not-found`,
+`fleet-tag-not-found`, `target-pane-unresolved`), multiple matches
+(`target-name-ambiguous`, `fleet-tag-ambiguous`, `target-pane-ambiguous`,
+`attachment-ambiguous`), a window whose session is not yet known
+(`target-session-unresolved`) and unreadable records
+(`target-observation-unavailable`). Unresolved addresses retain the original
+body, refs and address in one unsent pending message; the existing message
+runner resolves that address until it can fix one exact native session, and
+ambiguous or conflicting identities keep the original intent unbound. A pinned
+retained request keeps its original recipient: a current namesake is refused
+`target-identity-changed`. A queued carrier result remains distinct from exact
+receiver evidence.
 
 Clear and retire retain their checked foreground/form/draft and successor safety.
 For wrapped Claude and Codex panes, target foreground discovery reuses the same
@@ -3558,8 +3557,8 @@ An owned retire request without a recorded native lifetime can settle as
 endpoint confirms the pane is absent. This cancels only that unsent request;
 it establishes neither normal native exit nor handover and keeps the original
 target without selecting a replacement. The requester and failed evidence remain recorded.
-For Claude peers, `peer-steward.py prompt` uses `herdr agent prompt` for the guarded idle plain-TUI
-case above; busy Claude delivery waits for its existing callback. Neither a helper
+For Claude and OpenCode peers outside the session shell, `peer-steward.py prompt`
+types nothing; delivery waits for the session's own callback. Neither a helper
 return nor a status flip is a receive receipt. Continue retains its existing native
 carrier and booking checks. The memory handoff channel is pull-only (next prompt's
 `UserPromptSubmit` candidate or `mem recall`), so it is not a wake path either.
@@ -3583,8 +3582,8 @@ reconnect through the same watch id, with current identity and transition
 authority checked by the existing owner.
 A target with no session yet (a Codex before its first input) is held by server
 and pane, and the observer continues on the first session that pane reports;
-`prompt` types into such a pane and `retire` exits it on its native turn and
-screen alone, since nothing can be bound to it yet. A session its foreground
+`prompt` refuses such a pane (`target-session-unresolved`) and `retire` exits it
+on its native turn and screen alone, since nothing can be bound to it yet. A session its foreground
 process already proves (Codex 0.162 opens one at start) is that pane's session
 until herdr reports one: registered work bound to it still withholds input.
 Watcher, lock, receipt, and available wake carriers are runtime-owned

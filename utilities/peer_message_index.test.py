@@ -436,11 +436,17 @@ class CallSitePinTest(IndexTestCase):
         indexed = peer_message.pending_messages(self.recipient)
         self.assertEqual([row["ref"] for row in indexed], [row["ref"] for row in full])
         self.assertEqual(indexed, full)
-        source = (WORKTREE / "utilities" / "peer-steward.py").read_text(encoding="utf-8")
-        self.assertIn("rows = peer_message.pending_messages(recipient) if peer else []", source)
 
     def test_retry_receiver_idle_reuses_the_given_permission(self):
+        # The callback runs only for a booked tidy continuation of this harness.
+        import session_tidy_clear
+        clear = self.tmp_root / "tidy-clear"
+        clear.mkdir()
+        (clear / "seat-pin.json").write_text("{}", encoding="utf-8")
+        booked = {"harness": "claude", "status": "cleared", "continued": {"state": "pending"}}
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:pPin"}), \
+             mock.patch.object(session_tidy_clear, "clear_dir", return_value=clear), \
+             mock.patch.object(session_tidy_clear, "read_reservation", return_value=booked), \
              mock.patch.object(peer_message, "_peer_steward_module") as loaded, \
              mock.patch("fleet.herdr_projection.may_report",
                         side_effect=AssertionError("must not re-walk identity")):
@@ -799,9 +805,8 @@ class StopHookSubprocessTest(IndexTestCase):
         return root, shim, audit, herdr_log
 
     def test_stop_hook_reports_once_and_stays_on_the_per_pane_path(self):
-        # One owed row for this exact session makes the idle callback proceed to
-        # resolve the pane; the fake herdr then reports no such agent, so nothing
-        # is claimed or delivered.
+        # One owed peer row for this exact session: the idle callback never types
+        # peer rows, so without a booked tidy continuation it reads no window.
         self.pending("stop body", recipient={"harness": "claude",
                                              "session_id": "stop-session"})
         # One unrelated steward marker keeps the live-read fallback reachable;
@@ -846,8 +851,8 @@ class StopHookSubprocessTest(IndexTestCase):
         log = herdr_log.read_text(encoding="utf-8")
         self.assertIn("pane report-metadata", log)
         self.assertIn("--title", log)
-        # The idle callback ran after the display report: it resolves the pane.
-        self.assertIn("agent get w1:pStop", log)
+        # A peer row alone never makes the idle callback read the window.
+        self.assertNotIn("agent get", log)
 
 
 if __name__ == "__main__":

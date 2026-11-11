@@ -307,6 +307,8 @@ utility-deferred	opencode_server_log.py
 utility-deferred	owner_route_binding.py
 utility-deferred	parent_next_directive.py
 utility-deferred	preflight-doctor-cause.sh
+utility-deferred	peer_address.py
+utility-deferred	peer_session_fixture.py
 utility-deferred	peer-message.py
 utility-deferred	peer-steward.py
 utility-deferred	peer_steward_base.py

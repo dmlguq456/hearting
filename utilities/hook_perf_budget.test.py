@@ -193,7 +193,9 @@ REQUIRED_MODULE_LIFTS = {
     "codex-post-tool": ("peer-message.py:_pending_rows",),
     "codex-prompt": ("peer-message.py:_pending_rows",),
     "peer-prompt": ("peer-message.py:_pending_rows", "peer-steward.py:undelivered_watch_rows"),
-    "stop": ("peer-message.py:_pending_rows", "peer-steward.py:undelivered_watch_rows"),
+    # The Stop header's idle callback reads only tidy reservations now: peer rows are
+    # delivered by the shell host, the native queue or the next callback, never here.
+    "stop": (),
 }
 
 
