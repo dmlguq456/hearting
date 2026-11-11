@@ -4313,6 +4313,12 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             current = _read_pending(ref)
             if current and current["state"] in {"pending", "queued", "unverified"}:
                 _save_pending(dict(current, sender_notice_receipt="context-emitted"))
+    # What the flushed context showed: the follow-through state counts a sealed
+    # body from another session as a received peer request (PG-44).
+    return [{"text": row.get("text") or "",
+             "peer": (not row.get("no_trailer") and row.get("producer_binding") is None
+                      and (row.get("from") or {}).get("harness") in {"claude", "codex", "opencode"})}
+            for row in claims]
 
 
 # `context` is the OpenCode tool-output boundary, whose plugin kills the child
