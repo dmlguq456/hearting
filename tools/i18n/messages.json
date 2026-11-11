@@ -643,8 +643,8 @@
    "ko": "질문 변경됨 · Tab 다음"
   },
   "fleet.session_block.choose": {
-   "en": "1–9 choose · t text",
-   "ko": "1–9 선택 · t 직접 입력"
+   "en": "↑↓ choose · Enter send · t text",
+   "ko": "↑↓ choose · Enter send · t text"
   },
   "fleet.session_block.compact_applied": {
    "en": "✓ consumed",

@@ -47,13 +47,17 @@ const names=['layout','position','width','narrow','auxiliary','height','theme','
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
   theme:['terminal','light','mono'],shade:['none','light','medium'],route_line:['time','model']};
 const APPEARANCE_KEYS=['position','theme','shade'];
+// The session's own state, as Fleet's session row judges and draws it
+// (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
+const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const LIVE={working:['spin','running','g_spin'],idle:['●','idle','g_work_off'],blocked:['◑','waiting','g_blocked']};
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,expandedKeys=[],focused=false,cwd='',harness='',cellWidth}){
+function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,expandedKeys=[],focused=false,cwd='',harness='',cellWidth}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -180,26 +184,36 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const nativeModel=native.model&&(native.model!==model.model_value||!painted(model.selected).length);
     const selected=nativeModel?[text(native.model,'loc_repo'),...(native.effort?[text(' '+native.effort)]:[])]:
       painted(model.selected).length?model.selected:line(t('checking','Checking'));
-    const head=painted(model.head),jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
+    // Spec rule 15: the repo row carries the number and project only; Git takes the row below.
+    let head=painted(model.head),git=painted(model.git);
+    if(!Array.isArray(model.git)){const at=head.findIndex(p=>/^ \(/.test(String(p.text)));if(at>=0){git=[{...head[at],text:String(head[at].text).slice(1)},...head.slice(at+1)];head=head.slice(0,at);}}
+    const jobs=painted(model.jobs),work=painted(model.work),quota=painted(model.quota),mcp=painted(model.mcp);
     // OpenCode's MCP count stays beside the model and context (its native sidebar is hidden).
     const contextParts=mcp.length?joined([painted(model.context),mcp]):painted(model.context);
     const waitParts=model.wait?[text(model.wait,'g_blocked')]:[];
     const title=model.session_title||model.title||'';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),optional=new Set();
+    const top=[],spacers=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set();
+    // The Git row is cut within its own row; short of rows, it is the first to go.
+    const putGit=()=>{if(git.length){gitRows.add(top.length);top.push(cut(git,inner));}};
     const put=(rows,parts,max)=>{const out=[];wrap(parts,max,undefined,out);rows.push(...out);};
     if(side){
-      if(head.length){put(top,head,2);spacers.add(top.length);top.push([]);}
+      if(head.length)put(top,head,2);
+      putGit();
+      if(head.length||git.length){spacers.add(top.length);top.push([]);}
       top.push(selected);
       if(contextParts.length)top.push(contextParts);
-      if(jobs.length){const from=top.length;put(top,jobs,2);for(let i=from;i<top.length;i++)optional.add(i);}
+      if(jobs.length){const from=top.length;put(top,jobs,2);for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }else{
       const first=joined([head,selected,contextParts]);
       if(size(first)<=inner)top.push(first);
       else{put(top,joined([head,selected]),1);put(top,contextParts,1);}
-      // Running jobs join that row when they fit; otherwise they take a row that can give way.
-      if(jobs.length){if(size(top.at(-1))+3+size(jobs)<=inner)top[top.length-1]=joined([top.at(-1),jobs]);else{optional.add(top.length);top.push(cut(jobs,inner));}}
+      // Running jobs join that row when they fit; otherwise they take a row (below Git) that can give way.
+      const joinJobs=jobs.length&&size(top.at(-1))+3+size(jobs)<=inner;
+      if(joinJobs)top[top.length-1]=joined([top.at(-1),jobs]);
+      putGit();
+      if(jobs.length&&!joinJobs){optional.add(top.length);jobRows.add(top.length);top.push(cut(jobs,inner));}
       // The repo's open work gives way with the running jobs.
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }
@@ -246,13 +260,16 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     function details(r){
       const p=r.paint||{},out=[];
       if(side){
-        const gauge=p.gauge||[];
+        // Inside the box a full gauge may not fit: the bar gives way before its
+        // number, so a cut row never hides the percent behind `…`.
+        const gauge=p.gauge||[],percent=gauge.length?[gauge.at(-1)]:[];
+        const fit=(lead,end=[])=>{for(const g of [gauge,percent,[]]){const row=[...lead,...g];if(size(row)+(end.length?1+size(end):0)<=inner)return row;}return cut(lead,inner-(end.length?1+size(end):0));};
         if(routeLine==='model'){
-          const left=[text('  '),...(p.effort?[p.effort,text('  ')]:[]),...gauge];
-          out.push(r.elapsed?cut([...left,pad(inner-size(left)-measure(r.elapsed)),text(r.elapsed)],inner):left);
+          const end=r.elapsed?[text(r.elapsed)]:[],left=fit([text('  '),...(p.effort?[p.effort,text('  ')]:[])],end);
+          out.push(end.length?[...left,pad(inner-size(left)-size(end)),...end]:left);
         }else{
-          const left=[text('  '),...(p.model_text?[p.model_text,text(' ')]:[]),...(p.effort?[p.effort,text('  ')]:[]),...gauge];
-          if(size(left)>2)out.push(cut(left,inner));
+          const left=fit([text('  '),...(p.model_text?[p.model_text,text(' ')]:[]),...(p.effort?[p.effort,text('  ')]:[])]);
+          if(size(left)>2)out.push(left);
         }
       }
       if(r.flow){const flow=[];inner-=2;try{wrap([text(r.flow)],2,undefined,flow);}finally{inner+=2;}for(const row of flow)out.push([text('  '),...row]);}
@@ -262,56 +279,113 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
       if(!out.length)out.push([text('  '),text(t('checking','Checking'))]);
       return out;
     }
+    // Spec rule 14: every group is one box of the same thin rounded line; the
+    // question box is the person's and sits at the bottom. Strength of color
+    // tells the boxes apart: question the answer-needed color, route plain,
+    // messages dim, all from the panel's own styles.
+    const tone={route:'plain',messages:'dim',question:asking?'lvl_y':'dim'};
+    const box=4;
+    // Box content is laid out at the box's inner width, so nothing is cut by the frame.
+    const within=fn=>{inner-=box;try{return fn();}finally{inner+=box;}};
+    // A title in the top border: whole words only, so `route N` shows whole or not at all.
+    const titled=(label,limit,ellipsis)=>{
+      if(size(label)<=limit)return label;
+      if(ellipsis)return cut(label,limit);
+      const all=label.map(p=>clean(p.text)).join(''),words=all.split(' ');
+      if(words[0]==='route'&&words.length>1)words.splice(0,2,words[0]+' '+words[1]);
+      let keep='';
+      for(const word of words){const next=keep?keep+' '+word:word;if(measure(next)>limit)break;keep=next;}
+      const out=[];let left=keep.length;
+      for(const p of label){const s=clean(p.text).slice(0,left);if(s)out.push({...p,text:s});left-=s.length;}
+      return out;
+    };
+    const boxTop=(label,key,{action,ellipsis=false}={})=>{
+      const room=Math.max(0,inner-2),name=label.length&&room>=4?titled(label,room-3,ellipsis):[];
+      const head=name.length?[text('─ ',key),...name,text(' ',key)]:[];
+      return {parts:[text('╭',key),...head,text('─'.repeat(Math.max(0,room-size(head))),key),text('╮',key)],action};
+    };
+    const boxBottom=(key,note=[],action)=>{
+      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[text(' ',key),...note,text(' ─',key)]:[];
+      return {parts:[text('╰',key),text('─'.repeat(Math.max(0,room-size(tail))),key),...tail,text('╯',key)],action};
+    };
+    const boxRow=(item,key)=>{
+      const fit=clip(item.parts||[],Math.max(0,inner-box));
+      return {...item,parts:[text('│ ',key),...fit.parts,pad(inner-box-fit.used),text(' │',key)]};
+    };
     const routeRows=[],detailRows=[];
-    for(const r of listed){
-      const key='route:'+r.id;routeRows.push({parts:folded(r),action:key});
-      if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
-    }
+    within(()=>{
+      for(const r of listed){
+        const key='route:'+r.id;routeRows.push({parts:folded(r),action:key});
+        if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
+      }
+    });
     if(more>0)routeRows.push({parts:line('+'+more+' more'),action:'fleet'});
     const messages=painted(model.messages).slice(-3),messageRows=[];
-    for(const m of messages){
-      const key=messageKey(m),parts=messageParts(m);
-      // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
-      if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
-      else messageRows.push({parts:cut(parts,inner),action:key});
-    }
+    within(()=>{
+      for(const m of messages){
+        const key=messageKey(m),parts=messageParts(m);
+        // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
+        if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
+        else messageRows.push({parts:cut(parts,inner),action:key});
+      }
+    });
     let messageLimit=Math.max(0,...messageRows.map(x=>x.body?messageRows.filter(y=>y.body===x.body).length:0));
+    let messageOne=false;
     const visibleMessages=()=>{
       const out=[];
       for(const row of messageRows){
         if(!row.body){out.push(row);continue;}
         const group=messageRows.filter(y=>y.body===row.body),index=group.indexOf(row);
-        if(group.length<=messageLimit)out.push(row);
-        else if(index<messageLimit-1)out.push(row);
-        else if(index===messageLimit-1)out.push({parts:[text('  '),text('+'+(group.length-index)+' lines ›','loc_repo')],action:'read:'+row.body});
+        // Folded to one message, an opened body keeps one row and its read row.
+        const limit=messageOne?Math.min(messageLimit,2):messageLimit;
+        if(group.length<=limit)out.push(row);
+        else if(index<limit-1)out.push(row);
+        else if(index===limit-1)out.push({parts:[text('  '),text('+'+(group.length-index)+' lines ›','loc_repo')],action:'read:'+row.body});
       }
-      return out;
+      if(!messageOne)return out;
+      // Folded to one message: an opened one stays (its first row and the
+      // `+N lines ›` row to its read page), else the first; the border counts the rest.
+      const opened=out.find(row=>row.body);
+      if(!opened)return out.slice(0,1);
+      const read=out.find(row=>row.action==='read:'+opened.body);
+      return read?[opened,read]:[opened];
     };
-    // No rows yet: the producer's own label stands alone; a known empty list says `route 0`.
+    const hiddenMessages=()=>messageOne?Math.max(0,messages.length-1):0;
+    // No rows yet: the producer's own label stands alone; a known empty list draws no box.
     const label=clean(model.route_label||'').trim();
-    const routeHead=shown.length?{parts:rule([text('route '+total,'g_idle')]),action:'route'}:
-      label?{parts:rule([text(label,'g_idle')]),action:'route'}:model.routes_known?{parts:rule([text('route 0')])}:null;
-    const messageHead=messageRows.length?{parts:rule([text('messages')])}:null;
+    const routeTitle=shown.length?[text('route '+total,'g_idle')]:label?[text(label,'g_idle')]:null;
+    const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
-    const core=top.length-spacers.size-optional.size;
-    const q=questions({budget:Math.max(2,rows-core-2),columns:inner-4});
-    const box=[];
+    const core=top.length-spacers.size-optional.size-gitRows.size;
+    // Running jobs keep their row beside a question: its editor pages its own content.
+    const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-(quota.length?1:0)),columns:inner-box});
+    const ask=[];
     if(q.length){
-      box.push({parts:line('╭'+'─'.repeat(inner-2)+'╮',asking?'lvl_y':'dim'),action:'question'});
-      for(const row of q){const fit=clip(row,inner-4);box.push({parts:[text('│ ',asking?'lvl_y':'dim'),...fit.parts,text(' '.repeat(inner-3-fit.used)),text('│',asking?'lvl_y':'dim')],action:'question'});}
-      box.push({parts:line('╰'+'─'.repeat(inner-2)+'╯',asking?'lvl_y':'dim'),action:'question'});
+      const key=tone.question;
+      ask.push(boxTop(q[0],key,{action:'question',ellipsis:true}));
+      for(const row of q.slice(1))ask.push(boxRow({parts:row,action:'question'},key));
+      ask.push(boxBottom(key,[],'question'));
     }
-    // Short of rows: spacers go first, then messages, opened details, route rows.
-    // Then, only for the question's rows: the route section, running jobs, 5h/7d.
-    let keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeHead,keepOptional=true,keepQuota=quota.length>0;
+    // Short of rows: messages fold to one row; then (a question first takes the
+    // messages box) the Git row, spacers, the messages box, opened details, route
+    // rows, the route box, running jobs, 5h/7d.
+    let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0;
+    const routeBox=()=>keepRoutes?2+(shown.length?Math.min(routeLimit,routeRows.length)+(keepDetails?detailRows.filter(d=>routeRows.slice(0,routeLimit).some(x=>x.action==='route:'+d.after)).length:0):routeChecking.length):0;
     const need=()=>{
-      const r=keepRoutes?1+Math.min(routeLimit,routeRows.length)+(keepDetails?detailRows.length:0):0;
-      const m=keepMessages&&messageHead?visibleMessages().length+1:0;
-      return core+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+box.length+r+m+((r||m)?1:0)+(keepQuota?1:0);
+      const m=keepMessages&&messageRows.length?2+visibleMessages().length:0;
+      return core+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+m+(keepQuota?1:0);
     };
     const budget=rows;
+    const squeezeMessages=()=>{
+      while(need()>budget&&messageLimit>2)messageLimit--;
+      if(need()>budget&&visibleMessages().length>1)messageOne=true;
+    };
+    // Messages first fold to one row (`+N` in the border). With a question they then
+    // give up the box before anything else; without one the Git row goes next.
+    squeezeMessages();
+    if(ask.length&&need()>budget)keepMessages=false;
+    if(need()>budget)keepGit=false;
     if(need()>budget)keepSpacers=false;
-    while(need()>budget&&messageLimit>2)messageLimit--;
     if(need()>budget)keepMessages=false;
     if(need()>budget)keepDetails=false;
     while(need()>budget&&routeLimit>1)routeLimit--;
@@ -319,26 +393,40 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     if(need()>budget)keepOptional=false;
     if(need()>budget)keepQuota=false;
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i)))order.push({parts:row});});
-    order.push(...box);
-    const section=[];
+    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i)))order.push({parts:row});});
+    const boxes=[];
     if(keepRoutes){
-      section.push(routeHead);
+      const key=tone.route,rowsOf=[boxTop(routeTitle,key,{action:'route'})];
       const kept=routeRows.slice(0,routeLimit);
-      if(kept.length<routeRows.length){kept[kept.length-1]={parts:line(''),action:'fleet'};const hidden=total-kept.filter(x=>x.action!=='fleet').length;kept[kept.length-1].parts=line('+'+hidden+' more');}
-      for(const item of kept){section.push(item);if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)section.push(d);}
+      if(kept.length<routeRows.length){const hidden=total-kept.slice(0,-1).filter(x=>x.action!=='fleet').length;kept[kept.length-1]={parts:line('+'+hidden+' more'),action:'fleet'};}
+      for(const item of shown.length?kept:routeChecking){rowsOf.push(boxRow(item,key));if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)rowsOf.push(boxRow(d,key));}
+      rowsOf.push(boxBottom(key));boxes.push(rowsOf);
     }
-    if(keepMessages&&messageHead){section.push(messageHead,...visibleMessages());}
-    if(section.length)section.push({parts:rule([])});
-    const room=Math.max(0,budget-order.length-(keepQuota?1:0));
-    for(const item of [...order,...section.slice(0,room)])add(item.parts,item.action);
-    if(fill&&keepQuota)while(content.length<height-3)add([]);
+    if(keepMessages&&messageRows.length){
+      const key=tone.messages,hidden=hiddenMessages(),rowsOf=[boxTop([text('messages')],key)];
+      for(const item of visibleMessages())rowsOf.push(boxRow(item,key));
+      rowsOf.push(boxBottom(key,hidden?[text('+'+hidden,'loc_repo')]:[]));boxes.push(rowsOf);
+    }
+    // A box is placed whole or not at all, so no frame is left open.
+    const room=Math.max(0,budget-order.length-ask.length-(keepQuota?1:0)),placed=[];
+    for(const rowsOf of boxes){if(placed.length+rowsOf.length>room)break;placed.push(...rowsOf);}
+    for(const item of [...order,...placed])add(item.parts,item.action);
+    // The question box sits on the 5h/7d row; a side panel keeps it at the bottom.
+    if(fill)while(content.length<rows-ask.length-(keepQuota?1:0))add([]);
+    for(const item of ask)add(item.parts,item.action);
     if(keepQuota&&content.length<rows)add(cut(quota,inner));
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
-  const settingsLabel='⚙ '+t('settings','Settings'),label=clip(line(' HEARTING ','loc_repo'),width-4),right=clip(line(' '+settingsLabel+' ',color),Math.max(0,width-label.used-2));
-  rows.push([text('┌',color),...label.parts.map(p=>({...p,bold:true})),text('─'.repeat(Math.max(0,width-2-label.used-right.used)),color),...right.parts,text('┐',color)]);
-  hits.push({row:0,left:width-right.used-1,right:width-2,action:'settings'});
+  // Spec rules 16-17: the top border carries this session's state on the left
+  // (Fleet's session glyph and color, an English word) and only the gear on the
+  // right. `HEARTING` names the settings screen alone. An unknown state is left blank.
+  const live=settings?null:LIVE[state];
+  const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
+    live?[text(' ',color),text(live[0]==='spin'?SPIN[Math.abs(Math.trunc(frame))%SPIN.length]:live[0],live[2]),text(' '+live[1]+' ',live[2])]:[];
+  const label=clip(leftParts,Math.max(0,width-7)),right=clip(line(' ⚙ ',color),Math.max(0,width-label.used-2));
+  rows.push([text('┌',color),...label.parts,text('─'.repeat(Math.max(0,width-2-label.used-right.used)),color),...right.parts,text('┐',color)]);
+  // The gear's press reaches past its own cell to the rule beside it and the corner.
+  hits.push({row:0,left:Math.max(1,width-right.used-2),right:width-1,action:'settings'});
   for(let i=0;i<count-2;i++){
     const fitted=clip(content[i]||[],inner);
     rows.push([text('│',color),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),text('│',color)]);
@@ -348,4 +436,4 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
   return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN};

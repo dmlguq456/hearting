@@ -263,10 +263,21 @@ def route_row(row, now=None):
     return shown
 
 
+def _git_part(part):
+    return part[1] == "dim" and str(part[0]).startswith(" (")
+
+
 def session_head(values):
-    """``[e9] hearting (main 🚧 3)``: the session number, project and dim Git."""
+    """``[e9] hearting``: the session number and project (the panel's top row)."""
     from .session_line import line_segments
-    return line_segments(values, 10000, complete=True, fields={"folder"})
+    return [part for part in line_segments(values, 10000, complete=True, fields={"folder"}) if not _git_part(part)]
+
+
+def session_git(values):
+    """``(main 🚧 3)``: the dim Git observation the panel paints on the row below."""
+    from .session_line import line_segments
+    return [(str(text).lstrip(), key) for text, key in line_segments(values, 10000, complete=True, fields={"folder"})
+            if _git_part((text, key))]
 
 
 def quota_row(values):
@@ -350,7 +361,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
                                     "lvl_r" if mcp.get("failed") else "lvl_g")]
                  if isinstance(mcp, dict) and mcp.get("total") else [])
-    return {"head": session_head(values), "selected": selected,
+    return {"head": session_head(values), "git": session_git(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",

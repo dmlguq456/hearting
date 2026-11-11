@@ -240,13 +240,21 @@ function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
+    model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
+}
+// The top border's spinner turns with the paints the shell already makes: a
+// working native redraws its own screen, and each of those paints (render())
+// swaps this one braille cell in the cached border row. No timer of its own.
+function spinFrame(){return Math.floor(Date.now()/100);}
+function spunBorder(row){
+  if(state!=='working'||typeof row!=='string')return row;
+  const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']'),spin[spinFrame()%spin.length]);
 }
 function panelContent(){const view=panelViewNow();panelHits=view.hits;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
@@ -314,7 +322,7 @@ function render() {
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
         serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(!fleetView&&geometry().side){
-        const panel=y<panelRows.length?panelRows[y]:' '.repeat(panelColumns());
+        const panel=y<panelRows.length?(y===0?spunBorder(panelRows[0]):panelRows[y]):' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
       }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
@@ -322,7 +330,7 @@ function render() {
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
       const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
-        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:panelRows[y];
+        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:y===0?spunBorder(panelRows[0]):panelRows[y];
       if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
@@ -479,7 +487,7 @@ async function projection() {
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
@@ -493,10 +501,12 @@ async function projection() {
 function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
   const joined=parts=>(Array.isArray(parts)?parts:[]).map(part=>String(part.text)).join('').trim();
-  const rows=[joined(panelModel.head),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
+  const rows=[joined(panelModel.head),joined(panelModel.git),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
     String(panelModel.wait||''),panelModel.route_count?'route '+panelModel.route_count:''].filter(Boolean);
   const squeeze=s=>s.replace(/\s+/g,'');
-  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>squeeze(row).includes(squeeze(text))));
+  // A value the panel wrapped onto the next row is still painted: rows are read as one run.
+  const all=squeeze(paintedCommon.join(''));
+  return rows.length>0&&rows.every(text=>all.includes(squeeze(text)));
 }
 // The blanked Claude row carries the panel's one-line notice (empty by default),
 // at the native statusline's own two-cell indent.

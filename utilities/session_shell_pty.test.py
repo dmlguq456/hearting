@@ -130,7 +130,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/── route 0 /);
+ await waitFor(/\] (?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario!=='initial'){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
@@ -184,9 +184,9 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
-   if(!row(0).startsWith('┌')||!row(0).includes('HEARTING')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
+   if(!row(0).startsWith('┌')||!row(0).slice(0,40).includes('⚙')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
-   if(/HEARTING/.test(row(0).slice(42)))throw Error('panel painted twice');
+   if(/⚙/.test(row(0).slice(42)))throw Error('panel painted twice');
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
@@ -237,7 +237,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    let row;
    for(let y=0;y<sideTerm.rows;y++){
      const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
-     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('── route'))row={x:x+2,y:y+1};
+     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('╭─ route'))row={x:x+2,y:y+1};
    }
    if(!row)throw Error('route row absent');
    for(const marker of [/\+2 agent/,/ROUTE_PAGE/]){
@@ -253,8 +253,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    for(let y=0;y<sideTerm.rows;y++){
      const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
      // The route section's heading opens the evidence pages; its rows open in place.
-     if(!line?.translateToString().includes('── route 1'))continue;
-     let s='';for(let x=0;x<sideTerm.cols;x++){const c=line.getCell(x);if(!c||!c.getWidth())continue;s+=c.getChars()||' ';if(s.endsWith('── r'))point={x:x+1,y:y+1};}
+     if(!line?.translateToString().includes('╭─ route 1'))continue;
+     let s='';for(let x=0;x<sideTerm.cols;x++){const c=line.getCell(x);if(!c||!c.getWidth())continue;s+=c.getChars()||' ';if(s.endsWith('╭─ r'))point={x:x+1,y:y+1};}
    }
    }
    if(!point)throw Error('route detail target absent\n'+Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()).join('\n'));
@@ -274,7 +274,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(/NATIVE_ESC_[^\r]*\^\[5~/.test(raw))throw Error('a shown page let PgUp reach the native');
  }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/── route 0 /);
+ if(cfg.scenario==='display')await waitFor(/\] (?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;

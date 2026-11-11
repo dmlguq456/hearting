@@ -135,7 +135,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['[e9] project (topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','── route 6','ROUTE_0','ROUTE_4','+1 more','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['[e9] project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','ROUTE_4','+1 more','╭─ messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  assert(!idle.some(s=>s.includes('ROUTE_5')));assert(/^└─+┘$/.test(idle.at(-1)));
  assert(idle.at(-2).includes('7d 60%'),'quota is the last row');
@@ -305,6 +305,58 @@ for(let height=10;height<=22;height++){
         self.assertEqual(session_line.route_badge("⏳ route 12 ⠏12", rows, [("working", False)] * 12), "route 12 ⠏12")
         self.assertNotIn("⏳", "".join(text for row in session_line.status_lines(old, 80) for text, _key in row))
 
+    def test_place_tells_the_boxes_apart_and_the_border_carries_the_state(self):
+        # Spec rules 14-17 (2026-11-11 night, draft C6).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const p=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const route=i=>({id:'r'+i,title:'ROUTE_'+i,state:'working',kind:'working',elapsed:'42m',paint:{glyph:p('⠏'),harness:p('codex'),ctx:p('72%')}});
+const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],selected:[p('fixture high')],context:[p('context 42%')],
+ quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true}},
+ messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
+const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
+const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
+ settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
+const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
+// State on the left of the top border, the gear alone on the right; HEARTING only in settings.
+for(const [state,want] of [['idle','┌ ● idle ─'],['working','┌ ⠙ running ─'],['blocked','┌ ◑ waiting ─'],['unknown','┌──'],[undefined,'┌──']]){
+ const rows=text(paint({state,frame:1}));assert(rows[0].startsWith(want),state+' '+rows[0]);
+ assert(rows[0].endsWith(' ⚙ ┐')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
+}
+const settings=paint({settings:{index:0,value:view.defaults}});assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
+const gear=paint({state:'idle'}).hits.find(h=>h.action==='settings');assert(gear.row===0&&gear.left<=35&&gear.right>=39,JSON.stringify(gear));
+// The state word takes the same color as its glyph (Fleet's state key).
+const top=paint({state:'idle'}).rows[0];assert.equal(top[2].foreground,150);assert.equal(top[3].foreground,150);
+// Repo row, then Git on its own row; route then messages boxes; no question: nothing at the bottom.
+let rows=text(paint({state:'idle'}));
+assert(rows[1].includes('[e9] project')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
+const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('╭─ messages '));
+assert(r>0&&m>r&&rows[m-1].includes('╰')&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
+assert(rows.at(-2).includes('7d 60%')&&rows.at(-3).trim()==='│                                      │'.trim(),rows.join('\n'));
+for(const s of rows)assert.equal(cells(s),40,s);
+// A question box sits right above 5h/7d in the answer-needed color; messages are dim, route plain.
+const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
+const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD '));assert(qTop>m&&rows.at(-3).includes('╰')&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
+const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
+assert.equal(border(qTop,'╭').foreground,186);assert.equal(border(m,'╭').dim,true);assert.notEqual(border(r,'╭').dim,true);
+for(const s of rows)assert.equal(cells(s),40,s);
+// Short of rows with a question: messages fold to one row with `+N`, then go before routes or Git.
+const short=h=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:q=>question.slice(0,q.budget)}));
+const folded=short(23);assert(folded.some(s=>s.includes('MESSAGE_1'))&&!folded.some(s=>s.includes('MESSAGE_2'))&&folded.some(s=>/╰─+ \+2 ─╯/.test(s)),folded.join('\n'));
+const gone=short(20);assert(!gone.some(s=>s.includes('messages'))&&gone.some(s=>s.includes('ROUTE_2'))&&gone.some(s=>s.includes('(topic')),gone.join('\n'));
+// Every box is closed, whatever the height; an empty route list or message list draws no box.
+for(let h=10;h<=30;h++)for(const q of [[],question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',questions:o=>q.slice(0,o.budget)}));
+ assert.equal(rows.filter(s=>s.includes('╭')).length,rows.filter(s=>s.includes('╰')).length,h+'\n'+rows.join('\n'));}
+rows=text(paint({model:{routes:[],route_count:0,routes_known:true,messages:[]}}));assert(!rows.join('').includes('╭'),rows.join('\n'));
+// An opened message folded with the rest keeps its first row and its read row, so its page stays reachable.
+const long={way:'←',who:'[e7]',text:'LONG_BODY '+'word '.repeat(60),at:9},opened=[...model.messages.slice(1),long];
+const keyOf=view.render({width:40,height:30,side:true,sid:'s',configuration:{},model:{...model,messages:opened},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')&&h.row>0&&true&&h.action.includes(':9:')).action;
+for(const h of [18,19,20,21]){const v=view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,messages:opened},expandedKeys:[keyOf],state:'idle',questions:()=>[]});
+ const rows=text(v);if(!rows.some(s=>s.includes('LONG_BODY')))continue;
+ assert(rows.some(s=>/\+\d+ lines ›/.test(s))&&v.hits.some(x=>x.action==='read:'+keyOf),h+'\n'+rows.join('\n'));}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
@@ -363,7 +415,8 @@ for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(con
     def test_title_and_jobs_stay_on_screen_while_a_question_takes_the_session_rows(self):
         # Review [52] missing-field probe, on the 2026-11-11 layout: a question at
         # 80x14, its focused editor, and OpenCode's 35-column sidebar keep the
-        # session title, running jobs and branch on screen.
+        # session title and running jobs on screen. Spec rule 15 (2026-11-11 night):
+        # the branch has its own row below the repo row and is the first to go.
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet.session_panel import presentation
         values = {"harness": "claude", "tag": "[cb]", "state": "idle", "title": "REVIEW1463_TITLE",
@@ -375,7 +428,7 @@ for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(con
         models = {}
         for name, extra in (("short", {}), ("long", {"title": "REVIEW1463_TITLE_" + "A" * 80})):
             panel = presentation({**values, **extra}, {}, "claude", "sid", 80)
-            models[name] = {**{key: plain(panel[key]) for key in ("head", "selected", "context", "jobs", "quota")},
+            models[name] = {**{key: plain(panel[key]) for key in ("head", "git", "selected", "context", "jobs", "quota")},
                             "wait": panel["wait"], "session_title": panel["session_title"]}
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
@@ -386,8 +439,12 @@ const paint=(width,height,side,focused,model,n=question.length)=>view.render({wi
  .rows.map(r=>r.map(p=>p.text).join(''));
 for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,true],[80,14,false,true,5],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
  const rows=paint(width,height,side,focused,models.short,n);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','values-fixture*',models.short.wait,'◑ 질문 1'])
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB',models.short.wait,'◑ 질문 1'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
+ const branch=rows.findIndex(s=>s.includes('(values-fixture*'));
+ if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
+ // The Git row sits right below the repo row and never shares it.
+ if(branch>=0)assert(rows[branch-1].includes('[cb] project')&&!rows[branch].includes('[cb]'),rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait keeps its place.
