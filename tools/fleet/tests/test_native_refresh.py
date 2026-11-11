@@ -106,6 +106,44 @@ class NativeDisplayTests(unittest.TestCase):
         self.assertEqual(fields['window'],.1)
         self.assertEqual(self.native.context_policy['state'],'applied')
 
+    def test_a_read_that_overlaps_a_replacement_keeps_the_last_value_when_the_base_is_unobserved(self):
+        self.native.model = None
+        self.write(41)
+        shown = self.reader.read(self.snapshot)
+        self.assertEqual(shown[0][1]['context'], 41)
+        original, replaced = os.read, []
+        def read(fd, size):
+            data = original(fd, size)
+            if size == 4097 and not replaced:
+                self.write(41); replaced.append(True)
+            return data
+        self.write(41)  # a new generation, so this pass really opens the feed
+        with mock.patch.object(fast.os, 'read', side_effect=read):
+            overlapped = self.reader.read(self.snapshot)
+        self.assertTrue(replaced)
+        self.assertEqual(overlapped, shown)
+        layer = fast.NativeDisplayLayer(); layer.update(overlapped)
+        base = ExplorerViewModel.from_mapping(dict(
+            identity=1, sessions=[dict(tag='73', harness='opencode', state='idle', context=None, model=None)],
+            readiness={'ready': True}, source_records={'_detail_tags': {'opencode:exact': '73'},
+            '_detail_bindings': {'opencode:exact': ('opencode', 'exact', '1234', 'native-birth', (), '', '')}}))
+        self.assertEqual(layer.apply(base).sessions[0]['context'], 41)
+        # The next settled read reflects a real new value.
+        self.write(63)
+        self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 63)
+
+    def test_a_failed_read_keeps_the_value_but_a_changed_identity_does_not(self):
+        self.write(41); self.reader.read(self.snapshot)
+        self.write(52)
+        with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=OSError):
+            self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 41)
+        self.write(52, sid='another')
+        self.assertEqual(self.reader.read(self.snapshot), ())
+        self.write(52); self.reader.read(self.snapshot)
+        self.starts[1234] = 'reused-pid'
+        with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=OSError):
+            self.assertIsNone(self.reader.read(self.snapshot)[0][1]['context'])
+
     def test_departed_rows_do_not_accumulate_in_the_display_reader(self):
         self.write();self.reader.read(self.snapshot)
         self.assertEqual(self.reader.read(LiveSnapshot()),())

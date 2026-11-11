@@ -129,7 +129,9 @@ class NativeDisplayReader:
             try:
                 self._attachments = _attachment_index()
             except (OSError, ValueError, TypeError):
-                self._attachments = {}
+                # An unreadable index is not a removed attachment. Each kept
+                # binding still has to prove its live host below.
+                pass
         entries, result = {}, []
         event_paths, event_patterns, event_processes = set(), set(), set()
         for session in tuple(_get(snapshot, "sessions", ()) or ())[:_LIMIT]:
@@ -156,8 +158,8 @@ class NativeDisplayReader:
             if binding:
                 event_processes.add((binding['host_pid'], binding['host_start']))
             host_live = not binding or read_proc_start(binding["host_pid"]) == binding["host_start"]
-            signature = tuple(_signature(path) for path in
-                              (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)) + (
+            paths = (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)
+            signature = tuple(_signature(path) for path in paths) + (
                                   native_live, host_live,
                                   tuple(binding.get(key) for key in ('host_pid', 'host_start', 'incarnation', 'socket'))
                                   if binding else None)
@@ -170,11 +172,21 @@ class NativeDisplayReader:
             if previous is not None and previous[:2] == (signature, base):
                 entry = previous
             else:
+                unsettled = False
                 try:
                     fields = (self._read(session, identity, binding if host_live else None, tap, native_path, db)
                               if native_live else dict.fromkeys(_CELLS))
                 except (OSError, ValueError, TypeError):
-                    fields = None
+                    fields, unsettled = None, True
+                # A read that failed, or overlapped a source replacement, did not
+                # observe empty cells: keep this live process/attachment's last
+                # display. The next pass sees the new generation and reads it.
+                # A rejected or other-session source, and process, SID or
+                # attachment changes (explicit empty cells), still replace it.
+                if (fields is None and previous is not None and previous[2] is not None
+                        and previous[0][6:] == signature[6:]
+                        and (unsettled or tuple(_signature(path) for path in paths) != signature[:6])):
+                    fields = previous[2]
                 entry = signature, base, fields
             entries[identity] = entry
             if entry[2] is not None:
@@ -280,6 +292,9 @@ class NativeDisplayLayer:
         source = model.source_records or {}
         bindings = source.get("_detail_bindings", {})
         tags = source.get("_detail_tags", {})
+        # Cells kept from an earlier publication still read as unobserved in
+        # the complete base, so a native read against that base may fill them.
+        retained = source.get("_retained_cells", {})
         inputs = (model.sessions, bindings, tags)
         # Clock and account-usage updates share these deeply frozen inputs.
         # Reuse their display rows without revisiting every session or losing
@@ -305,10 +320,12 @@ class NativeDisplayLayer:
                 rows.append(row)
                 continue
             base = values.get("_base")
+            kept = retained.get(row.get("tag"), ())
             # A read started against an older complete base cannot overwrite a
             # cell the new base already changed while that read was in flight.
             updates = {key: freeze(values[key]) for key in _CELLS if key in values
-                       and (base is None or freeze(base.get(key)) == row.get(key))
+                       and (base is None or freeze(base.get(key)) == (
+                           None if key in kept else row.get(key)))
                        and freeze(values[key]) != row.get(key)}
             rows.append(dict(row, **updates) if updates else row)
         self._model, self._shown = model, model.with_updates(sessions=rows)

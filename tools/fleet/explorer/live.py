@@ -2134,6 +2134,51 @@ def current_session_activity(model, candidate, snapshot):
     return model.with_updates(sessions=rows) if changed else model
 
 
+# Display cells one collection may fail to observe; groups move together.
+_UNOBSERVED_CELL_GROUPS = (("model", "effort"), ("context", "window", "context_detail"), ("title",))
+
+
+def retain_unobserved_cells(candidate, published):
+    """Keep a same-process row's shown cells when the new ready pass did not observe them.
+
+    A required source being ready says nothing about model/context/title. A
+    real new value replaces the old one; a changed SID, PID or process birth,
+    a removed row or a dead row receives nothing from the earlier publication.
+    """
+    if candidate is None or published is None:
+        return candidate
+    old_records, new_records = published.source_records or {}, candidate.source_records or {}
+    old_bindings, new_bindings = old_records.get("_detail_bindings", {}), new_records.get("_detail_bindings", {})
+    old_tags, new_tags = old_records.get("_detail_tags", {}), new_records.get("_detail_tags", {})
+    if not old_bindings or not new_bindings:
+        return candidate
+    shown = {row.get("tag"): row for row in published.sessions}
+    previous = {}
+    for ref, binding in new_bindings.items():
+        old = old_bindings.get(ref)
+        if (isinstance(binding, (list, tuple)) and isinstance(old, (list, tuple))
+                and len(binding) >= 4 and tuple(binding[:4]) == tuple(old[:4])
+                and ref in new_tags and old_tags.get(ref) in shown):
+            previous[new_tags[ref]] = shown[old_tags[ref]]
+    rows, retained = [], {}
+    for row in candidate.sessions:
+        old = previous.get(row.get("tag"))
+        updates = {}
+        if old is not None and row.get("state") not in {"dead", "stale"}:
+            for group in _UNOBSERVED_CELL_GROUPS:
+                if row.get(group[0]) is None and old.get(group[0]) is not None:
+                    updates.update({key: old[key] for key in group if key in old})
+        if updates:
+            retained[row["tag"]] = tuple(sorted(updates))
+            rows.append(dict(row, **updates))
+        else:
+            rows.append(row)
+    if not retained:
+        return candidate
+    return candidate.with_updates(sessions=rows,
+                                  source_records={**new_records, "_retained_cells": retained})
+
+
 def current_claude_usage(model, snapshot, now):
     """Rebind only Claude usage at precomputed/replay and pending-draw boundaries."""
 
