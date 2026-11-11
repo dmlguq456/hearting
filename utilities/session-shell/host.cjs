@@ -77,7 +77,7 @@ let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown'
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
-let last = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
+let last = [], nativeLast = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
 let sourceError, fleetView,blockCursor;
 const deliveries = new Map(), calls = new Map(), watchers = new Map(), displayVTs = new Set();
 let callID = 0, projecting = false, projectionPending = false;
@@ -242,22 +242,60 @@ function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
-    cellWidth,
+    cellWidth,background:terminalBackground,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
 }
-// The top border's spinner turns with the paints the shell already makes: a
-// working native redraws its own screen, and each of those paints (render())
-// swaps this one braille cell in the cached border row. No timer of its own.
+// One beat for everything that runs (Fleet's 100 ms spinner frame and its
+// one-second blink, render_cells `_blink_phase`): the session's own spinner,
+// working route marks, the running stage and the open route count. The beat
+// runs only while the painted panel shows one of them; an idle panel paints
+// nothing between native frames. A spinner turn swaps only its own cells in
+// the cached rows; the blink, a color change, repaints the panel once a second.
 function spinFrame(){return Math.floor(Date.now()/100);}
-function spunBorder(row){
-  if(state!=='working'||typeof row!=='string')return row;
-  const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']'),spin[spinFrame()%spin.length]);
+let viewGroups=[],paintedGroups=new Set(),viewSpins=[],paintedSpins=new Set(),viewAnimated=false,panelAnimated=false;
+function spun(y,row){
+  if(typeof row!=='string'||!paintedSpins.has(y))return row;
+  const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
 }
-let viewGroups=[],paintedGroups=new Set();
-function panelContent(){const view=panelViewNow();panelHits=view.hits;viewGroups=view.groups||[];return view.rows;}
+let beatTimer,beatPhase=-1;
+function beating(){return panelAnimated&&activated&&!ended&&!relay&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
+function armBeat(){if(!beatTimer&&beating())beatTimer=setTimeout(beatTick,100-Date.now()%100);}
+function beatTick(){
+  beatTimer=undefined;if(!beating())return;
+  const phase=Math.floor(Date.now()/1000)%2;
+  if(phase!==beatPhase){beatPhase=phase;rebuildDisplay();}
+  else spinPaint();
+  armBeat();
+}
+// Only the spinner cells of the panel rows, with the cursor kept where the native left it.
+// A native frame already on its way paints them itself.
+function spinPaint(){
+  if(frameTimer||!paintedSpins.size)return;
+  let text='';const side=geometry().side;
+  for(const y of paintedSpins){
+    if(y>=panelRows.length)continue;
+    const panel=spun(y,panelRows[y]);
+    if(side){
+      if(nativeLast[y]===undefined)continue;
+      const line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+nativeLast[y]:nativeLast[y]+`\x1b[${terminal.cols+1}G\x1b[0m  `+panel;
+      if(last[y]===line)continue;last[y]=line;
+      text+=`\x1b[${y+1};${geometry().left?1:terminal.cols+3}H\x1b[0m`+panel;
+    }else{
+      const row=rows-height()+y;if(y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude')continue;
+      if(last[row]===panel)continue;last[row]=panel;text+=`\x1b[${row+1};1H`+panel;
+    }
+  }
+  if(text)emit('\x1b[?2026h\x1b7'+text+'\x1b8\x1b[?2026l');
+}
+// The terminal background, only where it is already known (COLORFGBG). Nothing
+// is asked: the host answers a native's own OSC 10/11 query itself, so an
+// unknown background keeps the terminal's own and paints no shade.
+const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=Number(value.split(';').pop());
+  return value.includes(';')&&Number.isInteger(bg)?([7,15].includes(bg)?'light':bg>=0&&bg<16?'dark':''):'';})();
+function panelContent(){const view=panelViewNow();panelHits=view.hits;viewGroups=view.groups||[];viewSpins=view.spins||[];viewAnimated=!!view.animated;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -323,7 +361,8 @@ function render() {
         '\x1b[0m'+' '.repeat(indent)+serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols,masked)+' '.repeat(masked-indent):
         serialize(view.buffer.active.getLine(view.buffer.active.viewportY+y),view.cols);
       if(!fleetView&&geometry().side){
-        const panel=y<panelRows.length?(y===0?spunBorder(panelRows[0]):panelRows[y]):' '.repeat(panelColumns());
+        nativeLast[y]=line;
+        const panel=y<panelRows.length?spun(y,panelRows[y]):' '.repeat(panelColumns());
         line=geometry().left?panel+`\x1b[${panelColumns()+1}G\x1b[0m  `+line:line+`\x1b[${view.cols+1}G\x1b[0m  `+panel;
       }
       if(last[y]!==line){text+=`\x1b[${y+1};1H${line}`;last[y]=line;}
@@ -331,7 +370,7 @@ function render() {
     if(!fleetView&&expanded&&!geometry().side)for(let y=0;y<panelRows.length;y++){
       const row=rows-height()+y;
       const cached=y===0&&!panelLines.length&&typeof nativeContext?.percent==='number'&&harness!=='claude'?
-        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:y===0?spunBorder(panelRows[0]):panelRows[y];
+        '\x1b[0m\x1b[2K'+nativeDisplay.firstLine(nativeContext)[0].text:spun(y,panelRows[y]);
       if(last[row]!==cached){text+=`\x1b[${row+1};1H${cached}`;last[row]=cached;}
     }
     else if(!fleetView&&!geometry().side&&height()>0&&footerLast!==displayFooter){text+=`\x1b[${rows};1H\x1b[0m\x1b[2K${displayFooter}`;footerLast=displayFooter;}
@@ -343,7 +382,7 @@ function render() {
     if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
     else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
     text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(block.focused&&!fleetView?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
-    emit(text);
+    emit(text);armBeat();
   } catch { rawRelay(); }
 }
 function lineLength(line){
@@ -386,12 +425,12 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();paintedSpins=new Set();panelAnimated=false;displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
-  let lines,edit=-1,groups=[];
+  let lines,edit=-1,groups=[],spins=[],animated=false;
   if(expanded){
-    const base=panelContent();groups=viewGroups;
+    const base=panelContent();groups=viewGroups;spins=viewSpins;animated=viewAnimated;
     const detail=[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
@@ -407,7 +446,7 @@ function rebuildDisplay() {
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
-    panelRows=painted;paintedGroups=new Set(groups);
+    panelRows=painted;paintedGroups=new Set(groups);paintedSpins=new Set(spins);panelAnimated=animated;
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
@@ -539,7 +578,7 @@ function rawRelay() {
   if(relay||ended)return;
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
-  clearTimeout(frameTimer);clearTimeout(projectionTimer);frameTimer=projectionTimer=undefined;
+  clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
   try{terminal.dispose();}catch{}
   for(const vt of displayVTs)try{vt.dispose();}catch{}
@@ -904,7 +943,7 @@ server.listen(socketPath,()=>{
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{
-    ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);
+    ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     server.close();await source('unregister');backend?.stdin.end();
     emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');

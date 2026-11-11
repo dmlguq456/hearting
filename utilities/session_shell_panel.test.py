@@ -278,7 +278,7 @@ const work={...six,work:[{text:'◌ '},{text:'3 open · WORK_HEADLINE'}]};
 for(const width of [40,80])assert(paint(work,width,30).plain.some(s=>s.includes('3 open · WORK_HEADLINE')),String(width));
 const owned={...six,routes:[{...route('r0','ROUTE_0'),owner:'owner · codex (gpt·high)',visibility:{summary:'SUMMARY_TEXT',lines:[]}}]};
 const detail=paint(owned,40,30,{routeDetail:true}).plain.join('\n');
-assert(detail.includes('owner · codex (gpt·high)')&&detail.includes('SUMMARY_TEXT'),detail);
+assert(detail.includes('owner codex (gpt·high)')&&detail.includes('SUMMARY_TEXT'),detail);
 // OpenCode's MCP count stays with the model and context at every height.
 const mcp={...six,mcp:[{text:'MCP '},{text:'2/3'}]};
 for(let height=10;height<=22;height++){
@@ -342,7 +342,7 @@ const asked=paint({state:'working',q:question,model:{answerable:true}});rows=tex
 const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── messages '));
 assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
-assert.equal(border(qTop,'╭').foreground,186);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(r,'╭').dim,true);
+assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(r,'╭').dim,true);
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows: the route side gives way first (two rows -> one row -> `+N more`); messages fold to
 // one row only after that, and go last.
@@ -414,6 +414,51 @@ const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506
 assert(!paint({}).join('').includes('RV-PR1506-R2-1111.md'));
 // Every row keeps the panel width with two-cell Hangul and emoji.
 for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(const s of rows)assert([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=80);
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_an_opened_route_carries_what_fleet_unfolds_and_runs_on_the_shared_beat(self):
+        # Spec rule 21: the kind and owner line, each stage with its doer, how it was run
+        # and checked, the next step and why it stopped; whole values, read on a page when long.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const p=t=>({text:t}),styles={g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},g_idle:{foreground:186}};
+const routes=[{id:'a',title:'ROUTE_A',kind:'working',elapsed:'42m',tool:'apply_patch',agents:1,
+  owner:'owner · claude (Opus 5.5·high)',kind_text:'autopilot-code(dev·std)',profile:'balanced-deep',owner_ctx:'31%',age:'42m',legs:2,
+  stages:[{name:'plan',mark:'✓',verdict:'PASS',harness:'codex',model:'gpt-fixture',effort:'high',elapsed:'12m',when:'done 22:34',unit:'plan/code',gate:true},
+   {name:'execute',mark:'●',current:true,round:2,harness:'codex',model:'gpt-fixture',effort:'high',elapsed:'30m',unit:'dev/backend',note:'NOTE_R2'},
+   {name:'review',mark:'',verdict:'pending',unit:'review/code'}],
+  workers:[{stage:'execute',harness:'codex',model:'gpt-fixture',ctx:'72%'},{stage:'execute',harness:'claude',model:'Sonnet 5.5',ctx:'12%'}],
+  visibility:{summary:'staged · test ✓',next:'resume · execute',lines:[]},paint:{glyph:p('⠏'),harness:p('codex'),ctx:p('72%')}},
+ {id:'b',title:'ROUTE_B',kind:'dead',reason:'worker claude · failed 3m',resume:'execute',stages:[{name:'execute',mark:'✕'}],paint:{glyph:p('✕'),harness:p('claude')}}];
+const model={routes,route_count:2,styles};
+const paint=(extra={})=>view.render({width:40,height:60,side:true,model,configuration:{},expandedKeys:['route:a','route:b'],questions:()=>[],...extra});
+const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
+const all=rows(paint()).join('\n'),flat=all.replace(/[│ \n]+/g,' ');
+for(const word of ['kind autopilot-code(dev·std)','owner claude (Opus 5.5·high) balanced-deep 31%','✓ plan · PASS · codex gpt-fixture high · 12m · done 22:34 · plan/code · gate ✓',
+ '● execute R2 · codex gpt-fixture high · 72% · >_ apply_patch · +1 agent · 30m · dev/backend','NOTE_R2','└ execute · 2 claude Sonnet 5.5 12%',
+ '· review · pending · review/code','42m · 2 legs · staged · test ✓','next resume · execute','✕ execute','worker claude · failed 3m','resume execute'])
+ assert(flat.includes(word),word+'\n'+all);
+for(const s of rows(paint()))assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
+// Short of rows the detail keeps its first rows and a `+N lines ›` row that opens the route page.
+const short=view.render({width:40,height:22,side:true,model,configuration:{},expandedKeys:['route:a'],questions:()=>[]});
+assert(rows(short).some(s=>/\+\d+ lines ›/.test(s)),rows(short).join('\n'));
+const more=short.hits.find(h=>h.action==='route'&&rows(short)[h.row]&&/lines ›/.test(rows(short)[h.row]));assert(more,'a press opens the route page');
+const page=rows(view.render({width:40,height:80,side:true,model,configuration:{},routeDetail:true,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
+for(const word of ['owner claude (Opus 5.5·high)','dev/backend','NOTE_R2','resume execute'])assert(page.includes(word),word+'\n'+page);
+// One beat (Fleet's 100 ms frame and one-second blink): the working route's mark spins on the
+// frame; the running stage and the open route count blink between g_work and g_work_off.
+const at=frame=>paint({frame,state:'working'});
+const a=at(0),b=at(3),c=at(13);
+const mark=v=>v.rows.flat().find(x=>x.text.length===1&&'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'.includes(x.text)&&x.role==='state:working'&&v.rows[0].indexOf(x)<0);
+assert.notEqual(mark(a).text,mark(b).text);assert.equal(mark(a).text,view.SPIN[0]);assert.equal(mark(b).text,view.SPIN[3]);
+const count=v=>v.rows.flat().find(x=>x.text==='route 2'),dot=v=>v.rows.flat().find(x=>x.text==='●'&&x.foreground===150);
+assert.equal(count(a).bold,true);assert.equal(count(c).dim,true);assert.equal(dot(a).bold,true);assert.equal(dot(c).dim,true);
+assert(a.animated&&a.spins.includes(0)&&a.spins.length>1,JSON.stringify(a.spins));
+// Nothing runs: no beat, nothing to turn between native frames.
+const idle=view.render({width:40,height:30,side:true,model:{routes:[{...routes[1]}],route_count:1,styles},state:'idle',configuration:{},questions:()=>[]});
+assert.equal(idle.animated,false);assert.deepEqual(idle.spins,[]);
+assert.equal(idle.rows.flat().find(x=>x.text==='route 1').foreground,186);
 '''
         self.node(script, "panel-view.cjs")
 
@@ -633,34 +678,51 @@ for(const [width,height,side] of [[37,21,true],[80,12,false]]){
             self.assertEqual(path.read_bytes(), before)
 
     def test_theme_and_shade_keep_glyphs_and_leave_the_terminal_theme_unchanged(self):
+        # Spec rule 22 (the reviewed set A, the question rose one step deeper).
         script = r'''
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
-const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},lvl_y:{foreground:186},g_work:{foreground:150,bold:true},lvl_g:{foreground:150}};
-const model={styles,colors:256,title:'Task',routes:[{title:'Task',state:'working',stages:[{name:'execute',current:true}]}],routes_known:true};
-const base=v.render({width:40,height:12,side:true,model,questions:()=>[]});
+const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},lvl_y:{foreground:186},g_work:{foreground:150,bold:true},lvl_g:{foreground:150},g_dead:{foreground:217,bold:true}};
+const model={styles,colors:256,title:'Task',answerable:true,routes:[{id:'t',title:'Task',state:'working',kind:'working',paint:{glyph:{text:'⠏'}},stages:[{name:'execute',current:true,mark:'●'}]}],
+ route_count:1,routes_known:true,messages:[{way:'←',who:'[e7]',text:'note',at:1}]};
+const q=()=>[[{text:'◑ questions 1'}],[{text:'Which?'}],[{text:'›'},{text:' A',bold:true}]];
+const paint=(cfg,background,extra={})=>v.render({width:40,height:24,side:true,model:{...model,...extra},configuration:cfg,background,questions:q});
 const text=r=>r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
-const same=v.render({width:40,height:12,side:true,model,configuration:{theme:'terminal',shade:'none'},questions:()=>[]});
-assert.deepEqual(same.rows,base.rows);
-for(const theme of ['terminal','light','mono'])for(const shade of ['none','light','medium']){
- const r=v.render({width:40,height:12,side:true,model,configuration:{theme,shade},questions:()=>[]});
+const base=paint({});
+assert.deepEqual(paint({theme:'terminal',shade:'none'}).rows,base.rows);
+const F=v.FACES;
+for(const background of ['','dark','light'])for(const theme of ['terminal','light','mono'])for(const shade of ['none','light','medium']){
+ const r=paint({theme,shade},background),parts=r.rows.flat(),label=[background,theme,shade].join('/');
  // Words and glyphs never change with color; only paint does.
- assert.equal(text(r),text(base));
- const parts=r.rows.flat();
- if(theme==='mono')assert(parts.every(p=>p.foreground===null||p.foreground===(shade==='none'?null:252)),theme+shade);
- if(theme==='light')assert(!parts.some(p=>[253,186,150].includes(p.foreground)),theme+shade);
- if(shade==='none')assert(parts.every(p=>p.background===undefined));
- else assert(parts.every(p=>Number.isInteger(p.background)&&Number.isInteger(p.foreground)),theme+shade);
- assert(parts.some(p=>p.bold)||theme==='mono'||true);
+ assert.equal(text(r),text(base),label);
+ const face=theme==='light'?'light':background;
+ // A shade needs a known face: `terminal` and `mono` on an unknown background keep the terminal's own.
+ if(shade==='none'||!face){assert(parts.every(p=>p.background===undefined),label);continue;}
+ const f=F[face];
+ assert(parts.every(p=>p.background===f[shade]&&Number.isInteger(p.foreground)),label);
+ // Nothing is dimmed on top of a shade: secondary text, messages and lines take their own color.
+ assert(!parts.some(p=>p.dim&&[f.body,f.secondary,f.frame,f.route,f.messages,f.title].includes(p.foreground)),label);
+ const at=ch=>parts.find(p=>p.text.startsWith(ch));
+ assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.secondary,label);
+ assert(parts.some(p=>p.text.includes('messages')&&p.foreground===f.title),label);
+ if(theme!=='mono'){
+  // The question's border, `◑` and `›` are rose; its words are body text.
+  assert(parts.some(p=>p.text==='◑'&&p.foreground===f.accent)&&parts.some(p=>p.text==='›'&&p.foreground===f.accent),label);
+  assert.equal(parts.find(p=>p.text==='Which?').foreground,f.body,label);
+ }
+ if(face==='light')assert(!parts.some(p=>[253,186,150,217].includes(p.foreground)),label);
 }
+// The light theme without a shade: the reviewed deep hues, secondary text without a dim.
+const light=paint({theme:'light'}).rows.flat();
+assert(!light.some(p=>[253,186,150,217,28,124,91].includes(p.foreground)));assert.equal(light.find(p=>p.text==='note').foreground,241);
+// The question rose on the terminal's own background too; mono keeps it by weight.
+assert(base.rows.flat().some(p=>p.text==='◑'&&p.foreground===174));
+assert(paint({theme:'mono'}).rows.flat().find(p=>p.text==='◑').bold===true);
 // Shade needs 256 colors and is off under NO_COLOR; an unknown theme is the default.
-for(const extra of [{colors:8},{no_color:true}]){
- const r=v.render({width:40,height:12,side:true,model:{...model,...extra},configuration:{shade:'medium'},questions:()=>[]});
- assert(r.rows.flat().every(p=>p.background===undefined));
-}
-assert.deepEqual(v.render({width:40,height:12,side:true,model,configuration:{theme:'neon'},questions:()=>[]}).rows,base.rows);
+for(const extra of [{colors:8},{no_color:true}])assert(paint({shade:'medium'},'dark',extra).rows.flat().every(p=>p.background===undefined));
+assert.deepEqual(paint({theme:'neon'}).rows,base.rows);
 // Every harness, OpenCode included, gets the chosen paint on the common panel.
 for(const harness of ['claude','codex','opencode'])
- assert(v.render({width:40,height:12,side:true,model,harness,configuration:{theme:'mono',shade:'medium'},questions:()=>[]}).rows.flat().every(p=>p.background===237),harness);
+ assert(v.render({width:40,height:12,side:true,model,harness,background:'dark',configuration:{theme:'mono',shade:'medium'},questions:()=>[]}).rows.flat().every(p=>p.background===235),harness);
 '''
         self.node(script, "panel-view.cjs")
 

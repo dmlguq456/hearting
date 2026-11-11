@@ -105,8 +105,12 @@ the left, as Fleet's session row judges and draws it, with an English
 lower-case word (a spinner and `running` while it works, `●` `idle`, `◑`
 `waiting`; an unknown state is left blank), and only the gear `⚙` on the right,
 whose press reaches the rule cell beside it and the corner. `HEARTING` names
-the settings screen alone. The spinner turns with the paints the shell
-already makes (a working native redraws its own screen); it adds no timer.
+the settings screen alone. What runs shares Fleet's one beat (its 100 ms
+spinner frame and one-second blink): this session's spinner, a working route's
+mark, the running stage and the open route count. The host keeps that beat only
+while the painted panel shows one of them; a spinner turn swaps only its own
+cells, the blink repaints the panel once a second, and an idle panel paints
+nothing between native frames.
 Then `[number] project`, with Git (branch and dirty mark, `🚧 N`,
 ahead/behind and the existing merge warnings) dim in parentheses on its own
 row below, cut with `…` within that row and absent without a Git reading; no
@@ -119,9 +123,17 @@ space; any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
 no box, only a titled upper rule (`── messages ──`) and a lower rule. They
-differ by place and strength of color only, all from the panel's theme and
-shade: the question the existing answer-needed color, route plain, messages
-dim. An opened route detail is indented inside its box, never a box in a box,
+differ by place and color only, all from the panel's theme and shade: the
+question's border, `◑` and `›` rose (its words are body text), route plain,
+messages dim. An opened route carries what Fleet's ROUTES row unfolds, from the
+same route records: kind and owner (with profile and context), each stage with
+its mark, verdict and doer (harness, model, effort, live workers' context, the
+open tool and sub-agents on the running stage, time, round, unit, output), how
+it was run and checked (age, legs, the evidence summary), the next step, and
+why it stopped (the worker line and where it resumes). Values are whole: a long
+one goes on to the next rows, and a detail short of rows keeps its first rows
+and `+N lines ›`, which opens the route page where every value reads.
+An opened route detail is indented inside its box, never a box in a box,
 and nothing is drawn for an empty route list or message list. Box rows are
 laid out at the box's inner width. Beside the native area a folded route takes
 two rows: the glyph and its whole title (cut with `…` only past the row), then,
@@ -247,10 +259,16 @@ side/bottom layout, panel position (right, the default, or left), side width,
 narrow-window behavior, auxiliary detail, theme, shade and `route line`
 (`time`, the default, or `model`). One placement rule
 serves every harness. Themes are `terminal` (the default: the shared palette),
-`light` (darker hues for a light terminal) and `mono` (no hue; weight, glyphs
-and words remain). Shade is `none` (the default), `light` or `medium`: the
-panel's own background, painted with an explicit text color so it reads on
-either terminal background, in 256-color terminals and never under `NO_COLOR`.
+`light` (a light terminal: the reviewed deep hues) and `mono` (no hue; weight,
+glyphs and words remain). Shade is `none` (the default), `light` or `medium`:
+a neutral grey panel background (dark face 234/235, light face 255/254), only
+on a known face, in 256-color terminals and never under `NO_COLOR`. The face is
+light for the `light` theme, else the terminal's background where it is
+already known (`COLORFGBG`; nothing is asked); on an unknown background `terminal` and
+`mono` keep the terminal's own and paint no shade. On a shade nothing is dimmed
+on top: secondary text and messages take 248/241, body text 253/237, the panel
+frame 244/243, route box 245/243, messages rules 242/245; the question's border,
+`◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own
 default without disabling the shell, and so does an unknown `route line`.

@@ -2,28 +2,59 @@
 // Geometry and paint only. The existing question controller owns drafts/effects.
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time'};
-// Panel color schemes. `terminal` is the original look: the terminal's own
-// background with the shared palette. `light` swaps that palette's pale hues
-// for darker ones that read on a light terminal; `mono` drops hue entirely and
-// keeps weight, glyphs and words. Text and glyphs always carry the state, so
-// no scheme makes color the only signal.
-const LIGHT_256={253:236,252:238,150:28,186:130,217:124,116:30,176:91,147:25,230:94,219:162,137:130};
-// A shade is the panel's own background. It is drawn with an explicit text
-// color, so it reads on either terminal background, and only in 256 colors.
-const SHADES={dark:{light:235,medium:237,text:252},light:{light:255,medium:253,text:235}};
-function appearance(rows,configuration={},{colors=256,noColor=false}={}){
+// Panel color schemes (spec rule 22: the reviewed set A, the question rose one
+// step deeper). `terminal` is the terminal's own background with the shared
+// palette; `light` declares a light terminal; `mono` drops hue and keeps weight,
+// glyphs and words. Text and glyphs always carry the state, so no scheme makes
+// color the only signal. A face is the background the panel stands on: `light`
+// for the light theme, else the terminal's background when it is known
+// (COLORFGBG or the terminal's own reply to a native's query; nothing is asked).
+const FACES={
+  dark:{light:234,medium:235,body:253,secondary:248,title:246,frame:244,route:245,messages:242,accent:174,
+    working:150,idle:186,blocked:174,dead:210,done:150},
+  light:{light:255,medium:254,body:237,secondary:241,title:241,frame:243,route:243,messages:245,accent:131,
+    working:22,idle:58,blocked:131,dead:88,done:22},
+};
+// Fleet's 256-color hues on each face. The light face takes the reviewed deep
+// counterparts (running 22, attention 58, failure 88, project 23, model 60)
+// instead of the earlier strong substitutes; the dark face changes only the
+// failure red, and only on a shade.
+const HUES={dark:{217:210},light:{253:237,252:238,150:22,186:58,217:88,116:23,176:60,147:25,230:22,219:132,137:94}};
+const LINES=new Set(['frame','route','messages']);
+function face(theme,background){return theme==='light'?'light':background==='light'||background==='dark'?background:'';}
+function appearance(rows,configuration={},{colors=256,noColor=false,background=''}={}){
   const cfg={...defaults,...configuration},theme=['terminal','light','mono'].includes(cfg.theme)?cfg.theme:'terminal';
-  const shade=['light','medium'].includes(cfg.shade)&&!noColor&&colors>=256?cfg.shade:'';
-  if(theme==='terminal'&&!shade)return rows;
-  const base=SHADES[theme==='light'?'light':'dark'];
+  if(noColor)return rows;
+  const known=face(theme,background),full=colors>=256;
+  // A shade needs a known face: on an unknown background the panel keeps the terminal's own.
+  const shade=['light','medium'].includes(cfg.shade)&&full&&known?cfg.shade:'';
+  const F=FACES[known||'dark'];
   return rows.map(row=>row.map(part=>{
-    let foreground=Number.isInteger(part.foreground)&&part.foreground>=0?part.foreground:null;
+    let foreground=Number.isInteger(part.foreground)&&part.foreground>=0?part.foreground:null,dim=part.dim===true,bold=part.bold===true;
+    const role=part.role||'';
+    if(!full){
+      // Eight colors: the light theme leaves the pale default white to the terminal.
+      if(theme==='mono')foreground=null;
+      else if(theme==='light'&&foreground===7)foreground=null;
+      return {...part,foreground};
+    }
     if(theme==='mono')foreground=null;
-    else if(theme==='light'&&foreground!==null)foreground=colors>=256?(LIGHT_256[foreground]??foreground):(foreground===7?null:foreground);
-    if(shade&&foreground===null)foreground=base.text;
-    const next={...part,foreground};
-    if(shade)next.background=base[shade];
-    return next;
+    else if(foreground!==null&&(known==='light'||shade))foreground=HUES[known||'dark'][foreground]??foreground;
+    // The question's border, `◑` and `›` are rose; mono keeps them by weight.
+    // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
+    if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=F.accent;else if(role==='accent')bold=true;dim=false;}
+    // A state glyph takes its face's state color, at full strength.
+    else if(role.startsWith('state:')&&theme!=='mono'&&(shade||known==='light')&&F[role.slice(6)]){foreground=F[role.slice(6)];dim=false;}
+    if(shade){
+      // On a shade nothing is dimmed on top: secondary text and lines take their own color.
+      if(LINES.has(role)){foreground=F[role];dim=false;}
+      else if(role==='title'){foreground=F.title;dim=false;}
+      else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
+      return {...part,foreground,dim,bold,background:F[shade]};
+    }
+    // A declared light terminal: secondary text takes its color instead of a dim default.
+    if(theme==='light'&&foreground===null&&dim){foreground=F.secondary;dim=false;}
+    return {...part,foreground,dim,bold};
   }));
 }
 // A combining mark or joined emoji stays with the character it belongs to.
@@ -57,7 +88,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,expandedKeys=[],focused=false,cwd='',harness='',cellWidth}){
+function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -99,6 +130,74 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     if(current.length)put(current);
   }
   const routes=model.routes||[],first=routes[0];
+  // Fleet's shared beat (render_cells `_blink_phase`): one second lit, one second
+  // dark, from the same clock as the 100 ms spinner frame.
+  const beat=Math.floor(Math.trunc(frame)/10)%2===0;
+  const spinGlyph={text:SPIN[Math.abs(Math.trunc(frame))%SPIN.length],spin:true};
+  // What runs here blinks or spins: the host keeps its beat only while one is painted.
+  let animated=false;
+  const live=r=>r?.kind==='working';
+  // A route's glyph: a working route spins on the frame like Fleet's route mark.
+  const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r)){animated=true;return {...g,...spinGlyph,role:'state:working'};}return {...g,role:'state:'+(r.kind||'idle')};};
+  const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
+  // Spec rule 21: an opened route carries what Fleet's ROUTES row unfolds, from
+  // the values Fleet already read: kind and owner, each stage with its doer
+  // (harness, model, effort, context, tool, sub-agents, time, round), how it
+  // was run and checked, the next step, and why it stopped. Values are whole;
+  // a long one goes on to the next rows.
+  function routeItems(r){
+    const items=[],stages=Array.isArray(r.stages)?r.stages:[],workers=Array.isArray(r.workers)?r.workers:[];
+    const owner=String(r.owner||'').replace(/^owner · /,'');
+    const kind=join([r.kind_text?[text('kind '),text(r.kind_text,'loc_repo')]:[],
+      owner?[text('owner '),text(owner),...(r.profile?[text(' '+r.profile)]:[]),...(r.owner_ctx?[text(' '),text(r.owner_ctx,'loc_repo')]:[])]:[]]);
+    if(kind.length)items.push(kind);
+    const used=new Set();
+    stages.forEach((stage,i)=>{
+      const mark=stage.mark||'';
+      if(stage.current){animated=true;}
+      const markPart=mark==='●'?text('●',beat?'g_work':'g_work_off'):mark==='✓'?text('✓','lvl_g'):mark==='✕'?text('✕','g_dead'):text('·');
+      const name=text(stage.name||'·',stage.current?(beat?'g_work':'g_work_off'):mark==='✕'?'g_dead':'loc_repo');
+      const mine=workers.filter(w=>w.stage===stage.name);mine.forEach(w=>used.add(w));
+      const first=mine[0]||{};
+      const doer=[stage.harness||first.harness,stage.model||first.model,stage.effort].filter(Boolean).join(' ');
+      // The doer's open tool and sub-agents belong to the stage it works on.
+      const doing=stage.current?[r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]:[];
+      const verdict=stage.verdict&&stage.verdict!=='running'?[text(stage.verdict,/^(PASS|done)$/i.test(stage.verdict)?'lvl_g':/^(FAIL|BLOCKED)/i.test(stage.verdict)?'g_dead':'dim')]:[];
+      const row=join([[markPart,text(' '),name,...(stage.round>1?[text(' R'+stage.round,stage.round>=3?'g_idle':'dim')]:[])],
+        verdict,doer?[text(doer)]:[],first.ctx?[text(first.ctx,'loc_repo')]:[],...doing,stage.elapsed?[text(stage.elapsed)]:[],
+        stage.when?[text(stage.when)]:[],stage.unit?[text(stage.unit)]:[],stage.gate?[text('gate ✓','lvl_g')]:[]]);
+      items.push(row);
+      // What the stage's box says beside them: its output, a rounds note, a quoted line.
+      for(const [label,value] of [['out',stage.out],['',stage.note],['',stage.says]])if(value)items.push({sub:true,parts:[...(label?[text(label+' ','dim')]:[]),text(value)]});
+      // More than one live worker on a stage: each its own row (Fleet's `└ stage · n`).
+      mine.slice(1).forEach((w,n)=>items.push({sub:true,parts:[text('└ '+(stage.name||'·')+' · '+(n+2)+' '),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]}));
+    });
+    for(const w of workers)if(!used.has(w))items.push([text('└ '+w.stage+' '),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]);
+    // An older feed row carries only the stage line (`plan ✓ › execute ● › review`).
+    if(!stages.length&&r.flow)items.push([text(r.flow)]);
+    // No stage record: the doer's tool and sub-agents stand alone.
+    if(!stages.length&&live(r)&&(r.tool||r.agents))items.push(join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]));
+    const how=join([r.age?[text(r.age)]:[],r.legs?[text(r.legs+' leg'+(r.legs===1?'':'s'))]:[],r.visibility?.summary?[text(r.visibility.summary)]:[]]);
+    if(how.length)items.push(how);
+    if(r.visibility?.next)items.push([text('next ','dim'),text(r.visibility.next)]);
+    // Why it stopped: the worker line Fleet reads, and where it resumes.
+    if(!live(r)&&(r.reason||r.state_label))items.push([text(r.reason||r.state_label,r.kind==='dead'?'g_dead':'dim')]);
+    if(r.resume)items.push([text('resume ','dim'),text(r.resume,'loc_repo')]);
+    if(r.outcome)items.push([text(r.outcome,'lvl_g')]);
+    return items;
+  }
+  // Each item laid out at the current width: the first row indented two cells,
+  // its continuation four, nothing cut.
+  function itemRows(items,lead='  '){
+    const out=[];
+    for(const item of items){
+      // A stage's own notes sit two cells further in, under the stage they belong to.
+      const parts=Array.isArray(item)?item:item.parts,first=item.sub?lead+'  ':lead,rest=first+'  ';
+      const rows=[];inner-=rest.length;try{wrap(parts,Infinity,undefined,rows);}finally{inner+=rest.length;}
+      rows.forEach((row,i)=>out.push([text(i?rest:first),...row]));
+    }
+    return out;
+  }
   const asking=!!model.answerable;
   // UI attention is not native agent liveness. Only a confirmed route failure
   // may make this frame red; an unknown source/permission popup cannot.
@@ -136,19 +235,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const start=content.length;
     if(reading)wrap(messageParts(reading),Infinity);
     else for(const route of routes){
-      wrap(line(route.title||t('checking','Checking'),'loc_repo'),2);
-      // The route's owner and its evidence summary, as the earlier route heading carried them.
-      if(route.owner)wrap(line(route.owner),2);
-      if(route.visibility?.summary)wrap(line(route.visibility.summary),2);
-      for(const stage of route.stages||[])wrap(line((stage.name||stage.id)+' · '+stage.state),2);
+      // The route's whole detail, as it opens in place, then its evidence lines.
+      wrap([routeGlyph(route),text(' '),text(route.title||t('checking','Checking'),'loc_repo')],Infinity);
+      for(const row of itemRows(routeItems(route)))add(row);
       if(route.stage_more)add(line('+'+route.stage_more+' · Fleet'));
-      wrap(line(route.reason||route.state_label||route.state),3);
-      if(route.outcome)wrap(line(route.outcome,'lvl_g'),2);
       for(const [label,value,tone] of route.visibility?.lines||[]){
         wrap(line(label+': '+value,({good:'lvl_g',bad:'lvl_r',mixed:'lvl_y',info:'loc_repo',dim:'dim'})[tone]||'dim'),20);
       }
-      const next=route.visibility?.next;
-      if(next&&!(route.visibility?.lines||[]).some(row=>row[1]===next))wrap(line(next),10);
     }
     const detail=content.splice(start),budget=Math.max(1,height-3-start);
     routePages=Math.max(1,Math.ceil(detail.length/budget));
@@ -243,7 +336,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
     const third=r=>r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:r.step?[text(r.step)]:[];
     function folded(r){
-      const p=r.paint||{},lead=[p.glyph||text('·'),text(' ')];
+      const p=r.paint||{},lead=[routeGlyph(r),text(' ')];
       if(!side){
         const ow=columnWidth(owner),gw=columnWidth(x=>x.paint?.gauge5||[]),tw3=columnWidth(third);
         // The title gives way first, but keeps half of what the tool or stage column would take.
@@ -275,10 +368,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
           if(size(left)>2)out.push(left);
         }
       }
-      if(r.flow){const flow=[];inner-=2;try{wrap([text(r.flow)],2,undefined,flow);}finally{inner+=2;}for(const row of flow)out.push([text('  '),...row]);}
-      const doing=[r.tool&&side?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]].filter(g=>g.length);
-      if(doing.length)out.push(cut([text('  '),...joined(doing,' · ')],inner));
-      if(r.kind==='dead'&&(r.reason||r.state_label))put(out,[text('  '),text(r.reason||r.state_label,'g_dead')],2);
+      out.push(...itemRows(routeItems(r)));
       if(!out.length)out.push([text('  '),text(t('checking','Checking'))]);
       return out;
     }
@@ -286,7 +376,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // question box is the person's and sits at the bottom. Strength of color
     // tells the boxes apart: question the answer-needed color, route plain,
     // messages dim, all from the panel's own styles.
-    const tone={route:'plain',messages:'dim',question:asking?'lvl_y':'dim'};
+    // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top;
+    // the question's border is rose.
+    const tone={route:{key:'plain',role:'route'},messages:'dim',question:{key:asking?'lvl_y':'dim',role:'accent-line'}};
+    const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role}:text(v,k);
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
     const within=fn=>{inner-=box;try{return fn();}finally{inner+=box;}};
@@ -304,16 +397,16 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     };
     const boxTop=(label,key,{action,ellipsis=false}={})=>{
       const room=Math.max(0,inner-2),name=label.length&&room>=4?titled(label,room-3,ellipsis):[];
-      const head=name.length?[text('─ ',key),...name,text(' ',key)]:[];
-      return {parts:[text('╭',key),...head,text('─'.repeat(Math.max(0,room-size(head))),key),text('╮',key)],action};
+      const head=name.length?[L('─ ',key),...name,L(' ',key)]:[];
+      return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head))),key),L('╮',key)],action};
     };
     const boxBottom=(key,note=[],action)=>{
-      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[text(' ',key),...note,text(' ─',key)]:[];
-      return {parts:[text('╰',key),text('─'.repeat(Math.max(0,room-size(tail))),key),...tail,text('╯',key)],action};
+      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+      return {parts:[L('╰',key),L('─'.repeat(Math.max(0,room-size(tail))),key),...tail,L('╯',key)],action};
     };
     const boxRow=(item,key)=>{
       const fit=clip(item.parts||[],Math.max(0,inner-box));
-      return {...item,parts:[text('│ ',key),...fit.parts,pad(inner-box-fit.used),text(' │',key)]};
+      return {...item,parts:[L('│ ',key),...fit.parts,pad(inner-box-fit.used),L(' │',key)]};
     };
     // Spec rule 19: beside the native area a folded route takes two rows: the
     // glyph and its whole title, then (indented, dim) harness, model, context and
@@ -331,7 +424,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     within(()=>{
       for(const r of listed){
         const key='route:'+r.id,p=r.paint||{};
-        const two=side?[[p.glyph||text('·'),text(' '),...cut(line(r.title||'·','loc_repo'),inner-2)],second(r)].filter(Boolean):null;
+        const two=side?[[routeGlyph(r),text(' '),...cut(line(r.title||'·','loc_repo'),inner-2)],second(r)].filter(Boolean):null;
         routeRows.push({parts:folded(r),two,action:key});
         if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
       }
@@ -368,7 +461,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const hiddenMessages=()=>messageOne?Math.max(0,messages.length-1):0;
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
     const label=clean(model.route_label||'').trim();
-    const routeTitle=shown.length?[text('route '+total,'g_idle')]:label?[text(label,'g_idle')]:null;
+    // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
+    const running=shown.some(live);if(running)animated=true;
+    const routeTitle=shown.length?[text('route '+total,running?(beat?'g_work':'g_work_off'):'g_idle')]:label?[text(label,'g_idle')]:null;
     const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
     const core=top.length-spacers.size-optional.size-gitRows.size;
@@ -377,8 +472,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const ask=[];
     if(q.length){
       const key=tone.question;
-      ask.push(boxTop(q[0],key,{action:'question',ellipsis:true}));
-      for(const row of q.slice(1))ask.push(boxRow({parts:row,action:'question'},key));
+      const accent=parts=>parts.flatMap(part=>{
+        const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
+        if(!m)return [part];
+        return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
+      });
+      ask.push(boxTop(accent(q[0]),key,{action:'question',ellipsis:true}));
+      for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
       ask.push(boxBottom(key,[],'question'));
     }
     // Short of rows (spec rules 14 and 19, the 11-11 night final layout): spacers;
@@ -389,13 +489,23 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0;
     let twoRows=side&&routeRows.some(x=>x.two);
     const routeSize=x=>twoRows&&x.two?x.two.length:1;
+    // An opened route's detail that outgrows its rows keeps its first rows and a
+    // `+N lines ›` row to the route read page, where every value reads whole.
+    let detailCap=Math.max(0,...listed.map(r=>detailRows.filter(d=>d.after===r.id).length));
+    const detailsOf=id=>{
+      const rows=detailRows.filter(d=>d.after===id);
+      if(rows.length<=detailCap)return rows;
+      const keep=Math.max(1,detailCap-1);
+      return [...rows.slice(0,keep),{parts:[text('  '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:'route',after:id}];
+    };
     const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,Math.min(routeLimit,routeRows.length)).reduce((n,x,i,list)=>n+(i===list.length-1&&list.length<routeRows.length?1:routeSize(x)),0)
-      +(keepDetails?detailRows.filter(d=>routeRows.slice(0,routeLimit).some(x=>x.action==='route:'+d.after)).length:0):routeChecking.length):0;
+      +(keepDetails?routeRows.slice(0,routeLimit).reduce((n,x)=>n+(x.action.startsWith('route:')?detailsOf(x.action.slice(6)).length:0),0):0):routeChecking.length):0;
     const messageSection=()=>keepMessages&&messageRows.length?2+visibleMessages().length:0;
     const need=()=>core+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+messageSection()+(keepQuota?1:0);
     const budget=rows;
     if(need()>budget)keepSpacers=false;
     if(need()>budget)twoRows=false;
+    while(need()>budget&&detailCap>2)detailCap--;
     if(need()>budget)keepDetails=false;
     // One route row stays beside `+N more` until the messages have folded too.
     while(need()>budget&&routeLimit>2)routeLimit--;
@@ -417,7 +527,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const item of shown.length?kept:routeChecking){
         // A press on either row of a two-row route opens it.
         for(const parts of twoRows&&item.two?item.two:[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
-        if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)routeBlock.push(boxRow(d,key));
+        if(keepDetails&&item.action.startsWith('route:'))for(const d of detailsOf(item.action.slice(6)))routeBlock.push(boxRow(d,key));
       }
       routeBlock.push(boxBottom(key));
     }
@@ -425,10 +535,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // bottom right above 5h/7d (spec rule 14, 11-11 night final layout).
     if(keepMessages&&messageRows.length){
       const key=tone.messages,hidden=hiddenMessages();
-      messageBlock=[{parts:rule([text('messages',key)]).map(x=>({...x,...(styles[key]||{dim:true})}))}];
+      messageBlock=[{parts:rule([{...text('messages',key),role:'title'}]).map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'}))}];
       messageBlock.push(...visibleMessages());
       const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
-      messageBlock.push({parts:[text('─'.repeat(Math.max(0,inner-size(note))),key),...note]});
+      messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(note))),key),role:'messages'},...note.map(x=>x.text==='─'?{...x,role:'messages'}:x)]});
     }
     // Each section is placed whole or not at all.
     const tail=ask.length+messageBlock.length+(keepQuota?1:0);
@@ -448,22 +558,27 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // Spec rules 16-17: the top border carries this session's state on the left
   // (Fleet's session glyph and color, an English word) and only the gear on the
   // right. `HEARTING` names the settings screen alone. An unknown state is left blank.
-  const live=settings?null:LIVE[state];
+  const own=settings?null:LIVE[state];
+  const frameText=v=>({...text(v,color),role:'frame'});
+  if(own&&own[0]==='spin')animated=true;
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
-    live?[text(' ',color),text(live[0]==='spin'?SPIN[Math.abs(Math.trunc(frame))%SPIN.length]:live[0],live[2]),text(' '+live[1]+' ',live[2])]:[];
-  const label=clip(leftParts,Math.max(0,width-7)),right=clip(line(' ⚙ ',color),Math.max(0,width-label.used-2));
-  rows.push([text('┌',color),...label.parts,text('─'.repeat(Math.max(0,width-2-label.used-right.used)),color),...right.parts,text('┐',color)]);
+    own?[frameText(' '),{...text(own[0]==='spin'?spinGlyph.text:own[0],own[2]),...(own[0]==='spin'?{spin:true}:{}),role:'state:'+state},
+      {...text(' '+own[1]+' ',own[2]),role:state==='idle'?'secondary':'state:'+state}]:[];
+  const label=clip(leftParts,Math.max(0,width-7)),right=clip([frameText(' ⚙ ')],Math.max(0,width-label.used-2));
+  rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used-right.used))),...right.parts,frameText('┐')]);
   // The gear's press reaches past its own cell to the rule beside it and the corner.
   hits.push({row:0,left:Math.max(1,width-right.used-2),right:width-1,action:'settings'});
   for(let i=0;i<count-2;i++){
     const fitted=clip(content[i]||[],inner);
-    rows.push([text('│',color),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),text('│',color)]);
+    rows.push([frameText('│'),text(' '),...fitted.parts,text(' '.repeat(Math.max(0,inner-fitted.used)+1)),frameText('│')]);
   }
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
-  rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
-  const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
+  rows.push([frameText('└─'),...foot.parts,frameText('─'.repeat(Math.max(0,width-3-foot.used))+'┘')]);
+  const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true,background});
+  // The rows whose spinner cells turn between paints (the host swaps only those cells).
+  const spins=rows.map((row,i)=>row.some(part=>part.spin)?i:-1).filter(i=>i>=0&&i<count);
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
-  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,groups};
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,groups,animated:animated&&!settings,spins};
 }
-module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN};
+module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES};

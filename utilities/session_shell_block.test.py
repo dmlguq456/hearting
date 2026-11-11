@@ -67,6 +67,25 @@ setImmediate(()=>{
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
 
+    def test_a_long_question_names_the_keys_that_read_its_body(self):
+        # While ↑↓ choose, the body pages with PgUp/PgDn; the hint says so. Keys are unchanged.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+const many=Array.from({length:9},(_,i)=>'CHOICE_'+i);
+block.update([{id:'c',answerable:true,questions:[{id:'q',question:'Which?',choices:many}]}]);
+block.enter();
+let text=JSON.stringify(block.detail({budget:6,columns:30}));
+assert(text.includes('more · PgUp/PgDn to read')&&!text.includes('focus and ↑↓'),text);
+// A question without choices still reads with ↑↓.
+block.update([{id:'t',answerable:true,questions:[{id:'q',question:'Q',choices:[]}]}]);
+text=JSON.stringify(block.detail({budget:3,columns:30}));
+assert(text.includes(' +1 ↑↓')&&!text.includes('PgUp'),text);
+console.log('PASS');"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
     def test_split_controls_drafts_and_replaced_questions_never_retarget_native_input(self):
         code=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

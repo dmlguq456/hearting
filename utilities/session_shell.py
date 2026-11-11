@@ -854,7 +854,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                                    for key, value in question["display"].items()}
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
-        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
     if columns < 64:
         for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
             labels[key] = ui_text("fleet.session_block.compact_" + key)

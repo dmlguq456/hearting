@@ -118,8 +118,10 @@ module.exports=function({changed,answer,action}) {
     const lit=choosing(row)?body.length+marked.findIndex(parts=>parts[0]?.text==='›'):-1;
     if(lit>=body.length){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
-    const more=[span(`+${Math.max(0,content.length-page)} · ${text('more','more · focus and ↑↓ to read')} ${scroll+1}/${content.length}`)];
-    if(space<=1)head=[...head,span(` +${content.length-page} ↑↓`)];
+    // While ↑↓ choose, the body pages with PgUp/PgDn: the hint names the keys that read it.
+    const reading=choosing(row)?text('more_choose','more · PgUp/PgDn to read'):text('more','more · focus and ↑↓ to read');
+    const more=[span(`+${Math.max(0,content.length-page)} · ${reading} ${scroll+1}/${content.length}`)];
+    if(space<=1)head=[...head,span(` +${content.length-page} ${choosing(row)?'PgUp/PgDn':'↑↓'}`)];
     return [head,...content.slice(scroll,scroll+page),...(space>1?[more]:[]),...footer].slice(0,limit);
   }
   // The option rows of one choice start with its number (`2 `); its wrapped rows

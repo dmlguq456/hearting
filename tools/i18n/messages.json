@@ -702,6 +702,10 @@
    "en": "more · focus and ↑↓ to read",
    "ko": "더 있음 · 포커스 후 ↑↓ 읽기"
   },
+  "fleet.session_block.more_choose": {
+   "en": "more · PgUp/PgDn to read",
+   "ko": "더 있음 · PgUp/PgDn 읽기"
+  },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
    "ko": "Tab 다음 · Esc/Ctrl+] 복귀"
