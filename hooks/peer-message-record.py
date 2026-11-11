@@ -280,6 +280,60 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
 _STOP_HEADER = "[hearting] Arrived before this turn ended:"
 
 
+def _turn(payload):
+    """``(session_id, prompt_id)`` of a main-conversation hook, or ``None``.
+
+    Claude Code gives every hook of one user prompt the same ``prompt_id``
+    (hooks reference, common input fields); it is this turn's key for the
+    follow-through state Codex keys by ``turn_id``. A subagent's hook is not
+    the main turn.
+    """
+    sid, tid = payload.get("session_id"), payload.get("prompt_id")
+    if (not isinstance(sid, str) or not sid or not isinstance(tid, str) or not tid
+            or str(payload.get("agent_id") or "").strip()):
+        return None
+    return sid, tid
+
+
+def _carrier():
+    if str(_UTILITIES_DIR) not in sys.path:
+        sys.path.insert(0, str(_UTILITIES_DIR))
+    import codex_turn_carrier
+    return codex_turn_carrier
+
+
+def note_turn_tool(payload):
+    """Count this tool for the shared follow-through rule (fail-soft)."""
+    with contextlib.suppress(Exception):
+        turn = _turn(payload)
+        if turn:
+            carrier = _carrier()
+            carrier.note_tool(*turn, command=carrier.tool_command(payload))
+
+
+def _peer_items(shown):
+    """Owed items for the sealed peer bodies a flushed context showed (fail-soft)."""
+    try:
+        carrier = _carrier()
+        return [carrier.peer_body_item(row["text"]) for row in shown or ()
+                if isinstance(row, dict) and row.get("peer")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def note_turn_received(payload, batches, extra=()):
+    """Record the owed actions this turn was shown (fail-soft)."""
+    with contextlib.suppress(Exception):
+        turn = _turn(payload)
+        if turn:
+            carrier = _carrier()
+            records = [record for _root, rows in batches for record in rows]
+            items = carrier.owed_items(records) + [item for item in extra if item]
+            if items or records:
+                carrier.note_received(*turn, items, rendered=[
+                    str(record.get("delivery_id")) for record in records])
+
+
 def handle_stop(payload, out):
     """Continue the turn once more with the records owed to this session, if any.
 
@@ -301,12 +355,24 @@ def handle_stop(payload, out):
             out.write(json.dumps({"decision": "block", "reason": _STOP_HEADER + "\n\n" + text},
                                  ensure_ascii=False) + "\n")
             out.flush()
+        else:
+            # Nothing more is owed: the one follow-through pass Codex's Stop
+            # gives an owed action no tool acted on (PG-44), same rule and state.
+            reason = ""
+            with contextlib.suppress(Exception):
+                turn = _turn(payload)
+                reason = _carrier().follow_through(*turn) if turn else ""
+            if reason:
+                out.write(json.dumps({"decision": "block", "reason": reason},
+                                     ensure_ascii=False) + "\n")
+                out.flush()
     finally:
         if batches:
             if out.flushed:
                 # Printed is not read: Claude Code may override this block and
                 # end the turn. Settled at the next call (above, or a tool boundary).
                 hold_stop_sends(session_id, batches, _CLAUDE_RECIPIENT_KIND)
+                note_turn_received(payload, batches)
             else:
                 settle_tool_boundary_records(session_id, batches, False)
 
@@ -576,6 +642,7 @@ def main(exit_guard=False):
             if mod and not str(payload.get("agent_id") or "").strip():
                 session_id = payload.get("session_id")
                 owed = []
+                note_turn_tool(payload)
                 settle_stop_records(payload)
 
                 def owed_context():
@@ -588,13 +655,17 @@ def main(exit_guard=False):
                     owed.extend(batches)
                     return text
 
+                shown = None
                 try:
-                    mod.emit_peer_context({"harness": "claude", "session_id": session_id},
-                                          event, extra_context=owed_context,
-                                          native_delivery=True, deadline=_deadline(), stream=out)
+                    shown = mod.emit_peer_context({"harness": "claude", "session_id": session_id},
+                                                  event, extra_context=owed_context,
+                                                  native_delivery=True, deadline=_deadline(),
+                                                  stream=out)
                 finally:
                     if owed:
                         settle_tool_boundary_records(session_id, owed, out.flushed)
+                    if out.flushed:
+                        note_turn_received(payload, owed, _peer_items(shown))
     elif mode == "stop":
         handle_stop(payload, out)
     elif mode == "prompt":
@@ -605,6 +676,11 @@ def main(exit_guard=False):
         except Exception:
             pass
         prompt = payload.get("prompt") or ""
+        with contextlib.suppress(Exception):
+            turn = _turn(payload)
+            peer = _carrier().peer_report_item(prompt, turn[0], "claude") if turn else None
+            if peer:
+                note_turn_received(payload, [], [peer])
         mod = _peer_message_module()
         guidance = ""
         if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
@@ -630,9 +706,12 @@ def main(exit_guard=False):
             return "\n".join(filter(None, [sweep, guidance]))
 
         if mod:
-            mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
-                                  "UserPromptSubmit", extra_context=extra_context,
-                                  native_delivery=True, deadline=_deadline(), stream=out)
+            shown = mod.emit_peer_context(
+                {"harness": "claude", "session_id": payload.get("session_id")},
+                "UserPromptSubmit", extra_context=extra_context,
+                native_delivery=True, deadline=_deadline(), stream=out)
+            if out.flushed:
+                note_turn_received(payload, [], _peer_items(shown))
         else:
             extra = extra_context()
             if extra:
