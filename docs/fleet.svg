@@ -57,9 +57,7 @@
 <text x="333" y="144" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="414" y="144" textLength="126" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ route 1 ⠏1 │</text>
 <text x="549" y="144" textLength="117" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">◑ to answer 1</text>
-<text x="675" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="693" y="144" textLength="351" lengthAdjust="spacing" fill="#858689" xml:space="preserve">52m ago ✓ Fix the pagination off-by-one</text>
-<text x="1053" y="144" textLength="378" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
+<text x="675" y="144" textLength="756" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
 <text x="9" y="162" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">ROUTES</text>
 <text x="270" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
 <text x="333" y="162" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>

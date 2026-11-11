@@ -1390,6 +1390,10 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
     """
     documents = _get(snapshot, "project_status")
     documents = documents if isinstance(documents, Mapping) else {}
+    waits = _get(snapshot, "answer_waits")
+    raw_waits = _get(waits, "items", default=()) if isinstance(waits, Mapping) else ()
+    raw_by_id = {str(item.get("id")): item for item in raw_waits
+                 if isinstance(item, Mapping) and item.get("id") and not item.get("older")}
     cwds = {}
     for row in session_rows:
         cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
@@ -1413,6 +1417,22 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        question_lines = []
+        for question in questions:
+            if question.get("project") != name or question.get("older"):
+                continue
+            source = raw_by_id.get(str(question.get("id")))
+            value = source.get("question") if isinstance(source, Mapping) else None
+            if not isinstance(value, str) and isinstance(source, Mapping):
+                detail = source.get("detail")
+                listed = detail.get("questions") if isinstance(detail, Mapping) else None
+                value = (listed[0].get("question") if isinstance(listed, (list, tuple))
+                         and listed and isinstance(listed[0], Mapping) else None)
+            first = str(value or "").splitlines()[0:1]
+            if first and first[0].strip():
+                question_lines.append(first[0].strip()[:100])
+        if question_lines:
+            status["question_lines"] = question_lines[:3]
         if open_routes:
             by_state = route_state_counts(route for route in routes if route["repo"] == name)
             status.update({"routes_running": by_state["running"],

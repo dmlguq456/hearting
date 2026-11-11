@@ -170,7 +170,7 @@ def _status_file(folder):
 
 
 def find_documents(root, now=None, budget=SCAN_BUDGET):
-    """Status documents under ``root`` the convention names, plus the legacy research copies.
+    """Campaign and legacy cycle status documents; chronological research is not a board.
 
     Campaign pages use cached filenames, including edits in an old campaign folder.
     Legacy cycles are scanned only in campaigns changed within ``RECENT_DAYS`` days;
@@ -180,8 +180,6 @@ def find_documents(root, now=None, budget=SCAN_BUDGET):
     since = now - RECENT_DAYS * 86400
     started = time.monotonic()
     found = []
-    for folder in _subdirs(os.path.join(root, "research")):
-        found.append(_status_file(folder))
     campaigns = []
     for campaign in _subdirs(os.path.join(root, "campaigns")):
         mtime = _mtime(campaign)
