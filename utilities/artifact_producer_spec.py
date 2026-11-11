@@ -372,14 +372,41 @@ _VERIFIED_REVISIONS_LOCK = threading.Lock()
 # unchanged is not walked again; the next pass observes it afresh.
 
 
+def _stored_sources(record: Any) -> Dict[str, Tuple[str, str]]:
+    """Logical path -> (provider revision, source path) for files stored elsewhere.
+
+    Storage schema 2 keeps an unchanged file in the earlier revision that first
+    held its bytes (``stored_in``); schema 1 named the provider only.
+    """
+    stored = record.get("stored_in") if isinstance(record, dict) else None
+    result = {}
+    for name, value in (stored or {}).items() if isinstance(stored, dict) else ():
+        if isinstance(value, dict):
+            provider, source = value.get("revision_id"), value.get("source_path")
+        else:
+            provider, source = value, name
+        if isinstance(provider, str) and isinstance(source, str):
+            result[name] = (provider, source)
+    return result
+
+
 def _revision_tree_signature(directory: Path) -> str:
-    """Stat identity of every entry beneath one revision directory."""
+    """Stat identity of every entry beneath one revision directory.
+
+    Files the revision stores in an earlier revision are part of its identity
+    too, so a rewrite of a provider's bytes is never recognised as unchanged.
+    """
     prefix = len(str(directory)) + 1
     rows = []
     for path in _walk_files(directory):
         info = os.lstat(path)
         rows.append((str(path)[prefix:], info.st_mode, info.st_dev, info.st_ino,
                      info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    record = _read_json(directory / REVISION_RECORD_NAME)
+    for name, (provider, source) in sorted(_stored_sources(record).items()):
+        info = os.lstat(directory.parent / provider / source)
+        rows.append(("stored:" + name, provider, source, info.st_mode, info.st_dev,
+                     info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
     return hashlib.sha256(repr(rows).encode("utf-8")).hexdigest()
 
 
@@ -395,17 +422,21 @@ class _VerifiedRevisionTree(_MappingABC):
     never receives bytes the revision's inventory does not name.
     """
 
-    def __init__(self, directory: Path, revision_id: str, rows: Sequence[Mapping[str, Any]]):
+    def __init__(self, directory: Path, revision_id: str, rows: Sequence[Mapping[str, Any]],
+                 record: Any = None):
         self._directory = directory
         self._revision_id = revision_id
         self._rows = {row["path"]: row for row in rows}
+        self._sources = _stored_sources(record)
         self._bytes: Dict[str, bytes] = {}
 
     def __getitem__(self, path: str) -> bytes:
         row = self._rows[path]
         data = self._bytes.get(path)
         if data is None:
-            target = self._directory / path
+            provider, source = self._sources.get(path, (None, path))
+            target = (self._directory.parent / provider / source if provider
+                      else self._directory / path)
             try:
                 if target.is_symlink() or not target.is_file():
                     raise ProducerError("shared-revision-integrity", self._revision_id)
@@ -495,7 +526,7 @@ def _verified_shared_spec_lazy(root: Path, ref_id: str, revision_id: str):
     tree, inventory, record = _verified_shared_revision(root, ref_id, revision_id)
     if tree is None:
         directory = root / "shared/spec" / ref_id / "revisions" / revision_id
-        tree = _VerifiedRevisionTree(directory, revision_id, inventory)
+        tree = _VerifiedRevisionTree(directory, revision_id, inventory, record)
     return tree, record
 
 

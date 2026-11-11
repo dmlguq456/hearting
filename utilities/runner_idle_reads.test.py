@@ -61,12 +61,17 @@ class SharedRevisionReads(unittest.TestCase):
         return reads, mock.patch.object(Path, "read_bytes", read_bytes)
 
     def test_unchanged_revision_is_not_read_again_and_a_rewrite_is_seen(self):
-        reads, patch = self.count_tree_reads()
-        with patch:
+        proofs = []
+        original = spec._verified_shared_spec
+
+        def verify(*args):
+            proofs.append(args)
+            return original(*args)
+        with mock.patch.object(spec, "_verified_shared_spec", verify):
             first, record = spec._verified_shared_spec_record(self.root, REF, REV)
-            self.assertEqual(len(reads), len(self.files))
+            self.assertEqual(len(proofs), 1)
             second, again = spec._verified_shared_spec_record(self.root, REF, REV)
-            self.assertEqual(len(reads), len(self.files), "a proven revision is not re-read")
+            self.assertEqual(len(proofs), 1, "a proven revision is not re-read")
         self.assertEqual(first, second)
         self.assertEqual(first, spec._spec_inventory(self.files))
         self.assertEqual(record, again)
@@ -118,6 +123,29 @@ class SharedRevisionReads(unittest.TestCase):
             with self.assertRaises(spec.ProducerError) as caught:
                 tree["b/prd.md"]
         self.assertEqual(caught.exception.code, "shared-revision-integrity")
+
+    def test_file_stored_in_an_earlier_revision_is_read_and_tracked(self):
+        later = "rrev_" + "3" * 32
+        directory = self.root / "shared/spec" / REF / "revisions" / later
+        (directory / "a").mkdir(parents=True)
+        files = {"a/prd.md": b"# A2\n", "b/prd.md": self.files["b/prd.md"]}
+        (directory / "a/prd.md").write_bytes(files["a/prd.md"])
+        rows = spec._spec_inventory(files)
+        record = {"shared_reference_id": REF, "shared_reference_revision_id": later,
+                  "schema_version": 2, "files": rows,
+                  "content_digest": spec._spec_inventory_digest(rows),
+                  "stored_in": {"b/prd.md": {"revision_id": REV, "source_path": "b/prd.md"}}}
+        (directory / producer_store.REVISION_RECORD_NAME).write_text(json.dumps(record))
+        (self.root / "shared/spec" / REF / "reference.json").write_text(json.dumps(
+            {"shared_reference_id": REF, "revisions": [REV, later]}))
+        spec._verified_shared_spec_record(self.root, REF, later)
+        tree, _record = spec._verified_shared_spec_lazy(self.root, REF, later)
+        self.assertEqual(dict(tree), files)
+        # Rewriting the provider's bytes changes the later revision's identity.
+        provider = self.directory / "b/prd.md"
+        provider.write_bytes(b"# Z\n")
+        with self.assertRaises(spec.ProducerError):
+            spec._verified_shared_spec_record(self.root, REF, later)
 
     def test_unverified_revision_returns_the_full_tree(self):
         tree, record = spec._verified_shared_spec_lazy(self.root, REF, REV)
