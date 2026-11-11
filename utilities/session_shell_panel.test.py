@@ -135,7 +135,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['[e9] project (topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','── ⏳ route 6','ROUTE_0','ROUTE_4','+1 more','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['[e9] project (topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','── route 6','ROUTE_0','ROUTE_4','+1 more','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  assert(!idle.some(s=>s.includes('ROUTE_5')));assert(/^└─+┘$/.test(idle.at(-1)));
  assert(idle.at(-2).includes('7d 60%'),'quota is the last row');
@@ -213,7 +213,7 @@ const paint=(model,width,height,extra={})=>{const r=view.render({width,height,si
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
 // Twelve current routes, eight kept rows: the head and `+N more` count all twelve.
 const twelve={...base,routes:Array.from({length:8},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:8,route_total:12};
-let r=paint(twelve,40,30);assert(r.plain.some(s=>s.includes('⏳ route 12')),r.plain.join('\n'));
+let r=paint(twelve,40,30);assert(r.plain.some(s=>s.includes('route 12')),r.plain.join('\n'));
 assert(r.plain.some(s=>s.includes('+7 more')),r.plain.join('\n'));
 // Fewer rows: the rows shown plus `+N more` are always the whole count.
 const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
@@ -257,12 +257,20 @@ for(let height=10;height<=22;height++){
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet import session_panel
         rows = [{"id": "rt-" + str(i), "title": "ROUTE", "state": "working", "marker": "working"} for i in range(8)]
-        values = {"harness": "opencode", "route_label": "⏳ route 12 ⠏12", "mcp": {"total": 3, "connected": 2, "failed": 1}}
+        values = {"harness": "opencode", "route_label": "route 12 ⠏12", "mcp": {"total": 3, "connected": 2, "failed": 1}}
         panel = session_panel.presentation(values, {"route_panels": {"opencode\0s": rows}}, "opencode", "s", 40)
         self.assertEqual((panel["route_count"], panel["route_total"]), (8, 12))
         self.assertEqual("".join(text for text, _key in panel["mcp"]), "MCP 2/3")
         panel = session_panel.presentation({"harness": "codex"}, {"route_panels": {"codex\0s": rows[:2]}}, "codex", "s", 40)
         self.assertEqual((panel["route_count"], panel["route_total"], panel["mcp"]), (2, None, []))
+        # A label an earlier release left in the shared cache still gives its whole count,
+        # and is drawn without the hourglass it carried.
+        from fleet import session_line
+        old = {"harness": "claude", "route_label": "⏳ route 12 ⠏12"}
+        panel = session_panel.presentation(old, {"route_panels": {"claude\0s": rows}}, "claude", "s", 40)
+        self.assertEqual((panel["route_count"], panel["route_total"], panel["route_label"]), (8, 12, "route 12 ⠏12"))
+        self.assertEqual(session_line.route_badge("⏳ route 12 ⠏12", rows, [("working", False)] * 12), "route 12 ⠏12")
+        self.assertNotIn("⏳", "".join(text for row in session_line.status_lines(old, 80) for text, _key in row))
 
     def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
         script = r'''

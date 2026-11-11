@@ -18,7 +18,7 @@ class CommonSessionLineTest(unittest.TestCase):
             with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": language}):
                 text = "".join(part for part, _key in line_segments(self.sample(), 240))
                 self.assertIn(words, text)
-                self.assertIn("context ", text); self.assertIn("⏳ route 2", text)
+                self.assertIn("context ", text); self.assertIn("route 2", text)
 
     def test_time_left_and_elapsed_use_fleets_spaced_form(self):
         import time
@@ -31,15 +31,15 @@ class CommonSessionLineTest(unittest.TestCase):
         return {"harness": "codex", "tag": "52", "state": "idle", "cwd": "/synthetic/hearting",
                 "title": "Synthetic session", "branch": "feature", "ctx_pct": 37,
                 "model": "sol", "effort": "xhigh", "weekly_pct": 60,
-                "route_label": "⏳ route 2 · impl-review, plan-check", "answer_wait": 3}
+                "route_label": "route 2 · impl-review, plan-check", "answer_wait": 3}
 
     def test_wide_line_uses_the_approved_order_and_weekly_quota(self):
         text = "".join(part for part, _key in line_segments(self.sample(), 240))
         # Spec 2026-11-11 rule 10: [number] project (git) │ model effort │ context │ wait │ route │ quota.
-        fields = ("[52] hearting", "(feature)", "sol xhigh", "context ━━━━────── 37%", "◑답 대기 3", "⏳ route 2", "7d 60%")
+        fields = ("[52] hearting", "(feature)", "sol xhigh", "context ━━━━────── 37%", "◑답 대기 3", "route 2", "7d 60%")
         positions = [text.index(field) for field in fields]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn(" │ ", text); self.assertNotIn(" · ", text.replace("⏳ route 2 · impl-review", ""))
+        self.assertIn(" │ ", text); self.assertNotIn(" · ", text.replace("route 2 · impl-review", ""))
         self.assertNotIn("📁", text); self.assertNotIn("⎇", text); self.assertNotIn("Synthetic session", text)
         self.assertNotIn("› 나", text)
 
@@ -50,7 +50,7 @@ class CommonSessionLineTest(unittest.TestCase):
             with self.subTest(width=width):
                 text = "".join(part for part, _key in line_segments(sample, width))
                 self.assertLessEqual(cell_width(text), width)
-                for value in ("37%", "7d 60%", "⏳ route 2"):
+                for value in ("37%", "7d 60%", "route 2"):
                     self.assertIn(value, text)
                 self.assertTrue("◑답 대기 3" in text or "◑ 3" in text, text)
 
@@ -144,16 +144,16 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
         self.assertTrue(d["closed"])
         # Fleet's judgment: an owner waiting on its worker is ●, a closed route is in no count.
-        self.assertEqual(session_line.route_badge("⏳ route 4 · execute", panels["claude\0s"]), "⏳ route 4 ⠏1 ●1 ✕1")
+        self.assertEqual(session_line.route_badge("route 4 · execute", panels["claude\0s"]), "route 4 ⠏1 ●1 ✕1")
         self.assertEqual(session_line.token_text(250_136), "250K")
         # Without its rows the count stays alone; a missing label stays empty.
-        self.assertEqual(session_line.route_badge("⏳ route 3 · execute", None), "⏳ route 3")
+        self.assertEqual(session_line.route_badge("route 3 · execute", None), "route 3")
         self.assertEqual(session_line.route_badge("", panels["claude\0s"]), "")
         # Past the panel's eight kept rows the pass's own markers of every current route count.
         markers = [("working", False)] * 7 + [("idle", False)] * 3 + [("dead", False), ("dead", True)]
-        self.assertEqual(session_line.route_badge("⏳ route 12", panels["claude\0s"][:2], markers),
-                         "⏳ route 12 ⠏7 ●3 ✕1")
-        self.assertEqual(session_line.route_badge("⏳ route 12", panels["claude\0s"]), "⏳ route 12")
+        self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"][:2], markers),
+                         "route 12 ⠏7 ●3 ✕1")
+        self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"]), "route 12")
 
     def test_messages_are_the_latest_three_peer_rows_either_way(self):
         from tools.fleet.session_line import peer_message_rows

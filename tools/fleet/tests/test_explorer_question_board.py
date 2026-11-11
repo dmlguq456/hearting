@@ -196,7 +196,7 @@ class NoResponseRoutes(unittest.TestCase):
         self.assertIn("no response", "\n".join(table))
         self.assertIn("0 open · no response 1 · 0 stopped", table[-1])
         overview = _text(vm, NavState(), 140)
-        self.assertIn("⏳ route 0 │ no response 1", overview[-1])
+        self.assertIn("route 0 │ no response 1", overview[-1])
 
 
 class MessageQuestions(unittest.TestCase):

@@ -542,7 +542,7 @@ for ms in $S_MS; do
   lbl="${ms%%:*}"; pv="${ms##*:}"
   [ -n "$lbl" ] && [ "$pv" -ge 0 ] 2>/dev/null && u="${u} $(mcol "$lbl")${lbl}${RST} $(pcol "$pv")${pv}%${RST}"
 done
-# [tag] project (git) │ model effort │ context │ ◑답 대기 │ ⏳ route │ 5h 7d
+# [tag] project (git) │ model effort │ context │ ◑답 대기 │ route │ 5h 7d
 for s in "$mseg" "$cseg" "$wseg" "$rseg" "${u# }"; do [ -n "$s" ] && segs_arr+=("$s"); done
 
 # join with 세로선 파티션

@@ -16,7 +16,7 @@ AGE_W = 6
 TITLE_MIN = 8              # a folded row always keeps this much of what it is (its title)
 TOOL_W = 14                # ``>_ apply_patch``: the open tool on a route row
 # The words the Claude statusline and the session shell use for the same values (규격 2026-11-11).
-ROUTE_WORD = "⏳ route"
+ROUTE_WORD = "route"
 ANSWER_WAIT_WORDS = {"ko": "◑답 대기", "en": "◑ to answer"}
 
 
@@ -98,10 +98,10 @@ BUNDLE_SEP = " │ "
 
 
 def route_count_segment(status):
-    """``⏳ route 3 ⠏2 ✕1``: the project's current routes and how many run or stopped.
+    """``route 3 ⠏2 ✕1``: the project's current routes and how many run or stopped.
 
     The by-state counts appear only when the status carries them; a bare count stays
-    ``⏳ route N`` and no zero is drawn."""
+    ``route N`` and no zero is drawn."""
     text = f"{ROUTE_WORD} {int(status['routes'])}"
     for key, glyph in (("routes_running", "⠏"), ("routes_waiting", "●"),
                        ("routes_stopped", "✕")):
@@ -342,7 +342,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 branch = session.get("branch")
                 tail = " (%s)" % _clip(str(branch), 12) if branch not in (None, "") else ""
                 route_count = current_routes.get(tag, 0)
-                route_tail = f" ⏳ {route_count}" if route_count and state.opened != tag else ""
+                route_tail = f" {ROUTE_WORD} {route_count}" if route_count and state.opened != tag else ""
                 # Current work remains visible while the session is folded.
                 # Reserve its cells before a long CJK title or branch is drawn.
                 if route_tail:

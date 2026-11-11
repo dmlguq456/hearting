@@ -1,7 +1,7 @@
 """Bounded shell presentation of Fleet-owned facts, never input authority."""
 import re
 from .config import ui_text
-from .session_line import status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
+from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
 from .token_budget import compaction_imminent
 
@@ -340,8 +340,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     # The producer's count is the session's whole current-route count; the panel
     # keeps at most eight rows, so the kept current rows are counted apart from it.
     current, total = len(routes), None
-    import re
-    match = re.match(r"⏳ route (\d+)", values.get("route_label") or "")
+    from .session_line import ROUTE_LABEL
+    match = ROUTE_LABEL.match(values.get("route_label") or "")
     if match:
         total = int(match.group(1))
         current = min(len(routes), total)
@@ -361,7 +361,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
-            "route_label": values.get("route_label") or "",
+            "route_label": route_text(values.get("route_label") or ""),
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
             "session": session_status(values, max(20, columns - 4)),

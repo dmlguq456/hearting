@@ -98,8 +98,8 @@ class BlinkAssertions(unittest.TestCase):
             self.assertFalse(render._HUE_OF[dim][1] & render._A_BOLD, (y, x, dim))
 
 
-# ``⏳`` is two cells wide; the grid's continuation cell reads as ``\0`` in the joined line.
-ROUTE_TAIL = "⏳" + ("\0" if __import__("tools.fleet.explorer.grid", fromlist=["cell_width"]).cell_width("⏳") == 2 else "") + " 1"
+# The folded session's route count, in the statusline word.
+ROUTE_TAIL = "route 1"
 
 
 class SessionRouteCountTests(BlinkAssertions):
@@ -119,9 +119,9 @@ class SessionRouteCountTests(BlinkAssertions):
                         # Include wide-character continuation cells when locating
                         # the suffix after a clipped CJK title.
                         lines = ["".join(cell[0] or "\0" for cell in row) for row in on.cells]
-                        # The folded session's title tail is ``⏳ N`` (the statusline word).
+                        # The folded session's title tail is ``route N`` (the statusline word).
                         badge = [(y, line.index(ROUTE_TAIL)) for y, line in enumerate(lines)
-                                 if ROUTE_TAIL in line]
+                                 if ROUTE_TAIL in line and "[c1]" in line]
                         if not current:
                             self.assertFalse(badge)
                             self.assert_structure(on, off)
@@ -145,8 +145,8 @@ class SessionRouteCountTests(BlinkAssertions):
                         adjusted = replace(on, cells=tuple(tuple(row) for row in masked))
                         self.assert_structure(adjusted, off)
                         expanded = draw(vm, NavState(opened="c1"), cols, 45, beat=1)
-                        self.assertNotIn(ROUTE_TAIL, "\n".join(
-                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells))
+                        self.assertNotIn(ROUTE_TAIL, "\n".join(line for line in (
+                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells) if "[c1]" in line))
 
 
 class StagePhaseTests(BlinkAssertions):

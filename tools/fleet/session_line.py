@@ -1,6 +1,7 @@
 """Compact session line sharing Fleet's values, glyphs and semantic style keys."""
 from __future__ import annotations
 import math
+import re
 import time
 from .explorer.grid import cell_width, clip_cells
 from .model import project_of
@@ -86,7 +87,7 @@ def effort_label(effort):
 
 
 def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
-    """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ ⏳ route N │ 5h … 7d …``.
+    """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ route N │ 5h … 7d …``.
 
     Shorten words before losing a known count; never invent an unknown value.
     ``fields`` keeps only the named groups that carry a value, for a surface
@@ -149,11 +150,9 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     if count is None or isinstance(count, int) and not isinstance(count, bool) and count > 0:
         number = str(count) if count is not None else "?"
         fixed("wait", answer_wait_word() + " " + number, "g_blocked", short=_LIVE_GLYPH["blocked"] + " " + number)
-    route = _text(values.get("route_label"), "")
+    route = route_text(_text(values.get("route_label"), ""))
     if route:
-        count = route.split(" ", 2)
-        count = " ".join(count[:3]) if route.startswith("⏳ route ") else route
-        words("route", route, "g_idle", 256, 3, minimum=cell_width(count))
+        words("route", route, "g_idle", 256, 3, minimum=cell_width(route))
     windows = values.get("quota_windows") or [("7d", values.get("weekly_pct"), None)]
     if reported_only:
         windows = [window for window in windows if _percent(window[1]) != "?"]
@@ -578,16 +577,26 @@ def route_glyph(marker):
 _GLYPH_STATES = frozenset(("working", "idle", "blocked", "dead", "done", "stale"))
 
 
-def route_badge(label, panels, markers=None):
-    """``⏳ route 3 ⠏2 ✕1``: the route count with Fleet's running/waiting/stopped counts.
+# The producer's route label, ``route N …``. An earlier release wrote it with a
+# leading ``⏳ ``, and a shared cache may still hold that until it is rewritten.
+ROUTE_LABEL = re.compile(r"(?:⏳ )?route (\d+)")
 
-    ``label`` is the producer's own ``⏳ route N`` reading; its first N panel
+
+def route_text(label):
+    """The route label as drawn now: an earlier ``⏳ route …`` without its hourglass."""
+    return label[2:] if isinstance(label, str) and label.startswith("⏳ route ") else label
+
+
+def route_badge(label, panels, markers=None):
+    """``route 3 ⠏2 ✕1``: the route count with Fleet's running/waiting/stopped counts.
+
+    ``label`` is the producer's own ``route N`` reading (an earlier release's
+    ``⏳ route N`` still reads, and is written back without it); its first N panel
     rows are those current routes. ``markers`` are the (marker, closed) pairs of
     all N current routes from the same pass, so a count past the panel's kept
     rows is still tallied. Without every marker the count stays alone.
     """
-    import re
-    match = re.match(r"⏳ route (\d+)", label or "")
+    match = ROUTE_LABEL.match(label or "")
     if not match:
         return label or ""
     count = int(match.group(1))
@@ -595,9 +604,9 @@ def route_badge(label, panels, markers=None):
         rows = [row for row in (panels or ())[:count] if isinstance(row, dict) and row.get("marker")]
         markers = [(row["marker"], bool(row.get("closed"))) for row in rows]
     if len(markers) != count:
-        return "⏳ route " + str(count)
+        return "route " + str(count)
     tally = route_tally(markers)
-    return " ".join(["⏳ route " + str(count)] + [glyph + str(tally[name]) for name, glyph in _TALLY if tally[name]])
+    return " ".join(["route " + str(count)] + [glyph + str(tally[name]) for name, glyph in _TALLY if tally[name]])
 
 
 def _number(value):

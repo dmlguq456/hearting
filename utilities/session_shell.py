@@ -956,13 +956,13 @@ def _block_action(binding, request):
                 "status", "--route", route, "--json"], capture_output=True, text=True, timeout=10)
             try:
                 value = json.loads(run.stdout)
-                lines.append("⏳ " + _plain(value.get("capability") or "route") + " · "
+                lines.append(_plain(value.get("capability") or "route") + " · "
                              + _plain(value.get("derived_workflow_state") or value.get("workflow_state") or "?"))
                 for name, node in (value.get("nodes") or {}).items():
                     lines.append("  " + _plain(name) + " · " + _plain(node.get("state") or "?"))
             except ValueError:
-                lines.append("⏳ ?")
-        return {"ok": True, "lines": lines or ["⏳ ·"]}
+                lines.append("?")
+        return {"ok": True, "lines": lines or ["·"]}
     return {"ok": False, "reason": "unknown-action"}
 
 

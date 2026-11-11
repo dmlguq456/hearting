@@ -211,7 +211,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='action-display'||cfg.scenario==='answer-display'){
    await rpc(cfg.inlet,{batch:Buffer.from(cfg.scenario==='answer-display'?'\x1d1\r':'\x1dw').toString('base64')});
    await existing(cfg.actionReady);
-   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='⏳ route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));value.observed_at=Date.now()/1000;value.route_status['claude\0'+cfg.sid]='route 1 · DURING_ACTION';value.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(/DURING_ACTION/);
    const gate=fs.openSync(cfg.actionGate,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);fs.writeSync(gate,Buffer.from('1'));fs.closeSync(gate);
@@ -236,7 +236,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    let row;
    for(let y=0;y<sideTerm.rows;y++){
      const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
-     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('⏳'))row={x:x+2,y:y+1};
+     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('── route'))row={x:x+2,y:y+1};
    }
    if(!row)throw Error('route row absent');
    for(const marker of [/\+2 agent/,/ROUTE_PAGE/]){
@@ -252,8 +252,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    for(let y=0;y<sideTerm.rows;y++){
      const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
      // The route section's heading opens the evidence pages; its rows open in place.
-     if(!line?.translateToString().includes('⏳ route 1'))continue;
-     for(let x=0;x<sideTerm.cols;x++)if(line.getCell(x)?.getChars()==='⏳')point={x:x+1,y:y+1};
+     if(!line?.translateToString().includes('── route 1'))continue;
+     let s='';for(let x=0;x<sideTerm.cols;x++){const c=line.getCell(x);if(!c||!c.getWidth())continue;s+=c.getChars()||' ';if(s.endsWith('── r'))point={x:x+1,y:y+1};}
    }
    }
    if(!point)throw Error('route detail target absent\n'+Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()).join('\n'));
@@ -266,7 +266,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='display')await waitFor(/── route 0 /);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
-   const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='⏳ route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
+   const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }

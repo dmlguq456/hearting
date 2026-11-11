@@ -217,7 +217,7 @@ class SessionShellTest(unittest.TestCase):
         observed = {"harness": "claude", "cwd": "/synthetic/hearting", "title": "Common title",
                     "branch": "feature", "ctx_pct": 37, "model": "claude-opus", "effort": "high", "weekly_pct": 60}
         with ExitStack() as patches:
-            patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=((2, 1), "⏳ route 2")))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=((2, 1), "route 2")))
             patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value={"items": [], "by_session": {("claude", row["sid"]): ["wait-one"]}}))
             patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "known", "human": {"at": 123, "text": "A real person's private draft"}, "received": []}))
             patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
@@ -227,7 +227,7 @@ class SessionShellTest(unittest.TestCase):
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
         # Spec 2026-11-11 rule 10: the session title is the panel's, not the line's.
         from fleet.session_line import answer_wait_word   # the screen language's words
-        fields = ("[52] hearting", "(feature)", "claude-opus high", "context ━━━━────── 37%", answer_wait_word() + " 2", "⏳ route 2", "7d 60%")
+        fields = ("[52] hearting", "(feature)", "claude-opus high", "context ━━━━────── 37%", answer_wait_word() + " 2", "route 2", "7d 60%")
         for field in fields:
             self.assertIn(field, text)
         self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))

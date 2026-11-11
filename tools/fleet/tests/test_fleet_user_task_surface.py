@@ -466,12 +466,12 @@ class ContractProjectionTests(unittest.TestCase):
             with self.subTest(cols=cols):
                 state = NavState(view="OVERVIEW")
                 frame = draw(vm, state, cols, 45)
-                self.assertIn("⏳ 1", "\n".join(frame.text_rows()))
+                self.assertIn("route 1", "\n".join(row for row in frame.text_rows() if "[p1]" in row))
                 hit = next(h for h in frame.hits if h.action == ("fold", "sopen:OVERVIEW", "p1"))
                 opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                 self.assertEqual(opened.opened, "p1")
         history = replace(vm, routes=tuple(dict(row, current=False, state="done") for row in vm.routes))
-        self.assertNotIn("⏳ 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
+        self.assertNotIn("route 1", "\n".join(row for row in draw(history, NavState(), 180, 45).text_rows() if "[p1]" in row))
 
     def test_older_questions_never_light_current_session_marker(self):
         snapshot = self.route_snapshot()

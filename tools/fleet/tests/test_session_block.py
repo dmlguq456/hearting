@@ -39,7 +39,7 @@ class SessionBlockTest(unittest.TestCase):
         board=[dict(id='exact-wait',questions=[dict(id='q1',question='Include 2025?',choices=['Yes','No'],recommended=0)])]
         for rows in (12,24,50):
             lines=block_lines(self.values(),columns=100,rows=rows,questions=board,
-                              route='⏳ route 1 · draft',received=['✉ [73] ready'],human='› 2m · hello')
+                              route='route 1 · draft',received=['✉ [73] ready'],human='› 2m · hello')
             self.assertTrue(1<=len(lines)<=10)
             text=[''.join(part for part,_ in line) for line in lines]
             self.assertIn('Include 2025?', '\n'.join(text))
@@ -59,7 +59,7 @@ class SessionBlockTest(unittest.TestCase):
         from tools.fleet.session_block import block_lines
         for harness in ('claude','codex','opencode'):
             text='\n'.join(''.join(t for t,_ in row) for row in block_lines(
-                {**self.values(),'harness':harness},columns=180,rows=50,route='⏳ route 1 · draft',human='› 1m · hello'))
+                {**self.values(),'harness':harness},columns=180,rows=50,route='route 1 · draft',human='› 1m · hello'))
             self.assertEqual('context ' in text,harness!='claude')
             self.assertEqual('[52] project' in text,harness!='claude')
             self.assertIn('route 1',text);self.assertIn('› 1m · hello',text)
@@ -75,8 +75,8 @@ class SessionBlockTest(unittest.TestCase):
         from tools.fleet.session_block import block_lines
         board=[{'questions':[{'question':'Keep this question?','choices':['Yes','No']}]}]
         text='\n'.join(''.join(t for t,_ in row) for row in block_lines(
-            {**self.values(),'native_route':'⏳ route 1 · draft','native_wait':1},
-            columns=180,rows=50,questions=board,route='⏳ route 1 · draft'))
+            {**self.values(),'native_route':'route 1 · draft','native_wait':1},
+            columns=180,rows=50,questions=board,route='route 1 · draft'))
         self.assertIn('Keep this question?',text)
         self.assertNotIn('⏳',text);self.assertNotIn('◑',text)
 

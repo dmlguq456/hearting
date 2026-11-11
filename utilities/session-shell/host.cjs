@@ -483,7 +483,7 @@ function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
   const joined=parts=>(Array.isArray(parts)?parts:[]).map(part=>String(part.text)).join('').trim();
   const rows=[joined(panelModel.head),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
-    String(panelModel.wait||''),panelModel.route_count?'⏳ route '+panelModel.route_count:''].filter(Boolean);
+    String(panelModel.wait||''),panelModel.route_count?'route '+panelModel.route_count:''].filter(Boolean);
   const squeeze=s=>s.replace(/\s+/g,'');
   return rows.length>0&&rows.every(text=>paintedCommon.some(row=>squeeze(row).includes(squeeze(text))));
 }

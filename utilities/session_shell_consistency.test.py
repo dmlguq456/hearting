@@ -23,7 +23,7 @@ const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 
 assert.equal(seen,null,'an unknown native reading claims nothing');
 const numeric=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · 5h ? · 7d ?'],'exact');
 assert.deepEqual(numeric,{sid:'exact',percent:42},'quota must not replace the observed model');
-const full=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · Opus high · 5h ? · 7d ? · ⏳ route 1 · plan · ◑ 1'],'exact');
+const full=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · Opus high · 5h ? · 7d ? · route 1 · plan · ◑ 1'],'exact');
 assert.deepEqual(full,{sid:'exact',percent:42,model:'Opus',effort:'high'},'route, wait and quota stay with the panel');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
@@ -215,7 +215,7 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
  if(question){assert(text.includes('│ Choose the destination'),state+' inner padding');}
- if(state!=='start')assert(text.includes('⏳ route 1')&&text.includes('Current task'),state+' route row missing');
+ if(state!=='start')assert(text.includes('route 1')&&text.includes('Current task'),state+' route row missing');
  else assert(text.includes('── route 0 '),state+' known-empty route list');
 }
 '''

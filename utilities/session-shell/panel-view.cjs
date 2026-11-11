@@ -277,7 +277,7 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     };
     // No rows yet: the producer's own label stands alone; a known empty list says `route 0`.
     const label=clean(model.route_label||'').trim();
-    const routeHead=shown.length?{parts:rule([text('⏳ route '+total,'g_idle')]),action:'route'}:
+    const routeHead=shown.length?{parts:rule([text('route '+total,'g_idle')]),action:'route'}:
       label?{parts:rule([text(label,'g_idle')]),action:'route'}:model.routes_known?{parts:rule([text('route 0')])}:null;
     const messageHead=messageRows.length?{parts:rule([text('messages')])}:null;
     // A press in the panel opens a route's question; the editor keeps its budget.

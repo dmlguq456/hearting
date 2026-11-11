@@ -137,7 +137,7 @@ or route binding; configured defaults never masquerade as observed selection.
 An official startup callback's active-model field may travel with its existing
 birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
-The route section has no box: a titled rule (`── ⏳ route N ──`) above and a
+The route section has no box: a titled rule (`── route N ──`) above and a
 rule below, shared with the messages section when both show. Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker
 and judgment (`⠏` working, `●` waiting on a worker or a person, `✕` stopped,
@@ -150,7 +150,7 @@ elapsed time on the row whatever the setting. Pressing a row opens it in place
 stages, `>_ tool` while working, `+N agent`) and pressing it again folds it.
 More than five routes end in `+N more`, which opens Fleet. The count is the
 producer's whole current-route count, not the rows the cache keeps (at most
-eight) or the rows shown: the heading says `⏳ route N` for all N, and the rows
+eight) or the rows shown: the heading says `route N` for all N, and the rows
 shown plus `+N more` always add up to N, also when rows run short and the last
 kept row turns into `+N more`. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
@@ -158,7 +158,7 @@ Fleet's own route records from that pass and adds each row's marker and the
 values of who does the work now (the working worker of the shown stage, else
 the owner: harness, display model, effort, context, tool, active sub-agents)
 plus an absolute start time, and counts running, waiting and stopped routes
-into the statusline label (`⏳ route 3 ⠏2 ✕1`) by Fleet's own rule, over every
+into the statusline label (`route 3 ⠏2 ✕1`) by Fleet's own rule, over every
 current route of that pass rather than the kept rows; a route
 its supervisor closed is in neither count. Context is Fleet's own gauge
 percent, else tokens over a known window, else the exact token count
@@ -278,7 +278,7 @@ waking a shell. Shell display and input transport add no model instructions.
 
 The common line (the collapsed panel row and Claude's statusline, inside and
 outside the shell) reads `[e9] hearting (main 🚧 3) │ Fable 5.2 xhigh │ context
-━━━━━━──── 58% │ ◑답 대기 1 │ ⏳ route 3 ⠏2 ✕1 │ 5h 12%(↻ 2h) 7d 66%(↻ 5d)`;
+━━━━━━──── 58% │ ◑답 대기 1 │ route 3 ⠏2 ✕1 │ 5h 12%(↻ 2h) 7d 66%(↻ 5d)`;
 Claude's second (`>_ running:`) and third (tidy notice) rows are unchanged.
 Narrow layouts shorten words before numeric values, routes and waits (the
 answer wait shortens to `◑ N`). Its title and guidance use Fleet's

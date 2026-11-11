@@ -4125,6 +4125,9 @@ def cached_statusline(harness, session_id):
     label = routes.get(key, "") if isinstance(routes, dict) else ""
     if not isinstance(label, str) or len(label) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in label):
         label = ""
+    # An earlier release wrote ``⏳ route N``; it reads as ``route N`` until rewritten.
+    if label.startswith("⏳ route "):
+        label = label[2:]
     return (total, count), label
 
 

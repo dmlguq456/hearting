@@ -119,8 +119,8 @@ console.log(JSON.stringify(out));'''
             # Wall clock: the row keeps an absolute start time and the panel ages it.
             labels, panels = shell_route_status(_snapshot(harness), include_details=True)
             # Fleet's own judgment: the staged route's owner waits on its worker (●).
-            self.assertEqual(set(labels.values()), {"⏳ route 2 ⠏1 ●1"})
-            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "⏳ route 2 ⠏1 ●1"},
+            self.assertEqual(set(labels.values()), {"route 2 ⠏1 ●1"})
+            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏1 ●1"},
                                                    {"route_panels": panels}, harness, "sid-main", 60)
             solo = next(route for route in presented["routes"] if route["id"] == "rt-solo")
             self.assertEqual(solo["owner"], "owner · codex (Opus 5.5·high)")
