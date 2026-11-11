@@ -343,16 +343,24 @@ class APaneKeepsTheServerItWasObservedOn(unittest.TestCase):
             tmux = live._session_pane({"tmux_pane": "%3", "tmux_server": "/tmp/t/b"}, {})
             default = live._session_pane({"tmux_pane": "%3", "tmux_server": ""}, {})
             delivered = live._session_pane({"session_id": "s1"}, {"s1": "w1:p9"})
-        self.assertEqual(herdr, {"pane": "w1:p2", "pane_server": "herdr:work"})
-        self.assertEqual(tmux, {"pane": "%3", "pane_server": "tmux:/tmp/t/b"})
-        self.assertEqual(default, {"pane": "%3", "pane_server": "tmux:"})
+        self.assertEqual(herdr, {"pane": "w1:p2", "pane_server": "herdr:work", "pane_from": "census"})
+        self.assertEqual(tmux, {"pane": "%3", "pane_server": "tmux:/tmp/t/b", "pane_from": "census"})
+        self.assertEqual(default, {"pane": "%3", "pane_server": "tmux:", "pane_from": "census"})
         # Known only from a delivered message: no server, so the press moves nothing.
-        self.assertEqual(delivered, {"pane": "w1:p9", "pane_server": None})
+        self.assertEqual(delivered, {"pane": "w1:p9", "pane_server": None, "pane_from": "peer"})
 
 
-def _pane_cell(source, current_map, *, merged=False):
-    """``build_view_model`` for one session and its question, the session's pane learnt from
-    ``source`` and, with ``current_map``, also seen as ``w1:p2`` by a current pane read."""
+PATHS = ("build", "pending-merge", "pending-merge-over-older-map")
+
+
+def _pane_cell(source, current_map, *, merged=False, path=None):
+    """One session and its question, published through ``path``, the session's pane learnt
+    from ``source`` and, with ``current_map``, also seen as ``w1:p2`` by a current pane read.
+
+    ``build`` composes the detail directly; ``pending-merge`` merges it later into a model
+    composed without it; ``pending-merge-over-older-map`` merges it into a model composed
+    with an older map that saw ``w1:p7``."""
+    path = path or ("pending-merge" if merged else "build")
     import copy
     from unittest import mock
     from tools.fleet.explorer import live
@@ -371,17 +379,21 @@ def _pane_cell(source, current_map, *, merged=False):
     if source == "peer":
         snapshot["peer_messages"] = {"records": [{"ts": "2026-11-11T00:00:00Z",
                                                   "to": {"session_id": sid, "pane": "w1:p2"}}]}
-    accepted = None
-    if current_map:
+
+    def pane_map(pane):
         key = FocusKey("codex", sid)
         request = FocusRequest(key, 1, 1, wants=("panes",),
                                bindings=tuple(live.detail_bindings(copy.deepcopy(snapshot)).items()))
-        accepted = ExplorerDetail(panes={sid: "w1:p2"}, results={"panes": FocusResult(
+        return ExplorerDetail(panes={sid: pane}, results={"panes": FocusResult(
             key, 1, 1, health=Health("success", 1001), request=request)})
+    accepted = pane_map("w1:p2") if current_map else None
     with mock.patch.object(live, "herdr_pane_server", return_value="herdr:work"):
-        if merged:                                    # the read arrives after the complete model
-            return live.selected_detail(live.build_view_model(snapshot, now=1002), accepted)
-        return live.build_view_model(snapshot, accepted_detail=accepted, now=1002)
+        if path == "build":
+            return live.build_view_model(snapshot, accepted_detail=accepted, now=1002)
+        older = pane_map("w1:p7") if path == "pending-merge-over-older-map" else None
+        # the read arrives after the complete model was published
+        return live.selected_detail(live.build_view_model(snapshot, accepted_detail=older, now=1002),
+                                    accepted)
 
 
 def _open_pane_requests(vm, state, cols=140):
@@ -414,10 +426,17 @@ class ASessionAndItsQuestionOpenTheSamePane(unittest.TestCase):
         ("census-tmux", True): ("%3", "tmux:/tmp/fixture/b"),
     }
 
-    def test_build_view_model_draw_and_press_agree_for_each_cell(self):
+    def test_every_publication_path_draw_and_press_agree_for_each_cell(self):
+        # A census pair is never replaced by the map (census-herdr's w1:p5 differs from the
+        # map's w1:p2); every path settles the same pair, and the question opens it too.
+        cells = 0
         for (source, current_map), (pane, server) in self.EXPECTED.items():
-            with self.subTest(source=source, current_map=current_map):
-                vm = _pane_cell(source, current_map)
+          for path in PATHS:
+            if path == "pending-merge-over-older-map" and not current_map:
+                continue                              # no new detail: nothing is merged
+            with self.subTest(source=source, current_map=current_map, path=path):
+                cells += 2
+                vm = _pane_cell(source, current_map, path=path)
                 row, question = vm.sessions[0], vm.questions[0]
                 self.assertEqual((row.get("pane"), row.get("pane_server")), (pane, server))
                 self.assertEqual((question.get("pane"), question.get("pane_server")), (pane, server))
@@ -426,6 +445,7 @@ class ASessionAndItsQuestionOpenTheSamePane(unittest.TestCase):
                     hits, asked = _open_pane_requests(vm, state)
                     self.assertEqual(hits, 1 if pane else 0, state)
                     self.assertEqual(asked, [(pane, server)] if server else [], state)
+        self.assertEqual(cells, 40)                   # 4 sources x (2 paths + 3 paths) x 2 rows
 
     def test_a_pane_read_merged_into_the_shown_model_reaches_its_question(self):
         for source in ("none", "peer"):

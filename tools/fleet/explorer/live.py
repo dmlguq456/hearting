@@ -359,15 +359,38 @@ def _session_pane(session, delivery_panes):
     """
     own = _text(_get(session, "herdr_pane", "pane", "pane_id"))
     if own:
-        return {"pane": own, "pane_server": _text(_get(session, "pane_server")) or None}
+        server = _text(_get(session, "pane_server")) or None
+        return {"pane": own, "pane_server": server, "pane_from": "census" if server else None}
     evidence = _text(_get(_get(session, "session_identity_evidence"), "pane"))
     if evidence:
-        return {"pane": evidence, "pane_server": herdr_pane_server()}
+        return {"pane": evidence, "pane_server": herdr_pane_server(), "pane_from": "census"}
     tmux = _text(_get(session, "tmux_pane"))
     if tmux:
-        return {"pane": tmux, "pane_server": "tmux:" + (_text(_get(session, "tmux_server")) or "")}
+        return {"pane": tmux, "pane_server": "tmux:" + (_text(_get(session, "tmux_server")) or ""),
+                "pane_from": "census"}
     delivered = delivery_panes.get(_text(_get(session, "session_id", "sid", "id")) or "")
-    return {"pane": delivered, "pane_server": None}
+    return {"pane": delivered, "pane_server": None, "pane_from": "peer" if delivered else None}
+
+
+def settle_panes(rows, seen, questions=()):
+    """The one rule for every session's ``(pane, pane_server)`` pair, shared by every publication.
+
+    1. a pair the collectors' census gave (``pane_from == "census"``) stays;
+    2. otherwise a pane the current pane map or pane read observed for the same bound
+       session (``seen``: ``{tag: pane}``) takes Fleet's Herdr server;
+    3. otherwise a pane known only from a peer delivery keeps no server, so it moves nothing.
+
+    A question then opens the same pair as its session (``session_tag``/``open_tag``).
+    """
+    by_tag = {row["tag"]: row for row in rows}
+    for tag, pane in seen.items():
+        row = by_tag.get(tag)
+        if row is not None and pane and row.get("pane_from") != "census":
+            row["pane"], row["pane_server"], row["pane_from"] = pane, herdr_pane_server(), "seen"
+    for question in questions:
+        owner = by_tag.get(question.get("session_tag") or question.get("open_tag") or question.get("tag") or "")
+        if owner and owner.get("pane"):
+            question["pane"], question["pane_server"] = owner["pane"], owner.get("pane_server")
 
 
 def _last_input(display, now):
@@ -2909,10 +2932,8 @@ def selected_detail(model, detail, *, peer_model=None):
     by_tag = {row["tag"]: row for row in rows}
     for current_tag in touched:
         by_tag[current_tag]["generation"] = by_tag[current_tag]["last_clear"] = None
-    for ref, current_tag in tag_of.items():
-        if current_tag in by_tag and ref.partition(":")[2] in panes:
-            by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
-            by_tag[current_tag]["pane_server"] = herdr_pane_server()
+    seen = {current_tag: panes[ref.partition(":")[2]] for ref, current_tag in tag_of.items()
+            if current_tag in by_tag and ref.partition(":")[2] in panes}
     if ENDED_SEATS in seats:
         old_seats = [seat for seat in old_seats if not ended_seat(seat)]
     for seat in seat_rows:
@@ -2929,6 +2950,8 @@ def selected_detail(model, detail, *, peer_model=None):
         by_tag[tag]["pane_lines"] = []
     if pane_read:
         current_tag, read = pane_read
+        if _text(read.get("pane")):
+            seen.setdefault(current_tag, _text(read.get("pane")))
         by_tag[current_tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
         by_tag[current_tag]["pane_meta"] = "visible screen"
     health_results = dict(detail.results)
@@ -2946,10 +2969,7 @@ def selected_detail(model, detail, *, peer_model=None):
             feed.sort(key=lambda item: -item[0])
             events = tuple(freeze(event) for _epoch, event in feed[:5])
     questions = [dict(question) for question in model.questions or ()]
-    for question in questions:                        # a question opens the pane its session settled on
-        owner = by_tag.get(question.get("session_tag") or question.get("open_tag") or "")
-        if owner and owner.get("pane"):
-            question["pane"], question["pane_server"] = owner["pane"], owner.get("pane_server")
+    settle_panes(rows, seen, questions)
     return model.with_updates(sessions=rows, questions=tuple(freeze(row) for row in questions),
                    seats=tuple(freeze(row) for row in old_seats + seat_rows),
                    generations=freeze(new_generations), cards=freeze(new_cards),
@@ -3417,12 +3437,11 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         by_repo.setdefault(row["repo_id"], []).append(row)
     session_rows = [row for repo in repos for row in stewards_first(by_repo.get(repo["id"], ()))]
     focus, _seats, detail_config, panes = _detail_parts(accepted_detail)
-    for row in session_rows:                          # a pane id the herdr read found for this session
-        if not row.get("pane_server"):                # a pane known only from a message gains its server
-            info = session_index[row["tag"]]
-            seen = next((panes[i] for i in info["ids"] if i in panes), None)
-            if seen:
-                row["pane"], row["pane_server"] = seen, herdr_pane_server()
+    seen = {}                                         # panes the current herdr map found per session
+    for row in session_rows:
+        found = next((panes[i] for i in session_index[row["tag"]]["ids"] if i in panes), None)
+        if found:
+            seen[row["tag"]] = found
     seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
         session_rows, session_index, accepted_detail, clock, resolver)
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
@@ -3443,14 +3462,11 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
             row["last_clear"] = when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
     if pane_read:
         tag, read = pane_read
-        if not by_tag[tag].get("pane_server") and _text(read.get("pane")):
-            by_tag[tag]["pane"], by_tag[tag]["pane_server"] = _text(read.get("pane")), herdr_pane_server()
+        if _text(read.get("pane")):
+            seen.setdefault(tag, _text(read.get("pane")))
         by_tag[tag]["pane_meta"] = "visible screen" + (f" · {_clock(read['at'])}" if _clock(read.get("at")) else "")
         by_tag[tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
-    for question in questions:                        # a question opens the pane its session settled on
-        owner = by_tag.get(question.get("session_tag") or question.get("open_tag") or question["tag"])
-        if owner and owner.get("pane"):
-            question["pane"], question["pane_server"] = owner["pane"], owner.get("pane_server")
+    settle_panes(session_rows, seen, questions)
     tag_of_sid = {info["sid"]: tag for tag, info in session_index.items() if info["sid"]}
     tag_of_cwd = {}
     for tag, info in session_index.items():
