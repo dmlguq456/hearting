@@ -572,6 +572,52 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertIsNone(job.ctx_pct)
         self.assertIsNone(job.context_display_window_tokens)
 
+    def _first_turn_and_finished_turn(self, finished_model="claude-fable-5", version="9.9.9"):
+        running = self._job("att-running-first-turn")
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+        finished = self._job("att-finished-turn")
+        finished.liveness = "done"
+        self._write_log(finished, [
+            self._init("sid-done", model_id=finished_model, version=version),
+            self._assistant("sid-done", finished_model, 1000),
+            {"type": "result", "session_id": "sid-done",
+             "modelUsage": {finished_model: {"contextWindow": 1000000,
+                                             "maxOutputTokens": 128000}}}])
+        return running, finished
+
+    def test_a_running_turn_never_takes_another_attempts_window(self):
+        # Same model, same Claude Code version: the other attempt's window is still not this
+        # attempt's (CLAUDE_CODE_DISABLE_1M_CONTEXT alone splits 1M and 200K), so the running
+        # first turn keeps its exact token count and no percent.
+        running, finished = self._first_turn_and_finished_turn()
+        for job in (running, finished):
+            dispatch_collector._enrich_claude_stream_session(job)
+        self.assertEqual(finished.context_window_tokens, 1000000)
+        self.assertEqual(running.active_context_tokens, 250136)
+        self.assertIsNone(running.context_window_tokens)
+        self.assertIsNone(running.ctx_pct)
+        self.assertEqual(render._native_context_gauge(running), (None, None))
+        # A later pass without the finished attempt keeps nothing from it either.
+        later = self._job("att-later-first-turn")
+        self._write_log(later, [self._init("sid-later", version="9.9.9"),
+                                self._assistant("sid-later", "claude-fable-5", 250136)])
+        dispatch_collector._enrich_claude_stream_session(later)
+        self.assertIsNone(later.context_window_tokens)
+        self.assertEqual(render._native_context_gauge(later), (None, None))
+        self.assertFalse(hasattr(dispatch_collector, "_CLAUDE_OBSERVED_WINDOWS"))
+
+    def test_a_running_turn_shows_its_percent_once_its_own_result_reports_the_window(self):
+        running, _finished = self._first_turn_and_finished_turn()
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136),
+                                  {"type": "result", "session_id": "sid-run",
+                                   "modelUsage": {"claude-fable-5": {"contextWindow": 1000000,
+                                                                     "maxOutputTokens": 128000}}}])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 1000000)
+        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
+
     def test_small_configured_window_applies_without_a_terminal_window(self):
         job = self._job()
         job._registry_metadata = self._launch_metadata(

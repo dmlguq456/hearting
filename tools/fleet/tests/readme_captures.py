@@ -122,6 +122,7 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, default=ROOT / "docs" / "fleet")
     parser.add_argument("--no-gif", action="store_true")
     args = parser.parse_args(argv)
+    os.environ["FLEET_NOW_LANG"] = "en"       # README screens are English on every machine
     isolate()
     write(args.out.resolve(), not args.no_gif)
     return 0

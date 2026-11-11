@@ -285,15 +285,15 @@ class RenderTest(unittest.TestCase):
     def test_segments(self):
         segments = tables.repo_status_segments(self.DOC, 120)
         text = "".join(text for text, _key in segments)
-        self.assertEqual(text, "백로그를 묶어 v4.0.0 정식 공개까지 간다. · 3 to decide · 2 to answer · 12m ago")
+        self.assertEqual(text, "백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide │ ◑ to answer 2 │ 12m ago")
         self.assertIn(("3 to decide", "lvl_y"), segments)
         self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("3 to decide", "lvl_y")])
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)),
-                         "2 routes active · 53m ago ✓ csi bundle")
+                         "⏳ route 2 │ 53m ago ✓ csi bundle")
         self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True), [])
         stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)),
-                         "5d ago · 백로그를 묶어 v4.0.0 정식 공개까지 간다. · 3 to decide")
+                         "5d ago · 백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide")
         tight = tables.repo_status_segments(self.DOC, 50)
         self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 50)
         self.assertTrue(tight[0][0].endswith("…"))
@@ -304,9 +304,9 @@ class RenderTest(unittest.TestCase):
                                 NavState(), 140, 45, beat=1))
         changed = [y for y, (a, b) in enumerate(zip(plain, shown)) if a != b]
         self.assertEqual(len(changed), 2, changed)                     # exactly the two group rules
-        self.assertIn(self.first + "/  백로그를 묶어", shown[changed[0]])
-        self.assertIn("3 to decide · 2 to answer · 12m ago ┈", shown[changed[0]])
-        self.assertIn(self.second + "/  2 routes active · 53m ago ✓ csi bundle ┈", shown[changed[1]])
+        self.assertIn(self.first + "/ │ 백로그를 묶어", shown[changed[0]])
+        self.assertIn("3 to decide │ ◑ to answer 2 │ 12m ago ┈", shown[changed[0]])
+        self.assertIn(self.second + "/ │ ⏳ route 2 │ 53m ago ✓ csi bundle ┈", shown[changed[1]])
 
     def test_repo_page_opens_with_four_status_lines(self):
         state = NavState(scope="repo:" + self.first)
@@ -315,12 +315,12 @@ class RenderTest(unittest.TestCase):
         top = next(y for y, row in enumerate(shown) if "status:" in row)
         self.assertIn("백로그를 묶어 v4.0.0 정식 공개까지 간다.", shown[top])
         self.assertIn("3 · 케언 PR 병합 · +2 more", shown[top + 1])
-        self.assertIn("2 to answer", shown[top + 1])
+        self.assertIn("◑ to answer 2", shown[top + 1])
         self.assertIn("[50] 정리 뒤 계획 확정", shown[top + 2])
         self.assertIn("12m ago research/x/현황.md · 41m ago ✓ importer", shown[top + 3])
-        header = next(y for y, row in enumerate(plain) if " ID " in row and "HARNESS" in row)
+        header = next(y for y, row in enumerate(plain) if " ID " in row and "MODEL" in row)
         pane = 32                                                     # the sidebar left of the pane is unchanged
-        new_header = next(y for y, row in enumerate(shown) if " ID " in row and "HARNESS" in row)
+        new_header = next(y for y, row in enumerate(shown) if " ID " in row and "MODEL" in row)
         self.assertEqual(shown[new_header][pane:], plain[header][pane:])
         self.assertTrue(any("OPEN WORK" in row or "백로그·진행" in row for row in shown[top + 4:new_header]))
 

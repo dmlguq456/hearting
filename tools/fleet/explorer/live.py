@@ -555,6 +555,7 @@ def _worker_segments(node, resources, state_text=None, owner=None):
         return ["resource", host, [list(s) for s in state]]
     if harness is None:
         return None
+    # The session shell reads these segments too; Fleet draws them in its MODEL cell words.
     segs = [[harness, "hb_" + harness]]
     pair = _model_pair(node.get("model")) or (
         _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
@@ -737,18 +738,24 @@ def _clock_ago(now, minutes):
     return _clock(now - value * 60)
 
 
+def _model_segments(harness, model, effort):
+    """``claude Opus 5.5 xhigh`` as segments: the session row's MODEL cell words (one function)."""
+    from .tables import model_cell_parts
+    return [[text, key] for text, key in model_cell_parts(harness, model, effort)]
+
+
+def _model_words(model_name, effort):
+    """``Opus 5.5 high``: the model and effort words of a MODEL cell, after the harness."""
+    from .tables import _effort_word
+    return " ".join(part for part in (model_name, _effort_word(effort) if effort else None) if part)
+
+
 def _route_title_line(rid, owner, resume, role="owner"):
     harness = _text(owner.get("harness"))
     parts = [[f"  {rid[:11]} · {role} ", _SEG_DIM]]
     if harness:
-        parts.append([harness, "hb_" + harness])
         model, effort = owner.get("model"), owner.get("effort")
-        if model:
-            parts += [[" (", _SEG_DIM], [model[0], model[1]]]
-            if effort:
-                parts += [["·", _SEG_DIM],
-                          [effort, "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM]]
-            parts.append([")", _SEG_DIM])
+        parts += _model_segments(harness, model or None, effort if model else None)
     if resume:
         parts += [["  resumes from ", _SEG_DIM], [resume, "lvl_y"]]
     return parts
@@ -760,7 +767,7 @@ def _node_detail(node, now):
     harness = _text(node.get("harness"))
     model = _text(node.get("model"))
     effort = _effort(node.get("effort"))
-    who = [harness, "·".join(part for part in (model, effort) if part)] if harness else None
+    who = [harness, _model_words(model, effort)] if harness else None
     if state == "done":
         verdict = "PASS" if node.get("gate_passed") else "done"
     else:
@@ -897,6 +904,36 @@ def _display_nodes(nodes, frame_displays):
     return out
 
 
+def _context_tokens(job):
+    """Exact active-context tokens of one attempt, or None (never derived from a percent)."""
+    value = _get(job, "active_context_tokens")
+    return value if type(value) is int and value >= 0 else None
+
+
+def _route_doer(worker, owner, dead):
+    """Who does the route's work now, for its one-line row: harness, model, effort, context
+    (percent, window, or the exact token count when no window is known), the open tool and
+    the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
+    attempt (a one-shot route's owner is its worker). A dead route keeps the harness only."""
+    job = worker if worker is not None else owner
+    if job is None:
+        return None
+    harness = _text(_get(job, "harness"))
+    if dead:
+        return {"harness": harness, "model": None, "effort": None, "context": None,
+                "window": None, "tokens": None, "tool": None, "agents": 0}
+    pct, window = _context_gauge(job)
+    tool = _get(job, "exec_tool")
+    tool_name = _text(tool.get("name")) if isinstance(tool, Mapping) else None
+    live = _get(job, "liveness") == "working"
+    agents = sum(1 for item in (_get(job, "subagents") or ())
+                 if _get(item, "active") is True)
+    return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+            "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            "tokens": _context_tokens(job) if pct is None else None,
+            "tool": tool_name if live else None, "agents": agents if live else 0}
+
+
 def _route_records(snapshot, session_rows, session_index, resolver, now):
     collected = _collect_routes(snapshot)
     resources = _records(_get(snapshot, "resources", default=()))
@@ -1024,7 +1061,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # Navigation ancestry never authorizes metrics from the parent session.
         # Each attempt uses the same applied-policy/native gauge as a session.
         owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
+        owner_tokens = (_context_tokens(owner) if owner is not None and owner_gauge[0] is None
+                        and _get(owner, "liveness", "status", "state", "st") not in ("stale", "dead")
+                        else None)
         worker_contexts = []
+        context_jobs = []
         selected_worker = _selected_worker_job(worker_node, jobs)
         worker_context_index = None
         for job in jobs:
@@ -1060,6 +1101,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             pct, window = _context_gauge(job) if attempt else (None, None)
             if job is selected_worker:
                 worker_context_index = len(worker_contexts)
+            context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
                                     "model": _model_pair(_get(job, "resolved_model", "model")),
                                     "context": pct, "window": window})
@@ -1111,12 +1153,19 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
-            "owner_context": None, "owner_gauge": list(owner_gauge),
+            # Without a gauge, the owner's exact token count (no window: nothing is estimated).
+            "owner_context": ([owner_tokens, None] if owner_tokens is not None else None),
+            "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
             "current": current, "owner_waits": owner_waits,
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
+        doer_job = (selected_worker if worker_context_index is not None
+                    else context_jobs[0] if len(context_jobs) == 1 else None)
+        doer = _route_doer(doer_job, owner, dead)
+        if doer is not None:
+            route["doer"] = doer
         if record:
             # Display only: shape and its basis, stages, verification and next step, read
             # from this route's own record, Fleet's view and its outcome sidecar.
@@ -1127,6 +1176,14 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 max(depth_one, key=current_attempt_rank) if depth_one else None)
             route["visibility"] = route_visibility.bounded(route_visibility.describe(
                 record, view, owner=route_visibility.owner_from_job(shown_owner)))
+            # A route its supervisor closed (``capability-route close``, the outcome sidecar's
+            # ``closed_at``) is over even when its owner ended without a passed gate: it is
+            # neither a stopped leg to count nor one to resume.
+            codes = route["visibility"].get("codes") if isinstance(route["visibility"], Mapping) else None
+            verification = codes.get("verification") if isinstance(codes, Mapping) else None
+            if isinstance(verification, Mapping) and verification.get("closed_at"):
+                route["closed"] = True
+                route["resume"] = None
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
@@ -1149,15 +1206,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
             line = [[short_id + "  ", "dim"]]
             harness = _text(node.get("harness"))
             if harness:
-                line.append([harness, "hb_" + harness])
                 model = _stage_model(node.get("model"))
                 effort = _effort(node.get("effort"))
-                if model:
-                    line += [[" (", "dim"], [model[0], model[1]]]
-                    if effort:
-                        line += [["·", "dim"],
-                                 [effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"]]
-                    line.append([")", "dim"])
+                line += _model_segments(harness, model or None, effort if model else None)
             lines.append(line)
         frame_name = " ∥ ".join(str(node.get("id") or "frame") for node in frame_nodes)
         # The band's identity can be a borrowed frame leg; only a real owner attempt
@@ -1174,7 +1225,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([route["harness"], "hb_" + route["harness"]])
     model = route.get("model")
     if model:
-        owner_line.append([f" {model[0]}·{route['effort']}" if route.get("effort") else f" {model[0]}", "soft"])
+        owner_line.append([" " + _model_words(model[0], route.get("effort")), "soft"])
     if route.get("age"):
         owner_line.append([" · " + route["age"], "dim"])
     return [{
@@ -1312,6 +1363,11 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        if open_routes:
+            by_state = route_state_counts(route for route in routes if route["repo"] == name)
+            status.update({"routes_running": by_state["running"],
+                           "routes_waiting": by_state["waiting"],
+                           "routes_stopped": by_state["stopped"]})
         if doc is None:
             status["changed"] = repo.get("age")
         else:
@@ -3086,6 +3142,36 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
                                   "lines": list(entry.get("lines") or ())}
         dialogue = {"logs": logs, "generation_text": dict((dialogue or {}).get("generation_text", {}))}
     return seat_rows, generations, cards, dialogue, pane_read, raw
+
+
+def route_marker_state(route):
+    """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
+    ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
+
+    A route whose worker still runs reads as working; an owner that only waits on its
+    worker reads as waiting, the worker's own line being the one that spins."""
+    if route.get("owner_waits"):
+        return "idle"
+    if route.get("activity") == "running":
+        return "working"
+    state = str(route.get("state") or "")
+    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+
+
+def route_state_counts(routes):
+    """``{"running", "waiting", "stopped"}`` over current routes, by the shared marker state."""
+    counts = {"running": 0, "waiting": 0, "stopped": 0}
+    for route in routes:
+        if route.get("current") is not True:
+            continue
+        state = route_marker_state(route)
+        if state == "working":
+            counts["running"] += 1
+        elif state in ("idle", "blocked"):
+            counts["waiting"] += 1
+        elif state == "dead":
+            counts["stopped"] += 1
+    return counts
 
 
 def current_route_counts(routes):

@@ -180,8 +180,8 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES",
                                                   folds=(("ropen:ROUTES", ROUTE_ID),)),
                                       cols, 60).text_rows())
-                self.assertIn("frame  claude (Opus·max)", text)
-                self.assertIn("alt  codex (gpt-6-astra)", text)
+                self.assertIn("frame  claude Opus max", text)
+                self.assertIn("alt  codex gpt-6-astra", text)
                 self.assertNotIn("gpt-6-astra·", text)
                 self.assertNotIn("·)", text)
 
@@ -196,16 +196,20 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 row = next(line for line in pane if "[z9]" in line)
                 self.assertIn("frame", row)
                 self.assertNotIn("worker", row)
-                self.assertIn("claude·max", row)
+                self.assertIn("claude Opus max", row)
+                # The frame body line unfolds under the one-line row.
+                opened = draw(vm, NavState(view="ROUTES", title="ROUTES",
+                                           folds=(("ropen:ROUTES", ROUTE_ID),)), cols, 60)
+                pane = ["".join(cell[0] for cell in row[34:]) for row in opened.cells]
                 self.assertTrue(any("└ frame" in line for line in pane), pane[:12])
         wide = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                           220, 60).text_rows()
                     if "[z9]" in line and "frame" in line)
-        self.assertIn("claude (Opus·max)", wide)
+        self.assertIn("claude Opus max", wide)
 
     def test_wide_routes_owner_cell_has_no_separator_without_effort_or_model(self):
         # 435 of 731 frame jobs carry no effort row: the wide owner cell must read
-        # `codex (gpt-6-astra)`, and a missing model falls back to `harness·effort`.
+        # `codex gpt-6-astra`, and a missing model falls back to `harness effort`.
         _view_value, _record_value, route, vm = _vm()
         self.assertIsNone(route["effort"])
         for cols in (186, 220):
@@ -214,9 +218,9 @@ class FrameOwnerLevelTests(unittest.TestCase):
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines()
                            if "[z9]" in line and "frame" in line)
-                self.assertIn("codex (gpt-6-astra)", row)
+                self.assertIn("codex gpt-6-astra", row)
                 self.assertNotIn("gpt-6-astra·", row)
-                self.assertNotIn("·)", row)
+                self.assertNotIn("(", row.split("frame", 1)[0])
         _view_value, _record_value, _route, vm = _vm(
             owner={"harness": "claude", "model": None, "effort": "xhigh"})
         for cols in (186, 220):
@@ -225,7 +229,7 @@ class FrameOwnerLevelTests(unittest.TestCase):
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines()
                            if "[z9]" in line and "frame" in line)
-                self.assertIn("claude·xhigh", row)
+                self.assertIn("claude xhigh", row)
                 self.assertNotIn("(·", row)
 
     def test_the_frame_band_says_frame_for_a_borrowed_identity_and_owner_for_a_real_attempt(self):
@@ -239,7 +243,7 @@ class FrameOwnerLevelTests(unittest.TestCase):
                             if "frame ∥ frame-alternative" in line and "┴─" in line)
                 self.assertNotIn("owner", band)
                 if cols == 180:
-                    self.assertIn("rt-frame · frame codex (gpt-6-astra)", band)
+                    self.assertIn("rt-frame · frame codex gpt-6-astra", band)
         _view_value, _record_value, _route, owned = _vm(
             owner={"harness": "opencode", "model": "glm-5.2", "effort": "medium"})
         for cols in (120, 180):
@@ -251,7 +255,7 @@ class FrameOwnerLevelTests(unittest.TestCase):
                             if "frame ∥ frame-alternative" in line and "┴─" in line)
                 self.assertIn("rt-frame · owner opencode", band)
                 if cols == 180:
-                    self.assertIn("(glm-5.2·medium)", band)
+                    self.assertIn("opencode glm-5.2 med", band)
 
     def test_both_frame_legs_show_their_own_harness_and_model(self):
         _view_value, _record_value, _route, vm = _vm()
@@ -267,8 +271,8 @@ class FrameOwnerLevelTests(unittest.TestCase):
                                        folds=(("ropen:ROUTES", ROUTE_ID),)), cols, 60)
                 self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
                 text = "\n".join(frame.text_rows())
-                self.assertIn("frame  claude (Opus·max)", text)
-                self.assertIn("alt  codex (gpt-6-astra)", text)
+                self.assertIn("frame  claude Opus max", text)
+                self.assertIn("alt  codex gpt-6-astra", text)
                 self.assertNotIn("gpt-6-astra·", text)
                 self.assertNotIn("·)", text)
 
@@ -301,8 +305,8 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 self.assertIn("● hello", text)
                 self.assertIn("● Bash  ls", text)
                 self.assertEqual(text.count("frame-review and the legs after it"), 1)
-                self.assertEqual(text.count("frame  claude (Opus·max)"), 1)
-                self.assertEqual(text.count("alt  codex (gpt-6-astra)"), 1)
+                self.assertEqual(text.count("frame  claude Opus max"), 1)
+                self.assertEqual(text.count("alt  codex gpt-6-astra"), 1)
                 lines = text.splitlines()
                 band = next(i for i, line in enumerate(lines)
                             if "frame ∥ frame-alternative" in line and "┌" in line)
@@ -412,7 +416,8 @@ class FrameOwnerLevelTests(unittest.TestCase):
     def test_narrow_routes_keep_the_progress_mark_at_96_and_100_columns(self):
         _view_value, _record_value, _route, vm = _vm(
             owner={"harness": "opencode", "model": "glm-5.2", "effort": "xhigh"})
-        for cols, harness_cell in ((96, "opencod…"), (100, "opencode·xh…")):
+        # The MODEL cell keeps the harness whole; the model and effort give way first.
+        for cols, harness_cell in ((96, "opencode"), (100, "opencode")):
             with self.subTest(cols=cols):
                 frame, trace = ef.trace_draw(draw, vm, NavState(view="ROUTES", title="ROUTES"),
                                              cols, 60)
@@ -443,15 +448,18 @@ class FrameOwnerLevelTests(unittest.TestCase):
         row = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                          120, 60).text_rows()
                    if "[z9]" in line and "frame" in line)
-        self.assertIn("claude·high", row[34:])
+        self.assertIn("claude Opus high", row[34:])
 
         _view_value, _record_value, _route, vm = _vm(
             owner={"harness": "opencode", "model": "glm-5.2", "effort": "xhigh"})
+        # At 80 columns the one-line row keeps its marker, ID, the whole harness and the
+        # elapsed time; TITLE and the stage rail are the cells that give way.
         row = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                          80, 60).text_rows()
-                   if "[z9]" in line and "frame" in line)
-        self.assertIn("opencode·…", row[34:])
+                   if "[z9]" in line)
+        self.assertIn("opencode", row[34:])
         self.assertNotIn("opencode·x ", row[34:])
+        self.assertIn("11m", row[34:])
 
     def test_a_frame_leg_shown_as_the_body_row_keeps_the_frame_label(self):
         view = _view(running=True)
