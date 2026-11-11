@@ -99,6 +99,13 @@ _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP = (
     "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
     "Receipt/ACK isn't execution; handled exact repeats need no ACK."
 )
+_FROZEN_PREVIOUS_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review result; do approved follow-through or existing "
+    "continuation. First close: show the runtime summary below to the person first, as written; "
+    "then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
+    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
 _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -114,20 +121,21 @@ _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
 )
 
 
+def _current_runtime_v1_followup():
+    import dispatch_completion_join
+    return dispatch_completion_join.RUNTIME_V1_FOLLOWUP_PREFIXES[False]
+
+
 def _previous_native_body(text, *, legacy=False):
+    _CURRENT_RUNTIME_V1_FOLLOWUP = _current_runtime_v1_followup()
     text = text.replace(SWEEP.GATE_DELIVERY_HEADER, _FROZEN_GATE_DELIVERY_HEADER, 1)
     text = text.replace(SWEEP.NOTICE_DELIVERY_HEADER, _FROZEN_NOTICE_DELIVERY_HEADER, 1)
     text = text.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
                         _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER if legacy
                         else _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
-    if legacy:
-        text = text.replace(SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
-                            _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
-        text = text.replace(SWEEP._PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIX,
-                            _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
-    else:
-        text = text.replace(SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
-                            _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
+    text = text.replace(_CURRENT_RUNTIME_V1_FOLLOWUP,
+                        _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP if legacy
+                        else _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
     return text
 
 
@@ -3259,7 +3267,7 @@ console.log(JSON.stringify({prompts, logs}));
     def test_previous_full_completion_body_matches_exactly_with_frozen_renderer(self):
         self.seed_turn()
         record = self._mark_sent_ambiguous("delivery-" + "a" * 32)
-        current_followup = (SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX +
+        current_followup = (_current_runtime_v1_followup() +
                             "\nprior next-action handle\n\n" +
                             SWEEP.NOTICE_DELIVERY_HEADER + "\nquoted payload header")
         with mock.patch.object(SWEEP, "_followup", return_value=current_followup):
@@ -3268,10 +3276,10 @@ console.log(JSON.stringify({prompts, logs}));
                                        _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
             legacy = current.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
                                      _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER, 1).replace(
-                                         SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
+                                         _current_runtime_v1_followup(),
                                          _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
             previous_short = previous.replace(
-                SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
+                _current_runtime_v1_followup(),
                 _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
             for version, body in (("current", current),
                                   ("previous-short", previous_short),
@@ -3287,6 +3295,58 @@ console.log(JSON.stringify({prompts, logs}));
                                     body.replace(SWEEP.NOTICE_DELIVERY_HEADER,
                                                  _FROZEN_NOTICE_DELIVERY_HEADER, 1)):
                         messages[0]["parts"][0]["text"] = altered
+                        self.assertEqual(SWEEP._opencode_delivery_expectations(
+                            [self.root], "opencode-turn", self.SID, messages), [])
+
+    def test_immediately_previous_runtime_v1_body_from_real_producer_is_recognized(self):
+        # The release before the short first close shipped the current headers
+        # with the earlier follow-up, with and without a sealed runtime summary.
+        # Build the current body with the real producer and the previous one
+        # from frozen shipped bytes, never from the module's own constants.
+        import dispatch_completion_join as JOIN
+        import route_parent_close
+        import work_intent
+        from types import SimpleNamespace
+        owner = SimpleNamespace(metadata={"dispatch_depth": "1", "worker_type": "owner",
+                                          "workflow_completion": "runtime-v1"})
+        summary = "[완료 요약] autopilot-code · route rt-example\n결과: 완료\n산출물: 없음"
+        for case, sealed, frozen in (("no-summary", None, _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP),
+                                     ("summary", summary,
+                                      _FROZEN_PREVIOUS_RUNTIME_V1_SUMMARY_FOLLOWUP)):
+            with self.subTest(case=case):
+                did = "delivery-" + ("e" if sealed else "f") * 32
+                self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+                    "attempt_id": "att-0000000000000000000000000000bbbb", "status": "done",
+                    "readiness": "ready", "reason": "completed",
+                    "required_action": "advance-completed", "harness": "opencode",
+                    "delivery_classification": "completion"}]))
+                record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+                with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                        mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                        mock.patch.object(work_intent, "sealed_summary", return_value=sealed):
+                    followup = SWEEP._followup(self.root, record)
+                    self.assertIn("First close: give the result in one or two sentences", followup)
+                    self.assertEqual(sealed is not None, summary in followup)
+                    current = SWEEP.delivery_context([(self.root, [record])])
+                    self.assertEqual(current.count(followup), 1)
+                    previous = current.replace(
+                        followup, frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(previous, current)
+                    older = previous.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                             _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
+                    accepted_bodies = [current, previous] + ([] if sealed else [older])
+                    for body in accepted_bodies:
+                        messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                                     "parts": [{"type": "text", "text": body}]}]
+                        accepted = SWEEP._opencode_delivery_expectations(
+                            [self.root], "opencode-turn", self.SID, messages)
+                        self.assertEqual([item["text"] for item in accepted], [body])
+                    never_shipped = current.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                                    _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
+                    for altered in (previous + " ", previous.replace("First close:", "First close :", 1),
+                                    previous.replace(frozen, frozen[:-1], 1), never_shipped):
+                        messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                                     "parts": [{"type": "text", "text": altered}]}]
                         self.assertEqual(SWEEP._opencode_delivery_expectations(
                             [self.root], "opencode-turn", self.SID, messages), [])
 
@@ -3308,7 +3368,7 @@ console.log(JSON.stringify({prompts, logs}));
                 ids = [completion_id, gate_id, notice["delivery_id"]]
                 records = [{**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
                            for did in ids]
-                followup = SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX + "\nprior next-action handle"
+                followup = _current_runtime_v1_followup() + "\nprior next-action handle"
                 with mock.patch.object(SWEEP, "_followup", return_value=followup):
                     current = SWEEP.delivery_context([(self.root, records)])
                     previous = _previous_native_body(current, legacy=legacy)
