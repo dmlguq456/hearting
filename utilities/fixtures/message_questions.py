@@ -124,16 +124,39 @@ class MessageQuestionFixture:
                 calls.extend(item["text"] for item in params["input"] if item.get("type") == "text")
                 return {"queuedSubmission": {"id": "queued-fixture"}}
             raise AssertionError("unexpected native RPC " + method)
+        import peer_address
+        import session_shell
+        # Claude and OpenCode take the answer through their session-shell host: it
+        # reports an idle, empty input, then begins the exact pending write it injects.
+        binding = {"harness": harness, "sid": sid, "native_pid": os.getpid(),
+                   "host_pid": os.getpid(), "incarnation": "fixture-" + sid}
+
+        def exact_binding(want_harness, want_sid):
+            if harness != "codex" and (want_harness, want_sid) == (harness, sid):
+                return binding, ""
+            return None, "attachment-unavailable"
+
+        def control(current, operation, **fields):
+            if operation == "status":
+                return {"ok": True, "state": "idle", "empty": True, "focused": False, "epoch": 1}
+            if operation != "inject":
+                return {"ok": False, "reason": "unsupported-operation", "not_started": True}
+            row, claim = self.peer._read_pending(fields.get("ref")), fields.get("claim") or {}
+            begun = row and self.peer.begin_pending_write(
+                row, recipient={"harness": harness, "session_id": sid},
+                receipt="session-shell-inflight",
+                claimant={"pid": claim.get("pid"), "start": claim.get("start")})
+            if not begun:
+                return {"ok": False, "reason": "peer-claim-changed", "not_started": True}
+            native_prompt(None, row["text"])
+            return {"ok": True}
+
         with contextlib.ExitStack() as patches:
             for patch in (
                 mock.patch.object(runner.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(inventory))),
-                mock.patch.object(runner, "_resolve_target", return_value=(harness, sid, "fixture")),
-                patch_split(runner, "_herdr_missing", return_value=False),
-                mock.patch.object(runner, "_resolve_prompt_target", return_value=(resolved, None, [])),
-                mock.patch.object(runner, "_prompt_exact_candidate", return_value=(resolved, None)),
-                mock.patch.object(runner, "_pane_readiness", return_value=SimpleNamespace(state="ready")),
-                mock.patch.object(runner, "_native_idle_prompt_guard", return_value=(None, {})),
-                mock.patch.object(runner, "_herdr_prompt", side_effect=native_prompt),
+                mock.patch.object(session_shell, "exact_binding", side_effect=exact_binding),
+                mock.patch.object(session_shell, "control", side_effect=control),
+                mock.patch.object(peer_address, "presence", return_value="present"),
                 mock.patch.object(queue, "_rpc", side_effect=rpc),
                 mock.patch.object(queue, "_known_consumed", return_value=None),
                 mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value=self.root / "fixture.sock"),

@@ -245,8 +245,12 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 if inventory and legacy:
                     self.assertEqual(observed_path_before,
                                      (failed_path.read_bytes(), real_stat(failed_path).st_mtime_ns))
-                if not inventory or legacy or historical or no_resend:
+                if not inventory or legacy or historical or (no_resend and no_resend != "pending"):
                     native.assert_not_called()
+                elif no_resend == "pending":
+                    # A's lineage is readable during partial inventory: its prepared
+                    # transfer may get its one first write, never a second transfer.
+                    self.assertLessEqual(native.call_count, 1)
                 else:
                     self.assertEqual(native.call_count, 1, "usable notice progresses during partial inventory")
                 if not inventory:
@@ -300,7 +304,13 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 self.assertEqual(steward.cmd_obligation_runner(SimpleNamespace(
                     state_root=self.tmp_root, lock_fd=lock.fileno(),
                     service_current="/fixture/current" if service else None)), 0)
-                self.assertEqual(native.call_count, 0 if historical or no_resend or replace_lock else 1)
+                # A prepared, still pending transfer gets its one first write from the
+                # message courier (same ref, never a new transfer); every other prepared
+                # state stays unsent.
+                first_write = no_resend == "pending" and not replace_lock
+                self.assertEqual(native.call_count,
+                                 1 if first_write else
+                                 0 if historical or no_resend or replace_lock else 1)
                 self.assertEqual(execute.call_count, len(discoveries) if service else 0)
                 self.assertTrue(all(not thread.is_alive() and stop.is_set() for thread, _, stop in workers))
                 with lock_path.open("r+") as contender:
@@ -319,7 +329,8 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
         self.assertEqual(delays[:len(expected_delays)], expected_delays)
         if message_progress:
             self.assertTrue(prepared_messages)
-            self.assertEqual(steward.peer_message._read_pending(ref)["state"], "pending")
+            # The same prepared transfer: pending, or accepted by its one first write.
+            self.assertIn(steward.peer_message._read_pending(ref)["state"], {"pending", "queued"})
         # Each iteration now reads accepted active notices before discovery,
         # then starts a separate full-recovery pass. Neither phase may reuse a
         # store snapshot or authority context from an earlier phase/iteration.

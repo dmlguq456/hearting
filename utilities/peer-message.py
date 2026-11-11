@@ -31,7 +31,7 @@ from dispatch_contract import resolve_dispatch_state_root, stable_state_root  # 
 _KINDS = ("watch", "steer", "handoff", "gate-relay", "notice")
 _SURFACES = (
     "claude-native", "herdr", "codex-queue", "codex-gateway-steer",
-    "opencode-native", "opencode-unknown", "manual-paste",
+    "opencode-native", "opencode-unknown", "manual-paste", "unresolved",
 )
 _STATUSES = ("sent", "delivered", "received", "failed", "unknown")
 _SUMMARY_MAX = 200
@@ -406,8 +406,7 @@ def _reference_access_evidence_valid(evidence, recipient):
             or any(target.get(key) != recipient.get(key)
                    for key in ("harness", "session_id"))
             or (recipient.get("pane_id") is not None
-                and recipient.get("pane_id") != target.get("pane_id"))
-            or not isinstance(target.get("pane_id"), str) or not target["pane_id"]):
+                and recipient.get("pane_id") != target.get("pane_id"))):
         return False
     return _reference_local_process_matches(evidence.get("local_process"))
 
@@ -2144,12 +2143,44 @@ def pending_messages(recipient, *, deadline=None):
 
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
-                         producer_binding=None, handoff=None, original_target=None, server=None):
-    """A retry reuses a pending intent; ordinary sends need no preparation lock."""
+                         producer_binding=None, handoff=None, original_target=None, server=None,
+                         prepared=None, namespace=None):
+    """A retry reuses a pending intent; ordinary sends need no preparation lock.
+
+    ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
+    caller can keep its courier even when a later read of that row fails.
+    ``namespace`` is the Herdr socket a window ``original_target`` was read on (default:
+    this environment's own, as ``peer_address.resolve`` reads it). A window request
+    belongs to the namespace it was first made on: a row from another namespace, or an
+    unbound one that never recorded its namespace, is not this call's retry."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
+    address_namespace = None
+    if original_target is not None:
+        import peer_address
+        if peer_address.is_herdr_pane_address(original_target):
+            address_namespace = namespace or peer_address.caller_endpoint(
+                server=None if server in (None, "default") else server)["socket"]
+
+    def same_namespace(row):
+        if address_namespace is None:
+            return True
+        recorded = row.get("namespace")
+        if recorded is None:
+            # Rows sealed before the row carried it keep it on their duty.
+            from peer_obligations import ObligationStore
+            duty = ObligationStore().get("message-" + row["ref"]) or {}
+            intent = duty.get("intent") or {}
+            if intent.get("ref") == row["ref"]:
+                recorded = (intent.get("identity") or {}).get("namespace")
+        if recorded is not None:
+            return recorded == address_namespace
+        # An unknown first namespace is never this one where the address would bind
+        # the request; a request already pinned to its exact session binds nothing.
+        target = row.get("to") or {}
+        return not (_unresolved_target(target) and not row.get("bound_to"))
 
     def address_evidence(row):
         target = row.get("to") or {}
@@ -2194,7 +2225,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         addresses, recorded = address_evidence(row)
         if server is not None and recorded != server:
             return False  # Missing endpoint evidence is not the default endpoint.
-        if original_target is not None and original_target in addresses:
+        if (original_target is not None and original_target in addresses
+                and same_namespace(row)):
             return True
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
@@ -2249,6 +2281,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                         associations = current.get("verified_addresses", [])
                         if association not in associations:
                             _save_pending(dict(current, verified_addresses=[*associations, association]))
+                if prepared is not None:
+                    prepared.append(row)
                 return row["text"], row["ref"]
         return None
 
@@ -2301,6 +2335,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             pending["server"] = server
         if original_target is not None:
             pending["original_target"] = original_target
+        if address_namespace is not None:
+            pending["namespace"] = address_namespace
         if handoff is not None:
             pending["handoff"] = handoff
         if producer_binding is not None:
@@ -2312,6 +2348,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         if transfer and transfer.get("body_ref") is not None:
             pending["body_ref"] = transfer["body_ref"]
         _save_pending(pending)
+        if prepared is not None:
+            prepared.append(pending)
         return text, ref
 
 
@@ -4074,6 +4112,20 @@ def retry_receiver_idle(recipient, *, peer=True, permission=None):
     ``permission`` lets the calling hook pass the one ``may_report`` answer it
     already computed instead of walking process identity a second time.
     """
+    if recipient.get("harness") not in {"claude", "opencode"}:
+        return
+    try:
+        # Peer rows never need this callback; only a booked tidy continuation does.
+        # Read the reservations directly: resolving this caller's seat reads its window.
+        import session_tidy_clear
+        if not any(req and req.get("harness") == recipient["harness"]
+                   and req.get("status") == "cleared"
+                   and (req.get("continued") or {}).get("state") == "pending"
+                   for req in (session_tidy_clear.read_reservation(path.stem)
+                               for path in session_tidy_clear.clear_dir().glob("*.json"))):
+            return
+    except Exception:
+        return
     pane = os.environ.get("HERDR_PANE_ID")
     tmux = False
     if not pane:

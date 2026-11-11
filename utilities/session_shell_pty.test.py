@@ -114,7 +114,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:cfg.columns||100,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
         HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher,
-        ...(cfg.scenario==='herdr'?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(cfg.directory,'private-herdr.sock')}:{})}});
+        ...(cfg.scenario==='herdr'||cfg.peer?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(process.env.XDG_CONFIG_HOME||path.join(process.env.HOME,'.config'),'herdr','herdr.sock')}:{})}});
  child.onData(text=>{if(sideTerm)sideTerm.write(text);raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
@@ -219,6 +219,26 @@ function existing(file){return new Promise((resolve,reject)=>{
    await waitFor(cfg.scenario==='answer-display'?/ANSWER_DONE/:/ACTION_DONE/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_ACTION\r').toString('base64')});await waitFor(/DONE_AFTER_ACTION/);
  }
+ const peer=[];
+ if(cfg.peer){
+   // peer-steward prompt from an unrelated process, addressed only by Hearting records.
+   const cp=require('node:child_process');
+   const tags=JSON.parse(fs.readFileSync(cfg.tags,'utf8')).assignments.filter(row=>row.session_id===cfg.sid);
+   for(const [label,target,extra] of cfg.peer.targets){
+     const address=target==='TAG'?'['+tags[0].tag+']':target;
+     const body='PEER_HELLO_'+label+'_'+cfg.peer.round;
+     const out=cp.execFileSync(cfg.python,[cfg.audit,cfg.peerCount+'-'+label,cfg.steward,'prompt',address,body],
+       {env:{...process.env,PATH:cfg.peer.path,...(extra||{})},encoding:'utf8'});
+     const count=JSON.parse(fs.readFileSync(cfg.peerCount+'-'+label,'utf8'));
+     const row={label,address,receipt:out.trim().split('\n').pop(),...count};
+     if(/prompted=queued/.test(row.receipt)&&/via=session-shell/.test(row.receipt)&&cfg.peer.expectInput){
+       await waitFor(new RegExp('DONE_'+body));row.typed=true;
+     }
+     peer.push(row);
+   }
+   const log=cfg.peer.herdrLog&&fs.existsSync(cfg.peer.herdrLog)?fs.readFileSync(cfg.peer.herdrLog,'utf8'):'';
+   peer.push({herdr_calls:log.split('\n').filter(Boolean).length});
+ }
  const displayLag=[];
  if(cfg.scenario==='route-pages'){
    const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
@@ -283,7 +303,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag}));
+ console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -330,8 +350,8 @@ class SessionShellPTYTest(unittest.TestCase):
         cls.driver=cls.root/'driver.cjs';cls.driver.write_text(DRIVER)
         cls.project=cls.root/'project';cls.project.mkdir()
 
-    def run_loop(self,scenario,*,blocked_backend=False):
-        directory=self.root/('case-'+scenario);directory.mkdir(mode=0o700)
+    def run_loop(self,scenario,*,blocked_backend=False,peer=None,case=None):
+        directory=self.root/('case-'+(case or scenario));directory.mkdir(mode=0o700)
         exit_fifo=directory/'native-exit';os.mkfifo(exit_fifo,0o600)
         sid='00000000-0000-4000-8000-000000000052'
         import time
@@ -368,6 +388,16 @@ class SessionShellPTYTest(unittest.TestCase):
                 'registry':str(self.registry),'scenario':scenario,'utilities':str(ROOT/'utilities'),
                 'exit_fifo':str(exit_fifo),'routeCache':str(cache/'projection.json')}
         if scenario in {'action-display','answer-display'}:config.update(actionGate=str(gate),actionReady=str(ready))
+        if peer is not None:
+            audit=directory/'audit.py'
+            # Counts every subprocess the sender starts and its wall time; nothing else changes.
+            audit.write_text('import json,runpy,sys,time\nout=sys.argv[1];sys.argv=sys.argv[2:]\n'
+                'calls=[]\nsys.addaudithook(lambda e,a:calls.append(str(a[1][0]) if a[1] else "?") if e=="subprocess.Popen" else None)\n'
+                'began=time.monotonic()\ntry:\n runpy.run_path(sys.argv[0],run_name="__main__")\nexcept SystemExit:\n pass\n'
+                'finally:\n open(out,"w").write(json.dumps({"subprocesses":len(calls),"programs":sorted(set(calls)),"ms":round((time.monotonic()-began)*1000)}))\n')
+            config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
+                          steward=str(ROOT/'utilities/peer-steward.py'),
+                          tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
         if scenario in {'side-layout','side-columns','side-left'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)
@@ -401,6 +431,55 @@ class SessionShellPTYTest(unittest.TestCase):
             raise
         self.assertEqual(child.returncode,0,stderr)
         return json.loads(stdout.splitlines()[-1])
+
+    def peer_path(self,directory,*,herdr):
+        # The sender's PATH: no herdr at all, or a private herdr that only records its argv.
+        bin_dir=self.root/('peer-bin-'+directory);bin_dir.mkdir(exist_ok=True)
+        log=self.root/('peer-herdr-'+directory+'.log')
+        if herdr:
+            fake=bin_dir/'herdr'
+            fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> '+repr(str(log))+'\nexit 1\n');fake.chmod(0o700)
+        dirs=[str(bin_dir)]+[d for d in self.env['PATH'].split(os.pathsep)
+                              if d and not os.access(os.path.join(d,'herdr'),os.X_OK)]
+        return os.pathsep.join(dirs),str(log)
+
+    def peer_rows(self,result):
+        rows=[row for row in result['peer'] if 'label' in row]
+        return {row['label']:row for row in rows},result['peer'][-1]['herdr_calls']
+
+    def test_peer_prompt_reaches_an_idle_shell_by_session_number_and_window_without_herdr(self):
+        for herdr in (False,True):
+            with self.subTest(herdr=herdr):
+                path,log=self.peer_path('idle-'+str(herdr),herdr=herdr)
+                sid='00000000-0000-4000-8000-000000000052'
+                result=self.run_loop('warm',case='peer-idle-'+str(herdr),peer={
+                    'path':path,'herdrLog':log,'expectInput':True,'round':'idle'+str(herdr),
+                    'targets':[['sid','claude:'+sid],['tag','TAG'],['window','private:p1'],
+                               ['other_server','private:p1',{'AGENT_HERDR_SESSION':'other-server'}],
+                               # Same server name, another Herdr configuration: never this window.
+                               ['other_namespace','private:p1',
+                                {'HERDR_CONFIG_PATH':str(self.root/'other-herdr'/'config.toml')}]]})
+                rows,herdr_calls=self.peer_rows(result)
+                for label in ('sid','tag','window'):
+                    self.assertIn('prompted=queued',rows[label]['receipt'])
+                    self.assertIn('via=session-shell',rows[label]['receipt'])
+                    self.assertTrue(rows[label].get('typed'),rows[label])
+                    self.assertEqual(rows[label]['subprocesses'],0,rows[label])
+                for label in ('other_server','other_namespace'):
+                    self.assertIn('prompted=unverified reason=target-pane-unresolved',rows[label]['receipt'])
+                self.assertEqual(herdr_calls,0)
+
+    def test_peer_prompt_leaves_a_form_or_draft_untouched_and_pending(self):
+        for scenario in ('form','unpainted-draft'):
+            with self.subTest(scenario=scenario):
+                path,log=self.peer_path(scenario,herdr=True)
+                result=self.run_loop(scenario,case='peer-'+scenario,peer={
+                    'path':path,'herdrLog':log,'expectInput':False,'round':scenario,
+                    'targets':[['held','claude:00000000-0000-4000-8000-000000000052']]})
+                rows,herdr_calls=self.peer_rows(result)
+                self.assertIn('prompted=queued',rows['held']['receipt'])
+                self.assertIn('reason=not-idle-empty',rows['held']['receipt'])
+                self.assertEqual(herdr_calls,0)
 
     def test_native_escape_closes_a_modal_without_disabling_the_next_block_focus(self):
         self.assertFalse(self.run_loop('native-escape-focus')['status']['focused'])
