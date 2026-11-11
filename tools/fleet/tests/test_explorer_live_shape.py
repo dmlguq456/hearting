@@ -33,7 +33,7 @@ def route_extension(key, value):
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
     if key == "owner_gauge":
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
-    if key in ("current", "owner_waits"):
+    if key in ("current", "owner_waits", "closed"):
         return type(value) is bool
     if key == "worker_context_index":
         return type(value) is int and value >= 0
@@ -60,6 +60,19 @@ def route_extension(key, value):
                 isinstance(item, str) for item in row["model"]))
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
+    if key == "doer":
+        # The one-line route row: who does the work now, its context and its open tool.
+        optional_text = lambda item: item is None or isinstance(item, str)
+        return (isinstance(value, dict)
+                and set(value) == {"harness", "model", "effort", "context", "window", "tokens",
+                                   "tool", "agents"}
+                and optional_text(value["harness"]) and optional_text(value["effort"])
+                and optional_text(value["tool"])
+                and (value["model"] is None or pair(value["model"]) and all(
+                    isinstance(item, str) for item in value["model"]))
+                and optional_pct(value["context"]) and optional_number(value["window"])
+                and (value["tokens"] is None or type(value["tokens"]) is int)
+                and type(value["agents"]) is int and value["agents"] >= 0)
     raise ValueError(key)
 
 
@@ -79,7 +92,8 @@ def question_extension(key, value):
 
 
 REPO_STATUS_TEXT = frozenset(("done", "done_age", "changed", "line", "decision", "next", "doc", "doc_age"))
-REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions"))
+REPO_STATUS_COUNT = frozenset(("routes", "questions", "decisions", "routes_running",
+                               "routes_waiting", "routes_stopped"))
 
 
 def repo_status(value):
@@ -176,7 +190,8 @@ def conform(live, samples, path, problems):
                     problems.append(f"{path}.{key}: expected optional finite completion timestamp")
                 continue
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
-                                              "worker_context_index", "owner_waits", "visibility"):
+                                              "worker_context_index", "owner_waits", "visibility", "doer",
+                                              "closed"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue

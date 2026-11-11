@@ -67,7 +67,7 @@ class RepoColumnTests(unittest.TestCase):
                     frame, trace = ef.trace_draw(draw, vm, state, cols, 60)
                     self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
                     pane = _pane_rows(frame, cols)
-                    header = next(line for line in pane if "ID" in line and "HARNESS" in line)
+                    header = next(line for line in pane if "ID" in line and "MODEL" in line)
                     self.assertNotIn("REPO", header)
                     for repo in (LONG, CJK):
                         prefix = repo[:8]
@@ -129,19 +129,23 @@ class RouteSummaryRepoRule(unittest.TestCase):
         for cols in (100, 140, 180):
             with self.subTest(cols=cols):
                 frame = draw(vm, NavState(view="OVERVIEW"), cols, 60)
+                # At 100 columns the MODEL and CONTEXT cells leave TITLE (which gives way first)
+                # room for a shortened repo name and the start of the title only.
+                probe, long_probe, cjk_probe = (("first", "secon", "third"), LONG[:5], CJK[:2]) \
+                    if cols < 140 else (("first w", "second w", "third w"), LONG[:12], CJK[:4])
                 rows = []
                 for y, row in enumerate(frame.cells):
                     pane = "".join(cell[0] for cell in row[34:])
-                    if any(title in pane for title in ("first w", "second w", "third w")):
+                    if any(title in pane for title in probe):
                         rows.append((y, pane))
                 self.assertEqual(len(rows), 3, rows)
-                long_rows = [row for _y, row in rows if LONG[:12] in row]
-                cjk_rows = [row for _y, row in rows if CJK[:4] in row]
+                long_rows = [row for _y, row in rows if long_probe in row]
+                cjk_rows = [row for _y, row in rows if cjk_probe in row]
                 # Every OVERVIEW ROUTES row names its own repo, not only the first of a run.
                 self.assertEqual(len(long_rows), 2)
                 self.assertEqual(len(cjk_rows), 1)
-                self.assertTrue(all(LONG[:12] in row for _y, row in rows if "[b2]" in row))
-                first_two = [y for y, pane in rows if LONG[:12] in pane][:2]
+                self.assertTrue(all(long_probe in row for _y, row in rows if "[b2]" in row))
+                first_two = [y for y, pane in rows if long_probe in pane][:2]
                 self.assertEqual(_cell_column(frame, first_two[0], "["),
                                  _cell_column(frame, first_two[1], "["))
 

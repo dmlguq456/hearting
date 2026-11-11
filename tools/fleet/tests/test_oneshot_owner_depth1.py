@@ -88,17 +88,23 @@ class OneShotOwnerTests(unittest.TestCase):
     def test_overview_and_routes_show_the_owner_harness_model_and_effort(self):
         vm, _routes = self.routes()
         overview = "\n".join(draw(vm, NavState(view="OVERVIEW", scope="-"), 150, 40).text_rows())
-        line = next(row for row in overview.splitlines() if "Fixture solo route" in row)
+        line = next(row for row in overview.splitlines() if "Fixture solo" in row)
         self.assertIn("[s1]", line)
-        self.assertIn("codex (Opus 5.5·high)", line)
+        self.assertIn("codex Opus 5.5 high", line)
         self.assertIn("one-shot", line)
         page = draw(vm, NavState(view="ROUTES", scope="-"), 150, 40).text_rows()
-        index = next(i for i, row in enumerate(page) if "Fixture solo route" in row)
+        index = next(i for i, row in enumerate(page) if "Fixture solo" in row)
         self.assertIn("codex", page[index])
-        self.assertIn("└ owner", page[index + 1])
-        self.assertNotIn("worker", page[index + 1])
-        staged = next(i for i, row in enumerate(page) if "Fixture staged route" in row)
-        self.assertIn("└ worker", page[staged + 1])
+        # The owner/worker body line unfolds under the one-line route row.
+        for route_id, title, body in (("rt-solo", "Fixture solo", "└ owner"),
+                                      ("rt-staged", "Fixture staged", "└ worker")):
+            opened = draw(vm, NavState(view="ROUTES", scope="-",
+                                       folds=(("ropen:ROUTES", route_id),)), 150, 40).text_rows()
+            index = next(i for i, row in enumerate(opened) if title in row)
+            body_row = next(row for row in opened[index + 1:index + 4] if "└ owner" in row or "└ worker" in row)
+            self.assertIn(body, body_row)
+            if body == "└ owner":
+                self.assertNotIn("worker", body_row)
 
     def test_shell_panel_reads_the_same_owner_for_every_harness(self):
         script = r'''

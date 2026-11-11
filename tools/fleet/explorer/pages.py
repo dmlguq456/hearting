@@ -167,8 +167,9 @@ def _repo_status_block(grid, x, right, y, status):
         if status.get("stale") and status.get("doc_age"):
             head.insert(0, (str(status["doc_age"]) + " · ", "dim"))
     else:
+        from .tables import route_count_segment
         count = int(status.get("routes") or 0)
-        head = [(f"{count} route{'s' if count != 1 else ''} active", "soft" if count else "dim"),
+        head = [(route_count_segment(dict(status, routes=count))[0], "soft" if count else "dim"),
                 (" · no status document", "dim")]
     decisions = int(status.get("decisions") or 0)
     if has_doc and decisions:
@@ -177,7 +178,8 @@ def _repo_status_block(grid, x, right, y, status):
             decide.append((f" · +{decisions - 1} more", "dim"))
     else:
         decide = [("0" if has_doc else "·", "dim")]
-    decide.append((f"      {asked} to answer", "blocked" if asked else "dim"))
+    from .tables import answer_wait_word
+    decide.append((f"      {answer_wait_word()} {asked}", "blocked" if asked else "dim"))
     following = status.get("next")
     changed = []
     if has_doc:
@@ -223,19 +225,26 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     model = tuple(session.get("model") or ())
     grid.put(x + 3, y, "harness:", "label", limit=right)
     cursor = grid.put(x + 16, y, harness, "hb_" + harness, limit=right)
-    if model:
-        effort = session.get("effort")
-        cursor = _segs(grid, cursor, y, [
-            (" (", "dim"), (model[0], model[1] if len(model) > 1 else "dim"), ("·", "dim"),
-            (str(effort), "eff_" + str(effort) if effort in ("medium", "xhigh") else "dim"),
-            (")", "dim")], right)
+    if model or session.get("effort"):
+        # ``claude Opus 5.5 xhigh``: the session row's own MODEL cell words.
+        from .tables import model_cell_parts
+        cursor = _segs(grid, cursor, y, model_cell_parts(
+            harness, model or None, str(session.get("effort") or ""))[1:], right)
     pane = session.get("pane")
-    cursor = _segs(grid, cursor, y, [("      pane ", "label"),
-                                     (str(pane or "·"), "soft" if pane else "dim")], right)
+    field = [("      pane ", "label"), (str(pane or "·"), "soft" if pane else "dim")]
+    link = "  (open ▸)" if pane else ""
+    if pane and cursor + _width(field) + cell_width(link) > right - 1:
+        # Too narrow beside the model: the pane gets its own field line, so its link still fits.
+        y += 1
+        grid.put(x + 3, y, "pane:", "label", limit=right)
+        cursor, field = x + 16, [(str(pane), "soft")]
+        if cursor + _width(field) + cell_width(link) > right - 1:
+            link = " ▸"
+    cursor = _segs(grid, cursor, y, field, right)
     if pane:
-        open_x = grid.put(cursor, y, "  (open ▸)", "hearting", limit=right)
+        open_x = grid.put(cursor, y, link, "hearting", limit=right)
         if open_x <= right - 1:          # the link is a target only where all of it is drawn in the pane
-            grid.add_hit(y, cursor + 2, open_x, ("pane", tag, str(pane)))
+            grid.add_hit(y, cursor + len(link) - len(link.lstrip()), open_x, ("pane", tag, str(pane)))
     y += 1
     session_state = str(session.get("state") or "·")
     ask = bool(session.get("ask"))
@@ -853,6 +862,25 @@ def _route_after(route, nodes):
     return ""
 
 
+def _route_band_head(route):
+    """The detail band's top edge up to the title: ``web-api › [4f] › Rate limiting``."""
+    tag = route.get("session_tag")
+    repo_text = repo_rule_label(route.get("repo"))
+    head = [(" ", None), *(((repo_text, "title_dim"), (" › ", "line")) if repo_text else ())]
+    if tag:
+        head += [("[", "tag_b"), (str(tag), "soft"), ("]", "tag_b"), (" › ", "line")]
+    return head
+
+
+def route_band_shows_title(grid, vm, route, x, use):
+    """Whether the detail band under an unfolded route carries its whole title on the top edge."""
+    if not tuple((vm.nodes or {}).get(str(route.get("id") or ""), ())):
+        return False                          # a route with no stage record draws no title there
+    title = str(route.get("detail_title") or route.get("title") or "·")   # the band's own words
+    right = min(grid.cols - 1, x + use)
+    return x + 2 + _width(_route_band_head(route) + [(title, None)]) <= right - 1
+
+
 def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     """Route frame, node band and the picked node's panel from row y to bottom."""
     right = min(grid.cols - 1, x + use)
@@ -874,11 +902,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
                  "dim", limit=right)
         grid.mark_moved()
         return bottom + 1
-    tag = route.get("session_tag")
-    repo_text = repo_rule_label(route.get("repo"))
-    head = [(" ", None), *(((repo_text, "title_dim"), (" › ", "line")) if repo_text else ())]
-    if tag:
-        head += [("[", "tag_b"), (str(tag), "soft"), ("]", "tag_b"), (" › ", "line")]
+    head = _route_band_head(route)
     leg_count = sum(1 for item in route.get("legs") or () if str(item[0]) != "frame")
     if route.get("detail_trailer") is not None:
         # The source states how long the route ran and what its record holds; nothing is derived.

@@ -29,6 +29,112 @@ _COMPLETE_STATES = frozenset({"complete", "completed", "success", "ok", "observe
 _OBSERVED_STATES = frozenset({"complete", "completed", "success", "ok", "observed", "absent"})
 
 
+def focus_command(pane, server=None, env=None):
+    """How ``pane`` is brought forward for the person: ``("herdr", endpoint, pane)``,
+    ``("tmux", [argv, ...])`` or ``None`` when nothing here can reach it.
+
+    ``server`` is where Fleet observed the pane: ``herdr:<endpoint>`` (``default`` is Herdr's
+    default server) or ``tmux:<socket>`` (empty for tmux's default server). A pane number names
+    a pane only on its own server, so an unknown ``server`` asks no server at all. A Herdr pane id
+    (``w1:p3``) goes to that endpoint's ``pane.focus`` request; a tmux pane id (``%12``) is
+    selected in its window and client on that tmux server.
+    """
+    env = os.environ if env is None else env
+    pane = str(pane or "").strip()
+    if not pane or pane == "·" or env.get("FLEET_DEMO"):
+        return None
+    kind, _sep, where = str(server or "").partition(":")
+    if pane.startswith("%"):
+        if kind != "tmux":
+            return None
+        prefix = ["tmux"] + (["-S", where] if where else ["-L", "default"])
+        return ("tmux", [prefix + ["select-window", "-t", pane], prefix + ["select-pane", "-t", pane],
+                         prefix + ["switch-client", "-t", pane]])
+    if kind != "herdr":
+        return None
+    return ("herdr", where.strip() or "default", pane)
+
+
+def herdr_endpoint_socket(endpoint, env=None):
+    """The socket of the Herdr ``endpoint`` Fleet observes: the inherited one when it belongs
+    to that endpoint, else the one Herdr itself reports (the collectors' resolver), else ""."""
+    from pathlib import Path as _Path
+    utilities = str(_Path(__file__).resolve().parents[3] / "utilities")
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+    try:
+        import herdr_observation
+        found = herdr_observation.socket_path_for_endpoint(endpoint, env)
+        if found:
+            return found
+        from session_tidy import _herdr_endpoint_socket
+        return _herdr_endpoint_socket("" if endpoint == "default" else endpoint) or ""
+    except Exception:
+        return ""
+
+
+def pane_target(vm, tag, pane=""):
+    """``(pane, server)`` for a focus effect: the pane the row of ``tag`` holds, with the server
+    it was observed on. An empty ``pane`` (Enter where the link was not drawn) takes the row's
+    own pane; a pane the row does not hold has no known server."""
+    tag, pane = str(tag or ""), str(pane or "").strip()
+    rows = [row for row in getattr(vm, "sessions", ()) or () if str(row.get("tag")) == tag]
+    rows += [row for row in getattr(vm, "questions", ()) or ()
+             if str(row.get("open_tag") or row.get("tag")) == tag]
+    for row in rows:
+        own = str(row.get("pane") or "").strip()
+        if own and (not pane or own == pane):
+            return own, row.get("pane_server")
+    return pane, None
+
+
+def _herdr_focus(socket_path, pane, timeout=3.0):
+    """One ``pane.focus`` request; True when Herdr answered with a result."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.settimeout(timeout)
+            stream.connect(socket_path)
+            stream.sendall((json.dumps({"id": "fleet:pane.focus", "method": "pane.focus",
+                                        "params": {"pane_id": pane}}) + "\n").encode())
+            reply = b""
+            while not reply.endswith(b"\n") and len(reply) < 65536:
+                chunk = stream.recv(65536)
+                if not chunk:
+                    break
+                reply += chunk
+        return "result" in json.loads(reply.decode("utf-8", "replace") or "{}")
+    except (OSError, ValueError):
+        return False
+
+
+def focus_pane(pane, server=None, env=None, runner=None, resolve=None):
+    """Bring the pane forward on its own server without holding the screen thread; returns
+    whether it was asked (nothing is asked when the server is unknown)."""
+    env = os.environ if env is None else env
+    plan = focus_command(pane, server, env)
+    if not plan:
+        return False
+
+    def run():
+        if plan[0] == "herdr":
+            socket_path = (resolve or herdr_endpoint_socket)(plan[1], env)
+            if socket_path:
+                (runner or _herdr_focus)(socket_path, plan[2])
+            return
+        import subprocess
+        for command in plan[1]:
+            try:
+                (runner or subprocess.run)(command, capture_output=True, text=True, timeout=5,
+                                           check=False)
+            except (OSError, subprocess.SubprocessError):
+                return
+    if runner is not None:
+        run()
+    else:
+        threading.Thread(target=run, name="fleet-focus-pane", daemon=True).start()
+    return True
+
+
 class ExplorerRuntime:
     """Behaviour-preserving runtime hooks for the explorer."""
 
@@ -919,7 +1025,7 @@ class ExplorerRuntime:
                 "message": (message + note)[:240], "error": None, "models": refreshed}
 
     def apply_effects(self, effects, vm):
-        """Apply accepted ordering and validated MODELS effects."""
+        """Apply accepted ordering, pane focus and validated MODELS effects."""
         from . import order
         ordering = getattr(vm, "ordering", None)
         saved = ({"repos": list(ordering.get("repo_keys", ())),
@@ -933,6 +1039,9 @@ class ExplorerRuntime:
                 continue
             if effect and effect[0] == "alloc.apply":
                 result = self._apply_allocation_action(effect, vm)
+                continue
+            if effect and effect[0] == "focus" and len(effect) > 2:
+                focus_pane(*pane_target(vm, effect[1], effect[2]))
                 continue
             if not effect or effect[0] != "reorder" or len(effect) < 5:
                 continue
