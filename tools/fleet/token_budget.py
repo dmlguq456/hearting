@@ -149,6 +149,45 @@ def codex_context_used_pct(active_context_tokens, context_window_tokens) -> Opti
     return min(99, round(100.0 * used / effective_window))
 
 
+def opencode_context_tokens(tokens) -> Optional[int]:
+    """One OpenCode request's prompt size, as its own TUI counts it.
+
+    ``tokens`` is an assistant message's ``tokens`` record: its ``total`` when
+    present, otherwise input + output + cache read + cache write. Fleet's
+    OpenCode collector and the OpenCode token-budget hook share this rule.
+    """
+    if not isinstance(tokens, Mapping):
+        return None
+    total = _policy_tokens(tokens.get("total"))
+    if total is None and isinstance(tokens.get("total"), float):
+        total = _counter(tokens.get("total"))
+    if total is not None:
+        return total
+    cache = tokens.get("cache") if isinstance(tokens.get("cache"), Mapping) else {}
+    values = [_counter(value) if not isinstance(value, bool) else None
+              for value in (tokens.get("input"), tokens.get("output"),
+                            cache.get("read"), cache.get("write"))]
+    observed = [value for value in values if value is not None]
+    return sum(observed) if observed else None
+
+
+def telemetry_from_opencode_message(*, session_id=None, tokens=None,
+                                    context_window_tokens=None,
+                                    session_total_tokens=None) -> TokenTelemetry:
+    """Latest OpenCode assistant request against its model's ``limit.context``.
+
+    The percentage is OpenCode's own footer figure (tokens / limit.context);
+    the plugin supplies both values from the runtime's message and model APIs.
+    """
+    telemetry = telemetry_from_explicit(
+        adapter="opencode", session_id=session_id,
+        active_context_tokens=opencode_context_tokens(tokens),
+        context_window_tokens=context_window_tokens,
+        session_total_tokens=session_total_tokens)
+    telemetry.signal_source = "opencode-plugin"
+    return telemetry
+
+
 def policy_band(context_used_pct, tight_pct=DEFAULT_TIGHT_PCT,
                 critical_pct=DEFAULT_CRITICAL_PCT) -> str:
     """Return ``unknown|normal|tight|critical`` for a normalized context %."""

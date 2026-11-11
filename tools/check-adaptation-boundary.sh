@@ -1227,10 +1227,11 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'class TransitionLock' utilities/token-budget.py \
     || ! grep -Fq 'class DirectoryLock' tools/fleet/token_accounting.py \
     || ! grep -Fq 'eligible_for_user_review' tools/fleet/token_experiment.py \
-    || ! grep -Fq 'Phase 2 automatic accounting' adapters/opencode/README.md; then
+    || ! grep -Fq 'utilities/token-budget.py --adapter opencode' adapters/opencode/README.md \
+    || ! grep -Fq '"--adapter", "opencode"' adapters/opencode/plugins/hearting-guards.js; then
     fail_msg "token-budget projection must preserve portable orthogonality, bounded accounting, isolated evaluation, and native-config boundaries"
   fi
-  for p in utilities/token-budget.py adapters/codex/hooks/userprompt-lifecycle.py adapters/codex/bin/preflight.sh adapters/codex/hooks/hooks.json; do
+  for p in utilities/token-budget.py adapters/codex/hooks/userprompt-lifecycle.py adapters/codex/bin/preflight.sh adapters/codex/hooks/hooks.json adapters/opencode/plugins/hearting-guards.js; do
     if grep -Eq 'offline-forecast-v1|token_experiment|production_dynamic_enabled' "$p"; then
       fail_msg "$p must not import or activate the production-disabled token experiment"
     fi

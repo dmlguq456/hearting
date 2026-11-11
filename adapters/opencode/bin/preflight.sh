@@ -363,7 +363,7 @@ autopilot_entrypoints=opencode-native-skills-commands
 autopilot_auto_routing=instruction-guided-not-claude-slash-router
 subagent_surface=opencode-native-subagents
 subagent_auto_spawn=explicit-or-main-dispatched
-note=OpenCode exposes a native TUI footer (model/context/tokens/session) but no user-customizable shell statusline script; use preflight status for harness-specific signals.
+note=OpenCode exposes a native TUI footer (model/context/tokens/session) but no user-customizable shell statusline script; OpenCode 2 adds the answer wait, open route and waiting tidy result in the prompt.footer.status slot outside the session shell; use preflight status for other harness-specific signals.
 EOF
     ;;
   memory)

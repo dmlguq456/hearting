@@ -97,12 +97,15 @@ def native_binary(harness: str) -> str | None:
 
 class Reply:
     """One scripted model answer: plain text, a single shell tool call, or one
-    named tool call (``tool=(name, arguments)``) such as a skill load."""
+    named tool call (``tool=(name, arguments)``) such as a skill load.
+    ``input_tokens`` is the prompt size the answer reports (default 1)."""
 
-    def __init__(self, text: str = "", shell: str | None = None, tool=None):
+    def __init__(self, text: str = "", shell: str | None = None, tool=None,
+                 input_tokens: int = 1):
         self.text = text
         self.shell = shell
         self.tool = tool
+        self.input_tokens = input_tokens
 
     def call(self, protocol: str, names):
         """The (name, arguments) of this reply's tool call, or None."""
@@ -332,7 +335,7 @@ class ModelFixture:
         if not blocks:
             blocks.append({"type": "text", "text": "OK"})
         stop = "tool_use" if call else "end_turn"
-        usage = {"input_tokens": 1, "output_tokens": 1,
+        usage = {"input_tokens": reply.input_tokens, "output_tokens": 1,
                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
         if not streaming:
             body = {"id": mid, "type": "message", "role": "assistant", "model": FIXTURE_MODEL,
@@ -394,7 +397,8 @@ class ModelFixture:
                            "item": item})
         events.append({"type": "response.completed", "response": dict(
             base, status="completed", output=output,
-            usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
+            usage={"input_tokens": reply.input_tokens, "output_tokens": 1,
+                   "total_tokens": reply.input_tokens + 1,
                    "input_tokens_details": {"cached_tokens": 0},
                    "output_tokens_details": {"reasoning_tokens": 0}})})
         return self._sse(events) + b"data: [DONE]\n\n", "text/event-stream"
@@ -419,7 +423,8 @@ class ModelFixture:
             body = {"id": cid, "object": "chat.completion", "created": created,
                     "model": FIXTURE_MODEL,
                     "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+                    "usage": {"prompt_tokens": reply.input_tokens, "completion_tokens": 1,
+                              "total_tokens": reply.input_tokens + 1}}
             return json.dumps(body).encode(), "application/json"
 
         def chunk(delta, finish_reason=None, usage=None):
@@ -435,7 +440,8 @@ class ModelFixture:
         if tool_calls:
             events.append(chunk({"tool_calls": tool_calls}))
         events.append(chunk({}, finish,
-                            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}))
+                            {"prompt_tokens": reply.input_tokens, "completion_tokens": 1,
+                             "total_tokens": reply.input_tokens + 1}))
         return self._sse(events, named=False) + b"data: [DONE]\n\n", "text/event-stream"
 
 

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -361,6 +362,93 @@ console.log("OpenCode actual chat.message -> shared usage/state -> toast/system 
         result = subprocess.run(["node", "--input-type=module", "-e", script], text=True,
                                 capture_output=True, timeout=30, env={**self.env,
                                 "AGENT_HOME": str(fixture), "PLUGIN_PATH": str(plugin_path)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        print(result.stdout.strip())
+
+    @unittest.skipUnless(shutil.which("node"), "node unavailable")
+    def test_opencode_token_budget_reads_v1_and_v2_message_apis(self):
+        # PG-17: the plugin passes the latest request's tokens and that model's
+        # limit.context to the shared token-budget CLI; the directive rides the
+        # same turn's system context. V2 rows come from session.context.
+        fixture = self.temp / "harness"
+        (fixture / "core").mkdir(parents=True)
+        (fixture / "core/CORE.md").touch()
+        (fixture / "adapters/opencode/bin").mkdir(parents=True)
+        preflight = fixture / "adapters/opencode/bin/preflight.sh"
+        preflight.write_text("#!/bin/sh\nexit 0\n")
+        preflight.chmod(0o755)
+        (fixture / "utilities").mkdir()
+        for name in ("context_alert.py", "token-budget.py", "session_tidy.py",
+                     "session_card_format.py"):
+            shutil.copy(ROOT / "utilities" / name, fixture / "utilities" / name)
+        (fixture / "tools/fleet").mkdir(parents=True)
+        for name in ("__init__.py", "token_budget.py", "token_accounting.py"):
+            shutil.copy(ROOT / "tools/fleet" / name, fixture / "tools/fleet" / name)
+        (fixture / "capabilities").mkdir()
+        shutil.copy(ROOT / "capabilities/session-tidy.md", fixture / "capabilities/session-tidy.md")
+        plugin_path = ROOT / "adapters/opencode/plugins/hearting-guards.js"
+        script = r'''
+import assert from "node:assert/strict"
+const { AgentHarnessGuards } = await import(process.env.PLUGIN_PATH)
+let used = 1000, model = "fixture-model"
+const row = () => ({id: "a" + used, sessionID: "ses_v1", role: "assistant", time: {created: used},
+  providerID: "fixture", modelID: model, tokens: {input: used, output: 1, cache: {read: 0, write: 0}}})
+const client = {session: {get: async ({path}) => ({data: {id: path.id}}),
+  messages: async ({path}) => ({data: [{info: {...row(), sessionID: path.id}},
+    {info: {id: "u", sessionID: path.id, role: "user", time: {created: 1}}}]})}, tui: {}}
+// Each prompt reads the previous request; `turns` is what each request then reports.
+async function run(plugin, sid, turns) {
+  const seen = []
+  for (const [index, value] of turns.entries()) {
+    await plugin["chat.message"]({sessionID: sid, messageID: sid + index},
+      {message: {sessionID: sid, agent: "build"}, parts: [{type: "text", text: "go"}]})
+    const output = {system: []}
+    await plugin["experimental.chat.system.transform"]({sessionID: sid}, output)
+    seen.push((output.system.find(text => text.startsWith("TOKEN_BUDGET=")) || "").split(":")[0])
+    used = value
+    await plugin["chat.params"]({sessionID: sid, model: {providerID: "fixture", id: model,
+      limit: {context: 200000, output: 8000}}}, {})
+  }
+  return seen
+}
+const v1 = await AgentHarnessGuards({directory: process.env.HOME, client})
+assert.deepEqual(await run(v1, "ses_v1", [150000, 150000, 175000, 175000, 1]),
+  ["", "TOKEN_BUDGET=tight", "", "TOKEN_BUDGET=critical", ""])
+// A window seen for another model is never borrowed.
+used = 190000; model = "other"
+await v1["chat.params"]({sessionID: "ses_mismatch", model: {providerID: "fixture", id: "fixture-model",
+  limit: {context: 200000}}}, {})
+await v1["chat.message"]({sessionID: "ses_mismatch", messageID: "x"},
+  {message: {sessionID: "ses_mismatch", agent: "build"}, parts: [{type: "text", text: "go"}]})
+const mismatch = {system: []}
+await v1["experimental.chat.system.transform"]({sessionID: "ses_mismatch"}, mismatch)
+assert(!mismatch.system.some(text => text.startsWith("TOKEN_BUDGET=")))
+v1.dispose()
+// V2: the legacy client wrapper returns user rows only; assistant usage is session.context.
+used = 1000; model = "fixture-model"
+const v2 = await AgentHarnessGuards({directory: process.env.HOME, nativeHost: "v2",
+  client: {session: {get: client.session.get, messages: async () => ({data: []})}, tui: {}},
+  session: {context: async ({sessionID}) => ({data: [{id: "u", type: "user", text: "go"},
+    {id: "a" + used, type: "assistant", time: {created: used}, model: {providerID: "fixture", id: model},
+     tokens: {input: used, output: 1, reasoning: 0, cache: {read: 0, write: 0}}}]})}},
+  {initialize: false})
+assert.deepEqual(await run(v2, "ses_v2", [150000, 150000, 175000, 175000, 1]),
+  ["", "TOKEN_BUDGET=tight", "", "TOKEN_BUDGET=critical", ""])
+v2.dispose()
+console.log("OpenCode token budget V1 messages / V2 session.context paths passed")
+'''
+        result = subprocess.run(["node", "--input-type=module", "-e", script], text=True,
+                                capture_output=True, timeout=60, env={**self.env,
+                                "PYTHONDONTWRITEBYTECODE": "1",
+                                "AGENT_HOME": str(fixture), "PLUGIN_PATH": str(plugin_path)})
+        # The plugin's detached turn helpers may still be writing under HOME.
+        last, deadline = None, time.monotonic() + 5
+        while time.monotonic() < deadline:
+            now = sorted(str(path) for path in self.temp.rglob("*"))
+            if now == last:
+                break
+            last = now
+            time.sleep(0.5)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         print(result.stdout.strip())
 

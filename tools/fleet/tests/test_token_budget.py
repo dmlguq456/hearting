@@ -476,6 +476,49 @@ class TransitionPolicyTest(unittest.TestCase):
             self.assertEqual(sum("TOKEN_BUDGET=tight" in out for out in outputs), 1)
 
 
+class OpenCodeTransitionTest(unittest.TestCase):
+    """PG-17: the OpenCode plugin hands the latest request's tokens and its model's
+    limit.context to the same CLI; the band, transition and accounting stay shared."""
+
+    def run_cli(self, state, tokens, window, *extra):
+        result = subprocess.run([
+            sys.executable, str(CLI), "--adapter", "opencode", "--session-id", "ses_" + "a" * 20,
+            "--format", "hook", "--message-stdin", "--record-accounting", "--state-dir", state,
+            *extra], input=json.dumps({"tokens": tokens, "context_window": window}),
+            text=True, capture_output=True, check=True)
+        return result.stdout
+
+    def test_count_rule_is_the_fleet_collector_rule(self):
+        from fleet.token_budget import opencode_context_tokens
+        self.assertEqual(opencode_context_tokens(
+            {"input": 100, "output": 5, "cache": {"read": 20, "write": 3}}), 128)
+        self.assertEqual(opencode_context_tokens({"total": 77, "input": 1}), 77)
+        self.assertIsNone(opencode_context_tokens({"input": True}))
+        self.assertIsNone(opencode_context_tokens(None))
+        self.assertEqual(opencode._context_tokens_from_payload(
+            {"tokens": {"input": 100, "output": 5, "cache": {"read": 20, "write": 3}}}), 128)
+
+    def test_same_bands_and_transitions_as_codex(self):
+        usage = lambda n: {"input": n, "output": 1, "cache": {"read": 0, "write": 0}}
+        with tempfile.TemporaryDirectory() as state:
+            outputs = [self.run_cli(state, usage(n), 200_000)
+                       for n in (1_000, 150_000, 150_000, 175_000, 175_000)]
+            self.assertEqual(outputs, ["", DIRECTIVE_TEXTS["tight-v1"] + "\n", "",
+                                       DIRECTIVE_TEXTS["critical-v1"] + "\n", ""])
+            aggregate = read_accounting("ses_" + "a" * 20, adapter="opencode", state_dir=state)
+            self.assertEqual((aggregate["hook_invocations"], aggregate["emissions"],
+                              aggregate["zero_injections"]), (5, 2, 3))
+            self.assertEqual(aggregate["zero_reason_counts"]["same_band"], 2)
+
+    def test_missing_window_or_tokens_is_zero_bytes(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.assertEqual(self.run_cli(state, {"input": 190_000}, None), "")
+            self.assertEqual(self.run_cli(state, None, 200_000), "")
+            aggregate = read_accounting("ses_" + "a" * 20, adapter="opencode", state_dir=state)
+            self.assertEqual((aggregate["hook_invocations"], aggregate["emissions"]), (2, 0))
+            self.assertEqual(aggregate["zero_reason_counts"]["unknown"], 2)
+
+
 class AccountingTest(unittest.TestCase):
 
     def event(self, *, reason="normal", total=None, directive_id=None):

@@ -76,7 +76,7 @@ results remain a supervisor verification item.
 | Permission contract wrapper | yes | `adapters/opencode/bin/preflight.sh permissions` reports native permission surfaces and rejects Claude `allowedTools` as a portable contract |
 | MCP servers (`mcp` config: local/remote) | yes | `adapters/opencode/bin/preflight.sh mcp` reports native MCP surfaces and rejects Claude `settings.json` MCP payloads as a portable contract |
 | Model selection (`model`, per-agent `model`, variant) | yes | `adapters/opencode/bin/role-map.sh` resolves portable roles; V2 provider/model suffix syntax and scoped eligibility are normalized by `utilities/opencode_runtime.py` |
-| Statusline / footer | no user shell surface | TUI footer is native; harness status signals stay instruction-only/preflight |
+| Statusline / footer | V2 TUI slot | TUI footer is native; outside the session shell the `prompt.footer.status` slot shows the answer wait, open route and waiting tidy result (`tui/hearting-route-status.tsx`); no user shell statusline script |
 | Shell hooks (Claude-style `settings.json` hook events) | no | harness guards run as explicit preflight wrappers |
 
 ## Native Skill, Command, And Agent Surface Debt
@@ -259,11 +259,12 @@ native `read` tool; a successful marker command is not evidence of its contents.
 Two items remain that cannot reach byte-for-byte Claude parity; they are
 OpenCode runtime surface limits, not adapter debt:
 
-1. **No persistent statusline.** OpenCode has a native TUI footer (model,
-   context, tokens, session) but no user shell statusline surface. Harness
-   signals (git risk, headless jobs) are injected per prompt
-   through the plugin transform instead of shown persistently. Functional, not a
-   persistent display.
+1. **Partial persistent statusline.** OpenCode has a native TUI footer (model,
+   context, tokens, session) and no user shell statusline script. On OpenCode 2
+   the official `prompt.footer.status` slot shows Hearting's answer wait, open
+   route and waiting tidy result outside the session shell (PG-20); git risk
+   and headless jobs are still injected per prompt through the plugin
+   transform, and V1 draws no badge.
 2. **Prompt-lifecycle injection rides a runtime plugin hook.** V1 reaches it
    through `experimental.chat.system.transform`, in OpenCode's
    `experimental.*` namespace; V2 through the documented `context` session
@@ -428,6 +429,12 @@ OpenCode has a native TUI footer that shows model, context, tokens, and
 session state. There is no user-customizable shell statusline script
 (`statusline.sh` equivalent) in the OpenCode config schema. Do not attempt to
 replace the native footer, and do not project `adapters/claude/statusline.sh`.
+OpenCode 2 appends to it through the official `prompt.footer.status` slot
+(https://opencode.ai/docs/build/plugins/cli/): outside the session shell
+`tui/hearting-route-status.tsx` shows the answer wait, the open route and a
+waiting session-tidy result from `utilities/human_wait_state.py --statusline
+opencode <sid> --with-tidy-notice`, the helper and cache Claude's status line,
+the shell panel and Fleet read; it shows no session id.
 
 Harness-specific status signals need OpenCode-native realization:
 
@@ -550,11 +557,19 @@ owns early, debounced, and final sidecars. Interactive `chat.message` and
 session DB cursor. `dispatch-reconcile --apply` may restore only a missing owner
 for one exact live attempt. Fleet merely reads the resulting sidecars.
 
-Token self-regulation v2 remains deferred for OpenCode: no automatic Phase 2
-hook accounting, no projected `token-budget-experiment.py`, and no production
-dynamic-policy import, activation flag, or config mutation. Portable Fleet
-modules and the Codex realization may be used as implementation references, but
-they are not OpenCode runtime support.
+Token self-regulation v2 (Phase 1 directive and Phase 2 accounting) runs from
+the plugin: `chat.message` reads the latest assistant request of the exact main
+session (V1 `session.messages`, V2 `session.context`; a child session is
+skipped) and the `limit.context` last seen for that same provider/model (V1
+`chat.params`, V2 `context` resolved through `model.list`), and runs the shared
+`utilities/token-budget.py --adapter opencode --format hook --message-stdin
+--record-accounting`. The shared code keeps the band rule, transition state and
+bounded accounting; the plugin appends the directive to that turn's system
+context and copies no rule. The 500K/700K notice reads the same record (before
+this, V2 read user rows only and the notice never fired). There is no projected
+`token-budget-experiment.py` and no production dynamic-policy import,
+activation flag or config mutation. A timed-out helper records nothing, where
+the Codex parent counts `timeout_or_error`.
 
 ### SD-15 limit-death detection (OPERATIONS §5.10 ⑨) — parity: partial (disclosed)
 

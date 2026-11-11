@@ -169,6 +169,9 @@ const peerGuidanceBySession = new Map()
 // One threshold notice per native session, retained for the triggering turn so
 // an auxiliary title call cannot consume the answering model's system context.
 const contextAlertBySession = new Map()
+// The model and `limit.context` of each session's latest model request (V1
+// `chat.params`, V2 `context` + `model.list`), read back at the next prompt.
+const modelWindowBySession = new Map()
 const v2SessionInfo = new Map()
 const v2WorkerSessions = new Set()
 const v2ContractSessions = new Set()
@@ -207,37 +210,85 @@ function compactionWorkerContract(contract) {
     "to the worker's final response, not to this summary request.\n\n" + contract
 }
 
-async function contextAlert(ctx, sid, output) {
-  if (!sid || isWorkerSession() || process.env.MEM_DISTILL === "1"
-      || ["owner", "worker", "auxiliary", "reviewer"].includes((process.env.AGENT_SESSION_ROLE || "").toLowerCase())
-      || ["compaction", "title", "summary"].includes(output?.message?.agent)
-      || (output?.parts?.length && output.parts.every((part) => part.synthetic || part.ignored))) return ""
+// The context notices (500K/700K alert, token budget) read one record: the
+// latest assistant request of this exact main session, as the native message API
+// reports it (V1 `session.messages`, V2 `session.context`). `undefined` means the
+// turn is not one these notices observe; `null` means no usable reading.
+function tokenNoticeTurn(sid, output) {
+  return Boolean(sid) && !isWorkerSession() && process.env.MEM_DISTILL !== "1"
+    && !["owner", "worker", "auxiliary", "reviewer"].includes((process.env.AGENT_SESSION_ROLE || "").toLowerCase())
+    && !["compaction", "title", "summary"].includes(output?.message?.agent)
+    && !(output?.parts?.length && output.parts.every((part) => part.synthetic || part.ignored))
+}
+
+function assistantUsage(row, sid) {
+  // V1 rows are `{ info, parts }`; V2 `session.context` rows are the message itself.
+  const info = row?.info && typeof row.info === "object" ? row.info : row
+  const role = info?.role || info?.type
+  if (role !== "assistant" || info.summary || !info.tokens || typeof info.tokens !== "object") return null
+  if (info.sessionID && info.sessionID !== sid) return null
+  const model = info.model && typeof info.model === "object" ? info.model : {}
+  return { tokens: info.tokens, created: info.time?.created || 0, id: String(info.id || ""),
+    providerID: info.providerID || model.providerID || "", modelID: info.modelID || model.id || "" }
+}
+
+async function latestAssistantUsage(ctx, sid) {
   const client = ctx.client
-  if (typeof client?.session?.get !== "function" || typeof client?.session?.messages !== "function") return ""
+  if (typeof client?.session?.get !== "function") return null
+  const v2 = ctx.nativeHost === "v2"
+  if (v2 ? typeof ctx.session?.context !== "function" : typeof client?.session?.messages !== "function") return null
   const controller = new AbortController()
   let timer
   try {
     return await Promise.race([(async () => {
       const options = { throwOnError: true, signal: controller.signal }
       const session = sdkResponseData(await client.session.get({ path: { id: sid }, ...options }))
-      if (session?.id !== sid || session.parentID) return ""
-      const rows = sdkResponseData(await client.session.messages({ path: { id: sid },
-        query: { limit: 16 }, ...options }))
-      if (controller.signal.aborted || !Array.isArray(rows)) return ""
-      const latest = rows.map((row) => row?.info)
-        .filter((info) => info?.sessionID === sid && info.role === "assistant" && !info.summary)
-        .sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0)
-          || String(b.id || "").localeCompare(String(a.id || "")))[0]
-      if (!latest?.tokens) return ""
-      const result = spawnSync(python3, [path.join(root, "utilities", "context_alert.py")], {
-        input: JSON.stringify({ session_id: sid, tokens: latest.tokens }) + "\n",
-        encoding: "utf8", timeout: 1000,
-      })
-      return result.status === 0 ? (result.stdout || "").trim() : ""
+      if (session?.id !== sid || session.parentID) return null
+      const result = v2 ? await ctx.session.context({ sessionID: sid })
+        : await client.session.messages({ path: { id: sid }, query: { limit: 16 }, ...options })
+      const rows = v2 ? (result?.error ? null : result?.data ?? result) : sdkResponseData(result)
+      if (controller.signal.aborted || !Array.isArray(rows)) return null
+      return rows.map((row) => assistantUsage(row, sid)).filter(Boolean)
+        .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))[0] || null
     })(), new Promise((resolve) => {
-      timer = setTimeout(() => { controller.abort(); resolve("") }, 500)
+      timer = setTimeout(() => { controller.abort(); resolve(null) }, 500)
     })])
-  } catch { return "" } finally { clearTimeout(timer) }
+  } catch { return null } finally { clearTimeout(timer) }
+}
+
+function contextAlert(sid, latest) {
+  if (!latest?.tokens) return ""
+  const result = spawnSync(python3, [path.join(root, "utilities", "context_alert.py")], {
+    input: JSON.stringify({ session_id: sid, tokens: latest.tokens }) + "\n",
+    encoding: "utf8", timeout: 1000,
+  })
+  return result.status === 0 ? (result.stdout || "").trim() : ""
+}
+
+function rememberModelWindow(sid, providerID, modelID, context) {
+  if (!sid || typeof providerID !== "string" || !providerID || typeof modelID !== "string" || !modelID) return
+  modelWindowBySession.set(sid, { providerID, modelID,
+    context: Number.isSafeInteger(context) && context > 0 ? context : null })
+}
+
+// Token self-regulation v2 (spec token-self-regulation): the shared
+// `utilities/token-budget.py` judges the band, keeps the transition state and
+// records the bounded accounting; this hook only supplies the latest request's
+// tokens and the window of that same model. A window seen for another model is
+// not borrowed. Every failure is zero bytes.
+function tokenBudget(sid, latest) {
+  const seen = latest && modelWindowBySession.get(sid)
+  const window = seen && seen.providerID === latest.providerID && seen.modelID === latest.modelID
+    ? seen.context : null
+  const result = spawnSync(python3, [path.join(root, "utilities", "token-budget.py"),
+    "--adapter", "opencode", "--session-id", sid, "--format", "hook",
+    "--message-stdin", "--record-accounting"], {
+    cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1000,
+    input: JSON.stringify({ tokens: latest?.tokens || null, context_window: window }),
+    killSignal: "SIGKILL",
+  })
+  const text = result.status === 0 ? (result.stdout || "").trim() : ""
+  return text.startsWith("TOKEN_BUDGET=") && Buffer.byteLength(text) <= 240 && !text.includes("\n") ? text : ""
 }
 
 function showContextAlert(ctx, text) {
@@ -1400,11 +1451,16 @@ async function setupOpenCodeV2(ctx) {
       const worker = v2WorkerSessions.has(sid)
       observation.worker = worker
       void (async () => {
-        if (!worker && !selections.length) return
         if (typeof observation.model.providerID !== "string" || !observation.model.providerID
             || typeof observation.model.id !== "string" || !observation.model.id) return
         observation.model = await v2ContextModel(ctx, observation.model)
         if (controller.signal.aborted || contextObservations.get(sid) !== observation) return
+        // The token budget reads this request's window at the next prompt (main sessions).
+        if (!worker) {
+          rememberModelWindow(sid, observation.model.providerID, observation.model.id,
+            observation.model.limit?.context)
+        }
+        if (!worker && !selections.length) return
         observation.resolved = true
         if (worker) {
           writeContextPolicy(observation, {})
@@ -3411,6 +3467,10 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
   },
   "chat.params": async (input, output) => {
     writeContextPolicy(input, output)
+    if (!isWorkerSession()) {
+      rememberModelWindow(input?.sessionID, input?.model?.providerID || input?.provider?.info?.id,
+        input?.model?.id, input?.model?.limit?.context)
+    }
   },
   event: async ({ event }) => {
     if (event && event.type === "session.created") {
@@ -3524,6 +3584,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         historyNoticeSettledBySession.delete(sid)
         peerGuidanceBySession.delete(sid)
         contextAlertBySession.delete(sid)
+        modelWindowBySession.delete(sid)
         paneProjectionRetryAt.delete(sid)
         runtimeStatusBySession.delete(sid)
         pendingPeerStatus.delete(sid)
@@ -3571,8 +3632,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     const alertTurn = turn || prompt
     if (eventSid && contextAlertBySession.get(sid)?.turn !== alertTurn) {
-      const text = await contextAlert(ctx, eventSid, output)
-      contextAlertBySession.set(sid, { turn: alertTurn, text })
+      const observed = tokenNoticeTurn(eventSid, output)
+      const latest = observed ? await latestAssistantUsage(ctx, eventSid) : null
+      const text = observed ? contextAlert(eventSid, latest) : ""
+      const budget = observed ? tokenBudget(eventSid, latest) : ""
+      contextAlertBySession.set(sid, { turn: alertTurn, text, budget })
       showContextAlert(ctx, text)
     }
     const cardTurn = turn || prompt
@@ -3625,6 +3689,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     appendContext(output, cardBySession.get(sid)?.text)
     appendContext(output, peerGuidanceBySession.get(sid))
     appendContext(output, contextAlertBySession.get(sid)?.text)
+    appendContext(output, contextAlertBySession.get(sid)?.budget)
 
     const prompt = promptBySession.get(sid) || ""
     const turn = turnBySession.get(sid) || ""

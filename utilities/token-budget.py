@@ -26,8 +26,13 @@ from fleet.token_budget import (  # noqa: E402
     policy_band,
     telemetry_from_codex_session,
     telemetry_from_explicit,
+    telemetry_from_opencode_message,
 )
-from fleet.token_accounting import read_accounting, session_digest  # noqa: E402
+from fleet.token_accounting import (  # noqa: E402
+    read_accounting,
+    record_accounting,
+    session_digest,
+)
 
 
 DEGRADED_REASONS = {
@@ -52,7 +57,7 @@ def env_int(name: str, default: int) -> int:
 
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--adapter", choices=("portable", "codex"), default="portable")
+    ap.add_argument("--adapter", choices=("portable", "codex", "opencode"), default="portable")
     ap.add_argument("--session-id")
     ap.add_argument("--active-context-tokens", type=int)
     ap.add_argument("--context-window", dest="context_window_tokens", type=int)
@@ -74,10 +79,30 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--native-active", action="store_true",
                     help="validated native rollout-budget opt-in; suppress fallback policy")
     ap.add_argument("--format", choices=("kv", "json", "hook"), default="kv")
+    ap.add_argument("--message-stdin", action="store_true",
+                    help="OpenCode plugin: read {tokens, context_window} of the latest "
+                         "assistant request from stdin")
+    ap.add_argument("--record-accounting", action="store_true",
+                    help="hook format: record this invocation's outcome in the bounded "
+                         "aggregate (an adapter whose parent is not Python)")
     return ap
 
 
+def opencode_message(stream) -> dict:
+    try:
+        value = json.loads(stream.read(65536) or "{}")
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def collect(args) -> TokenTelemetry:
+    if args.adapter == "opencode" and args.message_stdin:
+        message = opencode_message(sys.stdin)
+        return telemetry_from_opencode_message(
+            session_id=args.session_id, tokens=message.get("tokens"),
+            context_window_tokens=message.get("context_window"),
+            session_total_tokens=args.session_total_tokens)
     explicit = args.active_context_tokens is not None or args.context_window_tokens is not None
     if explicit:
         return telemetry_from_explicit(
@@ -311,6 +336,12 @@ def main() -> int:
         parser().error(str(exc))
     if args.format == "hook":
         directive, private_receipt = hook_output(args, result)
+        if args.record_accounting and args.session_id:
+            try:
+                record_accounting(args.session_id, private_receipt, adapter=args.adapter,
+                                  state_dir=args.state_dir)
+            except Exception:
+                pass  # Accounting is an observation and never owns the output.
         receipt_path = os.environ.get("AGENT_TOKEN_BUDGET_RESULT_PATH")
         if receipt_path:
             write_receipt(receipt_path, private_receipt)
