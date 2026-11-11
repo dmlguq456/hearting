@@ -19,8 +19,9 @@ What this adds over ``tools/fleet/refresh_title.read_delta`` /
   A new append becomes its own range; an old unread front is never overwritten by a
   newer end-of-file.
 
-Position meaning: a byte offset into the JSONL file (Claude, Codex) or the ``part``
-rowid (OpenCode); a range is half-open ``[from, to)``.  A row that could not be read
+Position meaning: a byte offset into the JSONL file (Claude, Codex), or for OpenCode
+the ``part`` rowid (V1) or the ``session_message`` seq (OpenCode 2), both read through
+``opencode_runtime.read_session_parts``; a range is half-open ``[from, to)``.  A row that could not be read
 whole (a half-written last line, an unanswered question still open) stays unread.
 
 Public functions (all return plain dicts / dataclasses, never raise for a missing
@@ -87,7 +88,7 @@ class Chunk:
     skipped_oversize: int = 0
     blocked: str = ""      # "open-question": stopped before an unanswered question
     error: str = ""
-    unit: str = "byte"     # "byte" (Claude, Codex) | "rowid" (OpenCode)
+    unit: str = "byte"     # "byte" (Claude, Codex) | "rowid" (OpenCode V1) | "seq" (OpenCode 2)
     total: int = 0         # end of the snapshot this chunk was cut from
     pending_after: list = dataclasses.field(default_factory=list)   # ranges still unread once this one is applied
     plan: dict = dataclasses.field(default_factory=dict)            # what ``mark_applied`` needs
@@ -910,50 +911,142 @@ def _read_jsonl(harness: str, path: Path, cursor: int, limit: int) -> Chunk:
     return chunk
 
 
-def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> Chunk:
+def _opencode_session(db_path: Path, session_id: str, after: int = 0, limit: Optional[int] = None,
+                      sized: bool = True):
+    """``(unit, rows, error)`` of one exact OpenCode session after ``after``.
+
+    The shared generation-aware reader (``opencode_runtime.read_session_parts``)
+    picks the V1 ``part`` rows or the OpenCode 2 ``session_message`` rows from
+    one read-only snapshot; a session found in both is refused there. Each row
+    becomes ``(cursor, updated_ms, size, role, parts, source)`` with V1-shaped parts.
+    ``limit`` uses that reader's existing row budget (the oldest ``limit`` rows).
+    With ``sized=False`` the size is left ``None`` for ``_row_size`` to fill on demand.
+    """
+    import opencode_runtime
+    snapshot = opencode_runtime.read_session_parts(session_id, db_path=db_path, after_cursor=after, limit=limit)
+    if snapshot.get("state") != "observed":
+        reason = str(snapshot.get("reason") or "unknown")
+        if reason == "exact-session-not-found":
+            return "rowid", [], ""                      # nothing written for this session yet
+        detail = " ".join(str(snapshot.get("detail") or "").split())[:180]
+        return "rowid", [], f"unreadable: {reason}" + (f": {detail}" if detail else "")
+    generation = snapshot.get("generation")
+    rows = []
+    for row in snapshot["parts"]:
+        data, raw = row.get("data"), row.get("raw")
+        source = raw if isinstance(raw, (str, bytes)) else data
+        size = _row_size((None, None, None, None, None, source)) if sized else None
+        role = str(row.get("role") or "")
+        if generation == "v2":
+            parts = _opencode_v2_parts(role, data)
+        else:
+            parts = [data] if isinstance(data, dict) else []
+        rows.append((int(row["cursor"]), int(row.get("updated") or 0), size, role, parts, source))
+    return ("seq" if generation == "v2" else "rowid"), rows, ""
+
+
+def _row_size(row) -> int:
+    """The budget size of one ``_opencode_session`` row: its native JSON length."""
+    if row[2] is not None:
+        return row[2]
+    source = row[5]
+    return len(source) if isinstance(source, (str, bytes)) else len(json.dumps(source, ensure_ascii=False))
+
+
+OPENCODE_CHUNK_PAGE = 16          # first page of rows a bounded chunk asks the shared reader for
+OPENCODE_CHUNK_PAGE_MAX = 512
+
+
+def _opencode_v2_parts(role: str, data) -> list:
+    """OpenCode 2 message rows as the V1 part shapes the readers below already parse."""
+    if not isinstance(data, dict):
+        return []
+    if role == "user":
+        return [{"type": "text", "text": data["text"]}] if isinstance(data.get("text"), str) else []
+    if role != "assistant" or not isinstance(data.get("content"), list):
+        return []
+    parts = []
+    for part in data["content"]:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "tool":
+            state = dict(part.get("state")) if isinstance(part.get("state"), dict) else {}
+            started = (part.get("time") or {}).get("created") if isinstance(part.get("time"), dict) else None
+            if started is not None and not isinstance(state.get("time"), dict):
+                state["time"] = {"start": started}
+            part = {**part, "tool": part.get("name"), "callID": part.get("id"), "state": state}
+        parts.append(part)
+    return parts
+
+
+def _open_question(part, updated_ms) -> bool:
+    """A question still waiting for its answer (an old one stops blocking)."""
+    return (isinstance(part, dict) and part.get("tool") == "question"
+            and (part.get("state") or {}).get("status") in ("pending", "running", "streaming")
+            and now_epoch() - float(updated_ms or 0) / 1000 < OPEN_QUESTION_STALE_SEC)
+
+
+def _digest_opencode(rows, chunk: Chunk) -> None:
+    """Fill ``chunk`` (rows, text, choices) from ``_opencode_session`` rows, oldest first."""
+    texts = []
+    for row in rows:
+        role, parts = row[3], row[4]
+        chunk.rows += 1
+        for part in parts:
+            chunk.choices.extend(_opencode_choices(part))
+            if part.get("type") != "text" or part.get("synthetic") or part.get("ignored"):
+                continue
+            text = _rt._opencode_text(part).strip()
+            if text:
+                texts.append(_dialogue_line(role, text))
+    chunk.text = "\n".join(texts)
+
+
+def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int,
+                   cursor_unit: Optional[list] = None) -> Chunk:
     chunk = Chunk("opencode", str(db_path), cursor, cursor)
     if not session_id:
         chunk.error = "no session id"
         return chunk
-    try:
-        with _opencode_view(db_path) as con:
-            rows = con.execute(
-                "SELECT p.rowid, p.data, p.time_updated, m.data FROM part p "
-                "LEFT JOIN message m ON m.id = p.message_id "
-                "WHERE p.session_id = ? AND p.rowid > ? ORDER BY p.rowid ASC", (session_id, int(cursor)))
-            used, last, texts, exhausted = 0, int(cursor), [], True
-            for rowid, raw, updated_ms, message_raw in rows:
-                raw = raw if isinstance(raw, str) else (raw or b"").decode("utf-8", "replace")
-                if used and used + len(raw) > limit:
-                    exhausted = False
-                    break
-                try:
-                    part = json.loads(raw)
-                except ValueError:
-                    part = None
-                if isinstance(part, dict) and part.get("tool") == "question" and \
-                        (part.get("state") or {}).get("status") in ("pending", "running") and \
-                        now_epoch() - float(updated_ms or 0) / 1000 < OPEN_QUESTION_STALE_SEC:
-                    chunk.blocked, exhausted = "open-question", False
-                    break
-                used += len(raw)
-                last = int(rowid)
-                chunk.rows += 1
-                if not isinstance(part, dict):
-                    continue
-                chunk.choices.extend(_opencode_choices(part))
-                if part.get("type") != "text" or part.get("synthetic") or part.get("ignored"):
-                    continue
-                text = _rt._opencode_text(part).strip()
-                if text:
-                    try:
-                        role = str((json.loads(message_raw) or {}).get("role") or "")
-                    except (ValueError, TypeError, AttributeError):
-                        role = ""
-                    texts.append(_dialogue_line(role, text))
-            chunk.cursor_to, chunk.eof, chunk.text = last, exhausted, "\n".join(texts)
-    except (OSError, sqlite3.Error) as exc:
-        chunk.error = _read_error(exc)
+    # Read only the rows this budget can take: small pages through the shared reader's row
+    # limit, doubling while the budget lasts, so a long session is not decoded per chunk.
+    # A nonzero cursor means something only in the unit (generation) that issued it, so every
+    # page of every attempt must stay in the unit the first page saw; ``cursor_unit`` carries it
+    # across the retries of one chunk. Cursor 0 belongs to no unit and reads any one from the start.
+    held = cursor_unit if cursor_unit is not None and cursor else []
+    used, last, taken, exhausted, page = 0, int(cursor), [], True, OPENCODE_CHUNK_PAGE
+    unit = held[0] if held else None
+    while True:
+        page_unit, rows, error = _opencode_session(db_path, session_id, last, page)
+        if unit is not None and page_unit != unit:
+            # The generation changed (an empty page included): the cursor no longer names this
+            # session, so the read fails like an ambiguous one (only a cursor-0 retry reads the new one).
+            error = "unreadable: session-generation-ambiguous"
+        if error:
+            chunk.error = error
+            return chunk
+        if unit is None:
+            unit = page_unit
+            held.append(unit)
+        stopped = False
+        for row in rows:
+            if used and used + row[2] > limit:
+                stopped = True
+                break
+            if any(_open_question(part, row[1]) for part in row[4]):
+                chunk.blocked, stopped = "open-question", True
+                break
+            used += row[2]
+            last = row[0]
+            taken.append(row)
+        if stopped:
+            exhausted = False
+            break
+        if len(rows) < page:
+            break
+        page = min(page * 2, OPENCODE_CHUNK_PAGE_MAX)
+    _digest_opencode(taken, chunk)
+    chunk.cursor_to, chunk.eof, chunk.unit = last, exhausted, unit
     return chunk
 
 
@@ -963,7 +1056,8 @@ def read_chunk(harness: str, source, cursor: int = 0, sid: Optional[str] = None,
     limit = max(1, int(limit_bytes))
     cursor = max(0, int(cursor or 0))
     if harness == "opencode":
-        return _opencode_retry(lambda: _read_opencode(Path(source), sid or "", cursor, limit))
+        cursor_unit: list = []          # the unit the first page saw, kept for every retry
+        return _opencode_retry(lambda: _read_opencode(Path(source), sid or "", cursor, limit, cursor_unit))
     if harness in ("claude", "codex"):
         return _read_jsonl(harness, Path(source), cursor, limit)
     return Chunk(harness, str(source), cursor, cursor, error="unknown harness")
@@ -1339,44 +1433,29 @@ def _plan_jsonl(path, mark: dict) -> dict:
     return {"unit": "byte", "end": end, "ranges": _merge_ranges([[0, end]]), "inode": inode, "size": info.st_size}
 
 
-def _plan_opencode(con, sid: str, mark: dict) -> dict:
-    """The unread rowid ranges of one OpenCode session, inside one read-only snapshot."""
-    top, stamp = con.execute("SELECT MAX(rowid), MAX(time_updated) FROM part WHERE session_id = ?", (sid,)).fetchone()
-    end = int(top) + 1 if top is not None else 0
-    snapshot_ms = int(stamp or 0)
+def _plan_opencode(unit: str, rows: list, mark: dict) -> dict:
+    """The unread cursor ranges of one OpenCode session, from one read-only snapshot.
+
+    Cursors are V1 ``part`` rowids or OpenCode 2 ``session_message`` seqs (``unit``);
+    a watermark of the other unit starts the session over.
+    """
+    end = rows[-1][0] + 1 if rows else 0
+    snapshot_ms = max((row[1] for row in rows), default=0)
     pending = mark.get("pending")
-    if isinstance(pending, list) and mark.get("unit") == "rowid" and isinstance(mark.get("end"), int) \
+    if isinstance(pending, list) and mark.get("unit") == unit and isinstance(mark.get("end"), int) \
             and mark["end"] <= end:
         ranges = [list(r) for r in pending if isinstance(r, list) and len(r) == 2]
         if end > mark["end"]:
             ranges.append([mark["end"], end])
         if mark.get("snapshot_ms"):
             # A row that changed after the last snapshot (a tool part that was still running) is read again.
-            for (rowid,) in con.execute("SELECT rowid FROM part WHERE session_id = ? AND rowid < ? "
-                                        "AND time_updated > ?", (sid, mark["end"], int(mark["snapshot_ms"]))):
-                ranges.append([int(rowid), int(rowid) + 1])
-    elif isinstance(mark.get("cursor"), int) and not isinstance(pending, list):
+            ranges += [[row[0], row[0] + 1] for row in rows
+                       if row[0] < mark["end"] and row[1] > int(mark["snapshot_ms"])]
+    elif unit == "rowid" and isinstance(mark.get("cursor"), int) and not isinstance(pending, list):
         ranges = [[mark["cursor"] + 1, end]]                      # schema 1: last rowid consumed
     else:
         ranges = [[0, end]]
-    return {"unit": "rowid", "end": end, "ranges": _merge_ranges(ranges), "snapshot_ms": snapshot_ms}
-
-
-def _open_question_rowid(con, sid: str, lo: int, hi: int) -> Optional[int]:
-    """The first rowid in ``[lo, hi)`` of a question still waiting for its answer, if any."""
-    rows = con.execute("SELECT rowid, data, time_updated FROM part WHERE session_id = ? AND rowid >= ? "
-                       "AND rowid < ? AND data LIKE '%question%' ORDER BY rowid ASC", (sid, lo, hi))
-    for rowid, raw, updated_ms in rows:
-        raw = raw if isinstance(raw, str) else (raw or b"").decode("utf-8", "replace")
-        try:
-            part = json.loads(raw)
-        except ValueError:
-            continue
-        if isinstance(part, dict) and part.get("tool") == "question" and \
-                (part.get("state") or {}).get("status") in ("pending", "running") and \
-                now_epoch() - float(updated_ms or 0) / 1000 < OPEN_QUESTION_STALE_SEC:
-            return int(rowid)
-    return None
+    return {"unit": unit, "end": end, "ranges": _merge_ranges(ranges), "snapshot_ms": snapshot_ms}
 
 
 def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chunk:
@@ -1384,55 +1463,37 @@ def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chun
     if not sid:
         chunk.error = "no session id"
         return chunk
-    try:
-        with _opencode_view(db_path) as con:
-            plan = _plan_opencode(con, sid, mark)
-            chunk.plan, chunk.total = plan, plan["end"]
-            ranges = plan["ranges"]
-            if not ranges:
-                chunk.cursor_from = chunk.cursor_to = plan["end"]
-                return chunk
-            lo, hi = ranges[-1]
-            blocked_at = _open_question_rowid(con, sid, lo, hi)
-            if blocked_at is not None:
-                chunk.blocked, hi = "open-question", blocked_at
-            low, rows, used = hi, [], 0
-            if hi > lo:
-                low = lo
-                for rowid, raw, message_raw in con.execute(
-                        "SELECT p.rowid, p.data, m.data FROM part p LEFT JOIN message m ON m.id = p.message_id "
-                        "WHERE p.session_id = ? AND p.rowid >= ? AND p.rowid < ? ORDER BY p.rowid DESC",
-                        (sid, lo, hi)):
-                    raw = raw if isinstance(raw, str) else (raw or b"").decode("utf-8", "replace")
-                    if used and used + len(raw) > limit:
-                        low = int(rowid) + 1
-                        break
-                    used += len(raw)
-                    rows.append((int(rowid), raw, message_raw))
-            texts = []
-            for _rowid, raw, message_raw in reversed(rows):
-                chunk.rows += 1
-                try:
-                    part = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(part, dict):
-                    continue
-                chunk.choices.extend(_opencode_choices(part))
-                if part.get("type") != "text" or part.get("synthetic") or part.get("ignored"):
-                    continue
-                text = _rt._opencode_text(part).strip()
-                if text:
-                    try:
-                        role = str((json.loads(message_raw) or {}).get("role") or "")
-                    except (ValueError, TypeError, AttributeError):
-                        role = ""
-                    texts.append(_dialogue_line(role, text))
-            chunk.cursor_from, chunk.cursor_to, chunk.text = low, hi, "\n".join(texts)
-            chunk.pending_after = _subtract(ranges, low, hi)
-            chunk.eof = not chunk.pending_after
-    except (OSError, sqlite3.Error) as exc:
-        chunk.error = _read_error(exc)
+    # The plan needs every row's cursor and update time (``_plan_opencode``), so this read
+    # stays whole; only the rows the budget takes are sized.
+    unit, rows, error = _opencode_session(db_path, sid, sized=False)
+    if error:
+        chunk.error = error
+        return chunk
+    plan = _plan_opencode(unit, rows, mark)
+    chunk.plan, chunk.total, chunk.unit = plan, plan["end"], unit
+    ranges = plan["ranges"]
+    if not ranges:
+        chunk.cursor_from = chunk.cursor_to = plan["end"]
+        return chunk
+    lo, hi = ranges[-1]
+    inside = [row for row in rows if lo <= row[0] < hi]
+    blocked_at = next((row[0] for row in inside if any(_open_question(part, row[1]) for part in row[4])), None)
+    if blocked_at is not None:
+        chunk.blocked, hi = "open-question", blocked_at
+    low, taken, used = hi, [], 0
+    if hi > lo:
+        low = lo
+        for row in reversed([row for row in inside if row[0] < hi]):
+            size = _row_size(row)
+            if used and used + size > limit:
+                low = row[0] + 1
+                break
+            used += size
+            taken.append(row)
+    _digest_opencode(list(reversed(taken)), chunk)
+    chunk.cursor_from, chunk.cursor_to = low, hi
+    chunk.pending_after = _subtract(ranges, low, hi)
+    chunk.eof = not chunk.pending_after
     return chunk
 
 
@@ -1560,14 +1621,21 @@ def _discover(harness: str, horizon: float) -> Iterator[dict]:
         db = opencode_db_path()
         if not db.is_file():
             return
+        rows = []
         try:
             with _opencode_view(db) as con:
-                rows = con.execute(
-                    "SELECT id, directory, time_updated FROM session WHERE time_updated >= ? "
-                    "AND parent_id IS NULL ORDER BY time_updated DESC LIMIT ?",
-                    (int(horizon * 1000), MAX_DISCOVER_FILES)).fetchall()
+                tables = {row[0] for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','session_v2')")}
+                # OpenCode 2 keeps its sessions in ``session_v2``; an upgraded home still has ``session``.
+                for table in ("session_v2", "session"):
+                    if table in tables:
+                        rows += con.execute(
+                            f"SELECT id, directory, time_updated FROM {table} WHERE time_updated >= ? "
+                            "AND parent_id IS NULL ORDER BY time_updated DESC LIMIT ?",
+                            (int(horizon * 1000), MAX_DISCOVER_FILES)).fetchall()
         except (OSError, sqlite3.Error):
             return
+        rows = sorted(rows, key=lambda row: -float(row[2] or 0))[:MAX_DISCOVER_FILES]
         for sid, directory, updated in rows:
             yield {"harness": "opencode", "sid": sid, "transcript": str(db),
                    "cwd": directory or "", "last_active": float(updated) / 1000}
