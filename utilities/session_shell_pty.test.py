@@ -54,6 +54,7 @@ while True:
         if not callback_missing:event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line.startswith('geometry'):print('GEOMETRY_'+line+'_'+str(os.get_terminal_size(0).columns)+'x'+str(os.get_terminal_size(0).lines)+'\r\n',end='',flush=True)
+        if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
         if line=='side-unicode':print('\x1b[3;1H🙂',end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
 """
@@ -260,7 +261,17 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${point.x};${point.y}M\x1b[<0;${point.x};${point.y}m`).toString('base64')});
    await waitFor(/PgUp\/PgDn/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~').toString('base64')});await waitFor(/‹ 2\//);
+   // A collapsed panel shows no page, so its page keys and Esc reach the native.
+   await rpc(pinnedRoute.socket,{...pinnedRoute,op:'panel',expanded:false});
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~HIDDEN_PGDN\r').toString('base64')});await waitFor(/NATIVE_ESC_\^\[6~HIDDEN_PGDN/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
+   await rpc(cfg.inlet,{batch:Buffer.from('HIDDEN_ESC\r').toString('base64')});await waitFor(/NATIVE_ESC_\^HIDDEN_ESC/);
+   // Shown again, the same page takes them again.
+   raw='';
+   await rpc(pinnedRoute.socket,{...pinnedRoute,op:'panel',expanded:true});await waitFor(/PgUp\/PgDn/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[5~').toString('base64')});await waitFor(/‹ 1\//);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_DETAIL\r').toString('base64')});await waitFor(/DONE_AFTER_DETAIL/);
+   if(/NATIVE_ESC_[^\r]*\^\[5~/.test(raw))throw Error('a shown page let PgUp reach the native');
  }
  // Registry publication precedes the first complete display observation.
  if(cfg.scenario==='display')await waitFor(/── route 0 /);
