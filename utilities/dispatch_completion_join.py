@@ -788,10 +788,16 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     counters = {"rows_read": 0, "records_read": 0, "budget_exhausted": 0}
     registry_complete = True
     registry_cursor = None
+    # A missing registry has no rows; one that could not be read was not
+    # observed, so no record may be treated as having no owning row.
+    registry_observed = True
     try:
         lines = registry_lines(jobs)
+    except FileNotFoundError:
+        lines = []
     except OSError:
         lines = []
+        registry_observed = False
     rows_by_attempt: dict[str, dict[str, str]] = {}
     parsed: list[dict[str, str] | None] = []
     for line in lines:
@@ -877,11 +883,13 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
             if owner_metadata is not None:
                 expiry = expire_pending_for_dead_recipient(
                     jobs, owner_metadata, record, attempt_id=owner_attempt_id)
-            if owner_metadata is None and record.get("route_node") == "notice":
+            if (owner_metadata is None and registry_observed
+                    and record.get("route_node") == "notice"):
                 # A notice for a gone session usually has no owning attempt row
                 # to prove its recipient dead; the declared TTL ends it. When a
                 # row exists, the dead-recipient rule above alone decides: a
-                # live, handed-over or unclear recipient is never aged out.
+                # live, handed-over or unclear recipient is never aged out, and
+                # an unread registry is not taken as proof that no row exists.
                 try:
                     if pending_delivery.expire_notice_past_ttl(
                             record_file, actor="dispatch-reconcile") == "expired":

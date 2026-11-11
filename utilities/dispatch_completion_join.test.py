@@ -5204,6 +5204,38 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
             self.assertEqual(result["expired"], 0)
             self.assertEqual(pd.read(jobs.parent, sid, delivery)["state"], "pending")
 
+    def test_notice_ttl_never_reads_an_unreadable_registry_as_no_owner(self):
+        # The registry could not be read (an OSError from the read, or a path
+        # that is not a file): its rows were not observed, so the live parent's
+        # old notice must not be aged out as if it had no owner (review R2 F1).
+        for failure in ("oserror", "directory"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                jobs = Path(td) / "jobs.log"
+                attempt = "att-reconcile-unread-ttl"
+                birth = D.process_start_ticks(os.getpid())
+                row = self._row(attempt, ancestry=(os.getpid(), birth)).replace(
+                    "route_node=execute", "route_node=notice")
+                jobs.write_text(row + "\n", encoding="utf-8")
+                self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+                self.assertTrue(JOIN.materialize_after_terminal_close(jobs, attempt))
+                pd = JOIN.pending_delivery
+                owner = JOIN.current_attempt_row(jobs, attempt)
+                sid, delivery = owner.metadata["parent_sid"], owner.metadata["delivery_id"]
+                old = time.time() - 8 * 86400
+                os.utime(pd.record_path(jobs.parent, sid, delivery), (old, old))
+                if failure == "oserror":
+                    def unreadable(*_args, **_kwargs):
+                        raise OSError("fixture registry read unavailable")
+                    with mock.patch.dict(JOIN.reconcile_pending_delivery.__globals__,
+                                         {"registry_lines": unreadable}):
+                        result = JOIN.reconcile_pending_delivery(jobs)
+                else:
+                    jobs.unlink()
+                    jobs.mkdir()
+                    result = JOIN.reconcile_pending_delivery(jobs)
+                self.assertEqual(result["expired"], 0)
+                self.assertEqual(pd.read(jobs.parent, sid, delivery)["state"], "pending")
+
     def test_materializes_a_row_intent_stamped_but_not_yet_materialized(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
