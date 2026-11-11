@@ -113,7 +113,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:cfg.columns||100,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
         HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher,
-        ...(cfg.scenario==='herdr'||cfg.peer?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(cfg.directory,'private-herdr.sock')}:{})}});
+        ...(cfg.scenario==='herdr'||cfg.peer?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(process.env.XDG_CONFIG_HOME||path.join(process.env.HOME,'.config'),'herdr','herdr.sock')}:{})}});
  child.onData(text=>{if(sideTerm)sideTerm.write(text);raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
  child.onExit(()=>{alive=false;ended();});
@@ -421,14 +421,18 @@ class SessionShellPTYTest(unittest.TestCase):
                 result=self.run_loop('warm',case='peer-idle-'+str(herdr),peer={
                     'path':path,'herdrLog':log,'expectInput':True,'round':'idle'+str(herdr),
                     'targets':[['sid','claude:'+sid],['tag','TAG'],['window','private:p1'],
-                               ['other_server','private:p1',{'AGENT_HERDR_SESSION':'other-server'}]]})
+                               ['other_server','private:p1',{'AGENT_HERDR_SESSION':'other-server'}],
+                               # Same server name, another Herdr configuration: never this window.
+                               ['other_namespace','private:p1',
+                                {'HERDR_CONFIG_PATH':str(self.root/'other-herdr'/'config.toml')}]]})
                 rows,herdr_calls=self.peer_rows(result)
                 for label in ('sid','tag','window'):
                     self.assertIn('prompted=queued',rows[label]['receipt'])
                     self.assertIn('via=session-shell',rows[label]['receipt'])
                     self.assertTrue(rows[label].get('typed'),rows[label])
                     self.assertEqual(rows[label]['subprocesses'],0,rows[label])
-                self.assertIn('prompted=unverified reason=target-pane-unresolved',rows['other_server']['receipt'])
+                for label in ('other_server','other_namespace'):
+                    self.assertIn('prompted=unverified reason=target-pane-unresolved',rows[label]['receipt'])
                 self.assertEqual(herdr_calls,0)
 
     def test_peer_prompt_leaves_a_form_or_draft_untouched_and_pending(self):

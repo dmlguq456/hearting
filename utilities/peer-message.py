@@ -2143,8 +2143,12 @@ def pending_messages(recipient, *, deadline=None):
 
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
-                         producer_binding=None, handoff=None, original_target=None, server=None):
-    """A retry reuses a pending intent; ordinary sends need no preparation lock."""
+                         producer_binding=None, handoff=None, original_target=None, server=None,
+                         prepared=None):
+    """A retry reuses a pending intent; ordinary sends need no preparation lock.
+
+    ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
+    caller can keep its courier even when a later read of that row fails."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
@@ -2248,6 +2252,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                         associations = current.get("verified_addresses", [])
                         if association not in associations:
                             _save_pending(dict(current, verified_addresses=[*associations, association]))
+                if prepared is not None:
+                    prepared.append(row)
                 return row["text"], row["ref"]
         return None
 
@@ -2311,6 +2317,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         if transfer and transfer.get("body_ref") is not None:
             pending["body_ref"] = transfer["body_ref"]
         _save_pending(pending)
+        if prepared is not None:
+            prepared.append(pending)
         return text, ref
 
 

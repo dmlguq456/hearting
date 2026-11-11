@@ -15,8 +15,12 @@ sys.path.insert(0, str(_HERE.parent / "tools"))
 import peer_address  # noqa: E402
 
 
-def _row(harness, sid, pane="", *, server=None, socket=None, tmux_pane=None, tmux=None):
-    env = {}
+def _row(harness, sid, pane="", *, server=None, socket=None, tmux_pane=None, tmux=None,
+         config=None):
+    # A native process of this user carries its own HOME and configuration folders.
+    env = {key: os.environ[key] for key in ("HOME", "XDG_CONFIG_HOME") if os.environ.get(key)}
+    if config:
+        env["XDG_CONFIG_HOME"] = config
     if pane:
         env["HERDR_PANE_ID"] = pane
     if server:
@@ -97,10 +101,37 @@ class PeerAddressTest(unittest.TestCase):
         os.environ["HERDR_SOCKET_PATH"] = str(self.root / "mine.sock")
         self.sessions = [_row("claude", "sid-a", "w1:p1", socket=str(self.root / "theirs.sock"))]
         self.assertEqual(peer_address.resolve("w1:p1"), (None, "target-pane-unresolved"))
-        self.sessions = [_row("claude", "sid-a", "w1:p1"), _row("claude", "sid-b", "w1:p1")]
+        mine = str(self.root / "mine.sock")
+        self.sessions = [_row("claude", "sid-a", "w1:p1", socket=mine),
+                         _row("claude", "sid-b", "w1:p1", socket=mine)]
         self.assertEqual(peer_address.resolve("w1:p1"), (None, "target-pane-ambiguous"))
-        self.sessions = [_row("opencode", "", "w1:p1")]
+        self.sessions = [_row("opencode", "", "w1:p1", socket=mine)]
         self.assertEqual(peer_address.resolve("w1:p1"), (None, "target-session-unresolved"))
+
+    def test_unknown_socket_never_borrows_another_namespace_with_the_same_server_name(self):
+        # Two Herdr servers named alike, each under its own configuration folder.
+        a, b = str(self.root / "a"), str(self.root / "b")
+        sock_a = os.path.join(a, "herdr", "sessions", "hb", "herdr.sock")
+        sock_b = os.path.join(b, "herdr", "sessions", "hb", "herdr.sock")
+        native_b = _row("claude", "sid-b", "w1:p1", server="hb", socket=sock_b, config=b)
+        os.environ.update(AGENT_HERDR_SESSION="hb", XDG_CONFIG_HOME=a)
+        self.sessions = [native_b]
+        # A's caller without a socket value is on A's namespace: B's same window is refused.
+        self.assertEqual(peer_address.resolve("w1:p1"), (None, "target-pane-unresolved"))
+        os.environ["HERDR_SOCKET_PATH"] = sock_a
+        self.assertEqual(peer_address.resolve("w1:p1"), (None, "target-pane-unresolved"))
+        os.environ.pop("HERDR_SOCKET_PATH")
+        # A's own native in the same window number still resolves without a socket value.
+        self.sessions = [native_b, _row("codex", "thread-a", "w1:p1", server="hb", socket=sock_a, config=a)]
+        self.assertEqual(peer_address.resolve("w1:p1")[0]["session_id"], "thread-a")
+        # A retained message keeps the namespace it was first read on, whoever re-reads it.
+        os.environ["XDG_CONFIG_HOME"] = b
+        self.assertEqual(peer_address.resolve("w1:p1")[0]["session_id"], "sid-b")
+        self.assertEqual(peer_address.resolve("w1:p1", server="hb", namespace=sock_a)[0]["session_id"],
+                         "thread-a")
+        self.sessions = [native_b]
+        self.assertEqual(peer_address.resolve("w1:p1", server="hb", namespace=sock_a),
+                         (None, "target-pane-unresolved"))
 
     def test_tmux_window_address_matches_its_own_server_socket(self):
         mine, other = str(self.root / "tmux-mine"), str(self.root / "tmux-other")

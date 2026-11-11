@@ -10,7 +10,9 @@ from what Hearting already holds, never from a Herdr or tmux answer:
 - a window address (``wB:pB3``, tmux ``%N@socket``) is the pane value a live
   native session process received when its window started it
   (``HERDR_PANE_ID``/``TMUX_PANE`` in its own environment), on the same terminal
-  server as the caller. Another server's window with the same number never matches.
+  server as the caller: the same server name and the same Herdr socket, where a
+  missing socket value means the server's socket under that environment's own
+  Herdr configuration. Another server's window with the same number never matches.
 
 What cannot be resolved is refused with a named reason; nothing is guessed.
 """
@@ -58,25 +60,52 @@ def _server_name(env):
     return (env.get("AGENT_HERDR_SESSION") or env.get("HERDR_SESSION") or "default").strip() or "default"
 
 
-def caller_endpoint(environ=None, *, server=None):
-    """The terminal server an address is read on: Herdr server name + socket, tmux socket.
+def _herdr_config_dir(env):
+    config = str(env.get("HERDR_CONFIG_PATH") or "").strip()
+    if config:
+        return os.path.dirname(config)
+    base = str(env.get("XDG_CONFIG_HOME") or "").strip()
+    if not base:
+        home = str(env.get("HOME") or "").strip() or os.path.expanduser("~")
+        base = os.path.join(home, ".config")
+    return os.path.join(base, "herdr")
 
-    ``server`` is the recorded server of a retained message (its duty's identity);
-    the caller's own socket is compared only when it belongs to that same server."""
+
+def herdr_namespace(env, server=None):
+    """The one Herdr API socket a server name means in ``env``.
+
+    An inherited ``HERDR_SOCKET_PATH`` counts only for the server that owns it.
+    Otherwise it is where that server listens under this environment's Herdr
+    configuration folder (``herdr.sock`` for default, ``sessions/<name>/herdr.sock``
+    for a named server). A missing socket value therefore never stands for any
+    server: it is this environment's own one."""
+    name = (server or _server_name(env)).strip() or "default"
+    socket = str(env.get("HERDR_SOCKET_PATH") or "").strip()
+    if socket and _server_name(env) == name:
+        return _real(socket)
+    base = _herdr_config_dir(env)
+    return _real(os.path.join(base, "herdr.sock") if name == "default"
+                 else os.path.join(base, "sessions", name, "herdr.sock"))
+
+
+def caller_endpoint(environ=None, *, server=None, namespace=None):
+    """The terminal server an address is read on: Herdr server name + namespace, tmux socket.
+
+    ``server`` is the recorded server of a retained message (its duty's identity) and
+    ``namespace`` the Herdr socket recorded with it; without a record the caller's own
+    environment names the namespace (``herdr_namespace``)."""
     env = os.environ if environ is None else environ
-    own = _server_name(env)
-    name = (server or own).strip() or "default"
-    socket = _real(env.get("HERDR_SOCKET_PATH") or "") if name == own else ""
+    name = (server or _server_name(env)).strip() or "default"
+    socket = _real(namespace) if namespace else herdr_namespace(env, name)
     return {"server": name, "socket": socket,
             "tmux": _real(str(env.get("TMUX") or "").split(",", 1)[0].strip())}
 
 
 def _same_herdr_server(env, endpoint):
-    """Same server by name, and by socket wherever both sides recorded one."""
+    """Same server name and the same namespace; an unknown socket is never another's."""
     if _server_name(env) != endpoint["server"]:
         return False
-    socket = _real(env.get("HERDR_SOCKET_PATH") or "")
-    return not socket or not endpoint["socket"] or socket == endpoint["socket"]
+    return bool(endpoint["socket"]) and herdr_namespace(env, endpoint["server"]) == endpoint["socket"]
 
 
 def _tmux_default_socket():
@@ -248,8 +277,10 @@ def is_pane_address(target):
             and target.split(":", 1)[0] not in HARNESSES))
 
 
-def resolve(target, *, server=None, environ=None):
-    """``(identity, reason)``: identity is ``{harness, session_id[, pane]}`` or None."""
+def resolve(target, *, server=None, environ=None, namespace=None):
+    """``(identity, reason)``: identity is ``{harness, session_id[, pane]}`` or None.
+
+    ``namespace`` is a retained message's recorded Herdr socket (``caller_endpoint``)."""
     if not isinstance(target, str) or not target:
         return None, "target-not-found"
     if ":" in target and target.split(":", 1)[0] in HARNESSES:
@@ -261,7 +292,7 @@ def resolve(target, *, server=None, environ=None):
     if tag:
         return _resolve_tag(tag.group(1))
     if is_pane_address(target):
-        return _resolve_pane(target, caller_endpoint(environ, server=server))
+        return _resolve_pane(target, caller_endpoint(environ, server=server, namespace=namespace))
     found, reason = _resolve_name(target)
     if found is None and reason == "target-name-not-found" and _BARE_TAG.fullmatch(target):
         return _resolve_tag(target)

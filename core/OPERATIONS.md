@@ -3514,8 +3514,10 @@ address and `harness:<session id>` may resolve to the same recipient only throug
 Hearting's records (`peer_address`); no Herdr or tmux answer is read. A window
 address matches the `HERDR_PANE_ID` (tmux: `TMUX_PANE` and its server socket) in a
 live native session process's own environment, on the caller's server or the
-retained message's recorded server; another server's window with the same number
-is no match (named refusal `target-pane-unresolved`). A shell attachment is
+retained message's recorded server and Herdr namespace (its socket; without a
+socket value, that server's socket under the environment's own Herdr
+configuration folder); another server's or namespace's window with the same
+number is no match (named refusal `target-pane-unresolved`). A shell attachment is
 birth-bound proof of its native process; its inner native PID still takes part
 in the native identity check, and a different independently PROVEN SID is a
 conflict (`target-identity-changed`). An explicit `codex:<full SID>` address uses

@@ -183,6 +183,9 @@ del _moved_class
 # session, and the environment variable is what a detached watcher re-armed
 # from a hook inherits.
 _HERDR_SESSION = os.environ.get("AGENT_HERDR_SESSION") or None
+# The Herdr namespace (socket) a retained window address was first read on; the courier
+# sets it from the duty so a later re-resolution never moves to another server.
+_PEER_NAMESPACE = None
 _RETIRE_FOLLOWUP_COMPLETE = set()
 _HANDOFF_ACCEPTANCE_REPLAYED = set()
 
@@ -5283,6 +5286,12 @@ def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=Non
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
                 "harness": harness or "", "session_id": sid or ""}
+    if peer_message._unresolved_target(recipient):
+        import peer_address
+        if peer_address.is_pane_address(recipient.get("name")):
+            # The window address is re-read later only on the namespace it was sent on.
+            identity["namespace"] = (_PEER_NAMESPACE or peer_address.caller_endpoint(
+                server=_HERDR_SESSION)["socket"])
     intent = {"ref": row.get("ref"), "body_digest": row.get("body_sha256"),
               "target": target, "from": sender, "to": recipient,
               "refs": list(row.get("refs") or []),
@@ -5363,14 +5372,16 @@ def _ensure_sender_delay_notice_if_due(row):
 
 def _resume_message_obligation(duty, store, *, read_context=None):
     """Observe and deliver on the duty's endpoint, including unresolved addresses."""
-    global _HERDR_SESSION
-    old_server = _HERDR_SESSION
-    server = ((duty.get("intent") or {}).get("identity") or {}).get("server") or "default"
+    global _HERDR_SESSION, _PEER_NAMESPACE
+    old_server, old_namespace = _HERDR_SESSION, _PEER_NAMESPACE
+    identity = (duty.get("intent") or {}).get("identity") or {}
+    server = identity.get("server") or "default"
     _HERDR_SESSION = None if server == "default" else server
+    _PEER_NAMESPACE = identity.get("namespace") or None
     try:
         return _resume_message_obligation_scoped(duty, store, read_context=read_context)
     finally:
-        _HERDR_SESSION = old_server
+        _HERDR_SESSION, _PEER_NAMESPACE = old_server, old_namespace
 
 
 def _resume_message_obligation_scoped(duty, store, *, read_context=None):
@@ -5435,6 +5446,11 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     try:
         row = read_pending()
     except (OSError, ValueError):
+        # The duty keeps the sealed request; its own record still dates the sender notice.
+        if not delay_for:
+            _ensure_sender_delay_notice_if_due({
+                "ref": ref, "refs": intent.get("refs") or [], "from": intent.get("from") or {},
+                "to": intent.get("to") or {}, "created": duty.get("accepted_at")})
         checkpoint(state="unknown", observation={"ref": ref, "reason": "pending-row-unreadable"})
         return
     if row is None:
@@ -5449,12 +5465,16 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
         return
     if peer_message._unresolved_target(row.get("to")) and not row.get("bound_to"):
         if row.get("receipt") == "target-identity-changed" or "ambiguous" in row.get("receipt", ""):
+            # Delivery stays refused; the sender's one-hour notice is still owed.
+            _ensure_sender_delay_notice_if_due(row)
             checkpoint(state="unknown", observation={"ref": ref, "reason": row["receipt"]})
             return
         import peer_address
         current, error = peer_address.resolve((row.get("to") or {}).get("name"),
-                                              server=globals()["_HERDR_SESSION"])
+                                              server=globals()["_HERDR_SESSION"],
+                                              namespace=globals()["_PEER_NAMESPACE"])
         if not current or not peer_message.usable_session_id(current.get("session_id")):
+            _ensure_sender_delay_notice_if_due(row)
             checkpoint(state="unknown", observation={"ref": ref, "reason": error or "target-identity-unverified"})
             return
         row = peer_message.bind_unresolved_pending_recipient(ref, {
@@ -5520,6 +5540,8 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     harness, sid = native_recipient["harness"], native_recipient["session_id"]
     attachment, attachment_reason = _current_shell_binding(harness, sid)
     if attachment_reason == "target-identity-changed":
+        # Identity protection refuses delivery; the sender's one-hour notice still applies.
+        _ensure_sender_delay_notice_if_due(row)
         checkpoint(state="unknown", observation={"ref": ref, "reason": attachment_reason})
         return
     held_codex_restart = (
@@ -7685,22 +7707,27 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             and len(body.encode("utf-8")) > peer_message._BODY_REFERENCE_THRESHOLD):
         reference_evidence = _peer_reference_access_evidence(
             harness, sid, binding=binding, native_owner=native_owner)
+    prepared = []
     try:
         text, ref = peer_message.prepare_peer_message(body, sender, recipient,
             defer=True, refs=args.ref, receipt="native-pending", with_trailer=not args.no_trailer,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
-            original_target=args.target, server=_HERDR_SESSION or "default")
+            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
-        print("prompted=unverified reason=peer-pending-unavailable")
-        return 5
+        if not prepared:
+            print("prompted=unverified reason=peer-pending-unavailable")
+            return 5
+        return _prompt_sealed_unread(args, prepared[-1], producer_binding, f"{harness}:{sid}")
     try:
         row = peer_message._read_pending(ref)
     except (OSError, ValueError):
-        print("prompted=unverified reason=peer-pending-unavailable")
-        return 5
+        row = None
+    if row is None:
+        return _prompt_sealed_unread(args, prepared[-1] if prepared else None,
+                                     producer_binding, f"{harness}:{sid}", ref=ref)
     pinned = peer_message.pending_delivery_recipient(row)
     if pinned is not None and not peer_message._same_transfer_session(pinned, recipient):
         # The same retained request may outlive its original name association. Keep
@@ -7766,26 +7793,47 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
     return _PROMPT_EXIT[outcome]
 
 
+def _prompt_sealed_unread(args, sealed, producer_binding, target, *, ref=None):
+    """A sealed request whose row could not be read back still has its courier and ref.
+
+    ``sealed`` is the authoritative row ``prepare_peer_message`` stored or reused; its
+    recipient is never re-resolved from the current name."""
+    ref = ref or (sealed or {}).get("ref")
+    if sealed is not None and producer_binding is None:
+        _schedule_message_obligation(sealed, target)
+    if not ref:
+        print("prompted=unverified reason=peer-pending-unavailable")
+        return 5
+    print(f"prompted=unverified reason=peer-pending-unavailable ref={ref}")
+    _prompt_carrier_note(ref, args.target, "unverified")
+    return 5
+
+
 def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_harness, from_sid,
                        on_prepared=None, producer_binding=None, handoff=None):
     """An address Hearting's records cannot resolve: a named, retained refusal."""
     _prompt_failure_ledger(args.target, reason, [], kind=_prompt_message_kind(body), ref=args.ref,
                            from_identity=from_identity, from_name=from_name)
+    prepared = []
     try:
         _text, ref = peer_message.prepare_peer_message(
             body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
             {"harness": "unknown", "session_id": None, "name": args.target},
             defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
             producer_binding=producer_binding, handoff=handoff,
-            original_target=args.target, server=_HERDR_SESSION or "default")
+            original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared)
         if on_prepared is not None:
             on_prepared(ref)
         row = peer_message._read_pending(ref)
+        if row is None:
+            raise OSError("peer-pending-unreadable")
         if producer_binding is None:
             _schedule_message_obligation(row, args.target)
         print(f"prompted=unverified reason={reason} ref={ref}")
         _prompt_carrier_note(ref, args.target, "unverified")
     except (OSError, ValueError):
+        if prepared:
+            return _prompt_sealed_unread(args, prepared[-1], producer_binding, args.target)
         print("prompted=unverified reason=peer-pending-unavailable")
     return 5
 
