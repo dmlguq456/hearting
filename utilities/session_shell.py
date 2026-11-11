@@ -731,11 +731,12 @@ def _panel_common_rows(panel, columns):
     from fleet.explorer.grid import cell_width
     text = lambda name: "".join(part["text"] for part in panel.get(name) or ()).strip()
     head, selected, context, quota = text("head"), text("selected"), text("context"), text("quota")
+    git = text("git")  # Its own row below the repo row (spec rule 15).
     if columns >= 64:
         first = " │ ".join(part for part in (head, selected, context) if part)
-        rows = [first] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context]
+        rows = [first, git] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context, git]
     else:
-        rows = [head, selected, context]
+        rows = [head, git, selected, context]
     return [row for row in rows + [quota] if row]
 
 
@@ -853,7 +854,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                                    for key, value in question["display"].items()}
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
-        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
     if columns < 64:
         for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
             labels[key] = ui_text("fleet.session_block.compact_" + key)
@@ -883,7 +884,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -904,7 +905,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r")}
+                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
+                                   "g_spin", "g_work_off")}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
@@ -1078,11 +1080,12 @@ def _backend_operation(request: dict) -> dict:
             panel["status"] = []
             panel["summary"] = []
             panel["session"] = panel["brief"] = []
-            for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
+            for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
                 panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r",
+                                           "g_spin", "g_work_off")}
             panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:
