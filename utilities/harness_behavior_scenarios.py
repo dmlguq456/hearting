@@ -824,6 +824,33 @@ def _ids(node, key):
     return found
 
 
+def private_herdr_env(root: Path, env: dict) -> str:
+    """Point ``env`` at this fixture's private Herdr server; return its session name.
+
+    Idempotent. ``--surface herdr`` calls it before the first install, so every
+    long-lived process the fixture starts (the obligation runner that carries
+    notices and peer messages is spawned by install and outlives it) sees the
+    private ``herdr`` and session, as a person's runner sees their own.
+    """
+    session = env.get("HERDR_SESSION") or ""
+    if not re.fullmatch(r"hb[0-9a-f]{8}", session):
+        session = "hb" + uuid.uuid4().hex[:8]
+    config = Path(env["XDG_CONFIG_HOME"]) / "herdr"
+    config.mkdir(parents=True, exist_ok=True, mode=0o700)
+    bin_dir = root / "herdr-bin"
+    bin_dir.mkdir(exist_ok=True)
+    link = bin_dir / "herdr"
+    if REAL_HERDR and not link.exists():
+        link.symlink_to(REAL_HERDR)
+    parts = env.get("PATH", "").split(os.pathsep)
+    if str(bin_dir) not in parts:
+        env["PATH"] = os.pathsep.join([str(bin_dir), *[part for part in parts if part]])
+    env.update({"HERDR_SESSION": session, "AGENT_HERDR_SESSION": session,
+                "HERDR_CONFIG_PATH": str(config / "config.toml"),
+                "HERDR_SOCKET_PATH": str(config / "sessions" / session / "herdr.sock")})
+    return session
+
+
 class PrivateHerdrTui:
     """A real TUI as a Herdr agent inside a Herdr server only this fixture owns.
 
@@ -837,22 +864,13 @@ class PrivateHerdrTui:
         self.harness = harness
         self.argv = argv
         self.cwd = cwd
-        self.session = "hb" + uuid.uuid4().hex[:8]
         self.name = "hbsteward"
         self.panes: dict[str, str] = {}
         self.server = None
         self.started = False
         self.calls: list[dict] = []
+        self.session = private_herdr_env(root, env)
         config = Path(env["XDG_CONFIG_HOME"]) / "herdr"
-        config.mkdir(parents=True, exist_ok=True, mode=0o700)
-        bin_dir = root / "herdr-bin"
-        bin_dir.mkdir(exist_ok=True)
-        link = bin_dir / "herdr"
-        if REAL_HERDR and not link.exists():
-            link.symlink_to(REAL_HERDR)
-        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
-        env.update({"HERDR_SESSION": self.session, "AGENT_HERDR_SESSION": self.session,
-                    "HERDR_CONFIG_PATH": str(config / "config.toml")})
         self.socket = config / "sessions" / self.session / "herdr.sock"
         self.env = env
 
@@ -1142,6 +1160,8 @@ class Run:
         tui = None
         try:
             self.home = InstalledHome(root, self.harness, fixture)
+            if SURFACE == "herdr":
+                self.evidence["herdr_session"] = private_herdr_env(root, self.home.env)
             install = self.home.install()
             self.evidence["install"] = install
             if SURFACE == "herdr":
