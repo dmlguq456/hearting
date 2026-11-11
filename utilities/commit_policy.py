@@ -279,6 +279,10 @@ def read_runtime_permission_context(environ=None) -> dict[str, object] | None:
             or not value.get("route_file") or not value.get("route_id")
             or not value.get("route_hash") or not value.get("attempt_id")):
         raise ValueError("owner-runtime-permission-context-invalid")
+    carried = value.get("carried_allowed_tools")
+    if carried is not None and (not isinstance(carried, list)
+                                or any(not isinstance(rule, str) for rule in carried)):
+        raise ValueError("owner-runtime-permission-context-invalid")
     return value
 
 

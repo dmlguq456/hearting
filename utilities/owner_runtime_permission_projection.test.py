@@ -210,7 +210,7 @@ class OwnerRuntimePermissionProjectionTest(unittest.TestCase):
         self.assertTrue(any(f"route_id={self.route['route_id']}" in row for row in rows), rows)
         return attempt
 
-    def _runtime_context(self, harness, attempt):
+    def _runtime_context(self, harness, attempt, **context):
         base = self.route_binding_env(self.base_env(self.jobs[harness]))
         context_args = argparse.Namespace(
             worker_type="owner", dispatch_depth=1, capability="autopilot-code",
@@ -221,7 +221,7 @@ class OwnerRuntimePermissionProjectionTest(unittest.TestCase):
         )
         extra = {"adapter": harness}
         if harness == "claude":
-            extra.update(permission_mode_requested="allowlist", agent_home=str(ROOT))
+            extra.update(permission_mode_requested="allowlist", agent_home=str(ROOT), **context)
         elif harness == "codex":
             extra.update(base_sandbox="workspace-write", network_eligible=True)
         else:
@@ -354,6 +354,116 @@ class OwnerRuntimePermissionProjectionTest(unittest.TestCase):
         module, args, server, thread, _trace = session[:5]
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(module, "emit"):
             module.run_turn(server, thread_id=thread, prompt=prompt, args=args)
+
+    def _carried_claude_rules(self):
+        """The allow list a release that predates task-branch publication sealed for this owner."""
+        wrapper = load_module("fixture_claude_carried_dispatch",
+                              ROOT / "adapters/claude/bin/dispatch-headless.py")
+        carried = list(wrapper._allowlist_rules(
+            ROOT, self.repo, self.artifact_root, "owner", commit_expected=True,
+            task_publish_scope=None))
+        self.assertFalse(any("git push" in rule or "gh pr" in rule for rule in carried))
+        return wrapper, carried
+
+    def test_claude_carried_allow_list_survives_every_turn_and_merge_observation_still_narrows(self):
+        # #1510: a replacement owner whose lineage was sealed on another release holds that
+        # sealed allow list on every supervised turn, not the one this release would compute.
+        wrapper, carried = self._carried_claude_rules()
+        attempt = self._register_owner("claude")
+        session = self._claude_session(attempt)
+        env = self._runtime_context("claude", attempt, carried_allowed_tools=carried)
+        control_env = self._runtime_context("claude", attempt)
+        observation = list(wrapper._allowlist_rules(
+            ROOT, self.repo, self.artifact_root, "owner", merge_observation_only=True))
+
+        # While a merge is open the observation rules narrow the session, as before.
+        first_mode, first_allowed = self._claude_turn(session, env, resume=False, prompt="first")
+        self.assertEqual(first_mode, "plan")
+        self.assertEqual(first_allowed, observation)
+        self.assertNotEqual(first_allowed, carried)
+
+        (self.repo / "engine.py").write_text("value = 'fixture resolution'\n", encoding="utf-8")
+        self._git("add", "engine.py")
+        self._git("commit", "-q", "-m", "settle test fixture merge")
+        settled = commit_policy.runtime_permission_projection(argparse.Namespace(
+            worker_type="owner", dispatch_depth=1, capability="autopilot-code",
+            worktree=str(self.repo), route_file=str(self.route_file),
+            route_id=self.route["route_id"], route_hash=self.route["route_hash"],
+            artifact_root=str(self.artifact_root), artifact_output_dir=str(self.output_dir),
+        ))
+        self.assertEqual(settled["task_publish_scope"]["branch"], "pr-ci-task")
+
+        # Once it settles the carried list holds, in place of the fresh one with publication.
+        second_mode, second_allowed = self._claude_turn(session, env, resume=True, prompt="second")
+        self.assertEqual(second_mode, "acceptEdits")
+        self.assertEqual(second_allowed, carried)
+        self.assertFalse(any("git push" in rule or "gh pr" in rule for rule in second_allowed))
+        third_mode, third_allowed = self._claude_turn(session, env, resume=True, prompt="third")
+        self.assertEqual((third_mode, third_allowed), (second_mode, carried))
+        # The same context without the carried list is today's fresh computation.
+        _mode, fresh_allowed = self._claude_turn(session, control_env, resume=True, prompt="fresh")
+        self.assertTrue(any("git push -u origin HEAD:refs/heads/pr-ci-task" in rule
+                            for rule in fresh_allowed))
+        self.assertEqual([rule for rule in fresh_allowed if rule not in carried],
+                         [f"Bash({command})" for command in
+                          commit_policy.task_publish_commands(settled["task_publish_scope"])])
+
+        # A carried value that is not a list of rules is refused as a corrupt context.
+        for bad in ("x", [1], {"a": "b"}):
+            bad_env = self._runtime_context("claude", attempt, carried_allowed_tools=bad)
+            with self.subTest(bad=bad), mock.patch.dict(os.environ, bad_env, clear=True):
+                with self.assertRaises(session[0].SupervisorError) as caught:
+                    session[0].refresh_owner_runtime_permissions(session[1])
+                self.assertEqual(str(caught.exception), "owner-runtime-permission-context-invalid")
+
+    def test_claude_carried_allow_list_keeps_its_publication_rules_only_for_the_branch_it_names(self):
+        # A carried list is never grown, and the network grant that follows the publication
+        # rules is kept only when the list already holds them. A branch changed after a release
+        # move therefore gets neither rules nor network; it is not refused, which a lineage
+        # that never left its release still is (`require_recovery_work` is not changed).
+        wrapper, carried = self._carried_claude_rules()
+        (self.repo / ".git" / "MERGE_HEAD").unlink()
+        projection = commit_policy.runtime_permission_projection(argparse.Namespace(
+            worker_type="owner", dispatch_depth=1, capability="autopilot-code",
+            worktree=str(self.repo), route_file=str(self.route_file),
+            route_id=self.route["route_id"], route_hash=self.route["route_hash"],
+            artifact_root=str(self.artifact_root), artifact_output_dir=str(self.output_dir),
+        ))
+        scope = projection["task_publish_scope"]
+        self.assertEqual(scope["branch"], "pr-ci-task")
+
+        def resolve(rules):
+            args = argparse.Namespace(
+                worker_type="owner", dispatch_depth=1, worktree=str(self.repo),
+                artifact_root=str(self.artifact_root), permission_mode="allowlist",
+                agent_home=str(ROOT), carried_allowed_tools=rules,
+                _launch_permission_projection=projection)
+            with mock.patch.dict(os.environ, self.base_env(), clear=True):
+                posture = wrapper.resolve_permission_posture(args)
+            return posture, args
+
+        # Carried without publication rules: the scope (and so network) is withdrawn.
+        posture, args = resolve(carried)
+        self.assertEqual(list(posture["allowed_tools"]), carried)
+        self.assertIsNone(args.task_publish_scope)
+        # Carried with the exact rules of this branch: kept, and nothing else is added.
+        published = carried + [f"Bash({command})" for command in
+                               commit_policy.task_publish_commands(scope)]
+        posture, args = resolve(published)
+        self.assertEqual(list(posture["allowed_tools"]), published)
+        self.assertEqual(args.task_publish_scope, scope)
+        # Rules for another branch do not satisfy this branch's scope.
+        other = dict(scope, branch="another-branch")
+        elsewhere = carried + [f"Bash({command})" for command in
+                               commit_policy.task_publish_commands(other)]
+        posture, args = resolve(elsewhere)
+        self.assertEqual(list(posture["allowed_tools"]), elsewhere)
+        self.assertIsNone(args.task_publish_scope)
+        # No carried list: today's computation, with the scope's rules.
+        posture, args = resolve(None)
+        self.assertEqual(args.task_publish_scope, scope)
+        self.assertTrue(any("git push -u origin HEAD:refs/heads/pr-ci-task" in rule
+                            for rule in posture["allowed_tools"]))
 
     def test_opencode_wrapper_capture_keeps_verified_limits_across_permission_refresh(self):
         wrapper = load_module("fixture_opencode_owner_dispatch",

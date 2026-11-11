@@ -676,12 +676,23 @@ def resolve_permission_posture(args: argparse.Namespace) -> dict[str, object]:
     worker_type = getattr(args, "worker_type", None)
     commit_expected = bool(projection["may_commit"])
     args.task_publish_scope = projection["task_publish_scope"]
-    allowed = _allowlist_rules(
-        agent_home, worktree, getattr(args, "artifact_root", None), worker_type,
-        commit_expected=commit_expected,
-        task_publish_scope=args.task_publish_scope,
-        merge_observation_only=args.merge_observation_only,
-    )
+    carried = getattr(args, "carried_allowed_tools", None)
+    if carried is not None and not args.merge_observation_only:
+        # A replacement owner keeps the allow list its sealed lineage holds
+        # (`dispatch_replacement.carried_allowed_tools`). The task-branch publication rules
+        # (and the network grant that follows them) stay only when that list already has them.
+        allowed = tuple(carried)
+        if args.task_publish_scope is not None and not all(
+                f"Bash({command})" in allowed
+                for command in commit_policy.task_publish_commands(args.task_publish_scope)):
+            args.task_publish_scope = None
+    else:
+        allowed = _allowlist_rules(
+            agent_home, worktree, getattr(args, "artifact_root", None), worker_type,
+            commit_expected=commit_expected,
+            task_publish_scope=args.task_publish_scope,
+            merge_observation_only=args.merge_observation_only,
+        )
     return {
         "mode": mode,
         "reason": reason,
@@ -1228,6 +1239,25 @@ def main(argv: list[str]) -> int:
         profile_type=profile_worker_type(ROOT, args.profile),
     )
     args.jobs_path = jobs
+    if getattr(args, "automatic_retry_of", None):
+        # A same-harness owner replacement after a release move keeps its sealed allow list.
+        # Anything unreadable keeps the ordinary computation, which admission then judges.
+        try:
+            from dispatch_replacement import carried_allowed_tools
+            args.carried_allowed_tools = carried_allowed_tools(
+                jobs, args.automatic_retry_of, harness="claude", worker_type=args.worker_type,
+                agent_home=args.agent_home, current_home=ROOT)
+        except Exception as exc:  # noqa: BLE001 -- never hides a refusal: admission compares as before
+            args.carried_allowed_tools = None
+            # Same non-fatal stderr line the launcher already uses for a caution: a defect in the
+            # helper shows up as itself, not only as the refusal it falls back to.
+            print(
+                f"caution=owner-replacement-carry-skipped error={type(exc).__name__} "
+                "(the ordinary allow list is computed and admission judges it)",
+                file=sys.stderr,
+            )
+        if args.carried_allowed_tools is not None:
+            args.resolved_permission_posture = resolve_permission_posture(args)
     try:
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
@@ -1315,6 +1345,8 @@ def main(argv: list[str]) -> int:
                 args, adapter="claude",
                 permission_mode_requested=getattr(args, "permission_mode", None) or "config",
                 agent_home=str(args.agent_home),
+                **({"carried_allowed_tools": list(args.carried_allowed_tools)}
+                   if getattr(args, "carried_allowed_tools", None) is not None else {}),
             ),
             current_sandbox="adapter-default",
             supervised=args.resolved_completion_delivery == "session-resume-supervised",
