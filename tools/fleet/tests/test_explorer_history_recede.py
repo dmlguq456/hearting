@@ -74,9 +74,7 @@ def _row_regions(grid, surface):
                         spans.append((y, left + 1, right))
                     start = x + len(marker)
         elif HISTORY_MARKERS.search(line[TABLE_X:]):
-            spans.append((y, TABLE_X, None))
-            if surface != "OVERVIEW":              # the ROUTES table is a two-row route+worker block
-                spans.append((y + 1, TABLE_X, None))
+            spans.append((y, TABLE_X, None))      # every route is one row; its worker line unfolds
     return spans
 
 

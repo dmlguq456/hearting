@@ -572,6 +572,50 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertIsNone(job.ctx_pct)
         self.assertIsNone(job.context_display_window_tokens)
 
+    def _first_turn_and_finished_turn(self, finished_model="claude-fable-5", version="9.9.9"):
+        running = self._job("att-running-first-turn")
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+        finished = self._job("att-finished-turn")
+        finished.liveness = "done"
+        self._write_log(finished, [
+            self._init("sid-done", model_id=finished_model, version=version),
+            self._assistant("sid-done", finished_model, 1000),
+            {"type": "result", "session_id": "sid-done",
+             "modelUsage": {finished_model: {"contextWindow": 1000000,
+                                             "maxOutputTokens": 128000}}}])
+        return running, finished
+
+    def test_running_first_turn_takes_the_window_its_model_reported_on_this_runtime(self):
+        dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear()
+        self.addCleanup(dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear)
+        running, finished = self._first_turn_and_finished_turn()
+        for job in (running, finished):
+            dispatch_collector._enrich_claude_stream_session(job)
+        self.assertIsNone(running.context_window_tokens)      # before: tokens only
+        dispatch_collector._fill_claude_observed_windows([running, finished])
+        self.assertEqual(running.active_context_tokens, 250136)
+        self.assertEqual(running.context_window_tokens, 1000000)
+        self.assertEqual(running._context_window_source, "claude-result-model-usage")
+        # An unverified runtime has no applied trigger, so the native gauge gives the percent.
+        self.assertIsNone(running.ctx_pct)
+        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
+
+    def test_no_report_for_the_same_model_and_version_keeps_the_window_unknown(self):
+        for name, model, version in (("model", "claude-opus-5-5", "9.9.9"),
+                                     ("version", "claude-fable-5", "2.1.299")):
+            with self.subTest(name):
+                dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear()
+                self.addCleanup(dispatch_collector._CLAUDE_OBSERVED_WINDOWS.clear)
+                dispatch_collector._CLAUDE_STREAM_CACHE.clear()
+                running, finished = self._first_turn_and_finished_turn(model, version)
+                for job in (running, finished):
+                    dispatch_collector._enrich_claude_stream_session(job)
+                dispatch_collector._fill_claude_observed_windows([running, finished])
+                self.assertEqual(running.active_context_tokens, 250136)
+                self.assertIsNone(running.context_window_tokens)
+                self.assertEqual(render._native_context_gauge(running), (None, None))
+
     def test_small_configured_window_applies_without_a_terminal_window(self):
         job = self._job()
         job._registry_metadata = self._launch_metadata(

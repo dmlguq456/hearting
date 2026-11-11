@@ -167,8 +167,9 @@ def _repo_status_block(grid, x, right, y, status):
         if status.get("stale") and status.get("doc_age"):
             head.insert(0, (str(status["doc_age"]) + " · ", "dim"))
     else:
+        from .tables import route_count_segment
         count = int(status.get("routes") or 0)
-        head = [(f"{count} route{'s' if count != 1 else ''} active", "soft" if count else "dim"),
+        head = [(route_count_segment(dict(status, routes=count))[0], "soft" if count else "dim"),
                 (" · no status document", "dim")]
     decisions = int(status.get("decisions") or 0)
     if has_doc and decisions:
@@ -177,7 +178,8 @@ def _repo_status_block(grid, x, right, y, status):
             decide.append((f" · +{decisions - 1} more", "dim"))
     else:
         decide = [("0" if has_doc else "·", "dim")]
-    decide.append((f"      {asked} to answer", "blocked" if asked else "dim"))
+    from .tables import answer_wait_word
+    decide.append((f"      {answer_wait_word()} {asked}", "blocked" if asked else "dim"))
     following = status.get("next")
     changed = []
     if has_doc:

@@ -87,7 +87,7 @@ class OneCount(unittest.TestCase):
         vm = build_view_model(snapshot, now=1000)
         self.assertEqual(len(vm.questions), 9)
         overview = _text(vm, NavState(), 140)
-        self.assertIn("3 questions", overview[-1])
+        self.assertIn("◑ to answer 3", overview[-1])
         self.assertNotIn("9 question", "\n".join(overview))
         board = _text(vm, NavState(view="QUESTIONS", title="QUESTIONS"), 140)
         self.assertIn("WAITING  3 questions · older waits 6", "\n".join(board))
@@ -98,7 +98,7 @@ class OneCount(unittest.TestCase):
                                "answer_waits": {"items": [], "total": 0, "older": 0,
                                                 "complete": False,
                                                 "health": [{"source": "cache", "state": "failed"}]}})
-        self.assertIn("? questions", _text(vm, NavState(), 140)[-1])
+        self.assertIn("◑ to answer ?", _text(vm, NavState(), 140)[-1])
 
 
 class EachRow(unittest.TestCase):
@@ -187,9 +187,9 @@ class NoResponseRoutes(unittest.TestCase):
                                              "system": {}})
         table = _text(vm, NavState(view="ROUTES", title="ROUTES"), 140)
         self.assertIn("no response", "\n".join(table))
-        self.assertIn("0 open · no response 1 · 0 stopped legs", table[-1])
+        self.assertIn("0 open · no response 1 · 0 stopped", table[-1])
         overview = _text(vm, NavState(), 140)
-        self.assertIn("0 routes · no response 1", overview[-1])
+        self.assertIn("⏳ route 0 │ no response 1", overview[-1])
 
 
 class MessageQuestions(unittest.TestCase):

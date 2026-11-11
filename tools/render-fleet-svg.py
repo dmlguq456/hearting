@@ -17,6 +17,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -115,6 +116,8 @@ def render() -> str:
 
 
 def main() -> int:
+    # The README demo is English whatever language this machine declares for its screens.
+    os.environ["FLEET_NOW_LANG"] = "en"
     want = render()
     if "--check" in sys.argv[1:]:
         if not OUT.is_file() or OUT.read_text(encoding="utf-8") != want:

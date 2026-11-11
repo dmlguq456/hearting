@@ -52,6 +52,17 @@ def _load_native_fixture(case, name):
     return module
 
 
+
+# A route is one row; its worker and context lines unfold under it on a press.
+OPENED = NavState(view="ROUTES", folds=(("ropen:ROUTES", "rt-exact"),))
+
+
+def unfolded_rows(frame):
+    """The lines under the opened route's own row (worker, context and detail lines)."""
+    rows = frame.text_rows()
+    head = next(y for y, line in enumerate(rows) if "▶" in line)
+    return rows[head + 1:]
+
 class ContractProjectionTests(unittest.TestCase):
     def route_snapshot(self, harness="claude", **owner_values):
         view = {"cwd": "/synthetic/repo", "capability": "autopilot-code",
@@ -114,7 +125,8 @@ class ContractProjectionTests(unittest.TestCase):
                 self.assertEqual(len(route["worker_contexts"]), 2)
                 expected = [render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:]]
                 self.assertEqual([row["context"] for row in route["worker_contexts"]], expected)
-                text = "\n".join(draw(vm, NavState(view="ROUTES"), 220, 60).text_rows())
+                # Each worker keeps its own gauge on its own unfolded line.
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 220, 60)))
                 for pct in expected:
                     self.assertIn(f"{pct}%", text)
 
@@ -176,7 +188,7 @@ class ContractProjectionTests(unittest.TestCase):
         route = vm.routes[0]
         self.assertEqual(route["worker_context_index"], 0)
         self.assertEqual(len(route["worker_contexts"]), 1)
-        frame = draw(vm, NavState(view="ROUTES"), 240, 60)
+        frame = draw(vm, OPENED, 240, 60)
         rows = [line for line in frame.text_rows() if "└ worker" in line]
         self.assertEqual(len(rows), 1)
         self.assertIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", rows[0])
@@ -187,7 +199,7 @@ class ContractProjectionTests(unittest.TestCase):
         snapshot = self.selected_worker_snapshot(2)
         vm = build_view_model(snapshot)
         self.assertEqual(len(vm.routes[0]["worker_contexts"]), 2)
-        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
         for pct in (render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:]):
             self.assertEqual(text.count(f"{pct}%"), 1)
         self.assertIn("└ worker", text)
@@ -208,7 +220,7 @@ class ContractProjectionTests(unittest.TestCase):
                 vm = build_view_model(snapshot)
                 self.assertNotIn("worker_context_index", vm.routes[0])
                 self.assertEqual(len(vm.routes[0]["worker_contexts"]), 1)
-                text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
                 self.assertIn("└ execute · 1", text)
                 pct = render._native_context_gauge(snapshot["jobs"][1])[0]
                 self.assertEqual(text.count(f"{pct}%"), 1)
@@ -237,8 +249,8 @@ class ContractProjectionTests(unittest.TestCase):
     def test_inline_context_phase_and_private_replay_do_not_change_identity_or_gauge(self):
         from tools.fleet.explorer.view_model import persistable_view_model
         vm = build_view_model(self.selected_worker_snapshot())
-        on = draw(vm, NavState(view="ROUTES"), 240, 60, beat=1)
-        off = draw(vm, NavState(view="ROUTES"), 240, 60, beat=0)
+        on = draw(vm, OPENED, 240, 60, beat=1)
+        off = draw(vm, OPENED, 240, 60, beat=0)
         self.assertEqual(on.text_rows(), off.text_rows())
         self.assertEqual(on.hits, off.hits)
         pct = vm.routes[0]["worker_contexts"][0]["context"]
@@ -272,7 +284,7 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertEqual(vm.routes[0]["stages"][0]["st"], "failed")
         self.assertEqual(vm.routes[0]["worker_contexts"], ())
         self.assertNotIn("worker_context_index", vm.routes[0])
-        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        text = "\n".join(draw(vm, OPENED, 240, 60).text_rows())
         self.assertIn("worker ended", text)
         self.assertNotIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", text)
 
@@ -294,7 +306,7 @@ class ContractProjectionTests(unittest.TestCase):
                     self.assertNotIn("└ execute", text)
                     action = ("fold", "ropen:ROUTES", "rt-exact")
                     hits = [hit for hit in frame.hits if hit.action == action]
-                    self.assertGreaterEqual(len(hits), 2)
+                    self.assertGreaterEqual(len(hits), 1)      # the one-line route row
                     for hit in hits:
                         opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                         self.assertEqual(opened.opened_for("ropen:ROUTES"), "rt-exact")
@@ -326,12 +338,12 @@ class ContractProjectionTests(unittest.TestCase):
             with self.subTest(cols=cols):
                 state = NavState(view="OVERVIEW")
                 frame = draw(vm, state, cols, 45)
-                self.assertIn("route 1", "\n".join(frame.text_rows()))
+                self.assertIn("⏳ 1", "\n".join(frame.text_rows()))
                 hit = next(h for h in frame.hits if h.action == ("fold", "sopen:OVERVIEW", "p1"))
                 opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                 self.assertEqual(opened.opened, "p1")
         history = replace(vm, routes=tuple(dict(row, current=False, state="done") for row in vm.routes))
-        self.assertNotIn("route 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
+        self.assertNotIn("⏳ 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
 
     def test_older_questions_never_light_current_session_marker(self):
         snapshot = self.route_snapshot()
@@ -342,7 +354,7 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertIsNone(vm.sessions[0]["ask"])
         self.assertIsNone(vm.sessions[0]["answer_wait_marker"])
         text = "\n".join(draw(vm, NavState(view="OVERVIEW"), 180, 45).text_rows())
-        self.assertIn("0 needs answer", text)
+        self.assertIn("◑ to answer 0", text)
         self.assertTrue(vm.questions[0]["older"])
 
     def test_all_context_choices_wrap_in_a_forty_cell_pane_with_real_current_value(self):
