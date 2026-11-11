@@ -159,6 +159,27 @@ class ContractProjectionTests(unittest.TestCase):
                 self.assertNotEqual(alpha[0], bravo[0])
                 self.assertIn("claude", alpha[0])
 
+    def test_what_a_narrow_row_leaves_out_is_in_its_unfolded_lines(self):
+        vm = build_view_model(self.route_snapshot())
+        route = dict(vm.routes[0], doer={"harness": "claude", "model": ["Sonnet 5.5", "dim"],
+                                         "effort": "medium", "context": None, "window": None,
+                                         "tokens": 250_136, "tool": "Bash", "agents": 1})
+        session = dict(vm.sessions[0], last_input="› 1m · keep the limiter per key",
+                       model=["Opus 5.5", "dim"], effort="xhigh", branch="feat/limit")
+        vm = replace(vm, routes=(route,), sessions=(session,))
+        folded = draw(vm, NavState(view="ROUTES"), 80, 40).text_rows()
+        row = next(line for line in folded if "250K" in line)
+        self.assertNotIn(">_ Bash", row)
+        unfolded = "\n".join(unfolded_rows(draw(vm, OPENED, 80, 60)))
+        for value in ("claude Sonnet 5.5 med", ">_ Bash · +1 agent"):
+            self.assertIn(value, unfolded)
+        tag = str(session["tag"])
+        row = next(line for line in draw(vm, NavState(), 80, 40).text_rows() if f"[{tag}]" in line)
+        self.assertNotIn("keep the limiter", row)
+        opened = "\n".join(draw(vm, NavState(opened=tag), 80, 60).text_rows())
+        for value in ("LAST INPUT", "keep the", "claude Opus 5.5 xhigh", "TITLE"):
+            self.assertIn(value, opened)
+
     def test_worker_only_and_multiple_owners_have_unknown_owner_context(self):
         snapshot = self.route_snapshot(active_context_tokens=500_000, context_window_tokens=1_000_000)
         snapshot["jobs"] = snapshot["jobs"][1:]

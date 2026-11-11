@@ -314,6 +314,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
             if c.get("ctx_w", 1):
                 _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"),
                                     narrow=c["narrow"], bare=c["bare"])
+            title_whole = False
             if c["title_w"]:
                 title = str(session.get("title") or "·")
                 # The checkout follows the title in parentheses (12 cells at most); the title gives way
@@ -330,6 +331,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                     restart_inline = True
                     tail = " " + restart_text + route_tail
                 room = max(0, c["title_w"] - _seg_width(tail))
+                branch_tail = " (%s)" % _clip(str(branch), 12) if branch not in (None, "") else ""
+                if branch_tail and tail.startswith(branch_tail) and room < min(TITLE_MIN, _seg_width(title)):
+                    # The title keeps its minimum before the checkout; the unfolded TITLE line has both.
+                    tail = tail[len(branch_tail):]
+                    room = max(0, c["title_w"] - _seg_width(tail))
+                title_whole = (_seg_width(title) <= room and (
+                    not branch_tail or tail.startswith(branch_tail) and branch_tail == " (%s)" % branch))
                 title_text = _clip(title, room)
                 bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
                             "opencode": ("l", 1, 0)}.get(harness, "unknown")
@@ -387,7 +395,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 y += 1
             if state.opened == tag:
                 _tint_row(grid, row_y, x - 1, right, 236)
-                y = _session_unfold(grid, vm, x, use, y, session, c, input_shown=session_table)
+                y = _session_unfold(grid, vm, x, use, y, session, c, input_shown=session_table,
+                                    title_whole=title_whole)
             if y >= grid.rows - 5:
                 if sticky:
                     pin(None, tail_height, lambda target, top: _draw_overview_tail(
@@ -618,15 +627,15 @@ def _wrap_cells(text, width):
     return rows + [current]
 
 
-def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False):
+def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_whole=True):
     """Under an unfolded session row: NOW in full, each route on a line, its question.
 
-    A narrow row that left out LAST INPUT gives it here; the tightest row, which keeps only the
-    start of its title, gives the title (and checkout) in full too."""
+    What the folded row left out or cut is given in full here: the title and checkout, a
+    clipped MODEL cell's whole ``harness model effort``, and LAST INPUT on a narrow row."""
     tag = str(session.get("tag"))
     right = x + use + 1
     x_lab, x_val = x + c["h"], x + c["h"] + 7
-    if c["bare"] or not c["title_w"]:
+    if not title_whole:
         branch = session.get("branch")
         title = str(session.get("title") or "·") + (
             " (%s)" % branch if branch not in (None, "") else "")
@@ -634,14 +643,23 @@ def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False):
         for line in _wrap_cells(title, x + use - x_val):
             grid.put(x_val, y, line, "soft")
             y += 1
+    model = _harness_cell_text(session)
+    if _seg_width(model) > (c["ctx"] - c["gap"] - c["h"] if c.get("harn_w") else 0):
+        # The row clipped its MODEL cell (model or effort given way): the whole cell is here.
+        grid.put(x_lab, y, "MODEL", "label")
+        _put_model_cell(grid, max(x_val, x_lab + 7), y,
+                        model_cell_parts(session.get("harness"), session.get("model"),
+                                         str(session.get("effort") or "")), right)
+        y += 1
     if c["now"] is None:
         if not input_shown:
             label = ui_text("fleet.input.label")
             input_x = max(x_val, x_lab + _seg_width(label) + 2)
             grid.put(x_lab, y, label, "label", limit=right)
-            grid.put(input_x, y, _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
-                                       max(0, right - input_x)), "soft", limit=right)
-            y += 1
+            for line in _wrap_cells(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                                    max(1, right - input_x)):
+                grid.put(input_x, y, line, "soft", limit=right)
+                y += 1
     grid.put(x_lab, y, "NOW", "label")
     now = session.get("now")
     for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
@@ -819,10 +837,18 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
         grid.put(x + IND + 8, y, "⚑", "steward")
     parts, (pct, window, tokens), tool, agents = route_doer_cells(route)
     harn_end = _overview_harness_end(use, c)
+    # What this row leaves out or cuts, for the unfolded route to give in full (a cut title is
+    # whole on the route detail's top band).
+    dropped = []
+    model_room = (min(x + c["ctx"] - c["gap"], x + harn_end) - (x + c["h"])) if harn_end is not None else 0
+    if sum(_seg_width(text) for text, _key in parts) > model_room:
+        dropped.append(list(parts))
     if harn_end is not None:
         _put_model_cell(grid, x + c["h"], y, parts, min(x + c["ctx"] - c["gap"], x + harn_end))
     if c.get("ctx_w", 1):
         _draw_context_gauge(grid, x + c["ctx"], y, pct, window, tokens, narrow=c["narrow"], bare=c["bare"])
+    elif pct is not None or token_count_text(tokens):
+        dropped.append([(f"{int(pct)}%" if pct is not None else token_count_text(tokens), "dim")])
     cursor = x + c["title"]
     title_w = c["title_w"] if title_w is None else title_w
     room = max(0, min(title_w, age_x - c["gap"] - cursor))
@@ -843,6 +869,7 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     tool_text = ">_ " + str(tool) if tool else ""
     agent_text = f" · +{agents} agent" if tool_text and agents else ""
     progress_end = age_x - GAP
+    full_tool = [(tool_text, "soft")] + ([(agent_text, "dim")] if agent_text else [])
     if tool_text:
         width = max(TOOL_W, _seg_width(tool_text + agent_text))
         if age_x - GAP - width - cursor < 12:
@@ -853,9 +880,14 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
             if agent_text:
                 grid.put(end, y, agent_text, "dim", limit=tool_x + width)
             progress_end = tool_x - GAP
+            if _seg_width(tool_text) > width or len(full_tool) > 1 and not agent_text:
+                dropped.append(full_tool)
+        else:
+            dropped.append(full_tool)
     if progress_end > cursor:
         _draw_route_progress(grid, cursor, progress_end, y, route, card=False)
     grid.put(age_x, y, age, "dim")
+    return dropped
 
 
 def _route_line_room(x0, x1, route):
@@ -1266,7 +1298,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
             if is_open:
                 grid.fill(x - 1, right, y, " ", tint=236)
                 grid.put(x, y, "▶", "soft")
-            draw_route_row(grid, x, use, y, route, row_cols, title_w=row_title_w)
+            dropped = draw_route_row(grid, x, use, y, route, row_cols, title_w=row_title_w)
             age = _clip(str(route.get("age") or ""), cols["age_w"])
             age_edge = x + use - _seg_width(age)                              # content stops where AGE starts
             owner_edge = (x + cols["own"] + cols["own_w"] if cols["tiny"] else
@@ -1293,10 +1325,41 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 cursor = grid.put(cursor, y, text, style, limit=right)
             cursor = grid.put(cursor, y, "  owner ", "dim", limit=right)
             cursor = _draw_owner(grid, cursor, y, route, cols["narrow"], slim, right)
-            # The folded row shows the live doer's context; the owner's own stays here.
-            _draw_owner_context(grid, cursor + 2, y, route, right)
+            # The folded row shows the live doer's context; the owner's own stays here (on a
+            # line of its own when the kind line has no room left for it).
+            owner_context = right - cursor - 2 >= _owner_context_width(route)
+            if owner_context:
+                _draw_owner_context(grid, cursor + 2, y, route, right)
             _tint_row(grid, y, x - 1, right, 236)
             y += 1
+            extra = [] if owner_context or not _owner_context_width(route) else [None]
+            # What the folded row left out or cut (MODEL, context, open tool, sub-agents); a cut
+            # title is whole on the top band of the route detail drawn below.
+            extra.extend(dropped)
+            line, line_x = 0, None
+            for item in extra:
+                width = (_owner_context_width(route) if item is None
+                         else sum(_seg_width(text) for text, _key in item))
+                if line_x is None or line_x + 3 + width > right:
+                    if line_x is not None:
+                        _tint_row(grid, y, x - 1, right, 236)
+                        y += 1
+                    grid.fill(x - 1, right, y, " ", tint=236)
+                    grid.add_hit(y, x, right, action)
+                    line_x = grid.put(x + cols["title"], y, "└ " if line == 0 else "  ", "dim", limit=right)
+                    line += 1
+                elif line_x is not None:
+                    line_x = grid.put(line_x, y, " · ", "dim", limit=right)
+                if item is None:
+                    line_x = grid.put(line_x, y, "owner ", "dim", limit=right)
+                    _draw_owner_context(grid, line_x, y, route, right)
+                    line_x += _owner_context_width(route)
+                    continue
+                for text, key in item:
+                    line_x = grid.put(line_x, y, text, key, limit=right)
+            if line_x is not None:
+                _tint_row(grid, y, x - 1, right, 236)
+                y += 1
             if link:
                 grid.add_hit(y, x + use - 7, right, ("route", ident))
             grid.add_hit(y, x, right, action)
@@ -1980,6 +2043,15 @@ def route_owner_context(route):
         if type(tokens) is int and type(size) is int and size > 0:
             pct, window, tokens = round(100 * tokens / size), size / 1_000_000, None
     return pct, window, tokens
+
+
+def _owner_context_width(route):
+    """Cells ``_draw_owner_context`` takes, or 0 when the owner has no context to show."""
+    pct, _window, tokens = route_owner_context(route)
+    if pct is not None:
+        return len("context ") + CTX_W
+    text = token_count_text(tokens)
+    return len("context ") + len(text) if text else 0
 
 
 def _draw_owner_context(grid, x, y, route, right):

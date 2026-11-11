@@ -500,6 +500,14 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
                     continue
                 name, percent, reset = window
                 x = 14 + win_index * 40
+                if window_end(win_index, window) > usage_limit:
+                    # No room for this window's gauge: its value and reset in the header's own
+                    # words (``7d 41%(↻ 4d 0h)``) at the same place, so nothing is cut at the edge.
+                    x = grid.put(x, y, ("7d" if name == "week" else str(name)) + " ", "dim", limit=usage_limit)
+                    x = grid.put(x, y, f"{int(percent)}%", _usage_level(int(percent)), limit=usage_limit)
+                    if reset not in (None, "", "·"):
+                        grid.put(x, y, f"(↻ {reset})", "dim", limit=usage_limit)
+                    continue
                 x = grid.put(x, y, str(name).rjust(5), "label", limit=usage_limit)
                 x = grid.put(x + 1, y, "[", "dim", limit=usage_limit)
                 filled = max(1, min(12, round(12 * int(percent) / 100))) if int(percent) else 0
