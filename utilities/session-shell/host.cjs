@@ -256,7 +256,8 @@ function spunBorder(row){
   if(state!=='working'||typeof row!=='string')return row;
   const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']'),spin[spinFrame()%spin.length]);
 }
-function panelContent(){const view=panelViewNow();panelHits=view.hits;return view.rows;}
+let viewGroups=[],paintedGroups=new Set();
+function panelContent(){const view=panelViewNow();panelHits=view.hits;viewGroups=view.groups||[];return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -385,12 +386,12 @@ const block=require('./block-input.cjs')({changed:queueDisplay,
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
-  if(!height()){panelRows=[];paintedCommon=[];displayFooter='';blockCursor=null;schedule();return;}
+  if(!height()){panelRows=[];paintedCommon=[];paintedGroups=new Set();displayFooter='';blockCursor=null;schedule();return;}
   if(rebuilding){rebuildPending=true;return;}rebuilding=true;rebuildPending=false;
   const extra=currentDelivery?` · 전달 중${heldBytes?' · 입력 보존 '+heldBytes+'B':''}`:'';
-  let lines,edit=-1;
+  let lines,edit=-1,groups=[];
   if(expanded){
-    const base=panelContent();
+    const base=panelContent();groups=viewGroups;
     const detail=[];
     if(detail.length){
       const prefix=base.slice(0,Math.max(0,height()-detail.length)),visible=detail.slice(-Math.max(1,height()-prefix.length));
@@ -406,7 +407,7 @@ function rebuildDisplay() {
   const editColumn=editAt>=0?cellWidth(editParts.slice(0,editAt+1).map(part=>part.text).join(''))+1:0;
   displayLines(lines,expanded?height():1,(painted,lengths,plain)=>{
     blockCursor=edit>=0?{row:panelRow()+edit+1,col:geometry().panelColumn+Math.min(panelColumns()-2,editColumn)}:null;
-    panelRows=painted;
+    panelRows=painted;paintedGroups=new Set(groups);
     paintedCommon=plain.map(row=>row.startsWith('│ ')&&row.endsWith(' │')?'  '+row.slice(2,-2).trimEnd():row);
     displayFooter=painted[0];footerLast='\0';rebuilding=false;
     if(rebuildPending)rebuildDisplay();
@@ -495,18 +496,17 @@ async function projection() {
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
-// the same session's groups that row carries: number, project and Git, context,
-// the answer wait, the route count, 5h/7d and running jobs. Any other state,
-// including a panel too short for all of them, shows it.
+// the same session's groups that row carries: number and project, Git, context,
+// the answer wait, the route count, 5h/7d and running jobs. A group the panel
+// paints counts even when its row is cut to the panel's width; only a group
+// the panel does not paint at all (short of rows, a read page, settings) keeps
+// the native rows, so no value leaves the screen.
 function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
-  const joined=parts=>(Array.isArray(parts)?parts:[]).map(part=>String(part.text)).join('').trim();
-  const rows=[joined(panelModel.head),joined(panelModel.git),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
-    String(panelModel.wait||''),panelModel.route_count?'route '+panelModel.route_count:''].filter(Boolean);
-  const squeeze=s=>s.replace(/\s+/g,'');
-  // A value the panel wrapped onto the next row is still painted: rows are read as one run.
-  const all=squeeze(paintedCommon.join(''));
-  return rows.length>0&&rows.every(text=>all.includes(squeeze(text)));
+  const has=parts=>(Array.isArray(parts)?parts:[]).some(part=>String(part.text).trim());
+  const wanted=[['head',has(panelModel.head)],['git',has(panelModel.git)],['context',has(panelModel.context)],['quota',has(panelModel.quota)],
+    ['jobs',has(panelModel.jobs)],['wait',!!panelModel.wait],['route',!!panelModel.route_count]].filter(([,shown])=>shown).map(([name])=>name);
+  return wanted.length>0&&wanted.every(name=>paintedGroups.has(name));
 }
 // The blanked Claude row carries the panel's one-line notice (empty by default),
 // at the native statusline's own two-cell indent.

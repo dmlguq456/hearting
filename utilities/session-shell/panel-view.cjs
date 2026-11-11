@@ -66,7 +66,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
   let inner=width-4;const content=[],hits=[],edge=[];
-  function add(parts,action){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);}
+  // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
+  const contentGroups=[];
+  function add(parts,action,groups){const row=content.length;if(action)hits.push({row:row+1,left:2,right:width-3,action});content.push(parts);contentGroups.push(groups||[]);}
   function wrap(parts,maximum=3,action,into){
     // `into` collects the rows for a caller that places them after measuring.
     const put=into?row=>into.push(row):row=>add(row,action);
@@ -193,27 +195,28 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const waitParts=model.wait?[text(model.wait,'g_blocked')]:[];
     const title=model.session_title||model.title||'';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set();
+    const top=[],spacers=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const mark=(from,...names)=>{for(let i=from;i<top.length;i++)topGroups.set(i,[...(topGroups.get(i)||[]),...names]);};
     // The Git row is cut within its own row; short of rows, it is the first to go.
-    const putGit=()=>{if(git.length){gitRows.add(top.length);top.push(cut(git,inner));}};
+    const putGit=()=>{if(git.length){gitRows.add(top.length);top.push(cut(git,inner));mark(top.length-1,'git');}};
     const put=(rows,parts,max)=>{const out=[];wrap(parts,max,undefined,out);rows.push(...out);};
     if(side){
-      if(head.length)put(top,head,2);
+      if(head.length){put(top,head,2);mark(0,'head');}
       putGit();
       if(head.length||git.length){spacers.add(top.length);top.push([]);}
       top.push(selected);
-      if(contextParts.length)top.push(contextParts);
-      if(jobs.length){const from=top.length;put(top,jobs,2);for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
+      if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
+      if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }else{
       const first=joined([head,selected,contextParts]);
-      if(size(first)<=inner)top.push(first);
-      else{put(top,joined([head,selected]),1);put(top,contextParts,1);}
+      if(size(first)<=inner){top.push(first);mark(0,'head',...(contextParts.length?['context']:[]));}
+      else{put(top,joined([head,selected]),1);mark(0,'head');const from=top.length;put(top,contextParts,1);mark(from,'context');}
       // Running jobs join that row when they fit; otherwise they take a row (below Git) that can give way.
       const joinJobs=jobs.length&&size(top.at(-1))+3+size(jobs)<=inner;
-      if(joinJobs)top[top.length-1]=joined([top.at(-1),jobs]);
+      if(joinJobs){top[top.length-1]=joined([top.at(-1),jobs]);mark(top.length-1,'jobs');}
       putGit();
-      if(jobs.length&&!joinJobs){optional.add(top.length);jobRows.add(top.length);top.push(cut(jobs,inner));}
+      if(jobs.length&&!joinJobs){optional.add(top.length);jobRows.add(top.length);top.push(cut(jobs,inner));mark(top.length-1,'jobs');}
       // The repo's open work gives way with the running jobs.
       if(work.length){optional.add(top.length);top.push(cut(work,inner));}
     }
@@ -226,9 +229,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     }
     if(side){
       if(waitParts.length||title){spacers.add(top.length);top.push([]);}
-      if(waitParts.length)top.push(waitParts);
+      if(waitParts.length){top.push(waitParts);mark(top.length-1,'wait');}
       if(title)put(top,line(title,'loc_repo'),2);
-    }else if(waitParts.length||title)top.push(cut(joined([waitParts,title?line(title,'loc_repo'):[]]),inner));
+    }else if(waitParts.length||title){top.push(cut(joined([waitParts,title?line(title,'loc_repo'):[]]),inner));if(waitParts.length)mark(top.length-1,'wait');}
     const rows=height-2;
     // Routes: the current ones the statusline counts, one row each.
     const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
@@ -312,23 +315,35 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const fit=clip(item.parts||[],Math.max(0,inner-box));
       return {...item,parts:[text('│ ',key),...fit.parts,pad(inner-box-fit.used),text(' │',key)]};
     };
+    // Spec rule 19: beside the native area a folded route takes two rows: the
+    // glyph and its whole title, then (indented, dim) harness, model, context and
+    // elapsed time. Short of cells the `route line` choice keeps its value (time:
+    // elapsed, model: model) and the other goes; a value shows whole or not at all.
+    function second(r){
+      const p=r.paint||{},value=x=>x?[{...x,dim:true}]:[];
+      const H=value(p.harness),M=value(p.model_text),C=value(p.ctx),E=r.elapsed?[text(r.elapsed)]:[];
+      const build=(h,m,c,e)=>{const left=[h,m,c].filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);return [text('  '),...left,...(e.length?[...(left.length?[text(' · ')]:[]),...e]:[])];};
+      const drops=routeLine==='model'?[[H,M,C,E],[H,M,C,[]],[H,M,[],[]],[H,[],[],[]],[[],[],[],[]]]:[[H,M,C,E],[H,[],C,E],[H,[],[],E],[[],[],[],E],[[],[],[],[]]];
+      for(const pick of drops){const row=build(...pick);if(size(row)<=inner)return size(row)>2?row:null;}
+      return null;
+    }
     const routeRows=[],detailRows=[];
     within(()=>{
       for(const r of listed){
-        const key='route:'+r.id;routeRows.push({parts:folded(r),action:key});
+        const key='route:'+r.id,p=r.paint||{};
+        const two=side?[[p.glyph||text('·'),text(' '),...cut(line(r.title||'·','loc_repo'),inner-2)],second(r)].filter(Boolean):null;
+        routeRows.push({parts:folded(r),two,action:key});
         if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
       }
     });
     if(more>0)routeRows.push({parts:line('+'+more+' more'),action:'fleet'});
     const messages=painted(model.messages).slice(-3),messageRows=[];
-    within(()=>{
-      for(const m of messages){
-        const key=messageKey(m),parts=messageParts(m);
-        // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
-        if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
-        else messageRows.push({parts:cut(parts,inner),action:key});
-      }
-    });
+    for(const m of messages){
+      const key=messageKey(m),parts=messageParts(m);
+      // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
+      if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
+      else messageRows.push({parts:cut(parts,inner),action:key});
+    }
     let messageLimit=Math.max(0,...messageRows.map(x=>x.body?messageRows.filter(y=>y.body===x.body).length:0));
     let messageOne=false;
     const visibleMessages=()=>{
@@ -338,13 +353,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const group=messageRows.filter(y=>y.body===row.body),index=group.indexOf(row);
         // Folded to one message, an opened body keeps one row and its read row.
         const limit=messageOne?Math.min(messageLimit,2):messageLimit;
-        if(group.length<=limit)out.push(row);
+        if(group.length<=limit&&!(messageOne&&group.length>1))out.push(row);
         else if(index<limit-1)out.push(row);
         else if(index===limit-1)out.push({parts:[text('  '),text('+'+(group.length-index)+' lines ›','loc_repo')],action:'read:'+row.body});
       }
       if(!messageOne)return out;
       // Folded to one message: an opened one stays (its first row and the
-      // `+N lines ›` row to its read page), else the first; the border counts the rest.
+      // `+N lines ›` row to its read page), else the first; the lower rule counts the rest.
       const opened=out.find(row=>row.body);
       if(!opened)return out.slice(0,1);
       const read=out.find(row=>row.action==='read:'+opened.body);
@@ -366,55 +381,68 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const row of q.slice(1))ask.push(boxRow({parts:row,action:'question'},key));
       ask.push(boxBottom(key,[],'question'));
     }
-    // Short of rows: messages fold to one row; then (a question first takes the
-    // messages box) the Git row, spacers, the messages box, opened details, route
-    // rows, the route box, running jobs, 5h/7d.
+    // Short of rows (spec rules 14 and 19, the 11-11 night final layout): spacers;
+    // then the route side first — two-row routes fold to one row, opened details
+    // close, route rows give way to one row and `+N more`; then messages fold to
+    // one row and the last route row goes; the Git row; the route box; running
+    // jobs; the messages section only last; 5h/7d.
     let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0;
-    const routeBox=()=>keepRoutes?2+(shown.length?Math.min(routeLimit,routeRows.length)+(keepDetails?detailRows.filter(d=>routeRows.slice(0,routeLimit).some(x=>x.action==='route:'+d.after)).length:0):routeChecking.length):0;
-    const need=()=>{
-      const m=keepMessages&&messageRows.length?2+visibleMessages().length:0;
-      return core+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+m+(keepQuota?1:0);
-    };
+    let twoRows=side&&routeRows.some(x=>x.two);
+    const routeSize=x=>twoRows&&x.two?x.two.length:1;
+    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,Math.min(routeLimit,routeRows.length)).reduce((n,x,i,list)=>n+(i===list.length-1&&list.length<routeRows.length?1:routeSize(x)),0)
+      +(keepDetails?detailRows.filter(d=>routeRows.slice(0,routeLimit).some(x=>x.action==='route:'+d.after)).length:0):routeChecking.length):0;
+    const messageSection=()=>keepMessages&&messageRows.length?2+visibleMessages().length:0;
+    const need=()=>core+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+messageSection()+(keepQuota?1:0);
     const budget=rows;
-    const squeezeMessages=()=>{
-      while(need()>budget&&messageLimit>2)messageLimit--;
-      if(need()>budget&&visibleMessages().length>1)messageOne=true;
-    };
-    // Messages first fold to one row (`+N` in the border). With a question they then
-    // give up the box before anything else; without one the Git row goes next.
-    squeezeMessages();
-    if(ask.length&&need()>budget)keepMessages=false;
-    if(need()>budget)keepGit=false;
     if(need()>budget)keepSpacers=false;
-    if(need()>budget)keepMessages=false;
+    if(need()>budget)twoRows=false;
     if(need()>budget)keepDetails=false;
+    // One route row stays beside `+N more` until the messages have folded too.
+    while(need()>budget&&routeLimit>2)routeLimit--;
+    while(need()>budget&&messageLimit>2)messageLimit--;
+    if(need()>budget&&visibleMessages().length>1)messageOne=true;
     while(need()>budget&&routeLimit>1)routeLimit--;
+    if(need()>budget)keepGit=false;
     if(need()>budget)keepRoutes=false;
     if(need()>budget)keepOptional=false;
+    if(need()>budget)keepMessages=false;
     if(need()>budget)keepQuota=false;
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i)))order.push({parts:row});});
-    const boxes=[];
+    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i)))order.push({parts:row,groups:topGroups.get(i)});});
+    let routeBlock=[],messageBlock=[];
     if(keepRoutes){
-      const key=tone.route,rowsOf=[boxTop(routeTitle,key,{action:'route'})];
+      const key=tone.route;routeBlock=[{...boxTop(routeTitle,key,{action:'route'}),groups:['route']}];
       const kept=routeRows.slice(0,routeLimit);
       if(kept.length<routeRows.length){const hidden=total-kept.slice(0,-1).filter(x=>x.action!=='fleet').length;kept[kept.length-1]={parts:line('+'+hidden+' more'),action:'fleet'};}
-      for(const item of shown.length?kept:routeChecking){rowsOf.push(boxRow(item,key));if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)rowsOf.push(boxRow(d,key));}
-      rowsOf.push(boxBottom(key));boxes.push(rowsOf);
+      for(const item of shown.length?kept:routeChecking){
+        // A press on either row of a two-row route opens it.
+        for(const parts of twoRows&&item.two?item.two:[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
+        if(keepDetails)for(const d of detailRows)if(item.action==='route:'+d.after)routeBlock.push(boxRow(d,key));
+      }
+      routeBlock.push(boxBottom(key));
     }
+    // Messages have no box: a titled upper rule and a lower rule, fixed at the
+    // bottom right above 5h/7d (spec rule 14, 11-11 night final layout).
     if(keepMessages&&messageRows.length){
-      const key=tone.messages,hidden=hiddenMessages(),rowsOf=[boxTop([text('messages')],key)];
-      for(const item of visibleMessages())rowsOf.push(boxRow(item,key));
-      rowsOf.push(boxBottom(key,hidden?[text('+'+hidden,'loc_repo')]:[]));boxes.push(rowsOf);
+      const key=tone.messages,hidden=hiddenMessages();
+      messageBlock=[{parts:rule([text('messages',key)]).map(x=>({...x,...(styles[key]||{dim:true})}))}];
+      messageBlock.push(...visibleMessages());
+      const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
+      messageBlock.push({parts:[text('─'.repeat(Math.max(0,inner-size(note))),key),...note]});
     }
-    // A box is placed whole or not at all, so no frame is left open.
-    const room=Math.max(0,budget-order.length-ask.length-(keepQuota?1:0)),placed=[];
-    for(const rowsOf of boxes){if(placed.length+rowsOf.length>room)break;placed.push(...rowsOf);}
-    for(const item of [...order,...placed])add(item.parts,item.action);
-    // The question box sits on the 5h/7d row; a side panel keeps it at the bottom.
-    if(fill)while(content.length<rows-ask.length-(keepQuota?1:0))add([]);
-    for(const item of ask)add(item.parts,item.action);
-    if(keepQuota&&content.length<rows)add(cut(quota,inner));
+    // Each section is placed whole or not at all.
+    const tail=ask.length+messageBlock.length+(keepQuota?1:0);
+    if(order.length+routeBlock.length+tail>budget)routeBlock=[];
+    for(const item of [...order,...routeBlock])add(item.parts,item.action,item.groups);
+    // What comes and goes sits low: the question right above the messages, which keep the bottom.
+    if(fill)while(content.length<rows-tail)add([]);
+    if(content.length+tail<=budget){
+      for(const item of ask)add(item.parts,item.action);
+      for(const item of messageBlock)add(item.parts,item.action);
+    }else for(const item of ask)add(item.parts,item.action);
+    // A reset time that does not fit goes whole, never as a cut `(↻ …`.
+    const quotaRow=size(quota)<=inner?quota:quota.filter(part=>!/^\(↻/.test(String(part.text)));
+    if(keepQuota&&content.length<rows)add(cut(quotaRow,inner),undefined,['quota']);
   }
   const count=fill?height:Math.min(height,content.length+2),rows=[];
   // Spec rules 16-17: the top border carries this session's state on the left
@@ -434,6 +462,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
   const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
-  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail};
+  // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
+  const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,groups};
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN};

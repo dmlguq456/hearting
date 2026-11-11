@@ -114,14 +114,22 @@ folder or branch glyph;
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the repo row at the bottom);
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
-the jobs); `◑답 대기 N` and the session's title; the route box; the messages
-box; any question box at the bottom; and `5h … │ 7d …` last. Every group is
-one box of the same thin rounded line, its title in the top border; the boxes
+the jobs); `◑답 대기 N` and the session's title; the route box, high; free
+space; any question box; the messages section, fixed at the bottom; and
+`5h … │ 7d …` last. Only the route and the question are boxed, in the same
+thin rounded line with the title in the top border; the messages section has
+no box, only a titled upper rule (`── messages ──`) and a lower rule. They
 differ by place and strength of color only, all from the panel's theme and
 shade: the question the existing answer-needed color, route plain, messages
-dim. Opened details are indented inside their own box, never a box in a box,
-and a box that would be empty (no route, no message) is not drawn. Box rows
-are laid out at the box's inner width. Groups are divided by
+dim. An opened route detail is indented inside its box, never a box in a box,
+and nothing is drawn for an empty route list or message list. Box rows are
+laid out at the box's inner width. Beside the native area a folded route takes
+two rows: the glyph and its whole title (cut with `…` only past the row), then,
+indented and dim, harness, model, context percent and elapsed time
+(`claude Opus 5.5 25% · 1h 27m`); short of cells the `route line` choice keeps
+its value (`time`: elapsed, `model`: model) and the other goes, and a value is
+shown whole or not at all. A press on either row opens it. The bottom layout
+keeps its one folded row. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `messages`, stage names, `5h`/`7d`); only real content and
 language-dependent text follows the screen language: the answer wait reads
@@ -130,14 +138,14 @@ strings. Times use Fleet's spaced form (`45m`, `3h 20m`, `3d 0h`) for elapsed
 time and quota resets alike.
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
-short, the question and the top groups stay. Messages first fold to one row
-with `+N` in the box's bottom border; with a question showing, the messages
-box then goes before anything else. Then the Git row, spacer rows, the
-messages box, opened details, route rows (the last kept one turning into
-`+N more`) and the route box give way (and, only for a question's rows,
-running jobs other than the running-job row and 5h/7d). A box is placed whole
-or not at all. Inside a box, an opened route's gauge bar gives way before its
-percent. Variable-width text (titles, message
+short, the question (its body and choices) and the top groups stay, and the
+route side gives way first: spacer rows, then two-row routes fold to one row,
+an opened route detail closes, route rows give way to one row and `+N more`;
+then messages fold to one row (`+N` at the end of the lower rule), the last
+route row goes, then the Git row, the route box and running jobs; the messages
+section goes only last, then 5h/7d. A section is placed whole or not at all.
+Inside the box, an opened route's gauge bar gives way before its percent.
+Variable-width text (titles, message
 bodies) is cut with `…` before fixed-shape values (percent, glyphs, elapsed
 time), in two-cell Hangul and emoji as well. Claude's exact statusline callback
 remains the source of its values; the panel shows them in the same groups as
@@ -187,7 +195,7 @@ percent, else tokens over a known window, else the exact token count
 exist. The display is as fresh as that cache. Pressing the
 box's top border opens the existing read-only route evidence pages, which
 also carry each route's owner and evidence summary.
-The messages box (dim) shows the latest three peer messages, one row each (`←`
+The messages section (dim, two rules) shows the latest three peer messages, one row each (`←`
 received from the exact session's retained received inputs, `→` sent from this
 session's own ledger shard and its 200-character summary), cut with `…`;
 pressing a row shows its whole retained text in place. Two limits differ: the
@@ -335,11 +343,13 @@ shared Git observation as later callbacks, so folder, branch and model show
 before the first input; context and quota readings Claude has not reported yet
 (it sends them after its first response) are left out, as the native statusline
 did, rather than shown as `?`. Only while the panel actually paints the groups
-that row carries (number, project and Git, context, the answer wait, the route
+that row carries (number and project, Git, context, the answer wait, the route
 count, 5h/7d and running jobs) for the callback's exact session does the shell blank Claude's
 statusline area, the rows directly under the input box, when their text equals
-the callback's latest recorded output. A painted value wrapped onto the next
-panel row still counts as painted. A native screen too short for the whole
+the callback's latest recorded output. A group the panel paints counts even
+when its row is cut to the panel's width or wrapped; only a group the panel
+does not paint at all (dropped for rows, a read page, settings) keeps the
+native rows, so no value leaves the screen. A native screen too short for the whole
 record (the bottom layout's ten native rows) shows only its first rows, running
 to the screen's last line; those rows are the recorded ones and are blanked
 too. A screen without that input box, such
