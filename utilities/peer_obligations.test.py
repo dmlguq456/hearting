@@ -1851,6 +1851,94 @@ class ObligationStoreTest(unittest.TestCase):
                     stored = pending.read(self.jobs.parent, "sid-notice", record["delivery_id"])
                     self.assertEqual(stored["state"], "pending")
 
+    def test_old_duties_yield_to_a_notice_accepted_mid_pass(self):
+        """Each old non-notice duty is followed by the runner's new-notice check."""
+        order = []
+        checker = mock.Mock()
+        checker.advance.side_effect = lambda duty, _store: order.append(duty["id"])
+        store = mock.Mock()
+        store.get.return_value = None
+        duties = [{"id": f"steward-check-{index}", "state": "pending",
+                   "intent": {"kind": "steward-check"}} for index in range(3)]
+        with mock.patch.object(peer_steward, "_steward_check_module", return_value=checker):
+            peer_steward._reconcile_obligations(
+                store, duties, between_duties=lambda: order.append("notice-check"))
+        self.assertEqual(order, ["steward-check-0", "notice-check", "steward-check-1",
+                                 "notice-check", "steward-check-2", "notice-check"])
+
+    def test_gone_recipient_terminal_backlog_does_not_starve_a_fresh_notice(self):
+        """2026-11-11: terminal notices for gone sessions held a question answer forever.
+
+        Terminal groups always went first and a gone recipient's group only
+        recorded ``recipient-unavailable``, so a progress-class notice for a
+        live session was never selected. Groups already found unavailable now
+        take every other pass; the fresh group is the first one sent.
+        """
+        from types import SimpleNamespace
+
+        case_root = self.root / "notice-gone-backlog"
+        case_root.mkdir()
+        jobs = case_root / "jobs.log"
+        jobs.touch()
+        env = {"HOME": str(case_root / "home"), "XDG_STATE_HOME": str(case_root / "state"),
+               "XDG_DATA_HOME": str(case_root / "data"), "XDG_CONFIG_HOME": str(case_root / "config"),
+               "XDG_CACHE_HOME": str(case_root / "cache"),
+               "HARNESS_STATE_ROOT": str(case_root / "harness"),
+               "AGENT_PEER_LEDGER_ROOT": str(case_root / "peer-ledger"),
+               "AGENT_DISPATCH_JOBS": str(jobs)}
+        gone = ("sid-a-gone", "sid-b-gone", "sid-c-gone")
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(obligations, "ensure_normal_runner", return_value=False):
+            for sid in gone:
+                self.assertIsNotNone(_legacy_notice(
+                    "claude", sid, key="notice:gone:" + sid, subject="done", text="old",
+                    jobs=jobs, required_action="report-to-user"))
+            self.assertIsNotNone(_legacy_notice(
+                "claude", "sid-z-live", key="notice:fresh", subject="answer", text="fresh",
+                jobs=jobs))
+            store = obligations.ObligationStore(case_root)
+            for duty in store.list(kinds={"session-notice"}):
+                if duty["intent"]["identity"]["storage_sid"] in gone:
+                    # An earlier runner already found these recipients gone.
+                    store.update(duty["id"], observation={
+                        "recipient_sid": duty["intent"]["identity"]["storage_sid"],
+                        "reason": "recipient-unavailable"})
+            inventory = {"result": {"agents": [{"agent": "claude",
+                "agent_session": {"value": "sid-z-live"}, "pane_id": "pane-z-live"}]}}
+            sent = []
+
+            def courier(_args, *, expected_recipient, on_prepared, producer_binding=None):
+                sent.append(expected_recipient)
+                on_prepared("fresh-transfer")
+                return 0
+
+            selection = {}
+            census = mock.Mock(return_value=SimpleNamespace(
+                stdout=json.dumps(inventory), returncode=0))
+            with mock.patch.object(peer_steward, "_herdr_argv", return_value=["herdr"]), \
+                 mock.patch.object(peer_steward.subprocess, "run", census), \
+                 mock.patch.object(peer_steward, "_resolve_target",
+                                   return_value=("claude", "sid-z-live", "current")), \
+                 mock.patch.object(peer_steward.peer_message, "_read_pending", return_value=None), \
+                 mock.patch.object(peer_steward, "_schedule_message_obligation"), \
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+                peer_steward._reconcile_obligations(
+                    store, store.list(kinds={"session-notice"}), notice_selection=selection,
+                    runner_incarnation="runner-gone-backlog")
+                self.assertEqual(sent, [("claude", "sid-z-live")])
+                self.assertEqual(selection["last_group"], ("claude", "sid-z-live"))
+                # The gone groups keep their every-other-pass turn and stay open.
+                for _pass in range(2):
+                    peer_steward._reconcile_obligations(
+                        store, store.list(kinds={"session-notice"}), notice_selection=selection,
+                        runner_incarnation="runner-gone-backlog")
+            self.assertEqual(sent, [("claude", "sid-z-live")])
+            self.assertIn(selection["last_parked_group"],
+                          {("claude", sid) for sid in gone})
+            for duty in store.list(kinds={"session-notice"}):
+                if duty["intent"]["identity"]["storage_sid"] in gone:
+                    self.assertEqual(duty["state"], "pending")
+
     def test_notice_runner_rotates_past_blocked_recipient_groups(self):
         from types import SimpleNamespace
         import dispatch_pending_delivery as pending

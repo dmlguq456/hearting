@@ -1428,6 +1428,64 @@ class PruneTest(IsolatedRootMixin, unittest.TestCase):
         self.assertFalse(old_acked.exists())
 
 
+class NoticeTtlTest(IsolatedRootMixin, unittest.TestCase):
+    """SD-111 §(7) `pending-delivery-ttl-exceeded` for open notice records.
+
+    2026-11-11: open notices for gone sessions had no end condition (the dead
+    parent rule needs an owner attempt row a notice does not have), stayed
+    candidates on every runner pass and were never pruned.
+    """
+
+    DAY = 86400
+
+    def _notice(self, letter, *, age_days, answer=False, route_node="notice"):
+        receipt = {"schema_version": 1, "kind": "notice", "key": "notice:" + letter,
+                   "subject": "s", "text": "t", "required_action": "read-notice"}
+        if answer:
+            receipt["answer_binding"] = {"request_id": "fixture"}
+        delivery_id = "delivery-" + letter * 64
+        notice = route_node == "notice"
+        PD.create(
+            self.root, recipient_kind="claude-parent-runtime", recipient_key="sess-gone",
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[] if notice else ["att-" + letter * 32],
+            parent_attempt_id="" if notice else "att-" + "a" * 32,
+            route_id="route-free", route_node=route_node, receipt=receipt,
+            receipt_digest=_digest(receipt),
+            row_revisions={} if notice else {"att-" + letter * 32: "deadbeef"}, lineage=[])
+        path = PD.record_path(self.root, "sess-gone", delivery_id)
+        old = time.time() - age_days * self.DAY
+        os.utime(path, (old, old))
+        return path
+
+    def _state(self, path):
+        value = json.loads(path.read_text("utf-8"))
+        return value["state"], value.get("expiry_reason")
+
+    def test_reconcile_expires_only_stale_open_notices(self):
+        import dispatch_completion_join as join
+
+        stale = self._notice("1", age_days=8)
+        fresh = self._notice("2", age_days=1)
+        answer = self._notice("3", age_days=30, answer=True)
+        completion = self._notice("4", age_days=30, route_node="execute")
+        result = join.reconcile_pending_delivery(self.root / "jobs.log")
+        self.assertEqual(result["expired"], 1)
+        self.assertEqual(self._state(stale), ("expired", "pending-delivery-ttl-exceeded"))
+        self.assertEqual(self._state(fresh)[0], "pending")
+        # The person's own answer and a non-notice completion keep their rules.
+        self.assertEqual(self._state(answer)[0], "pending")
+        self.assertEqual(self._state(completion)[0], "pending")
+        # Already terminal: a second sweep changes nothing.
+        self.assertEqual(join.reconcile_pending_delivery(self.root / "jobs.log")["expired"], 0)
+
+    def test_only_the_declared_actor_expires(self):
+        stale = self._notice("5", age_days=8)
+        with self.assertRaises(PD.PendingDeliveryError):
+            PD.expire_notice_past_ttl(stale, actor="fleet")
+        self.assertEqual(self._state(stale)[0], "pending")
+
+
 class BoundedPruneTest(IsolatedRootMixin, unittest.TestCase):
     """`prune_bounded`: the stat-prefiltered, oldest-first, budgeted prune the
     HOME retention pass and the reconcile actor share, with removal-only

@@ -873,11 +873,19 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                         owner_attempt_id = candidate
                         owner_metadata = rows_by_attempt[candidate]
                         break
-            if owner_metadata is None:
-                result["skipped"] += 1
-                continue
-            expiry = expire_pending_for_dead_recipient(
-                jobs, owner_metadata, record, attempt_id=owner_attempt_id)
+            expiry = "skipped"
+            if owner_metadata is not None:
+                expiry = expire_pending_for_dead_recipient(
+                    jobs, owner_metadata, record, attempt_id=owner_attempt_id)
+            if expiry != "expired" and record.get("route_node") == "notice":
+                # A notice for a gone session usually has no owning attempt row
+                # to prove its recipient dead; the declared TTL ends it.
+                try:
+                    if pending_delivery.expire_notice_past_ttl(
+                            record_file, actor="dispatch-reconcile") == "expired":
+                        expiry = "expired"
+                except (pending_delivery.PendingDeliveryError, OSError):
+                    pass
             if expiry == "expired":
                 result["expired"] += 1
             elif expiry == "skipped":

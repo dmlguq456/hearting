@@ -1906,6 +1906,44 @@ def expire_if_due(
         return _public_record(updated)
 
 
+# SD-111 §(7) `pending-delivery-ttl-exceeded`: an open notice record (route
+# notice, completion notice, question-answer excluded) whose last write is older
+# than this has no delivery left to make. Its file mtime is the clock, as for
+# terminal retention: an unclaimed notice for a gone session is never rewritten.
+NOTICE_TTL_SECONDS = 7 * 86400
+
+
+def expire_notice_past_ttl(path: Path, *, actor: str, now: float | None = None) -> str:
+    """Expire one open notice record whose last write is past the notice TTL.
+
+    The same declared actor and record lock as ``expire_if_due``. A question
+    answer is the person's own reply and is never expired by age; a claimed or
+    otherwise rewritten record restarts its window. Returns expired, fresh, or
+    skipped (not an open notice, answer, unreadable).
+    """
+    if actor != EXPIRY_ACTOR:
+        raise PendingDeliveryError("pending-delivery-expiry-actor-invalid", actor)
+    now = time.time() if now is None else now
+    path = Path(path)
+    with _record_reference_lock(path):
+        try:
+            value = _read_unlocked(path)
+            modified = path.stat().st_mtime
+        except (PendingDeliveryError, OSError):
+            return "skipped"
+        if (value is None or value.get("state") not in OPEN_STATES
+                or value.get("route_node") != "notice"
+                or "answer_binding" in (value.get("receipt") or {})):
+            return "skipped"
+        if now - modified < NOTICE_TTL_SECONDS:
+            return "fresh"
+        updated = dict(value)
+        updated["state"] = "expired"
+        updated["expiry_reason"] = "pending-delivery-ttl-exceeded"
+        _write_unlocked(path, updated)
+        return "expired"
+
+
 def expire_recovery(
     root: Path, recipient_key: str, delivery_id: str, *, expected: dict,
     actor: str, reason: str, apply: bool = True,
