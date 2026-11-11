@@ -3349,6 +3349,21 @@ def _codex_queue_present():
         return False
 
 
+def _codex_turn_in_progress(thread_id):
+    """The thread's latest native turn is running (App Server ``thread/turns/list``).
+
+    Unknown (no socket, an RPC error) is not running: the courier keeps its
+    existing path.
+    """
+    try:
+        from codex_queue_dispatch import resolve_queue_socket
+        import codex_queue_delivery
+        return codex_queue_delivery._latest_turn_status(
+            resolve_queue_socket(), thread_id, timeout=2.0) == "inProgress"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def cmd_watch(args):
     root = _watch_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -7108,6 +7123,24 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # policy. An obsolete resume must not hold a useful completion behind it.
     resume_only = session_resume.is_resume(batch[0][4])
     batch = [item for item in batch if session_resume.is_resume(item[4]) == resume_only]
+    if harness == "codex" and not resume_only:
+        # While the Codex turn runs, its in-turn carrier (codex_turn_carrier)
+        # shows the notice at the next tool boundary or Stop, as Claude gets it
+        # mid-turn. Queued here it would only open the next turn (PG-45), and two
+        # carriers would race for one notice. An unprepared ordinary notice waits
+        # for the next pass; once the turn ends this courier queues it as before.
+        deferred = [item for item in batch
+                    if not (item[0].get("observation") or {}).get("transfer_ref")
+                    and "answer_binding" not in (item[4].get("receipt") or {})]
+        if deferred and _codex_turn_in_progress(recipient_sid):
+            for item in deferred:
+                store.update(item[0]["id"], state="pending", observation={
+                    **(item[0].get("observation") or {}), "reason": "codex-turn-active-in-turn-carrier"},
+                    expected_phases={(item[0].get("observation") or {}).get("phase", "waiting")},
+                    skip_unchanged=True)
+            batch = [item for item in batch if item not in deferred]
+            if not batch:
+                return
     pending_transfers = []
     retargeted = {}
     folded = []

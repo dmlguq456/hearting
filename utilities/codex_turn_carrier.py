@@ -29,10 +29,13 @@ UserPromptSubmit bridge already uses for queued receipts:
    exactly as before, and a notice beside it is still carried.
 2. **One follow-through pass.** When this turn received a Hearting record whose
    required action is not plain reading (or a verified peer report addressed to
-   this thread, not a quoted trailer), and the model ended
+   this thread, not a quoted trailer and not a ``[report]``/``[notice]`` that
+   only needs reading), and the model ended
    the turn without running any tool after it, Stop continues the turn once with
    that required action. The model may still end with a one-line reason; there
-   is no second pass, approval, or required input.
+   is no second pass, approval, or required input. Claude's Stop
+   (``hooks/peer-message-record.py``) applies the same per-turn state and
+   ``follow_through`` decision, keyed by Claude's ``prompt_id``.
 
 Everything is fail-open: any error leaves the hook silent and the records on
 disk for their existing carriers.
@@ -307,7 +310,23 @@ def owed_items(records: list[dict]) -> list[dict]:
     return items
 
 
-def peer_report_item(prompt: str, sid: str = "") -> dict | None:
+# A peer body whose first line carries one of these asks only to be read and
+# reported, as a ``read-notice`` receipt does (PG-46). The same first-line
+# reading as the ledger's ``[steer]``/``[handoff]``/``[gate]`` kinds; a body
+# without one keeps the pass.
+READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
+
+
+def _peer_body_first_line(prompt: str) -> str:
+    """The body's first line; a Claude native envelope's opening tag is not body."""
+    prompt = re.sub(r"^\s*<cross-session-message\b[^>]*>", "", prompt)
+    for line in prompt.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict | None:
     """A verified peer report that arrived as this turn's prompt.
 
     The existing receive classification (``peer-message.prompt_origin``, read
@@ -315,18 +334,47 @@ def peer_report_item(prompt: str, sid: str = "") -> dict | None:
     exact thread counts. A quoted ``(peer-from: ...)`` in an ordinary prompt
     has no such envelope, and a runtime completion or human answer carries its
     own required action in the receipt the bridge already rendered, so neither
-    adds a pass here.
+    adds a pass here. A report that only needs reading (its first line starts
+    with ``[report]`` or ``[notice]``) adds none either.
     """
-    if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt):
+    if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt
+                                 and "cross-session-message" not in prompt):
+        return None
+    if peer_body_item(prompt) is None:
         return None
     try:
         import session_tidy
-        origin = session_tidy._current_request_origin(prompt, "codex", sid)
+        origin = session_tidy._current_request_origin(prompt, harness, sid)
     except Exception:  # noqa: BLE001 - an unreadable envelope is not a report
         return None
     if not isinstance(origin, dict) or origin.get("kind") != "peer":
         return None
     return {"kind": "peer-report", "required_action": "follow-through"}
+
+
+def peer_body_item(text: str) -> dict | None:
+    """The owed item for a verified peer body this turn was shown, or ``None``
+    when it only needs reading. Claude shows sealed peer bodies as hook context
+    (``peer-message.emit_peer_context``) where Codex gets them as the prompt."""
+    if _peer_body_first_line(text or "").startswith(READ_ONLY_PEER_PREFIXES):
+        return None
+    return {"kind": "peer-report", "required_action": "follow-through"}
+
+
+def follow_through(sid: str, tid: str, root: Path | None = None) -> str:
+    """The turn's one follow-through reason when it would end now, else "".
+
+    The single decision both adapters' Stop applies (Codex ``stop`` below,
+    Claude ``hooks/peer-message-record.py stop``): an owed action no tool has
+    acted on continues the turn once; the pass is spent when claimed.
+    """
+    if not sid or not tid:
+        return ""
+    state = read_state(sid, tid, root)
+    owed = unmet(state)
+    if not owed or state.get("nudged") or not mark_nudged(sid, tid, root):
+        return ""
+    return nudge_text(owed)
 
 
 def nudge_text(items: list[dict]) -> str:
@@ -656,11 +704,9 @@ def stop(payload: dict, stream) -> int:
                 release(sid, batches)
         return 0
     try:
-        state = read_state(sid, tid)
-        owed = unmet(state)
-        if owed and not state.get("nudged"):
-            if mark_nudged(sid, tid):
-                _emit({"decision": "block", "reason": nudge_text(owed)}, stream)
+        reason = follow_through(sid, tid)
+        if reason:
+            _emit({"decision": "block", "reason": reason}, stream)
     except Exception:  # noqa: BLE001
         pass
     return 0

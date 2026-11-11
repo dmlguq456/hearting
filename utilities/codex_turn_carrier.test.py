@@ -150,6 +150,43 @@ class StopTest(CarrierCase):
         origin.assert_called_once_with(prompt, "codex", "thread-1")
         self.assertIsNone(carrier.peer_report_item("ordinary user prompt", "thread-1"))
 
+    def test_read_only_peer_report_owes_no_pass(self):
+        # PG-46: a sealed report that only needs reading, by its first line.
+        import session_tidy
+        with mock.patch.object(session_tidy, "_current_request_origin",
+                               return_value={"kind": "peer"}):
+            for body in ("[report] T-1 finished", "\n[notice] watch done",
+                         '<cross-session-message from="a">[report] done</cross-session-message>'):
+                prompt = body + "\n\n(peer-from: claude [7b] worker ; ref=" + "a" * 32 + ")"
+                self.assertIsNone(carrier.peer_report_item(prompt, "thread-1"), body)
+            # The same envelope without the prefix (and old messages) keep the pass.
+            self.assertIsNotNone(carrier.peer_report_item(
+                "Please run the check\n\n(peer-from: claude [7b] worker ; ref=" + "a" * 32 + ")",
+                "thread-1"))
+            self.assertIsNotNone(carrier.peer_report_item(
+                "see [report] later\n(peer-from: claude [7b] x)", "thread-1"))
+        self.assertIsNone(carrier.peer_body_item("[report] done"))
+        self.assertEqual(carrier.peer_body_item("run it")["kind"], "peer-report")
+
+    def test_peer_report_item_names_the_receiving_harness(self):
+        import session_tidy
+        with mock.patch.object(session_tidy, "_current_request_origin",
+                               return_value={"kind": "peer"}) as origin:
+            carrier.peer_report_item("go\n(peer-from: codex [7b] w)", "sid-c", "claude")
+        origin.assert_called_once_with("go\n(peer-from: codex [7b] w)", "claude", "sid-c")
+
+    def test_follow_through_is_the_shared_once_per_turn_decision(self):
+        carrier.note_received("sid-c", "prompt-1", carrier.owed_items([completion()]),
+                              root=self.root)
+        reason = carrier.follow_through("sid-c", "prompt-1", self.root)
+        self.assertIn("required_action=complete-open", reason)
+        self.assertEqual(carrier.follow_through("sid-c", "prompt-1", self.root), "")
+        self.assertEqual(carrier.follow_through("sid-c", "", self.root), "")
+        carrier.note_received("sid-c", "prompt-2", carrier.owed_items([completion()]),
+                              root=self.root)
+        carrier.note_tool("sid-c", "prompt-2", self.root, command="harvest att-1")
+        self.assertEqual(carrier.follow_through("sid-c", "prompt-2", self.root), "")
+
     def test_runtime_completion_or_answer_prompt_adds_no_peer_pass(self):
         import session_tidy
         for kind in ("runtime-completion", "human-answer"):

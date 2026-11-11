@@ -3490,6 +3490,44 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(len(sends), 1)
                 self.assertEqual(store.get(duty["id"])["state"], "complete")
 
+    def test_codex_notice_waits_for_the_in_turn_carrier_while_a_turn_runs(self):
+        # PG-45: one carrier per notice. While the Codex turn runs the courier
+        # leaves it pending for the in-turn carrier; once idle it queues as before.
+        import dispatch_pending_delivery as pending_delivery
+        notice = self._notice("codex", key="checkpoint:active-turn")
+        store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+        duty, = store.list(kinds={"run-notice"})
+        with mock.patch.object(peer_steward, "_codex_turn_in_progress",
+                               return_value=True) as running:
+            store, sends = self._run_notice_duty("codex", duty)
+        running.assert_called_with(self.sid)
+        self.assertEqual(sends, [])
+        self.assertEqual(pending_delivery.read(
+            self.tmp_root, self.sid, notice["delivery_id"])["state"], "pending")
+        held = store.get(duty["id"])
+        self.assertEqual(held["observation"]["reason"], "codex-turn-active-in-turn-carrier")
+        self.assertNotIn("transfer_ref", held["observation"])
+        with mock.patch.object(peer_steward, "_codex_turn_in_progress", return_value=False):
+            store, sends = self._run_notice_duty("codex", held)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(pending_delivery.read(
+            self.tmp_root, self.sid, notice["delivery_id"])["state"], "acked")
+
+    def test_claude_notice_does_not_ask_for_a_codex_turn(self):
+        notice = self._notice("claude", key="checkpoint:claude-active")
+        store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+        duty, = store.list(kinds={"run-notice"})
+        with mock.patch.object(peer_steward, "_codex_turn_in_progress",
+                               return_value=True) as running:
+            store, sends = self._run_notice_duty("claude", duty)
+        running.assert_not_called()
+        self.assertEqual(len(sends), 1)
+        self.assertTrue(notice["delivery_id"])
+
+    def test_codex_turn_probe_is_unknown_without_an_app_server(self):
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.tmp_root / "no-codex")}):
+            self.assertFalse(peer_steward._codex_turn_in_progress("thread-x"))
+
     def test_codex_queue_acceptance_stays_unacked_until_exact_native_receipt(self):
         import dispatch_pending_delivery as pending_delivery
         notice = self._notice("codex", key="checkpoint:queue-then-receipt")
