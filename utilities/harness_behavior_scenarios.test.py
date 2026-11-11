@@ -247,54 +247,59 @@ class CompletionCloseFactTest(unittest.TestCase):
         import harness_behavior_cases_completion_close as close
         self.close = close
 
-    def test_facts_are_extracted_from_the_captured_reply(self):
-        reply = "Result: partial; HB-UNRUN-CHECK; HB-RECORD-PATH"
-        facts = self.close.extract_event_facts(reply, "partial")
-        self.assertTrue(facts["unfinished"])
-        self.assertTrue(facts["record_pointer"])
-        self.assertTrue(self.close.close_passes(reply, "partial"))
+    def test_carrier_facts_require_exact_summary_and_event_sentinels(self):
+        summary = self.close.synthetic_sealed_summary("failure")
+        carrier = ("attempt-1\nFirst close: " + self.close.CURRENT_DIRECTIVE
+                   + "\n" + summary)
+        facts = self.close.carrier_facts(carrier, summary, "failure")
+        self.assertTrue(facts["summary_byte_identical"])
+        self.assertTrue(facts["expected_sentinel_present"])
+        self.assertTrue(facts["record_sentinel_present"])
+        self.assertTrue(facts["unexpected_event_sentinels_absent"])
+        self.assertEqual(facts["sentinels_observed"],
+                         ["HB-FAIL-CAUSE", "HB-RECORD-PATH"])
 
-    def test_carrier_token_does_not_count_when_display_reply_omits_it(self):
-        carrier = "HB-FAIL-CAUSE HB-RECORD-PATH"
-        self.assertIn("HB-FAIL-CAUSE", carrier)
-        reply = "Result: work did not complete. HB-RECORD-PATH"
-        facts = self.close.extract_event_facts(reply, "failure")
-        self.assertFalse(facts["failure"])
-        self.assertFalse(self.close.close_passes(reply, "failure"))
+    def test_carrier_facts_report_missing_and_unexpected_sentinels(self):
+        summary = self.close.synthetic_sealed_summary("partial")
+        carrier = summary.replace("HB-UNRUN-CHECK", "MISSING") + "\nHB-FAIL-CAUSE"
+        facts = self.close.carrier_facts(carrier, summary, "partial")
+        self.assertFalse(facts["summary_byte_identical"])
+        self.assertFalse(facts["expected_sentinel_present"])
+        self.assertTrue(facts["record_sentinel_present"])
+        self.assertFalse(facts["unexpected_event_sentinels_absent"])
 
     def test_carrier_counts_only_the_completion_request_item(self):
-        close_text = "attempt-1\nFirst close: one or two sentences\nHB-RECORD-PATH"
+        close_text = "attempt-1\nFirst close: " + self.close.CURRENT_DIRECTIVE
         record = {"last_text": close_text,
                   "text": "earlier generic instruction mentioning First close: but no event"}
         self.assertEqual(self.close.completion_carrier(record, "attempt-1"), close_text)
         self.assertEqual(self.close.completion_carrier(record, "attempt-2"), "")
 
-    def test_old_directive_reply_keeps_summary_and_required_sections(self):
-        summary = self.close.synthetic_sealed_summary("partial")
-        carrier = ("First close: " + self.close.OLD_DIRECTIVE + ".\n" + summary)
-        reply, mode = self.close.scripted_reply_from_carrier(carrier)
-        self.assertEqual(mode, "derived-old-directive")
-        self.assertIn(summary, reply)
-        self.assertIn(self.close.OLD_REQUIRED_SECTIONS, reply)
+    def test_current_and_old_directives_are_recorded_without_reply_derivation(self):
+        self.assertEqual(self.close.observed_directive(
+            "First close: " + self.close.CURRENT_DIRECTIVE), "current")
+        self.assertEqual(self.close.observed_directive(
+            "First close: " + self.close.OLD_DIRECTIVE), "old")
+        self.assertEqual(self.close.observed_directive("no close instruction"), "none")
+        baseline = "First close: " + self.close.OLD_DIRECTIVE
+        self.assertEqual(self.close.carrier_facts(
+            baseline, self.close.synthetic_sealed_summary("success"), "success")
+            ["directive_observed"], "old")
 
-    def test_before_minimum_is_derived_from_the_fixture_sealed_summary(self):
-        summary = self.close.synthetic_sealed_summary("failure")
-        self.assertIn("HB-FAIL-CAUSE", summary)
-        self.assertIn("HB-RECORD-PATH", summary)
+    def test_screen_split_captures_hearting_text_beside_reply(self):
+        reply = self.close.LOOPBACK_REPLY
+        screen = "Hearting notice\n" + reply + "\nstatus text"
+        self.assertEqual(self.close.split_screen_reply(screen, reply),
+                         "Hearting notice\n\nstatus text")
+        self.assertEqual(self.close.split_screen_reply(screen, ""), screen)
+
+    def test_old_minimum_is_explicitly_derived(self):
         derived = self.close.derived_old_minimum("failure")
         self.assertEqual(derived["measurement"], "derived")
-        self.assertEqual(derived["summary_chars"], len(summary))
+        self.assertEqual(derived["summary_chars"],
+                         len(self.close.synthetic_sealed_summary("failure")))
         self.assertEqual(derived["minimum_user_chars"],
-                         len(summary) + len(self.close.OLD_REQUIRED_SECTIONS))
-
-    def test_scripted_reply_uses_only_tokens_present_in_carrier(self):
-        carrier = "First close: concise. HB-UNRUN-CHECK HB-RECORD-PATH"
-        reply, mode = self.close.scripted_reply_from_carrier(carrier)
-        self.assertEqual(mode, "scripted-transport")
-        self.assertIn("HB-UNRUN-CHECK", reply)
-        self.assertIn("HB-RECORD-PATH", reply)
-        self.assertNotIn("HB-FAIL-CAUSE", reply)
-        self.assertEqual(len(reply.splitlines()), 1)
+                         derived["summary_chars"] + derived["required_sections_chars"])
 
 
 if __name__ == "__main__":
