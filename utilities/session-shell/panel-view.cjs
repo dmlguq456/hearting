@@ -30,17 +30,17 @@ function appearance(rows,configuration={},{colors=256,noColor=false}={}){
 const SEGMENTER=typeof Intl==='object'&&Intl.Segmenter?new Intl.Segmenter(undefined,{granularity:'grapheme'}):null;
 const JOINS=/[\p{M}\u200d\u1160-\u11ff\u{1f1e6}-\u{1f1ff}\u{1f3fb}-\u{1f3ff}]/u;
 const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x.segment):[...s];
-// A message keeps its plain `message:<at>:<way>` key; a different one kept in the
-// same second and direction adds its who and body, and an identical record its order.
+// A message's key is its own: when, which way, who and what. The recent list moving
+// or losing a neighbour never hands one message's key to another; only an identical
+// record (same body) counts its order, from the newest, so an older copy leaving the
+// front of the list leaves the kept copies' keys as they were.
 function digest(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;}return h.toString(36);}
 function messageKeys(list){
-  const first=new Map(),seen=new Map();
-  return list.map(m=>{
-    const base='message:'+m.at+':'+m.way,body=String(m.who??'')+'\n'+String(m.text??'');
-    if(!first.has(base))first.set(base,body);
-    const key=first.get(base)===body?base:base+':'+digest(body),n=seen.get(key)||0;seen.set(key,n+1);
+  const seen=new Map();
+  return list.map(m=>'message:'+m.at+':'+m.way+':'+digest(String(m.who??'')+'\n'+String(m.text??''))).reverse().map(key=>{
+    const n=seen.get(key)||0;seen.set(key,n+1);
     return n?key+'.'+n:key;
-  });
+  }).reverse();
 }
 const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','side_min_columns'];
 const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','threshold'];
@@ -161,7 +161,19 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
     const pad=n=>text(' '.repeat(Math.max(0,n)));
     const cut=(parts,limit)=>{const all=size(parts);if(all<=limit)return parts;const fit=clip(parts,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     const joined=(groups,sep=' │ ')=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
-    const rule=(label)=>{const head=label.length?[text('── '),...label,text(' ')]:[];return [...head,text('─'.repeat(Math.max(0,inner-size(head))))];};
+    // A narrow panel gives up the lead rule, then whole words from the end of the label:
+    // `route N` shows whole or not at all, never as a shorter number.
+    const fitted=label=>{
+      if(size([text('── '),...label,text(' ')])<=inner)return [text('── '),...label,text(' ')];
+      const all=label.map(p=>clean(p.text)).join(''),words=all.split(' ');
+      if(words[0]==='route'&&words.length>1)words.splice(0,2,words[0]+' '+words[1]);
+      let keep='';
+      for(const word of words){const next=keep?keep+' '+word:word;if(measure(next)>inner)break;keep=next;}
+      const out=[];let left=keep.length;
+      for(const p of label){const t=clean(p.text).slice(0,left);if(t)out.push({...p,text:t});left-=t.length;}
+      return keep&&measure(keep)<inner?[...out,text(' ')]:out;
+    };
+    const rule=(label)=>{const head=label.length?fitted(label):[];return [...head,text('─'.repeat(Math.max(0,inner-size(head))))];};
     const open=new Set(expandedKeys||[]);
     const routeLine=['time','model'].includes(cfg.route_line)?cfg.route_line:'time';
     // The session's own model: the native selection when it is shown, else Fleet's.
@@ -334,6 +346,6 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const foot=clip(settings?line(' Esc · '+t('cancel','Cancel')+' '):edge.length?[text(' '),...edge,text(' ')]:[],width-4);
   rows.push([text('└─',color),...foot.parts,text('─'.repeat(Math.max(0,width-3-foot.used))+'┘',color)]);
   const painted=appearance(rows,cfg,{colors:model.colors??256,noColor:model.no_color===true});
-  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages};
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail};
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS};

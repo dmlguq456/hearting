@@ -230,7 +230,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
         grid.put(x - 2, y, "┃", "line")
         grid.put(1, y, "OVERVIEW", "head", tint=236)
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
-    c = _overview_columns(use, _overview_harness_width(vm.sessions))
+    route_rows = [route for route in vm.routes if route.get("session_tag")]
+    current_routes, open_current_routes = current_route_counts(route_rows)
+    # A folded row's `route N` keeps its whole count: the MODEL cell gives way to it as it does
+    # to the title (the count is never cut to a shorter number or a part of the word).
+    tail_need = max((_seg_width(f"{ROUTE_WORD} {count}") for tag, count in current_routes.items()
+                     if state.opened != tag), default=0)
+    c = _overview_columns(use, _overview_harness_width(vm.sessions), tail_need)
     harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "MODEL"), (c["ctx"], "CTX" if c["bare"] else "CONTEXT"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()),
@@ -242,8 +248,6 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     y += 1
     repos = tuple(vm.repos or ())
     sessions = tuple(vm.sessions or ())
-    route_rows = [route for route in vm.routes if route.get("session_tag")]
-    current_routes, open_current_routes = current_route_counts(route_rows)
     # The ROUTES summary and RECENT stay in view under a long session list: the page
     # viewport pins them to its bottom edge and only the sessions above them scroll.
     # A short screen keeps fewer RECENT rows (at least one) before it gives the pin up.
@@ -345,9 +349,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 route_tail = f" {ROUTE_WORD} {route_count}" if route_count and state.opened != tag else ""
                 # Current work remains visible while the session is folded.
                 # Reserve its cells before a long CJK title or branch is drawn.
+                if route_tail and _seg_width(route_tail) > c["title_w"]:
+                    # No title is left beside it: the count starts the cell without its space,
+                    # and where even that does not fit it is left out whole, never cut.
+                    route_tail = route_tail[1:] if _seg_width(route_tail) - 1 <= c["title_w"] else ""
                 if route_tail:
                     tail = tail + route_tail if _seg_width(tail + route_tail) <= c["title_w"] // 2 else route_tail
-                if restart_text and _seg_width(" " + restart_text) <= c["title_w"]:
+                if restart_text and _seg_width(" " + restart_text + route_tail) <= c["title_w"]:
                     restart_inline = True
                     tail = " " + restart_text + route_tail
                 room = max(0, c["title_w"] - _seg_width(tail))
@@ -1198,7 +1206,7 @@ def _overview_harness_width(sessions):
     return max((_seg_width(_harness_cell_text(session)) for session in sessions), default=0)
 
 
-def _overview_columns(use, harn_need=0):
+def _overview_columns(use, harn_need=0, tail_need=0):
     """ID │ MODEL │ CONTEXT │ TITLE │ LAST INPUT … AGE — the session row, and the route row after it.
 
     MODEL keeps the observed display text (model and effort included) up to the room TITLE,
@@ -1220,14 +1228,15 @@ def _overview_columns(use, harn_need=0):
     now = use - (title + title_w + GAP) - AGE_W - GAP >= 16
     if not now:
         title_w = use - title - AGE_W - GAP
-    if title_w >= TITLE_MIN:
+    if title_w >= max(TITLE_MIN, tail_need):
         return {"h": h, "title": title, "title_w": title_w, "ctx": ctx, "gap": GAP, "bare": False,
                 "harn_w": harn_w, "narrow": narrow, "now": title + title_w + GAP if now else None}
     # Too narrow for the full cells: the margins, the gauge (its value stays) and the model's
-    # optional words (model, effort) give way before the title, which keeps what the row is.
+    # optional words (model, effort) give way before the title, which keeps what the row is
+    # and a folded row's whole `route N`.
     gap = 1
     h = IND + 3 + 6 + gap
-    harn_w = max(0, min(8, max(5, harn_need), use - h - 4 - AGE_W - 3 * gap - TITLE_MIN))
+    harn_w = max(0, min(8, max(5, harn_need), use - h - 4 - AGE_W - 3 * gap - max(TITLE_MIN, tail_need)))
     if harn_w < 5:
         harn_w = 0                # not even a harness word fits: MODEL is left out
     ctx = h + harn_w + (gap if harn_w else 0)

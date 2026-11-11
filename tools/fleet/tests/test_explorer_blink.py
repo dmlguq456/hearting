@@ -149,6 +149,26 @@ class SessionRouteCountTests(BlinkAssertions):
                             "".join(cell[0] or "\0" for cell in row) for row in expanded.cells) if "[c1]" in line))
 
 
+    def test_a_narrow_table_shows_the_whole_route_count_or_none_of_it(self):
+        # A folded row's `route N` is never cut to a shorter number or a part of the word
+        # (RV-PR1517-R3 §1 ②): the title and MODEL give way first, else the tail is left out.
+        base = blink_view_model()
+        sessions = tuple(dict(row, title="XXXX XXXX " * 8) for row in base.sessions)
+        first = dict(base.routes[0], current=True, state="working")
+        for count in (1, 12, 123):
+            vm = replace(base, sessions=sessions,
+                         routes=tuple(dict(first, id="r%d" % i) for i in range(count)))
+            whole = "route %d" % count
+            for cols in [*range(60, 100), 100, 140]:
+                with self.subTest(count=count, cols=cols):
+                    rows = [row.rstrip() for row in draw(vm, NavState(), cols, 45, beat=1).text_rows()
+                            if "[c1]" in row]
+                    tail = re.sub(r"X+|…|\(.*?\)", "", re.search(r"%(.*?)\d+h \d+m$", rows[0]).group(1)).strip()
+                    self.assertIn(tail, ("", whole), rows[0])
+                    # From 69 columns (and down to 67-69 by count) the whole count shows.
+                    if cols >= 69 or cols >= 66 + len(str(count)):
+                        self.assertEqual(tail, whole, rows[0])
+
 class StagePhaseTests(BlinkAssertions):
     def test_stage_boxes_pulse_only_active_names_and_dot_all_hues(self):
         for index in range(5):

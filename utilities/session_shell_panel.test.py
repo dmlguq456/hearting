@@ -151,7 +151,7 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
-assert(r.hits.some(h=>h.action==='message:1:←'));assert(r.hits.some(h=>h.action==='fleet'));
+assert(r.hits.some(h=>h.action.startsWith('message:1:←:')));assert(r.hits.some(h=>h.action==='fleet'));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -201,6 +201,38 @@ for(const [name,messages,want] of [['same-way',[one('a','FIRST'),one('b','SECOND
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_chosen_message_stays_chosen_when_the_recent_list_moves(self):
+        # A newer message pushing the first one out never opens the next one in its place
+        # (RV-PR1517-R3 §1 ①): a kept message keeps its key; a message gone opens nothing.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const one=(tag,at,way='→',who='peer')=>({way,who,at,text:tag+' '+'word '.repeat(40)+tag+'_END'});
+const F=one('FIRST',7),S=one('SECOND',7),T=one('THIRD',8),U=one('FOURTH',9),X=one('INSERTED',7),A=one('SAME',7),A2=one('SAME',7);
+const draw=(messages,extra={})=>{const r=view.render({width:40,height:40,side:true,fill:false,model:{messages},questions:()=>[],configuration:{},...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+const keys=messages=>draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action);
+const ends=rows=>['FIRST','SECOND','THIRD','FOURTH','INSERTED','SAME'].filter(t=>rows.some(s=>s.includes(t+'_END')));
+const page=(messages,key)=>{const first=draw(messages,{routeDetail:key,height:10}),out=[];
+ for(let p=0;p<first.routePages;p++)out.push(...draw(messages,{routeDetail:key,routePage:p,height:10}).plain);
+ return {opened:first.plain.some(s=>s.includes('messages · ')),shown:ends(out),detail:first.routeDetail};};
+for(const [name,before,after] of [['front-out',[F,S,T],[S,T,U]],['insert',[F,T,U],[X,F,T]],['identical',[A,A2,T],[A2,T,U]],['none',[F,S,T],[F,S,T]]]){
+ const k=keys(before);
+ before.forEach((m,i)=>{
+  const want=m.text.split(' ')[0],stays=after.includes(m),p=page(after,k[i]),inline=ends(draw(after,{expandedKeys:[k[i]]}).plain);
+  assert.equal(p.opened,stays,name+' '+i);
+  if(stays){assert.deepEqual(p.shown,[want],name+' '+i);assert.deepEqual(inline,[want],name+' '+i);assert.equal(p.detail,k[i]);}
+  else{assert.deepEqual(inline,[],name+' '+i);assert.equal(p.detail,false,name+' '+i);}
+  if(stays)assert.equal(keys(after)[after.indexOf(m)],k[i],name+' '+i);
+ });
+}
+// The panel head's `route N` is whole or left out at any width, never `route 1` for 12.
+for(const n of [1,12,123])for(let width=12;width<=40;width++){
+ const rows=view.render({width,height:12,side:true,model:{routes:[{id:'a',title:'ROW',state:'working',kind:'working',paint:{}}],route_total:n},questions:()=>[],configuration:{}}).rows.map(r=>r.map(p=>p.text).join(''));
+ for(const row of rows)for(const hit of row.matchAll(/\br(?:o|ou|out|oute)?\b( \d+)?/g))assert.equal(hit[0],'route '+n,width+' '+row);
+}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_shortening_keeps_the_observed_count_message_and_mcp(self):
         # Only the rows shown shrink: the whole route count, a message's recorded
         # end and OpenCode's MCP count stay readable (review RV-PR1517 §1).
@@ -226,15 +258,16 @@ for(let height=10;height<=22;height++){
 // An opened message reads to its recorded end where rows allow, else counts the rest and reads on.
 const long='START '+'word '.repeat(60)+'END_1517';
 const msg={...base,routes:[],route_count:0,messages:[{way:'←',who:'[e7]',text:long,at:1}]};
+const key=paint(msg,40,40).hits.find(h=>h.action.startsWith('message:')).action;
 for(const [width,height] of [[40,30],[80,24]]){
- r=paint(msg,width,height,{expandedKeys:['message:1:←']});assert(r.plain.join('\n').includes('END_1517'),width+'\n'+r.plain.join('\n'));
+ r=paint(msg,width,height,{expandedKeys:[key]});assert(r.plain.join('\n').includes('END_1517'),width+'\n'+r.plain.join('\n'));
 }
-r=paint(msg,40,14,{expandedKeys:['message:1:←']});const text=r.plain.join('\n');
+r=paint(msg,40,14,{expandedKeys:[key]});const text=r.plain.join('\n');
 assert(!text.includes('END_1517'));const rest=text.match(/\+(\d+) lines ›/);assert(rest,text);
-assert(r.hits.some(h=>h.action==='read:message:1:←'));
+assert(r.hits.some(h=>h.action==='read:'+key));
 // The pages read the whole message from its start.
-let pages=paint(msg,40,9,{routeDetail:'message:1:←'}),seen=[];
-for(let page=0;page<pages.routePages;page++)seen.push(...paint(msg,40,9,{routeDetail:'message:1:←',routePage:page}).plain);
+let pages=paint(msg,40,9,{routeDetail:key}),seen=[];
+for(let page=0;page<pages.routePages;page++)seen.push(...paint(msg,40,9,{routeDetail:key,routePage:page}).plain);
 assert(pages.routePages>1);assert(seen.join('\n').includes('START'));assert(seen.join('\n').includes('END_1517'));
 assert(pages.plain.some(s=>s.includes('messages · ')));
 // A message no longer kept falls back to the ordinary panel.
@@ -296,7 +329,8 @@ assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert
 const openedModel=paint({route_line:'model'},['route:a']);
 assert(openedModel.some(s=>s.includes('high')&&s.includes('42m')),openedModel.join('\n'));
 // A message row opens to its whole retained text and closes again.
-const message=paint({},['message:5:←']);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
+const messageKey=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')).action;
+const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
 assert(!paint({}).join('').includes('RV-PR1506-R2-1111.md'));
 // Every row keeps the panel width with two-cell Hangul and emoji.
 for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(const s of rows)assert([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=80);

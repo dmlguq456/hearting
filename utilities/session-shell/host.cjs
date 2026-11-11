@@ -244,6 +244,8 @@ function panelContent(){
     settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+  // A message no longer kept closes its page here too, so its page keys go back to the native.
+  if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   panelHits=view.hits;routePageCount=view.routePages;return view.rows;
 }
 function height(){
