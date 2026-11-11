@@ -242,5 +242,53 @@ class TidyCompactFlowTest(unittest.TestCase):
         self.assertEqual(len(self.tc._inputs(claude)), 1)
 
 
+class CompletionCloseFactTest(unittest.TestCase):
+    def setUp(self):
+        import harness_behavior_cases_completion_close as close
+        self.close = close
+
+    def test_facts_are_extracted_from_the_captured_reply(self):
+        reply = "Result: partial; HB-UNRUN-CHECK; HB-RECORD-PATH"
+        facts = self.close.extract_event_facts(reply, "partial")
+        self.assertTrue(facts["unfinished"])
+        self.assertTrue(facts["record_pointer"])
+        self.assertTrue(self.close.close_passes(reply, "partial"))
+
+    def test_carrier_token_does_not_count_when_display_reply_omits_it(self):
+        carrier = "HB-FAIL-CAUSE HB-RECORD-PATH"
+        self.assertIn("HB-FAIL-CAUSE", carrier)
+        reply = "Result: work did not complete. HB-RECORD-PATH"
+        facts = self.close.extract_event_facts(reply, "failure")
+        self.assertFalse(facts["failure"])
+        self.assertFalse(self.close.close_passes(reply, "failure"))
+
+    def test_old_directive_reply_keeps_summary_and_required_sections(self):
+        summary = self.close.synthetic_sealed_summary("partial")
+        carrier = ("First close: " + self.close.OLD_DIRECTIVE + ".\n" + summary)
+        reply, mode = self.close.scripted_reply_from_carrier(carrier)
+        self.assertEqual(mode, "derived-old-directive")
+        self.assertIn(summary, reply)
+        self.assertIn(self.close.OLD_REQUIRED_SECTIONS, reply)
+
+    def test_before_minimum_is_derived_from_the_fixture_sealed_summary(self):
+        summary = self.close.synthetic_sealed_summary("failure")
+        self.assertIn("HB-FAIL-CAUSE", summary)
+        self.assertIn("HB-RECORD-PATH", summary)
+        derived = self.close.derived_old_minimum("failure")
+        self.assertEqual(derived["measurement"], "derived")
+        self.assertEqual(derived["summary_chars"], len(summary))
+        self.assertEqual(derived["minimum_user_chars"],
+                         len(summary) + len(self.close.OLD_REQUIRED_SECTIONS))
+
+    def test_scripted_reply_uses_only_tokens_present_in_carrier(self):
+        carrier = "First close: concise. HB-UNRUN-CHECK HB-RECORD-PATH"
+        reply, mode = self.close.scripted_reply_from_carrier(carrier)
+        self.assertEqual(mode, "scripted-transport")
+        self.assertIn("HB-UNRUN-CHECK", reply)
+        self.assertIn("HB-RECORD-PATH", reply)
+        self.assertNotIn("HB-FAIL-CAUSE", reply)
+        self.assertEqual(len(reply.splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
