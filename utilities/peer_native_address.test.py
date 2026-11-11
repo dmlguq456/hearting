@@ -71,9 +71,9 @@ class NativeAddressTest(unittest.TestCase):
         self.submitted.append(kw["thread_id"])
         return {"status": "queued", "queued_submission_id": "item-fixture"}
 
-    def prompt(self):
+    def prompt(self, text="Continue the registered local task."):
         args = SimpleNamespace(target="codex:" + self.sid, body_file=None, body_stdin=False,
-                               text="Continue the registered local task.", ref=[], no_trailer=False)
+                               text=text, ref=[], no_trailer=False)
         with contextlib.redirect_stdout(io.StringIO()) as output:
             code = peer.cmd_prompt(args)
         self.physical.assert_not_called()
@@ -89,15 +89,24 @@ class NativeAddressTest(unittest.TestCase):
         self.assertEqual(rows[0]["to"]["session_id"], self.sid)
         self.assertEqual(rows[0]["original_target"], "codex:" + self.sid)
 
-    def test_unknown_or_different_current_root_is_not_an_address_proof(self):
+    def test_unknown_or_different_current_root_only_queues_to_the_exact_thread(self):
+        # A full native address is itself; without a current-root proof the
+        # message still goes only to that thread's native queue, never restarted
+        # (rpc asserts allow_restart is False) and never typed.
         for current in (None, "01000000-0000-7000-8000-000000000002"):
             with self.subTest(current=current):
                 self.current = current
-                self.prompt()
-                self.assertEqual(self.submitted, [])
+                self.submitted.clear()
+                _code, output = self.prompt("Continue the registered local task " + str(current))
+                # Older queued rows of this sender may be promoted first (existing
+                # same-thread ordering); every submission is still this exact thread.
+                self.assertEqual(set(self.submitted), {self.sid})
+                self.assertIn("prompted=queued", output)
+        self.submitted.clear()
         with mock.patch.object(codex, "process_for_thread", side_effect=OSError("unavailable")):
-            self.prompt()
-        self.assertEqual(self.submitted, [])
+            _code, output = self.prompt("Continue the registered local task unavailable")
+        self.assertEqual(set(self.submitted), {self.sid})
+        self.assertIn("prompted=queued", output)
 
     def test_birth_or_current_root_changes_at_add_and_steer_boundary_do_not_submit(self):
         for phase in ("add", "steer"):
@@ -116,14 +125,18 @@ class NativeAddressTest(unittest.TestCase):
                     self.assertEqual(self.rpc_count, count + 1)
                     self.assertEqual(self.submitted, [])
 
-    def test_known_conflicting_or_ambiguous_attachment_is_not_bypassed(self):
+    def test_known_conflicting_attachment_is_not_bypassed(self):
         self.attachments.return_value = [{"native_pid": 420001, "native_start": "100", "sid": "other"}]
         self.prompt()
         self.assertEqual(self.submitted, [])
-        self.attachments.return_value = []
-        with mock.patch.object(session_shell, "resolve_target", return_value=(None, "attachment-ambiguous")):
-            self.prompt()
+
+    def test_ambiguous_attachment_is_not_bypassed(self):
+        with mock.patch.object(session_shell, "exact_binding",
+                               return_value=(None, "attachment-ambiguous")):
+            code, output = self.prompt()
         self.assertEqual(self.submitted, [])
+        self.assertEqual(code, 5)
+        self.assertIn("prompted=unverified reason=attachment-ambiguous", output)
 
 
 if __name__ == "__main__":

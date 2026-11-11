@@ -3500,8 +3500,15 @@ class MessageCompletionTests(unittest.TestCase):
             again = self.f.submit(envelope, "retry", "different-action")
         self.assertEqual(again["action_id"], "fixture-action")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        calls, _ref, pending = self.f.courier(signal)
-        self.assertEqual(len(calls), 1)
+        import peer_address
+        # The live Claude recipient (no shell attachment) is present by Hearting's
+        # records; the courier seals one pending row for its next native callback
+        # and types nothing into its window.
+        with mock.patch.object(peer_address, "presence", return_value="present"):
+            calls, _ref, pending = self.f.courier(signal)
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["state"], "pending")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.f.consume(signal, pending["text"])
         self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")

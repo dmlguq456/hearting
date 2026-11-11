@@ -31,7 +31,7 @@ from dispatch_contract import resolve_dispatch_state_root, stable_state_root  # 
 _KINDS = ("watch", "steer", "handoff", "gate-relay", "notice")
 _SURFACES = (
     "claude-native", "herdr", "codex-queue", "codex-gateway-steer",
-    "opencode-native", "opencode-unknown", "manual-paste",
+    "opencode-native", "opencode-unknown", "manual-paste", "unresolved",
 )
 _STATUSES = ("sent", "delivered", "received", "failed", "unknown")
 _SUMMARY_MAX = 200
@@ -406,8 +406,7 @@ def _reference_access_evidence_valid(evidence, recipient):
             or any(target.get(key) != recipient.get(key)
                    for key in ("harness", "session_id"))
             or (recipient.get("pane_id") is not None
-                and recipient.get("pane_id") != target.get("pane_id"))
-            or not isinstance(target.get("pane_id"), str) or not target["pane_id"]):
+                and recipient.get("pane_id") != target.get("pane_id"))):
         return False
     return _reference_local_process_matches(evidence.get("local_process"))
 
@@ -4074,6 +4073,20 @@ def retry_receiver_idle(recipient, *, peer=True, permission=None):
     ``permission`` lets the calling hook pass the one ``may_report`` answer it
     already computed instead of walking process identity a second time.
     """
+    if recipient.get("harness") not in {"claude", "opencode"}:
+        return
+    try:
+        # Peer rows never need this callback; only a booked tidy continuation does.
+        # Read the reservations directly: resolving this caller's seat reads its window.
+        import session_tidy_clear
+        if not any(req and req.get("harness") == recipient["harness"]
+                   and req.get("status") == "cleared"
+                   and (req.get("continued") or {}).get("state") == "pending"
+                   for req in (session_tidy_clear.read_reservation(path.stem)
+                               for path in session_tidy_clear.clear_dir().glob("*.json"))):
+            return
+    except Exception:
+        return
     pane = os.environ.get("HERDR_PANE_ID")
     tmux = False
     if not pane:

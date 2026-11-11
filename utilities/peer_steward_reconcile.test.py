@@ -129,30 +129,22 @@ class IsolatedCase(unittest.TestCase):
 
     @contextlib.contextmanager
     def transport(self, sid="B", *, sent=None):
-        inventory = {"result": {"agents": [{"agent": "claude",
-            "agent_session": {"value": sid}, "pane_id": "w1:pLive"}]}}
-        resolved = {"pane": "w1:pLive", "harness": "claude", "session_id": sid,
-                    "name": "fixture", "state": "idle"}
+        """A shell-attached recipient; the courier's prompt is counted, never typed."""
+        import session_shell
+        binding = {"harness": "claude", "sid": sid, "native_pid": 0}
+
+        def exact_binding(harness, session_id):
+            return (binding, None) if (harness, session_id) == ("claude", sid) else (
+                None, "attachment-missing")
 
         def courier(args, *, expected_recipient, on_prepared, producer_binding):
             body = Path(args.body_file).read_text()
             if sent is not None:
-                sent.append({"body": body, "recipient": expected_recipient})
+                sent.append({"body": body, "recipient": expected_recipient,
+                             "target": args.target})
             return 3
 
-        with mock.patch.object(peer_steward.subprocess, "run",
-                               return_value=SimpleNamespace(
-                                   returncode=0, stdout=json.dumps(inventory))), \
-             mock.patch.object(peer_steward, "_resolve_target",
-                               return_value=("claude", sid, "fixture")), \
-             patch_split(peer_steward, "_herdr_missing", return_value=False), \
-             mock.patch.object(peer_steward, "_resolve_prompt_target",
-                               return_value=(resolved, None, [])), \
-             mock.patch.object(peer_steward, "_pane_readiness",
-                               return_value=SimpleNamespace(state="ready")), \
-             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
-                               return_value=(None, {})), \
-             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})), \
+        with mock.patch.object(session_shell, "exact_binding", side_effect=exact_binding), \
              mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
             yield
 

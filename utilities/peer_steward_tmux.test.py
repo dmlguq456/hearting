@@ -239,37 +239,15 @@ class TmuxPeerStewardTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, line)
         self.assertEqual(self.typed(), b"")
 
-    def test_a_prompt_to_an_idle_claude_pane_is_typed_once_through_its_guards(self):
-        self.start_claude()
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertIn("to_harness=claude", line)
-        self.assertNotIn("reason=herdr-not-found", line)
-        typed = self.typed()
-        self.assertEqual(typed.count(b"\x1b[200~"), 1, typed)
-        self.assertIn(b"hello from a peer", typed)
-        self.assertTrue(typed.endswith(b"\x1b[201~\r"), typed)
-
-    def test_a_prompt_reaches_a_claude_that_is_the_panes_root_process(self):
-        pid = self.start_claude_as_pane_root()
-        self.assertEqual(str(pid), self.tmux("display-message", "-p", "-t", self.pane, "#{pane_pid}").stdout.strip())
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertNotIn("pane-identity-unverified", line)
-        typed = self.typed()
-        self.assertEqual(typed.count(b"\x1b[200~"), 1, typed)
-        self.assertIn(b"hello from a peer", typed)
-
     def test_a_prompt_to_a_busy_claude_pane_types_nothing_and_stays_queued(self):
         self.start_claude(status="busy")
         rc, line = self.steward("prompt", self.pane, "hello from a peer")
         self.assertIn("prompted=queued", line)
         self.assertEqual(self.typed(), b"")
 
-    def test_a_pane_in_copy_mode_is_neither_prompted_nor_cleared(self):
+    def test_a_pane_in_copy_mode_is_not_cleared(self):
         self.start_claude()
         self.tmux("copy-mode", "-t", self.pane)
-        rc, line = self.steward("prompt", self.pane, "first line\nsecond line")
-        self.assertIn("prompted=queued", line)
-        self.assertIn("reason=pane-in-mode", line)
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertIn("cleared=skipped", line)
@@ -285,8 +263,6 @@ class TmuxPeerStewardTest(unittest.TestCase):
                            "00000000-0000-4000-8000-000000000000", "idle", NEW, ""])
         self.tmux("split-window", "-d", "-t", self.pane, line)
         self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertIn("reason=pane-synchronized", line)
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertIn("reason=pane-synchronized", line)
@@ -304,18 +280,26 @@ class TmuxPeerStewardTest(unittest.TestCase):
                          self.pane)
         other_log = self.root / "other.log"
         other_log.touch()
-        self.start_claude()
-        self.start_claude(socket=other, log=other_log, sid="2b2b2b2b-3c3c-4d4d-8e8e-5f5f5f5f5f5f")
-        rc, line = self.steward("prompt", self.pane, "to this server")
-        self.assertIn(f"target={self.address}", line)
-        rc, line = self.steward("prompt", f"{self.pane}@{os.path.realpath(other)}", "to the other server")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not other_log.read_bytes():
-            time.sleep(.05)
-        self.assertIn(b"to this server", self.typed())
-        self.assertNotIn(b"to the other server", self.typed())
-        self.assertIn(b"to the other server", other_log.read_bytes())
-        self.assertNotIn(b"to this server", other_log.read_bytes())
+        other_sid = "2b2b2b2b-3c3c-4d4d-8e8e-5f5f5f5f5f5f"
+        pids = [self.start_claude(),
+                self.start_claude(socket=other, log=other_log, sid=other_sid)]
+        # The address resolves from the TMUX_PANE/TMUX each runtime process received;
+        # only this test's two runtimes are observed.
+        import peer_address
+        listdir = os.listdir
+        only_ours = mock.patch.object(peer_address.os, "listdir", side_effect=lambda path: (
+            [str(pid) for pid in pids] if path == "/proc" else listdir(path)))
+        with only_ours:
+            here = peer_address.resolve(self.pane)
+            named_here = peer_address.resolve(self.address)
+            there = peer_address.resolve(f"{self.pane}@{os.path.realpath(other)}")
+        self.assertEqual((here[0] or {}).get("session_id"), OLD, here)
+        self.assertEqual((named_here[0] or {}).get("session_id"), OLD, named_here)
+        self.assertEqual((there[0] or {}).get("session_id"), other_sid, there)
+        self.assertEqual((here[0]["harness"], there[0]["harness"]), ("claude", "claude"))
+        # Resolution types into neither window.
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(other_log.read_bytes(), b"")
 
     def test_the_clear_helper_waits_for_the_runtime_turn_record_on_tmux(self):
         import session_tidy_clear as clear

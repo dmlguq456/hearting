@@ -4380,9 +4380,14 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
     def test_supervisor_command_records_the_typed_cutover_and_reserves_retire(self):
         meta = self._register_job()
         self._write_source_card("진행 중: 카드 본문", prompt_seq=0)
-        with mock.patch.object(peer_message, "deliver_pending_codex",
-                               return_value={"status": "received"}), \
-             mock.patch.object(self.steward, "_codex_interrupt_start_gate", return_value=False), \
+        def codex_receives(ref, **_kwargs):
+            # Stand-in for the exact Codex queue and its native receipt: only the
+            # row's received state makes the prompt report true.
+            with peer_message.pending_lock(ref):
+                peer_message._save_pending(dict(peer_message._read_pending(ref), state="received"))
+            return {"ok": True, "status": "received"}
+        with mock.patch.object(peer_message, "deliver_pending_codex", side_effect=codex_receives), \
+             mock.patch.object(self.steward, "_codex_shell_start_gate", return_value=False), \
              mock.patch.object(self.steward, "_record", wraps=self.steward._record) as recorded:
             code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
         self.assertEqual(code, 0, (lines, stderr))
