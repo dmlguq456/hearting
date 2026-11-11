@@ -47,8 +47,12 @@ def codex_selected_model(pid, start, sid):
             client.close()
 
 
-def claude_callback(path, sid, pid, start):
-    """Read the existing bounded, exact-session display tap, never latest-global."""
+def claude_callback(path, sid, pid, start, *, raise_unread=False):
+    """Read the existing bounded, exact-session display tap, never latest-global.
+
+    With ``raise_unread`` a tap that exists but was not read (an I/O error, or
+    a replacement during the read) raises OSError instead of returning None.
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -58,11 +62,18 @@ def claude_callback(path, sid, pid, start):
             raw = os.read(fd, 65537)
             stamp = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
             if len(raw) != before.st_size or stamp(os.fstat(fd)) != stamp(before) or stamp(path.lstat()) != stamp(before):
+                if raise_unread:
+                    raise InterruptedError("display tap replaced during the read")
                 return None
-            value = json.loads(raw)
         finally:
             os.close(fd)
-    except (OSError, ValueError):
+        value = json.loads(raw)
+    except OSError as error:
+        from .session_registry import unread_error
+        if raise_unread and unread_error(error):
+            raise
+        return None
+    except ValueError:
         return None
     if not isinstance(value, dict) or value.get("session_id") != sid:
         return None
