@@ -52,6 +52,17 @@ def _load_native_fixture(case, name):
     return module
 
 
+
+# A route is one row; its worker and context lines unfold under it on a press.
+OPENED = NavState(view="ROUTES", folds=(("ropen:ROUTES", "rt-exact"),))
+
+
+def unfolded_rows(frame):
+    """The lines under the opened route's own row (worker, context and detail lines)."""
+    rows = frame.text_rows()
+    head = next(y for y, line in enumerate(rows) if "▶" in line)
+    return rows[head + 1:]
+
 class ContractProjectionTests(unittest.TestCase):
     def route_snapshot(self, harness="claude", **owner_values):
         view = {"cwd": "/synthetic/repo", "capability": "autopilot-code",
@@ -114,9 +125,104 @@ class ContractProjectionTests(unittest.TestCase):
                 self.assertEqual(len(route["worker_contexts"]), 2)
                 expected = [render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:]]
                 self.assertEqual([row["context"] for row in route["worker_contexts"]], expected)
-                text = "\n".join(draw(vm, NavState(view="ROUTES"), 220, 60).text_rows())
+                # Each worker keeps its own gauge on its own unfolded line.
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 220, 60)))
                 for pct in expected:
                     self.assertIn(f"{pct}%", text)
+
+    def test_unfolded_route_keeps_the_owner_context_beside_its_workers(self):
+        # The folded row shows who works now; the owner's own context stays in the unfolded detail.
+        for values, owner_text in (({"active_context_tokens": 770_000,
+                                     "context_window_tokens": 1_000_000}, "77%"),
+                                   ({"active_context_tokens": 250_136}, "250K")):
+            with self.subTest(owner_text):
+                vm = build_view_model(self.route_snapshot(**values))
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
+                owner_line = next(line for line in text.splitlines() if "owner " in line)
+                self.assertIn("context", owner_line)
+                self.assertIn(owner_text, owner_line)
+                for pct in ("20%", "30%"):
+                    self.assertIn(pct, text)
+
+    def test_routes_that_differ_only_by_title_stay_distinct_at_every_width(self):
+        vm = build_view_model(self.route_snapshot())
+        base = vm.routes[0]
+        twins = (dict(base, id="rt-alpha", title="ALPHA 독립 검토"),
+                 dict(base, id="rt-bravo", title="BRAVO 출판 작업"))
+        vm = replace(vm, routes=twins)
+        for width in (80, 100, 120):
+            with self.subTest(width=width):
+                rows = draw(vm, NavState(view="ROUTES"), width, 40).text_rows()
+                alpha = [line for line in rows if "ALPHA" in line]
+                bravo = [line for line in rows if "BRAVO" in line]
+                self.assertEqual((len(alpha), len(bravo)), (1, 1))
+                self.assertNotEqual(alpha[0], bravo[0])
+                self.assertIn("claude", alpha[0])
+
+    def test_what_a_narrow_row_leaves_out_is_in_its_unfolded_lines(self):
+        vm = build_view_model(self.route_snapshot())
+        route = dict(vm.routes[0], doer={"harness": "claude", "model": ["Sonnet 5.5", "dim"],
+                                         "effort": "medium", "context": None, "window": None,
+                                         "tokens": 250_136, "tool": "Bash", "agents": 1})
+        session = dict(vm.sessions[0], last_input="› 1m · keep the limiter per key",
+                       model=["Opus 5.5", "dim"], effort="xhigh", branch="feat/limit")
+        vm = replace(vm, routes=(route,), sessions=(session,))
+        folded = draw(vm, NavState(view="ROUTES"), 80, 40).text_rows()
+        row = next(line for line in folded if "250K" in line)
+        self.assertNotIn(">_ Bash", row)
+        unfolded = "\n".join(unfolded_rows(draw(vm, OPENED, 80, 60)))
+        for value in ("claude Sonnet 5.5 med", ">_ Bash · +1 agent"):
+            self.assertIn(value, unfolded)
+        tag = str(session["tag"])
+        row = next(line for line in draw(vm, NavState(), 80, 40).text_rows() if f"[{tag}]" in line)
+        self.assertNotIn("keep the limiter", row)
+        opened = "\n".join(draw(vm, NavState(opened=tag), 80, 60).text_rows())
+        for value in ("LAST INPUT", "keep the", "claude Opus 5.5 xhigh", "TITLE"):
+            self.assertIn(value, opened)
+
+    def test_unfolded_lines_give_long_values_whole_at_80(self):
+        # What the folded row shortened is not shortened again where it unfolds: it wraps.
+        model, tool = "custom-local-instruct-32b-v2", "mcp__fixture_docs__search_documents"
+        title = "긴 제목 Long route title 🚀 fixture value"
+        vm = build_view_model(self.route_snapshot())
+        route = dict(vm.routes[0], title=title, harness="opencode", model=[model, "dim"],
+                     effort="high", doer={"harness": "opencode", "model": [model, "dim"],
+                                          "effort": "high", "context": None, "window": None,
+                                          "tokens": 250_136, "tool": tool, "agents": 3})
+        session = dict(vm.sessions[0], harness="opencode", model=[model, "dim"],
+                       effort="high", title=title)
+        vm = replace(vm, routes=(route,), sessions=(session,))
+
+        def flat(rows):
+            # The page body from column 34 (the side tree is left of it), joined across rows.
+            return "".join("".join(line[34:].split()) for line in rows)
+
+        unfolded = unfolded_rows(draw(vm, OPENED, 80, 60))
+        lines = [line for line in unfolded if "└ wo" in line or "╔" in line]
+        lines = unfolded[:unfolded.index(lines[0])]           # the kind and left-out lines
+        self.assertIn(model, "\n".join(lines))
+        for value in (title, "owner opencode " + model + " high",
+                      "opencode " + model + " high", ">_ " + tool + " · +3 agent"):
+            self.assertIn("".join(value.split()), flat(lines))
+        self.assertFalse([line for line in lines if "…" in line])
+        tag = str(session["tag"])
+        opened = draw(vm, NavState(opened=tag), 80, 60).text_rows()
+        self.assertIn(model, "\n".join(opened))
+        model_at = next(y for y, line in enumerate(opened) if "MODEL  opencode" in line)
+        self.assertIn("opencode" + model + "high", flat(opened[model_at:model_at + 3]))
+        self.assertFalse([line for line in opened[model_at:model_at + 3] if "…" in line])
+
+    def test_session_page_and_route_owner_use_the_model_cell_words(self):
+        vm = build_view_model(self.route_snapshot())
+        session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")
+        route = dict(vm.routes[0], harness="claude", model=["Opus 5.5", "dim"], effort="medium")
+        vm = replace(vm, sessions=(session,), routes=(route,))
+        page = "\n".join(draw(vm, NavState(scope="session:" + str(session["tag"])), 168, 50).text_rows())
+        self.assertIn("claude Opus 5.5 xhigh", page)
+        self.assertNotIn("(Opus 5.5·xhigh)", page)
+        text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
+        self.assertIn("owner claude Opus 5.5 med", text)
+        self.assertNotIn("·medium", text)
 
     def test_worker_only_and_multiple_owners_have_unknown_owner_context(self):
         snapshot = self.route_snapshot(active_context_tokens=500_000, context_window_tokens=1_000_000)
@@ -176,7 +282,7 @@ class ContractProjectionTests(unittest.TestCase):
         route = vm.routes[0]
         self.assertEqual(route["worker_context_index"], 0)
         self.assertEqual(len(route["worker_contexts"]), 1)
-        frame = draw(vm, NavState(view="ROUTES"), 240, 60)
+        frame = draw(vm, OPENED, 240, 60)
         rows = [line for line in frame.text_rows() if "└ worker" in line]
         self.assertEqual(len(rows), 1)
         self.assertIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", rows[0])
@@ -187,7 +293,7 @@ class ContractProjectionTests(unittest.TestCase):
         snapshot = self.selected_worker_snapshot(2)
         vm = build_view_model(snapshot)
         self.assertEqual(len(vm.routes[0]["worker_contexts"]), 2)
-        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
         for pct in (render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:]):
             self.assertEqual(text.count(f"{pct}%"), 1)
         self.assertIn("└ worker", text)
@@ -208,7 +314,7 @@ class ContractProjectionTests(unittest.TestCase):
                 vm = build_view_model(snapshot)
                 self.assertNotIn("worker_context_index", vm.routes[0])
                 self.assertEqual(len(vm.routes[0]["worker_contexts"]), 1)
-                text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+                text = "\n".join(unfolded_rows(draw(vm, OPENED, 240, 60)))
                 self.assertIn("└ execute · 1", text)
                 pct = render._native_context_gauge(snapshot["jobs"][1])[0]
                 self.assertEqual(text.count(f"{pct}%"), 1)
@@ -237,8 +343,8 @@ class ContractProjectionTests(unittest.TestCase):
     def test_inline_context_phase_and_private_replay_do_not_change_identity_or_gauge(self):
         from tools.fleet.explorer.view_model import persistable_view_model
         vm = build_view_model(self.selected_worker_snapshot())
-        on = draw(vm, NavState(view="ROUTES"), 240, 60, beat=1)
-        off = draw(vm, NavState(view="ROUTES"), 240, 60, beat=0)
+        on = draw(vm, OPENED, 240, 60, beat=1)
+        off = draw(vm, OPENED, 240, 60, beat=0)
         self.assertEqual(on.text_rows(), off.text_rows())
         self.assertEqual(on.hits, off.hits)
         pct = vm.routes[0]["worker_contexts"][0]["context"]
@@ -272,7 +378,7 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertEqual(vm.routes[0]["stages"][0]["st"], "failed")
         self.assertEqual(vm.routes[0]["worker_contexts"], ())
         self.assertNotIn("worker_context_index", vm.routes[0])
-        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        text = "\n".join(draw(vm, OPENED, 240, 60).text_rows())
         self.assertIn("worker ended", text)
         self.assertNotIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", text)
 
@@ -294,7 +400,7 @@ class ContractProjectionTests(unittest.TestCase):
                     self.assertNotIn("└ execute", text)
                     action = ("fold", "ropen:ROUTES", "rt-exact")
                     hits = [hit for hit in frame.hits if hit.action == action]
-                    self.assertGreaterEqual(len(hits), 2)
+                    self.assertGreaterEqual(len(hits), 1)      # the one-line route row
                     for hit in hits:
                         opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                         self.assertEqual(opened.opened_for("ropen:ROUTES"), "rt-exact")
@@ -320,18 +426,52 @@ class ContractProjectionTests(unittest.TestCase):
         text = "\n".join(draw(vm, NavState(view="ROUTES"), 220, 60).text_rows())
         self.assertIn("50%", text)
 
+    def test_a_route_its_supervisor_closed_is_neither_resumed_nor_counted(self):
+        """``capability-route close`` leaves ``closed_at`` in the outcome sidecar; a closed
+        route whose owner ended without a passed gate offers no resume and is no stopped leg."""
+        from tools.fleet.explorer import live
+        from tools.fleet.explorer.tables import route_counts
+        from tools.fleet import route as routemod
+        snapshot = self.selected_worker_snapshot()
+        for job in snapshot["jobs"]:
+            job.liveness = "dead"
+        backing = snapshot["jobs"][0].work_projection._route_view
+        backing["view"] = routemod._record_view(backing["record"], "rt-exact", snapshot["jobs"], {}, 1000)
+        before = build_view_model(snapshot).routes[0]
+        self.assertEqual(before["state"], "dead")
+        self.assertTrue(before["resume"])
+        self.assertEqual(route_counts([before]), (1, 0, 1))
+        bounded = live.route_visibility.bounded
+
+        def closed(desc, *args, **kwargs):
+            value = dict(bounded(desc, *args, **kwargs))
+            codes = dict(value.get("codes") or {})
+            codes["verification"] = dict(codes.get("verification") or {},
+                                         closed_at="2026-11-11T01:14:00Z")
+            value["codes"] = codes
+            return value
+        with mock.patch.object(live.route_visibility, "bounded", closed):
+            route = build_view_model(snapshot).routes[0]
+        self.assertTrue(route["closed"])
+        self.assertIsNone(route["resume"])
+        self.assertEqual(route_counts([route]), (0, 0, 0))
+        text = "\n".join(draw(replace(build_view_model(snapshot), routes=(route,)),
+                               NavState(view="ROUTES"), 168, 40).text_rows())
+        self.assertNotIn("resume", text)
+        self.assertIn("0 open · 0 stopped", text)
+
     def test_folded_session_shows_only_current_route_count(self):
         vm = build_view_model(self.route_snapshot())
         for cols in (140, 168, 180):
             with self.subTest(cols=cols):
                 state = NavState(view="OVERVIEW")
                 frame = draw(vm, state, cols, 45)
-                self.assertIn("route 1", "\n".join(frame.text_rows()))
+                self.assertIn("⏳ 1", "\n".join(frame.text_rows()))
                 hit = next(h for h in frame.hits if h.action == ("fold", "sopen:OVERVIEW", "p1"))
                 opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                 self.assertEqual(opened.opened, "p1")
         history = replace(vm, routes=tuple(dict(row, current=False, state="done") for row in vm.routes))
-        self.assertNotIn("route 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
+        self.assertNotIn("⏳ 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
 
     def test_older_questions_never_light_current_session_marker(self):
         snapshot = self.route_snapshot()
@@ -342,7 +482,7 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertIsNone(vm.sessions[0]["ask"])
         self.assertIsNone(vm.sessions[0]["answer_wait_marker"])
         text = "\n".join(draw(vm, NavState(view="OVERVIEW"), 180, 45).text_rows())
-        self.assertIn("0 needs answer", text)
+        self.assertIn("◑ to answer 0", text)
         self.assertTrue(vm.questions[0]["older"])
 
     def test_all_context_choices_wrap_in_a_forty_cell_pane_with_real_current_value(self):
@@ -481,7 +621,7 @@ class NativeResponseIntegrationTests(unittest.TestCase):
                 return results
 
             self.assertNotIn("PRIVATE-ORIGINAL-PROMPT", "\n".join(draw(vm, state, 180, 70).text_rows()))
-            click(("question.select",))
+            click(("question.open",))
             detail = render._EXPLORER_STATE.question_overlay["detail"]
             self.assertEqual(detail["request_id"], request_id)
             self.assertIs(type(detail["request_id"]), type(request_id))
@@ -575,7 +715,7 @@ class OpenCodeHTTPIntegrationTests(unittest.TestCase):
                     result = ExplorerRuntime.execute_question_action(effect)
                     render._explorer_accept_question_result({"effect": effect, "result": result})
                 return effects, result
-            click(("question.select",))
+            click(("question.open",))
             self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "open")
             if permission:
                 self.assertEqual(click(("question.decision", "defer")), ((), None))

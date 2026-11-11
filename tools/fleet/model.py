@@ -560,6 +560,10 @@ class Session:
     pane_location: Optional[str] = None
     multiplexer: Optional[str] = None
     pane_corner: Optional[bool] = None
+    # The tmux pane id (``%12``) and the tmux server socket it was read on ("" = tmux's
+    # default server): Fleet's open-pane press moves that pane on that server only.
+    tmux_pane: Optional[str] = None
+    tmux_server: Optional[str] = None
     # F-100c — steward flag (depth −1 role): True when this session's marker (under the
     # dispatch state root's `peer-steward/`) holds role evidence — `steward on`
     # (source=explicit), a `wait`/`watch` that observed a real target (source=watch) or a

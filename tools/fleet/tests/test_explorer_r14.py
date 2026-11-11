@@ -214,7 +214,7 @@ class R14Renderer(unittest.TestCase):
     def test_end_measures_finite_questions_past_8192_rows(self):
         questions = tuple({"tag": f"q{index:04d}", "h": "claude", "kind": "wait",
                            "wait": "1m", "project": "p", "title": "q", "now": "n",
-                           "pane": "p"} for index in range(1400))
+                           "pane": "p"} for index in range(8300))
         vm = ExplorerViewModel.from_mapping({"questions": questions})
         state = NavState(view="QUESTIONS")
 
@@ -226,7 +226,7 @@ class R14Renderer(unittest.TestCase):
         self.assertEqual(end.pane_scroll[4], maximum)
         self.assertEqual(end.pane_scroll[5], maximum)
         self.assertFalse(end.pane_scroll[7])
-        self.assertIn("q1399", "\n".join(end.text_rows()))
+        self.assertIn("q8299", "\n".join(end.text_rows()))
         self.assertTrue(all(0 <= hit.y < 20 for hit in end.hits if hit.y >= 0))
 
     def test_peers_end_and_stale_restore_reach_fixture_tail_in_wide_and_compact_layouts(self):

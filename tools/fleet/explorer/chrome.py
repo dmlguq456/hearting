@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping
 from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
-from .tables import repo_label, route_counts
+from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_counts
 from .style import steward_flag_key
 
 NAV_WIDTH = 32
@@ -75,6 +75,43 @@ class _TreeViewport:
         screen_y = self._screen_y(y)
         if screen_y is not None:
             self.base.add_hit(screen_y, x0, x1, action)
+
+
+def _usage_level(percent):
+    return "lvl_r_flat" if percent >= 80 else "lvl_y" if percent >= 50 else "lvl_g"
+
+
+def usage_fragment(item):
+    """``claude  5h 12%(↻ 2h) │ 7d 66%(↻ 5d)``: one harness's quota, in the Claude statusline's words.
+
+    A window that is not observed is left out (no ``?``); a third (model or monthly) window
+    joins only when it is high. Returns ``(segments, annotation)``; ``segments`` is None when
+    the harness has no observed window (its own status text stands instead)."""
+    text, annotation = str(item.get("text", "")), ""
+    windows = [window for window in item.get("windows", ()) if window]
+    if item.get("key") == "hb_claude" and windows:
+        text, _, annotation = text.partition(" ")
+    shown = []
+    for index, window in enumerate(item.get("windows", ())):
+        if not window:
+            continue
+        name, percent, reset = window
+        percent = int(percent)
+        if index > 1 and percent < 80:
+            continue
+        label = "7d" if name == "week" else str(name)
+        piece = [(label + " ", "dim"), (f"{percent}%", _usage_level(percent))]
+        if reset not in (None, "", "·"):
+            piece.append((f"(↻ {reset})", "dim"))
+        shown.append(piece)
+    if not shown:
+        return None, annotation
+    fragment = [(text, item.get("key", "dim")), ("  ", "dim")]
+    for index, piece in enumerate(shown):
+        if index:
+            fragment.append((" │ ", "dim"))
+        fragment.extend(piece)
+    return fragment, annotation
 
 
 def count_word(count, word, plural=None):
@@ -420,51 +457,24 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
         grid.put(more_x, 1, "u", "hearting", limit=width - 1)
         grid.put(more_x + 1, 1, " more ▸", "dim", limit=width - 1)
         x = 1
-        grid.put(x, 1, "usage(week)", "label")
-        x = 14
+        limit = width - 12
         annotations = []
         for item in usage:
-            text = item.get("text", "")
-            key = item.get("key", "dim")
-            annotation = ""
-            if key == "hb_claude" and any(item.get("windows", ())):
-                text, _, annotation = str(text).partition(" ")
-            week = next((window for window in item.get("windows", ())
-                         if window and window[0] == "week"), None)
-            if week is None:
-                if key == "hb_claude" or item.get("harness") == "claude" or annotation:
-                    status = _clip(str(item.get("text", "")), width - 12 - x)
-                    x = grid.put(x, 1, status, key, limit=width - 12) + 4
+            fragment, annotation = usage_fragment(item)
+            if fragment is None:
+                if item.get("key") == "hb_claude" or item.get("harness") == "claude" or annotation:
+                    status = _clip(str(item.get("text", "")), limit - x)
+                    x = grid.put(x, 1, status, item.get("key", "dim"), limit=limit) + 3
                 continue
-            label, percent, reset = week
-            reset = "·" if reset is None else reset
-            extras = [(window[0], int(window[1])) for window in item.get("windows", ())
-                      if window and window[0] != "week" and int(window[1]) >= 80]
-            extra_width = sum(3 + len(name) + len(str(value)) + 2 for name, value in extras)
-            fragment_width = len(str(text)) + 1 + 10 + 1 + 4 + 3 + len(str(reset)) + extra_width
-            if x + fragment_width >= width - 12:
+            if x + sum(cell_width(text) for text, _key in fragment) >= limit:
                 continue
-            x = grid.put(x, 1, str(text) + " ", key, limit=width - 12)
-            percent = int(percent)
-            filled = max(1, min(10, round(10 * percent / 100))) if percent else 0
-            gauge_key = "lvl_r_flat" if percent >= 80 else "lvl_y" if percent >= 50 else "lvl_g"
-            x = grid.put(x, 1, "━" * filled, gauge_key, limit=width - 12)
-            track = "·" if annotation.startswith("stale") else "─"
-            x = grid.put(x, 1, track * (10 - filled), "dim", limit=width - 12)
-            x = grid.put(x, 1, f" {percent:3d}%", gauge_key, limit=width - 12)
-            x = grid.put(x, 1, " ↻ " + str(reset), "dim", limit=width - 12)
-            if extras:
-                x = grid.put(x, 1, "  ", "dim", limit=width - 12)
-                x = grid.put(x, 1, "·", "dim", limit=width - 12)
-                x = grid.put(x, 1, " ", "dim", limit=width - 12)
-                for name, value in extras:
-                    x = grid.put(x, 1, f"{name} {value}%", "blocked", limit=width - 12)
-            else:
-                x += 4
+            for text, key in fragment:
+                x = grid.put(x, 1, text, key, limit=limit)
+            x += 3
             if annotation:
                 annotations.append(annotation)
         if annotations:
-            grid.put(x, 1, _clip(" · ".join(annotations), width - 12 - x), "dim", limit=width - 12)
+            grid.put(x, 1, _clip(" · ".join(annotations), limit - x), "dim", limit=limit)
     else:
         for index, item in enumerate(usage[:3]):
             y = 1 + index
@@ -490,6 +500,14 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
                     continue
                 name, percent, reset = window
                 x = 14 + win_index * 40
+                if window_end(win_index, window) > usage_limit:
+                    # No room for this window's gauge: its value and reset in the header's own
+                    # words (``7d 41%(↻ 4d 0h)``) at the same place, so nothing is cut at the edge.
+                    x = grid.put(x, y, ("7d" if name == "week" else str(name)) + " ", "dim", limit=usage_limit)
+                    x = grid.put(x, y, f"{int(percent)}%", _usage_level(int(percent)), limit=usage_limit)
+                    if reset not in (None, "", "·"):
+                        grid.put(x, y, f"(↻ {reset})", "dim", limit=usage_limit)
+                    continue
                 x = grid.put(x, y, str(name).rjust(5), "label", limit=usage_limit)
                 x = grid.put(x + 1, y, "[", "dim", limit=usage_limit)
                 filled = max(1, min(12, round(12 * int(percent) / 100))) if int(percent) else 0
@@ -549,15 +567,15 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             # The same current count as the QUESTIONS tab: older waits are not counted here.
             current = answer_wait_count(vm)
             open_routes, no_response, _stopped = route_counts(routes)
-            status = (f"{count_word(len(sessions), 'session')} · "
-                      f"{count_word(open_routes, 'route')} · "
-                      + (f"no response {no_response} · " if no_response else "")
-                      + (count_word(current, 'question') if current is not None else "? questions"))
+            status = (f"{count_word(len(sessions), 'session')} │ "
+                      f"{ROUTE_WORD} {open_routes} │ "
+                      + (f"no response {no_response} │ " if no_response else "")
+                      + f"{answer_wait_word()} {current if current is not None else '?'}")
         elif state.view == "ROUTES":
             open_routes, no_response, stopped = route_counts(routes)
             status = (f"{open_routes} open · "
                       + (f"no response {no_response} · " if no_response else "")
-                      + count_word(stopped, 'stopped leg'))
+                      + f"{stopped} stopped")
         elif state.view == "QUESTIONS":
             total = (system.get("answered_total") if isinstance(system, Mapping) else None)
             waits = _answer_wait_summary(vm)
@@ -566,7 +584,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             older_text = older_waits_text(waits)
             records = total if total is not None else len(questions)
             suffix = "" if waits.get("state") == "complete" else " · observation " + str(waits.get("state"))
-            status = f"{waiting} waiting{older_text} · {count_word(records, 'decision record')} today{suffix}"
+            status = f"{answer_wait_word()} {waiting}{older_text} · {count_word(records, 'decision record')} today{suffix}"
         elif state.view == "HISTORY":
             seats = tuple(vm.seats or ())
             status = (f"{count_word(len(seats), 'seat')} · "

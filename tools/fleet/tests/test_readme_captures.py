@@ -84,7 +84,7 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertIn("opencode", text["overview"])
         self.assertIn("answer needed", text["overview"])
         self.assertIn("plan ✓ › execute ●", text["overview"])
-        self.assertIn("WAITING  1 question", text["questions"])
+        self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
         self.assertIn("1 link", text["session"])
         self.assertIn("owner raw", text["output"])
