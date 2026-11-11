@@ -6,6 +6,7 @@ control call checks current process births and the connected peer again.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -191,7 +192,16 @@ def valid_binding(value: dict, *, harness: str | None = None, sid: str | None = 
 
 
 
-def read_binding(path: Path, *, harness: str | None = None, sid: str | None = None) -> dict | None:
+def _unread(error: OSError) -> bool:
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.session_registry import unread_error
+    return unread_error(error)
+
+
+def read_binding(path: Path, *, harness: str | None = None, sid: str | None = None,
+                 raise_unread: bool = False) -> dict | None:
     try:
         value = _private_json(path, MAX_RECORD_BYTES)
         if not valid_binding(value, harness=harness, sid=sid):
@@ -199,17 +209,36 @@ def read_binding(path: Path, *, harness: str | None = None, sid: str | None = No
         if path != binding_path(value["harness"], value["host_pid"]):
             return None
         return value
-    except (OSError, ValueError, TypeError):
+    except OSError as error:
+        if raise_unread and _unread(error):
+            raise
+        return None
+    except (ValueError, TypeError):
         return None
 
 
-def bindings(*, harness: str | None = None, sid: str | None = None) -> list[dict]:
+def bindings(*, harness: str | None = None, sid: str | None = None,
+             raise_unread: bool = False) -> list[dict]:
+    """Valid attachments. With ``raise_unread`` an attachment directory or
+    record that exists but was not read raises OSError instead of vanishing."""
     if harness is not None and harness not in HARNESSES:
         return []
     rows = []
     for name in sorted((harness,) if harness else HARNESSES):
-        for path in (registry_root() / name).glob("session-shell-*.json"):
-            row = read_binding(path, harness=name, sid=sid)
+        directory = registry_root() / name
+        if raise_unread:
+            # Path.glob() hides a directory it could not list.
+            try:
+                paths = [directory / entry for entry in os.listdir(directory)
+                         if fnmatch.fnmatchcase(entry, "session-shell-*.json")]
+            except OSError as error:
+                if _unread(error):
+                    raise
+                paths = []
+        else:
+            paths = directory.glob("session-shell-*.json")
+        for path in paths:
+            row = read_binding(path, harness=name, sid=sid, raise_unread=raise_unread)
             if row is not None:
                 rows.append(row)
     return rows
