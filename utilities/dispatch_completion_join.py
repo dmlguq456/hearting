@@ -1093,6 +1093,28 @@ def _owner_handed_over_lines(route: dict, route_file: Path, node_id) -> list[str
             + worker_bootstrap.handed_over_lines(found, "- "))
 
 
+# The fixed first line of a completed runtime-v1 owner follow-up, keyed by
+# whether runtime summaries follow it. Delivery recovery maps exactly these
+# bytes back to earlier shipped wording (dispatch_session_sweep).
+RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: "
+           "give the result in one or two sentences; preserve any important remaining failure, "
+           "unfinished work, or user-impacting limit; ask for at most one decision the person "
+           "must make; and point to the detailed record. Keep the runtime summary below as "
+           "agent context and record; do not reproduce it for the person. "
+           " No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: "
+            "give the result in one or two sentences, preserve any important remaining failure, "
+            "unfinished work, or user-impacting limit, ask for at most one necessary decision, "
+            "and point to the detailed record. "
+            " No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+
+
 def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1149,14 +1171,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
         notes = [f"The approved route plan names a next leg (index {child['next_leg']['index']}): "
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
-        return ("Original request/format apply. Review result; do approved follow-through or existing "
-                "continuation. First close: "
-                + ("show the runtime summary below to the person first, as written; then add what it "
-                   "does not show of " if summaries else "")
-                + "changes/why, before/after, checks run/reused/skipped/unrun, "
-                "commit/PR/deployment/serving, limits."
-                + " No harvest/restart/manual finalize. "
-                "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+        return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
