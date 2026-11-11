@@ -117,6 +117,10 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
     display_name = clean(name)
     if session_id:
         display_name = display_name.replace(str(session_id), parts[1])
+    # A harness-derived `<folder>-<xx>` label only repeats the tag (and a dated folder
+    # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]` and the pane.
+    if parts[1] != "[?]" and display_name.endswith("-" + parts[1][1:-1]):
+        display_name = ""
     if display_name:
         parts.append(display_name)
     suffix = " ; pane=%s ; sid=%s" % (clean(pane_id) or "-", usable_session_id(session_id) or "-")

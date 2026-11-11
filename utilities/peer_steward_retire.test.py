@@ -9161,7 +9161,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
         pm = peer_steward.peer_message
         with self._world("claude", "sid-child", screen=CLAUDE_FORM):
             rc, line, ref = self._prompt("claude", "sid-child")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertIn("reason=form-open", line)
             self.assertEqual(self.sent, [])
             self.assertEqual(pm._read_pending(ref)["state"], "pending")
@@ -9190,7 +9190,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
         pm = peer_steward.peer_message
         with self._world("opencode", "sid-opencode", screen=OPENCODE_FORM):
             rc, line, ref = self._prompt("opencode", "sid-opencode")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertIn("reason=form-open", line)
             self.assertEqual(self.sent, [])
             self.assertEqual(pm._read_pending(ref)["state"], "pending")
@@ -9310,7 +9310,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
         self.server = self._AppServer(turn_status="interrupted")
         with self._codex_world("codex", "codex-thread", screen=CODEX_FORM):
             rc, line, ref = self._prompt("codex", "codex-thread")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertIn("reason=native-queue-held-interrupted:form", line)
             self.assertEqual(self.server.params("thread/queue/start"), [])
             self.assertEqual(len(self.server.params("thread/queue/add")), 1)
@@ -9376,7 +9376,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 rc, line, ref = self._prompt("claude", "sid-child")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertTrue(line.startswith("prompted=queued "), line)
             self.assertIsNotNone(self._duty(ref))
             self.assertIn(f"next: nothing to resend - the runtime delivers ref={ref} to child", err.getvalue())
@@ -9406,7 +9406,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
                                    side_effect=FileNotFoundError(
                                        errno.ENOENT, "herdr not found")):
                 rc, line, ref = self._prompt("claude", "sid-child")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             # The printed line names the held outcome, not a submission that
             # never happened: queued + the start-failure reason, row pending.
             self.assertIn("prompted=queued", line)

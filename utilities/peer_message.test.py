@@ -720,6 +720,15 @@ class F100cSenderAndStewardTest(unittest.TestCase):
         self.assertEqual(peer_message.parse_peer_trailer(
             peer_message.peer_trailer("claude", "s", "a) b"))["name"], "a  b".replace("  ", " "))
 
+    def test_trailer_drops_a_derived_label_that_only_repeats_the_tag(self):
+        # BC-SMALL-SURFACE-1112 #4: `claude [57] 2026-11-57` read as a date; SID and ref stay.
+        with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
+            derived = peer_message.peer_trailer("claude", "sid-a", "2026-11-57",
+                                                transfer_ref="a" * 32, pane_id="w1:p3")
+            chosen = peer_message.peer_trailer("claude", "sid-a", "release-notes", pane_id="w1:p3")
+        self.assertEqual(derived, "(peer-from: claude [57] ; pane=w1:p3 ; sid=sid-a ; ref=" + "a" * 32 + ")")
+        self.assertIn("(peer-from: claude [57] release-notes ; pane=w1:p3", chosen)
+
     def _marker_keys_on_disk(self):
         return {(h, d.get("session_id")) for h, _p, d in
                 peer_message._iter_marker_files(peer_message.peer_state_root()) if d}
