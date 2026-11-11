@@ -50,8 +50,8 @@ class NativeCase(unittest.TestCase):
         self.cwd = str(self.iso.home)
         self.patch(native, "_caller_runtime", return_value=(self.own, False))
         self.patch(pane_ownership, "verified_pane", return_value="")
-        # Sessions with a transcript and no background agent: tidy keeps the clear
-        # (a session whose transcript cannot be found is compacted instead).
+        # Each session has its own transcript: the /compact claim records its end so the
+        # helper can find the same session's compaction boundary after it.
         for sid in ("session-A", "session-B", "session-C"):
             transcript = self.iso.claude_dir / "projects" / "-fixture" / f"{sid}.jsonl"
             transcript.parent.mkdir(parents=True, exist_ok=True)
@@ -79,18 +79,17 @@ class NativeCase(unittest.TestCase):
              mock.patch.object(clear, "herdr_command", return_value=None):
             self.assertEqual(clear.schedule_for_enqueue(self.seat, "claude", "session-A", self.cwd), "clear=scheduled")
         req = clear.read_reservation(self.seat.key)
-        with st.seat_lock(self.seat.key):
-            req["snapshot_state"] = "ready"  # the command tests start after helper snapshot preparation
-            clear._write_reservation(req)
+        # A manual booking types /compact and takes no handover snapshot.
+        self.assertEqual((req["clear_command"], req["snapshot_state"]), ("compact", "not-applicable"))
         path = clear.reservation_path(self.seat.key)
         if continuing:
-            clear._finish(self.seat.key, req["nonce"], "cleared", observed="session-B")
-            self.publish(sessionId="session-B")
-            # The real start hook (session-card-inject.sh) records the session but renders
-            # no card; the continue's own prompt hook hands it over.
-            self.assertEqual(st.run_hook("claude", "start", "session-B", source="clear", cwd=self.cwd,
+            # The same session compacted (its PostCompact hook) and the helper confirmed it;
+            # the continue goes to that same session, whose own prompt hook carries the card.
+            clear._finish(self.seat.key, req["nonce"], "cleared", observed="session-A")
+            self.assertEqual(st.run_hook("claude", "compact", "session-A", source="manual", cwd=self.cwd,
                                          render_context=False), "")
             req = clear.read_reservation(self.seat.key)
+            self.assertEqual(req["new_session"], "session-A")
         return req, path
 
     def book_compact(self):
@@ -183,13 +182,18 @@ class NativeIdentityTest(NativeCase):
         self.assertEqual(st.run_hook("claude", "start", "session-A", cwd=self.cwd), "")
         self.assertFalse(st._ledger_path(self.seat).exists())
 
-    def test_native_card_survives_clear_and_is_delivered_once(self):
+    def test_own_clear_during_compact_booking_gets_card_once_and_one_succession(self):
+        # A person's own /clear while a /compact booking waits: the booking notes the new
+        # session, its start records the one tidy succession edge, and the new conversation
+        # receives the seat card once (no tidy typed the clear).
         req, _ = self.book()
         self.publish(sessionId="session-B")
         first = st.run_hook("claude", "start", "session-B", source="clear", cwd=self.cwd)
+        self.assertEqual((clear.read_reservation(self.seat.key).get("observed") or {}).get("sid"), "session-B")
+        self.assertEqual([row.get("from") for row in st._read_ledger_lines(
+            st.session_seat(self.seat, "claude", "session-B")) if row.get("event") == "succession"], ["session-A"])
         self.assertIn("진행 중인 일", first)
-        self.assertEqual(clear.read_reservation(self.seat.key)["observed"]["sid"], "session-B")
-        self.assertNotIn("진행 중인 일", st.run_hook("claude", "prompt", "session-B", cwd=self.cwd))
+        self.assertNotIn("진행 중인 일", st.run_hook("claude", "prompt", "session-A", cwd=self.cwd))
         self.assertEqual(st.resolve_seat("claude", self.cwd).key, self.seat.key)
 
 
@@ -267,34 +271,43 @@ class NativeCommandTest(NativeCase):
         return native.command(req, path, req["nonce"], continuing=continuing,
                               screen_ready=ready or (lambda *_: None))
 
-    def test_snapshot_pending_is_unsent_and_the_same_booking_can_clear_after_recovery(self):
+    def test_deferred_snapshot_is_unsent_and_the_same_booking_compacts_after_recovery(self):
         req, path = self.book(); self.prepare_transport()
         held = clear.read_reservation(self.seat.key)
-        held["snapshot_state"] = "pending"
+        held["snapshot_state"] = "deferred"
         clear._write_reservation(held)
         result = self.run_command(held, path)
         self.assertEqual((result["cleared"], result["reason"]), ("queued", "snapshot-pending"))
         self.write.assert_not_called()
         self.assertNotIn("clear_claim", clear.read_reservation(self.seat.key))
-        held["snapshot_state"] = "ready"
+        held["snapshot_state"] = "not-applicable"
         clear._write_reservation(held)
-        def sent(fd, text):
-            self.publish(sessionId="session-B")
-            return len(text)
-        self.write.side_effect = sent
-        self.assertEqual(self.run_command(held, path)["cleared"], "true")
-        self.write.assert_called_once()
+        self.write.side_effect = lambda fd, text: len(text)
+        result = self.run_command(held, path)
+        self.assertEqual((result["cleared"], result["reason"]), ("unverified", "compact-pending"))
+        self.write.assert_called_once_with(99, b"/compact\r")
 
-    def test_clear_once_and_observe_exact_new_session(self):
+    def test_compact_once_in_the_same_session_and_leave_confirmation_to_the_helper(self):
         req, path = self.book(); self.prepare_transport()
+        transcript = self.iso.claude_dir / "projects" / "-fixture" / "session-A.jsonl"
         def sent(fd, text):
-            self.assertEqual(text, b"/clear\r")
-            self.publish(sessionId="session-B")
+            self.assertEqual(text, b"/compact\r")
+            claim = clear.read_reservation(self.seat.key)["clear_claim"]
+            self.assertEqual((claim["command"], claim["transcript"], claim["offset"]),
+                             ("compact", str(transcript), transcript.stat().st_size))
             return len(text)
         self.write.side_effect = sent
         result = self.run_command(req, path)
-        self.assertEqual((result["cleared"], result["new_session"]), ("true", "session-B"))
+        self.assertEqual((result["cleared"], result["reason"]), ("unverified", "compact-pending"))
+        self.assertFalse(result.get("new_session"))
         self.write.assert_called_once()
+        self.assertEqual(native.live(self.target)["sessionId"], "session-A")
+        held = clear.read_reservation(self.seat.key)
+        self.assertFalse(clear.compact_confirmed(held))
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                                     "sessionId": "session-A"}) + "\n")
+        self.assertTrue(clear.compact_confirmed(held))
 
     def test_unreadable_source_after_clear_claim_keeps_claim_and_rechecks_screen_before_one_write(self):
         for source in ("card", "frontier"):
@@ -323,11 +336,11 @@ class NativeCommandTest(NativeCase):
                     else:
                         source_path.write_bytes(original)
                 self.view.side_effect = read
-                self.write.side_effect = lambda fd, text: (self.publish(sessionId="session-B"), len(text))[1]
+                self.write.side_effect = lambda fd, text: len(text)
                 with mock.patch.object(native.time, "sleep", side_effect=restore):
                     result = self.run_command(req, path)
-                self.assertEqual(result["cleared"], "true")
-                self.write.assert_called_once_with(99, b"/clear\r")
+                self.assertEqual((result["cleared"], result["reason"]), ("unverified", "compact-pending"))
+                self.write.assert_called_once_with(99, b"/compact\r")
                 self.assertEqual(len(reads), 3)
                 self.assertEqual(clear.read_reservation(self.seat.key)["clear_claim"], claims[0])
 
@@ -349,7 +362,7 @@ class NativeCommandTest(NativeCase):
             self.assertEqual(clear.read_reservation(self.seat.key)["continued"], claims[0])
             card_path.write_bytes(original)
         def sent(fd, text):
-            st.run_hook("claude", "prompt", "session-B", cwd=self.cwd)
+            st.run_hook("claude", "prompt", "session-A", cwd=self.cwd)
             return len(text)
         self.view.side_effect = read
         self.write.side_effect = sent
@@ -388,7 +401,7 @@ class NativeCommandTest(NativeCase):
                         self.assertEqual(clear.read_reservation(self.seat.key)["continued"], claims[0])
                     card_path.write_bytes(original)
                 def sent(_fd, data):
-                    st.run_hook("claude", "prompt", "session-B", cwd=self.cwd)
+                    st.run_hook("claude", "prompt", "session-A", cwd=self.cwd)
                     return len(data)
                 self.write.side_effect = sent
                 def continuer(path, nonce, _pane):
@@ -426,7 +439,7 @@ class NativeCommandTest(NativeCase):
                     st.atomic_write_json(card_path, card)
                     reason = "card-changed" if change == "replaced" else "handed-off"
                 elif change == "new-input":
-                    st.bump_prompt_seq(booked, "claude", "session-B", st.now_epoch())
+                    st.bump_prompt_seq(booked, "claude", "session-A", st.now_epoch())
                     reason = "new-input"
                 else:
                     card_path.write_bytes(b'\xff')
@@ -543,10 +556,10 @@ class NativeCommandTest(NativeCase):
             handle.write(json.dumps({"type": "assistant", "uuid": "a-final",
                                      "message": {"stop_reason": "end_turn", "content": [
                                          {"type": "text", "text": "최종 응답"}]}}) + "\n")
-        self.write.side_effect = lambda fd, text: (self.publish(sessionId="session-B"), len(text))[1]
+        self.write.side_effect = lambda fd, text: len(text)
         result = self.run_command(req, path)
-        self.assertEqual((result["cleared"], result["new_session"]), ("true", "session-B"))
-        self.write.assert_called_once()
+        self.assertEqual((result["cleared"], result["reason"]), ("unverified", "compact-pending"))
+        self.write.assert_called_once_with(99, b"/compact\r")
 
     def test_native_compact_rechecks_transcript_after_claim_before_send(self):
         req, path, transcript = self.book_compact()
@@ -584,13 +597,13 @@ class NativeCommandTest(NativeCase):
         self.write.assert_called_once()
 
     def test_continue_once_after_real_card_receipt(self):
-        # 2026-11-10: the start hook renders no card, so the continue goes without a
-        # start receipt and its own prompt hook carries the card.
+        # 2026-11-10: the continue goes to the same compacted session; its own prompt
+        # hook carries the card.
         req, path = self.book(continuing=True); self.prepare_transport()
         delivered = []
         def sent(fd, text):
             self.assertEqual(text, (clear.CONTINUE_TEXT + "\r").encode())
-            delivered.append(st.run_hook("claude", "prompt", "session-B", cwd=self.cwd,
+            delivered.append(st.run_hook("claude", "prompt", "session-A", cwd=self.cwd,
                                          prompt_text=clear.CONTINUE_TEXT))
             return len(text)
         self.write.side_effect = sent
@@ -601,7 +614,7 @@ class NativeCommandTest(NativeCase):
 
     def test_continue_is_not_typed_when_a_prompt_already_took_the_card(self):
         req, path = self.book(continuing=True); self.prepare_transport()
-        self.assertIn("진행 중인 일", st.run_hook("claude", "prompt", "session-B", cwd=self.cwd))
+        self.assertIn("진행 중인 일", st.run_hook("claude", "prompt", "session-A", cwd=self.cwd))
         result = self.run_command(req, path, continuing=True)
         self.assertEqual(result["continued"], "skipped")
         self.write.assert_not_called()
@@ -613,7 +626,7 @@ class NativeCommandTest(NativeCase):
         self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "pending")
         self.write.assert_not_called()
 
-    def test_another_clear_after_send_cannot_confirm_the_continue_prompt(self):
+    def test_another_session_after_send_cannot_confirm_the_continue_prompt(self):
         req, path = self.book(continuing=True); self.prepare_transport()
         def sent(fd, text):
             self.publish(sessionId="session-C")
@@ -634,7 +647,7 @@ class NativeCommandTest(NativeCase):
                     nonlocal count
                     count += 1
                     if count == 2:
-                        st.run_hook("claude", "prompt", "session-B" if continuing else "session-A", cwd=self.cwd)
+                        st.run_hook("claude", "prompt", "session-A", cwd=self.cwd)
                     return lines
                 self.view.side_effect = read
                 result = self.run_command(req, path, continuing=continuing)
@@ -738,10 +751,11 @@ def write(fd, data):
     if continuing:
         st.bump_prompt_seq(st.seat_from_dict(req['seat']), 'claude', req['new_session'], st.now_epoch())
     else:
-        registry = Path(config['registry'])
-        record = json.loads(registry.read_text())
-        record['sessionId'] = 'session-B'
-        registry.write_text(json.dumps(record))
+        # The same session compacts: its boundary lands after the claim's transcript end.
+        assert data == b'/compact\r', data
+        with open(claim['transcript'], 'a') as handle:
+            handle.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary',
+                                     'sessionId': req['sid']}) + '\n')
     return len(data)
 proxy = SimpleNamespace(**vars(os)); proxy.write = write
 with mock.patch.object(native, 'attachment', side_effect=attached), \
@@ -774,9 +788,6 @@ raise SystemExit(code)
             req["deadline"] = deadline
             req["continue_off"] = True
         clear._write_reservation(req)
-        import dispatch_seat_handover as handover
-        with st.seat_lock(self.seat.key):
-            handover.write_snapshot_locked(self.seat, "claude", "session-A")
         tag = mode + "-" + scenario
         script = self.iso.root / (tag + ".py")
         events_path = self.iso.root / (tag + ".jsonl")
@@ -800,7 +811,8 @@ raise SystemExit(code)
             return done
         with mock.patch.dict(os.environ, {"HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
                                          "HEARTING_TIDY_PEER_STEWARD": str(script),
-                                         "HEARTING_TIDY_CLEAR_OBSERVE": "0.01"}), \
+                                         # bounds the helper's wait for a boundary that never comes
+                                         "HEARTING_TIDY_COMPACT_CONFIRM": "1.5"}), \
              mock.patch.object(clear, "STEWARD_TIMEOUT_SEC", .75), \
              mock.patch.object(clear.subprocess, "run", side_effect=capture), \
              mock.patch.object(native, "wait_idle", return_value="idle"):

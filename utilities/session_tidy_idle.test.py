@@ -1497,8 +1497,7 @@ class UnifiedIdleTests(unittest.TestCase):
                 with self.iso.patched_environ(self.extra), \
                         mock.patch.object(clear, "_start_helper", return_value=12345), \
                         mock.patch.object(runner, "start_detached", return_value=None), \
-                        mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
-                        mock.patch.object(clear, "background_agents_running", return_value=True):
+                        mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
                     sid = "private-" + harness
                     seat, req, reply = self.accepted(harness, sid, clock)
                     sent = []

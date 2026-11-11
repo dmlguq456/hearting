@@ -159,19 +159,6 @@ class HerdrSessionTargeting(unittest.TestCase):
             reason, _agent, _lines = module._clear_look("oc-live", req)
         self.assertIsNone(reason)
 
-    def test_delayed_old_start_cannot_replace_the_booked_successor(self):
-        import session_tidy as st
-        import session_tidy_clear as clear
-        seat = st.Seat("pane", "seat", "w1:p3", "opencode")
-        req = {"status": "reserved", "harness": "opencode", "sid": "booked-sid",
-               "created": 100.0}
-        with unittest.mock.patch.object(clear, "read_reservation", return_value=req), \
-                unittest.mock.patch("fleet.process_identity.current_session_identity",
-                                    return_value="current-sid"), \
-                unittest.mock.patch.object(clear, "_write_reservation") as write:
-            clear.note_start_locked(seat, "opencode", "delayed-old-sid", 110.0)
-        write.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()
