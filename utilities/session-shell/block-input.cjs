@@ -46,7 +46,7 @@ module.exports=function({changed,answer,action}) {
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
     if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;}
     else if(found>=0){index=found;frozen=undefined;stale=false;}
-    else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length)){
+    else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length)){
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
     }else{frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;}
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));

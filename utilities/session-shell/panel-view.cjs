@@ -45,6 +45,10 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     if(role==='accent'||role==='accent-line'){if(theme!=='mono')foreground=F.accent;else if(role==='accent')bold=true;dim=false;}
     // A state glyph takes its face's state color, at full strength.
     else if(role.startsWith('state:')&&theme!=='mono'&&(shade||known==='light')&&F[role.slice(6)]){foreground=F[role.slice(6)];dim=false;}
+    // The session's own state keeps Fleet's session keys (running g_spin, idle
+    // g_work_off, waiting g_blocked) on every face; the state colors above are
+    // the route and stage marks' (running 150 / idle 186).
+    else if(role==='session'&&theme!=='mono'&&(shade||known==='light'))dim=false;
     if(shade){
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
@@ -348,9 +352,14 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
         return [...left,pad(inner-size(left)-size(end)),...end];
       }
-      const right=routeLine==='model'?[p.harness,p.model_text&&text(' '),p.model_text,p.ctx&&text(' '),p.ctx].filter(Boolean):
-        [p.harness,p.ctx&&text(' '),p.ctx,(elapsedWidth&&text(' '+' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||'')))].filter(Boolean);
-      const room=inner-2-size(right)-1,name=cut(line(r.title||'·','loc_repo'),Math.max(4,room));
+      // As in second(): the title gives way first, and each fixed value
+      // (harness, model, context, time) shows whole or not at all.
+      const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],C=p.ctx?[p.ctx]:[];
+      const E=elapsedWidth?[text(' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||''))]:[];
+      const drops=routeLine==='model'?[[H,M,C],[H,M],[H],[]]:[[H,C,E],[H,E],[E],[]];
+      const join=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+      const right=drops.map(join).find(values=>!values.length||inner-2-size(values)-1>=4)||[];
+      const room=inner-2-size(right)-(right.length?1:0),name=cut(line(r.title||'·','loc_repo'),Math.max(1,room));
       return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
     }
     function details(r){
@@ -562,8 +571,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const frameText=v=>({...text(v,color),role:'frame'});
   if(own&&own[0]==='spin')animated=true;
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
-    own?[frameText(' '),{...text(own[0]==='spin'?spinGlyph.text:own[0],own[2]),...(own[0]==='spin'?{spin:true}:{}),role:'state:'+state},
-      {...text(' '+own[1]+' ',own[2]),role:state==='idle'?'secondary':'state:'+state}]:[];
+    own?[frameText(' '),{...text(own[0]==='spin'?spinGlyph.text:own[0],own[2]),...(own[0]==='spin'?{spin:true}:{}),role:'session'},
+      {...text(' '+own[1]+' ',own[2]),role:state==='idle'?'secondary':'session'}]:[];
   const label=clip(leftParts,Math.max(0,width-7)),right=clip([frameText(' ⚙ ')],Math.max(0,width-label.used-2));
   rows.push([frameText('┌'),...label.parts,frameText('─'.repeat(Math.max(0,width-2-label.used-right.used))),...right.parts,frameText('┐')]);
   // The gear's press reaches past its own cell to the rule beside it and the corner.

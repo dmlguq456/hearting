@@ -117,4 +117,38 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]);
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
 
+    def test_an_arrow_choice_is_kept_like_a_number_choice_when_its_question_changes(self):
+        # Review RV-PR1528 §1: ↓ then a new ID or revision must not send the new question's first choice.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+const item=(id,revision,decision=false)=>({id,revision,request_state:'open',answerable:true,answer_kind:decision?'decision':'message',
+ questions:[{id:'q',question:id+' question',choices:['FIRST','SECOND'],recommended:0}]});
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ for(const harness of ['claude','codex','opencode'])for(const mode of ['replace','revision','number','text','stable','insert']){
+  const sent=[],block=create({changed(){},answer:async v=>{sent.push(v);return {state:'received'};},action(){}});
+  const owner={harness,session_id:'s'},a={...item('old','r1'),owner},b={...item(mode==='revision'?'old':'new',mode==='revision'?'r2':'r1'),owner};
+  block.update([a]);block.enter();block.input(Buffer.from(mode==='number'?'2':mode==='text'?'tDRAFT':'\x1b[B'));
+  block.update(mode==='stable'?[a]:mode==='insert'?[b,a]:[b]);
+  block.input(Buffer.from('\r'));await tick();block.input(Buffer.from('\r'));await tick();
+  const label=harness+' '+mode+' '+JSON.stringify(sent);
+  if(['stable','insert'].includes(mode))assert.deepEqual(sent,[{question_id:'old',revision:'r1',answers:{q:['SECOND']}}],label);
+  else{assert.equal(sent.length,0,label);assert.ok(JSON.stringify(block.detail()).includes('question changed'),label);}
+ }
+ // A decision still needs its explicit choice; one Enter sends it once.
+ const sent=[],block=create({changed(){},answer:async v=>{sent.push(v);return {state:'received'};},action(){}});
+ block.update([item('d','r1',true)]);block.enter();block.input(Buffer.from('\r'));await tick();assert.equal(sent.length,0);
+ block.input(Buffer.from('\x1bOB'));block.input(Buffer.from('\r'));await tick();block.input(Buffer.from('\r'));await tick();
+ assert.deepEqual(sent,[{question_id:'d',revision:'r1',decision:'approve'}]);
+ // Unfocused arrows and Enter return to the native caller untouched.
+ const idle=create({changed(){},answer:async()=>{throw Error('unfocused');},action(){}});idle.update([item('old','r1')]);
+ assert.deepEqual(idle.input(Buffer.from('\x1b[B\r')),Buffer.from('\x1b[B\r'));
+ console.log('PASS');
+})().catch(error=>{console.error(error.stack);process.exitCode=1;});
+"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],
+                              text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
+
 if __name__=='__main__':unittest.main()

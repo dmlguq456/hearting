@@ -417,6 +417,31 @@ for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(con
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_route_folded_to_one_row_keeps_each_value_whole(self):
+        # Review RV-PR1528 §2: 32 cells, the boxed one-row route cut `72%` to `7…`.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const P=t=>({text:t}),route=i=>({id:'r'+i,title:'ROUTE_'+i+' 한글🙂',kind:'working',state:'working',elapsed:'1h 27m',
+ paint:{glyph:P('⠏'),harness:P('codex'),model_text:P('gpt-6-sol'),ctx:P('72%'),gauge5:[P('━━━── 72%')]}});
+const model={head:[P('[52] project')],git:[P('(long-branch-'+'x'.repeat(50)+' 🚧 3)')],selected:[P('fixture high')],context:[P('context 42%')],
+ quota:[P('5h 12% │ 7d 66%')],route_count:3,route_total:3,routes:[1,2,3].map(route),messages:[1,2,3].map(at=>({at,way:'←',who:'[peer]',text:'MESSAGE_'+at}))};
+let oneRow=0;
+for(const width of [32,40])for(let height=10;height<=30;height++)for(const route_line of ['time','model'])for(const asking of [false,true]){
+ const v=view.render({width,height,side:true,state:'idle',model:{...model,answerable:asking},configuration:{route_line},
+  questions:o=>asking?[[P('Q')],[P('Question body')],[P('1 YES')],[P('2 NO')]].slice(0,o.budget):[]});
+ const rows=v.rows.map(r=>r.map(p=>p.text).join(''));
+ for(const hit of v.hits.filter(h=>h.action?.startsWith('route:'))){
+  const s=rows[hit.row],label=width+'x'+height+' '+route_line+' '+asking+'\n'+rows.join('\n');
+  if(s.includes('codex'))oneRow+=s.includes('ROUTE')?1:0;
+  // A value is whole or absent: no cut number, harness, model or time.
+  assert(!/7…|\d…|codex…|gpt[^ ]*…|1h…/.test(s),label);
+  for(const m of s.matchAll(/72\S*/g))assert.equal(m[0],'72%',label);
+ }
+}
+assert(oneRow>0,'the probe reaches the one-row form');
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_an_opened_route_carries_what_fleet_unfolds_and_runs_on_the_shared_beat(self):
         # Spec rule 21: the kind and owner line, each stage with its doer, how it was run
         # and checked, the next step and why it stopped; whole values, read on a page when long.
@@ -676,6 +701,25 @@ for(const [width,height,side] of [[37,21,true],[80,12,false]]){
                 with self.assertRaises(ValueError):
                     shell.save_display_policy({**desired, key: bad}, env)
             self.assertEqual(path.read_bytes(), before)
+
+    def test_the_session_state_keeps_fleet_session_keys_on_every_face(self):
+        # Review RV-PR1528 §4: the session's running is g_spin and idle g_work_off;
+        # g_work/g_idle (150/186 on a shade) belong to the route and stage marks.
+        script = r'''
+const assert=require('node:assert/strict'),v=require(process.argv[1]);
+const styles={g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:174},g_work:{foreground:150,bold:true},g_idle:{foreground:186}};
+const model={styles,colors:256,route_count:1,routes:[{id:'r',title:'R',state:'working',kind:'working',paint:{glyph:{text:'⠏',foreground:150}}}]};
+const head=(state,cfg,background)=>v.render({width:40,height:16,side:true,state,model,configuration:cfg,background,questions:()=>[]}).rows[0].slice(1,4);
+for(const [cfg,background,spin,idle] of [[{},'',230,150],[{shade:'medium'},'dark',230,150],[{theme:'light'},'',22,22],[{theme:'light',shade:'light'},'',22,22]]){
+ const label=JSON.stringify([cfg,background]);
+ assert.equal(head('working',cfg,background)[1].foreground,spin,label);assert.equal(head('idle',cfg,background)[1].foreground,idle,label);
+ assert.notEqual(head('idle',cfg,background)[1].foreground,v.FACES.dark.idle,label);
+}
+// The route's own mark keeps the route state color on a shade.
+const r=v.render({width:40,height:16,side:true,state:'idle',model,configuration:{shade:'medium'},background:'dark',questions:()=>[]});
+assert(r.rows.slice(1).flat().some(x=>x.role==='state:working'&&x.foreground===v.FACES.dark.working));
+'''
+        self.node(script, "panel-view.cjs")
 
     def test_theme_and_shade_keep_glyphs_and_leave_the_terminal_theme_unchanged(self):
         # Spec rule 22 (the reviewed set A, the question rose one step deeper).
