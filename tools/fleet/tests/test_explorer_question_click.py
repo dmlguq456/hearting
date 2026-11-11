@@ -200,30 +200,111 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
         self.assertNotIn("question.choice", pressable)
 
 
+def _tmux(name, *argv):
+    import subprocess
+    return subprocess.run(["tmux", "-L", name, "-f", "/dev/null", *argv], capture_output=True,
+                          text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+
 class OpenPaneReachesTheMultiplexer(unittest.TestCase):
-    def test_the_focus_effect_is_executed_not_dropped(self):
+    def test_the_focus_effect_is_executed_with_the_server_its_pane_was_observed_on(self):
         seen = []
         import tools.fleet.explorer.runtime as runtime
         original = runtime.focus_pane
-        runtime.focus_pane = lambda pane, *a, **k: seen.append(pane)
+        runtime.focus_pane = lambda pane, server=None, *a, **k: seen.append((pane, server))
+        vm = ExplorerViewModel(questions=(_row(0, pane_server="herdr:default"),))
         try:
-            ExplorerRuntime().apply_effects((("focus", "a0", "w1:p2"),), _vm())
+            ExplorerRuntime().apply_effects((("focus", "a0", "w1:p2"),), vm)
+            ExplorerRuntime().apply_effects((("focus", "a0", "w9:p9"),), vm)
         finally:
             runtime.focus_pane = original
-        self.assertEqual(seen, ["w1:p2"])
+        # The row's own pane goes with its server; a pane the row does not hold has none.
+        self.assertEqual(seen, [("w1:p2", "herdr:default"), ("w9:p9", None)])
 
     def test_which_multiplexer_command_a_pane_gets(self):
-        self.assertEqual(focus_command("w1:p2", {"HERDR_SOCKET_PATH": "/x/herdr.sock"}),
-                         ("herdr", "/x/herdr.sock", "w1:p2"))
-        tmux = focus_command("%7", {"TMUX": "/tmp/tmux-1/default,1,0"})
+        self.assertEqual(focus_command("w1:p2", "herdr:default", {}), ("herdr", "default", "w1:p2"))
+        self.assertEqual(focus_command("w1:p2", "herdr:work", {}), ("herdr", "work", "w1:p2"))
+        tmux = focus_command("%7", "tmux:/tmp/tmux-1/b", {})
         self.assertEqual(tmux[0], "tmux")
-        self.assertIn(["tmux", "select-pane", "-t", "%7"], tmux[1])
-        for pane, env in (("w1:p2", {}), ("%7", {}), ("", {"TMUX": "x"}),
-                          ("w1:p2", {"HERDR_SOCKET_PATH": "/s", "FLEET_DEMO": "1"})):
-            self.assertIsNone(focus_command(pane, env), (pane, env))
+        self.assertIn(["tmux", "-S", "/tmp/tmux-1/b", "select-pane", "-t", "%7"], tmux[1])
+        self.assertIn(["tmux", "-L", "default", "select-pane", "-t", "%7"],
+                      focus_command("%7", "tmux:", {})[1])
+        # The pane's server unknown (or of the other multiplexer): nothing is asked anywhere,
+        # even though Fleet itself sits in a tmux or Herdr server with the same pane numbers.
+        inside = {"TMUX": "/tmp/tmux-1/a,1,0", "HERDR_SOCKET_PATH": "/s"}
+        for pane, server, env in (("w1:p2", None, inside), ("%7", None, inside),
+                                  ("%7", "herdr:default", inside), ("w1:p2", "tmux:", inside),
+                                  ("", "tmux:", {}),
+                                  ("w1:p2", "herdr:default", {"FLEET_DEMO": "1"})):
+            self.assertIsNone(focus_command(pane, server, env), (pane, server, env))
         calls = []
-        self.assertTrue(focus_pane("%7", {"TMUX": "x"}, runner=lambda argv, **_k: calls.append(argv)))
-        self.assertEqual(calls[0], ["tmux", "select-window", "-t", "%7"])
+        self.assertFalse(focus_pane("%7", None, inside, runner=lambda argv, **_k: calls.append(argv)))
+        self.assertEqual(calls, [])
+
+    def test_herdr_focus_uses_the_observed_endpoint_without_an_inherited_socket(self):
+        asked, sent = [], []
+        resolve = lambda endpoint, _env: asked.append(endpoint) or "/run/herdr-default.sock"
+        self.assertTrue(focus_pane("w1:p2", "herdr:default", {}, runner=lambda *a: sent.append(a),
+                                   resolve=resolve))
+        self.assertEqual((asked, sent), (["default"], [("/run/herdr-default.sock", "w1:p2")]))
+        # The endpoint's socket cannot be found: no request.
+        sent.clear()
+        focus_pane("w1:p2", "herdr:default", {}, runner=lambda *a: sent.append(a),
+                   resolve=lambda *_a: "")
+        self.assertEqual(sent, [])
+
+    def test_the_endpoint_socket_is_the_inherited_one_only_when_it_belongs_to_that_endpoint(self):
+        import sys
+        from unittest import mock
+        from tools.fleet.explorer.runtime import herdr_endpoint_socket
+        herdr_endpoint_socket("default", {})          # puts utilities/ on the path
+        import session_tidy
+        with mock.patch.object(session_tidy, "_herdr_endpoint_socket",
+                               side_effect=lambda server: f"/reported/{server or 'default'}.sock"):
+            self.assertEqual(herdr_endpoint_socket("default", {"HERDR_SOCKET_PATH": "/inherited.sock"}),
+                             "/inherited.sock")
+            self.assertEqual(herdr_endpoint_socket("default", {}), "/reported/default.sock")
+            self.assertEqual(herdr_endpoint_socket("work", {"HERDR_SOCKET_PATH": "/inherited.sock"}),
+                             "/reported/work.sock")
+        self.assertIn("session_tidy", sys.modules)
+
+    @unittest.skipUnless(__import__("shutil").which("tmux"), "tmux is not installed")
+    def test_two_tmux_servers_with_the_same_pane_numbers_move_only_the_questions_server(self):
+        import subprocess
+        names = ("fqc-focus-a-%d" % os.getpid(), "fqc-focus-b-%d" % os.getpid())
+        try:
+            for name in names:
+                _tmux(name, "new-session", "-d", "-s", "fixture", "-x", "120", "-y", "40", "sleep 120")
+                _tmux(name, "new-window", "-t", "fixture:1", "sleep 120")
+            sockets = {name: _tmux(name, "display-message", "-p", "-t", "fixture", "#{socket_path}")
+                       for name in names}
+            active = lambda: {name: _tmux(name, "display-message", "-p", "-t", "fixture",
+                                          "#{pane_id}") for name in names}
+            before = active()
+            target = _tmux(names[1], "display-message", "-p", "-t", "fixture:0", "#{pane_id}")
+            self.assertEqual(target, "%0")
+            self.assertEqual(before, {names[0]: "%1", names[1]: "%1"})
+            env = {"TMUX": sockets[names[0]] + ",1,0"}           # Fleet itself runs in server A
+            row = _row(0, pane=target, pane_server="tmux:" + sockets[names[1]])
+            vm = ExplorerViewModel(questions=(row,))
+            state = _selected({"state": "unknown", "support": {"supported": False}, "detail": None})
+            frame = draw(vm, state, 80, 45)
+            x, y = _locate(frame, "open pane")
+            _state, effects = _press(state, frame, x + 2, y)
+            self.assertEqual(effects, (("focus", "a0", "%0"),))
+            from tools.fleet.explorer.runtime import pane_target
+            self.assertTrue(focus_pane(*pane_target(vm, *effects[0][1:]), env, runner=subprocess.run))
+            self.assertEqual(active(), {names[0]: "%1", names[1]: "%0"})
+            # The same press with the pane's server unknown asks neither server.
+            _tmux(names[1], "select-window", "-t", "fixture:1")
+            unknown = ExplorerViewModel(questions=(_row(0, pane=target),))
+            self.assertFalse(focus_pane(*pane_target(unknown, *effects[0][1:]), env,
+                                        runner=subprocess.run))
+            self.assertEqual(active(), {names[0]: "%1", names[1]: "%1"})
+        finally:
+            for name in names:
+                subprocess.run(["tmux", "-L", name, "kill-server"], capture_output=True,
+                               stdin=subprocess.DEVNULL)
 
     def test_herdr_receives_one_pane_focus_request_for_that_pane(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
@@ -251,6 +332,61 @@ class OpenPaneReachesTheMultiplexer(unittest.TestCase):
         self.assertEqual(received[0]["method"], "pane.focus")
         self.assertEqual(received[0]["params"], {"pane_id": "w1:p2"})
         self.assertFalse(_herdr_focus(os.path.join(directory, "gone.sock"), "w1:p2"))
+
+
+class APaneKeepsTheServerItWasObservedOn(unittest.TestCase):
+    def test_each_pane_source_names_its_server_or_none(self):
+        from unittest import mock
+        from tools.fleet.explorer import live
+        with mock.patch.object(live, "herdr_pane_server", return_value="herdr:work"):
+            herdr = live._session_pane({"session_identity_evidence": {"pane": "w1:p2"}}, {})
+            tmux = live._session_pane({"tmux_pane": "%3", "tmux_server": "/tmp/t/b"}, {})
+            default = live._session_pane({"tmux_pane": "%3", "tmux_server": ""}, {})
+            delivered = live._session_pane({"session_id": "s1"}, {"s1": "w1:p9"})
+        self.assertEqual(herdr, {"pane": "w1:p2", "pane_server": "herdr:work"})
+        self.assertEqual(tmux, {"pane": "%3", "pane_server": "tmux:/tmp/t/b"})
+        self.assertEqual(default, {"pane": "%3", "pane_server": "tmux:"})
+        # Known only from a delivered message: no server, so the press moves nothing.
+        self.assertEqual(delivered, {"pane": "w1:p9", "pane_server": None})
+
+
+class AnOpenPaneWayRemainsWhenNarrow(unittest.TestCase):
+    """Every session with a pane keeps a pressable link and an Enter that names its pane."""
+
+    def test_session_page_link_and_enter_at_every_width(self):
+        from tools.fleet.explorer.view_model import load_fixture
+        from tools.fleet.explorer.runtime import pane_target
+        vm = load_fixture(Path(__file__).parent / "fixtures" / "explorer" / "view_model.json")
+        sessions = [row for row in vm.sessions if row.get("pane")]
+        self.assertGreater(len(sessions), 3)
+        for cols in (80, 100, 120, 140):
+            for session in sessions:
+                tag, pane = str(session["tag"]), str(session["pane"])
+                with self.subTest(cols=cols, tag=tag):
+                    state = NavState(scope="session:" + tag)
+                    frame = draw(vm, state, cols, 45)
+                    hits = [h for h in frame.hits if h.action == ("pane", tag, pane)]
+                    self.assertEqual(len(hits), 1, "\n".join(frame.text_rows()))
+                    _state, effects = _press(state, frame, hits[0].x0, hits[0].y)
+                    self.assertEqual(effects, (("focus", tag, pane),))
+                    _state, effects = reduce(state, {"type": "key", "key": "enter"}, frame)
+                    self.assertEqual(effects, (("focus", tag, pane),))
+                    # Even an Enter that found no drawn link names the selected session's pane.
+                    self.assertEqual(pane_target(vm, tag, "")[0], pane)
+
+    def test_overview_unfolded_question_keeps_its_link_at_80_columns(self):
+        from dataclasses import replace
+        session = {"tag": "a0", "harness": "codex", "state": "blocked", "ask": "question",
+                   "title": "fixture", "repo": "r", "repo_id": "r", "pane": "w1:p2"}
+        vm = ExplorerViewModel(repos=({"id": "r", "name": "r"},), sessions=(session,),
+                               questions=(_row(0, ask=LONG),))
+        for cols in (80, 140):
+            with self.subTest(cols=cols):
+                state = NavState(folds=(("sopen:OVERVIEW", "a0"),), opened="a0")
+                frame = draw(vm, state, cols, 45)
+                hits = [h for h in frame.hits if h.action[:1] == ("pane",)]
+                self.assertTrue(hits, "\n".join(frame.text_rows()))
+                self.assertEqual(hits[0].action, ("pane", "a0", "w1:p2"))
 
 
 if __name__ == "__main__":

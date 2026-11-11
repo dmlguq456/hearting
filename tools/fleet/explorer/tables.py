@@ -664,12 +664,16 @@ def _session_unfold(grid, vm, x, use, y, session, c):
         lead = [(marker, "lvl_y" if marker == "◑" else "blocked"),
                 (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
-        from .pages import _segs
-        cursor = _segs(grid, x_val, y, lead, right)
+        from .pages import _fit, _segs
         pane = question.get("pane")
-        if question.get("open_tag") and pane:
+        link = "(open ▸)" if question.get("open_tag") and pane else ""
+        if link and x_val + sum(_seg_width(text) for text, _k in lead) + 2 + _seg_width(link) > right:
+            link = "▸"                     # narrow: the question text gives way, the link stays whole
+        room = right - x_val - (2 + _seg_width(link) if link else 0)
+        cursor = _segs(grid, x_val, y, _fit(lead, room) if link else lead, right)
+        if link:
             cursor = grid.put(cursor, y, "  ", "branch_s", limit=right)
-            open_x = grid.put(cursor, y, "(open ▸)", "hearting", limit=right)
+            open_x = grid.put(cursor, y, link, "hearting", limit=right)
             if open_x <= right:
                 grid.add_hit(y, cursor, open_x, ("pane", tag, str(pane)))
     else:
@@ -1689,7 +1693,7 @@ def draw_questions(grid, vm, state, x=34, y=3):
         grid.put(tag_x + 1, y, tag_text, "soft" if question.get("session_tag") or shown_tag == tag
                  else "dim", limit=tag_x + 1 + _seg_width(tag_text))
         grid.put(tag_x + 1 + _seg_width(tag_text), y, "]", "dim")
-        put_fit(grid, model_x, y, _question_model(question), limit=model_x + model_w)
+        _put_model_cell(grid, model_x, y, _question_model(question), model_x + model_w)
         cursor = model_x + model_w + 1
         grid.put(cursor, y, "│", "dim")
         if project_w:

@@ -341,6 +341,35 @@ def _delivery_panes(snapshot):
     return found
 
 
+def herdr_pane_server():
+    """``herdr:<endpoint>``: the Herdr server whose panes Fleet's collectors observe."""
+    try:
+        from .focus import utility
+        return "herdr:" + str(utility("herdr_observation").endpoint_name())
+    except Exception:
+        return "herdr:default"
+
+
+def _session_pane(session, delivery_panes):
+    """``{"pane", "pane_server"}``: the session's pane and the server it was observed on.
+
+    Herdr's pane census (identity evidence) is read on Fleet's Herdr endpoint and the tmux
+    census on the tmux server Fleet reads. A pane known only from a delivered message has
+    no known server, so pressing it moves nothing rather than a same-numbered pane elsewhere.
+    """
+    own = _text(_get(session, "herdr_pane", "pane", "pane_id"))
+    if own:
+        return {"pane": own, "pane_server": _text(_get(session, "pane_server")) or None}
+    evidence = _text(_get(_get(session, "session_identity_evidence"), "pane"))
+    if evidence:
+        return {"pane": evidence, "pane_server": herdr_pane_server()}
+    tmux = _text(_get(session, "tmux_pane"))
+    if tmux:
+        return {"pane": tmux, "pane_server": "tmux:" + (_text(_get(session, "tmux_server")) or "")}
+    delivered = delivery_panes.get(_text(_get(session, "session_id", "sid", "id")) or "")
+    return {"pane": delivered, "pane_server": None}
+
+
 def _last_input(display, now):
     """Presentation of a decided frontier, with a fresh age and no text classification."""
     from ..prompt_line import last_input
@@ -403,9 +432,7 @@ def _session_records(snapshot, now, resolver):
             "ask": _ask_kind(session) if state == "blocked" else None,
             "age": age, "repo": repo, "repo_id": repo,
             "branch": _text(_get(session, "branch")),
-            "pane": _text(_get(session, "herdr_pane", "pane", "pane_id")) or
-                    _text(_get(_get(session, "session_identity_evidence"), "pane")) or
-                    delivery_panes.get(_text(_get(session, "session_id", "sid", "id")) or ""),
+            **_session_pane(session, delivery_panes),
             "generation": None, "last_clear": None,
             "running": _running(session), "gpu": None, "pane_meta": None, "pane_lines": [],
         }
@@ -1488,6 +1515,7 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "session_tag": session["tag"] if session else None,
             "open_tag": session["tag"] if session else None,
             "pane": session["pane"] if session else None,
+            "pane_server": session.get("pane_server") if session else None,
             "marker": "◌" if owner_state == "none" else "◑" if source == "S2" else "●",
             "node": _text(item.get("node")),
             "since_at": _clock_or_date(item.get("since"), now),
@@ -2878,6 +2906,7 @@ def selected_detail(model, detail, *, peer_model=None):
     for ref, current_tag in tag_of.items():
         if current_tag in by_tag and ref.partition(":")[2] in panes:
             by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
+            by_tag[current_tag]["pane_server"] = herdr_pane_server()
     if ENDED_SEATS in seats:
         old_seats = [seat for seat in old_seats if not ended_seat(seat)]
     for seat in seat_rows:
@@ -3381,6 +3410,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         if not row.get("pane"):
             info = session_index[row["tag"]]
             row["pane"] = next((panes[i] for i in info["ids"] if i in panes), None)
+            row["pane_server"] = herdr_pane_server() if row["pane"] else row.get("pane_server")
     seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
         session_rows, session_index, accepted_detail, clock, resolver)
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
@@ -3401,12 +3431,14 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
             row["last_clear"] = when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
     if pane_read:
         tag, read = pane_read
-        by_tag[tag]["pane"] = by_tag[tag]["pane"] or _text(read.get("pane"))
+        if not by_tag[tag]["pane"] and _text(read.get("pane")):
+            by_tag[tag]["pane"], by_tag[tag]["pane_server"] = _text(read.get("pane")), herdr_pane_server()
         by_tag[tag]["pane_meta"] = "visible screen" + (f" · {_clock(read['at'])}" if _clock(read.get("at")) else "")
         by_tag[tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
     for question in questions:
         if not question.get("pane"):
             question["pane"] = by_tag.get(question["tag"], {}).get("pane")
+            question["pane_server"] = by_tag.get(question["tag"], {}).get("pane_server")
     tag_of_sid = {info["sid"]: tag for tag, info in session_index.items() if info["sid"]}
     tag_of_cwd = {}
     for tag, info in session_index.items():

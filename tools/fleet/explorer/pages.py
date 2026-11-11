@@ -232,12 +232,20 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
             (str(effort), "eff_" + str(effort) if effort in ("medium", "xhigh") else "dim"),
             (")", "dim")], right)
     pane = session.get("pane")
-    cursor = _segs(grid, cursor, y, [("      pane ", "label"),
-                                     (str(pane or "·"), "soft" if pane else "dim")], right)
+    field = [("      pane ", "label"), (str(pane or "·"), "soft" if pane else "dim")]
+    link = "  (open ▸)" if pane else ""
+    if pane and cursor + _width(field) + cell_width(link) > right - 1:
+        # Too narrow beside the model: the pane gets its own field line, so its link still fits.
+        y += 1
+        grid.put(x + 3, y, "pane:", "label", limit=right)
+        cursor, field = x + 16, [(str(pane), "soft")]
+        if cursor + _width(field) + cell_width(link) > right - 1:
+            link = " ▸"
+    cursor = _segs(grid, cursor, y, field, right)
     if pane:
-        open_x = grid.put(cursor, y, "  (open ▸)", "hearting", limit=right)
+        open_x = grid.put(cursor, y, link, "hearting", limit=right)
         if open_x <= right - 1:          # the link is a target only where all of it is drawn in the pane
-            grid.add_hit(y, cursor + 2, open_x, ("pane", tag, str(pane)))
+            grid.add_hit(y, cursor + len(link) - len(link.lstrip()), open_x, ("pane", tag, str(pane)))
     y += 1
     session_state = str(session.get("state") or "·")
     ask = bool(session.get("ask"))
