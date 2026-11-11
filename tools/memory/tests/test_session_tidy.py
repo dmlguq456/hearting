@@ -1866,7 +1866,7 @@ def codex_row(kind: str, text: str) -> dict:
 class TailFirstReadingTest(TidyCase):
     """The newest unread range is read first; an old unread front is never overwritten by a newer end."""
 
-    SID = "sid-tail"
+    SID = "ses_tail"        # an OpenCode session id; the JSONL harnesses take any id
     ROWS = 4000
 
     def setUp(self):
@@ -4137,10 +4137,286 @@ class OpenCodeTransactionReadTest(TidyCase):
         with self.library(), mock.patch.object(tt.time, "sleep"):
             before = tt.read_watermark("opencode", self.SID)
             chunk = tt.read_pending("opencode", self.SID, self.iso.opencode_db)
-            self.assertIn("DatabaseError: file is not a database", chunk.error)
+            self.assertIn("file is not a database", chunk.error)
             self.assertNotIn("\n", chunk.error)
             self.assertLessEqual(len(chunk.error), 220)
             self.assertEqual(tt.read_watermark("opencode", self.SID), before)
+
+
+class OpenCodeV2ReadTest(TidyCase):
+    """OpenCode 2 keeps sessions in ``session_v2``/``session_message``; tidy reads them like V1 ones."""
+
+    SID = "ses_fixturev2000000000000001"
+    V1_SID = "ses_fixture0000000000000001"
+
+    def load(self, *, upgraded=False):
+        con = sqlite3.connect(self.iso.opencode_db)
+        try:
+            if upgraded:            # a home used before 2.x keeps its old tables and sessions
+                con.executescript((FIXTURES / "opencode-choice.sql").read_text(encoding="utf-8"))
+            con.executescript((FIXTURES / "opencode-v2-choice.sql").read_text(encoding="utf-8"))
+            con.commit()
+        finally:
+            con.close()
+
+    def pending(self, sid):
+        return tt.read_pending("opencode", sid, self.iso.opencode_db, 1 << 20)
+
+    def discovered(self):
+        with mock.patch.object(tt, "opencode_db_path", return_value=self.iso.opencode_db):
+            return [item["sid"] for item in tt._discover("opencode", 0)]
+
+    def test_a_fresh_opencode_2_home_is_read_and_holds_at_an_open_question(self):
+        self.load()
+        with self.library(), mock.patch.object(tt, "now_epoch", return_value=FIXTURE_NOW):
+            first = self.pending(self.SID)
+            self.assertEqual(first.error, "")
+            self.assertEqual((first.unit, first.cursor_from, first.cursor_to, first.blocked),
+                             ("seq", 0, 9, "open-question"))
+            self.assertEqual(first.text, "[user] v2 정리 시험을 시작합니다\n[assistant] v2 질문을 드립니다.\n"
+                                         "[assistant] v2 파일 저장으로 진행합니다.")
+            self.assertEqual([(c["question"], c["answers"]) for c in first.choices],
+                             [("v2 저장 방식을 어떻게 할까요?", ["파일로 저장 (권장)"])])
+            self.assertEqual(first.pending_after, [[9, 13]])
+            tt.mark_applied("opencode", self.SID, first)
+            con = sqlite3.connect(self.iso.opencode_db)
+            data = json.loads(con.execute("SELECT data FROM session_message WHERE seq = 9").fetchone()[0])
+            data["content"][0]["state"].update({"status": "completed", "metadata": {"answers": [["진행 (권장)"]]}})
+            con.execute("UPDATE session_message SET data = ?, time_updated = time_updated + 5000 WHERE seq = 9",
+                        (json.dumps(data, ensure_ascii=False),))
+            con.commit()
+            con.close()
+            second = self.pending(self.SID)
+            self.assertEqual([c["answers"] for c in second.choices], [["진행 (권장)"]])
+            tt.mark_applied("opencode", self.SID, second)
+            third = self.pending(self.SID)
+            self.assertEqual((third.cursor_from, third.cursor_to, third.pending_after), (13, 13, []))
+            idle_card = tt.read_chunk("opencode", self.iso.opencode_db, 0, self.SID)
+            self.assertEqual((idle_card.error, idle_card.unit, idle_card.cursor_to), ("", "seq", 12))
+            self.assertIn("[user] v2 정리 시험을 시작합니다", idle_card.text)
+        self.assertEqual(self.discovered(), [self.SID])
+
+    def test_an_upgraded_home_reads_the_new_session_and_still_reads_the_old_one(self):
+        self.load(upgraded=True)
+        with self.library(), mock.patch.object(tt, "now_epoch",
+                                               return_value=FIXTURE_NOW + 2 * tt.OPEN_QUESTION_STALE_SEC):
+            new = self.pending(self.SID)
+            old = self.pending(self.V1_SID)
+        self.assertEqual((new.error, new.unit, new.cursor_to), ("", "seq", 13))
+        self.assertIn("[user] v2 정리 시험을 시작합니다", new.text)
+        self.assertEqual((old.error, old.unit, old.cursor_to), ("", "rowid", 7))
+        self.assertIn("[user] 정리 시험을 시작합니다", old.text)
+        self.assertIn("[assistant] 파일 저장으로 진행합니다.", old.text)
+        self.assertEqual(len(old.choices), 3)
+        self.assertEqual(sorted(self.discovered()), sorted([self.SID, self.V1_SID]))
+
+    def test_a_session_in_both_generations_is_unreadable_and_does_not_advance(self):
+        self.load(upgraded=True)
+        con = sqlite3.connect(self.iso.opencode_db)
+        con.execute("INSERT INTO part VALUES ('prt_both', 'msg_fix01', ?, 1, 1, '{\"type\":\"text\",\"text\":\"x\"}')",
+                    (self.SID,))
+        con.commit()
+        con.close()
+        with self.library(), mock.patch.object(tt.time, "sleep"):
+            before = tt.read_watermark("opencode", self.SID)
+            chunk = self.pending(self.SID)
+            self.assertEqual(chunk.error, "unreadable: session-generation-ambiguous")
+            self.assertEqual(tt.read_watermark("opencode", self.SID), before)
+
+    def test_a_bounded_chunk_decodes_only_near_its_budget_and_chained_chunks_cover_the_session(self):
+        # Review [e7] P2: a chunk used to decode the whole remaining session before its budget.
+        import opencode_runtime
+        self.load(upgraded=True)
+        con = sqlite3.connect(self.iso.opencode_db)
+        for i in range(400):
+            text = json.dumps({"type": "text", "text": "ROW-%04d " % i + "가" * 2000}, ensure_ascii=False)
+            con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                        ("msg_long%04d" % i, self.V1_SID, json.dumps({"role": "user" if i % 2 else "assistant"})))
+            con.execute("INSERT INTO part VALUES (?, ?, ?, 1, 1, ?)",
+                        ("prt_long%04d" % i, "msg_long%04d" % i, self.V1_SID, text))
+            con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                        ("msg_v2long%04d" % i, self.SID, 100 + i,
+                         json.dumps({"text": "ROW-%04d " % i + "가" * 2000}, ensure_ascii=False)))
+        con.commit()
+        con.close()
+        decode, decoded = opencode_runtime._decode_json, []
+        limit = 16 * 1024
+        with self.library(), mock.patch.object(tt, "now_epoch",
+                                               return_value=FIXTURE_NOW + 2 * tt.OPEN_QUESTION_STALE_SEC), \
+                mock.patch.object(opencode_runtime, "_decode_json",
+                                  side_effect=lambda raw: decoded.append(len(raw or "")) or decode(raw)):
+            for sid in (self.V1_SID, self.SID):
+                decoded.clear()
+                first = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, limit)
+                self.assertEqual(first.error, "")
+                self.assertGreater(first.rows, 1)
+                # The session holds about 2.4 MB after the cursor; this chunk decodes a few pages.
+                self.assertLess(sum(decoded), 8 * limit, sid)
+                whole = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, 1 << 30)
+                cursor, texts, choices, rows = 0, [], [], 0
+                while True:
+                    chunk = tt.read_chunk("opencode", self.iso.opencode_db, cursor, sid, limit)
+                    self.assertEqual((chunk.error, chunk.cursor_from), ("", cursor))
+                    self.assertGreater(chunk.cursor_to, cursor)
+                    texts.append(chunk.text)
+                    choices += chunk.choices
+                    rows += chunk.rows
+                    cursor = chunk.cursor_to
+                    if chunk.eof:
+                        break
+                self.assertEqual((rows, cursor, choices), (whole.rows, whole.cursor_to, whole.choices))
+                self.assertEqual("\n".join(t for t in texts if t), whole.text)
+
+    def test_a_generation_change_between_pages_is_read_again_in_the_new_generation(self):
+        # Review [e7] R2 P2: a page read after the session moved generation (an empty page
+        # included) let the old unit's cursor stand as a normal result and NEW rows go missing.
+        import conversation_reader
+        import opencode_runtime
+        self.load(upgraded=True)
+        sid = "ses_fixtureswitch0000000001"
+
+        def put(con, generation, cursors, tag):
+            for t in ("part", "message", "session_message"):     # one session's rows only
+                con.execute("DELETE FROM %s" % t)
+            for i in cursors:
+                if generation == "v1":
+                    con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                                ("msg_sw%03d" % i, sid, json.dumps({"role": "user"})))
+                    con.execute("INSERT INTO part(rowid, id, message_id, session_id, time_created, time_updated,"
+                                " data) VALUES (?, ?, ?, ?, 1, 1, ?)",
+                                (i, "prt_sw%03d" % i, "msg_sw%03d" % i, sid,
+                                 json.dumps({"type": "text", "text": "%s-%03d" % (tag, i)})))
+                else:
+                    con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                                ("msg_v2sw%03d" % i, sid, i, json.dumps({"text": "%s-%03d" % (tag, i)})))
+
+        original = opencode_runtime.read_session_parts
+        for old, new in (("v1", "v2"), ("v2", "v1")):
+            for cursors in ((4, 5), (4, 5, 25, 30)):
+                for public in (False, True):
+                    with self.subTest(old=old, new=new, cursors=cursors, public=public):
+                        with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as con, con:
+                            put(con, old, range(1, 41), "OLD")
+                        calls = []
+
+                        def reader(*args, **kwargs):
+                            snapshot = original(*args, **kwargs)
+                            calls.append(kwargs.get("after_cursor"))
+                            if len(calls) == 1:       # the session moves after the first page
+                                with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as writer, writer:
+                                    put(writer, new, cursors, "NEW")
+                            return snapshot
+
+                        expected = "\n".join("[user] NEW-%03d" % i for i in cursors)
+                        with self.library(), mock.patch.object(tt.time, "sleep"), \
+                                mock.patch.object(opencode_runtime, "read_session_parts", side_effect=reader):
+                            if public:
+                                view = conversation_reader.read_conversation(
+                                    {"harness": "opencode", "sid": sid,
+                                     "transcript": {"path": str(self.iso.opencode_db), "status": "available"}})
+                                self.assertEqual((view.status, view.text), ("available", expected))
+                            else:
+                                chunk = tt.read_chunk("opencode", self.iso.opencode_db, 0, sid, 1 << 20)
+                                self.assertEqual((chunk.error, chunk.eof, chunk.unit, chunk.text),
+                                                 ("", True, "seq" if new == "v2" else "rowid", expected))
+
+    def test_a_normal_chunk_never_mixes_generations_or_drops_rows_after_its_cursor(self):
+        # Review [e7] R3: a cursor means something only in the unit that issued it. Whatever the
+        # moment of a generation change inside one chunk, a normal result (a chunk without
+        # error, an ``available`` conversation) keeps one generation and every row of it after
+        # the cursor in that generation; any other outcome must be an error or ``partial``.
+        import re
+        import conversation_reader
+        import opencode_runtime
+        self.load(upgraded=True)
+        sid = "ses_fixtureinvariant0000001"
+        old_rows, line = list(range(1, 81)), re.compile(r"\[user\] (OLD|NEW)-(\d{3})")
+
+        def put(con, generation, cursors, tag, pad=0):
+            for t in ("part", "message", "session_message"):     # one session's rows only
+                con.execute("DELETE FROM %s" % t)
+            for i in cursors:
+                text = "%s-%03d" % (tag, i) + ("X" * pad if i <= 10 else "")
+                if generation == "v1":
+                    con.execute("INSERT INTO message VALUES (?, ?, 1, 1, ?)",
+                                ("msg_iv%03d" % i, sid, json.dumps({"role": "user"})))
+                    con.execute("INSERT INTO part(rowid, id, message_id, session_id, time_created, time_updated,"
+                                " data) VALUES (?, ?, ?, ?, 1, 1, ?)",
+                                (i, "prt_iv%03d" % i, "msg_iv%03d" % i, sid,
+                                 json.dumps({"type": "text", "text": text})))
+                else:
+                    con.execute("INSERT INTO session_message VALUES (?, ?, 'user', ?, 1, 1, ?)",
+                                ("msg_v2iv%03d" % i, sid, i, json.dumps({"text": text})))
+
+        def broken(tags, nums, unit, start, eof, cursor_to, units, rows, whole):
+            """Why a normal result breaks the invariant, or '' when it holds."""
+            if len(set(tags)) > 1:
+                return "mixed generations"
+            tag = tags[0] if tags else ("OLD" if unit == units["OLD"] else "NEW")
+            if unit is not None and unit != units[tag]:
+                return "rows of one generation under the other's unit"
+            after = start if tag == "OLD" else 0        # the caller's cursor is the old unit's
+            want = [i for i in rows[tag] if after < i and (whole or i <= cursor_to)]
+            if nums != want or (eof and want != [i for i in rows[tag] if after < i]):
+                return "rows missing after the cursor"
+            return ""
+
+        original, cells = opencode_runtime.read_session_parts, []
+        for timing in ("after-first-page", "after-later-page", "before-retry"):
+            for start in (0, 10):
+                for old, new in (("v1", "v2"), ("v2", "v1")):
+                    for new_rows in ((4, 5), (4, 5, 25, 30)):
+                        for public in (False, True):
+                            with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as con, con:
+                                put(con, old, old_rows, "OLD", pad=1000 if start else 0)
+                            units = {"OLD": "rowid" if old == "v1" else "seq",
+                                     "NEW": "rowid" if new == "v1" else "seq"}
+                            rows = {"OLD": old_rows, "NEW": list(new_rows)}
+                            with self.library():
+                                sizes = [r[2] for r in tt._opencode_session(self.iso.opencode_db, sid, 0)[1]]
+                            # The public reader starts at 0; its first chunk ends at ``start``.
+                            limit = sum(sizes[:start]) if start else 1 << 20
+                            seen = {"count": None, "switched": False}
+
+                            def reader(*args, **kwargs):
+                                if seen["count"] is None and kwargs.get("after_cursor") == start:
+                                    seen["count"] = 0                       # the chunk under test begins
+                                snapshot = original(*args, **kwargs)
+                                if seen["count"] is not None and not seen["switched"]:
+                                    seen["count"] += 1
+                                    if seen["count"] == (1 if timing == "after-first-page" else 2):
+                                        with contextlib.closing(sqlite3.connect(self.iso.opencode_db)) as w, w:
+                                            put(w, new, new_rows, "NEW")
+                                        seen["switched"] = True
+                                        if timing == "before-retry":        # this page itself is refused
+                                            snapshot = {"state": "unreadable", "reason": "database-busy"}
+                                return snapshot
+
+                            read = tt.read_chunk
+                            with self.library(), mock.patch.object(tt.time, "sleep"), \
+                                    mock.patch.object(opencode_runtime, "read_session_parts", side_effect=reader), \
+                                    mock.patch.object(tt, "read_chunk",
+                                                      side_effect=lambda *a, **kw: read(*a, **kw, limit_bytes=limit)):
+                                if public:
+                                    view = conversation_reader.read_conversation(
+                                        {"harness": "opencode", "sid": sid,
+                                         "transcript": {"path": str(self.iso.opencode_db), "status": "available"}})
+                                    outcome, normal, text = view.status, view.status == "available", view.text
+                                    args = (None, 0, True, 0, True)
+                                else:
+                                    chunk = read("opencode", self.iso.opencode_db, start, sid, 1 << 20)
+                                    outcome, normal, text = chunk.error or "normal", not chunk.error, chunk.text
+                                    args = (chunk.unit, start, chunk.eof, chunk.cursor_to, False)
+                            found = line.findall(text)
+                            unit, begin, eof, cursor_to, whole = args
+                            reason = broken([t for t, _ in found], [int(n) for _, n in found], unit, begin,
+                                            eof, cursor_to, units, rows, whole) if normal else ""
+                            cells.append((timing, start, old + ">" + new, new_rows,
+                                          "public" if public else "read_chunk", outcome, reason))
+                            self.assertTrue(seen["switched"], cells[-1])      # the change did happen
+        self.cells = cells                              # the whole table, for a report
+        self.assertEqual(len(cells), 48)
+        self.assertEqual([c for c in cells if c[-1]], [])
 
 
 class OpenCodeReadRetryTest(unittest.TestCase):

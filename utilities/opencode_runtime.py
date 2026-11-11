@@ -2317,8 +2317,10 @@ def read_session_parts(session_id: str, *, db_path: str | Path | None = None,
     By default this additive viewer API has no message-count or text-size
     cap. ``refresh_cursors`` re-reads mutable rows which were previously
     observed while streaming. V1 cursors are part rowids; V2 cursors are
-    session_message sequence numbers. The existing bounded observation API is
-    unchanged.
+    session_message sequence numbers. Each row also carries ``updated``, the
+    row's native ``time_updated`` (``None`` when the column is absent), so a
+    reader can re-read rows that changed after it saw them. The existing bounded
+    observation API is unchanged.
 
     The optional budget arguments leave that default untouched: ``limit`` reads
     at most that many rows after ``after_cursor`` (oldest first; refreshed rows
@@ -2351,9 +2353,10 @@ def read_session_parts(session_id: str, *, db_path: str | Path | None = None,
             columns = _table_columns(con, "session_message")
             if not {"session_id", "type", "seq", "data"}.issubset(columns):
                 return {"state": "unknown", "reason": "session-message-schema-invalid", "parts": []}
+            updated = "time_updated" if "time_updated" in columns else "NULL"
             refresh = sorted({int(v) for v in refresh_cursors if isinstance(v, int) and v >= 0})
             if limit is not None or before_cursor is not None:
-                rows = _bounded_rows(con, "SELECT type,seq,data FROM session_message WHERE session_id=?",
+                rows = _bounded_rows(con, "SELECT type,seq,data," + updated + " FROM session_message WHERE session_id=?",
                                      "seq", session_id, after_cursor, refresh, limit, newest, before_cursor)
             else:
                 where = "session_id=? AND (seq>?"
@@ -2362,22 +2365,27 @@ def read_session_parts(session_id: str, *, db_path: str | Path | None = None,
                     where += " OR seq IN (" + ",".join("?" for _ in refresh) + ")"
                     params.extend(refresh)
                 where += ")"
-                rows = con.execute("SELECT type,seq,data FROM session_message WHERE " + where +
+                rows = con.execute("SELECT type,seq,data," + updated + " FROM session_message WHERE " + where +
                                    " ORDER BY seq", params).fetchall()
-            for typ, cursor, raw in rows:
+            for typ, cursor, raw, changed in rows:
                 data = _decode_json(raw)
                 result.append({"cursor": cursor, "role": typ, "data": data,
-                               "raw": raw if data is None else None})
+                               "raw": raw if data is None else None, "updated": changed})
             return _parts_result("v2", result, [row[1] for row in rows], after_cursor, limit, before_cursor)
         if v1:
-            if not {"session_id", "message_id", "data"}.issubset(_table_columns(con, "part")):
+            part_cols = _table_columns(con, "part")
+            if not {"session_id", "message_id", "data"}.issubset(part_cols):
                 return {"state": "unknown", "reason": "part-schema-invalid", "parts": []}
+            updated = "p.time_updated" if "time_updated" in part_cols else "NULL"
             message_cols = _table_columns(con, "message") if "message" in tables else set()
-            role_expr = "m.role" if "role" in message_cols else "NULL"
+            # The native V1 ``message`` row keeps its role inside ``data``.
+            role_expr = ("m.role" if "role" in message_cols else
+                         "CASE WHEN json_valid(m.data) THEN json_extract(m.data,'$.role') END"
+                         if "data" in message_cols else "NULL")
             join = " LEFT JOIN message m ON m.id=p.message_id" if "id" in message_cols else ""
             refresh = sorted({int(v) for v in refresh_cursors if isinstance(v, int) and v >= 0})
             if limit is not None or before_cursor is not None:
-                rows = _bounded_rows(con, "SELECT p.rowid," + role_expr + ",p.data FROM part p" + join +
+                rows = _bounded_rows(con, "SELECT p.rowid," + role_expr + ",p.data," + updated + " FROM part p" + join +
                                      " WHERE p.session_id=?", "p.rowid", session_id, after_cursor, refresh,
                                      limit, newest, before_cursor)
             else:
@@ -2387,12 +2395,12 @@ def read_session_parts(session_id: str, *, db_path: str | Path | None = None,
                     where += " OR p.rowid IN (" + ",".join("?" for _ in refresh) + ")"
                     params.extend(refresh)
                 where += ")"
-                rows = con.execute("SELECT p.rowid," + role_expr + ",p.data FROM part p" + join +
+                rows = con.execute("SELECT p.rowid," + role_expr + ",p.data," + updated + " FROM part p" + join +
                                    " WHERE " + where + " ORDER BY p.rowid", params).fetchall()
-            for cursor, role, raw in rows:
+            for cursor, role, raw, changed in rows:
                 data = _decode_json(raw)
                 result.append({"cursor": cursor, "role": role, "data": data,
-                               "raw": raw if data is None else None})
+                               "raw": raw if data is None else None, "updated": changed})
             return _parts_result("v1", result, [row[0] for row in rows], after_cursor, limit, before_cursor)
         return {"state": "missing", "reason": "exact-session-not-found", "parts": []}
     except (OSError, sqlite3.Error) as exc:

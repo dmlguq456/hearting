@@ -378,8 +378,14 @@ _loop_run_codex() {
       return 64
       ;;
   esac
+  # PG-23: approve a registered design MCP server's tools for this one run only.
+  local design_args=()
+  while IFS= read -r arg; do
+    [ -n "$arg" ] && design_args+=("$arg")
+  done < <(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import codex_permission_profile as p; print("\n".join(p.design_mcp_run_arguments(sys.argv[2])))' \
+    "$agent_home/utilities" "$runtime_home" 2>/dev/null)
   ( cd "$repo" && AGENT_HOME="$agent_home" AGENT_SESSION_ROLE=worker python3 "$governor" run --class loop -- timeout "$to" "$bin" exec --cd "$repo" \
-      "${sandbox_args[@]}" \
+      "${sandbox_args[@]}" "${design_args[@]}" \
       --skip-git-repo-check --json - < "$pf" ) \
       > "$j" 2>"${j%.json}.stderr.txt"
   runtime_rc=$?

@@ -290,6 +290,8 @@ class ModelFixture:
             index = len([r for r in self.requests if r["main"]])
             record = {
                 "at": _now(), "protocol": protocol, "main": main,
+                # The model id the harness asked for (a sub-agent's own model, PG-13).
+                "model": payload.get("model"),
                 "main_index": index if main else None,
                 "last_kind": kind, "last_text": last_text[-4000:],
                 "text": text, "tools": names[:60],
