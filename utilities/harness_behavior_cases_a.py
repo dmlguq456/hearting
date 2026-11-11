@@ -56,7 +56,7 @@ from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
 # --------------------------------------------------------------------------
 
 FX_HELPER = r'''
-import json, os, signal, subprocess, sys, time, hashlib
+import json, os, signal, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,27 +86,6 @@ def register(flags):
     from harness_capabilities import parent_completion
     harness, sid, source = session()
     carrier = parent_completion(harness).get("carrier", "")
-    # Give every harness path a real sealed-summary fixture in the same terminal
-    # slot read by work_intent.sealed_summary().
-    import dispatch_terminal_commit, work_intent
-    route_id = "rt-" + hashlib.sha256(attempt.encode()).hexdigest()[:16]
-    artifact_root = HERE / "hb_fx_artifacts"
-    route_file = HERE / "hb_fx_route.json"
-    route_file.write_text(json.dumps({"route_id": route_id, "artifact_root": str(artifact_root)}),
-                          encoding="utf-8")
-    event = CONF.get("event", "success")
-    event_tokens = {"failure": "HB-FAIL-CAUSE", "partial": "HB-UNRUN-CHECK",
-                    "decision": "HB-DECISION-A-OR-B"}
-    event_fact = event_tokens.get(event, "HB-SUCCESS")
-    summary = (f"{work_intent.summary_heads()[0]}\nResult: simulated {event} completion.\n"
-               f"{event_fact}\nRecord: HB-RECORD-PATH")
-    summary_path = dispatch_terminal_commit.terminal_slot(
-        artifact_root, route_id, attempt) / work_intent.SUMMARY_NAME
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(summary, encoding="utf-8")
-    sealed = work_intent.sealed_summary({"route_file": str(route_file)}, attempt)
-    if sealed != summary:
-        raise RuntimeError("fixture summary did not pass sealed_summary validation")
     jobs.parent.mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(["sleep", "900"], start_new_session=True, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -116,8 +95,7 @@ def register(flags):
     meta = ["attempt_schema_version=2", "capability=autopilot-code", "dispatch_depth=1",
             "worker_type=review", "transport=headless", "execution_surface=registered-headless",
             "registered_worker=1", "fallback_hop=same-harness-headless", f"harness={harness}",
-            f"parent_sid={sid}", f"parent_completion_delivery={carrier}",
-            f"route_file={route_file}"]
+            f"parent_sid={sid}", f"parent_completion_delivery={carrier}"]
     binding = None
     try:
         from dispatch_contract import runtime_ancestry_binding
@@ -147,7 +125,6 @@ def register(flags):
             sidecar = {"error": f"{type(exc).__name__}: {exc}"}
     state = {"harness": harness, "session_id": sid, "session_source": source, "carrier": carrier,
              "runtime_binding": list(binding) if binding else None, "child_pid": child.pid,
-             "sealed_summary": sealed, "sealed_summary_path": str(summary_path),
              "jobs": str(jobs), "sidecar": sidecar}
     state_file.write_text(json.dumps(state))
     print(f"HB-REGISTERED harness={harness} carrier={carrier} session_source={source} "
@@ -244,10 +221,9 @@ else:
 '''
 
 
-def _install_helper(run, attempt: str, event: str = "success") -> Path:
+def _install_helper(run, attempt: str) -> Path:
     root = run.home.root
-    (root / "hb_fx.json").write_text(json.dumps({"attempt": attempt, "harness": run.harness,
-                                                        "event": event}),
+    (root / "hb_fx.json").write_text(json.dumps({"attempt": attempt, "harness": run.harness}),
                                      encoding="utf-8")
     helper = root / "hb_fx.py"
     helper.write_text(FX_HELPER, encoding="utf-8")
