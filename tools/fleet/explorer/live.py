@@ -3313,12 +3313,34 @@ def _worker_pieces(worker):
     return pieces[:8]
 
 
+def _panel_stage(stage, box=None):
+    """One stage of a route record for the shell panel: its state and its doer's values,
+    with what its box in Fleet's route detail reads (verdict, time, unit, output, note)."""
+    row = {"name": str(stage.get("name") or "")[:64], "st": str(stage.get("st") or "")[:24]}
+    for key, source, limit in (("verdict", "verdict", 32), ("when", "when", 48), ("unit", "unit", 64),
+                               ("out", "out", 160), ("note", "rounds_note", 120), ("says", "says", 160)):
+        value = box.get(source) if isinstance(box, Mapping) else None
+        if isinstance(value, str) and value.strip() and value.strip() != "·":
+            row[key] = value.strip()[:limit]
+    model = stage.get("m")
+    if isinstance(model, (list, tuple)) and model and model[0]:
+        row["m"] = str(model[0])[:64]
+    for key, limit in (("h", 32), ("e", 32), ("el", 32)):
+        if isinstance(stage.get(key), str) and stage[key]:
+            row[key] = stage[key][:limit]
+    if type(stage.get("r")) is int and stage["r"] > 1:
+        row["r"] = stage["r"]
+    if stage.get("gate") is True:
+        row["gate"] = True
+    return row
+
+
 def session_route_status(snapshot, now=None, *, include_details=False):
     """Question-free labels from the same route records OVERVIEW consumes."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
     rows, index = _session_records(snapshot, now, resolver)
-    routes, _ = _route_records(snapshot, rows, index, resolver, now)
+    routes, route_nodes = _route_records(snapshot, rows, index, resolver, now)
     counts, opened = current_route_counts(routes)
     result = {}
     for tag in opened:
@@ -3357,9 +3379,33 @@ def session_route_status(snapshot, now=None, *, include_details=False):
         for route in selected[:8]:
             row = {key: str(route.get(key) or "")[:320] for key in
                    ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
-            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
-                              "st": str(stage.get("st") or "")[:24]}
+            # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
+            boxes = {}
+            for group in (route_nodes or {}).get(route.get("id")) or ():
+                for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
+                    if isinstance(item, Mapping) and item.get("n"):
+                        boxes.setdefault(str(item["n"]), item)
+            row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
                              for stage in (route.get("stages") or ())[:16]]
+            # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
+            # same record values, bounded; nothing here is collected a second time.
+            for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
+                if isinstance(route.get(key), str) and route[key]:
+                    row[key] = route[key][:64]
+            row["legs"] = len(route.get("legs") or ())
+            gauge = route.get("owner_gauge")
+            if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
+                row["owner_ctx_pct"] = round(gauge[0], 1)
+            context = route.get("owner_context")
+            if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
+                    and type(context[0]) is int):
+                row["owner_ctx_tokens"] = context[0]
+            row["worker_contexts"] = [
+                {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
+                 **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
+                    and item["model"] and item["model"][0] else {}),
+                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {})}
+                for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             if type(route.get("result_at")) in (int, float):
                 row["result_at"] = route["result_at"]
