@@ -2842,7 +2842,7 @@ def cmd_retire(args):
         return finish("target-changed", pending=True)
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
-    lines = _read_screen(target, typing=True)
+    lines = _read_screen(target)
     screen_reason = (_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines else "screen-unavailable"
     if screen_reason:
         return finish(screen_reason, pending=True)
@@ -4941,7 +4941,7 @@ def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
     refusal = _tmux_input_refusal(expected_pane)
     if refusal:
         return refusal, None
-    lines = _read_screen(expected_pane, typing=True)
+    lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
     screen_reason = _screen_ready(harness, lines)
@@ -5004,7 +5004,7 @@ def _sidless_idle_prompt_guard(target, expected_harness, expected_pane,
     refusal = _tmux_input_refusal(expected_pane)
     if refusal:
         return refusal, None
-    lines = _read_screen(expected_pane, typing=True)
+    lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
     screen_reason = _screen_ready(expected_harness, lines)
@@ -8510,26 +8510,19 @@ def _shell_seat(target, harness=None, info=None):
         return None
 
 
-def _read_screen(target, *, typing=False):
+def _read_screen(target):
     """The visible pane (ANSI) as screen lines, or None when it could not be read.
 
     A shell seat's pane also shows the shell's frame and panel; its draft, form
     and footer judgments read the native cells instead (one shared source). Every
     judged key into a shell seat's pane reads here first: while the host says a
     shell editor holds the outer keys, or gives no answer, there is no screen to
-    type into (None), never the framed pane read again as an empty box.
-    ``typing``: the caller types into the empty native box these cells show, so
-    the host must also say native takes those keys (``native_takes_keys``: an
-    older running host leaves its Fleet explorer out of ``focused`` but not out
-    of its input-wait answer)."""
+    type into (None), never the framed pane read again as an empty box."""
     seat = _shell_seat(target)
     if seat is not None:
         import session_shell
         lines = session_shell.native_screen(seat)
         if lines != session_shell.PASSTHROUGH:
-            if (typing and lines and _screen_ready(seat.get("harness"), lines) is None
-                    and not session_shell.native_takes_keys(seat)):
-                return None
             return lines
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)
@@ -8792,7 +8785,7 @@ def _clear_look(target, req):
     refusal = _tmux_input_refusal(target)
     if refusal:
         return refusal, agent, None
-    lines = _read_screen(target, typing=True)
+    lines = _read_screen(target)
     if lines is None:
         return "screen-unknown", agent, None
     return _screen_ready(req.get("harness"), lines), agent, lines
