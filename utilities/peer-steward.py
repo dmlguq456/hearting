@@ -7120,7 +7120,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # A question answer is the person's own reply: it ranks with terminal.
     def _terminal_rank(item):
         try:
-            if "answer_binding" in (item[4].get("receipt") or {}):
+            receipt = item[4].get("receipt")
+            if isinstance(receipt, dict) and "answer_binding" in receipt:
                 return 0
             return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
         except (TypeError, ValueError, AttributeError):

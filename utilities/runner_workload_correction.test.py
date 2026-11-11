@@ -873,27 +873,35 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 counts["batch_activation_calls"] += 1
             return None
 
+        reconcile_depth = [0]
+
         def checked_reconcile(store, duties=None, *, read_context=None, retry_state=None,
                               notice_selection=None, runner_incarnation=None,
-                              settlement_context=None):
+                              settlement_context=None, between_duties=None):
             if not runner_store:
                 runner_store.append(store)
-            if (runner_store[0] is store
+            # A notice handed over between duties runs inside its pass; it is
+            # not a pass of its own.
+            nested = reconcile_depth[0] > 0
+            if (runner_store[0] is store and not nested
                     and monitoring[0] and phase[0] == "runner"):
                 counts["passes"] += 1
                 counts["passes_after_input" if event else "passes_before_input"] += 1
                 if retry_state is not None:
                     counts["reconcile_retry_state_passes"] += 1
             cpu_started = time.process_time()
+            reconcile_depth[0] += 1
             try:
                 return original_reconcile(
                     store, duties, read_context=read_context, retry_state=retry_state,
                     notice_selection=notice_selection,
                     runner_incarnation=runner_incarnation,
                     settlement_context=settlement_context,
+                    between_duties=between_duties,
                 )
             finally:
-                if (runner_store[0] is store
+                reconcile_depth[0] -= 1
+                if (runner_store[0] is store and not nested
                         and monitoring[0] and phase[0] == "runner"):
                     counts["reconcile_cpu_seconds"] += time.process_time() - cpu_started
 

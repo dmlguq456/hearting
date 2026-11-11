@@ -1931,9 +1931,10 @@ def expire_notice_past_ttl(path: Path, *, actor: str, now: float | None = None) 
             modified = path.stat().st_mtime
         except (PendingDeliveryError, OSError):
             return "skipped"
-        if (value is None or value.get("state") not in OPEN_STATES
+        receipt = None if not isinstance(value, dict) else value.get("receipt")
+        if (not isinstance(value, dict) or value.get("state") not in OPEN_STATES
                 or value.get("route_node") != "notice"
-                or "answer_binding" in (value.get("receipt") or {})):
+                or (isinstance(receipt, dict) and "answer_binding" in receipt)):
             return "skipped"
         if now - modified < NOTICE_TTL_SECONDS:
             return "fresh"
