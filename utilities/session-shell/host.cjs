@@ -578,6 +578,7 @@ function observeInput(data) {
     else if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;
   }
 }
+function observeReport(data){epoch+=data.length;empty=false;}
 function openSettings(){
   settings={value:{...panelView.defaults,...displayConfiguration},before:{...displayConfiguration},index:0};
   block.leave();epoch++;queueLayout();
@@ -666,11 +667,20 @@ mouseInput=require('./panel-mouse.cjs')({
     // A left panel moves the native area right; native sees its own columns.
     const offset=geometry().nativeColumn;
     if(offset){if(x<=offset)return;raw=Buffer.from(`\x1b[<${code};${x-offset};${y}${release?'m':'M'}`,'latin1');}
-    if(!release&&(code&3)===0){block.leave();queueDisplay();}
-    if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
-    observeInput(raw);child.write(raw);
+    nativePointer(code,release,raw);
   }
 });
+function nativePointer(code,release,raw){
+  // A wheel report scrolls; it neither edits the composer nor clicks away
+  // the question block. Like a focus report it invalidates the in-flight
+  // observation but leaves no native draft, so a scroll (or the scroll nudge
+  // Herdr sends a Claude pane on a recent read) keeps the input settled.
+  const wheel=(code&0xc0)===64;
+  if(!release&&!wheel&&(code&3)===0){block.leave();queueDisplay();}
+  const observe=wheel&&!keyTail&&!paste?observeReport:observeInput;
+  if(currentDelivery){inputOwner.hold(raw);observe(raw);heldBytes+=raw.length;return;}
+  observe(raw);child.write(raw);
+}
 function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;

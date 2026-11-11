@@ -54,6 +54,53 @@ function make(){
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_wheel_reports_keep_input_settled_but_clicks_and_drafts_do_not(self):
+        # PG-50: Herdr sends a Claude pane wheel down/up/down on every recent read.
+        script = r"""
+const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict');
+const text=fs.readFileSync(process.argv[1],'utf8');
+function declaration(name){
+  const begin=text.search(new RegExp('^(?:async )?function '+name+'\\(','m'));
+  const end=text.indexOf('\n}',begin);
+  a.ok(begin>=0&&end>begin,'standalone function '+name+' is present');
+  return text.slice(begin,end+2);
+}
+const code=['refreshReadiness','observeInput','observeReport','nativePointer'].map(declaration).join('\n');
+function make(){
+  const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
+    relay:false,currentDelivery:null,sid:'owned-sid',selection:0,screenRevision:0,state:'idle',heldBytes:0,
+    left:0,written:[],held:[],screenSnapshot:()=>[],queueProjection:()=>{},queueDisplay:()=>{},
+    source:async()=>({ok:true,ready:true})};
+  s.block={leave:()=>s.left++};s.child={write:d=>s.written.push(d)};s.inputOwner={hold:d=>s.held.push(d)};
+  vm.createContext(s);vm.runInContext(code,s);return s;
+}
+const packet=(c,release=false)=>Buffer.from(`\x1b[<${c};60;20${release?'m':'M'}`,'latin1');
+(async()=>{
+  const s=make();s.observeInput(Buffer.from('turn one\r'));s.submitted=s.lastEnter;
+  for(const c of [65,65,65,64,64,64,65,65,65,68,81])s.nativePointer(c,false,packet(c));
+  a.equal(s.nativeEpoch,9,'wheel reports are not edits');a.equal(s.left,0,'wheel keeps block focus');
+  a.equal(s.written.length,11,'native still receives the scroll');a.ok(s.epoch>9);
+  await s.refreshReadiness();a.equal(s.empty,true);
+  const held=make();held.currentDelivery='ref';held.nativePointer(65,false,packet(65));
+  a.equal(held.held.length,1);a.equal(held.nativeEpoch,0);a.equal(held.heldBytes,packet(65).length);
+  const click=make();click.nativePointer(0,false,packet(0));click.nativePointer(0,true,packet(0,true));
+  a.equal(click.left,1);a.ok(click.nativeEpoch>0);await click.refreshReadiness();
+  a.equal(click.empty,false,'a click still withholds input');
+  const draft=make();draft.observeInput(Buffer.from('draft'));draft.nativePointer(65,false,packet(65));
+  await draft.refreshReadiness();a.equal(draft.empty,false,'a typed draft stays protected after a scroll');
+  const pasted=make();pasted.observeInput(Buffer.from('\x1b[200~'));pasted.nativePointer(65,false,packet(65));
+  a.equal(pasted.nativeEpoch,6+packet(65).length,'pasted wheel text counts');
+  const race=make();let resolve;race.source=()=>new Promise(r=>resolve=r);
+  const pending=race.refreshReadiness();race.nativePointer(65,false,packet(65));resolve({ok:true,ready:true});await pending;
+  a.equal(race.empty,false,'a scroll still invalidates an in-flight observation');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(
+            ["node", "-e", script, str(ROOT / "utilities/session-shell/host.cjs")],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
