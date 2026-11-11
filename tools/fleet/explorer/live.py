@@ -555,6 +555,7 @@ def _worker_segments(node, resources, state_text=None, owner=None):
         return ["resource", host, [list(s) for s in state]]
     if harness is None:
         return None
+    # The session shell reads these segments too; Fleet draws them in its MODEL cell words.
     segs = [[harness, "hb_" + harness]]
     pair = _model_pair(node.get("model")) or (
         _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
@@ -737,18 +738,24 @@ def _clock_ago(now, minutes):
     return _clock(now - value * 60)
 
 
+def _model_segments(harness, model, effort):
+    """``claude Opus 5.5 xhigh`` as segments: the session row's MODEL cell words (one function)."""
+    from .tables import model_cell_parts
+    return [[text, key] for text, key in model_cell_parts(harness, model, effort)]
+
+
+def _model_words(model_name, effort):
+    """``Opus 5.5 high``: the model and effort words of a MODEL cell, after the harness."""
+    from .tables import _effort_word
+    return " ".join(part for part in (model_name, _effort_word(effort) if effort else None) if part)
+
+
 def _route_title_line(rid, owner, resume, role="owner"):
     harness = _text(owner.get("harness"))
     parts = [[f"  {rid[:11]} · {role} ", _SEG_DIM]]
     if harness:
-        parts.append([harness, "hb_" + harness])
         model, effort = owner.get("model"), owner.get("effort")
-        if model:
-            parts += [[" (", _SEG_DIM], [model[0], model[1]]]
-            if effort:
-                parts += [["·", _SEG_DIM],
-                          [effort, "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM]]
-            parts.append([")", _SEG_DIM])
+        parts += _model_segments(harness, model or None, effort if model else None)
     if resume:
         parts += [["  resumes from ", _SEG_DIM], [resume, "lvl_y"]]
     return parts
@@ -760,7 +767,7 @@ def _node_detail(node, now):
     harness = _text(node.get("harness"))
     model = _text(node.get("model"))
     effort = _effort(node.get("effort"))
-    who = [harness, "·".join(part for part in (model, effort) if part)] if harness else None
+    who = [harness, _model_words(model, effort)] if harness else None
     if state == "done":
         verdict = "PASS" if node.get("gate_passed") else "done"
     else:
@@ -1199,15 +1206,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
             line = [[short_id + "  ", "dim"]]
             harness = _text(node.get("harness"))
             if harness:
-                line.append([harness, "hb_" + harness])
                 model = _stage_model(node.get("model"))
                 effort = _effort(node.get("effort"))
-                if model:
-                    line += [[" (", "dim"], [model[0], model[1]]]
-                    if effort:
-                        line += [["·", "dim"],
-                                 [effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"]]
-                    line.append([")", "dim"])
+                line += _model_segments(harness, model or None, effort if model else None)
             lines.append(line)
         frame_name = " ∥ ".join(str(node.get("id") or "frame") for node in frame_nodes)
         # The band's identity can be a borrowed frame leg; only a real owner attempt
@@ -1224,7 +1225,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([route["harness"], "hb_" + route["harness"]])
     model = route.get("model")
     if model:
-        owner_line.append([f" {model[0]}·{route['effort']}" if route.get("effort") else f" {model[0]}", "soft"])
+        owner_line.append([" " + _model_words(model[0], route.get("effort")), "soft"])
     if route.get("age"):
         owner_line.append([" · " + route["age"], "dim"])
     return [{
