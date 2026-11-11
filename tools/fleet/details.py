@@ -23,6 +23,9 @@ _METADATA = ("campaign_label", "location_kind", "location_wt", "location_repo",
 # The steward relation lists travel with the scalar flag from the same optional
 # pass. They are display-only and never enter the scalar continuation payload.
 _STEWARD_RELATIONS = ("steward_targets", "steward_parents")
+# Filled only by the optional detail pass (Git display and campaign label).
+_OPTIONAL_METADATA = ("branch", "worktree_count", "branch_ahead", "branch_behind",
+                      "campaign_label")
 _PEER_FIELDS = ("peer_last_recv", "peer_last_sent", "peer_sent_1h",
                 "peer_recv_1h", "peer_obligations")
 
@@ -1032,6 +1035,20 @@ def retain_optional_last_good(previous, current):
     old, new = previous.snapshot, current.snapshot
     old_observations = getattr(old, "observations", None) or {}
     new_observations = dict(getattr(new, "observations", None) or {})
+    # A required-only pass does not read Git or campaign metadata (only the
+    # optional pass records ``optional:memory``). Keep the last optional values
+    # for the same rows instead of blanking them until the next optional pass.
+    if "optional:memory" not in new_observations and "optional:memory" in old_observations:
+        prior_rows = {}
+        for row in old.sessions + old.jobs:
+            prior_rows.setdefault((identity(row), binding(row)), []).append(row)
+        for row in new.sessions + new.jobs:
+            matches = prior_rows.get((identity(row), binding(row)), ())
+            if len(matches) != 1:
+                continue
+            for field in _OPTIONAL_METADATA:
+                if getattr(row, field, None) is None and getattr(matches[0], field, None) is not None:
+                    setattr(row, field, getattr(matches[0], field))
 
     old_memory = old_observations.get("optional:memory", {})
     new_memory = new_observations.get("optional:memory", {})

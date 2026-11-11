@@ -53,6 +53,40 @@ class PassScopeTest(unittest.TestCase):
         self.assertEqual(walk.call_count, 2)
 
 
+class SharedVerdictTest(unittest.TestCase):
+    def test_one_notice_verdict_per_delivery_per_pass_including_errors(self):
+        from fleet.collectors import dispatch
+        supervision = mock.Mock()
+        supervision.notice_is_current.side_effect = [True, ValueError("stale"), ValueError("again")]
+        record = {"receipt_digest": "sha256:x"}
+        with pass_scope.collection_pass():
+            self.assertTrue(dispatch._notice_current_in_pass(supervision, record, "d", "g", "r"))
+            self.assertTrue(dispatch._notice_current_in_pass(supervision, record, "d", "g", "r"))
+        with pass_scope.collection_pass():
+            for _ in range(2):
+                with self.assertRaises(ValueError):
+                    dispatch._notice_current_in_pass(supervision, record, "d", "g", "r")
+        self.assertEqual(supervision.notice_is_current.call_count, 2)
+
+    def test_required_pass_keeps_last_optional_git_and_label_fields(self):
+        from fleet import details
+        from fleet.model import Session
+        from fleet.refresh import LiveSnapshot
+
+        def snap(branch, optional):
+            row = Session(harness="codex", session_id="s", pid=1, cwd="/r")
+            row.branch = branch
+            value = LiveSnapshot(sessions=[row])
+            value.observations = {"optional:memory": {"state": "success"}} if optional else {}
+            return details.DetailSnapshot({}, value)
+
+        kept = details.retain_optional_last_good(snap("main", True), snap(None, False))
+        self.assertEqual(kept.snapshot.sessions[0].branch, "main")
+        # An optional pass that observed no branch is not overridden.
+        cleared = details.retain_optional_last_good(snap("main", True), snap(None, True))
+        self.assertIsNone(cleared.snapshot.sessions[0].branch)
+
+
 class GenerationReuseTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
