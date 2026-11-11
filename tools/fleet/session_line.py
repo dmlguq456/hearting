@@ -8,9 +8,18 @@ from .render_cells import _clean_model, _effort_text, _EFF_SHORT, _glyph, _model
 from .session_handle import sanitize_title
 
 SEPARATOR = " │ "
-# The answer-wait words the native statusline always used; a person has not
-# chosen an English form, so they stay as they are (spec rule 3).
-WAIT_LABEL = "◑답 대기"
+# The answer-wait words follow the screen language (spec rule 3, supervisor
+# 2026-11-11): the same strings as Fleet #1514's ``ANSWER_WAIT_WORDS``.
+ANSWER_WAIT_WORDS = {"ko": "◑답 대기", "en": "◑ to answer"}
+
+
+def answer_wait_word():
+    """``◑답 대기`` on a Korean screen, ``◑ to answer`` otherwise."""
+    try:
+        from .config import ui_language
+        return ANSWER_WAIT_WORDS.get(ui_language(), ANSWER_WAIT_WORDS["en"])
+    except Exception:
+        return ANSWER_WAIT_WORDS["ko"]
 QUOTA_GROUPS = frozenset({"quota", "model_quota"})
 
 
@@ -29,15 +38,13 @@ def _level(value):
 
 
 def _remaining(reset):
+    """Time left until a quota reset in Fleet's spaced form: ``45m``, ``3h 20m``, ``3d 0h``."""
     if type(reset) not in (int, float) or not math.isfinite(reset):
         return ""
     seconds = int(reset - time.time())
     if seconds <= 0:
         return ""
-    days, rest = divmod(seconds, 86400)
-    hours, rest = divmod(rest, 3600)
-    minutes = rest // 60
-    return f"{days}d{hours}h" if days else (f"{hours}h{minutes:02d}m" if hours else f"{minutes}m")
+    return elapsed_text(seconds // 60)
 
 
 def _git_text(values):
@@ -141,7 +148,7 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     count = values.get("answer_wait")
     if count is None or isinstance(count, int) and not isinstance(count, bool) and count > 0:
         number = str(count) if count is not None else "?"
-        fixed("wait", WAIT_LABEL + " " + number, "g_blocked", short=_LIVE_GLYPH["blocked"] + " " + number)
+        fixed("wait", answer_wait_word() + " " + number, "g_blocked", short=_LIVE_GLYPH["blocked"] + " " + number)
     route = _text(values.get("route_label"), "")
     if route:
         count = route.split(" ", 2)
@@ -513,147 +520,236 @@ def context_detail_lines(detail):
 # route row shows from the jobs of that very snapshot: no second collection,
 # timer or process. Display only; none of this is liveness or input authority.
 
-ROUTE_GLYPHS = (("working", "⠏"), ("idle", "●"), ("blocked", "◑"), ("dead", "✕"), ("done", "✓"))
-_ROUTE_STATE = {"stale": "dead", "failed": "dead", "attention": "dead", "degraded": "dead"}
+# The one place the shell judges a route row and counts the states. It follows
+# Fleet #1514 (``explorer.live.route_marker_state``/``route_state_counts``/
+# ``_route_doer``): once those are on main, ``route_marker`` and ``route_doer``
+# below call them (the ``getattr`` lines) and this fallback goes unused.
+ROUTE_MARKS = {"working": "⠏", "idle": "●", "blocked": "●", "dead": "✕", "done": "✓", "stale": "◌"}
+_TALLY = (("running", "⠏"), ("waiting", "●"), ("stopped", "✕"))
 
 
-def route_state(state):
-    """The Fleet state a route row is drawn with: working, idle, blocked, dead or done."""
-    state = str(state or "")
-    state = _ROUTE_STATE.get(state, state)
-    return state if state in dict(ROUTE_GLYPHS) else "idle"
+def route_closed(route):
+    """A route its supervisor closed (the outcome sidecar's ``closed_at``) is over."""
+    if route.get("closed"):
+        return True
+    codes = (route.get("visibility") or {}).get("codes") if isinstance(route.get("visibility"), dict) else None
+    verification = codes.get("verification") if isinstance(codes, dict) else None
+    return bool(isinstance(verification, dict) and verification.get("closed_at"))
 
 
-def route_glyph(state):
-    """Fleet's glyph and color key for a route row (the spinner frame while working)."""
-    return _glyph(route_state(state))
+def route_marker(route):
+    """Fleet's route marker: working, idle (waits), blocked, dead, done or stale."""
+    from .explorer import live
+    shared = getattr(live, "route_marker_state", None)
+    if shared is not None:
+        return shared(route)
+    if route.get("owner_waits"):
+        return "idle"
+    if route.get("activity") == "running":
+        return "working"
+    state = str(route.get("state") or "")
+    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+
+
+def route_tally(markers):
+    """``{"running", "waiting", "stopped"}`` as Fleet's ``route_state_counts`` counts them,
+    over (marker, closed) pairs of current routes; a closed route is in neither count."""
+    counts = {"running": 0, "waiting": 0, "stopped": 0}
+    for marker, closed in markers:
+        if closed:
+            continue
+        if marker == "working":
+            counts["running"] += 1
+        elif marker in ("idle", "blocked"):
+            counts["waiting"] += 1
+        elif marker == "dead":
+            counts["stopped"] += 1
+    return counts
+
+
+def route_glyph(marker):
+    """The glyph and color key Fleet's route row draws for a marker (the spinner frame while working)."""
+    from .render_cells import _state_key
+    if marker == "working":
+        return _glyph("working")
+    return ROUTE_MARKS.get(marker, "·"), _state_key(marker if marker in _GLYPH_STATES else "unknown")
+
+
+_GLYPH_STATES = frozenset(("working", "idle", "blocked", "dead", "done", "stale"))
 
 
 def route_badge(label, panels):
-    """``⏳ route 3 ⠏2 ✕1``: the route count with how many are in each state.
+    """``⏳ route 3 ⠏2 ✕1``: the route count with Fleet's running/waiting/stopped counts.
 
     ``label`` is the producer's own ``⏳ route N`` reading; its first N panel
-    rows are those current routes. Without panel rows the count stays alone.
+    rows are those current routes. Without their markers the count stays alone.
     """
     import re
     match = re.match(r"⏳ route (\d+)", label or "")
     if not match:
         return label or ""
     count = int(match.group(1))
-    rows = [row for row in (panels or ())[:count] if isinstance(row, dict)]
+    rows = [row for row in (panels or ())[:count] if isinstance(row, dict) and row.get("marker")]
     if len(rows) != count:
         return "⏳ route " + str(count)
-    states = [route_state(row.get("state")) for row in rows]
-    tally = [glyph + str(states.count(state)) for state, glyph in ROUTE_GLYPHS if states.count(state)]
-    return " ".join(["⏳ route " + str(count), *tally])
+    tally = route_tally((row["marker"], bool(row.get("closed"))) for row in rows)
+    return " ".join(["⏳ route " + str(count)] + [glyph + str(tally[name]) for name, glyph in _TALLY if tally[name]])
 
 
 def _number(value):
     return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
 
-def job_context_percent(job, get):
-    """``ctx_pct`` when known, else tokens over the window when both are known, else None."""
+def job_context(job, get):
+    """``(percent, tokens)``: Fleet's own gauge percent, else tokens over a known window,
+    else the exact token count with no percent; ``(None, None)`` for a stopped job."""
     if get(job, "liveness") in ("stale", "dead"):
-        return None
-    percent = _number(get(job, "ctx_pct"))
-    if percent is not None:
-        return min(100.0, percent)
+        return None, None
+    percent = None
+    try:
+        from .explorer import live
+        percent = _number(live._context_gauge(job)[0])
+    except Exception:
+        percent = None
+    if percent is None:
+        percent = _number(get(job, "ctx_pct"))
     tokens, window = _number(get(job, "active_context_tokens")), _number(get(job, "context_window_tokens"))
-    if tokens is not None and window:
-        return min(100.0, tokens * 100.0 / window)
-    return None
+    if percent is None and tokens is not None and window:
+        percent = tokens * 100.0 / window
+    if percent is not None:
+        return min(100.0, percent), None
+    return None, int(tokens) if tokens is not None else None
 
 
-def _route_job(row, jobs, get, owner_jobs):
-    """The job a route row describes: the live worker of the shown stage, else the owner."""
-    live = [job for job in jobs if get(job, "liveness") in ("working", "idle", "blocked")]
-    stage = row.get("worker_stage")
-    owners = owner_jobs(jobs)
-    workers = [job for job in live if job not in owners and stage and get(job, "route_node") == stage]
-    if len(workers) == 1:
-        return workers[0]
-    if len(owners) == 1:
-        return owners[0]
-    return live[0] if len(live) == 1 else None
+def route_doer(route, jobs, get, live):
+    """Who does the route's work now: the live worker of the shown stage, else the owner.
+
+    Fleet #1514 records this as ``route["doer"]``; when present it is used as is.
+    """
+    shared = route.get("doer") if isinstance(route, dict) else None
+    if isinstance(shared, dict):
+        pair = shared.get("model")
+        return {"harness": shared.get("harness"), "model": pair[0] if isinstance(pair, (list, tuple)) and pair else None,
+                "effort": shared.get("effort"), "percent": _number(shared.get("context")),
+                "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
+                "tool": shared.get("tool"), "agents": shared.get("agents") or 0}
+    stage = (route or {}).get("worker_stage")
+    owners = live._owner_jobs(jobs)
+    workers = [job for job in jobs if job not in owners and stage and get(job, "route_node") == stage
+               and get(job, "liveness") in ("working", "idle", "blocked")]
+    owner = owners[0] if len(owners) == 1 else None
+    job = workers[0] if len(workers) == 1 else owner
+    if job is None:
+        return None
+    harness = get(job, "harness")
+    if (route or {}).get("state") in ("dead", "stale"):
+        return {"harness": harness}
+    pair = live._model_pair(get(job, "resolved_model", "model"))
+    percent, tokens = job_context(job, get)
+    tool = get(job, "exec_tool")
+    name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
+    working = get(job, "liveness") == "working"
+    agents = get(job, "subagents") or ()
+    return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"),
+            "percent": percent, "tokens": tokens, "tool": name if working else None,
+            "agents": sum(1 for agent in agents if get(agent, "active") is True)
+                      if working and isinstance(agents, (list, tuple)) else 0}
 
 
-def route_details(snapshot, panels, now=None):
-    """Add harness, model, effort, context, tool, agents and start time to panel rows.
+def route_details(snapshot, panels, routes=None, now=None):
+    """Add each panel row's marker, closed flag and doer values, and its start time.
 
-    Rows are changed in place. A value the jobs did not report is left out.
-    The start time is absolute so a re-published pass still ages correctly.
+    Rows are changed in place; ``routes`` are Fleet's own route records by id.
+    A value that was not reported is left out. The start time is absolute so a
+    re-published pass still ages correctly.
     """
     from .explorer import live
     now = time.time() if now is None else now
     get = live._get
     collected = live._collect_routes(snapshot)
+    routes = routes or {}
     seen = set()
     for rows in (panels or {}).values():
         for row in rows if isinstance(rows, list) else ():
             if not isinstance(row, dict) or id(row) in seen:
                 continue
             seen.add(id(row))
+            route = routes.get(row.get("id"))
+            if isinstance(route, dict):
+                row["marker"] = route_marker(route)
+                if route_closed(route):
+                    row["closed"] = True
             slot = collected.get(row.get("id"))
-            if not slot:
-                continue
-            jobs = list(slot.get("jobs") or ())
-            job = _route_job(row, jobs, get, live._owner_jobs)
-            elapsed = [_number(get(item, "elapsed_min")) for item in jobs]
-            elapsed = [value for value in elapsed if value is not None]
-            running = any(get(item, "liveness") in ("working", "idle", "blocked") for item in jobs)
+            jobs = list(slot.get("jobs") or ()) if slot else []
+            elapsed = [value for value in (_number(get(item, "elapsed_min")) for item in jobs) if value is not None]
             if elapsed:
-                if running:
-                    row["since"] = round(now - max(elapsed) * 60, 1)
+                if any(get(item, "liveness") in ("working", "idle", "blocked") for item in jobs):
+                    row["since"] = now - max(elapsed) * 60
                 else:
                     row["elapsed_min"] = round(max(elapsed), 1)
-            if job is None:
+            doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
+            if not doer:
                 continue
-            for key in ("harness", "effort"):
-                text = get(job, key)
-                if isinstance(text, str) and 0 < len(text) <= 64:
-                    row[key] = text
-            model = get(job, "resolved_model", "model")
-            if isinstance(model, str) and 0 < len(model) <= 128:
-                # Fleet's own display name for a runtime model id (``Opus 5.5``).
-                pair = live._model_pair(model)
-                row["model"] = pair[0] if pair else model
-            percent = job_context_percent(job, get)
-            if percent is not None:
-                row["ctx_pct"] = round(percent, 1)
-            if get(job, "liveness") == "working":
-                tool = get(job, "exec_tool")
-                name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
-                if isinstance(name, str) and 0 < len(name) <= 64:
-                    row["tool"] = name
-            agents = get(job, "subagents") or ()
-            active = sum(1 for agent in agents if get(agent, "active") is True) if isinstance(agents, (list, tuple)) else 0
-            if active:
-                row["agents"] = active
+            for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64)):
+                if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit:
+                    row[key] = doer[key]
+            if doer.get("percent") is not None:
+                row["ctx_pct"] = round(doer["percent"], 1)
+            elif type(doer.get("tokens")) is int:
+                row["ctx_tokens"] = doer["tokens"]
+            if type(doer.get("agents")) is int and doer["agents"] > 0:
+                row["agents"] = doer["agents"]
     return panels
 
 
 def session_route_status(snapshot, now=None, *, include_details=False):
-    """Fleet's question-free route labels, with the row values the shell panel paints."""
-    from .explorer.live import session_route_status as labels_and_panels
-    result = labels_and_panels(snapshot, now, include_details=include_details)
-    if include_details:
-        labels, panels = result
-        try:
-            route_details(snapshot, panels, now)
-            # The statusline reads only this label: count the states here, once.
-            labels = {key: route_badge(label, panels.get(key)) for key, label in labels.items()}
-        except Exception:
-            pass  # Optional display values never cost the labels.
-        return labels, panels
-    return result
+    """Fleet's question-free route labels, with the row values the shell panel paints.
+
+    Fleet's own route records are read from the same interpretation pass (no
+    second pass): its record builder is observed for the duration of the call.
+    """
+    from .explorer import live
+    if not include_details:
+        return live.session_route_status(snapshot, now)
+    captured = []
+    original = live._route_records
+
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        captured.append(result[0])
+        return result
+
+    live._route_records = observed
+    try:
+        labels, panels = live.session_route_status(snapshot, now, include_details=True)
+    finally:
+        live._route_records = original
+    try:
+        routes = {route.get("id"): route for route in (captured[-1] if captured else ()) if isinstance(route, dict)}
+        route_details(snapshot, panels, routes, now)
+        # The statusline reads only this label: count the states here, once.
+        labels = {key: route_badge(label, panels.get(key)) for key, label in labels.items()}
+    except Exception:
+        pass  # Optional display values never cost the labels.
+    return labels, panels
+
+
+def token_text(tokens):
+    """``250K`` as Fleet writes an exact token count with no known window."""
+    if type(tokens) is not int or tokens < 0:
+        return ""
+    if tokens < 1000:
+        return str(tokens)
+    if tokens < 999_500:
+        return f"{round(tokens / 1000)}K"
+    return f"{tokens / 1_000_000:.1f}M"
 
 
 def elapsed_text(minutes):
-    """``42m``, ``1h 27m`` or ``2d 3h``; empty for an unknown value."""
+    """``42m``, ``1h 27m`` or ``2d 3h`` (Fleet's ``_dur``); empty for an unknown value."""
     if _number(minutes) is None:
         return ""
-    minutes = int(minutes + 0.5)
+    minutes = int(minutes)   # whole minutes, as Fleet's ``_dur``
     if minutes < 60:
         return f"{minutes}m"
     hours, minutes = divmod(minutes, 60)

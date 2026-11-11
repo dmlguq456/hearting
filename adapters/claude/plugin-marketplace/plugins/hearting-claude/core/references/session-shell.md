@@ -108,7 +108,10 @@ running jobs; `◑답 대기 N` and the session's title; any question; the route
 section; the messages section; and `5h … │ 7d …` last. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `Settings`, `messages`, stage names, `5h`/`7d`); only real content and
-language-dependent text is Korean, and `◑답 대기 N` keeps its existing words.
+language-dependent text follows the screen language: the answer wait reads
+`◑답 대기 N` on a Korean screen and `◑ to answer N` otherwise, Fleet's same
+strings. Times use Fleet's spaced form (`45m`, `3h 20m`, `3d 0h`) for elapsed
+time and quota resets alike.
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
 short, the question and the top groups stay; spacer rows, then messages, then
@@ -135,8 +138,9 @@ birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
 The route section has no box: a titled rule (`── ⏳ route N ──`) above and a
 rule below, shared with the messages section when both show. Each current
-route (the ones the statusline counts) is one folded row: Fleet's state glyph
-and judgment (`⠏` working, `●` waiting, `◑` blocked, `✕` stopped, `✓` done),
+route (the ones the statusline counts) is one folded row: Fleet's route marker
+and judgment (`⠏` working, `●` waiting on a worker or a person, `✕` stopped,
+`✓` done, `◌` no response),
 title, harness, context percent and elapsed time (`route line` = `time`, the
 default) or title, harness, model and context percent (`model`). The bottom
 layout fits model, effort, a five-cell gauge, the current tool or stage and the
@@ -144,12 +148,17 @@ elapsed time on the row whatever the setting. Pressing a row opens it in place
 (model, effort and gauge, `plan ✓ › execute ● › review` when there are several
 stages, `>_ tool` while working, `+N agent`) and pressing it again folds it.
 More than five routes end in `+N more`, which opens Fleet. These values come
-from the answer-wait producer's existing pass: the shared line helper adds each
-route row's job values (harness, display model, effort, context, tool, active
-sub-agents and an absolute start time) from that same snapshot, and counts
-the route states into the statusline label (`⏳ route 3 ⠏2 ✕1`). A job's
-context is its `ctx_pct`, else its tokens over its window when both are
-known, else left out. The display is as fresh as that cache. Pressing the
+from the answer-wait producer's existing pass: the shared line helper reads
+Fleet's own route records from that pass and adds each row's marker and the
+values of who does the work now (the working worker of the shown stage, else
+the owner: harness, display model, effort, context, tool, active sub-agents)
+plus an absolute start time, and counts running, waiting and stopped routes
+into the statusline label (`⏳ route 3 ⠏2 ✕1`) by Fleet's own rule; a route
+its supervisor closed is in neither count. Context is Fleet's own gauge
+percent, else tokens over a known window, else the exact token count
+(`250K`); a stopped job shows none. The judgment lives in one place
+(`tools/fleet/session_line.py`) and uses Fleet's shared functions once they
+exist. The display is as fresh as that cache. Pressing the
 section's heading opens the existing read-only route evidence pages.
 The messages section shows the latest three peer messages, one row each (`←`
 received from the exact session's retained received inputs, `→` sent from this

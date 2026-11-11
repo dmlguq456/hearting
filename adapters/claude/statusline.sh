@@ -70,8 +70,9 @@ def rlrem(k):
     if not isinstance(rs, (int, float)): return ""
     s = int(rs - time.time())
     if s <= 0: return ""
+    # The spaced form the shell panel and Fleet write: 45m, 3h 20m, 3d 0h.
     dd, r = divmod(s, 86400); hh, r = divmod(r, 3600); mm = r // 60
-    return f"{dd}d{hh}h" if dd else (f"{hh}h{mm:02d}m" if hh else f"{mm}m")
+    return f"{dd}d {hh}h" if dd else (f"{hh}h {mm}m" if hh else f"{mm}m")
 # per-model 사용량 버킷 → "fable:57 opus:12" 꼴. 두 스키마 모두 수용 (2.1.198 번들 확인):
 #  1. named 형제 키: seven_day_opus/sonnet · seven_day_overage_included("Fable 5 limit") · oauth_apps
 #  2. model_scoped 배열: [{display_name:"Fable", utilization:0..1, resets_at:str}]
@@ -172,11 +173,12 @@ PY
   )
   read -r display_pid tap_pid tap_start tap_policy <<< "$identity" || true
 fi
-S_SESSION_DISPLAY=""; S_SESSION_TAG=""; S_SESSION_PROJECT=""
+S_SESSION_DISPLAY=""; S_SESSION_TAG=""; S_SESSION_PROJECT=""; S_WAIT_WORD=""
 session_helper="$AGENT_HOME/tools/fleet/session_handle.py"
 [ -f "$session_helper" ] || session_helper="$(dirname "$AGENT_HOME")/tools/fleet/session_handle.py"
 if [ -n "$S_SID" ] && [ -f "$session_helper" ]; then
-  # Lines: the session number Fleet already assigned (read only), the project, the title.
+  # Lines: the session number Fleet already assigned (read only), the project, the
+  # answer-wait words, the title.
   session_display=$(python3 - "$session_helper" "$S_SID" "$display_pid" "$S_CWD" <<'PY' 2>/dev/null || true
 import importlib.util, sys
 try:
@@ -205,6 +207,13 @@ try:
     except Exception:
         project = ""
     print(mod.clip_cells(project, 48) if project and project != "(unknown)" else "")
+    # Third line: the answer-wait words in the screen language (Fleet's same strings).
+    try:
+        from fleet.config import ui_language
+        wait_word = {"ko": "◑답 대기", "en": "◑ to answer"}.get(ui_language(), "◑ to answer")
+    except Exception:
+        wait_word = ""
+    print(wait_word)
     from fleet.titles import last_title
     title = last_title(sid, harness="claude")
     name = mod.current_session_subject(inputs.get("runtime_name"), title)
@@ -225,7 +234,10 @@ PY
   S_SESSION_TAG="${session_display%%$'\n'*}"
   case "$session_display" in *$'\n'*)
     rest="${session_display#*$'\n'}"; S_SESSION_PROJECT="${rest%%$'\n'*}"
-    case "$rest" in *$'\n'*) S_SESSION_DISPLAY="${rest#*$'\n'}" ;; esac ;;
+    case "$rest" in *$'\n'*)
+      rest="${rest#*$'\n'}"; S_WAIT_WORD="${rest%%$'\n'*}"
+      case "$rest" in *$'\n'*) S_SESSION_DISPLAY="${rest#*$'\n'}" ;; esac ;;
+    esac ;;
   esac
 fi
 
@@ -483,7 +495,7 @@ if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
     if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
       wait_total="$1"
       [ "$wait_total" = "-1" ] && wait_total="?"
-      wseg="${RED}◑답 대기 ${wait_total}${RST}"
+      wseg="${RED}${S_WAIT_WORD:-◑답 대기} ${wait_total}${RST}"
     fi
     [ -z "$route_label" ] || rseg="${YEL}${route_label}${RST}"
     # A session-tidy result line (a continue that was not sent) otherwise waits for the

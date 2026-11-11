@@ -6,6 +6,27 @@ from tools.fleet.palette import style_components
 
 
 class CommonSessionLineTest(unittest.TestCase):
+    def setUp(self):
+        # Korean screen words for the fixed assertions; the English form is checked below.
+        from unittest import mock
+        patch = mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})
+        patch.start(); self.addCleanup(patch.stop)
+
+    def test_answer_wait_words_follow_the_screen_language(self):
+        from unittest import mock
+        for language, words in (("Korean", "◑답 대기 3"), ("English", "◑ to answer 3")):
+            with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": language}):
+                text = "".join(part for part, _key in line_segments(self.sample(), 240))
+                self.assertIn(words, text)
+                self.assertIn("context ", text); self.assertIn("⏳ route 2", text)
+
+    def test_time_left_and_elapsed_use_fleets_spaced_form(self):
+        import time
+        from tools.fleet.session_line import _remaining, elapsed_text
+        self.assertEqual(elapsed_text(45), "45m"); self.assertEqual(elapsed_text(200), "3h 20m")
+        self.assertEqual(elapsed_text(3 * 1440), "3d 0h")
+        self.assertEqual(_remaining(time.time() + 200 * 60 + 30), "3h 20m")
+        self.assertEqual(_remaining(time.time() - 5), "")
     def sample(self):
         return {"harness": "codex", "tag": "52", "state": "idle", "cwd": "/synthetic/hearting",
                 "title": "Synthetic session", "branch": "feature", "ctx_pct": 37,
@@ -95,19 +116,36 @@ class CommonSessionLineTest(unittest.TestCase):
             "rt-c": [job(attempt_id="o3", depth=1, worker_type="owner", liveness="dead", harness="claude",
                          ctx_pct=12, elapsed_min=54.0)],
         }
+        jobs["rt-d"] = [job(attempt_id="o4", depth=1, worker_type="owner", liveness="dead", harness="codex",
+                            elapsed_min=30.0)]
         collected = {rid: {"jobs": rows} for rid, rows in jobs.items()}
-        panels = {"claude\0s": [{"id": "rt-a", "state": "working", "worker_stage": "execute"},
-                                {"id": "rt-b", "state": "working", "worker_stage": "one-shot"},
-                                {"id": "rt-c", "state": "dead", "worker_stage": "execute"}]}
+        # Fleet's own route records (``_route_records``), as the producer observes them.
+        closed = {"codes": {"schema": "route_visibility_codes_v1", "verification": {"closed_at": "2026-11-11T00:00:00Z"}}}
+        routes = {"rt-a": {"id": "rt-a", "state": "working", "activity": "running", "owner_waits": True, "current": True,
+                           "worker_stage": "execute"},
+                  "rt-b": {"id": "rt-b", "state": "working", "activity": "running", "current": True, "worker_stage": "one-shot"},
+                  "rt-c": {"id": "rt-c", "state": "dead", "activity": "ended", "current": True, "worker_stage": "execute"},
+                  "rt-d": {"id": "rt-d", "state": "dead", "activity": "ended", "current": True, "visibility": closed}}
+        panels = {"claude\0s": [{"id": rid, "state": route["state"], "worker_stage": route.get("worker_stage")}
+                                for rid, route in routes.items()]}
         with mock.patch.object(live, "_collect_routes", return_value=collected):
-            session_line.route_details(object(), panels, now=10_000.0)
-        a, b, c = panels["claude\0s"]
+            session_line.route_details(object(), panels, routes, now=10_000.0)
+        a, b, c, d = panels["claude\0s"]
+        # MODEL and CONTEXT are the working worker's, else the owner's (Fleet's choice).
+        # The percent is Fleet's own CONTEXT gauge for that job (the same number Fleet draws).
+        fleet_percent = live._context_gauge(jobs["rt-a"][1])[0]
+        self.assertIsNotNone(fleet_percent)
         self.assertEqual((a["harness"], a["model"], a["effort"], a["ctx_pct"], a["tool"], a["agents"]),
-                         ("codex", "gpt-fixture", "high", 72.0, "apply_patch", 1))
+                         ("codex", "gpt-fixture", "high", round(fleet_percent, 1), "apply_patch", 1))
         self.assertEqual(a["since"], 10_000.0 - 87 * 60)   # absolute: a re-published pass still ages
-        self.assertNotIn("ctx_pct", b); self.assertEqual(b["tool"], "Bash")
+        # No window known: the exact token count, never a made-up percent.
+        self.assertNotIn("ctx_pct", b); self.assertEqual(b["ctx_tokens"], 250_136); self.assertEqual(b["tool"], "Bash")
         self.assertNotIn("ctx_pct", c); self.assertNotIn("tool", c); self.assertEqual(c["elapsed_min"], 54.0)
-        self.assertEqual(session_line.route_badge("⏳ route 3 · execute", panels["claude\0s"]), "⏳ route 3 ⠏2 ✕1")
+        self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
+        self.assertTrue(d["closed"])
+        # Fleet's judgment: an owner waiting on its worker is ●, a closed route is in no count.
+        self.assertEqual(session_line.route_badge("⏳ route 4 · execute", panels["claude\0s"]), "⏳ route 4 ⠏1 ●1 ✕1")
+        self.assertEqual(session_line.token_text(250_136), "250K")
         # Without its rows the count stays alone; a missing label stays empty.
         self.assertEqual(session_line.route_badge("⏳ route 3 · execute", None), "⏳ route 3")
         self.assertEqual(session_line.route_badge("", panels["claude\0s"]), "")

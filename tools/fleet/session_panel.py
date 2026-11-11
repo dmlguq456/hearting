@@ -167,8 +167,8 @@ def notice_line(values, routes, questions, display, now):
     waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
                   and (item.get("request_state") or "open") == "open")
     if waiting:
-        from .session_line import WAIT_LABEL
-        return [(WAIT_LABEL + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
+        from .session_line import answer_wait_word
+        return [(answer_wait_word() + " " + str(waiting), "g_blocked"), (" │ Ctrl+]", "dim")]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
@@ -208,11 +208,17 @@ def notice_line(values, routes, questions, display, now):
 def route_row(row, now=None):
     """A route row's painted values (spec rules 5-7); an unreported value is left out."""
     import time
-    from .session_line import (route_glyph, route_state, effort_label, gauge_parts, elapsed_text,
-                               stage_glyph, _number)
+    from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
+                               stage_glyph, token_text, _number)
     now = time.time() if now is None else now
-    glyph, key = route_glyph(row.get("state"))
-    shown = {"glyph": glyph, "glyph_key": key, "kind": route_state(row.get("state"))}
+    # The producer's Fleet marker; an older cache row has only its state.
+    marker = row.get("marker")
+    if marker not in ("working", "idle", "blocked", "dead", "done", "stale"):
+        state = str(row.get("state") or "")
+        marker = {"failed": "dead", "attention": "dead", "degraded": "dead"}.get(state, state)
+        marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
+    glyph, key = route_glyph(marker)
+    shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
     harness = sanitize_title(str(row.get("harness") or ""))[:32]
     if harness:
         shown.update(harness=harness, harness_key="hb_" + harness)
@@ -226,6 +232,10 @@ def route_row(row, now=None):
     if _percent(percent) != "?":
         shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
                      gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+    elif token_text(row.get("ctx_tokens")):
+        # No window known: the exact token count, as Fleet writes it, never a made-up percent.
+        tokens = token_text(row["ctx_tokens"])
+        shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
     minutes = None
     if _number(row.get("since")) is not None:
         minutes = max(0.0, (now - row["since"]) / 60)
@@ -321,7 +331,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
     # Fixed words are English in every language (spec rule 3).
     labels.update(settings="Settings", routes="route", context="context", route_line="route line")
-    from .session_line import effort_label, gauge_parts, WAIT_LABEL
+    from .session_line import effort_label, gauge_parts, answer_wait_word
     selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
     if effort_label(values.get("effort")):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
@@ -334,7 +344,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         current = min(len(routes), int(match.group(1)))
     return {"head": session_head(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
-            "wait": WAIT_LABEL + " " + (str(count) if count is not None else "?")
+            "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
             "session_title": sanitize_title(str(values.get("title") or ""))[:320],
             "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]

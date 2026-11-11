@@ -226,7 +226,8 @@ class SessionShellTest(unittest.TestCase):
                 result = shell._backend_operation({"op": "projection", "binding": row, "columns": 240, "state": "idle"})
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
         # Spec 2026-11-11 rule 10: the session title is the panel's, not the line's.
-        fields = ("[52] hearting", "(feature)", "claude-opus high", "context ━━━━────── 37%", "◑답 대기 2", "⏳ route 2", "7d 60%")
+        from fleet.session_line import answer_wait_word   # the screen language's words
+        fields = ("[52] hearting", "(feature)", "claude-opus high", "context ━━━━────── 37%", answer_wait_word() + " 2", "⏳ route 2", "7d 60%")
         for field in fields:
             self.assertIn(field, text)
         self.assertEqual([text.index(field) for field in fields], sorted(text.index(field) for field in fields))
@@ -240,8 +241,9 @@ class SessionShellTest(unittest.TestCase):
                 mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "none"}):
             result = shell.panel_projection("claude", "test-native-session")
         text = "".join(segment["text"] for segment in result.get("segments", [{"text": result["footer"]}]))
-        self.assertIn("◑답 대기 ?", text)
-        self.assertNotIn("◑답 대기 0", result["footer"])
+        from fleet.session_line import answer_wait_word
+        self.assertIn(answer_wait_word() + " ?", text)
+        self.assertNotIn(answer_wait_word() + " 0", result["footer"])
 
     def test_readiness_requires_the_exact_native_idle_record_and_known_empty_screen(self):
         from fleet import session_registry

@@ -107,7 +107,7 @@ for(const [harness,states] of Object.entries(models))for(const width of [35,40,8
   if(asking){assert.equal(text,none,id+' '+s);continue;}
   const first=rows.findIndex(l=>l.includes('⚠ [정리]'));
   // The notice ends at the next group: a blank row, a section rule or the answer wait.
-  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||l.includes('◑답')));
+  const end=rows.findIndex((l,i)=>i>first&&(/^│ +│$/.test(l)||l.includes('── ')||/◑(답| to answer)/.test(l)));
   assert(first>=0&&end>first&&text.includes('이어서해'),id+' '+s+'\n'+text);
   const lines=rows.slice(first,end);
   // Bottom: one row; side: at most three. A cut line says so with an ellipsis.
@@ -235,13 +235,13 @@ const paint=(width,height,side,focused,model,n=question.length)=>view.render({wi
  .rows.map(r=>r.map(p=>p.text).join(''));
 for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,true],[80,14,false,true,5],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
  const rows=paint(width,height,side,focused,models.short,n);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','values-fixture*','◑답 대기 1','◑ 질문 1'])
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','values-fixture*',models.short.wait,'◑ 질문 1'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait keeps its place.
 const rows=paint(80,14,false,false,models.long);
-assert(rows.some(s=>s.includes('◑답 대기 1')&&s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));
+assert(rows.some(s=>s.includes(models.long.wait)&&s.includes('REVIEW1463_TITLE_AAA')&&s.includes('…')),rows.join('\n'));
 assert(/^└─.*─┘$/.test(rows.at(-1))&&[...rows.at(-1)].length===80,rows.at(-1));
 '''
         result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"), json.dumps(models)],
