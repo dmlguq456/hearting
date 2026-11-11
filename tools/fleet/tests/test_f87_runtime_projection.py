@@ -214,13 +214,14 @@ class RuntimeProjectionTest(unittest.TestCase):
         return result, rows
 
     def test_claude_positive_missing_control_and_long_titles(self):
-        """F-99 — statusline shows the canonical name with zero sid8 (`CL/<sid8>`)."""
+        """F-99 — zero sid8 (`CL/<sid8>`); since 2026-11-11 (spec rule 10) the statusline
+        reads `[number] project (git)` and the title belongs to the panel and Fleet."""
         with tempfile.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             self.successful_title(root, sid, "My Task")
             native_title = "Automatic stdin title"
             output = self.statusline(root, sid, native_title).stdout
-            self.assertIn("My Task", output)
+            self.assertNotIn("My Task", output)
             self.assertNotIn(native_title, output)
             missing = self.statusline(root, sid, native_title, helper=False)
             self.assertEqual(missing.returncode, 0)
@@ -228,14 +229,13 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertNotIn(native_title, missing.stdout)
             self.assertNotIn("CL/abcdefgh", missing.stdout)
             self.successful_title(root, sid, "A\nB\x00")
-            self.assertIn("A B", self.statusline(root, sid, native_title).stdout)
+            controlled = self.statusline(root, sid, native_title).stdout
+            self.assertNotIn("\x00", controlled); self.assertEqual(controlled.count("\n"), 1)
             self.successful_title(root, sid, "가" * 100)
             long = self.statusline(root, sid, native_title).stdout
             self.assertNotIn("CL/abcdefgh", long)
             self.assertNotIn(native_title, long)
-            display = next(x for x in long.split(" │ ") if "가" in x)
-            self.assertLess(display.count("가"), 100)
-            self.assertIn("…", display)
+            self.assertNotIn("가" * 10, long)
 
     def test_codex_herdr_exact_argv_and_failures(self):
         sid = CODEX_SID
@@ -338,7 +338,8 @@ class RuntimeProjectionTest(unittest.TestCase):
                     self.successful_title(root, sid, expected)
                     native_title = "Automatic stdin title"
                     statusline_output = self.statusline(root, sid, native_title).stdout
-                    self.assertIn(expected, statusline_output)
+                    # The pane header carries the title; the statusline no longer does.
+                    self.assertNotIn(expected, statusline_output)
                     self.assertNotIn(native_title, statusline_output)
                 else:
                     _, rows = self.project(root, sid, title=title)
@@ -685,18 +686,18 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertEqual(rows[-1][4:], ["herdr:opencode", "--display-agent", oc_agent,
                                             "--title", oc_agent + " OC task"])
 
-    def test_statusline_carries_the_title_only(self):
-        """2026-09-09 — the `[46]` badge moved to the pane header, and a name that is just
-        the folder is not a title (the `📁 <dir>` segment already says it)."""
+    def test_statusline_leads_with_the_project_and_carries_no_title(self):
+        """2026-11-11 (spec rule 10): `[number] project (git) │ model …`, no folder glyph
+        and no session title; a title equal to the folder is not repeated either."""
         with tempfile.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             import re
             strip = lambda s: re.sub(r"\x1b\[[0-9;]*m", "", s)
             self.successful_title(root, sid, "Real title")
             out = strip(self.statusline(root, sid, "Automatic stdin title").stdout)
-            segment = next(s for s in out.split("│") if "Real title" in s)
-            self.assertEqual(segment.strip(), "Real title")   # title only, no `[46]` badge
-            # A name that is only the folder is not a title: `📁 <dir>` already says it.
+            self.assertNotIn("Real title", out)
+            self.assertTrue(out.split("│")[0].strip().split(" (")[0].endswith(root.name), out)
+            self.assertNotIn("📁", out)
             self.successful_title(root, sid, root.name)
             bare = strip(self.statusline(root, sid, "Automatic stdin title").stdout)
             self.assertEqual(bare.count(root.name), 1)

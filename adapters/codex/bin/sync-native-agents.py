@@ -149,7 +149,21 @@ def selectable_providers(runtime_home: Path) -> frozenset[str]:
     return frozenset(providers or {"openai"})
 
 
+# The models and efforts every session of the home is confirmed to spawn with, as JSON
+# `{slug: [efforts]}`; absent when that cannot be confirmed (PG-13).
+LISTED_KEY = "_CODEX_HOME_LISTED_MODELS"
+
+
+def listed_models(runtime_home: Path) -> Optional[dict]:
+    """`{slug: [efforts]}` every session of the home can spawn with, or None when unconfirmed."""
+    return native_agents.codex_listed_models(runtime_home)
+
+
 def runtime_config(cfg: Mapping[str, str], runtime_home: Path) -> Mapping[str, str]:
+    import json
+    listed = listed_models(runtime_home)
+    if listed is not None:
+        cfg = {**cfg, LISTED_KEY: json.dumps(listed, sort_keys=True)}
     if selectable_providers(runtime_home) <= ACCOUNT_PROVIDERS:
         return cfg
     return {**cfg, UNPINNED_KEY: "1"}
@@ -211,6 +225,35 @@ def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[s
     return render_catalog_agent(name, profile, cfg)
 
 
+def default_subagent(cfg: Mapping[str, str]) -> Optional[dict]:
+    """`[agents] default_subagent_model`/`_reasoning_effort` for this home (PG-13).
+
+    Codex gives a spawn with no model and an agent with no `model` the parent's
+    model; this default takes its place (an explicit spawn model and an agent
+    file's own `model` still win). Codex checks the default against the spawn
+    list of the session and refuses every such spawn when it is not there, so the
+    default is written only where every session of this home names a
+    `model_catalog_json` whose list accepts the model and its effort under any
+    auth (`native_agents.codex_listed_models`). A provider name or a
+    `models_cache.json` is no such evidence; elsewhere the parent's model stays.
+    """
+    import json
+    if cfg.get(UNPINNED_KEY) or not cfg.get(LISTED_KEY):
+        return None
+    resolved = native_agents.native_subagent_default("codex", cfg)
+    if resolved is None:
+        return None
+    try:
+        listed = json.loads(cfg[LISTED_KEY])
+    except ValueError:
+        return None
+    efforts = listed.get(resolved["model"]) if isinstance(listed, dict) else None
+    if not isinstance(efforts, list) or resolved["budget"] not in efforts:
+        return None
+    return {"default_subagent_model": resolved["model"],
+            "default_subagent_reasoning_effort": resolved["budget"]}
+
+
 FORMAT = native_agents.Format(
     adapter="codex",
     kernel_names=tuple(harness_manifest.load()["kernel"]["agents"]),
@@ -220,6 +263,7 @@ FORMAT = native_agents.Format(
     render=render,
     collect_glob="*.toml",
     runtime_config=runtime_config,
+    default_subagent=default_subagent,
 )
 
 

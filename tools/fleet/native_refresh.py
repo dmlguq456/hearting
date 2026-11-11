@@ -23,6 +23,7 @@ from .collectors.procscan import read_proc_start
 
 _LIMIT = 512
 _CELLS = ("model", "effort", "context", "window", "context_detail")
+_UNREAD = (object(),) * 6  # source signatures of a generation no read observed
 
 
 def _get(value, name, default=None):
@@ -47,43 +48,62 @@ def _signature(path, limit=None):
         return None
 
 
+# Every source _read uses tells "not read" apart from "read: absent or refused".
+# Absence, a refused or other-session source and an explicit None return None
+# (or empty cells) and replace the display. A source that exists but was not
+# read raises OSError (session_registry.unread_error), which reaches the one
+# unread rule in NativeDisplayReader.read: keep the last display, read again.
+
+
 def _attachment_index():
     utilities = str(Path(__file__).resolve().parents[2] / "utilities")
     if utilities not in sys.path:
         sys.path.insert(0, utilities)
     import session_shell
     result = {}
-    for row in session_shell.bindings():
+    for row in session_shell.bindings(raise_unread=True):
         key = (row["harness"], row["sid"], str(row["native_pid"]), row["native_start"])
         # Conflicting attachments are unknown, just as in exact_binding().
         result[key] = None if key in result else row
     return result
 
 
+def _stamp(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def _feed(binding, identity):
     if not binding:
         return None
     directory = Path(binding["socket"]).parent
+    path = directory / "native-display.json"
     try:
         info = directory.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077):
             return None
-        path = directory / "native-display.json"
-        before = _signature(path, 4096)
-        if before is None:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 4096:
             return None
+        before = _stamp(info)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             info = os.fstat(fd)
-            stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            if stamp != before or info.st_mode & 0o022:
+            if _stamp(info) != before:
+                raise InterruptedError("native display feed replaced during the read")
+            if info.st_mode & 0o022:
                 return None
-            value = json.loads(os.read(fd, 4097))
-            if _signature(path, 4096) != before:
-                return None
+            raw = os.read(fd, 4097)
         finally:
             os.close(fd)
+        if _signature(path, 4096) != before:
+            raise InterruptedError("native display feed replaced during the read")
+    except OSError as error:
+        if session_registry.unread_error(error):
+            raise
+        return None
+    try:
+        value = json.loads(raw)
         if (not isinstance(value, dict) or value.get("schema") != "hearting-native-display-v1"
                 or (value.get("harness"), value.get("sid"), str(value.get("pid")), value.get("start")) != identity
                 or value.get("host_pid") != binding["host_pid"]
@@ -101,7 +121,7 @@ def _feed(binding, identity):
         if "context_percent" in fields and (percent is None or native_display.percentage(percent) is not None):
             result["context_percent"] = percent
         return result
-    except (OSError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return None
 
 
@@ -129,7 +149,10 @@ class NativeDisplayReader:
             try:
                 self._attachments = _attachment_index()
             except (OSError, ValueError, TypeError):
-                self._attachments = {}
+                # An unreadable index is not a removed attachment. Each kept
+                # binding still has to prove its live host below, and the
+                # next request reads the index again.
+                self._snapshot = None
         entries, result = {}, []
         event_paths, event_patterns, event_processes = set(), set(), set()
         for session in tuple(_get(snapshot, "sessions", ()) or ())[:_LIMIT]:
@@ -156,8 +179,8 @@ class NativeDisplayReader:
             if binding:
                 event_processes.add((binding['host_pid'], binding['host_start']))
             host_live = not binding or read_proc_start(binding["host_pid"]) == binding["host_start"]
-            signature = tuple(_signature(path) for path in
-                              (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)) + (
+            paths = (native_path, tap, db, str(db) + "-wal" if db else None, feed_path, registry)
+            signature = tuple(_signature(path) for path in paths) + (
                                   native_live, host_live,
                                   tuple(binding.get(key) for key in ('host_pid', 'host_start', 'incarnation', 'socket'))
                                   if binding else None)
@@ -170,12 +193,25 @@ class NativeDisplayReader:
             if previous is not None and previous[:2] == (signature, base):
                 entry = previous
             else:
+                unsettled = False
                 try:
                     fields = (self._read(session, identity, binding if host_live else None, tap, native_path, db)
                               if native_live else dict.fromkeys(_CELLS))
                 except (OSError, ValueError, TypeError):
-                    fields = None
-                entry = signature, base, fields
+                    fields, unsettled = None, True
+                # A read that failed, or overlapped a source replacement, did not
+                # observe empty cells: keep this live process/attachment's last
+                # display. The next pass sees the new generation and reads it.
+                # A rejected or other-session source, and process, SID or
+                # attachment changes (explicit empty cells), still replace it.
+                unread = fields is None and (
+                    unsettled or tuple(_signature(path) for path in paths) != signature[:6])
+                if (unread and previous is not None and previous[2] is not None
+                        and previous[0][6:] == signature[6:]):
+                    fields = previous[2]
+                # Keeping a value is not reading this generation: an unread one
+                # never becomes the cached key, so the next pass reads it again.
+                entry = (_UNREAD + signature[6:] if unread else signature), base, fields
             entries[identity] = entry
             if entry[2] is not None:
                 result.append((identity, entry[2]))
@@ -193,7 +229,7 @@ class NativeDisplayReader:
         harness, sid, pid, start = identity
         if read_proc_start(int(pid)) != start:
             return dict.fromkeys(_CELLS)
-        current = session_registry.read(harness, int(pid))
+        current = session_registry.read(harness, int(pid), raise_unread=True)
         if (current and str(current.get("procStart")) == start
                 and current.get("sessionId") and current["sessionId"] != sid):
             return dict.fromkeys(_CELLS)
@@ -206,18 +242,18 @@ class NativeDisplayReader:
                           context_detail=context_display_detail(row))
         feed = _feed(binding, identity)
         if harness == "claude":
-            callback = native_display.claude_callback(tap, sid, int(pid), start)
+            callback = native_display.claude_callback(tap, sid, int(pid), start, raise_unread=True)
             if callback is not None:
                 claude._apply_statusline(row, callback)
                 observed = True
         elif harness == "codex" and native_path and codex._sid(native_path) == sid:
-            model, effort = codex._rollout_model_effort(native_path)
+            model, effort = codex._rollout_model_effort(native_path, raise_unread=True)
             if model:
                 row.model = model
                 observed = True
             if effort:
                 row.effort = effort
-            token = codex._tail_token_count(native_path)
+            token = codex._tail_token_count(native_path, raise_unread=True)
             if token:
                 codex._apply_token_count(row, token, native_path)
                 observed = True
@@ -280,6 +316,9 @@ class NativeDisplayLayer:
         source = model.source_records or {}
         bindings = source.get("_detail_bindings", {})
         tags = source.get("_detail_tags", {})
+        # Cells kept from an earlier publication still read as unobserved in
+        # the complete base, so a native read against that base may fill them.
+        retained = source.get("_retained_cells", {})
         inputs = (model.sessions, bindings, tags)
         # Clock and account-usage updates share these deeply frozen inputs.
         # Reuse their display rows without revisiting every session or losing
@@ -305,10 +344,12 @@ class NativeDisplayLayer:
                 rows.append(row)
                 continue
             base = values.get("_base")
+            kept = retained.get(row.get("tag"), ())
             # A read started against an older complete base cannot overwrite a
             # cell the new base already changed while that read was in flight.
             updates = {key: freeze(values[key]) for key in _CELLS if key in values
-                       and (base is None or freeze(base.get(key)) == row.get(key))
+                       and (base is None or freeze(base.get(key)) == (
+                           None if key in kept else row.get(key)))
                        and freeze(values[key]) != row.get(key)}
             rows.append(dict(row, **updates) if updates else row)
         self._model, self._shown = model, model.with_updates(sessions=rows)

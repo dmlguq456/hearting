@@ -1280,7 +1280,8 @@ def mark_prompt_source(seat: Seat, harness: str, sid: str, sequence: int, source
 
 
 def _record_tidy_clear_succession_locked(seat: Seat, harness: str, sid: str, now: float) -> bool:
-    """Record the confirmed session edge from a matching tidy-clear reservation only.
+    """Record the confirmed session edge from a matching open tidy reservation only (a person's
+    own ``/clear``/``/new`` before the booked ``/compact``; no tidy types a clear).
 
     Returns whether this call appended the edge."""
     seat = session_seat(seat, harness, sid)
@@ -4115,11 +4116,11 @@ def tidy_report_line(booked: str, *, handoff: bool = False, origin: str = "", ha
     fields = str(booked or "").split()
     outcome = next((field for field in fields if field.startswith("clear=")), "")
     if outcome == "clear=scheduled":
-        # The clear waits for this turn to end with an empty input box; typing first keeps the window.
+        # /compact waits for this turn to end with an empty input box; typing first keeps it as is.
         if handoff or origin == "idle" or "continue=off" in fields:
-            return t("tidy.say.clear_soon")
-        return t("tidy.say.clear_and_continue")
-    command = "/new" if harness == "opencode" else "/clear"
+            return t("tidy.say.compact_soon")
+        return t("tidy.say.compact_and_continue")
+    command = "/compact"
     if outcome == "clear=off":
         return t("tidy.say.window_kept", command=command)
     hint = next((field.split("=", 1)[1] for field in fields if field.startswith("hint=")), "")
@@ -4153,14 +4154,6 @@ def cmd_tidy(args) -> int:
         print(handoff_line)
     origin = str((idle_context or {}).get("origin") or "")
     print("say=" + tidy_report_line(line, handoff=handoff, origin=origin, harness=caller[1]))
-    if caller[1] == "claude" and "clear=scheduled" in line.split():
-        compact = False
-        with contextlib.suppress(BaseException):
-            import session_tidy_clear as clear
-            compact = clear.background_agents_running("claude", caller[2], caller[0]) \
-                and clear.mark_compact(caller[0].key, "claude", caller[2])
-        if compact:
-            print("say=" + _ui_translator()("tidy.say.compact_for_agents"))
     return code
 
 

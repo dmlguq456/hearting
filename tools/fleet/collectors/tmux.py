@@ -61,7 +61,7 @@ def list_panes(runner=None, which=None, environ=None):
             continue
         rows.append({"pane_id": parts[0], "session": parts[1], "window_id": parts[2],
                      "window": parts[3], "pane": parts[4], "tty": parts[5], "rect": rect,
-                     "headers": (parts[10], parts[11])})
+                     "headers": (parts[10], parts[11]), "server": socket})
     return rows
 
 
@@ -91,10 +91,12 @@ def _mark_corners(rows, placed):
 
 
 def enrich(sessions, rows=None):
-    """Set ``pane_location``/``multiplexer``/``pane_corner`` for sessions in tmux panes."""
+    """Set ``pane_location``/``multiplexer``/``pane_corner`` (and the pane id with its tmux server)
+    for sessions in tmux panes."""
     for session in sessions:
         if getattr(session, "multiplexer", None) == "tmux":
             session.pane_location = session.multiplexer = session.pane_corner = None
+            session.tmux_pane = session.tmux_server = None
     candidates = [s for s in sessions if herdr._eligible(s) and getattr(s, "pid", None)
                   and getattr(s, "herdr_attached", None) is not True
                   and getattr(s, "multiplexer", None) is None]
@@ -114,6 +116,8 @@ def enrich(sessions, rows=None):
         if len(found) != 1:
             continue
         session.pane_location, session.multiplexer = location(found[0]), "tmux"
+        # The pane id names a pane only on this server: keep both for the open-pane press.
+        session.tmux_pane, session.tmux_server = found[0]["pane_id"], found[0].get("server", "")
         placed[found[0]["pane_id"]] = session
     if placed:
         _mark_corners(rows, placed)

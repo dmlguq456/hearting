@@ -248,6 +248,12 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
     transcript = _walk(payload, "transcript_path", "transcriptPath", "transcript")
     if not sid:
         return "booking=skipped reason=session-unknown"
+    try:
+        # A continue this turn made unnecessary (it took the card) or outlived is closed now.
+        from session_tidy_clear import settle_unsent_continue
+        settle_unsent_continue(harness, sid, now=now)
+    except Exception:  # noqa: BLE001 - settlement is bookkeeping; the observation goes on
+        pass
     from session_tidy import is_worker
     if is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower() in {
             "owner", "worker", "auxiliary", "reviewer"}:

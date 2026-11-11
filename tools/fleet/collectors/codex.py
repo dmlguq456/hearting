@@ -953,14 +953,20 @@ def _parse_appended_turn_context(path, offset, size, previous):
     return values, offset + newline + 1
 
 
-def _rollout_model_effort(path, chunk=65536):
-    """Latest per-rollout model/effort with an append-aware, strong-stamp LRU."""
+def _rollout_model_effort(path, chunk=65536, *, raise_unread=False):
+    """Latest per-rollout model/effort with an append-aware, strong-stamp LRU.
+
+    With ``raise_unread`` an existing rollout that could not be read raises
+    OSError instead of reading as (None, None).
+    """
     global _TURN_CONTEXT_CACHE_EVICTIONS
     canonical = os.path.realpath(os.path.abspath(path))
     try:
         before = os.stat(canonical)
-    except OSError:
+    except OSError as error:
         _TURN_CONTEXT_CACHE.pop(canonical, None)
+        if raise_unread and session_registry.unread_error(error):
+            raise
         return None, None
     stamp = (
         before.st_dev, before.st_ino, before.st_size,
@@ -980,8 +986,10 @@ def _rollout_model_effort(path, chunk=65536):
         else:
             values, offset = _parse_latest_turn_context(canonical, chunk)
         after = os.stat(canonical)
-    except OSError:
+    except OSError as error:
         _TURN_CONTEXT_CACHE.pop(canonical, None)
+        if raise_unread and session_registry.unread_error(error):
+            raise
         return None, None
     after_stamp = (
         after.st_dev, after.st_ino, after.st_size,
@@ -2110,15 +2118,21 @@ def prepare_tick(sessions, *, wait_timeout=0.0):
     return tick
 
 
-def _tail_token_count(path, chunk=65536):
-    """Last '"token_count"' line within the file's trailing `chunk` bytes."""
+def _tail_token_count(path, chunk=65536, *, raise_unread=False):
+    """Last '"token_count"' line within the file's trailing `chunk` bytes.
+
+    With ``raise_unread`` an existing rollout that could not be read raises
+    OSError instead of reading as no token count.
+    """
     try:
         sz = os.path.getsize(path)
         start = max(0, sz - chunk)
         with open(path, "rb") as f:
             f.seek(start)
             data = f.read().decode("utf-8", "replace")
-    except OSError:
+    except OSError as error:
+        if raise_unread and session_registry.unread_error(error):
+            raise
         return None
     lines = data.splitlines()
     if start > 0 and lines:

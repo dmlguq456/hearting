@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Shared tidy booking and its bounded detached helper.
 
-Manual tidy retains its clear, handover and continuation behavior. Automatic idle
-work uses the same reservation and safe writer, but saves one external card and
-then types native /compact once. It retains the session and has no continuation.
-The card file and later exact-session compaction boundary establish completion;
-transport ACKs and screen labels do not. Failure and cancellation are silent.
+Every tidy keeps its native session: the booking types native /compact once
+(Claude, Codex and OpenCode alike) and never a new-conversation command. Manual
+tidy then asks the same session to continue once; automatic idle work saves one
+external card first and has no continuation. The card file and the later
+exact-session compaction boundary establish completion; transport ACKs and
+screen labels do not. Idle failure and cancellation are silent.
 
 Bookings remain in clear/<seat>.json under the existing lock and nonce. After a
 send, a restarted helper observes the same operation without typing it again.
@@ -48,18 +49,11 @@ SCHEMA = 1
 CLEAR_DEADLINE_SEC = 600.0
 COMPACT_CLEAR_DEADLINE_SEC = 10_800.0
 COMPACT_POLL_SEC = 1.0
-OBSERVE_WAIT_SEC = 20.0
 STEWARD_TIMEOUT_SEC = 180.0
-# The built-in command that starts a fresh conversation in each harness.
-CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
-# Typed instead of the clear while a Claude window still has native background agents:
-# compaction keeps the session, its agents and their results (see background_agents_running).
+# The one command every tidy booking types (Claude, Codex and OpenCode name it alike):
+# compaction keeps the session, its number, its agents and its pending results.
 COMPACT_COMMAND = "/compact"
 COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (measured 2026-11-03)
-_TASK_ID = re.compile(rb"<task-id>([0-9A-Za-z_-]{1,80})</task-id>")
-_NOTICE = re.compile(rb"<task-notification>(.*?)</task-notification>", re.S)
-_WAITING = (b"waiting on its own background work", b"background work of its own")
-_RESUME_MARGIN_SEC = 5.0             # a finished agent's last write lands within 0.1 s of its notice
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
@@ -83,7 +77,7 @@ REASON_TEXT = {
     "pane-input-off": "창의 tmux 입력이 꺼져 있습니다",
     "agent-not-found": "창을 찾지 못했습니다",
     "card-not-delivered": "새 세션이 카드를 받지 못했습니다",
-    "card-taken": "카드가 이미 다른 세션에 전달됐습니다",
+    "card-taken": "카드가 이미 전달됐습니다",
     "new-session-unknown": "새 세션을 확인하지 못했습니다",
     "native-attach-unavailable": "세션 전용 연결을 열지 못했습니다",
     "not-idle-native": "세션이 입력 대기 상태가 아닙니다",
@@ -97,8 +91,10 @@ REASON_TEXT = {
 NOTIFICATION_TURN = "notification-turn"
 # Reasons after which this seat holds no card for the next session to receive.
 NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
-# Continue skips the person caused (or chose) themselves: no result line for these.
-CONTINUE_QUIET = frozenset({"new-input", "draft", "card-changed", "handed-off", "no-card", "superseded", "off"})
+# Continue skips the person caused (or chose) themselves, or that another automatic turn of the
+# same session made unnecessary by taking the card first: no result line for these.
+CONTINUE_QUIET = frozenset({"new-input", "draft", "card-changed", "handed-off", "no-card", "superseded", "off",
+                            "card-taken"})
 
 
 # ---------------------------------------------------------------------------
@@ -1142,9 +1138,9 @@ def _accept_idle_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, idle
                                                  req.get("card_generation", 0)) or 0)
             req.update(card_generation=int(card["generation"]), prompt_seq=st.read_prompt_seq(seat),
                        queue_id=queue_id, operation_id=operation_id or (req.get("idle") or {}).get("identity"),
-                       memory_state="queued", snapshot_state="not-applicable" if origin == "idle" else "pending",
+                       memory_state="queued", snapshot_state="not-applicable",
                        followup_kind="none" if origin == "idle" else "continue",
-                       clear_command="compact" if origin == "idle" else req.get("clear_command", ""),
+                       clear_command="compact",
                        deadline=st.now_epoch() + COMPACT_CONFIRM_SEC,
                        continue_off=bool(origin == "idle" or req.get("continue_off") or no_continue),
                        cwd=cwd, source_card_generation=source_card_generation, acceptance=acceptance)
@@ -1211,17 +1207,19 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                          operation_id: Optional[str] = None,
                          queue_id: Optional[str] = None,
                          idle_context: Optional[dict] = None) -> str:
-    """Book the clear and start its helper; the ``clear=...`` words ``enqueue`` prints.
+    """Book the same-session compaction and start its helper; the ``clear=...`` words ``enqueue`` prints.
 
-    ``clear=scheduled``      the window is cleared by itself once it is idle, then continued;
-    ``clear=scheduled continue=off``  ``--no-continue``: cleared, nothing typed after it;
+    ``clear=scheduled``      the window types /compact by itself once it is idle, then the same
+                             session continues;
+    ``clear=scheduled continue=off``  ``--no-continue``: compacted, nothing typed after it;
     ``clear=off``            ``--no-clear``: a pending booking is cancelled too;
     ``clear=skipped reason`` a prompt was submitted after the card: nothing is booked;
-    ``clear=manual hint=C``  outside herdr (no pane, no herdr): the user types ``C``.
+    ``clear=manual hint=/compact``  outside herdr/tmux (no provable pane): the user types it.
+    (The ``clear=`` word and ``--no-clear`` keep their names for callers; no booking clears.)
     """
     seat = st.session_seat(seat, harness, sid)
     now = st.now_epoch() if now is None else now
-    hint = CLEAR_COMMAND.get(harness, "/clear")
+    hint = COMPACT_COMMAND
     if opt_out:
         cancel(seat)
         return "clear=off"
@@ -1253,7 +1251,7 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                     "tail_start_id", "compaction_part_id", "boundary_offset")
                    if compact_context.get(key) is not None}
     native = seat.kind == "native" and seat.native and harness == "claude"
-    if not native and (seat.kind != "pane" or not seat.pane or harness not in CLEAR_COMMAND
+    if not native and (seat.kind != "pane" or not seat.pane or harness not in st.HARNESSES
                        or pane_command(seat.pane) is None):
         if compact:
             return "clear=skipped reason=outside-herdr"
@@ -1330,8 +1328,9 @@ def schedule_for_enqueue(seat: "st.Seat", harness: str, sid: str, cwd: str, *, o
                 "harness": harness, "sid": sid, "cwd": cwd,
                 "card_generation": int(card["generation"]) if card else 0, "prompt_seq": seq,
                 "continue_off": bool(no_continue or inherit_stop),
-                "snapshot_state": ("deferred" if compact else "pending")
-                if seat.kind in ("pane", "native") else "not-applicable"}
+                # The session stays, so running work needs no handover snapshot.
+                "clear_command": "compact",
+                "snapshot_state": "deferred" if compact else "not-applicable"}
             if seat.kind == "pane":
                 booking["herdr_transport"] = {"socket_path": str(seat.socket_path or "")}
             if compact:
@@ -1388,173 +1387,6 @@ def compact_observation(req: dict) -> dict:
         return {"state": "unknown", "reason": f"compact-reader-{type(exc).__name__}", "source": source}
 
 
-def _refresh_compact_card(req: dict, observation: dict) -> None:
-    """Collect current owners outside the lock, then publish against the booked card/input."""
-    import session_tidy as st
-    import dispatch_seat_handover as handover
-    seat = st.session_seat(st.seat_from_dict(req["seat"]),
-                           str(req.get("harness") or ""), str(req.get("sid") or ""))
-    identity = str((req.get("compact") or {}).get("identity") or "")
-    try:
-        bindings = handover.collect_snapshot_bindings(req["harness"], req["sid"])
-        steward = handover.collect_snapshot_steward(seat, req["harness"], req["sid"])
-        with st.seat_lock(seat.key):
-            held = read_reservation(seat.key)
-            if not held or held.get("nonce") != req.get("nonce") or held.get("status") != "reserved":
-                return
-            handover.publish_snapshot_locked(
-                seat, req["harness"], req["sid"], bindings,
-                expected_prompt_seq=int(req.get("prompt_seq", -1)),
-                expected_card_generation=int(req.get("card_generation", -1)),
-                steward_payload=steward)
-            held["snapshot_state"] = "ready"
-            held["snapshot_count"] = len(bindings)
-            _write_reservation(held)
-            st.update_compact_card_locked(seat, int(req.get("card_generation", 0) or 0), identity,
-                                          recent=str(observation.get("recent_post", observation.get("recent")) or ""),
-                                          source=str(observation.get("source") or ""),
-                                          recent_partial=bool(observation.get("recent_partial")),
-                                          recent_preserved=str(observation.get("recent_preserved") or ""),
-                                          last_reply=observation.get("last_reply"))
-    except BaseException:
-        # The original complete summary remains authoritative; best-effort enrichment
-        # and the extra snapshot do not turn missing transcript detail into a clear gate.
-        return
-
-
-def _claude_transcript(seat: Optional["st.Seat"], sid: str):
-    """The session's own transcript: the path its hooks recorded, else the runtime's projects."""
-    import tidy_transcripts as transcripts
-    hint = ""
-    if seat is not None:
-        with contextlib.suppress(Exception):
-            hint = str((st.session_summary(st.session_seat(seat, "claude", sid)).get(("claude", sid)) or {})
-                       .get("transcript") or "")
-    return transcripts.locate_transcript("claude", sid, hint or None)
-
-
-def background_agents_running(harness: str, sid: str, seat: Optional["st.Seat"] = None) -> bool:
-    """Whether this Claude session may still have native background agents that run or resume.
-
-    Claude keeps one ``subagents/agent-<id>.meta.json`` per Agent-tool launch beside the
-    session transcript, and reports each stop with a task notification (``<task-id>`` of the
-    agent) in the launching transcript. A background agent is over only when its last
-    notification is a final one and its own transcript was not written after it: a "waiting
-    on its own background work" notification or a later write (a SendMessage resume) means it
-    still runs, and so does a launch with no notification yet. A transcript or record that
-    cannot be found or read leaves the answer open, and then the window is compacted. A
-    session that never launched an agent has no ``subagents`` folder. Codex and OpenCode keep
-    their clear (see capabilities/session-tidy.md).
-    """
-    if harness != "claude" or not sid:
-        return False
-    try:
-        main = _claude_transcript(seat, sid)
-    except Exception:  # noqa: BLE001 - undecidable: keep the agents
-        return True
-    if main is None or main.suffix != ".jsonl":
-        return True
-    folder = main.with_suffix("") / "subagents"
-    try:
-        names = sorted(entry.name for entry in os.scandir(folder)
-                       if entry.name.startswith("agent-") and entry.name.endswith(".meta.json"))
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    launched = {}
-    for name in names:
-        try:
-            meta = json.loads((folder / name).read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, UnicodeError):
-            return True
-        if not isinstance(meta, dict):
-            return True
-        if meta.get("requestShape") in (None, "background"):
-            launched[name[len("agent-"):-len(".meta.json")]] = str(meta.get("parentAgentId") or "")
-    if not launched:
-        return False
-    events: dict = {}       # (agent id, notification text) -> (earliest row epoch: its enqueue, "waiting")
-    sources = {main, *(folder / f"agent-{parent}.jsonl" for parent in launched.values() if parent)}
-    for source in sources:
-        try:
-            with open(source, "rb") as handle:
-                for line in handle:
-                    if b"<task-notification>" not in line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        at = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00")).timestamp()
-                    except (ValueError, KeyError, TypeError):
-                        continue
-                    for block in _NOTICE.findall(line):
-                        agent = _TASK_ID.search(block)
-                        if not agent:
-                            continue
-                        key = (agent.group(1).decode("ascii"), block)
-                        if at < events.get(key, (float("inf"), False))[0]:
-                            events[key] = (at, any(mark in block for mark in _WAITING))
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return True
-    notices: dict = {}      # agent id -> its newest notification (enqueued at, says "waiting")
-    for (agent_id, _block), event in events.items():
-        if event[0] >= notices.get(agent_id, (float("-inf"), False))[0]:
-            notices[agent_id] = event
-    for agent_id in launched:
-        notice = notices.get(agent_id)
-        if notice is None or notice[1]:
-            return True
-        try:
-            written = (folder / f"agent-{agent_id}.jsonl").stat().st_mtime
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return True
-        if written > notice[0] + _RESUME_MARGIN_SEC:
-            return True
-    return False
-
-
-def _compact_mode(req: dict) -> bool:
-    """Idle always compacts; manually invoked tidy keeps its existing Claude protection."""
-    if req.get("origin") == "idle":
-        return True
-    if req.get("harness") != "claude":
-        return False
-    if req.get("clear_command") == "compact":
-        return True
-    seat = st.seat_from_dict(req["seat"]) if isinstance(req.get("seat"), dict) else None
-    return background_agents_running("claude", str(req.get("sid") or ""), seat)
-
-
-def mark_compact(seat_key: str, harness: str, sid: str, nonce: str = "") -> bool:
-    """Make this reserved, unclaimed Claude booking type /compact; it never goes back to the clear.
-
-    The same session continues after /compact, so a handover snapshot not taken yet is not
-    needed. Returns True when the booking now says compact."""
-    if harness != "claude":
-        return False
-    try:
-        with st.seat_lock(seat_key, wait=1.0):
-            req = read_reservation(seat_key)
-            if (not req or req.get("status") != "reserved" or (nonce and req.get("nonce") != nonce)
-                    or (req.get("harness"), req.get("sid")) != (harness, sid) or req.get("clear_claim")):
-                return False
-            if req.get("clear_command") == "compact" and req.get("snapshot_state") != "pending":
-                return True
-            req["clear_command"] = "compact"
-            if req.get("snapshot_state") == "pending":
-                req["snapshot_state"] = "not-applicable"
-            _write_reservation(req)
-            return True
-    except (OSError, TimeoutError, st.StateError):
-        return False     # the snapshot is taken as usual; the claim still types /compact
-
-
 def compact_confirmed(req: dict) -> bool:
     """The booked session compacted after the /compact claim: a ``compact_boundary`` row after
     the transcript end seen at the claim, or this session's PostCompact ledger row since then."""
@@ -1595,51 +1427,11 @@ def compact_confirmed(req: dict) -> bool:
         return False
 
 
-def _prepare_handover_snapshot(req: dict) -> bool:
-    """Take the dispatch snapshot after durable queueing, outside the short hook's lock."""
-    seat = st.session_seat(st.seat_from_dict(req["seat"]),
-                           str(req.get("harness") or ""), str(req.get("sid") or ""))
-    if seat.kind not in ("pane", "native"):
-        return True
-    if ((_compact_mode(req) or _notified_manual_tidy(req, seat))
-            and mark_compact(seat.key, str(req.get("harness") or ""),
-                             str(req.get("sid") or ""), str(req.get("nonce") or ""))):
-        return True    # /compact keeps this session: there is no successor to hand over to
-    import dispatch_seat_handover as handover
-    try:
-        bindings = handover.collect_snapshot_bindings(str(req.get("harness") or ""), str(req.get("sid") or ""))
-        steward = handover.collect_snapshot_steward(
-            seat, str(req.get("harness") or ""), str(req.get("sid") or ""))
-        with st.seat_lock(seat.key):
-            held = read_reservation(seat.key)
-            if not held or held.get("nonce") != req.get("nonce") or held.get("status") != "reserved":
-                return False
-            count = handover.publish_snapshot_locked(
-                seat, str(req.get("harness") or ""), str(req.get("sid") or ""), bindings,
-                expected_prompt_seq=int(req.get("prompt_seq", -1)),
-                expected_card_generation=int(req.get("card_generation", -1)),
-                steward_payload=steward)
-            held["snapshot_state"] = "ready"
-            held["snapshot_count"] = count
-            held.pop("last_failure", None)
-            _write_reservation(held)
-        return True
-    except BaseException as exc:
-        with contextlib.suppress(BaseException):
-            with st.seat_lock(seat.key):
-                held = read_reservation(seat.key)
-                if held and held.get("nonce") == req.get("nonce") and held.get("status") == "reserved":
-                    held["snapshot_state"] = "pending"
-                    held["last_failure"] = {"stage": "snapshot", "reason": type(exc).__name__,
-                                            "at": st.now_epoch()}
-                    _write_reservation(held)
-        return False
-
-
 def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> None:
-    """A session started at a pane that has a booking: remember it as the cleared window's
-    successor (caller holds the seat lock).  ``peer-steward.py clear`` reads this as the
-    hook-side proof that the new conversation really began."""
+    """A person's own ``/clear``/``/new`` at a pane whose tidy booking is still open: remember
+    the new session (caller holds the seat lock) so that its start hook records the one
+    tidy succession edge and the new conversation receives the saved card. No tidy types a
+    clear; the booking itself then skips (``target-changed``) and nothing continues."""
     req = read_reservation(seat.key)
     if not req or req.get("status") not in ("reserved", "unverified") or req.get("harness") != harness:
         return
@@ -1665,30 +1457,8 @@ def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> No
     if (req.get("observed") or {}).get("sid") == sid:
         return
     req["observed"] = {"sid": sid, "harness": harness, "at": now}
-    if req.get("status") == "unverified":
-        # Codex starts the new thread's SessionStart only with its first message, so the successor
-        # can show up after the helper stopped waiting: the clear did happen, drop the doubt.
-        req.update(status="cleared", new_session=sid, reason="")
-        _set_successor_prompt_frontier(req, sid)
-        _drop_unverified_notice(_booked_seat(req, seat.key), req)
     _write_reservation(req)
 
-
-def _drop_unverified_notice(seat: "st.Seat", req: dict) -> None:
-    """Remove the "could not confirm" line this booking left (caller holds the seat lock)."""
-    text = _notice_text("unverified", "", str(req.get("harness") or ""),
-                        compact=req.get("clear_command") == "compact")
-    path = st._notices_path(seat)
-    data = st.read_json(path)
-    items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return
-    kept = [i for i in items if not (isinstance(i, dict) and i.get("text") == text
-                                     and (i.get("author") or {}).get("sid") == req.get("sid"))]
-    if len(kept) != len(items):
-        st.atomic_write_json(path, {"schema": st.SCHEMA, "items": kept,
-                                    "delivered": data.get("delivered", []),
-                                    "lineage_received": data.get("lineage_received", [])})
 
 
 def _booking_at(path: Path):
@@ -1757,15 +1527,6 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
         # instead of dropping them (see claim_clear).
         reason = _card_unchanged_reason(req, card, booked)
     return reason
-
-
-def _notified_manual_tidy(req: dict, seat: "st.Seat") -> bool:
-    """A tidy the person ran, followed only by task notifications since its card. It is kept,
-    not cancelled: /compact keeps that turn, where a clear would drop it."""
-    if req.get("origin") in ("idle", "compact"):
-        return False
-    observation = _card_frontier(seat)
-    return bool(observation and _only_notifications_since(seat, int(req.get("prompt_seq", -1)), observation[1]))
 
 
 def _only_notifications_since(seat: "st.Seat", booked: int, sequence: int) -> bool:
@@ -1922,18 +1683,16 @@ def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time
 
 
 def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
-    """Atomically consume the one clear send before the steward/native writer acts."""
+    """Atomically consume the one /compact send before the steward/native writer acts."""
     req, seat, reason = _booking_at(Path(path))
     if req is None:
         return None, reason
-    compact = _compact_mode(req) or _notified_manual_tidy(req, seat)   # outside the lock: own files
     transcript, offset = "", None
-    if compact:
-        with contextlib.suppress(Exception):
-            import tidy_transcripts
-            found = tidy_transcripts.locate_transcript(req["harness"], str(req.get("sid") or ""))
-            if found is not None:
-                transcript, offset = str(found), found.stat().st_size
+    with contextlib.suppress(Exception):    # outside the lock: the session's own transcript
+        import tidy_transcripts
+        found = tidy_transcripts.locate_transcript(req["harness"], str(req.get("sid") or ""))
+        if found is not None:
+            transcript, offset = str(found), found.stat().st_size
     with st.seat_lock(seat.key):
         req, reason = validate_request(path, nonce)
         if req is None:
@@ -1957,9 +1716,8 @@ def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
             return None, reason
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
-        if compact or req.get("clear_command") == "compact" or _notified_manual_tidy(req, seat):
-            claim.update(command="compact", transcript=transcript, offset=offset)
-            req["clear_command"] = "compact"
+        claim.update(command="compact", transcript=transcript, offset=offset)
+        req["clear_command"] = "compact"
         req["clear_claim"] = claim
         _write_reservation(req)
         return {**req, "clear_claim": claim}, ""
@@ -2128,6 +1886,55 @@ def observe_continue_receipt(harness: str, sid: str, transfer_ref: str = "") -> 
     return True
 
 
+def continue_card_reason(req: dict) -> Optional[str]:
+    """``card-taken`` when another automatic turn of the booked session already received the
+    booked card (its consumption receipt is the card's own generation), else None."""
+    seat = st.seat_from_dict(req.get("seat") or {})
+    card = st.read_latest_card(seat)
+    consumed = st.read_json(st._consumed_path(seat))
+    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
+    return "card-taken" if held and consumed.get("receipts") else None
+
+
+def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
+    """Close a queued continue that will never be sent, with its real reason.
+
+    A continue held back while the session worked (``not-idle-*``) has no transfer ref and
+    no later sender on every harness; once the card reached another turn (``card-taken``) or
+    the continue window ended (``expired``) it is skipped, not left ``pending``. Called from
+    the session's own turn-end observation; nothing is typed and nothing is retried here."""
+    if harness not in ("claude", "codex", "opencode") or not sid:
+        return 0
+    now = st.now_epoch() if now is None else now
+    try:
+        paths = sorted(clear_dir().glob("*.json"))
+    except OSError:
+        return 0
+    settled = 0
+    for path in paths:
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+        except OSError:
+            continue
+        req = read_reservation(path.stem)
+        held = (req or {}).get("continued") if isinstance((req or {}).get("continued"), dict) else {}
+        if (not req or req.get("status") != "cleared" or req.get("harness") != harness
+                or req.get("new_session") != sid or held.get("state") != "pending"
+                or held.get("transfer_ref")):
+            continue
+        try:
+            reason = continue_card_reason(req)
+        except (OSError, ValueError, st.StateError):
+            continue
+        if not reason and now > float(held.get("deadline", 0) or 0):
+            reason = "expired"
+        if reason and _finish_continue(path.stem, str(req.get("nonce") or ""), "skipped", reason,
+                                       unsent=True):
+            settled += 1
+    return settled
+
+
 def release_unsent_continue(claim):
     """Return only this unsent claim to the same booking's pending state."""
     key = claim["seat"]["key"]
@@ -2258,23 +2065,14 @@ def _reason_text(reason: str, t) -> str:
         return REASON_TEXT.get(reason, reason)
 
 
-def _notice_text(outcome: str, reason: str, harness: str, *, compact: bool = False) -> str:
+def _notice_text(outcome: str, reason: str, harness: str = "") -> str:
+    """The one result line when the booked /compact did not happen or was not confirmed."""
     t = st._ui_translator()
     why = _reason_text(reason, t)
-    if compact:
-        # Background agents kept this window: the next step is the same /compact, never a clear.
-        kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept_compact")
-        if outcome == "unverified":
-            return t("tidy.clear.compact_unverified", kept=kept)
-        return t("tidy.clear.compact_failed" if outcome == "failed" else "tidy.clear.compact_skipped",
-                 why=why, kept=kept)
-    hint = CLEAR_COMMAND.get(harness, "/clear")
-    kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept", hint=hint)
+    kept = "" if reason in NO_CARD_REASONS else t("tidy.clear.kept")
     if outcome == "unverified":
-        return t("tidy.clear.unverified", hint=hint, kept=kept)
-    if outcome == "failed":
-        return t("tidy.clear.failed", why=why, hint=hint, kept=kept)
-    return t("tidy.clear.skipped", why=why, hint=hint, kept=kept)
+        return t("tidy.clear.unverified", kept=kept)
+    return t("tidy.clear.failed" if outcome == "failed" else "tidy.clear.skipped", why=why, kept=kept)
 
 
 # Why an idle card request was not sent, as it was at the last look.
@@ -2367,15 +2165,15 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
                             notice_id="idle:" + nonce)
             _wake_peer_inputs(req)
         return True
-    if outcome not in ("cleared", "cancelled"):
+    if outcome not in ("cleared", "cancelled") and not (reason == "target-changed" and req.get("observed")):
+        # (A person who cleared the window themselves already has the card in the new session.)
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle":
                 notice = _idle_notice_text(req, reason)
             elif req.get("origin") == "compact":
                 notice = st._ui_translator()("tidy.clear.auto_unverified")
             else:
-                notice = _notice_text(outcome, reason, str(req.get("harness") or ""),
-                                      compact=req.get("clear_command") == "compact")
+                notice = _notice_text(outcome, reason, str(req.get("harness") or ""))
             if notice:
                 st.write_notice(_booked_seat(req, seat_key), notice,
                                 author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
@@ -2383,8 +2181,11 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
 
 
 def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", *,
-                     claim_id: str = "", transfer_ref: str = "") -> bool:
-    """Settle only this continue claim; queued delivery keeps its exact native ref."""
+                     claim_id: str = "", transfer_ref: str = "", unsent: bool = False) -> bool:
+    """Settle only this continue claim; queued delivery keeps its exact native ref.
+
+    ``unsent`` settles a continue only while it still has no transfer ref: a ref bound
+    after the caller's read is settled by its receipt (``observe_continue_receipt``)."""
     initial = read_reservation(seat_key)
     if not initial:
         return False
@@ -2401,6 +2202,8 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
         if claim_id and held.get("claim_id") != claim_id:
             return False
         if held.get("state") == "sending" and not claim_id:
+            return False
+        if unsent and held.get("transfer_ref"):
             return False
         if outcome == "queued":
             req["continued"] = {**held, "state": "pending", "reason": reason}
@@ -2527,9 +2330,6 @@ def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float
         if now > float(held.get("deadline", 0) or 0):
             return "skipped" if _finish(seat_key, nonce, "skipped", "idle-card-not-accepted") else "superseded"
         if request.get("state") == "accepted":
-            if held.get("snapshot_state") == "pending" and not _prepare_handover_snapshot(held):
-                sleep(min(1.0, max(0.0, float(held.get("deadline", 0) or 0) - now)))
-                continue
             return "accepted"
         if request.get("state") in ("sending", "arrived"):
             sleep(min(1.0, max(0.0, float(held.get("deadline", 0) or 0) - now)))
@@ -2620,11 +2420,11 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
                steward: Optional[Callable[[Path, str, str], dict]] = None,
                continuer: Optional[Callable[[Path, str, str], dict]] = None,
                sleep: Callable[[float], None] = time.sleep) -> str:
-    """Wait for safe readiness, consume one clear send, and continue after a confirmed clear.
+    """Wait for safe readiness, type /compact once, and continue the same session after it.
 
-    Manual tidy keeps its single idle wait and returns ``continued`` after its clear
-    and native delivery. Idle tidy returns ``compacted`` only from its card and native
-    history; it never clears or sends a followup.
+    Manual tidy keeps its single idle wait and returns ``continued`` after the confirmed
+    compaction and native delivery of its continue. Idle tidy returns ``compacted`` only
+    from its card and native history; it sends no followup.
     """
     wait = wait or _herdr_wait_idle
     steward = steward or _run_steward
@@ -2643,24 +2443,6 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     if req.get("origin") == "compact":
         _finish(seat_key, nonce, "cancelled", "retired-auto-compact")
         return "cancelled"
-    import dispatch_seat_handover as handover
-    booked_seat = st.seat_from_dict(req["seat"])
-    snapshot_missing = (booked_seat.kind in {"pane", "native"}
-                        and handover.read_snapshot(booked_seat.key) is None)
-    if req.get("snapshot_state") == "pending" or (req.get("snapshot_state") == "ready" and snapshot_missing):
-        while True:
-            if _prepare_handover_snapshot(req):
-                break
-            checked, reason = reobserve_request(path, nonce, require_ready=False, sleep=sleep)
-            if checked is None:
-                if reason == "superseded":
-                    return "superseded"
-                return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-            remaining = float(req.get("deadline", 0) or 0) - st.now_epoch()
-            if remaining <= 0:
-                return "skipped" if _finish(seat_key, nonce, "skipped", "snapshot-unavailable") else "superseded"
-            sleep(min(1.0, remaining))
-            req = read_reservation(seat_key) or req
     pane = str((req.get("seat") or {}).get("pane") or "")
     if req.get("origin") == "idle":
         accepted = _idle_due_and_request(seat_key, nonce, sleep)
@@ -2693,25 +2475,12 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             if why == "superseded":
                 return "superseded"
             return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
-        if outcome not in {"queued", "skipped"} or reason != "snapshot-pending":
-            break
-        held = read_reservation(seat_key)
-        if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
-            return "superseded"
-        remaining = float(held.get("deadline", 0)) - st.now_epoch()
-        if remaining <= 0:
-            return "skipped" if _finish(seat_key, nonce, "skipped", "snapshot-unavailable") else "superseded"
-        if not _prepare_handover_snapshot(held):
-            sleep(min(1.0, remaining))
-        checked, why = reobserve_request(path, nonce, sleep=sleep)
-        if checked is None:
-            if why == "superseded":
-                return "superseded"
-            return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        break
     if req.get("origin") == "idle":
         return _await_idle_compaction(seat_key, nonce, sleep)
+    sid = str(req.get("sid") or "")
     if outcome == "true":
-        _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
+        _finish(seat_key, nonce, "cleared", observed=sid)
         return _continue(seat_key, nonce, continuer, sleep=sleep)
     held = read_reservation(seat_key) or {}
     if outcome == "unverified" and (held.get("clear_claim") or {}).get("command") == "compact":
@@ -2722,28 +2491,11 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
                 return "superseded"
             if compact_confirmed(held):
-                _finish(seat_key, nonce, "cleared", observed=str(held.get("sid") or ""))
+                _finish(seat_key, nonce, "cleared", observed=sid)
                 return _continue(seat_key, nonce, continuer, sleep=sleep)
             if time.monotonic() >= deadline:
                 return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
             sleep(COMPACT_POLL_SEC)
-    if outcome == "unverified":
-        # The clear was written once and never repeated; allow the new conversation's
-        # start hook a short bounded window to show up before calling it unconfirmed.
-        deadline = time.monotonic() + _tunable("CLEAR_OBSERVE", OBSERVE_WAIT_SEC)
-        while time.monotonic() < deadline:
-            held = read_reservation(seat_key)
-            seen = (held or {}).get("observed") or {}
-            if seen.get("sid"):
-                _finish(seat_key, nonce, "cleared", observed=str(seen["sid"]))
-                return _continue(seat_key, nonce, continuer, sleep=sleep)
-            sleep(1.0)
-        # A start recorded during the last wait is still inside the window.
-        seen = (read_reservation(seat_key) or {}).get("observed") or {}
-        if seen.get("sid"):
-            _finish(seat_key, nonce, "cleared", observed=str(seen["sid"]))
-            return _continue(seat_key, nonce, continuer, sleep=sleep)
-        return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
     final = "skipped" if outcome == "skipped" else "failed"
     return final if _finish(seat_key, nonce, final, reason) else "superseded"
 

@@ -505,6 +505,72 @@ class PostToolTest(_BaseTest):
         self.assertEqual(proc2.returncode, 0)
 
 
+class StopFollowThroughTest(_BaseTest):
+    """PG-44: Claude's Stop gives Codex's one follow-through pass, same rule and state."""
+
+    SID = "4f1c2b8e-0000-4000-8000-00000000f044"
+    ATTEMPT = "att-" + "e" * 32
+
+    def _completion(self):
+        parent = "att-" + "f" * 32
+        receipt = {"schema_version": 2, "state": "delivered", "parent_attempt_id": parent,
+                   "job_registry": str(self.jobs_path), "delivery_classification": "attention",
+                   "children": [{"attempt_id": self.ATTEMPT, "status": "done", "readiness": "ready",
+                                 "reason": "terminal-failure-or-unclosed",
+                                 "required_action": "inspect-done-failure", "harness": "claude",
+                                 "delivery_classification": "attention"}]}
+        pending_delivery.create(
+            root=self.tmp_root, recipient_kind="claude-parent-runtime", recipient_key=self.SID,
+            delivery_id="delivery-" + "e" * 32, session_generation="",
+            session_generation_supported="0", attempt_ids=[self.ATTEMPT],
+            parent_attempt_id=parent, route_id="rt-fixture", route_node="execute",
+            receipt=receipt, receipt_digest=pending_delivery._canonical_receipt_digest(receipt),
+            row_revisions={self.ATTEMPT: "deadbeef"})
+
+    def _tool(self, command, prompt_id="prompt-1", **extra):
+        proc = self._run("post-tool", {"session_id": self.SID, "prompt_id": prompt_id,
+                                       "tool_name": "Bash", "tool_input": {"command": command},
+                                       "hook_event_name": "PostToolUse", **extra})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.decode()
+
+    def _stop(self, prompt_id="prompt-1", **extra):
+        proc = self._run("stop", {"session_id": self.SID, "prompt_id": prompt_id,
+                                  "hook_event_name": "Stop", **extra})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return [json.loads(line) for line in proc.stdout.decode().splitlines() if line.strip()]
+
+    def test_an_owed_action_ignored_by_an_unrelated_tool_continues_once(self):
+        self._completion()
+        self.assertIn(self.ATTEMPT, self._tool("register && complete"))
+        self._tool("ls -1 /")
+        first = self._stop()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["decision"], "block")
+        self.assertIn("required_action=inspect-done-failure", first[0]["reason"])
+        self.assertIn("This is the only continuation for this turn.", first[0]["reason"])
+        self.assertEqual(self._stop(stop_hook_active=True), [])
+
+    def test_a_tool_naming_the_attempt_meets_the_action(self):
+        self._completion()
+        self._tool("register && complete")
+        self._tool("harvest --attempt " + self.ATTEMPT)
+        self.assertEqual(self._stop(), [])
+
+    def test_a_new_prompt_and_a_missing_prompt_id_start_without_owed_actions(self):
+        self._completion()
+        self._tool("register && complete")
+        self.assertEqual(self._stop(prompt_id="prompt-2"), [])
+        self.assertEqual(self._stop(prompt_id=""), [])
+
+    def test_a_subagent_tool_and_stop_are_not_the_main_turn(self):
+        self._completion()
+        self._tool("register && complete")
+        self._tool("harvest --attempt " + self.ATTEMPT, agent_id="sub-1")
+        self.assertEqual(self._stop(agent_id="sub-1"), [])
+        self.assertEqual(len(self._stop()), 1)
+
+
 class ToolBoundaryNoticeTest(_BaseTest):
     """Claude's PostToolUse hands the running turn its ordinary notices, as Codex does."""
 

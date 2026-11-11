@@ -167,9 +167,16 @@ push, use `preflight.sh worktree-cleanup --check` before `--apply`; a
 cleanup. The main/orchestrator chooses portable roles and concrete model
 settings per job.
 
-**Token budget.** OpenCode token self-regulation remains explicitly deferred:
-Phase 2 automatic accounting and the isolated experiment CLI are not
-projected; it does not copy Codex token-budget hooks or mutate runtime config.
+**Token budget.** At each main-session prompt the plugin passes the latest
+assistant request's tokens (V1 `session.messages`, V2 `session.context`) and the
+`limit.context` of that same model (V1 `chat.params`, V2 `context` + `model.list`)
+to the shared `utilities/token-budget.py --adapter opencode`. The shared code
+judges the 70/85% band on OpenCode's own footer percentage, emits the canonical
+directive only on a band transition, and records the bounded content-free
+accounting; the directive rides that turn's system context, like Codex's
+`UserPromptSubmit` context. A missing window, another model's window or any
+failure is zero bytes. The isolated experiment CLI is not projected and no
+runtime config is written.
 
 ## Runtime Mapping
 
@@ -188,7 +195,7 @@ projected; it does not copy Codex token-budget hooks or mutate runtime config.
 | worktree cleanup | `preflight.sh worktree-cleanup`; dry-run first, apply only after merge + integrated verification + push |
 | routing-contract signal | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh prompt-signal [cwd] [session-id]`; run it manually when plugins are unavailable |
 | harness status snapshot | Run `adapters/opencode/bin/preflight.sh status [cwd] [session-id]` for read-only artifact, notes, worktree, and git-risk signals. This does not replace OpenCode native model/context/session UI |
-| token self-regulation v2 | Phase 2 automatic hook accounting and the Phase 3 isolated experiment CLI are deferred. Shared Fleet modules may be inspected as portable source, but OpenCode projects no token-budget utility, production hook, activation flag, or runtime-config mutation |
+| token self-regulation v2 | Plugin `chat.message` → shared `utilities/token-budget.py --adapter opencode --format hook --message-stdin --record-accounting` (Phase 1 transition directive + Phase 2 accounting, adapter `opencode`); `kv`/`json` remain the L2 diagnostics. The Phase 3 isolated experiment CLI is not projected; no activation flag or runtime-config mutation |
 | adapter readiness | Run `adapters/opencode/bin/preflight.sh doctor` to check manifest freshness, native projections, and boundary rules in one command |
 | headless dispatch | Tool-contract check: `adapters/opencode/bin/preflight.sh headless --check <worktree>` verifies the worktree, `opencode run` availability, and installed OpenCode runtime projection (`hearting`, native Skills path, native Agents, native Commands, and guard plugin). Use `adapters/opencode/bin/preflight.sh dispatch --dry-run|--register|--start --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--agent <agent>] (--model-profile <deep|balanced-deep|light|mini> [--model-role <portable-role>]|--model-role <portable-role>|--model <model> --variant <variant>|--inherit-model-settings)` to build the command and register open jobs. The optional worker mode is a non-owner projection that must equal the selected portable unit; `_kernel/owner` rejects a stage mode and accepts a route-sealed owner profile alone. Route-bound profiles select the complete user `~/.config/opencode/agent-config/models.conf` when valid and otherwise the complete shipped `config/models.conf`. Installation seeds the user copy once and never rewrites or removes it. Caller model/variant replacement is rejected, and substantive registered `mini` is denied. OpenCode declares its own `balanced-deep`, `light` and `mini` tiers (no deep tier: `deep` and `top` collapse onto balanced-deep), records `profile_granularity` per profile (`full`, `collapsed-deep-to-balanced-deep`, `collapsed-balanced-to-light`, `collapsed-top-to-balanced-deep`), applies a route-sealed `compose --pin` model (`model_source=pin`), V1 omits `--variant` for `runtime-default`; V2 omits the `#variant` suffix. Registry/Fleet rows keep capability mode, worker mode, role, profile, tier, and granularity separate. `--start` reruns the same runtime projection check before launching. Use `liveness` while waiting and `harvest --mark-done` after main-session harvest; merge and cleanup remain outside the wrapper |
 | QA policy mapping | `adapters/opencode/bin/preflight.sh qa-policy <level> [code|research|doc|general]` maps portable QA levels from `core/CONVENTIONS.md` to OpenCode assurance scope, selected-pass reviewer budgets, external-adversary requirements, max rounds, and inline fallback reporting. `stage_graph_selector=explicit-graph-or-intensity-default` means these budgets do not open stages or depth by themselves |
@@ -212,7 +219,7 @@ projected; it does not copy Codex token-budget hooks or mutate runtime config.
 | memory sync | None at `session.idle` (D-82; `preflight session-end` is removed). `mem.py` exchanges in the background after writes and stale reads; `session.compacted` empties the candidate display history. No automatic distiller (D-78) |
 | memory store | `tools/memory/{mem.py,protocol_v2.py,git_exchange_v2.py,sync_v2.py}` are runtime-neutral |
 | permission model | OpenCode native `permission` config (`allow`/`ask`/`deny` per tool, per-agent override); adapter documents recommended rules, not a harness guard replacement |
-| statusline | OpenCode TUI footer is native; no user shell statusline surface in config schema; harness status signals stay instruction-only/preflight |
+| statusline | OpenCode 2 TUI footer is native; outside the session shell the official `prompt.footer.status` slot adds Hearting's answer wait (`◑답 대기 N`), open route and waiting session-tidy result from `utilities/human_wait_state.py --statusline` (the helper Claude's status line reads); under the shell the panel shows them and the slot draws nothing. No user shell statusline script |
 
 ## Tool Projection
 
@@ -524,8 +531,11 @@ Manual `정리만` / `--no-clear` saves the card and queues memory work while re
 ### Session route waiting
 
 OpenCode 2.0.32's official `prompt.footer.status` TUI slot displays
-`⏳ route N · stage` from the same current/open route projection as Fleet
-OVERVIEW. The existing terminal identity entry owns the slot and its cleanup.
+`◑답 대기 N` while this session waits for an answer, `route N · stage` from
+the same current/open route projection as Fleet OVERVIEW, and a waiting
+session-tidy result line, the same three Hearting items Claude's status line
+shows from the same helper. It draws nothing under the session shell, whose
+panel shows them. The existing terminal identity entry owns the slot and its cleanup.
 It reads Hearting's private display cache outside rendering; the existing
 answer-wait producer refreshes exact requested sessions every 30 seconds.
 Missing/stale data and sessions without an open current route show no badge.

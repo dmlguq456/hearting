@@ -88,6 +88,9 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
+// Route and message rows opened in place by a press. Display only: a press
+// here is not typing, so it moves neither the input epoch nor `empty`.
+const panelOpen=new Set();
 let displaySequence=0,nativeMcp;
 function binding() {
   // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
@@ -105,7 +108,7 @@ function publishNativeDisplay() {
     ?{context_percent:nativeContext.percent}:{})});
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
-function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
@@ -235,13 +238,24 @@ function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return geometry().side?rows:rows-height();}
 function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
-function panelContent(){
+function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
-  panelHits=view.hits;routePageCount=view.routePages;return view.rows;
+  // A message no longer kept closes its page here too, so its page keys go back to the native.
+  if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
+  routePageCount=view.routePages;return view;
+}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;return view.rows;}
+// A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
+// only while it is on screen. Collapsed, under Fleet or the settings editor,
+// relayed, or no longer kept, it leaves them to the native like any other key;
+// key ownership is not left to the next paint.
+function readPageShown(){
+  if(!routeDetail||relay||ended||!activated||fleetView||settings||!expanded)return false;
+  return panelViewNow().hits.some(hit=>hit.action==='route-prev')&&!!routeDetail;
 }
 function height(){
   if(fleetView)return 0;
@@ -473,13 +487,16 @@ async function projection() {
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
-// the same session's model, compact status and session rows (folder, title,
-// branch, Git, jobs). Any other state, including a panel too short for all of
-// them, shows it.
+// the same session's groups that row carries: number, project and Git, context,
+// the answer wait, the route count, 5h/7d and running jobs. Any other state,
+// including a panel too short for all of them, shows it.
 function claudePanelPainted(){
   if(harness!=='claude'||relay||ended||fleetView||!activated||!sid||!expanded||settings||!height())return false;
-  const rows=[...(panelModel.summary||[]),...(panelModel.session||[])].map(row=>row.map(part=>String(part.text)).join('').trim()).filter(Boolean);
-  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>row.includes(text)));
+  const joined=parts=>(Array.isArray(parts)?parts:[]).map(part=>String(part.text)).join('').trim();
+  const rows=[joined(panelModel.head),joined(panelModel.context),joined(panelModel.quota),joined(panelModel.jobs),
+    String(panelModel.wait||''),panelModel.route_count?'route '+panelModel.route_count:''].filter(Boolean);
+  const squeeze=s=>s.replace(/\s+/g,'');
+  return rows.length>0&&rows.every(text=>paintedCommon.some(row=>squeeze(row).includes(squeeze(text))));
 }
 // The blanked Claude row carries the panel's one-line notice (empty by default),
 // at the native statusline's own two-cell indent.
@@ -578,6 +595,7 @@ function observeInput(data) {
     else if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;
   }
 }
+function observeReport(data){epoch+=data.length;empty=false;}
 function openSettings(){
   settings={value:{...panelView.defaults,...displayConfiguration},before:{...displayConfiguration},index:0};
   block.leave();epoch++;queueLayout();
@@ -593,6 +611,10 @@ async function applySettings(){
 }
 function cancelSettings(){if(settings&&!settings.saving){displayConfiguration=settings.before;settings=undefined;queueLayout();}}
 function panelAction(action){
+  if(/^(?:route|message):/.test(action)&&!settings){
+    if(panelOpen.has(action))panelOpen.delete(action);else{if(panelOpen.size>=16)panelOpen.clear();panelOpen.add(action);}
+    queueLayout();return;
+  }
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
@@ -601,6 +623,8 @@ function panelAction(action){
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
   if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();}
+  // A message longer than its rows reads on, from its start, on the detail pages.
+  if(action.startsWith('read:message:')){routeDetail=action.slice(5);routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}
   if(action==='question'){routeDetail=false;block.enter();}
   if(action.startsWith('setting:')&&settings){
@@ -666,11 +690,20 @@ mouseInput=require('./panel-mouse.cjs')({
     // A left panel moves the native area right; native sees its own columns.
     const offset=geometry().nativeColumn;
     if(offset){if(x<=offset)return;raw=Buffer.from(`\x1b[<${code};${x-offset};${y}${release?'m':'M'}`,'latin1');}
-    if(!release&&(code&3)===0){block.leave();queueDisplay();}
-    if(currentDelivery){inputOwner.hold(raw);observeInput(raw);heldBytes+=raw.length;return;}
-    observeInput(raw);child.write(raw);
+    nativePointer(code,release,raw);
   }
 });
+function nativePointer(code,release,raw){
+  // A wheel report scrolls; it neither edits the composer nor clicks away
+  // the question block. Like a focus report it invalidates the in-flight
+  // observation but leaves no native draft, so a scroll (or the scroll nudge
+  // Herdr sends a Claude pane on a recent read) keeps the input settled.
+  const wheel=(code&0xc0)===64;
+  if(!release&&!wheel&&(code&3)===0){block.leave();queueDisplay();}
+  const observe=wheel&&!keyTail&&!paste?observeReport:observeInput;
+  if(currentDelivery){inputOwner.hold(raw);observe(raw);heldBytes+=raw.length;return;}
+  observe(raw);child.write(raw);
+}
 function userInput(data){if(data.length){epoch+=data.length;empty=false;mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
@@ -678,8 +711,9 @@ function inputBytes(data) {
     // Mouse-opened shell editors own their visible keys even while a peer's
     // paste is admitted. Only native-directed bytes enter the retained queue.
     if(settings&&!relay){settingsInput(data);epoch+=data.length;return;}
-    if(routeDetail&&!relay&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
-    if(!relay&&routeDetail&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
+    const page=!!routeDetail&&readPageShown();
+    if(page&&!paste){const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));if(pageKey){panelAction(pageKey[1]==='5'?'route-prev':'route-next');data=data.subarray(pageKey[0].length);continue;}}
+    if(page&&(data[0]===27&&data.length===1||data[0]===29)){routeDetail=false;queueDisplay();data=data.subarray(1);continue;}
     if(currentDelivery&&(!block.focused||relay)){
       inputOwner.hold(data);observeInput(data);heldBytes+=data.length;
       if(heldBytes>=65536)process.stdin.pause();if(!relay)rebuildDisplay();return;
@@ -715,7 +749,7 @@ function inputBytes(data) {
     // Escape has already reached native. Ctrl+] cannot continue an Escape/CSI
     // prefix; keeping that lone byte pending would disable focus after a modal.
     if(keyTail==='\x1b'&&!paste)keyTail='';
-    if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];block.enter();queueLayout();}
+    if(!paste&&!keyTail){epoch++;expanded=true;actionLines=[];routeDetail=false;routePage=0;block.enter();queueLayout();}
     else{const literal=data.subarray(offset,offset+1);observeInput(literal);child.write(literal);}
     data=data.subarray(offset+1);
   }
@@ -751,7 +785,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }

@@ -662,7 +662,9 @@ int main(void) {
                 "AGENT_HOME": self.config_home, "FLEET_TITLE_STATE_DIR": str(state),
                 "FIXTURE_NAME": name, "FIXTURE_NAME_SOURCE": name_source})
             self.assertEqual(process.returncode, 0, error)
-            self.assertIn(expected, output.decode())
+            # Spec 2026-11-11 rule 10: the statusline carries no session title;
+            # the verified runtime still binds the tap to the native process.
+            self.assertNotIn(expected, output.decode())
             self.assertEqual(json.loads(self._tap(sid))["pid"], process.pid)
 
     def test_non_brace_quote_input_stays_verbatim(self):

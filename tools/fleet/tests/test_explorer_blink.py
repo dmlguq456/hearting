@@ -98,6 +98,10 @@ class BlinkAssertions(unittest.TestCase):
             self.assertFalse(render._HUE_OF[dim][1] & render._A_BOLD, (y, x, dim))
 
 
+# The folded session's route count, in the statusline word.
+ROUTE_TAIL = "route 1"
+
+
 class SessionRouteCountTests(BlinkAssertions):
     def test_only_open_current_counts_pulse_bright_and_dark_without_moving_text(self):
         base = blink_view_model()
@@ -115,15 +119,16 @@ class SessionRouteCountTests(BlinkAssertions):
                         # Include wide-character continuation cells when locating
                         # the suffix after a clipped CJK title.
                         lines = ["".join(cell[0] or "\0" for cell in row) for row in on.cells]
-                        badge = [(y, line.index("route 1")) for y, line in enumerate(lines)
-                                 if "route 1" in line]
+                        # The folded session's title tail is ``route N`` (the statusline word).
+                        badge = [(y, line.index(ROUTE_TAIL)) for y, line in enumerate(lines)
+                                 if ROUTE_TAIL in line and "[c1]" in line]
                         if not current:
                             self.assertFalse(badge)
                             self.assert_structure(on, off)
                             continue
                         self.assertTrue(badge)
                         for y, x in badge:
-                            for offset in range(len("route 1")):
+                            for offset in range(len(ROUTE_TAIL)):
                                 a, b = on.cells[y][x + offset], off.cells[y][x + offset]
                                 # The text never goes away; only an open count changes colour.
                                 self.assertEqual(b[0], a[0])
@@ -135,13 +140,34 @@ class SessionRouteCountTests(BlinkAssertions):
                                 self.assertFalse(render._HUE_OF[b[1]][1] & render._A_REVERSE)
                         masked = [list(row) for row in on.cells]
                         for y, x in badge:
-                            for offset in range(len("route 1")):
+                            for offset in range(len(ROUTE_TAIL)):
                                 masked[y][x + offset] = off.cells[y][x + offset]
                         adjusted = replace(on, cells=tuple(tuple(row) for row in masked))
                         self.assert_structure(adjusted, off)
                         expanded = draw(vm, NavState(opened="c1"), cols, 45, beat=1)
-                        self.assertNotIn("route 1", "\n".join(expanded.text_rows()))
+                        self.assertNotIn(ROUTE_TAIL, "\n".join(line for line in (
+                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells) if "[c1]" in line))
 
+
+    def test_a_narrow_table_shows_the_whole_route_count_or_none_of_it(self):
+        # A folded row's `route N` is never cut to a shorter number or a part of the word
+        # (RV-PR1517-R3 §1 ②): the title and MODEL give way first, else the tail is left out.
+        base = blink_view_model()
+        sessions = tuple(dict(row, title="XXXX XXXX " * 8) for row in base.sessions)
+        first = dict(base.routes[0], current=True, state="working")
+        for count in (1, 12, 123):
+            vm = replace(base, sessions=sessions,
+                         routes=tuple(dict(first, id="r%d" % i) for i in range(count)))
+            whole = "route %d" % count
+            for cols in [*range(60, 100), 100, 140]:
+                with self.subTest(count=count, cols=cols):
+                    rows = [row.rstrip() for row in draw(vm, NavState(), cols, 45, beat=1).text_rows()
+                            if "[c1]" in row]
+                    tail = re.sub(r"X+|…|\(.*?\)", "", re.search(r"%(.*?)\d+h \d+m$", rows[0]).group(1)).strip()
+                    self.assertIn(tail, ("", whole), rows[0])
+                    # From 69 columns (and down to 67-69 by count) the whole count shows.
+                    if cols >= 69 or cols >= 66 + len(str(count)):
+                        self.assertEqual(tail, whole, rows[0])
 
 class StagePhaseTests(BlinkAssertions):
     def test_stage_boxes_pulse_only_active_names_and_dot_all_hues(self):
@@ -238,9 +264,11 @@ class StagePhaseTests(BlinkAssertions):
             with self.subTest(stages=stages):
                 route = dict(legs=[["code", "active", "0/1"]],
                              stages=stages, tree_label="code" if stages else None)
-                on, off = _grid(1, 9, 1), _grid(0, 9, 1)
+                # Eight cells: one short of ``execute ●`` now that a lone stage rail has no
+                # brackets to pay for, so the leg fallback is what is drawn.
+                on, off = _grid(1, 8, 1), _grid(0, 8, 1)
                 for grid in (on, off):
-                    tables._draw_route_progress(grid, 0, 9, 0, route)
+                    tables._draw_route_progress(grid, 0, 8, 0, route)
                 self.assertEqual(on.rows_text()[0].strip(), "code")
                 self.assertEqual(on.snapshot(), off.snapshot())
 
@@ -473,7 +501,9 @@ class FramePhaseTests(BlinkAssertions):
             values["routes"][0].update(activity=activity, worker=[
                 label, [["codex", "hb_codex"]], [[progress, "dim"]]])
             vm = ExplorerViewModel.from_mapping(values)
-            on, off = (draw(vm, blink_states()["routes"], 168, 45, beat=b) for b in (1, 0))
+            # The worker line unfolds under its one-line route row on a press.
+            opened = NavState(view="ROUTES", title="ROUTES", folds=(("ropen:ROUTES", "blink"),))
+            on, off = (draw(vm, opened, 168, 45, beat=b) for b in (1, 0))
             y = next(y for y, line in enumerate(on.text_rows()) if "└ " + label in line[34:])
             x = on.text_rows()[y].index(progress, 34)
             for col in range(34, x):

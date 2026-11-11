@@ -316,3 +316,34 @@ def config_arguments(config: dict) -> list[str]:
     for name, value in config.get("features", {}).items():
         arguments.extend(("-c", "features." + name + "=" + _toml(value)))
     return arguments
+
+
+# PG-23: a registered `[mcp_servers.design]` server's tools need approval, and a
+# noninteractive `codex exec` (approval_policy "never") rejects every such call. The
+# approval is given to that one server for one Hearting-launched run only, never in
+# the user's config: `default_tools_approval_mode` is read by every Codex host, so a
+# config value would also remove the approval question of interactive sessions.
+DESIGN_MCP_RUN_APPROVAL = "mcp_servers.design.default_tools_approval_mode"
+
+
+def design_mcp_run_arguments(codex_home) -> list[str]:
+    """`-c` arguments approving the design server's tools for one noninteractive run.
+
+    Empty unless `<codex_home>/config.toml` registers `[mcp_servers.design]` (a command
+    or url transport, not disabled) and leaves its approval mode unset: a dotted `-c`
+    on an unregistered server would create a broken table, and a value the user set
+    stays theirs. An unreadable config adds nothing.
+    """
+    import tomllib
+
+    try:
+        config = tomllib.loads((Path(codex_home) / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return []
+    servers = config.get("mcp_servers")
+    design = servers.get("design") if isinstance(servers, dict) else None
+    if not isinstance(design, dict) or design.get("enabled") is False \
+            or not (design.get("command") or design.get("url")) \
+            or "default_tools_approval_mode" in design:
+        return []
+    return ["-c", DESIGN_MCP_RUN_APPROVAL + '="approve"']

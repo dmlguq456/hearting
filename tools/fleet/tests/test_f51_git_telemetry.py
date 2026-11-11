@@ -726,7 +726,8 @@ os.execv(os.environ["DISPLAY_REAL_GIT"], [os.environ["DISPLAY_REAL_GIT"], *sys.a
             rendered = subprocess.run(["bash", os.environ["AGENT_HOME"] + "/adapters/claude/statusline.sh"],
                 input=payload, text=True, capture_output=True, timeout=5)
             self.assertEqual(rendered.returncode, 0, rendered.stderr)
-            self.assertIn("unknown", rendered.stdout)
+            # A pending observation stays unknown (`⚠️?`, `🚧 ?`), never `no-git`.
+            self.assertIn("🚧 ?", rendered.stdout)
             self.assertNotIn("no-git", rendered.stdout)
             self.assertLess(time.monotonic() - started, 3)
         finally:

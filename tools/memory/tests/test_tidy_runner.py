@@ -317,7 +317,7 @@ class RunnerCase(unittest.TestCase):
         result = self.cli("enqueue", "--harness", "claude", "--session-id", sid, **more)
         self.assertEqual(result.returncode, 0, result.stderr)
         line = result.stdout.strip()
-        self.assertRegex(line, r"^enqueue=tidy-\d{14}-[0-9a-f]{6} seat=[0-9a-f]+ status=queued clear=manual hint=/clear$")
+        self.assertRegex(line, r"^enqueue=tidy-\d{14}-[0-9a-f]{6} seat=[0-9a-f]+ status=queued clear=manual hint=/compact$")
         return line.split()[0].split("=", 1)[1]
 
     def item(self, qid):
@@ -875,7 +875,7 @@ class AutoClearTest(RunnerCase):
         self.wait_for(lambda: (self.reservation() or {}).get("status") == "skipped", "the skip")
         self.wait_for(lambda: any("입력창" in n for n in self.notices()), "the one result line")
         self.assertEqual(len(self.steps("clear.jsonl")), 1)
-        self.assertEqual(len([n for n in self.notices() if "자동으로 비우지 않았습니다" in n]), 1)
+        self.assertEqual(len([n for n in self.notices() if "/compact를 자동으로 입력하지 않았습니다" in n]), 1)
 
     def test_a_window_that_never_goes_idle_times_out_with_one_line_and_no_input(self):
         self.transcript("sid-A", [claude_row("user", "무언가 결정했다")])
@@ -889,7 +889,7 @@ class AutoClearTest(RunnerCase):
         self.assertEqual(result.stdout.strip(), "enqueue=none reason=worker")
         no_pane = self.iso.run([sys.executable, TIDY, "enqueue", "--harness", "codex", "--session-id", "sid-C"],
                                extra={k: v for k, v in self.env().items() if k != "HERDR_PANE_ID"}, cwd=self.cwd)
-        self.assertTrue(no_pane.stdout.strip().endswith("clear=manual hint=/clear"), no_pane.stdout)
+        self.assertTrue(no_pane.stdout.strip().endswith("clear=manual hint=/compact"), no_pane.stdout)
         self.assertFalse((self.state / "clear").exists())
 
 
