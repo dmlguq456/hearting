@@ -1,5 +1,6 @@
 """Fast cells retain native identity and never advance a complete publication."""
 import copy
+import errno
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,7 @@ class NativeDisplayTests(unittest.TestCase):
         mock.patch.object(fast,'_attachment_index',return_value={self.identity:self.binding}).start()
         mock.patch.object(fast,'read_proc_start',side_effect=lambda pid:self.starts.get(pid)).start()
         mock.patch.object(fast.session_registry,'registry_path',return_value=str(self.registry)).start()
-        mock.patch.object(fast.session_registry,'read',side_effect=lambda *a:
+        mock.patch.object(fast.session_registry,'read',side_effect=lambda *a, **k:
                           json.loads(self.registry.read_text()) if self.registry.exists() else None).start()
         mock.patch.object(fast.opencode,'_db',return_value=str(self.root/'absent.db')).start()
         from tools.fleet import session_view
@@ -182,10 +183,157 @@ class NativeDisplayTests(unittest.TestCase):
         self.assertTrue(replaced)
         self.assertEqual(self.reader.read(self.snapshot)[0][1]['context'], 63)
 
+    def test_a_source_read_failure_keeps_and_retries_wherever_it_is_caught(self):
+        # Failure location: raised out of _read, or met inside the feed helper.
+        for where in ('outside-read', 'inside-feed'):
+            with self.subTest(where=where):
+                reader = fast.NativeDisplayReader()
+                self.write(47); self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 47)
+                self.write(59)  # a valid new generation; nothing writes the feed again
+                parse, read_bytes, calls, failures = fast.NativeDisplayReader._read, os.read, [], []
+                def counted(*args):
+                    calls.append(1)
+                    if where == 'outside-read' and len(failures) < self.failing:
+                        failures.append(1); raise OSError('read error')
+                    return parse(*args)
+                def feed_read(fd, size):
+                    if where == 'inside-feed' and size == 4097 and len(failures) < self.failing:
+                        failures.append(1); raise OSError(errno.EIO, 'feed read error')
+                    return read_bytes(fd, size)
+                with mock.patch.object(fast.NativeDisplayReader, '_read', side_effect=counted), \
+                        mock.patch.object(fast.os, 'read', side_effect=feed_read):
+                    self.failing = 1
+                    self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 47)
+                    reader.invalidate()
+                    self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 59)
+                    reader.invalidate(); reader.read(self.snapshot)
+                    self.assertEqual(len(calls), 2)
+                    # While failures recur, each request reads once and keeps the value.
+                    self.write(71); failures.clear(); self.failing = 3
+                    for _ in range(3):
+                        self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 59)
+                    self.assertEqual(len(calls), 5)
+                    self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 71)
+
+    def test_an_unread_attachment_index_is_read_again_by_the_next_request(self):
+        self.write(47)
+        calls = []
+        def index():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError(errno.EIO, 'index read error')
+            return {self.identity: self.binding}
+        reader = fast.NativeDisplayReader()
+        with mock.patch.object(fast, '_attachment_index', side_effect=index):
+            self.assertEqual(reader.read(self.snapshot), ())
+            self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 47)
+            reader.read(self.snapshot)
+        self.assertEqual(len(calls), 2)
+
+    def test_absent_refused_or_explicitly_empty_feeds_still_clear(self):
+        feed = self.root/'native-display.json'
+        cases = (('absent', feed.unlink, ()),
+                 ('group-writable', lambda: feed.chmod(0o620), ()),
+                 ('other-session', lambda: self.write(91, sid='another'), ()),
+                 ('other-incarnation', lambda: self.write(91, incarnation='b'*48), ()))
+        for name, change, expected in cases:
+            with self.subTest(case=name):
+                reader = fast.NativeDisplayReader()
+                self.write(47); self.assertEqual(reader.read(self.snapshot)[0][1]['context'], 47)
+                change()
+                parse, calls = fast.NativeDisplayReader._read, []
+                with mock.patch.object(fast.NativeDisplayReader, '_read',
+                                       side_effect=lambda *a: calls.append(1) or parse(*a)):
+                    self.assertEqual(reader.read(self.snapshot), expected)
+                    reader.invalidate(); reader.read(self.snapshot)
+                self.assertEqual(len(calls), 1)  # settled: not read again
+        reader = fast.NativeDisplayReader()
+        self.write(47); reader.read(self.snapshot)
+        self.write(None)
+        self.assertIsNone(reader.read(self.snapshot)[0][1]['context'])
+
     def test_departed_rows_do_not_accumulate_in_the_display_reader(self):
         self.write();self.reader.read(self.snapshot)
         self.assertEqual(self.reader.read(LiveSnapshot()),())
         self.assertEqual(self.reader._entries,{})
+
+
+class SourceReadBoundaryTests(unittest.TestCase):
+    """Each source _read uses: not read raises, absent or refused reads None."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.io_error = OSError(errno.EIO, 'injected read error')
+
+    def assert_boundary(self, call, failing, absent):
+        """call(raise_unread) with an I/O failure, then on an absent source."""
+        with failing():
+            with self.assertRaises(OSError):
+                call(True)
+            self.assertIn(call(False), (None, (None, None)))
+        with absent():
+            self.assertIn(call(True), (None, (None, None)))
+
+    def test_registry_record(self):
+        from tools.fleet import session_registry
+        path = self.root/'1234.json'
+        path.write_text(json.dumps({'sessionId': 'exact'})); path.chmod(0o600)
+        target = mock.patch.object(session_registry, 'registry_path', return_value=str(path))
+        with target:
+            self.assertEqual(session_registry.read('codex', 1234, raise_unread=True)['sessionId'], 'exact')
+            self.assert_boundary(
+                lambda strict: session_registry.read('codex', 1234, raise_unread=strict),
+                lambda: mock.patch.object(session_registry, 'open', create=True, side_effect=self.io_error),
+                lambda: mock.patch.object(session_registry, 'registry_path', return_value=str(self.root/'absent')))
+
+    def test_claude_display_tap(self):
+        from tools.fleet import native_display
+        tap = self.root/'exact.json'
+        tap.write_text(json.dumps({'session_id': 'exact'})); tap.chmod(0o600)
+        self.assertEqual(native_display.claude_callback(tap, 'exact', 1, 's', raise_unread=True)['session_id'], 'exact')
+        self.assert_boundary(
+            lambda strict: native_display.claude_callback(tap, 'exact', 1, 's', raise_unread=strict),
+            lambda: mock.patch.object(native_display.os, 'read', side_effect=self.io_error),
+            lambda: mock.patch.object(native_display.os, 'open', side_effect=FileNotFoundError(errno.ENOENT, 'absent')))
+        link = self.root/'link.json'; link.symlink_to(tap)  # refused, not unread
+        self.assertIsNone(native_display.claude_callback(link, 'exact', 1, 's', raise_unread=True))
+
+    def test_codex_rollout_model_and_token_count(self):
+        from tools.fleet.collectors import codex
+        rollout = self.root/'rollout.jsonl'
+        rollout.write_text('{"type":"event_msg","payload":{"type":"token_count"}}\n')
+        for helper in (codex._rollout_model_effort, codex._tail_token_count):
+            with self.subTest(helper=helper.__name__):
+                codex._TURN_CONTEXT_CACHE.clear()
+                self.assert_boundary(
+                    lambda strict: helper(str(rollout), raise_unread=strict),
+                    lambda: mock.patch.object(codex, 'open', create=True, side_effect=self.io_error),
+                    lambda: mock.patch.object(codex.os, 'stat', side_effect=FileNotFoundError(errno.ENOENT, 'absent'))
+                    if helper is codex._rollout_model_effort else
+                    mock.patch.object(codex.os.path, 'getsize', side_effect=FileNotFoundError(errno.ENOENT, 'absent')))
+
+    def test_attachment_directory_and_record(self):
+        import importlib, sys
+        sys.path.insert(0, str(Path(fast.__file__).resolve().parents[2] / 'utilities'))
+        session_shell = importlib.import_module('session_shell')
+        (self.root/'opencode').mkdir()
+        record = self.root/'opencode'/'session-shell-4321.json'
+        record.write_text('{}'); record.chmod(0o600)
+        with mock.patch.object(session_shell, 'registry_root', return_value=self.root):
+            self.assertEqual(session_shell.bindings(harness='opencode', raise_unread=True), [])
+            for failing in (lambda: mock.patch.object(session_shell.os, 'listdir', side_effect=self.io_error),
+                            lambda: mock.patch.object(session_shell, '_private_json', side_effect=self.io_error)):
+                with failing():
+                    with self.assertRaises(OSError):
+                        session_shell.bindings(harness='opencode', raise_unread=True)
+            # Without the flag, other callers keep their existing result.
+            with mock.patch.object(session_shell, '_private_json', side_effect=self.io_error):
+                self.assertEqual(session_shell.bindings(harness='opencode'), [])
+            record.unlink(); (self.root/'opencode').rmdir()
+            self.assertEqual(session_shell.bindings(harness='opencode', raise_unread=True), [])
 
 
 class NativeLayerTests(unittest.TestCase):
