@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+import peer_address
 import session_shell
 
 spec = importlib.util.spec_from_file_location("peer_shell_resolution", ROOT / "utilities/peer-steward.py")
@@ -77,6 +78,14 @@ class WrappedPaneResolutionTest(unittest.TestCase):
         path.chmod(0o600)
         return value
 
+    def live(self, harness, sid=None):
+        """The native process's own window value, as peer_address reads it from procfs."""
+        server = peer._HERDR_SESSION or peer_address._server_name(os.environ)
+        row = {"harness": harness, "sid": self.sid if sid is None else sid,
+               "pid": self.native["pid"], "binding": None,
+               "env": {"HERDR_PANE_ID": self.pane, "HERDR_SESSION": server}}
+        return mock.patch.object(peer_address, "native_sessions", return_value=[row])
+
     def observed(self, harness):
         ident = {"harness": harness, "session_id": "-", "pane": self.pane, "name": "peer-name"}
         return mock.patch.object(peer, "_retire_target", return_value=("working", ident, 0, None))
@@ -93,7 +102,7 @@ class WrappedPaneResolutionTest(unittest.TestCase):
 
     def test_public_prompt_pins_one_native_carrier_without_physical_input(self):
         for harness in sorted(session_shell.HARNESSES):
-            with self.subTest(harness=harness), self.observed(harness):
+            with self.subTest(harness=harness), self.observed(harness), self.live(harness):
                 self.publish(harness)
                 args = SimpleNamespace(target=self.pane, body_file=None, body_stdin=False,
                                        text="synthetic report " + harness, ref=[], no_trailer=False)
@@ -176,11 +185,6 @@ class WrappedPaneResolutionTest(unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertEqual(error, "target-identity-unverified")
 
-    def test_unwrapped_native_address_does_not_add_an_outer_pane_observation(self):
-        with mock.patch.object(peer, "_retire_pane_info") as observe:
-            self.assertIsNone(peer._pane_shell_binding(self.pane, "codex", self.sid))
-        observe.assert_not_called()
-
     def test_optional_attachment_reader_absence_preserves_independent_native_proof(self):
         for native_sid in (self.sid, ""):
             with self.subTest(native_sid=native_sid), self.observed("codex"), \
@@ -212,16 +216,13 @@ class WrappedPaneResolutionTest(unittest.TestCase):
         self.publish("codex")
         original, duty, store = self.retained({"harness": "unknown", "session_id": None,
                                                "name": self.pane})
-        with self.observed("codex"), \
-             mock.patch.object(peer, "_message_terminal_evidence", return_value=None), \
-             mock.patch.object(peer, "_pane_readiness", return_value=SimpleNamespace(
-                 state="ready", reason="")), \
-             mock.patch.object(peer, "_codex_interrupt_start_gate", return_value=False), \
-             mock.patch.object(peer, "_deliver_codex_pending") as queue, \
+        with self.observed("codex"), self.live("codex"), \
+             mock.patch.object(peer, "_codex_shell_start_gate", return_value=False), \
+             mock.patch.object(peer.peer_message, "deliver_pending_codex",
+                               return_value={"status": "queued"}) as queue, \
              mock.patch.object(peer.peer_message, "prepare_peer_message") as prepare:
             peer._resume_message_obligation(duty, store)
-        queue.assert_called_once_with(original["ref"], self.pane, timeout=0.25,
-                                      start_interrupted=False)
+        queue.assert_called_once_with(original["ref"], timeout=0.25, start_interrupted=False)
         prepare.assert_not_called()
         current = peer.peer_message._read_pending(original["ref"])
         self.assertEqual(current["to"], original["to"])
@@ -233,14 +234,15 @@ class WrappedPaneResolutionTest(unittest.TestCase):
         self.publish("codex")
         original, duty, store = self.retained({"harness": "codex", "session_id": None,
                                                "name": "peer-name", "pane_id": self.pane})
-        with self.observed("codex"), \
-             mock.patch.object(peer, "_message_terminal_evidence", return_value=None), \
-             mock.patch.object(peer, "_deliver_codex_pending") as queue:
+        with self.observed("codex"), self.live("codex"), \
+             mock.patch.object(peer.peer_message, "deliver_pending_codex") as queue, \
+             mock.patch.object(session_shell, "deliver_pending") as shell:
             peer._resume_message_obligation(duty, store)
         queue.assert_not_called()
+        shell.assert_not_called()
         self.assertIsNone(peer.peer_message._read_pending(original["ref"]).get("bound_to"))
-        self.assertIn(store.get(duty["id"])["observation"]["reason"],
-                      {"target-process-proof-unknown", "target-session-unresolved"})
+        self.assertEqual(store.get(duty["id"])["observation"]["reason"],
+                         "target-session-unresolved")
 
 
 if __name__ == "__main__":

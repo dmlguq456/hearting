@@ -33,6 +33,8 @@ _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_obligation_test", str(_HERE / "peer-steward.py"))
 peer_steward = importlib.util.module_from_spec(_STEWARD_SPEC)
 _STEWARD_SPEC.loader.exec_module(peer_steward)
+import peer_session_fixture  # noqa: E402
+peer_session_fixture.install(peer_steward)
 
 
 def _pidfd_handoff_available():
@@ -1807,7 +1809,7 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual(refs, [duties[0]["id"], record["delivery_id"]])
         self.assertEqual(stored["state"], "sent-ambiguous")
 
-    def test_runner_preserves_notice_when_herdr_pane_id_is_missing_or_invalid(self):
+    def test_runner_preserves_notice_when_recipient_is_not_present(self):
         from types import SimpleNamespace
         import dispatch_pending_delivery as pending
         import session_notice
@@ -1830,20 +1832,16 @@ class ObligationStoreTest(unittest.TestCase):
                 "dispatch_depth=1,worker_type=owner,route_id=rt-known,route_hash=sha256:known\n")
             peer_steward._discover_session_notice_duties(store)
             duties = store.list(kinds={"session-notice"})
-            cases = [("missing", None), ("none", None), ("integer", 9),
-                     ("list", []), ("empty", ""), ("placeholder", "-")]
-            for label, pane in cases:
-                with self.subTest(pane_id=label):
-                    agent = {"agent": "claude", "agent_session": {"value": "sid-notice"}}
-                    if label != "missing":
-                        agent["pane_id"] = pane
-                    inventory = {"result": {"agents": [agent]}}
-                    with mock.patch.object(peer_steward, "_herdr_argv", return_value=["herdr"]), \
-                         mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
-                             stdout=json.dumps(inventory), returncode=0)), \
-                         mock.patch.object(peer_steward, "_resolve_target") as resolve:
+            import peer_address
+            import session_shell
+            for presence in ("absent", "unknown"):
+                with self.subTest(presence=presence):
+                    with mock.patch.object(session_shell, "exact_binding",
+                                           return_value=(None, "attachment-not-found")), \
+                         mock.patch.object(peer_address, "presence", return_value=presence), \
+                         mock.patch.object(peer_steward, "cmd_prompt") as send:
                         peer_steward._resume_session_notice_obligations(duties, store)
-                    resolve.assert_not_called()
+                    send.assert_not_called()
                     duty = store.get(duties[0]["id"])
                     self.assertEqual(duty["state"], "pending")
                     self.assertEqual(duty["observation"]["reason"], "recipient-unavailable")
@@ -1945,8 +1943,7 @@ class ObligationStoreTest(unittest.TestCase):
         import dispatch_pending_delivery as pending
         import session_notice
 
-        cases = ("pane-unavailable", "invalid-pane", "target-changed",
-                 "queued", "unverified", "pending")
+        cases = ("pane-unavailable", "queued", "unverified", "pending")
         for case in cases:
             with self.subTest(blocker=case):
                 case_root = self.root / ("notice-fairness-" + case)
@@ -2022,17 +2019,10 @@ class ObligationStoreTest(unittest.TestCase):
                     agents = [{"agent": "claude", "agent_session": {"value": "sid-z-live"},
                                "pane_id": "pane-z-live"}]
                     if case != "pane-unavailable":
-                        front_pane = "-" if case == "invalid-pane" else "pane-a-blocked"
                         agents.insert(0, {"agent": "claude",
                                           "agent_session": {"value": "sid-a-blocked"},
-                                          "pane_id": front_pane})
+                                          "pane_id": "pane-a-blocked"})
                     inventory = {"result": {"agents": agents}}
-
-                    def resolve(pane):
-                        if pane == "pane-a-blocked" and case == "target-changed":
-                            return "claude", "sid-changed", "target-changed"
-                        return "claude", {"pane-a-blocked": "sid-a-blocked",
-                                           "pane-z-live": "sid-z-live"}.get(pane), "current"
 
                     sent = []
 
@@ -2048,7 +2038,6 @@ class ObligationStoreTest(unittest.TestCase):
                     with mock.patch.object(peer_steward, "_herdr_argv", return_value=["herdr"]), \
                          mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
                              stdout=json.dumps(inventory), returncode=0)), \
-                         mock.patch.object(peer_steward, "_resolve_target", side_effect=resolve), \
                          mock.patch.object(peer_steward.peer_message, "_read_pending",
                                            side_effect=read_transfer), \
                          mock.patch.object(peer_steward, "_schedule_message_obligation") as schedule, \
@@ -2276,19 +2265,18 @@ class ObligationStoreTest(unittest.TestCase):
     def test_new_handover_preserves_a_live_claim_and_recipient_identity(self):
         import dispatch_pending_delivery as pending
         duty, record, answers = self._parent_handover()
+        # The parent is addressed by its exact session (codex:idle-parent); a live
+        # claim held by another carrier is never taken over or resent.
         with mock.patch("dispatch_owner_input.blocked_owner_answers", return_value=answers), \
              mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
              mock.patch.object(peer_steward.subprocess, "run", return_value=type("Result", (), {
                  "stdout": json.dumps({"result": {"agents": [{"agent": "codex", "pane_id": "w1:p5",
                      "agent_session": {"value": "idle-parent"}}]}})})()), \
-             mock.patch.object(peer_steward, "_resolve_target", return_value=("codex", "wrong-parent")), \
              mock.patch.object(peer_steward, "cmd_prompt") as send:
-            peer_steward._reconcile_obligations(self.store, [duty])
             self.assertEqual(pending.read(self.root, "idle-parent", record["delivery_id"])["attempts"], 0)
             pending.claim(self.root, "idle-parent", record["delivery_id"], claim_owner="other-live-carrier",
                           lease_seconds=300, require_generation_proof=False, jobs=self.jobs)
-            with mock.patch.object(peer_steward, "_resolve_target", return_value=("codex", "idle-parent")):
-                peer_steward._reconcile_obligations(self.store, [duty])
+            peer_steward._reconcile_obligations(self.store, [duty])
         send.assert_not_called()
         self.assertIn(self.store.get(duty["id"])["state"], {"pending", "unknown"})
         self.assertEqual(pending.read(self.root, "idle-parent", record["delivery_id"])["claim_owner"],
@@ -3516,16 +3504,21 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
     def test_later_native_observation_rechecks_the_whole_canonical_body(self):
         import dispatch_pending_delivery as pending
         records = self.notices(count=4)
-        calls = []
-        def target(*args, **kwargs):
-            calls.append(True)
-            if len(calls) == 6:
+        import session_shell
+        edged = []
+        def observe(harness, sid):
+            # The native observation made after every member is claimed is the
+            # last one before submission; a successor appearing there must stop
+            # the whole canonical body.
+            if not edged and all(pending.read(self.root, "canonical-A", record["delivery_id"])["state"]
+                                 == "claimed" for record in records):
+                edged.append(True)
                 self.edge("claude", "canonical-A", "late-successor")
-            return "claude", "canonical-A"
+            return None, "attachment-not-found"
         with self.courier("claude", "canonical-A") as sent, \
-             mock.patch.object(peer_steward, "_resolve_target", side_effect=target):
+             mock.patch.object(session_shell, "exact_binding", side_effect=observe):
             peer_steward._reconcile_obligations(self.store, self.duties())
-        self.assertGreaterEqual(len(calls), 6)
+        self.assertEqual(edged, [True])
         self.assertEqual(sent, [])
         self.assertTrue(all(pending.read(self.root, "canonical-A", record["delivery_id"])["state"] == "pending"
                             for record in records))

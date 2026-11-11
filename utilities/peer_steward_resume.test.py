@@ -23,7 +23,55 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
 
     parent_row=fixture.RetainedRunNoticeCarrierTest.parent_row
     _notice=fixture.RetainedRunNoticeCarrierTest._notice
-    _run_notice_duty=fixture.RetainedRunNoticeCarrierTest._run_notice_duty
+
+    def _run_notice_duty(self,harness,duty,*,target_state='idle',queue_accept_only=False,
+                         duties=None,input_observer=None,native_queue_impl=None):
+        """One runner pass with a shell-attached recipient; the host's input is the receipt.
+
+        Claude/OpenCode take the real ``session_shell.deliver_pending`` (status -> inject);
+        Codex takes its exact native queue. ``sends`` counts what the host or queue got."""
+        import session_shell
+        steward=fixture.peer_steward
+        store=steward.peer_obligations.ObligationStore(self.tmp_root)
+        binding={'harness':harness,'sid':self.sid,'native_pid':os.getpid(),
+                 'native_start':self.ident['pid_start'],'host_pid':os.getpid()}
+        recipient={'harness':harness,'session_id':self.sid}
+        sends=[]
+        def exact_binding(h,sid):
+            return (binding,'') if (h,sid)==(harness,self.sid) else (None,'attachment-missing')
+        def receive(text):
+            if input_observer:
+                input_observer(harness,self.sid,text)
+            sends.append(text)
+            self.assertEqual(steward.peer_message.receive_peer_message(text,recipient),0)
+        def control(_binding,operation,**fields):
+            if operation=='status':
+                return {'ok':True,'state':target_state,'empty':True,'focused':False,'epoch':1}
+            if operation=='inject':
+                receive(steward.peer_message._read_pending(fields['ref'])['text'])
+                return {'ok':True}
+            return {'ok':False,'reason':'fixture-unsupported'}
+        def native_queue(ref,*,timeout=1.0,**_kw):
+            row=steward.peer_message._read_pending(ref)
+            self.assertIsNotNone(row)
+            if queue_accept_only:
+                sends.append(row['text'])
+                with steward.peer_message.pending_lock(ref):
+                    current=steward.peer_message._read_pending(ref)
+                    steward.peer_message._save_pending(dict(
+                        current,state='queued',receipt='native-queue-accepted'))
+                return {'status':'queued','reason':'fixture-native-queue-accepted'}
+            receive(row['text'])
+            return {'status':'received','reason':'fixture-exact-native-history'}
+        with mock.patch.object(session_shell,'exact_binding',side_effect=exact_binding), \
+             mock.patch.object(session_shell,'control',side_effect=control), \
+             mock.patch.object(steward.subprocess,'run',side_effect=OSError('no terminal multiplexer')), \
+             mock.patch.object(steward,'_project_of',return_value=str(self.tmp_root)), \
+             mock.patch.object(steward.peer_message,'deliver_pending_codex',
+                               side_effect=native_queue_impl or native_queue):
+            steward._reconcile_obligations(
+                store,duties=steward._runner_duties(store,duties or [duty]))
+        return store,sends
 
     def notice(self,harness,*,sequence=1):
         key=session_resume.PREFIX+fixture.json.dumps([harness,self.sid,sequence])
@@ -41,26 +89,6 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
                 self.assertEqual(len(sends),1)
                 import dispatch_pending_delivery as pending
                 self.assertEqual(pending.read(self.tmp_root,self.sid,record['delivery_id'])['state'],'acked')
-
-    def test_existing_composer_draft_blocks_resume_before_any_native_submission(self):
-        for harness in ('claude','codex','opencode'):
-            with self.subTest(harness=harness),mock.patch.object(session_resume,'current',return_value=True):
-                record,duty=self.notice(harness)
-                store,sends=self._run_notice_duty(harness,duty,idle_guard=lambda *a,**k:('draft',None))
-                self.assertEqual(sends,[])
-                self.assertEqual(store.get(duty['id'])['observation']['reason'],'resume-draft')
-
-    def test_draft_appearing_during_claim_work_blocks_the_final_input_boundary(self):
-        for harness in ('claude','codex','opencode'):
-            calls=[]
-            def guard(*args,**kwargs):
-                calls.append(1)
-                return (None,'fixture-proof') if len(calls)==1 else ('draft',None)
-            with self.subTest(harness=harness),mock.patch.object(session_resume,'current',return_value=True):
-                record,duty=self.notice(harness)
-                _store,sends=self._run_notice_duty(harness,duty,idle_guard=guard)
-                self.assertEqual(sends,[])
-                self.assertEqual(len(calls),2)
 
     def test_accepted_codex_queue_is_not_submitted_again_without_exact_receipt(self):
         with mock.patch.object(session_resume,'current',return_value=True):
@@ -92,16 +120,17 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
             with self.subTest(harness=harness):
                 seat=session_resume._seat(harness,self.sid)
                 source={'session_seq':1,'prompt_seq':tidy.read_prompt_seq(seat),'ts':time.time()}
-                def guard(*args,**kwargs):
-                    with tidy.session_state_lock(seat):
-                        tidy.bump_prompt_seq(seat,harness,self.sid,time.time())
-                    return None,'fixture-ready-but-old-ui'
                 with mock.patch.object(session_resume,'_resume',return_value=source), \
                      mock.patch.object(session_resume,'native_state',return_value='interrupted-turn'), \
                      mock.patch.object(session_resume,'_human_wait',return_value=False):
                     record,duty=self.notice(harness)
-                    _store,sends=self._run_notice_duty(harness,duty,idle_guard=guard)
+                    # A new user prompt lands after the notice; the host still reads idle/empty.
+                    with tidy.session_state_lock(seat):
+                        tidy.bump_prompt_seq(seat,harness,self.sid,time.time())
+                    _store,sends=self._run_notice_duty(harness,duty)
                 self.assertEqual(sends,[])
+                import dispatch_pending_delivery as pending
+                self.assertNotEqual(pending.read(self.tmp_root,self.sid,record['delivery_id'])['state'],'acked')
 
     def test_own_native_prompt_frontier_still_allows_exact_receipt_settlement(self):
         import session_tidy as tidy
@@ -121,29 +150,6 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
                     _store,sends=self._run_notice_duty(harness,duty,input_observer=observed_input)
                 self.assertEqual(len(sends),1)
                 self.assertEqual(pending.read(self.tmp_root,self.sid,record['delivery_id'])['state'],'acked')
-
-    def test_new_activity_during_each_late_idle_guard_prevents_native_input(self):
-        import session_tidy as tidy
-        import time
-        for harness in ('claude','codex','opencode'):
-            for boundary in ((2,) if harness == 'codex' else (2,3,4)):
-                with self.subTest(harness=harness,boundary=boundary):
-                    seat=session_resume._seat(harness,self.sid)
-                    source={'session_seq':boundary,'prompt_seq':tidy.read_prompt_seq(seat),'ts':time.time()}
-                    calls=[]
-                    def guard(*args,**kwargs):
-                        calls.append(1)
-                        if len(calls)==boundary:
-                            with tidy.session_state_lock(seat):
-                                tidy.bump_prompt_seq(seat,harness,self.sid,time.time())
-                        return None,'synthetic UI has not caught up'
-                    with mock.patch.object(session_resume,'_resume',return_value=source), \
-                         mock.patch.object(session_resume,'native_state',return_value='interrupted-turn'), \
-                         mock.patch.object(session_resume,'_human_wait',return_value=False):
-                        _record,duty=self.notice(harness,sequence=boundary)
-                        _store,sends=self._run_notice_duty(harness,duty,idle_guard=guard)
-                    self.assertGreaterEqual(len(calls),boundary)
-                    self.assertEqual(sends,[])
 
     def test_new_activity_at_the_real_codex_before_add_boundary_prevents_input(self):
         import codex_queue_delivery
@@ -212,7 +218,7 @@ class ResumeCourierTest(fixture._TmpRootMixin,unittest.TestCase):
             ordinary_duty=next(row for row in store.list(kinds={'run-notice'})
                 if row['intent']['delivery_id']==ordinary['delivery_id'])
             _store,sends=self._run_notice_duty('codex',resume_duty,target_state='working',
-                duties=[resume_duty,ordinary_duty],idle_guard=lambda *a,**k:('native-state-working',None))
+                duties=[resume_duty,ordinary_duty])
         self.assertEqual(len(sends),1)
         self.assertIn(ordinary['delivery_id'],sends[0])
         self.assertNotIn(resume_record['delivery_id'],sends[0])
