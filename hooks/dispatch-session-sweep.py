@@ -205,7 +205,27 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
                 ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")
             except Exception:  # noqa: BLE001
                 pass
+        _note_turn_received(payload, session_id, batches)
     return 0
+
+
+def _note_turn_received(payload: object, session_id: str, batches) -> None:
+    """Tell the shared follow-through state what this prompt showed (PG-44).
+
+    The same per-turn record Codex's prompt bridge keeps; Claude's Stop
+    (``peer-message-record.py stop``) applies the one pass. Keyed by Claude's
+    ``prompt_id``; fail-soft.
+    """
+    try:
+        turn = payload.get("prompt_id") if isinstance(payload, dict) else None
+        if not isinstance(turn, str) or not turn or str(payload.get("agent_id") or "").strip():
+            return
+        import codex_turn_carrier as carrier
+        records = [record for _root, rows in batches for record in rows]
+        carrier.note_received(session_id, turn, carrier.owed_items(records),
+                              rendered=[str(record.get("delivery_id")) for record in records])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":
