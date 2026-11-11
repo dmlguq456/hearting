@@ -191,15 +191,17 @@ function observeNativeSelection() {
     if(nativeSelectionRevision!==screenRevision)observeNativeSelection();
   });
 }
-function readAction(extra,operation='action') {
+function readAction(extra,operation='action',own=false) {
   // A person-requested read or answer may be slow. It must not queue ahead
   // of event-driven values or readiness on the ordinary projection worker.
-  if(actionWorker)return Promise.resolve({ok:false,reason:'action-pending'});
+  // An `own` display read (the route page's raw output) never takes the one
+  // action slot, so it cannot hold an answer back.
+  if(actionWorker&&!own)return Promise.resolve({ok:false,reason:'action-pending'});
   return new Promise(resolve=>{
     let raw='',settled=false;
     const worker=cp.spawn(process.env.HEARTING_SHELL_PYTHON,
       [path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
-    actionWorker=worker;queueProjection();
+    if(!own){actionWorker=worker;queueProjection();}
     const finish=value=>{if(!settled){settled=true;clearTimeout(timer);resolve(value);}};
     const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
@@ -238,10 +240,16 @@ function nativeColumns(){return geometry().nativeCols;}
 function nativeRows(){return geometry().side?rows:rows-height();}
 function panelRow(){return geometry().side?0:rows-height();}
 function maxHeight(){return geometry().side?rows:Math.min(block.focused?Math.max(12,displayConfiguration.bottom_rows||14):displayConfiguration.narrow==='compact'&&!settings?8:displayConfiguration.bottom_rows||14,Math.max(4,rows-6));}
+// The opened route page's owner output (Fleet's `attempts`), read once per opening.
+let routeRaw;
+function readRouteRaw(){
+  const selected=selection,who=sid;routeRaw=undefined;
+  readAction({action:'raw'},'action',true).then(r=>{if(selected===selection&&who===sid&&routeDetail===true&&r?.ok&&Array.isArray(r.attempts)){routeRaw={sid:who,attempts:r.attempts};queueDisplay();}});
+}
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
@@ -671,7 +679,7 @@ function panelAction(action){
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
-  if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();}
+  if(action==='route'){routeDetail=!routeDetail;routePage=0;block.leave();if(routeDetail)readRouteRaw();}
   // A message longer than its rows reads on, from its start, on the detail pages.
   if(action.startsWith('read:message:')){routeDetail=action.slice(5);routePage=0;block.leave();}
   if((action==='route-prev'||action==='route-next')&&routeDetail){routePage=Math.max(0,Math.min(routePageCount-1,routePage+(action==='route-prev'?-1:1)));}

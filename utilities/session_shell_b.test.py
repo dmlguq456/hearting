@@ -205,4 +205,26 @@ for(const selected of [false,true]){
             self.assertIn('lines',session_shell.panel_projection('claude','exact',pane_binding={'sid':'exact'}))
 
 
+    def test_the_route_page_reads_its_owner_output_with_fleets_reader(self):
+        # Fleet's `attempts`: the same read_owner_raw, once per opened page, for this
+        # session's own routes; bounded so the read reply stays inside its frame.
+        from fleet.explorer import focus
+        entries=[(1,[],{'route_id':'rt-0123456789abcdef'}),(2,[],{'owner_route_id':'rt-0123456789abcdef'}),
+                 (3,[],{'route_id':'not-a-route'}),(4,[],{'route_id':'rt-fedcba9876543210'})]
+        calls=[]
+        def raw(route,attempt,rows,live,reader):
+            calls.append((route,attempt,rows,live))
+            return {'att':'att-'+route[-4:],'route':route,'lines':['x'*500]+['line %d'%n for n in range(60)]} if route.endswith('cdef') else None
+        with mock.patch.object(focus,'session_entries',return_value=entries) as listed, \
+             mock.patch.object(focus,'read_attempts',return_value=['ROWS']) as attempts, \
+             mock.patch.object(focus,'read_owner_raw',side_effect=raw):
+            result=session_shell._block_action({'sid':'exact','harness':'claude'},{'action':'raw'})
+        listed.assert_called_once_with(None,'exact');self.assertIs(attempts.call_args.kwargs['entries'],entries)
+        self.assertEqual([c[0] for c in calls],['rt-fedcba9876543210','rt-0123456789abcdef'])
+        self.assertTrue(all(c[1]==''and c[2]==['ROWS'] and c[3]=={} for c in calls))
+        self.assertEqual(result['ok'],True);self.assertEqual(len(result['attempts']),1)
+        row=result['attempts'][0];self.assertEqual((row['route'],row['att']),('rt-0123456789abcdef','att-cdef'))
+        self.assertEqual(row['lines'][-1],'line 59');self.assertEqual(len(row['lines']),30)
+        self.assertLess(len(json.dumps(result,ensure_ascii=False).encode()),65536)
+
 if __name__=='__main__':unittest.main()

@@ -789,6 +789,21 @@ def _sent_peer_messages(sid, limit=3):
     return rows, [str(shard)]
 
 
+# This backend's last observation of its one exact live native session. A source
+# that was not read keeps these cells (Fleet's native-reader rule); the next
+# projection reads it again. Another SID, PID or start never borrows them.
+_LAST_OBSERVED: dict = {}
+
+
+def _observe_session(observe, harness, sid, pid, start):
+    key = (harness, sid, pid, start)
+    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}))
+    _LAST_OBSERVED.clear()
+    if values:
+        _LAST_OBSERVED[key] = dict(values)
+    return values, watched
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
@@ -818,7 +833,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
              + " · " + _plain(row.get("text"), 160) for row in received[-2:]]
     tag = assigned_tag(harness, sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
-    values, watched = observe(harness, native_pid, native_start, sid) if native_pid else ({}, [])
+    values, watched = _observe_session(observe, harness, sid, native_pid, native_start) if native_pid else ({}, [])
     # The native OpenCode sidebar already owns this display value. It does not
     # establish an effective policy, process liveness or input readiness.
     if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
@@ -942,6 +957,31 @@ def _block_action(binding, request):
         value, _ = observe(binding["harness"], binding["native_pid"], binding["native_start"], binding["sid"])
         rows, _ = work(value.get("cwd"))
         return {"ok": True, "lines": [_plain(row.get("headline")) for row in rows[:32]] or ["◌ ·"]}
+    if key == "raw":
+        # The route page's owner output, read once when the person opens the page,
+        # through the same reader Fleet uses when its route page is opened.
+        from fleet.explorer.focus import read_attempts, read_owner_raw, session_entries
+        from fleet.explorer.output import OutputReader
+        entries = session_entries(None, binding["sid"])
+        rows = read_attempts(None, binding["sid"], entries=entries)
+        routes = []
+        for _line, _fields, meta in reversed(entries):
+            route = meta.get("owner_route_id") or meta.get("route_id")
+            if route and route not in routes and re.fullmatch(r"rt-[0-9a-f]{16}", route):
+                routes.append(route)
+        reader, attempts, budget = OutputReader(), [], 40000
+        for route in routes[:4]:
+            raw = read_owner_raw(route, "", rows, {}, reader)
+            lines = []
+            for text in reversed((raw or {}).get("lines") or ()):
+                text = _plain(text, 240)
+                if not text or len(lines) >= 30 or budget - len(text.encode()) < 0:
+                    continue
+                budget -= len(text.encode())
+                lines.append(text)
+            if lines:
+                attempts.append({"route": route, "att": _plain(raw.get("att"), 64), "lines": lines[::-1]})
+        return {"ok": True, "attempts": attempts}
     if key == "\r":
         import subprocess
         from fleet.explorer.focus import session_entries
