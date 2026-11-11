@@ -7641,6 +7641,19 @@ def _release_freed_memory(*, min_interval=5.0):
 RUNNER_PASS_WORK_SECONDS = 120.0
 
 
+def _runner_settlement_context(store):
+    """The runner's owner-settlement context, with proofs kept across restarts."""
+    context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    context.classify_budget_seconds = RUNNER_PASS_WORK_SECONDS
+    try:
+        path = store.root.parent / "runner-duties" / "settled-owners.json"
+        context.proof_path = path
+        context.load_settled_proofs(path)
+    except Exception:  # noqa: BLE001 - without it history is re-proved as before
+        context.proof_path = None
+    return context
+
+
 def _steward_relations_pass():
     """One runner pass resolves steward relations once across its duties."""
     try:
@@ -7752,8 +7765,7 @@ def cmd_obligation_runner(args):
 
     notice_selection = {"state_root": str(store.root.parents[1].resolve()),
                         "runner_incarnation": runner_incarnation, "last_group": None}
-    settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
-    settlement_context.classify_budget_seconds = RUNNER_PASS_WORK_SECONDS
+    settlement_context = _runner_settlement_context(store)
     duty_work_budget = {"seconds": RUNNER_PASS_WORK_SECONDS, "next": None}
     retired_for_exec = []
 
@@ -7835,8 +7847,7 @@ def cmd_obligation_runner(args):
             if retired_for_exec:
                 # The exec failed after the old context retired: continue on a
                 # fresh context under the same lock.
-                settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
-                settlement_context.classify_budget_seconds = RUNNER_PASS_WORK_SECONDS
+                settlement_context = _runner_settlement_context(store)
                 start_readiness_worker()
         external_snapshot = _external_obligation_snapshot()
         with _shared_revision_pass():
@@ -7844,6 +7855,8 @@ def cmd_obligation_runner(args):
                 store, service_current=service_current, snapshot=external_snapshot,
                 settlement_context=settlement_context)
         _release_freed_memory(min_interval=0.0)
+        with contextlib.suppress(Exception):
+            settlement_context.checkpoint_settled_proofs(min_interval=0.0)
         try:
             store.prune_terminal_obligations(time_budget=0.1)
         except (OSError, ValueError, RuntimeError, peer_obligations.ObligationError):

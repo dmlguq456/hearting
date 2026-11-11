@@ -1137,7 +1137,8 @@ def _marker_relation(harness: str, sid: str, marker: dict, evidence: list[dict],
 # One runner pass resolves steward relations once and reuses them across its
 # duties (every steward-check duty otherwise resolves them several times).
 # Runner-only, like `trust_unchanged_ledgers`; this process's own role writes
-# clear it, and the next pass resolves afresh.
+# clear it, and the next pass resolves afresh (a marker another session writes
+# during the pass is seen by the next pass, as any pinned pass observation).
 _RELATIONS_PASS = contextvars.ContextVar("dispatch_seat_handover_relations_pass", default=None)
 
 
@@ -1167,19 +1168,6 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
     if memo is None:
         return _resolved_steward_relations(harness, sid, seat_key=seat_key,
                                            include_released=include_released)
-    try:
-        # Markers are small and may be written by any session; the memo holds
-        # only while they are byte-for-byte the ones it was resolved from.
-        pm = _peer_message()
-        roots, _source = pm.steward_marker_roots()
-        markers = json.dumps(sorted((list(k), v) for k, v in pm.read_steward_markers(roots).items()),
-                             sort_keys=True, default=str)
-    except Exception:  # noqa: BLE001 - the uncached resolver decides as before
-        return _resolved_steward_relations(harness, sid, seat_key=seat_key,
-                                           include_released=include_released)
-    if memo.get("markers") != markers:
-        memo.clear()
-        memo["markers"] = markers
     key = (harness, sid, seat_key, bool(include_released))
     if key not in memo:
         memo[key] = _resolved_steward_relations(harness, sid, seat_key=seat_key,

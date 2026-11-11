@@ -310,5 +310,37 @@ class BoundedPassWork(unittest.TestCase):
         self.assertFalse(context.has_carry_over(jobs))
 
 
+class PersistedOwnerProofs(unittest.TestCase):
+    def test_restart_reuses_a_proof_until_a_dependency_changes(self):
+        import dispatch_batch_obligations as batch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = root / "jobs.log"
+            jobs.write_text("")
+            dependency = root / "marker.json"
+            dependency.write_text("{}")
+            proofs = root / "runner-duties" / "settled-owners.json"
+            meta = {"attempt_id": "att-1", "route_id": "rt-1"}
+            related = [SimpleNamespace(order=3, status="done", raw="row")]
+            first = batch.OwnerSettlementReadContext()
+            self.assertTrue(first.remember_settled_owner(
+                jobs, "done", "raw", meta, related, [dependency]))
+            self.assertTrue(first.save_settled_proofs(proofs))
+            self.assertFalse(first.save_settled_proofs(proofs), "unchanged proofs are not rewritten")
+
+            restarted = batch.OwnerSettlementReadContext()
+            self.assertEqual(restarted.load_settled_proofs(proofs), 1)
+            self.assertTrue(restarted.settled_owner_current(jobs, "done", "raw", meta, related))
+            self.assertFalse(restarted.settled_owner_current(jobs, "done", "other", meta, related))
+
+            again = batch.OwnerSettlementReadContext()
+            again.load_settled_proofs(proofs)
+            dependency.write_text('{"changed": true}')
+            self.assertFalse(again.settled_owner_current(jobs, "done", "raw", meta, related))
+            proofs.write_text("not json")
+            self.assertEqual(batch.OwnerSettlementReadContext().load_settled_proofs(proofs), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

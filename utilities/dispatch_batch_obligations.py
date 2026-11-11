@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import contextlib
 import hashlib
 import json
 import os
@@ -758,6 +759,35 @@ def _directory_stamp(path: Path):
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _digest_value(value) -> str:
+    """Stable digest of a persisted proof's row identity (rows can be large)."""
+    if isinstance(value, _DigestMatch):
+        return value.digest
+    return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class _DigestMatch:
+    """A loaded proof's row identity: equal exactly to the value it digested."""
+
+    __slots__ = ("digest",)
+
+    def __init__(self, digest: str):
+        self.digest = digest
+
+    def __eq__(self, other):
+        if isinstance(other, _DigestMatch):
+            return other.digest == self.digest
+        try:
+            return _digest_value(other) == self.digest
+        except (TypeError, ValueError):
+            return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = None
+
+
 _PASS_CLOCK = time.perf_counter  # bound at import: fixtures replace ``time`` itself
 
 
@@ -795,6 +825,10 @@ class OwnerSettlementReadContext:
         # next pass in order, so every owner is still classified, only later.
         self.classify_budget_seconds = None
         self._carry_over = {}
+        # Optional runner-private file holding settled-owner proofs across
+        # restarts (`load_settled_proofs` / `save_settled_proofs`).
+        self._settled_version = 0
+        self._saved_version = None
         self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
                          "dependency_checks": 0, "dependency_invalidations": 0,
                          "deferred_owner_checks": 0, "unsettled_retries": 0}
@@ -1066,6 +1100,7 @@ class OwnerSettlementReadContext:
             return False
         self._settled[key] = ((status, raw), self._fingerprint_rows(related_rows),
                               paths, generations, aliases)
+        self._settled_version += 1
         self._queue_settled_dependency_check(key)
         for alias in aliases:
             self._route_owners.setdefault((key[0], alias), set()).add(key[1])
@@ -1137,9 +1172,98 @@ class OwnerSettlementReadContext:
             self._queue_settled_dependency_check(key)
         return bool(queue) or invalidated
 
+    _PROOF_SCHEMA = 2
+
+    def load_settled_proofs(self, path) -> int:
+        """Load settled-owner proofs a previous runner recorded.
+
+        Each proof is still checked on use exactly like a proof taken in this
+        process: the owner row, its related rows and every dependency's stat
+        generation must be unchanged, otherwise it is dropped and re-proved.
+        """
+        try:
+            with open(path, "rb") as handle:
+                data = json.loads(handle.read(64 * 1024 * 1024))
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(data, dict) or data.get("schema") not in {1, self._PROOF_SCHEMA}:
+            return 0
+        full_rows = data.get("schema") == 1  # earlier files carried the rows themselves
+        loaded = 0
+        for item in data.get("owners") or ():
+            try:
+                root, attempt = item["key"]
+                if full_rows:
+                    row_match = _DigestMatch(_digest_value(tuple(item["row"])))
+                    related = _DigestMatch(_digest_value(
+                        tuple(tuple(row) for row in item["related"])))
+                else:
+                    row_match = _DigestMatch(str(item["row"]))
+                    related = _DigestMatch(str(item["related"]))
+                paths = tuple(str(value) for value in item["paths"])
+                generations = tuple((str(key), tuple(int(v) for v in generation))
+                                    for key, generation in item["generations"])
+                aliases = tuple(str(value) for value in item["aliases"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            key = (str(root), str(attempt))
+            if key in self._settled or len(self._settled) >= 4096:
+                continue
+            self._settled[key] = (row_match, related, paths, generations, aliases)
+            for alias in aliases:
+                self._route_owners.setdefault((key[0], alias), set()).add(key[1])
+            loaded += 1
+        self._saved_version = self._settled_version
+        return loaded
+
+    proof_path = None
+    _proof_saved_at = 0.0
+
+    def checkpoint_settled_proofs(self, *, min_interval=120.0) -> None:
+        """Persist proofs during a long first pass, so a restart keeps them."""
+        if self.proof_path is None:
+            return
+        now = _PASS_CLOCK()
+        if now - self._proof_saved_at < min_interval:
+            return
+        self._proof_saved_at = now
+        self.save_settled_proofs(self.proof_path)
+
+    def save_settled_proofs(self, path) -> bool:
+        """Write this context's settled-owner proofs when they changed."""
+        if self._saved_version == self._settled_version:
+            return False
+        owners = [{"key": list(key), "row": _digest_value(entry[0]),
+                   "related": _digest_value(entry[1]),
+                   "paths": list(entry[2]),
+                   "generations": [[name, list(generation)] for name, generation in entry[3]],
+                   "aliases": list(entry[4])}
+                  for key, entry in self._settled.items()]
+        payload = json.dumps({"schema": self._PROOF_SCHEMA, "owners": owners},
+                             separators=(",", ":")).encode("utf-8")
+        target = os.fspath(path)
+        temporary = f"{target}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            return False
+        self._saved_version = self._settled_version
+        return True
+
     def forget_owner(self, jobs: Path, attempt_id: str):
         key = (str(jobs.resolve(strict=False)), attempt_id)
         entry = self._settled.pop(key, None)
+        if entry is not None:
+            self._settled_version += 1
         self._forget_dependency_watch(key)
         if entry is not None:
             if key in self._dependency_queued:
@@ -1636,6 +1760,8 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
         # Each historical proof reads and drops large inputs; return the freed
         # heap while the long candidate walk continues (rate limited).
         peer_obligations.release_freed_memory()
+        if context is not None:
+            context.checkpoint_settled_proofs()
         order, raw, fields = candidate.order, candidate.raw, candidate.fields
         if fields[1] not in {"open", "running", "done"}:
             if context is not None and candidate.completion_metadata().get("attempt_id"):
