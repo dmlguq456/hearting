@@ -647,6 +647,32 @@ def _wrap_cells(text, width):
     return rows + [current]
 
 
+def _put_wrapped(grid, x, y, parts, right, cont_x, newline=None):
+    """Draw ``parts`` whole from ``x``, going on at ``cont_x`` on the next row when this one ends.
+
+    An unfolded line gives its values in full, so nothing here is clipped or elided: a segment
+    that fits on a fresh row moves there whole, a longer one is cut across rows. ``newline(y)``
+    opens the next row (default ``y + 1``). Returns ``(x, y)`` after the last cell drawn."""
+    newline = newline or (lambda row: row + 1)
+    for text, key in parts:
+        text = str(text)
+        if (x > cont_x and x + _seg_width(text) > right
+                and _seg_width(text.lstrip()) <= right - cont_x):
+            y, x = newline(y), cont_x
+        if x == cont_x:
+            text = text.lstrip()
+        chunk = ""
+        for char in text:
+            if (chunk or x > cont_x) and x + _seg_width(chunk + char) > right:
+                x = grid.put(x, y, chunk, key, limit=right)
+                y, x, chunk = newline(y), cont_x, ""
+                if char == " ":
+                    continue
+            chunk += char
+        x = grid.put(x, y, chunk, key, limit=right)
+    return x, y
+
+
 def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_whole=True):
     """Under an unfolded session row: NOW in full, each route on a line, its question.
 
@@ -666,10 +692,12 @@ def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_wh
     model = _harness_cell_text(session)
     if _seg_width(model) > (c["ctx"] - c["gap"] - c["h"] if c.get("harn_w") else 0):
         # The row clipped its MODEL cell (model or effort given way): the whole cell is here.
+        # Whole, wrapped if need be: the folded cell's shortening is not repeated here. A row
+        # it goes on to starts under the label, so a long model ID stays in one piece.
         grid.put(x_lab, y, "MODEL", "label")
-        _put_model_cell(grid, max(x_val, x_lab + 7), y,
-                        model_cell_parts(session.get("harness"), session.get("model"),
-                                         str(session.get("effort") or "")), right)
+        _x, y = _put_wrapped(grid, max(x_val, x_lab + 7), y,
+                             model_cell_parts(session.get("harness"), session.get("model"),
+                                              str(session.get("effort") or "")), x + use, x_lab)
         y += 1
     if c["now"] is None:
         if not input_shown:
@@ -835,7 +863,7 @@ def route_repo_width(routes, use):
 
 
 def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, title_w=None,
-                   repo_w=None):
+                   repo_w=None, title_below=True):
     """One route on one line, in the session row's columns:
 
     ``⠏ [e9]    claude Opus 5.5 med   ━━──────── 25%  PR #1505 보정  one-shot ●   >_ Bash   1h 27m``
@@ -843,7 +871,8 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     marker and ID, MODEL (harness model effort of who works now), CONTEXT, TITLE (the project
     name ahead of it on a list that is not grouped by project), the stage rail with any
     ``resume`` hint, the open tool and sub-agents while it runs, and the elapsed time. TITLE
-    gives way first; the marker, the percent and the time are never cut."""
+    gives way first; the marker, the percent and the time are never cut. A cut title is in the
+    returned list unless ``title_below`` says the detail band under the row carries it whole."""
     right = x + use
     age = _clip(str(route.get("age") or ""), AGE_W + 1)
     age_x = right - _seg_width(age)
@@ -889,6 +918,9 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
         grid.put(cursor, y, _clip(str(route.get("title") or "·"), max(0, title_room)), "soft",
                  limit=x + c["title"] + room)
         cursor = x + c["title"] + room + GAP
+    title = str(route.get("title") or "")
+    if not title_below and title and _seg_width(title) > (title_room if room else 0):
+        dropped.insert(0, [(title, "soft")])
     # ``>_ Bash · +1 agent``: the open tool and live sub-agents, only while the work runs.
     tool_text = ">_ " + str(tool) if tool else ""
     agent_text = f" · +{agents} agent" if tool_text and agents else ""
@@ -1322,7 +1354,11 @@ def draw_routes(grid, vm, state, x=34, y=3):
             if is_open:
                 grid.fill(x - 1, right, y, " ", tint=236)
                 grid.put(x, y, "▶", "soft")
-            dropped = draw_route_row(grid, x, use, y, route, row_cols, title_w=row_title_w)
+            from .pages import route_band_shows_title
+            dropped = draw_route_row(
+                grid, x, use, y, route, row_cols, title_w=row_title_w,
+                # The detail band follows an unfolded row here and on the route page alike.
+                title_below=not is_open or route_band_shows_title(grid, vm, route, x, use))
             age = _clip(str(route.get("age") or ""), cols["age_w"])
             age_edge = x + use - _seg_width(age)                              # content stops where AGE starts
             owner_edge = (x + cols["own"] + cols["own_w"] if cols["tiny"] else
@@ -1342,13 +1378,19 @@ def draw_routes(grid, vm, state, x=34, y=3):
                               (route.get("mode"), route.get("intensity")) if value)
             if suffix:
                 kind_parts.append(("(" + suffix + ")", "dim"))
+            def next_row(row):
+                """Close this unfolded row and open the next one under it."""
+                _tint_row(grid, row, x - 1, right, 236)
+                grid.fill(x - 1, right, row + 1, " ", tint=236)
+                grid.add_hit(row + 1, x, right, action)
+                return row + 1
+
             grid.fill(x - 1, right, y, " ", tint=236)
             grid.add_hit(y, x, right, action)
             cursor = grid.put(x + cols["title"], y, "└ kind ", "dim", limit=right)
-            for text, style in kind_parts:
-                cursor = grid.put(cursor, y, text, style, limit=right)
-            cursor = grid.put(cursor, y, "  owner ", "dim", limit=right)
-            cursor = _draw_owner(grid, cursor, y, route, cols["narrow"], slim, right)
+            # The unfolded owner is whole (harness, model, effort, profile), wrapped if need be.
+            cursor, y = _put_wrapped(grid, cursor, y, kind_parts + [("  owner ", "dim")] + _owner_parts(route),
+                                     right, x + cols["title"] + 2, next_row)
             # The folded row shows the live doer's context; the owner's own stays here (on a
             # line of its own when the kind line has no room left for it).
             owner_context = right - cursor - 2 >= _owner_context_width(route)
@@ -1357,30 +1399,29 @@ def draw_routes(grid, vm, state, x=34, y=3):
             _tint_row(grid, y, x - 1, right, 236)
             y += 1
             extra = [] if owner_context or not _owner_context_width(route) else [None]
-            # What the folded row left out or cut (MODEL, context, open tool, sub-agents); a cut
-            # title is whole on the top band of the route detail drawn below.
+            # What the folded row left out or cut (title, MODEL, context, open tool, sub-agents),
+            # whole; a cut title the detail band below carries whole is not repeated.
             extra.extend(dropped)
-            line, line_x = 0, None
+            line_x = None
             for item in extra:
                 width = (_owner_context_width(route) if item is None
                          else sum(_seg_width(text) for text, _key in item))
-                if line_x is None or line_x + 3 + width > right:
-                    if line_x is not None:
-                        _tint_row(grid, y, x - 1, right, 236)
-                        y += 1
+                if line_x is None:
                     grid.fill(x - 1, right, y, " ", tint=236)
                     grid.add_hit(y, x, right, action)
-                    line_x = grid.put(x + cols["title"], y, "└ " if line == 0 else "  ", "dim", limit=right)
-                    line += 1
-                elif line_x is not None:
+                    line_x = grid.put(x + cols["title"], y, "└ ", "dim", limit=right)
+                elif line_x + 3 + width > right:
+                    y = next_row(y)
+                    line_x = grid.put(x + cols["title"], y, "  ", "dim", limit=right)
+                else:
                     line_x = grid.put(line_x, y, " · ", "dim", limit=right)
                 if item is None:
                     line_x = grid.put(line_x, y, "owner ", "dim", limit=right)
                     _draw_owner_context(grid, line_x, y, route, right)
                     line_x += _owner_context_width(route)
                     continue
-                for text, key in item:
-                    line_x = grid.put(line_x, y, text, key, limit=right)
+                # A value longer than the row goes on under it, whole.
+                line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2, next_row)
             if line_x is not None:
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
@@ -1483,7 +1524,9 @@ def draw_routes(grid, vm, state, x=34, y=3):
                                         worker_context.get("context"), worker_context.get("window"))
                 else:
                     pct = worker_context.get("context")
-                    grid.put(x + cols["prog"], y, "CONTEXT ·" if pct is None else f"CONTEXT {pct}%",
+                    # The header's own short word where ``CONTEXT 100%`` has no room.
+                    word = "CONTEXT" if age_edge - (x + cols["prog"]) >= len("CONTEXT 100%") else "CTX"
+                    grid.put(x + cols["prog"], y, f"{word} ·" if pct is None else f"{word} {pct}%",
                              "dim", limit=age_edge)
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
@@ -2023,6 +2066,16 @@ def _draw_owner_context(grid, x, y, route, right):
         _draw_context_gauge(grid, x, y, pct, window)
     else:
         grid.put(x, y, f"{int(pct)}%", _context_key(int(pct)) if pct >= 50 else "dim", limit=right)
+
+
+def _owner_parts(route):
+    """The owner's whole MODEL words with any non-default profile, for an unfolded line."""
+    parts = model_cell_parts(str(route.get("harness") or "·"), route.get("model") or None,
+                             str(route.get("effort") or ""))
+    profile = route.get("profile")
+    if profile and profile != "deep":
+        parts.append((" " + str(profile), "dim"))
+    return parts
 
 
 def _draw_owner(grid, x, y, route, narrow, slim, limit):

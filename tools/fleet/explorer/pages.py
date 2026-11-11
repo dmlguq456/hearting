@@ -862,6 +862,25 @@ def _route_after(route, nodes):
     return ""
 
 
+def _route_band_head(route):
+    """The detail band's top edge up to the title: ``web-api › [4f] › Rate limiting``."""
+    tag = route.get("session_tag")
+    repo_text = repo_rule_label(route.get("repo"))
+    head = [(" ", None), *(((repo_text, "title_dim"), (" › ", "line")) if repo_text else ())]
+    if tag:
+        head += [("[", "tag_b"), (str(tag), "soft"), ("]", "tag_b"), (" › ", "line")]
+    return head
+
+
+def route_band_shows_title(grid, vm, route, x, use):
+    """Whether the detail band under an unfolded route carries its whole title on the top edge."""
+    if not tuple((vm.nodes or {}).get(str(route.get("id") or ""), ())):
+        return False                          # a route with no stage record draws no title there
+    title = str(route.get("detail_title") or route.get("title") or "·")   # the band's own words
+    right = min(grid.cols - 1, x + use)
+    return x + 2 + _width(_route_band_head(route) + [(title, None)]) <= right - 1
+
+
 def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     """Route frame, node band and the picked node's panel from row y to bottom."""
     right = min(grid.cols - 1, x + use)
@@ -883,11 +902,7 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
                  "dim", limit=right)
         grid.mark_moved()
         return bottom + 1
-    tag = route.get("session_tag")
-    repo_text = repo_rule_label(route.get("repo"))
-    head = [(" ", None), *(((repo_text, "title_dim"), (" › ", "line")) if repo_text else ())]
-    if tag:
-        head += [("[", "tag_b"), (str(tag), "soft"), ("]", "tag_b"), (" › ", "line")]
+    head = _route_band_head(route)
     leg_count = sum(1 for item in route.get("legs") or () if str(item[0]) != "frame")
     if route.get("detail_trailer") is not None:
         # The source states how long the route ran and what its record holds; nothing is derived.
