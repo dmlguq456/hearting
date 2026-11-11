@@ -178,6 +178,7 @@ def render(board, rows, folded):
     if not board.get("complete"):
         head += " · observation incomplete"
     lines = [head]
+    recommended_label = HWS.ui_translator()("fleet.session_block.recommended")
     for row in rows:
         place = " · " + row["project"] if row.get("project") else ""
         lines.append("%s  %s · %s%s · %s" % (row["id"], row["kind"], row["age"], place,
@@ -186,9 +187,14 @@ def render(board, rows, folded):
             lines.append("  folded: %s" % row["state"])
         for index, question in enumerate(row.get("questions") or (), 1):
             prefix = "  q%d " % index if len(row["questions"]) > 1 else "  "
-            lines.append(prefix + (question["question"] or "(question text is in that session)"))
+            body = question["question"] or "(question text is in that session)"
+            body_lines = str(body).splitlines() or [""]
+            lines.append(prefix + body_lines[0])
+            continuation = " " * len(prefix)
+            lines.extend(continuation + line for line in body_lines[1:])
             for number, choice in enumerate(question["choices"], 1):
-                mark = "  (recommended)" if question["recommended"] == number - 1 else ""
+                mark = ("  (" + recommended_label + ")"
+                        if question["recommended"] == number - 1 else "")
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
         if row.get("answerable"):
             listed = row.get("questions") or ()
