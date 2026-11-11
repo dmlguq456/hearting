@@ -26,6 +26,22 @@ function appearance(rows,configuration={},{colors=256,noColor=false}={}){
     return next;
   }));
 }
+// A combining mark or joined emoji stays with the character it belongs to.
+const SEGMENTER=typeof Intl==='object'&&Intl.Segmenter?new Intl.Segmenter(undefined,{granularity:'grapheme'}):null;
+const JOINS=/[\p{M}\u200d\u1160-\u11ff\u{1f1e6}-\u{1f1ff}\u{1f3fb}-\u{1f3ff}]/u;
+const graphemes=s=>SEGMENTER&&JOINS.test(s)?Array.from(SEGMENTER.segment(s),x=>x.segment):[...s];
+// A message keeps its plain `message:<at>:<way>` key; a different one kept in the
+// same second and direction adds its who and body, and an identical record its order.
+function digest(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;}return h.toString(36);}
+function messageKeys(list){
+  const first=new Map(),seen=new Map();
+  return list.map(m=>{
+    const base='message:'+m.at+':'+m.way,body=String(m.who??'')+'\n'+String(m.text??'');
+    if(!first.has(base))first.set(base,body);
+    const key=first.get(base)===body?base:base+':'+digest(body),n=seen.get(key)||0;seen.set(key,n+1);
+    return n?key+'.'+n:key;
+  });
+}
 const fields=['layout','position','side_width','narrow','auxiliary','bottom_rows','theme','shade','route_line','side_min_columns'];
 const names=['layout','position','width','narrow','auxiliary','height','theme','shade','route_line','threshold'];
 const OPTIONS={layout:['side','bottom'],position:['right','left'],narrow:['bottom','compact'],auxiliary:['summary','detail'],
@@ -50,10 +66,25 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   function wrap(parts,maximum=3,action,into){
     // `into` collects the rows for a caller that places them after measuring.
     const put=into?row=>into.push(row):row=>add(row,action);
+    // Unbounded rows (a kept message body) carry a token wider than a row on to
+    // the next rows by character cells; bounded rows keep their one-row `…`.
+    const keep=maximum===Infinity;
     let current=[],used=0,count=0,space=false;
     for(const part of parts)for(const token of clean(part.text).match(/\s+|\S+/gu)||[]){
       if(/^\s+$/.test(token)){space=used>0;continue;}
       const size=measure(token),gap=space&&used?1:0;
+      if(keep&&size>inner){
+        if(gap&&used+1<inner){current.push({...part,text:' '});used++;}
+        else if(gap){put(current);current=[];used=0;}
+        space=false;let s='';
+        for(const g of graphemes(token)){
+          const w=measure(g);
+          if(used&&used+w>inner){if(s)current.push({...part,text:s});put(current);current=[];used=0;s='';}
+          s+=g;used+=w;
+        }
+        if(s)current.push({...part,text:s});
+        continue;
+      }
       if(used&&used+gap+size>inner){put(current);current=[];used=0;space=false;if(++count>=maximum)return;}
       if(space&&used){current.push({...part,text:' '});used++;}space=false;
       if(size>inner){const fit=clip([{...part,text:token}],inner-1);current.push(...fit.parts,{...part,text:'…'});used=inner;}
@@ -71,9 +102,9 @@ function render({width,height,side,fill=side,model={},native={},state,sid,questi
   const cfg={...defaults,...configuration};
   let routePages=1;
   // A message too long to open in place is read here, on the route detail's pages.
-  const messageKey=m=>'message:'+m.at+':'+m.way,messageParts=m=>[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
-  const reading=typeof routeDetail==='string'&&routeDetail.startsWith('message:')?
-    (Array.isArray(model.messages)?model.messages:[]).find(m=>messageKey(m)===routeDetail):undefined;
+  const kept=Array.isArray(model.messages)?model.messages:[],keys=messageKeys(kept);
+  const messageKey=m=>keys[kept.indexOf(m)],messageParts=m=>[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
+  const reading=typeof routeDetail==='string'&&routeDetail.startsWith('message:')?kept[keys.indexOf(routeDetail)]:undefined;
   if(typeof routeDetail==='string'&&!reading)routeDetail=false;
   if(settings){
     add(line(t('settings_title','Hearting shell settings'),'loc_repo'));

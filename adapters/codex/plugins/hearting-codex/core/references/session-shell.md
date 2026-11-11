@@ -172,11 +172,15 @@ received from the exact session's retained received inputs, `→` sent from this
 session's own ledger shard and its 200-character summary), cut with `…`;
 pressing a row shows its whole retained text in place. Two limits differ: the
 source keeps a received input's first 384 characters and a sent message's
-200-character summary, never the whole payload; the screen never cuts that
-retained text further. An opened message uses the rows it needs; when rows run
-short its last row counts the rest (`+N lines ›`) and a press reads the whole
-retained text on the route evidence pages (`‹ 1/N ›`, PgUp/PgDn, Esc back).
-Nothing new is stored.
+200-character summary, never the whole payload; once opened, the screen never
+cuts that retained text further: a word wider than a row, such as a long URL or
+unbroken Hangul, runs on to the next rows by character cells, keeping wide
+characters and combining marks whole. An opened message uses the rows it needs;
+when rows run short its last row counts the rest (`+N lines ›`) and a press
+reads the whole retained text on the route evidence pages (`‹ 1/N ›`,
+PgUp/PgDn, Esc back). Each row opens and reads its own message, even when two
+were kept in the same second; identical records read the same text. Nothing
+new is stored.
 A press on a route or message row is display only: it opens or folds the row
 and leaves focus, `empty` and the native input frontier as they were.
 Put each answer choice on

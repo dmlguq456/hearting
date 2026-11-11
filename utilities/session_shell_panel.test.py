@@ -155,6 +155,52 @@ assert(r.hits.some(h=>h.action==='message:1:←'));assert(r.hits.some(h=>h.actio
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_a_chosen_message_reads_to_its_end_and_is_the_one_chosen(self):
+        # A token wider than a row runs on by cells instead of ending in `…`, and
+        # two messages kept in the same second open their own bodies (RV-PR1517-R2 §2).
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const wide=c=>{const n=c.codePointAt(0);return n>=0x300&&n<=0x36f?0:n>0x2e7f?2:1;},cellWidth=s=>[...s].reduce((n,c)=>n+wide(c),0);
+const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,side:width<80,fill:false,model:{messages},cellWidth,questions:()=>[],configuration:{},...extra});
+ return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
+const keyOf=(messages,i)=>draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:'))[i].action;
+const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
+ for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/messages · |‹ \d+\/\d+ ›/.test(s)));return out;};
+// A row's text without its frame and indent: a body read across rows, end to end.
+const flat=rows=>rows.map(s=>s.slice(1,-1)).join('').replace(/\s/g,'');
+const bodies=[['url','https://example.invalid/'+'a'.repeat(290)+'END_1517','END_1517'],['cjk','한글'.repeat(150)+'끝1517','끝1517'],
+ ['mixed','see '+'x'.repeat(120)+'한'.repeat(60)+' then END_1517','END_1517'],['marks','é'.repeat(150)+'END_1517','END_1517']];
+for(const [name,body,end] of bodies){
+ const messages=[{way:'←',who:'[e7]',text:body,at:1}],key=keyOf(messages,0);
+ assert(draw(messages,40,30).plain.some(s=>s.includes('…')),name+': the folded preview keeps its ellipsis');
+ for(const [width,height] of [[40,30],[80,14],[40,12]]){
+  const open=draw(messages,width,height,{expandedKeys:[key]});
+  for(const s of open.plain)assert(cellWidth(s)<=width,name+' '+width+'\n'+s);
+  assert(!open.plain.some(s=>/[│ ]́/.test(s)),name+': a mark stays with its letter');
+  assert(flat(open.plain).includes(end)||open.hits.some(h=>h.action==='read:'+key),name+' '+width+'x'+height+'\n'+open.plain.join('\n'));
+  const pages=flat(read(messages,key,width,height));
+  assert(pages.includes(body.replace(/\s/g,'')),name+' '+width+'x'+height+' pages lost text\n'+pages);
+ }
+}
+// Same second: each row opens and reads its own body; identical records read the same body.
+const one=(who,tag,at=7,way='→')=>({way,who,text:tag+' '+'word '.repeat(40)+tag+'_END',at});
+for(const [name,messages,want] of [['same-way',[one('a','FIRST'),one('b','SECOND')],['FIRST_END','SECOND_END']],
+ ['other-way',[one('a','FIRST'),one('b','SECOND',7,'←')],['FIRST_END','SECOND_END']],
+ ['identical',[one('a','SAME'),one('a','SAME')],['SAME_END','SAME_END']],
+ ['a-second-apart',[one('a','FIRST'),one('b','SECOND',8)],['FIRST_END','SECOND_END']]]){
+ const keys=[0,1].map(i=>keyOf(messages,i));assert.notEqual(keys[0],keys[1],name);
+ keys.forEach((key,i)=>{
+  const other=want[1-i],page=read(messages,key,40,12).join('\n');
+  assert(page.includes(want[i]),name+' '+i+'\n'+page);if(other!==want[i])assert(!page.includes(other),name+' '+i+'\n'+page);
+  const open=draw(messages,40,40,{expandedKeys:[key]}).plain,rows=open.filter(s=>s.includes('_END'));
+  assert.equal(rows.length,1,name+' '+i+'\n'+open.join('\n'));
+  const link=draw(messages,40,12,{expandedKeys:[key]}).hits.find(h=>h.action.startsWith('read:'));
+  if(link)assert.equal(link.action,'read:'+key,name);
+ });
+}
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_shortening_keeps_the_observed_count_message_and_mcp(self):
         # Only the rows shown shrink: the whole route count, a message's recorded
         # end and OpenCode's MCP count stay readable (review RV-PR1517 §1).
