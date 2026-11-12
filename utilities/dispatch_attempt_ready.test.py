@@ -297,7 +297,7 @@ class RuntimeWaitSharedJoinTest(unittest.TestCase):
         self.assertEqual(REGISTRY.metrics_snapshot()["full_metadata_parses"], 1)
 
     def test_terminal_commit_must_land_before_success_is_consumed(self):
-        def commit(jobs, row):
+        def commit(jobs, row, _previous=None):
             self.assertEqual(row.attempt_id, self.attempt)
             self.write_row("done", {**self.meta, "note": "completed-review", "failure_class": "pass"})
             return {"closed": True}

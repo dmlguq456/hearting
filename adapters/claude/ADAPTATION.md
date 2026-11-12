@@ -183,8 +183,12 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   the child wrapper. An interactive Claude parent's `PostToolUse(Bash)` hook
   identifies the exact owner attempt from the start receipt or the registry row
   bound to the session (never from the command text) and arms one native
-  `asyncRewake` hook for it, one waiter per attempt. `Stop` may re-take that
-  existing arm when a turn made no Bash call, but never first-arms a row.
+  `asyncRewake` hook for it, one waiter per attempt. `Stop` and `SessionStart`
+  run the same carrier for every attempt of the session no live hook process
+  watches (a lapsed arm, an arm whose process died with a reopened
+  conversation, or a fresh row no Bash call armed) and wake once for the first
+  due; a conversation reopened in a new process carries the wake once its
+  launch-time process is provably gone.
   Since SD-122 v56, a separate `asyncRewake` hook watches an exact steward
   watch armed by `peer-steward.py watch`. The completion hook waits for terminal
   quiescence outside the model and wakes once with an exact receipt (a harvest

@@ -312,30 +312,45 @@ class FrameOwnerLevelTests(unittest.TestCase):
                             if "frame ∥ frame-alternative" in line and "┌" in line)
                 self.assertIn("frame  claude", lines[band + 1])
 
-    def test_route_row_shows_the_owners_own_state_while_its_legs_run(self):
-        """3cffaf: an owner that handed the stage to workers and waits does not spin."""
+    def test_a_route_with_nothing_running_keeps_its_owners_recorded_model_and_never_spins(self):
+        """Spec rule 27: no running doer, the owner attempt's recorded harness, model and
+        effort stay (no context, tool or agents); a route its reader found with nothing
+        running reads as no response even while its record says it is in flight."""
+        from tools.fleet.explorer.tables import route_doer_cells
+        owner = _owner_job("att-owner", "claude", "opus", "xhigh", liveness="stale")
+        doer = live._route_doer(None, owner, True)
+        shown = live._model_pair("opus")[0]
+        self.assertEqual((doer["harness"], doer["model"][0], doer["effort"]), ("claude", shown, "xhigh"))
+        self.assertEqual((doer["context"], doer["tool"], doer["agents"]), (None, None, 0))
+        parts, context, tool, agents = route_doer_cells({"harness": "claude", "doer": doer})
+        self.assertEqual("".join(text for text, _key in parts).split(), ["claude", *shown.split(), "xhigh"])
+        self.assertEqual((context, tool, agents), ((None, None, None), None, 0))
+        self.assertIsNone(live._route_doer(None, None, True))          # no record: nothing is made up
+        for route, marker in (({"state": "stale", "activity": "running"}, "stale"),
+                              ({"state": "idle", "activity": "running"}, "working"),
+                              ({"state": "blocked", "activity": "running"}, "working"),
+                              ({"state": "dead", "activity": "ended"}, "dead"),
+                              ({"state": "idle", "activity": "ended"}, "idle")):
+            self.assertEqual(live.route_marker_state(route), marker, route)
+
+    def test_route_row_runs_while_its_owner_or_a_leg_runs(self):
+        """Spec rule 27 (2026-11-12, replacing 3cffaf): the route row spins while anything of
+        it runs, its owner or a worker, whether the owner works itself or waits on its legs."""
         wait = {"pid": 9, "comm": "sleep", "kind": "wait", "etime_s": 600}
         work = {"pid": 9, "comm": "python3", "kind": "work", "etime_s": 600}
-        for owner_session, waits in (({"liveness": "idle"}, True),
-                                     ({"liveness": "working", "exec_child": wait}, True),
-                                     ({"liveness": "working", "exec_child": work}, False),
-                                     ({"liveness": "working"}, False)):
+        for owner_session in ({"liveness": "idle"}, {"liveness": "working", "exec_child": wait},
+                              {"liveness": "working", "exec_child": work}, {"liveness": "working"}):
             with self.subTest(owner=owner_session):
                 _view_value, _record_value, route, vm = _vm(running=True,
                                                             owner_session=owner_session)
-                self.assertIs(route["owner_waits"], waits)
+                self.assertNotIn("owner_waits", route)
                 for view in ("ROUTES", "OVERVIEW"):
                     text = "\n".join(draw(vm, NavState(view=view, title=view), 180, 60).text_rows())
                     row = next(line for line in text.splitlines()
                                if "[z9]" in line and "frame" in line and "│" in line)
-                    if waits:
-                        self.assertNotIn("⠏", row)
-                    else:
-                        self.assertIn("⠏", row)
+                    self.assertIn("⠏", row)
                     if view == "ROUTES":
-                        self.assertIn(("●" if waits else "⠏") + " [z9]", row)
-        _view_value, _record_value, route, _vm_value = _vm(owner_session={"liveness": "idle"})
-        self.assertIs(route["owner_waits"], False)          # nothing runs: not a delegation
+                        self.assertIn("⠏ [z9]", row)
 
     def test_framed_progress_mark_follows_the_frame_legs(self):
         _view_value, _record_value, _route, running = _vm(running=True)

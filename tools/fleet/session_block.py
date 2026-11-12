@@ -38,9 +38,13 @@ def question_presentations(items, columns, *, native_wait=None):
                 parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
             for line_index, line in enumerate(wrap_parts(parts, max(1, width - cell_width(prefix)))):
                 options.append([(prefix if line_index == 0 else " " * cell_width(prefix), "dim"), *line])
+        body = []
+        for source_line in str(question.get("question") or "?").splitlines():
+            if source_line.strip():
+                body.extend(wrap_parts([(source_line, "loc_repo")], width))
         question["display"] = {
             "head": heading, "source": source,
-            "body": wrap_parts([(question.get("question") or "?", "loc_repo")], width),
+            "body": body,
             "options": (options or [[(ui_text("fleet.session_block.text_hint"), "dim")]])
                        if state == "open" else [[(str(item.get("reason") or ui_text("fleet.session_block." + state)), "dim")]],
         }
