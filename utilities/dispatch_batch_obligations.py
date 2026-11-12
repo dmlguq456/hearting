@@ -814,7 +814,8 @@ class OwnerSettlementReadContext:
         self._active_owners = {}
         self._route_owners = {}
         self._cursors = {}
-        self._invalidated_owners = set()
+        # Insertion-ordered: the oldest invalidation or deferral is proved first.
+        self._invalidated_owners = {}
         self._pass_file_generations = {}
         self._dependency_queues = {}
         self._dependency_queued = set()
@@ -1183,7 +1184,7 @@ class OwnerSettlementReadContext:
                             for pair in self._dependency_watch_keys.get(key, ()))
                 if dirty:
                     self._metrics["dependency_invalidations"] += 1
-                    self._invalidated_owners.add(key)
+                    self._invalidated_owners.setdefault(key)
                     self.forget_owner(jobs, key[1])
                     invalidated = True
                     continue
@@ -1207,7 +1208,7 @@ class OwnerSettlementReadContext:
             self._metrics["dependency_checks"] += len(current)
             if tuple(current) != expected:
                 self._metrics["dependency_invalidations"] += 1
-                self._invalidated_owners.add(key)
+                self._invalidated_owners.setdefault(key)
                 self.forget_owner(jobs, key[1])
                 invalidated = True
                 continue
@@ -1481,13 +1482,14 @@ class OwnerSettlementReadContext:
 
     def reselect_owner(self, jobs: Path, attempt_id: str):
         """Keep an owner with an invalid proof due on the next candidate selection."""
-        self._invalidated_owners.add((str(jobs.resolve(strict=False)), attempt_id))
+        self._invalidated_owners.setdefault((str(jobs.resolve(strict=False)), attempt_id))
 
     def take_invalidated_owner_ids(self, jobs: Path):
         root = str(jobs.resolve(strict=False))
         affected = tuple(attempt for item_root, attempt in self._invalidated_owners
                          if item_root == root)
-        self._invalidated_owners.difference_update((root, attempt) for attempt in affected)
+        for attempt in affected:
+            self._invalidated_owners.pop((root, attempt), None)
         return affected
 
     def owner_candidate_floor(self, jobs: Path, view):
@@ -1829,13 +1831,12 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
 
     pending = []
     deadline = None if context is None else context.owner_scan_deadline()
-    proven_through = None
-    last_proven = resume_after
     proved_this_pass = False
+    walk = _OwnerProofWalk(candidates, resume_after, reselected, budgeted=deadline is not None)
     # The resume order only marks rows an earlier pass already proved; an owner
     # whose proof became invalid since then is due again whatever its order.
     reselected = set(reselected)
-    for candidate in candidates:
+    for candidate in walk:
         # Each historical proof reads and drops large inputs; return the freed
         # heap while the long candidate walk continues (rate limited).
         peer_obligations.release_freed_memory()
@@ -1880,6 +1881,9 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
                 continue
             if had_proof:
                 reselected.add(attempt_id)
+                if walk.divert(candidate):
+                    # Found invalid before the suffix's turn: proved after it.
+                    continue
             deferred = (None if context is None else context.unsettled_current(
                 jobs, fields[1], raw, meta, related_rows, supervisor_lease_is_held))
             if deferred == "not-applicable":
@@ -1896,15 +1900,14 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
             elif (deadline is not None and proved_this_pass
                     and context._clock() >= deadline):
                 # This pass spent its proof budget; prove the rest next pass.
-                proven_through = last_proven
+                walk.defer(order)
                 if attempt_id in reselected:
                     # Behind the resume order: keep it on the reselection path.
                     context.reselect_owner(jobs, attempt_id)
                 continue
             else:
                 proved_this_pass = True
-                if last_proven is None or order > last_proven:
-                    last_proven = order
+                walk.proving()
                 try:
                     observed = dependencies = None
                     if context is not None:
@@ -1960,7 +1963,88 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
         except (OSError, ValueError):
             lease_held = True
         pending.append((order, fields[1], raw, meta, lease_held))
-    return tuple(pending), proven_through
+    return tuple(pending), walk.proven_through()
+
+
+class _OwnerProofWalk:
+    """The order one budgeted pass proves owners in.
+
+    The rows after the resume order (owners not yet proved by this scan) take
+    the pass's first proof, so they advance on every pass however many earlier
+    proofs become invalid. Owners due again (proof invalidated, or deferred by
+    an earlier budget) follow, oldest first, so a repeatedly invalidated owner
+    neither takes every pass's proof nor stays hidden behind the resume order;
+    the remaining rows keep registry order. A pass without a budget proves
+    every owner, so its order is the registry order.
+    """
+
+    def __init__(self, candidates, resume_after, reselected, *, budgeted):
+        self._candidates = candidates
+        self._resume_after = resume_after
+        self._reselected = tuple(reselected)
+        self._budgeted = budgeted
+        self._suffix_turn_taken = not budgeted
+        self._diverted = []
+        self._deferred = False
+        self._first_gap = None
+
+    def __iter__(self):
+        if not self._budgeted:
+            yield from self._candidates
+            return
+        due = set(self._reselected)
+        by_attempt = {}
+        for candidate in self._candidates:
+            attempt_id = candidate.completion_metadata().get("attempt_id")
+            if attempt_id in due:
+                by_attempt[attempt_id] = candidate
+        visited = set()
+        for candidate in self._candidates:
+            if self._suffix_turn_taken:
+                break
+            if self._resume_after is not None and candidate.order <= self._resume_after:
+                continue
+            if candidate.completion_metadata().get("attempt_id") in due:
+                continue
+            visited.add(id(candidate))
+            yield candidate
+        self._suffix_turn_taken = True
+        again = set()
+        for candidate in [by_attempt[attempt_id] for attempt_id in self._reselected
+                          if attempt_id in by_attempt] + self._diverted:
+            if id(candidate) in again:
+                continue
+            again.add(id(candidate))
+            visited.add(id(candidate))
+            yield candidate
+        for candidate in self._candidates:
+            if id(candidate) not in visited:
+                yield candidate
+
+    def divert(self, candidate) -> bool:
+        """Hold an owner found invalid during the suffix's turn until after it."""
+        if self._suffix_turn_taken:
+            return False
+        self._diverted.append(candidate)
+        return True
+
+    def proving(self):
+        self._suffix_turn_taken = True
+
+    def defer(self, order):
+        self._deferred = True
+        if self._resume_after is None or order > self._resume_after:
+            if self._first_gap is None or order < self._first_gap:
+                self._first_gap = order
+
+    def proven_through(self):
+        """The resume order: every due row up to it was proved or stays reselected."""
+        if not self._deferred:
+            return None
+        floor = -1 if self._resume_after is None else self._resume_after
+        if self._first_gap is None:
+            return floor
+        return max(floor, self._first_gap - 1)
 
 
 def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
