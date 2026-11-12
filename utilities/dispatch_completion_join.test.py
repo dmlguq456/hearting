@@ -4670,7 +4670,8 @@ class NextLegReceiptTest(unittest.TestCase):
         required = ("Original request/format apply", "Review the result",
                     "continue approved work", "First close:",
                     "one or two sentences", "important remaining failure",
-                    "at most one necessary decision", "point to the detailed record",
+                    "ask only what only the person can decide", "in-scope, reversible next step", "as proceeding",
+                    "point to the detailed record",
                     "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
                     "handled exact repeats need no ACK", "new failures/conflicts",
                     "unfinished work, questions")
@@ -4699,6 +4700,9 @@ class NextLegReceiptTest(unittest.TestCase):
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
         self.assertIn("First close: give the result in one or two sentences", before)
         self.assertIn("point to the detailed record", before)
+        self.assertIn("ask only what only the person can decide", before)
+        self.assertIn("in-scope, reversible next step (such as fixing and re-testing) as proceeding", before)
+        self.assertNotIn("at most one", before)
         self.assertNotIn("[완료 요약]", before)
         self.assertTrue(text.startswith("Original request/format apply."))
         self.assertIn("one or two sentences", text)

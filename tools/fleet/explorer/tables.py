@@ -46,52 +46,26 @@ def repo_rule_label(value, limit=None):
 
 
 def repo_status_segments(status, room, narrow=False):
-    """``(text, key)`` pieces of a project's status line on its OVERVIEW group rule.
+    """Count-only pieces on OVERVIEW; project prose and recent results stay on its page.
 
-    With a status document: its one line, what waits on the person (yellow when any), the
-    questions waiting (when any), and when the project last changed. Without one: routes
-    with live work, the questions, and the newest completed result. The free text (the
-    line, or the result) gives way first; a narrow screen keeps only the count waiting on
-    the person.
-    """
+    A narrow screen keeps only the counts waiting on the person (answers, then decisions);
+    the route count gives way first."""
     room = int(room)
-    has_doc = status.get("line") is not None
+    person = []
+    if int(status.get("questions") or 0):
+        person.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
     decisions = int(status.get("decisions") or 0)
-    decide = (f"{decisions} to decide", "lvl_y" if decisions else "dim")
-    if narrow:
-        return [decide] if has_doc and decisions and _seg_width(decide[0]) <= room else []
-    tail = []
-    if has_doc:
-        tail.append(decide)
-    elif status.get("routes"):
-        tail.append(route_count_segment(status))
-    if status.get("questions"):
-        tail.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
-    if has_doc:
-        free = str(status["line"])
-        stale = bool(status.get("stale") and status.get("doc_age"))
-        if stale:
-            free = f"{status['doc_age']} · {free}"
-        if status.get("changed") and not (stale and status["changed"] == status["doc_age"]):
-            tail.append((str(status["changed"]), "dim"))
-    else:
-        done = status.get("done")
-        free = (f"{status['done_age']} ✓ {done}" if status.get("done_age") else f"✓ {done}") if done else ""
-    if not tail and not free:
-        return []
-    pieces = []
-    for text, key in tail:
-        pieces += [(BUNDLE_SEP, "dim"), (text, key)] if pieces else [(text, key)]
-    fixed = sum(_seg_width(text) for text, _key in pieces)
-    if has_doc:
-        lead_room = room - fixed - 3
-        if lead_room >= 8:
-            return [(_clip(free, lead_room), "now_sub"), (BUNDLE_SEP, "dim")] + pieces
-        return pieces if fixed <= room else []
-    tail_room = room - fixed - (3 if pieces else 0)
-    if free and tail_room >= 8:
-        return pieces + ([(BUNDLE_SEP, "dim")] if pieces else []) + [(_clip(free, tail_room), "now_sub")]
-    return pieces if fixed <= room else []
+    if status.get("line") is not None and decisions:
+        person.append((f"{decisions} to decide", "lvl_y"))
+    routes = [route_count_segment(status)] if int(status.get("routes") or 0) and not narrow else []
+    pieces = routes + person
+    out = []
+    for text, key in pieces:
+        addition = ([(BUNDLE_SEP, "dim")] if out else []) + [(text, key)]
+        if sum(_seg_width(value) for value, _ in out + addition) > room:
+            break
+        out.extend(addition)
+    return out
 
 
 BUNDLE_SEP = " │ "
