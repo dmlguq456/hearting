@@ -169,6 +169,34 @@ class PeerReadContextTest(unittest.TestCase):
         context.lineage_summary(graph_b, second)
         self.assertEqual(second.call_count, 3)
 
+    def test_the_same_signature_object_is_not_hashed_again_and_nothing_stale_is_served(self):
+        class Counting(tuple):
+            hashes = 0
+
+            def __hash__(self):
+                type(self).hashes += 1
+                return super().__hash__()
+
+        signature = Counting(("ledgers", ("a", "b")))
+        context = PeerReadContext()
+        loads = mock.Mock(return_value="graph-1")
+        self.assertEqual(context.lineage_graph(signature, loads), "graph-1")
+        hashed = Counting.hashes
+        for _ in range(50):
+            self.assertEqual(context.lineage_graph(signature, loads), "graph-1")
+        self.assertEqual(Counting.hashes, hashed)            # the sweep's later lookups cost no hashing
+        loads.assert_called_once_with()
+        # An equal signature that is another object finds the same graph; a different one does not.
+        self.assertEqual(context.lineage_graph(tuple(signature), loads), "graph-1")
+        other = mock.Mock(return_value="graph-2")
+        self.assertEqual(context.lineage_graph(("ledgers", ("a", "c")), other), "graph-2")
+        self.assertEqual(context.lineage_graph(signature, mock.Mock(return_value="graph-3")), "graph-3")
+        # Invalidated: the same object no longer answers from memory.
+        context.invalidate_lineage_graph()
+        rebuilt = mock.Mock(return_value="graph-4")
+        self.assertEqual(context.lineage_graph(signature, rebuilt), "graph-4")
+        rebuilt.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
