@@ -109,7 +109,7 @@ function publishNativeDisplay() {
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
-function source(op, extra={}) {
+function source(op, extra={}, late) {
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
@@ -118,7 +118,7 @@ function source(op, extra={}) {
     // must not discard its eventual language/model result before first input.
     // They never delay native start or keys; backend exit settles all callers.
     const timer=['display-bootstrap','display-model'].includes(op)?null:
-      setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
+      setTimeout(()=>{if(late)calls.set(id,{resolve:late,timer:null});else calls.delete(id);resolve({ok:false,reason:'source-unavailable',late:!!late});},1500);
     calls.set(id,{resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
     if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
@@ -248,7 +248,7 @@ function readRouteRaw(){
 }
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
     questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
@@ -527,19 +527,30 @@ function observeFiles(paths) {
   }
   return changed;
 }
+// A projection past the 1.5 s limit is still applied when it arrives: one is in
+// flight at a time, so no older reply can follow a newer one. Values that stay
+// unanswered or failed for STALE_MS stop claiming a route state (spec rule 12).
+const STALE_MS=10000;let staleTimer,stale=false;
+function projectionMissed(data){
+  sourceError=data;
+  if(!staleTimer&&!stale)staleTimer=setTimeout(()=>{staleTimer=undefined;stale=true;queueDisplay();},STALE_MS);
+}
 async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
-    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
-    if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
+    let settle;const late=new Promise(resolve=>settle=resolve);
+    let data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery},settle);
+    if(data.late){projectionMissed(data);data=await late;}
+    if(relay||selected!==selection)return;if(!data.ok){projectionMissed(data);return;}sourceError=undefined;
+    const wasStale=stale;clearTimeout(staleTimer);staleTimer=undefined;stale=false;
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
-    if(key===projectionKey)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
+    if(key===projectionKey&&!wasStale)return;const oldHeight=height();projectionKey=key;nativeFooter=data.native_footer||null;footer=data.footer;footerSegments=data.segments||[];panelLines=data.lines;panelSections=data.block;panelModel={...data.panel,answerable:data.questions?.some(item=>item.answerable===true&&(item.request_state||'open')==='open')};block.update(data.questions,data.help,data.block);if(height()!==oldHeight)applyLayout();else rebuildDisplay();
   }finally{projecting=false;if(projectionPending)queueProjection();}
 }
 // Claude's statusline row may be blanked only while this visible panel paints
