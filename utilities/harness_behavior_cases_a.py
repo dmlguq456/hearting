@@ -84,6 +84,10 @@ def session():
 
 def register(flags):
     from harness_capabilities import parent_completion
+    if "delay" in flags:
+        # A launch that registers after its tool call already returned (a
+        # start the native tool moved to the background): the row appears later.
+        time.sleep(float(CONF.get("delay_seconds", 6)))
     harness, sid, source = session()
     carrier = parent_completion(harness).get("carrier", "")
     jobs.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,8 @@ def register(flags):
     start = stat.rsplit(")", 1)[1].split()[19]
     ns = os.readlink(f"/proc/{child.pid}/ns/pid")
     meta = ["attempt_schema_version=2", "capability=autopilot-code", "dispatch_depth=1",
-            "worker_type=review", "transport=headless", "execution_surface=registered-headless",
+            "worker_type=" + ("frame" if "frame" in flags else "review"),
+            "transport=headless", "execution_surface=registered-headless",
             "registered_worker=1", "fallback_hop=same-harness-headless", f"harness={harness}",
             f"parent_sid={sid}", f"parent_completion_delivery={carrier}"]
     binding = None
@@ -107,6 +112,10 @@ def register(flags):
                  f"parent_runtime_ns={binding[2]}"]
     meta += ["launch_claimed=1", f"pid={child.pid}", f"pgid={child.pid}", f"pid_start={start}",
              f"pid_ns={ns}", f"pid_observer_ns={ns}", "launch_started=1", f"attempt_id={attempt}"]
+    if "frame" in flags:
+        # A frame leg carries its route's identity and no parent attempt (its parent is the session).
+        import hashlib
+        meta += ["route_id=rt-" + hashlib.sha256(attempt.encode()).hexdigest()[:16], "route_node=frame"]
     stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with jobs.open("a", encoding="utf-8") as handle:
         handle.write("\t".join([stamp, "open", str(HERE), str(HERE), "hbfx-child", ",".join(meta)]) + "\n")
