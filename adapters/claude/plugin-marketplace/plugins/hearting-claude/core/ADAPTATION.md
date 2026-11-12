@@ -651,11 +651,21 @@ stamp path in `core/HOOKS.md`.
   returns only its own supervision-notice claims to the existing queue. The
   synchronous prompt sweep on the awakened turn can consume or retire them
   immediately, allowing that turn's next Bash call to re-arm the same attempt
-  for completion. At the end of a turn, the same async carrier also runs on
-  Claude `Stop` and may re-take only an existing arm bound to that session;
-  it never first-arms a fresh row there. Thus an attention turn with no Bash
-  call still resumes the exact completion wait, while a live holder or an
-  ended arm stays quiet. The async emit is not an acknowledgement; a lost wake stays
+  for completion. At the end of a turn (Claude `Stop`) and at a session start
+  (Claude `SessionStart`, e.g. a conversation reopened with `--resume` in a new
+  process, whose earlier hook processes died with the old one), the same async
+  carrier watches every attempt of that session that no live hook process
+  watches: a lapsed or holder-less arm, or a fresh open row no Bash call armed
+  (a launch registered after its own tool call returned). One hook process
+  holds them and wakes once for whichever is due first; the woken turn re-arms
+  the rest. Thus an attention turn with no Bash call still resumes the exact
+  completion wait, and a reopened conversation is woken for work its old
+  process started, while a live holder or an ended arm stays quiet. The arm
+  names the Claude process its holder wakes; once the launch-time process is
+  provably gone, the same session id in its new process carries the wake
+  (a resumed Claude conversation is a later delivery, not a misdelivery), and
+  the shared runner's retained wake waits for that live holder. A live or
+  unreadable launch-time process still refuses a second process. The async emit is not an acknowledgement; a lost wake stays
   recoverable. Human-gate notices retain their existing speculative lease and
   release semantics, and another carrier's successor claim is preserved.
 - The interactive Claude `asyncRewake` bridge never reads the Bash command
@@ -1037,7 +1047,10 @@ The shell host input requires the exact attachment (native SID, PID births and
 descent), an inner native process not proven on another session, native `idle`
 state, no open form or question, and an empty input on the host's own screen. A
 dim prompt suggestion is empty. Terminal focus and wheel reports invalidate an
-in-flight observation but do not leave an unsubmitted draft. Focus-looking bytes
+in-flight observation but do not leave an unsubmitted draft. A session start or
+selection settles the keys up to the Enter that chose it (a resume picker,
+`/clear`), so a seat reopened through a picker can take a delivery before its
+first prompt; keys typed after that Enter still count as a draft. Focus-looking bytes
 inside a paste remain input. Busy, blocked, unknown, form-open, nonempty-draft,
 or unreadable targets remain `pending` under the one `message-<ref>` carrier
 (`not-idle-empty`); a write that provably never started returns to `pending`,
@@ -1165,4 +1178,6 @@ inputs; review `RV-PR1443-1110.md`.
 | PG-51 | Claude, OpenCode ↔ Codex | A `report`-scope (and any quick) owner could push and reach the network on Claude and OpenCode, where only the instruction withholds publication, while a Codex owner had no network for that route | resolved | per the supervisor's direction (add no new block), a dispatch-depth-1 Codex owner gets the network grant whatever its capability (audit included), intensity or entry scope, and a depth-2 worker, a `read-only` sandbox and the mid-merge observation fence get none; one rule, `codex_owner_network_posture`, with no other widening path (RV-PR1474 P2-1); the `report` scope is kept by the owner instruction on all three, and a report owner can read what it reviews. `owner-publish` (2026-11-10): unscoped, `complete` and `report` push to a loopback git daemon and reach the network on all three. A real `gh pr view` needs GitHub credentials the isolated HOME does not carry. Repro: `--scenario owner-publish` |
 | PG-52 | Codex | A shipped Codex custom agent pinned the account model its profile resolves to in `adapters/codex/config/models.conf`; when the active provider could not resolve it, the spawn failed with `agent type is currently not available` and the parent saw only that tool error, while the same agent without the pin spawned | resolved | activation renders the agents for the home they install into: a home whose `config.toml`, profile file `<name>.config.toml` (`codex --profile <name>`, RV-PR1474 P2-2) or `[profiles.*]` table selects a `model_provider` other than `openai` gets them without the `model` line, keeping effort and sandbox, so they follow the session model; the default provider keeps the pins and the shipped files (`adapters/codex/bin/sync-native-agents.py` `runtime_config`). `custom-agent-spawn` (2026-11-10) installs the agent as activation renders it: the shipped `memory-scout` spawns in the TUI and under `codex exec`, no fixture-model copy needed. Repro: `--scenario custom-agent-spawn --harness codex` |
 | PG-53 | OpenCode | Session tidy's memory step could not read an OpenCode 2 conversation: a fresh home failed with `no such table: part`, and an upgraded home (old tables kept) read a new session as empty (`nothing-new`) | resolved | branch `opencode-tidy-v2-reader-1111`: `utilities/tidy_transcripts.py` reads an OpenCode session through `opencode_runtime.read_session_parts` (V1 `part` or OpenCode 2 `session_message`; a session in both stays `session-generation-ambiguous`) and finds recent sessions in `session_v2` too. Measured on an OpenCode 2.0.32 database with the real runner and a fake worker: fresh and upgraded homes `applied` with the session's 4 rows, a V1 session read as before (`BC-OPENCODE-TIDY-V2-READER-1111.md`); regression `OpenCodeV2ReadTest` |
+| PG-54 | Claude | A resting Claude parent reopened in a new process (`--resume` through the picker or `--continue`, as after an install) was woken for none of the work it had started: every `asyncRewake` waiter died with the old process (`SIGTERM`), only a Bash call or `Stop` re-armed, a re-armed waiter refused the record because its runtime was not the launch-time one, and under the session shell the retained runtime message stayed `not-idle-empty` because the picker keys left the host's input frontier unsettled. A launch registered after its own tool call returned (a start the TUI moved to the background) was armed by no boundary either. Measured on the supervisor 11-12: five completions 17:15–17:47 reached it only with the prompt at 17:58 (BC-IDLE-WAKE-MISSED-1112) | resolved | `SessionStart` runs the same async carrier as `Stop`; both watch every unwatched attempt of the session in one hook process (a lapsed or holder-less arm, or a fresh row no Bash call armed) and wake once for the first due; once the launch-time process is provably gone, the same session id in its new process carries the wake, the arm names that runtime and the shared runner's retained wake waits for its live holder; a session start settles the host's input frontier up to the Enter that chose it. `idle-wake-restart`, `idle-wake-restart-continue`, `idle-wake-background-launch` (plain and `--session-shell`) fail → pass, `idle-wake-restart-peer --session-shell` fail → pass; `completion-receipt`, `idle-wake-frame`, `idle-wake-reinstall` pass before and after (2026-11-12, Claude Code 2.1.322) |
+| PG-55 | OpenCode | When the process that runs the Hearting plugin starts again (the fixture's `--standalone` private server after a TUI restart; on the shared service, a service or plugin restart), the plugin's turn carrier knows no session until that session runs a turn or a tool: `--session <id>` and `--continue` alike stay `pending` and ride the next prompt. A TUI restart against the still-running shared service keeps the carrier (not measured here: the fixture never touches the shared service) | open | the restoring selector reads only the plugin process's own argv, which `--standalone` and the shared service do not carry; restoring would mean the plugin reading the sessions owed to `opencode-turn` at initialization. Until then such a completion waits for that session's next prompt; Fleet shows it only inside its global `delivery pending: N` line, with no per-session count, and the shell panel not at all (display is PR #1560's scope). `idle-wake-restart`/`idle-wake-restart-continue` fail before and after; Codex passes every idle-wake scenario before and after (2026-11-12) |
 <!-- parity-register:end -->

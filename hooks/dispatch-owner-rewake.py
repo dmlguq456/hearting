@@ -450,13 +450,13 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     own call or the next one. A row older than the arm window is a first-time
     refusal (the next-prompt sweep owns stale completions); a row whose claim
     lapsed -- its holder died with the session, or its gate wake was spent and
-    the gate has since closed -- is re-armed regardless of age. Stop can
-    re-take only an existing claim, so a tool-free attention turn continues
-    its completion wait without discovering new starts at that boundary."""
+    the gate has since closed -- is re-armed regardless of age. A turn end
+    (`Stop`) or a session start (`SessionStart`, e.g. a resumed conversation)
+    is a boundary: `boundary_launch` watches every such row at once."""
 
-    stopping = isinstance(payload, dict) and payload.get("hook_event_name") == "Stop"
-    session = _payload_session(payload) if stopping else None
-    gate = (payload, session) if session else _bash_call(payload)
+    if _boundary_session(payload) is not None:
+        return boundary_launch(payload)
+    gate = _bash_call(payload)
     if gate is None:
         return None
     payload, session = gate
@@ -480,8 +480,6 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     # may have finished between the release and this call (top review M1).
     for attempt_id, age, _status in rows:
         fresh = attempt_id in open_rows and age <= window
-        if stopping and not arm_path(jobs, attempt_id).exists():
-            continue
         if attempt_id not in open_rows and not arm_path(jobs, attempt_id).exists():
             continue
         claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
@@ -494,6 +492,137 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
         armed = "registry" if claim.arms == 1 else "registry-rearm"
         return Launch(attempt_id=attempt_id, jobs=jobs, session_id=session, armed=armed), claim
     return refusal
+
+
+# A turn end, and a session start (a resumed or cleared conversation in a new
+# Claude process, whose earlier hook processes died with the old one).
+BOUNDARY_EVENTS = frozenset({"Stop", "SessionStart"})
+
+
+def _boundary_session(payload: object) -> str | None:
+    if not isinstance(payload, dict) or payload.get("hook_event_name") not in BOUNDARY_EVENTS:
+        return None
+    return _payload_session(payload)
+
+
+def boundary_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | None:
+    """At a turn end or session start, watch every attempt of this session that
+    no live hook process watches, and wake for whichever is due first.
+
+    The candidates are the rows `registry_launch` could arm from a Bash call
+    (a fresh open row with no arm yet, or a row whose arm lapsed or lost its
+    holder), so a launch registered after its own tool call returned is armed
+    at the turn end, and a conversation reopened in a new Claude process --
+    which took its earlier waiters down with the old process -- is watched
+    again before anyone types. One hook process holds them all because Claude
+    wakes a resting session once per hook exit; the woken turn re-arms the
+    rest (`_first_due`)."""
+
+    session = _boundary_session(payload)
+    if session is None or os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        return None
+    jobs = _resolved_jobs(payload)
+    if jobs is None:
+        return None
+    window = _arm_window()
+    claims: list[tuple[Launch, ArmClaim]] = []
+    refusal: ArmRefusal | None = None
+    for attempt_id, age, status in _session_owner_states(jobs, session, RECEIPT_ROW_STATUSES):
+        fresh = status in ARM_ROW_STATUSES and age <= window
+        if not fresh and not arm_path(jobs, attempt_id).exists():
+            continue
+        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        if isinstance(claim, ArmRefusal):
+            refusal = refusal or claim
+            continue
+        armed = "registry" if claim.arms == 1 else "registry-rearm"
+        claims.append((Launch(attempt_id=attempt_id, jobs=jobs, session_id=session, armed=armed),
+                       claim))
+    if not claims:
+        return refusal
+    if len(claims) == 1:
+        return claims[0]
+    return _first_due(claims) or refusal
+
+
+_TERMINAL_WAIT_STATUSES = frozenset({"", "open", "running"})
+
+
+def _first_due(claims: list[tuple[Launch, ArmClaim]]) -> tuple[Launch, ArmClaim] | None:
+    """Hold several arms and return the first whose row ended or whose owner's
+    gate waits for a carrier; every other arm is left `lapsed`, so the woken
+    turn's next Bash call or Stop re-arms it once this process has exited."""
+
+    interval = _bounded_number("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300)
+    maximum = _bounded_number("AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400)
+    deadline = time.monotonic() + maximum
+    for launch, claim in claims:
+        _retain_completion(launch, claim)
+    pending = list(claims)
+    gate_scans: dict[str, tuple[float, int]] = {}
+    chosen = None
+    while chosen is None:
+        pending = [(launch, claim) for launch, claim in pending if _holds_arm(claim)]
+        if not pending:
+            break
+        chosen = next(((launch, claim) for launch, claim in pending
+                       if _owner_status(launch) not in _TERMINAL_WAIT_STATUSES), None)
+        if chosen is None:
+            gated = _gate_due_attempt([launch for launch, _claim in pending], gate_scans)
+            chosen = next(((launch, claim) for launch, claim in pending
+                           if launch.attempt_id == gated), None)
+        if chosen is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+    for _launch, claim in claims:
+        if chosen is None or claim is not chosen[1]:
+            settle_arm(claim, "lapsed")
+    return chosen
+
+
+def _gate_due_attempt(launches: list[Launch], scans: dict[str, tuple[float, int]]) -> str | None:
+    """The first of `launches` whose gate record waits for a carrier, as
+    `_open_gate_pending` judges one attempt; a recipient directory is read
+    again only when it changed or a lease it held has expired."""
+
+    now = time.monotonic_ns()
+    by_directory: dict[str, list[Launch]] = {}
+    root = launches[0].jobs.resolve(strict=False).parent if launches else None
+    for launch in launches:
+        recipient_key = _recipient_key(launch)
+        if not recipient_key or root is None:
+            continue
+        try:
+            directory = pending_delivery.record_directory(root, recipient_key)
+        except pending_delivery.PendingDeliveryError:
+            continue
+        by_directory.setdefault(str(directory), []).append(launch)
+    for directory, members in by_directory.items():
+        try:
+            mtime = Path(directory).stat().st_mtime
+        except OSError:
+            continue
+        seen = scans.get(directory)
+        if seen is not None and seen[0] == mtime and now < seen[1]:
+            continue
+        attempts = {launch.attempt_id for launch in members}
+        next_deadline = 2 ** 63
+        due = None
+        for _root, _key, _delivery_id, record in _recipient_gate_records(members[0]):
+            mine = attempts.intersection(record.get("attempt_ids") or [])
+            if not mine:
+                continue
+            state = record.get("state")
+            lease = int(record.get("claim_deadline_ns") or 0)
+            if state == "pending" or (state in {"claimed", "sent-ambiguous"} and lease < now):
+                due = due or sorted(mine)[0]
+            elif state in {"claimed", "sent-ambiguous"}:
+                next_deadline = min(next_deadline, lease)
+        scans[directory] = (mtime, next_deadline)
+        if due:
+            return due
+    return None
 
 
 def _process_identity(pid: int) -> tuple[str, str, str] | None:
@@ -753,11 +882,16 @@ def claim_arm(jobs: Path, attempt_id: str, session: str, *, fresh: bool) -> ArmC
                 if refusal is not None:
                     return ArmRefusal(refusal)
                 arms = int(existing["arms"]) + 1
+            runtime = runtime_ancestry_binding(os.getpid())
             record = {
                 "schema": ARM_SCHEMA,
                 "attempt_id": attempt_id,
                 "session_id": session,
                 "holder": list(identity),
+                # The Claude process this hook process wakes. After a resume it is
+                # not the row's launch-time runtime, and the shared runner's
+                # retained wake defers to a live holder only while this one lives.
+                "runtime": list(runtime) if runtime else None,
                 "state": "waiting",
                 "arms": arms,
                 "gate_delivery_id": None,
@@ -1273,7 +1407,13 @@ def _attention_has_open_child(message: str) -> bool:
 def _incarnation_binding_matches(metadata: dict[str, str]) -> bool:
     """SD-111 P2 round 2 C-3: the recorded launch-time triple must match this
     hook process's own walk exactly on all three fields. Absence, a partial
-    recording, or any mismatch is a fail-closed no (§3.2.1's fork)."""
+    recording, or any mismatch is a fail-closed no (§3.2.1's fork) -- except
+    when the recorded Claude process is provably gone: the same session id
+    reopened in a new process is the same conversation (stage-dispatch
+    §13.34.1, a resumed Claude session is a later delivery, not a misdelivery),
+    and without this a conversation reopened to pick up a new release could
+    never be woken for work it started. A live or unreadable recorded process
+    still refuses, so two live processes on one session never both claim."""
 
     recorded = (
         metadata.get("parent_runtime_pid", ""),
@@ -1285,7 +1425,7 @@ def _incarnation_binding_matches(metadata: dict[str, str]) -> bool:
     observed = runtime_ancestry_binding(os.getpid())
     if observed is None:
         return False
-    return recorded == observed
+    return recorded == observed or not _holder_alive(list(recorded))
 
 
 @dataclass(frozen=True)

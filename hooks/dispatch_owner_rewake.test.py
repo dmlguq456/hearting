@@ -4285,26 +4285,30 @@ class SupervisionWakeRearmTest(unittest.TestCase):
         self.assertEqual(self._run("ready", stop)[0], 2)
         self.assertEqual(json.loads(completion.read_text())["state"], "sent-ambiguous")
 
-    def test_stop_never_first_arms_or_takes_a_foreign_or_live_arm(self):
+    def test_stop_first_arms_a_fresh_unwatched_row_never_a_foreign_or_live_arm(self):
+        # A launch registered after its own Bash call returned (a start the TUI
+        # moved to the background) has no arm yet: the turn end arms it.
         stop = {"hook_event_name": "Stop", "session_id": "session-1"}
-        self.assertIsNone(rewake.registry_launch(stop))  # no ledger yet
-        claim = rewake.claim_arm(self.jobs, "att-owner-1", "session-1", fresh=True)
+        launch, claim = rewake.registry_launch(stop)
+        self.assertEqual((launch.attempt_id, launch.armed, claim.arms),
+                         ("att-owner-1", "registry", 1))
         self.assertEqual(rewake.registry_launch(stop).reason, "held-live")
         self._dead_holder()
         self.assertIsNone(rewake.registry_launch({**stop, "session_id": "foreign"}))
         self.assertEqual(rewake._read_arm(claim.path)["arms"], 1)
         self.assertIsNone(rewake.registry_launch({**stop, "hook_event_name": "SubagentStop"}))
 
-    def test_claude_stop_registers_the_same_async_completion_carrier(self):
+    def test_claude_stop_and_session_start_register_the_same_async_completion_carrier(self):
         settings = json.loads((ROOT / "adapters/claude/settings.json").read_text())
         by_event = {}
-        for event in ("PostToolUse", "Stop"):
+        for event in ("PostToolUse", "Stop", "SessionStart"):
             by_event[event] = [hook for entry in settings["hooks"][event]
                                for hook in entry["hooks"]
                                if "dispatch-owner-rewake.py" in hook.get("command", "")]
-        self.assertEqual(len(by_event["Stop"]), 1)
-        self.assertEqual(by_event["Stop"], by_event["PostToolUse"])
-        self.assertTrue(by_event["Stop"][0]["asyncRewake"])
+        for event in ("Stop", "SessionStart"):
+            self.assertEqual(len(by_event[event]), 1)
+            self.assertEqual(by_event[event], by_event["PostToolUse"])
+            self.assertTrue(by_event[event][0]["asyncRewake"])
 
 
 class GateCloseRearmTest(GateCarrierTest):
@@ -5486,6 +5490,109 @@ class ExpandedBatchAuthorityTest(unittest.TestCase):
             for index in (0, 1):
                 with self.subTest(kind=kind, index=index):
                     self.case(kind + '-' + str(index))
+
+
+class ReopenedConversationWakeTest(CarrierOneClaimGateTest):
+    """BC-IDLE-WAKE-MISSED-1112: a supervising Claude conversation reopened in a
+    new process (to pick up a release) lost every waiter with the old process
+    and was woken only by the next typed prompt. Its session start now watches
+    its unwatched attempts, and its own runtime carries the wake once the
+    launching runtime is provably gone."""
+
+    START = {"hook_event_name": "SessionStart", "session_id": "session-1", "source": "resume"}
+
+    def _arm_then_lose_holder(self, attempt_id="att-owner-1", runtime=None):
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=runtime):
+            claim = rewake.claim_arm(self.jobs, attempt_id, "session-1", fresh=True)
+        self.assertIsInstance(claim, rewake.ArmClaim)
+        record = rewake._read_arm(claim.path)
+        record["holder"] = DEAD_HOLDER   # the old Claude process took its hook down with it
+        claim.path.write_text(json.dumps(record), encoding="utf-8")
+        return claim
+
+    def _main(self, payload, runtime):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", stdout), \
+             mock.patch.object(rewake.sys, "stderr", stderr), \
+             mock.patch.object(rewake, "runtime_ancestry_binding", return_value=runtime), \
+             mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")):
+            code = rewake.main()
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_a_reopened_conversation_is_woken_for_work_its_old_process_started(self):
+        launched_under = tuple(DEAD_HOLDER)          # the launching Claude process, now gone
+        reopened = ("999", "888", DEAD_HOLDER[2])    # the same conversation in a new process
+        self._open_row(ancestry=launched_under)
+        claim = self._arm_then_lose_holder(runtime=launched_under)
+        self.assertEqual(rewake._read_arm(claim.path)["runtime"], list(launched_under))
+        record_path = self._close_and_materialize()
+        code, _stdout, stderr = self._main(self.START, reopened)
+        self.assertEqual(code, 2)   # the one exit that wakes the resting session
+        self.assertIn("attempt_id=att-owner-1 armed=registry-rearm", stderr)
+        self.assertIn("HEARTING_RECEIPT_V1", stderr)
+        self.assertEqual(json.loads(record_path.read_text())["state"], "sent-ambiguous")
+        arm = rewake._read_arm(claim.path)
+        self.assertEqual((arm["arms"], arm["state"], arm["runtime"]), (2, "ended", list(reopened)))
+
+    def test_a_second_live_process_on_the_same_session_still_claims_nothing(self):
+        live = rewake._process_identity(os.getpid())
+        self._open_row(ancestry=live)
+        record_path = self._close_and_materialize()
+        with mock.patch.object(rewake, "runtime_ancestry_binding",
+                               return_value=("999", "888", live[2])):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        record = json.loads(record_path.read_text())
+        self.assertEqual((record["state"], record["claim_owner"]), ("pending", None))
+
+    def test_session_start_without_unwatched_work_stays_silent(self):
+        self._open_row()
+        self.assertIsNone(rewake.registry_launch({**self.START, "session_id": "foreign"}))
+        stale = self.jobs.read_text().replace(
+            datetime.now(timezone.utc).strftime("%Y-%m-%d"), "2020-01-01", 1)
+        self.jobs.write_text(stale, encoding="utf-8")  # older than the arm window, never armed
+        self.assertEqual(self._main(self.START, self.ANCESTRY), (0, "", ""))
+        self.assertFalse(rewake.arm_path(self.jobs, "att-owner-1").exists())
+
+    def test_one_boundary_process_wakes_for_the_first_due_of_several(self):
+        self._open_row()
+        row = self.jobs.read_text()
+        self.jobs.write_text(row + row.replace("att-owner-1", "att-owner-2"), encoding="utf-8")
+        for attempt_id in ("att-owner-1", "att-owner-2"):
+            self._arm_then_lose_holder(attempt_id)
+        statuses = {"att-owner-1": iter(()), "att-owner-2": iter(("open", "done"))}
+        with mock.patch.object(rewake, "_owner_status",
+                               side_effect=lambda launch: next(statuses[launch.attempt_id], "open")), \
+             mock.patch.object(rewake, "_retain_completion") as retained, \
+             mock.patch.object(rewake.time, "sleep"):
+            launch, claim = rewake.registry_launch(self.START)
+        self.assertEqual((launch.attempt_id, launch.armed), ("att-owner-2", "registry-rearm"))
+        self.assertEqual(sorted(call.args[0].attempt_id for call in retained.call_args_list),
+                         ["att-owner-1", "att-owner-2"])
+        self.assertEqual(rewake._read_arm(claim.path)["state"], "waiting")
+        other = rewake._read_arm(rewake.arm_path(self.jobs, "att-owner-1"))
+        self.assertEqual((other["state"], other["arms"]), ("lapsed", 2))
+
+    def test_an_owner_gate_waiting_for_a_carrier_is_due(self):
+        launches = [rewake.Launch("att-owner-1", self.jobs, "session-1"),
+                    rewake.Launch("att-owner-2", self.jobs, "session-1")]
+        rewake.pending_delivery.record_directory(self.jobs.parent, "session-1").mkdir(
+            parents=True, exist_ok=True)
+        records = [(self.jobs.parent, "session-1", "delivery-gate",
+                    {"state": "pending", "attempt_ids": ["att-owner-2"]})]
+        scans = {}
+        with mock.patch.object(rewake, "_recipient_key", return_value="session-1"), \
+             mock.patch.object(rewake, "_recipient_gate_records", side_effect=lambda _l: records):
+            self.assertEqual(rewake._gate_due_attempt(launches, scans), "att-owner-2")
+            records[0][3]["state"] = "claimed"
+            records[0][3]["claim_deadline_ns"] = time.monotonic_ns() + 10**12
+            scans.clear()
+            self.assertIsNone(rewake._gate_due_attempt(launches, scans))
+            records[0][3]["claim_deadline_ns"] = time.monotonic_ns() - 1
+            self.assertIsNone(rewake._gate_due_attempt(launches, scans))  # unchanged, lease still read as live
+            scans.clear()
+            self.assertEqual(rewake._gate_due_attempt(launches, scans), "att-owner-2")
 
 
 if __name__ == "__main__":

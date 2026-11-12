@@ -5630,10 +5630,15 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                 "reason": ("received-delivery-ack-pending" if bound_received else
                            "received-delivery-identity-unresolved")})
             return
-    parent = [row.metadata.get(key, "") for key in
-              ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")]
-    # A native hook belongs to its original runtime. A live holder cannot wake
-    # a replacement process after that runtime died. Unknown identity stays protected.
+    # A native hook belongs to the runtime that started it: the arm names it,
+    # and an older arm without that field belongs to the row's launch-time
+    # runtime. A live holder cannot wake a replacement process after its own
+    # runtime died; a holder armed again inside a resumed runtime can, so the
+    # retained wake waits for it. Unknown identity stays protected.
+    armed_runtime = (arm or {}).get("runtime")
+    parent = (list(armed_runtime) if isinstance(armed_runtime, list) and len(armed_runtime) == 3
+              else [row.metadata.get(key, "") for key in
+                    ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")])
     # The duty follows confirmed handover; the signed queue stays under the
     # registered parent, even when its current recipient is a successor.
     recipient_sid, recipient_harness = _effective(row.metadata, jobs, read_context=read_context)
