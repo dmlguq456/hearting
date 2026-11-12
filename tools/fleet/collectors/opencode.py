@@ -537,7 +537,18 @@ def _opencode_v2_runtime():
     return opencode_runtime
 
 
-def _enrich_v2(sess, tick, db):
+def _db_unread(db, error):
+    """A database that is there and readable but whose read failed was not observed.
+
+    Fleet keeps the last display for such a read and reads again (the #1518 rule);
+    a missing, refused (EACCES/EPERM) or other-session source still clears.
+    """
+    if isinstance(error, OSError):
+        return session_registry.unread_error(error)
+    return isinstance(error, sqlite3.Error) and os.path.isfile(db) and os.access(db, os.R_OK)
+
+
+def _enrich_v2(sess, tick, db, raise_unread=False):
     """Read V2 data for the already-resolved current TUI selection."""
     runtime = _opencode_v2_runtime()
     if not runtime.credential_store_present(db_path=db):
@@ -553,6 +564,9 @@ def _enrich_v2(sess, tick, db):
     observed = runtime.read_session_observation(
         sid, db_path=db, shell_after_seq=shell_cursor,
         shell_refresh_seqs=shell_refresh_seqs)
+    if (raise_unread and observed.get("reason") == "database-read-failed"
+            and _db_unread(db, sqlite3.OperationalError("database-read-failed"))):
+        raise OSError("opencode database read failed")
     generation = observed.get("generation") if observed.get("state") == "observed" else None
     if generation != "v2":
         sess.shell_jobs = []
@@ -1211,7 +1225,7 @@ def _child_sessions(con, sid):
     return out
 
 
-def enrich(sess, tick=None):
+def enrich(sess, tick=None, *, raise_unread=False):
     # B-5: no hearting-managed writer exists yet for OpenCode (`writer_support ==
     # "not-implemented"`), so this always reads None today — the call is here so the
     # harness-parity contract (D) and a future writer both have one call site, matching
@@ -1229,7 +1243,7 @@ def enrich(sess, tick=None):
     if not os.path.exists(db):
         _attempt_sidecar_fallback(sess)
         return
-    if _enrich_v2(sess, tick, db):
+    if _enrich_v2(sess, tick, db, raise_unread=raise_unread):
         return
     con = None
     last_ctx = None
@@ -1261,7 +1275,11 @@ def enrich(sess, tick=None):
             # wrong parent.
             if row[-1] is None:
                 subagents = _child_sessions(con, row[0])
-    except Exception:
+    except Exception as error:
+        # With ``raise_unread`` a failed read of a readable database is reported, not
+        # shown as a session without model or context (the caller keeps its last values).
+        if raise_unread and _db_unread(db, error):
+            raise OSError("opencode database read failed: %s" % error) from error
         _attempt_sidecar_fallback(sess)
         return
     finally:

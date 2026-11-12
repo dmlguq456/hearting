@@ -180,8 +180,8 @@ or route binding; configured defaults never masquerade as observed selection.
 An official startup callback's active-model field may travel with its existing
 birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
-A native source that exists but was not read (an I/O error, or a replacement
-during the read) keeps the panel's last model and context for the same live
+A native source that exists but was not read (an I/O error, a replacement
+during the read, or a failed read of a readable OpenCode database) keeps the panel's last model and context for the same live
 session, as Fleet's native reader does; the next projection reads it again.
 Another session, a new process, an absent or refused source and an ended
 process still clear them, and an unobserved value is never made up.
