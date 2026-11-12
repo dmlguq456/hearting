@@ -1653,10 +1653,10 @@ class _WatchMixin(_TmpRootMixin):
         # Registered last, so it runs first: nothing may have reached Herdr.
         self.addCleanup(self._assert_no_herdr)
 
-    # Herdr calls a test accepts by prefix. The caller's OWN seat proof
-    # (`session_tidy.resolve_seat`, reached from `_steward_seat`) is a window-management
-    # read that still runs for a caller inside Herdr; tests that run such a caller name
-    # it here so the call stays visible instead of being masked.
+    # Herdr calls a test accepts by prefix. Only a caller that itself runs in a Herdr window
+    # (`HERDR_PANE_ID`) lets `_steward_seat` read its own pane; a test that runs such a caller
+    # names the call here so it stays visible instead of being masked. Every other caller,
+    # including a Codex caller with no window, reaches Herdr zero times.
     herdr_allowed = ()
 
     def _assert_no_herdr(self):
@@ -2043,9 +2043,6 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
 
     def _codex_env(self, with_socket):
         import socket as socket_module
-        # A Codex caller without a window id proves its own seat with one Herdr
-        # `agent list` (session_tidy.codex_pane_for_session); see `herdr_allowed`.
-        self.herdr_allowed = ("agent list",)
         env = self._env("idle")
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         env["CODEX_THREAD_ID"] = "019a0000-0000-7000-8000-0000000000cc"
@@ -2063,13 +2060,48 @@ class WatchArmTest(_WatchMixin, unittest.TestCase):
             self.addCleanup(sock.close)
         return env
 
+    def _codex_watch_with_seat(self, env, seat):
+        """`watch` as a Codex steward whose own seat proof is `seat` (None: unproven).
+
+        The seat proof itself needs a live Codex TUI in a pane; its own cases are in
+        `peer_steward_seat.test.py`. Here only what the watch does with the answer matters.
+        """
+        code = r"""
+import importlib.util, json, sys
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location("ps", sys.argv[1] + "/peer-steward.py")
+ps = importlib.util.module_from_spec(spec); spec.loader.exec_module(ps)
+seat = json.loads(sys.argv[3])
+ps._steward_seat = lambda harness, sid: seat
+sys.exit(ps.main(["watch", sys.argv[2]]))
+"""
+        return subprocess.run([sys.executable, "-c", code, str(_HERE), self.target, json.dumps(seat)],
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    _CODEX_SEAT = {"kind": "pane", "key": "codex-seat-k", "pane": "%7@/tmp/hbt-x/s",
+                   "harness": "codex", "project_key": ""}
+
     def test_a_codex_watch_with_its_native_queue_ends_the_turn(self):
-        proc = self._run("watch", self.target, env=self._codex_env(True))
+        proc = self._codex_watch_with_seat(self._codex_env(True), self._CODEX_SEAT)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("wake=queue", proc.stdout)
         directive = self._directive(proc.stdout)
         self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
         self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch-codex-queue")
+
+    def test_a_codex_watch_with_a_queue_but_no_proven_seat_never_promises_a_wake(self):
+        """The receipt notice that rides the queue needs the steward's seat; without one no
+        wake can come, so the line must print the bounded wait, not `end-turn`."""
+        for label, run in (
+                ("seat unproven in the watch", lambda env: self._codex_watch_with_seat(env, None)),
+                ("a real Codex caller with no window", lambda env: self._run("watch", self.target, env=env))):
+            with self.subTest(label):
+                proc = run(self._codex_env(True))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("wake=none", proc.stdout)
+                directive = self._directive(proc.stdout)
+                self.assertEqual(directive.get("parent_next"), "bounded-wait", proc.stdout)
+                self.assertIn("peer-steward.py join ", directive.get("parent_next_command", ""))
 
     def test_a_codex_queue_watch_receipt_is_handed_to_the_message_courier(self):
         code = r"""

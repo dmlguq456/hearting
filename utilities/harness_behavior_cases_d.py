@@ -389,6 +389,13 @@ class WatchWakeScenario(Scenario):
                 self.target_tui.stop()
             self.target_tui = None
 
+    def _next_action_ran(self, run, timeout=30):
+        """The woken steward's action output reached the model. Its shell call is only the
+        request: the result comes back in the next model request, so wait (bounded) for it
+        instead of reading the transcript the moment the call is seen."""
+        return bool(wait_for(lambda: any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests()),
+                             timeout, 0.5))
+
     def drive(self, run):
         ev = run.evidence
         if self.target_tui is None or not self.target_address:
@@ -417,7 +424,7 @@ class WatchWakeScenario(Scenario):
         ev["target_completed"] = bool(completed)
         woke = wait_for(lambda: any(self.NEXT in (r["reply"].get("shell") or "")
                                     for r in run.main_requests()[before:]), 150, 1)
-        ev["next_action_ran"] = any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests())
+        ev["next_action_ran"] = self._next_action_ran(run)
         if woke and ended:
             run.note(f"steward ended its turn ({ev['parent_next']}) and the native receipt woke it")
             return "pass" if ev["next_action_ran"] else "fail"
@@ -452,7 +459,7 @@ class NativeWatchEndScenario(WatchWakeScenario):
         ev["receipt_count"] = 1 if receipt else 0
         woke = wait_for(lambda: any(self.NEXT in (r["reply"].get("shell") or "")
                                     for r in run.main_requests()[before:]), 120, 1)
-        ev["next_action_ran"] = any(f"{self.NEXT}-42" in r["text"] for r in run.main_requests())
+        ev["next_action_ran"] = self._next_action_ran(run)
         if receipt and receipt.get("state") == "session-ended" and woke:
             return "pass" if ev["next_action_ran"] else "fail"
         run.note("target end did not produce one exact session-ended receipt and native wake")

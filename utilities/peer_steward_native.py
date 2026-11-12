@@ -69,7 +69,9 @@ def native_agent(harness, session_id, *, pane=None, server=None):
         if namespace != os.readlink("/proc/self/ns/pid"):
             return None
         from terminal_surface import native_turn
-        state = native_turn(harness, pid, session_id, pane=pane, server=server)
+        # A watch reads the latest native record of this exact live process: an OpenCode
+        # idle that began before the read stays idle until the next status event.
+        state = native_turn(harness, pid, session_id, pane=pane, server=server, max_age=None)
         name = None
         try:
             from peer_steward_base import _from_name

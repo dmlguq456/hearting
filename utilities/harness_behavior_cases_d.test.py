@@ -106,5 +106,21 @@ class WatchReceiptRootTest(unittest.TestCase):
                 cd.NativeWatchEndScenario._read_watch_receipt(run, "aaaaaaaaaaaaaaaa"), {"state": "done"})
 
 
+class NextActionResultTest(unittest.TestCase):
+    """The woken steward's shell call is not its result: wait for the output to reach the model."""
+
+    def test_a_result_that_arrives_after_the_wake_still_counts(self):
+        import threading
+        requests = [record("wake", "wake", reply={"shell": f"echo {cd.WatchWakeScenario.NEXT}-$((20+22))"})]
+        run = SimpleNamespace(main_requests=lambda: list(requests))
+        threading.Timer(0.6, lambda: requests.append(record(
+            f"wake\n{cd.WatchWakeScenario.NEXT}-42", f"{cd.WatchWakeScenario.NEXT}-42", "tool"))).start()
+        self.assertTrue(cd.WatchWakeScenario()._next_action_ran(run, timeout=10))
+
+    def test_no_result_within_the_bound_is_not_run(self):
+        run = SimpleNamespace(main_requests=lambda: [record("wake", "wake")])
+        self.assertFalse(cd.WatchWakeScenario()._next_action_ran(run, timeout=1))
+
+
 if __name__ == "__main__":
     unittest.main()

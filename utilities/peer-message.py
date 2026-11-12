@@ -4720,7 +4720,11 @@ def mark_steward(harness, session_id, to, kind, ts, source=None):
     return grant_steward(harness, session_id, to, kind, ts, source)["written"]
 
 
-def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=None):
+_SEAT_UNRESOLVED = object()
+
+
+def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=None,
+                  steward_seat=_SEAT_UNRESOLVED):
     """Raise (or extend) the session's steward marker with one evidence entry.
 
     ``source`` is required and says why the entry counts (`explicit` | `watch` |
@@ -4731,7 +4735,10 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
     A session that is not yet a supervisor of its repository is granted only while the
     repository has fewer than ``steward.max_supervisors_per_repo`` counted supervisors;
     the census and the write run under one grant lock so concurrent grants cannot pass
-    the limit together. Returns ``{"status": granted|extended|limited|refused|
+    the limit together. ``steward_seat`` is the caller's already-proven seat (a dict with
+    its ``key``, or None for none) when the caller proved it itself, as `watch` and `wait`
+    do without asking Herdr about other panes; left out, the shared resolver proves it.
+    Returns ``{"status": granted|extended|limited|refused|
     unavailable, "written", "repository", "holders", "limit", "reason"}``."""
     result = {"status": "refused", "written": False, "repository": None, "holders": [],
               "limit": None, "reason": None}
@@ -4864,11 +4871,13 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
         # Serialize role creation with same-seat clear adoption and release.
         import dispatch_seat_handover as handover
         import session_tidy as tidy
-        seat = handover.pane_seat(os.environ, harness, session_id)
-        if seat is None:
+        proof = (handover.pane_seat(os.environ, harness, session_id)
+                 if steward_seat is _SEAT_UNRESOLVED else steward_seat)
+        seat_key = proof.get("key") if isinstance(proof, dict) else getattr(proof, "key", None)
+        if not seat_key:
             decide_and_write()
         else:
-            with tidy.seat_lock(seat.key):
+            with tidy.seat_lock(seat_key):
                 decide_and_write()
     except Exception as exc:
         result.update(status="unavailable", written=False,

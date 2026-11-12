@@ -433,15 +433,61 @@ def _watch_monotonic_deadline(arm, *, wall=None, monotonic=None, boot_id=None):
 
 
 def _steward_seat(harness, sid):
-    """Return a pane/native seat only when the shared seat resolver proves one."""
+    """The caller's own pane/native seat, proved without asking Herdr about other panes.
+
+    Herdr is asked about one pane only: the caller's own, when the caller runs in a
+    Herdr window (`HERDR_PANE_ID`). A tmux pane (`TMUX_PANE`) is read through tmux, and a
+    caller with neither window is not searched for: its seat stays unknown and the watch
+    arms and settles natively. A Codex tool command runs in a shared service, so its
+    TUI is found from the native process table and its own tmux pane (also through a
+    session shell), never by walking every Codex pane on the host.
+    """
     if not harness or harness == "unknown" or not sid:
         return None
     try:
+        import pane_ownership
+        import session_tidy
+        env = os.environ
+        window = bool((env.get("HERDR_PANE_ID") or "").strip()) or bool(
+            session_tidy.terminal_tmux_pane(env))
+        if harness == "codex":
+            _caller, service = pane_ownership._caller_runtime(os.getpid(), "codex")
+            if service:
+                return _codex_service_seat(sid)
+            if not window:
+                return None
         import dispatch_seat_handover
         seat = dispatch_seat_handover.pane_seat(harness=harness, sid=sid)
         return seat.as_dict() if seat is not None and seat.kind in {"pane", "native"} else None
     except Exception:
         return None
+
+
+def _codex_service_seat(sid):
+    """Seat of the one native Codex TUI whose thread is `sid`, from its own tmux pane.
+
+    The TUI's pane address comes from the TUI process's own environment (the caller's
+    inherited values belong to the shared service); the same live proof as every other
+    pane seat decides it, including the session-shell attachment join. No Herdr call.
+    """
+    import pane_ownership
+    import session_tidy
+    import terminal_surface
+    from fleet.collectors import procscan
+    if (os.environ.get("CODEX_THREAD_ID") or "") != sid or pane_ownership._registered_worker(os.getpid()):
+        return None
+    processes = pane_ownership.codex_tui_processes_for_session(sid)
+    if len(processes) != 1:
+        return None
+    tui = processes[0]
+    hint, _socket = terminal_surface.caller_tmux_pane(procscan.read_environ(tui["pid"]))
+    if not hint or pane_ownership.verified_pane(
+            hint, "codex", sid, executable="tmux", socket_path="") != hint:
+        return None
+    seat = session_tidy.session_seat(session_tidy.pane_seat_from_binding(
+        {"pane": hint, "socket_path": "", "pid": tui["pid"], "pid_start": tui["pid_start"],
+         "session_id": sid}), "codex", sid)
+    return seat.as_dict() if seat.kind in {"pane", "native"} else None
 
 
 def _seat_claim_path(root, server, seat):

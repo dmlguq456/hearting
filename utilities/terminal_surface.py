@@ -369,13 +369,19 @@ def _codex_home():
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-def native_turn(harness, pid, session_id, *, pane=None, server=None):
+_NATIVE_TURN_FRESH = object()
+
+
+def native_turn(harness, pid, session_id, *, pane=None, server=None, max_age=_NATIVE_TURN_FRESH):
     """``idle`` | ``working`` | ``blocked`` | ``unknown`` from the runtime's own record.
 
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout; a thread with
     no rollout has no recorded turn and stays unknown. OpenCode reads the
-    plugin's exact pane/SID/PID-birth status record; absent or stale records stay unknown.
+    plugin's exact pane/SID/PID-birth status record; an absent record stays unknown, and
+    one older than the retire guard's 15 s does too unless the caller passes ``max_age``
+    (``None``: the latest record of this exact live process, which a watch needs to see
+    an idle that began long before its next read).
     """
     try:
         import pane_ownership
@@ -408,7 +414,9 @@ def native_turn(harness, pid, session_id, *, pane=None, server=None):
             endpoint = endpoint_name(server or "default")
             record_pane, _socket = tmux_address(pane)
             record_pane = record_pane or pane
-            record = read_native_status(endpoint, record_pane, harness, session_id, pid, str(live[5]))
+            bound = {} if max_age is _NATIVE_TURN_FRESH else {"max_age": max_age}
+            record = read_native_status(endpoint, record_pane, harness, session_id, pid, str(live[5]),
+                                        **bound)
             if isinstance(record, dict):
                 return record.get("status", "unknown")
     except Exception:

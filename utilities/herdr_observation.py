@@ -628,9 +628,15 @@ def record_native_status(payload: dict, *, now: float | None = None) -> bool:
 
 
 def read_native_status(endpoint: str, pane: str, harness: str, session_id: str,
-                       pid: int, pid_start: str, *, max_age: float = 15.0,
+                       pid: int, pid_start: str, *, max_age: float | None = 15.0,
                        now: float | None = None) -> dict | None:
-    """Return a fresh native event only for its exact pane, SID and PID birth."""
+    """Return a native event only for its exact pane, SID and PID birth.
+
+    ``max_age`` bounds how old the event may be (the retire guard keeps 15 s);
+    ``None`` accepts the latest event for as long as that exact process lives,
+    because the plugin writes one record per status change and an idle session
+    writes nothing more.
+    """
     try:
         path = _native_status_path(endpoint, pane, harness, session_id)
         row = json.loads(path.read_text(encoding="utf-8"))
@@ -643,7 +649,7 @@ def read_native_status(endpoint: str, pane: str, harness: str, session_id: str,
                 or row.get("status") not in {"idle", "working", "blocked", "unknown"}
                 or type(row.get("observed_at")) not in (int, float)
                 or current - row["observed_at"] < 0
-                or current - row["observed_at"] > max_age
+                or (max_age is not None and current - row["observed_at"] > max_age)
                 or _process_start_ticks(pid) != pid_start
                 or row.get("pid_namespace") != os.readlink(f"/proc/{pid}/ns/pid")
                 or row.get("pid_namespace") != os.readlink("/proc/self/ns/pid")):

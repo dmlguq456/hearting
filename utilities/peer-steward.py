@@ -794,8 +794,11 @@ def _run_herdr_wait(target, until, timeout_ms):
 _LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the last call (m3)
 
 
+_SEAT_UNPROVEN = object()
+
+
 def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pane=None,
-                   target_cwd=None):
+                   target_cwd=None, steward_seat=_SEAT_UNPROVEN):
     """F-100c-2 — the ONE place `source=watch` steward evidence is written: after
     the shared observer answered about a real target (`wait` returned a typed state other than
     agent-not-found, or `watch` armed its watcher). The `kind=watch` ledger row itself
@@ -809,8 +812,13 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
           "session_id": sid,
           "name": to_name if isinstance(to_name, str) and to_name and to_name != "-" else None,
           "pane": pane if isinstance(pane, str) and pane and pane != "-" else None}
+    # The caller's own seat serializes the grant. The watch/wait entry proves it without
+    # asking Herdr about other panes (`_steward_seat`); `watch` has already done so.
+    if steward_seat is _SEAT_UNPROVEN:
+        steward_seat = _steward_seat(from_harness, from_sid)
     result = peer_message.grant_steward(from_harness, from_sid, to, "watch", _utc_now(),
-                                        source="watch", target_cwd=target_cwd)
+                                        source="watch", target_cwd=target_cwd,
+                                        steward_seat=steward_seat)
     _print_steward_limited(result)
     return result
 
@@ -3401,8 +3409,12 @@ def cmd_watch(args):
     until = list(args.until or [])
     wake = args.wake
     if wake == "auto":
+        # `queue` rides a receipt notice, and a notice needs the steward's proven seat
+        # (`_prepare_watch_notice`). Without one no wake can come, so the line must not
+        # promise it: `wake=none` prints the bounded wait instead of `end-turn`.
         wake = "hook" if _caller_is_claude() else (
-            "queue" if steward_harness == "codex" and _codex_queue_present() else "none")
+            "queue" if (steward_harness == "codex" and steward_seat is not None
+                        and _codex_queue_present()) else "none")
 
     server = _HERDR_SESSION or "default"
     # Resolve names and pane aliases from Hearting's native session records.
@@ -3793,7 +3805,7 @@ def cmd_watch(args):
         resolved_name = agent["name"] if agent["name"] != "-" else target
         _mark_observed(agent["harness"], agent["session_id"], resolved_name,
                        from_identity=(steward_sid, steward_harness), pane=agent["pane"],
-                       target_cwd=native_agent_row.get("cwd"))
+                       target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat)
     finally:
         if claim_fd is not None:
             os.close(claim_fd)
