@@ -19,8 +19,9 @@ pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. Pane
 ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. tmux
 has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
 the pane's foreground runtime, its process-proven session and that runtime's own
-turn record (Claude's session registry status, Codex's rollout lifecycle). What
-no record proves stays ``unknown``, which every typing path refuses.
+turn record (Claude's session registry status, Codex's rollout lifecycle,
+OpenCode's newest message in that session). What no record proves stays
+``unknown``, which every typing path refuses.
 """
 from __future__ import annotations
 
@@ -374,11 +375,19 @@ def native_turn(harness, pid, session_id):
 
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout; a thread with
-    no rollout has no recorded turn and stays unknown. OpenCode has no durable
-    turn record outside Herdr's pane events, so it stays unknown.
+    no rollout has no recorded turn and stays unknown. OpenCode: the newest message
+    of that session in its own database (V1 or OpenCode 2), read only while this
+    exact process's TUI selection record still names that session.
     """
     try:
         import pane_ownership
+        if harness == "opencode":
+            from fleet.collectors import opencode
+            if opencode.session_of_process(pid) != (session_id, "opencode-tui-selection"):
+                return "unknown"
+            import opencode_runtime
+            return _opencode_turn(opencode_runtime.read_session_observation(
+                session_id, shell_after_seq=None))
         if harness == "claude":
             from fleet.collectors import claude
             record = claude.read_registry(pid) or {}
@@ -403,6 +412,34 @@ def native_turn(harness, pid, session_id):
     except Exception:
         pass
     return "unknown"
+
+
+def _opencode_turn(observed):
+    """One OpenCode session's turn state from ``read_session_observation``.
+
+    The turn has ended when its newest message is an assistant step that finished
+    for good: a ``finish`` other than ``tool-calls``/``unknown``, or an error -- the
+    rule OpenCode's own loop and TUI use to end a turn. A newer user message or a
+    step still running or about to call tools is working; a running ``question``
+    tool waits on the person. An unread session, or one with no message, is unknown.
+    """
+    if not isinstance(observed, dict) or observed.get("state") != "observed":
+        return "unknown"
+    messages = [row for row in observed.get("messages") or ()
+                if isinstance(row, dict) and row.get("type") in ("user", "assistant")]
+    if not messages:
+        return "unknown"
+    latest = messages[-1]
+    if latest["type"] == "user":
+        return "working"
+    if any(isinstance(tool, dict) and tool.get("name") == "question"
+           for tool in latest.get("tools") or ()):
+        return "blocked"
+    finish = latest.get("finish")
+    if latest.get("has_error") or (isinstance(finish, str) and finish
+                                   and finish not in ("tool-calls", "unknown")):
+        return "idle"
+    return "working"
 
 
 def _cwd(pid):
