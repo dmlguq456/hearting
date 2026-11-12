@@ -19,8 +19,9 @@ pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. Pane
 ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. tmux
 has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
 the pane's foreground runtime, its process-proven session and that runtime's own
-turn record (Claude's session registry status, Codex's rollout lifecycle). What
-no record proves stays ``unknown``, which every typing path refuses.
+turn record (Claude's session registry status, Codex's rollout lifecycle,
+OpenCode's own record of that session). What no record proves stays
+``unknown``, which every typing path refuses.
 """
 from __future__ import annotations
 
@@ -369,22 +370,25 @@ def _codex_home():
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-_NATIVE_TURN_FRESH = object()
-
-
-def native_turn(harness, pid, session_id, *, pane=None, server=None, max_age=_NATIVE_TURN_FRESH):
+def native_turn(harness, pid, session_id):
     """``idle`` | ``working`` | ``blocked`` | ``unknown`` from the runtime's own record.
 
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout; a thread with
-    no rollout has no recorded turn and stays unknown. OpenCode reads the
-    plugin's exact pane/SID/PID-birth status record; an absent record stays unknown, and
-    one older than the retire guard's 15 s does too unless the caller passes ``max_age``
-    (``None``: the latest record of this exact live process, which a watch needs to see
-    an idle that began long before its next read).
+    no rollout has no recorded turn and stays unknown. OpenCode: that session's own
+    record in its database (V1 messages; OpenCode 2's run record, whose ``idle`` row
+    ends a turn), read only while this exact process's TUI selection record still
+    names that session.
     """
     try:
         import pane_ownership
+        if harness == "opencode":
+            from fleet.collectors import opencode
+            if opencode.session_of_process(pid) != (session_id, "opencode-tui-selection"):
+                return "unknown"
+            import opencode_runtime
+            return _opencode_turn(opencode_runtime.read_session_observation(
+                session_id, shell_after_seq=None))
         if harness == "claude":
             from fleet.collectors import claude
             record = claude.read_registry(pid) or {}
@@ -406,19 +410,6 @@ def native_turn(harness, pid, session_id, *, pane=None, server=None, max_age=_NA
                 return "working"
             if lifecycle and lifecycle[0] in {"task_complete", "turn_aborted"}:
                 return "idle"
-        if harness == "opencode" and pane and session_id:
-            from herdr_observation import endpoint_name, read_native_status
-            live = pane_ownership._process(pid)
-            if not live:
-                return "unknown"
-            endpoint = endpoint_name(server or "default")
-            record_pane, _socket = tmux_address(pane)
-            record_pane = record_pane or pane
-            bound = {} if max_age is _NATIVE_TURN_FRESH else {"max_age": max_age}
-            record = read_native_status(endpoint, record_pane, harness, session_id, pid, str(live[5]),
-                                        **bound)
-            if isinstance(record, dict):
-                return record.get("status", "unknown")
     except Exception:
         pass
     return "unknown"
@@ -454,6 +445,48 @@ def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, se
             return {"error": {"code": "timeout"}}
         delay = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
         time.sleep(delay)
+
+
+def _opencode_turn(observed):
+    """One OpenCode session's turn state from ``read_session_observation``.
+
+    V1: the newest user or assistant message decides. OpenCode 2 records each run
+    itself, so its newest user, synthetic, assistant, compaction, shell or ``idle``
+    row decides: the ``idle`` row it appends when a run ends is idle; a user or
+    synthetic row, or a compaction (it runs inside a run, which only its ``idle`` row
+    ends), is working; a ``!`` shell command runs outside any run, so its row is
+    working while ``running`` and, once ended, leaves the row before it to decide.
+    An assistant step has ended the turn when it finished for good -- a ``finish``
+    other than ``tool-calls``/``unknown``, or an error -- unless OpenCode 2 has a
+    retry pending on it; a step still running or about to call tools is working,
+    and a running ``question`` tool waits on the person. A child (subagent) session,
+    whose state is not the pane's, an unread session, or one with no message, is
+    unknown.
+    """
+    if not isinstance(observed, dict) or observed.get("state") != "observed":
+        return "unknown"
+    if (observed.get("session") or {}).get("parent_id"):
+        return "unknown"
+    kinds = (("user", "synthetic", "assistant", "compaction", "shell", "idle")
+             if observed.get("generation") == "v2" else ("user", "assistant"))
+    messages = [row for row in observed.get("messages") or ()
+                if isinstance(row, dict) and row.get("type") in kinds
+                and (row["type"] != "shell" or row.get("status") == "running")]
+    if not messages:
+        return "unknown"
+    latest = messages[-1]
+    if latest["type"] == "idle":
+        return "idle"
+    if latest["type"] != "assistant" or latest.get("has_retry"):
+        return "working"
+    if any(isinstance(tool, dict) and tool.get("name") == "question"
+           for tool in latest.get("tools") or ()):
+        return "blocked"
+    finish = latest.get("finish")
+    if latest.get("has_error") or (isinstance(finish, str) and finish
+                                   and finish not in ("tool-calls", "unknown")):
+        return "idle"
+    return "working"
 
 
 def _cwd(pid):
@@ -706,7 +739,6 @@ class TmuxSurface:
     def __init__(self, runner=None, socket=None):
         self.runner = runner or _run
         self.socket = socket or None
-        self._native_servers = {}
 
     def _tmux(self, *args):
         argv = ["tmux"] + (["-S", self.socket] if self.socket else []) + [str(a) for a in args]
@@ -1008,16 +1040,7 @@ class TmuxSurface:
         else:
             harness, pid = found
             session_id = _process_session(harness, pid, pane, self)
-        # The runtime's own environment names its endpoint; the tmux socket is the fallback.
-        try:
-            from fleet.collectors import procscan
-            runtime_env = procscan.read_environ(pid) or {}
-        except Exception:
-            runtime_env = {}
-        native_server = (runtime_env.get("AGENT_HERDR_SESSION")
-                         or runtime_env.get("HERDR_SESSION") or self.socket)
-        self._native_servers[pane] = native_server or "default"
-        status = native_turn(harness, pid, session_id, pane=pane, server=native_server) if session_id else "unknown"
+        status = native_turn(harness, pid, session_id) if session_id else "unknown"
         if seat is not None and status == "unknown":
             # The shell host follows the native lifecycle hooks for every harness.
             status = shell_turn(seat)
@@ -1098,8 +1121,7 @@ class TmuxSurface:
                            else max(0.0, min(_WAIT_POLL_SEC, deadline - time.monotonic())))
                 if _process(agent["pid"]) != record:
                     break
-                current = native_turn(agent["agent"], agent["pid"], session, pane=pane,
-                                      server=self._native_servers.get(pane) or self.socket) if session else "unknown"
+                current = native_turn(agent["agent"], agent["pid"], session) if session else "unknown"
                 if current != state:
                     break
 

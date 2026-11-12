@@ -452,7 +452,13 @@ if [ "$git_repo" = 0 ]; then
 else
   git_text="${branch}"; [ "$branch" = unknown ] && git_text=""
   [ -n "$git_text" ] && [ "$git_dirty" = 1 ] && git_text="${git_text}*"
+  # Spec E9 rule 40 (b), (c), as the shared line: the branch keeps 20 cells (32 on a line of
+  # 60 or more; an ASCII branch counts one cell per character), and `✓` when ahead and
+  # behind are both known to be 0 (`unknown` draws nothing).
+  blimit=32; case "${COLUMNS:-}" in ''|*[!0-9]*) ;; *) [ "$COLUMNS" -lt 60 ] && blimit=20 ;; esac
+  [ "${#git_text}" -gt "$blimit" ] && git_text="${git_text:0:$((blimit-1))}…"
   [ -n "$gflag" ] && git_text="${git_text} ${gflag}"
+  if [ "${git_ahead:-}" = 0 ] && [ "${git_behind:-}" = 0 ]; then git_text="${git_text} ✓"; fi
   [ "${git_ahead:-0}" -gt 0 ] 2>/dev/null && git_text="${git_text} ↑${git_ahead}"
   [ "${git_behind:-0}" -gt 0 ] 2>/dev/null && git_text="${git_text} ↓${git_behind}"
   wt="$git_extra_worktrees"

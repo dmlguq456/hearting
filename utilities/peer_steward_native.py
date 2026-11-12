@@ -69,9 +69,7 @@ def native_agent(harness, session_id, *, pane=None, server=None):
         if namespace != os.readlink("/proc/self/ns/pid"):
             return None
         from terminal_surface import native_turn
-        # A watch reads the latest native record of this exact live process: an OpenCode
-        # idle that began before the read stays idle until the next status event.
-        state = native_turn(harness, pid, session_id, pane=pane, server=server, max_age=None)
+        state = native_turn(harness, pid, session_id)
         name = None
         try:
             from peer_steward_base import _from_name
@@ -239,9 +237,7 @@ def _resume_native_receiving_turn(duty, store, row, record, recipient_sid, stora
             return True
         from dispatch_completion_join import completion_followup_text
         encoded = json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        followup = completion_followup_text(
-            receipt, jobs=str(jobs_path),
-            surface=str(_UTILITIES_DIR.parent / "adapters/codex/bin/preflight.sh"))
+        followup = completion_followup_text(receipt, jobs=str(jobs_path))
         request_context = observation.get("native_request_context")
         original_request = None
         request_reference = None

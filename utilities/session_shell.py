@@ -757,7 +757,10 @@ def _panel_common_rows(panel, columns):
         first = " │ ".join(part for part in (head, selected, context) if part)
         rows = [first, git] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context, git]
     else:
-        rows = [head, git, selected, context]
+        # Beside the native area the Git row is painted without the worktree count (spec E9
+        # rule 37 (a)): the row compared is the row painted.
+        side_git = text("git_side") if panel.get("git_side") is not None else git
+        rows = [head, side_git, selected, context]
     return [row for row in rows + [quota] if row]
 
 
@@ -859,7 +862,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count
+    from fleet.session_work import observe as observe_work, open_count, latest_memory
     from fleet.session_panel import presentation
     from fleet.session_line import peer_message_rows
     counts, route = human_wait_state.cached_statusline(harness, sid)
@@ -898,8 +901,15 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     def styled(parts):
         return [{"text": text, **style_components(key, colors=colors, no_color=no_color)} for text, key in parts]
     segments = styled(line_segments(values, columns))
-    work, work_paths = observe_work(values.get("cwd"))
+    # Spec E9 rule 37 (b): the repo's newest saved memory row (the journal Fleet reads, read
+    # again only when it changed); its headline rides the open-work query below.
+    memory_row, memory_paths = latest_memory(values.get("cwd"))
+    work, work_paths = observe_work(values.get("cwd"),
+                                    (memory_row["headline_id"],) if memory_row and memory_row.get("headline_id") else ())
+    if memory_row:
+        values["memory_latest"] = {**memory_row, "headline": work.headlines.get(str(memory_row.get("headline_id")), "")}
     watched.extend(work_paths)
+    watched.extend(memory_paths)
     human_line = last_input(display, time.time())
     lines = block_lines(values, columns=columns, rows=rows, questions=board, route=_plain(route),
                         received=peers, human=human_line,
@@ -944,7 +954,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "repo", "git", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -952,7 +962,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                           ("effort", "effort_key"), ("ctx", "ctx_key")):
             if row.get(name):
                 paint[name] = styled([(row[name], row.get(key) or "dim")])[0]
-        for name in ("gauge", "gauge5"):
+        for name in ("gauge", "gauge5", "gauge_row"):
             if row.get(name):
                 paint[name] = styled([tuple(part) for part in row[name]])
         row["paint"] = paint

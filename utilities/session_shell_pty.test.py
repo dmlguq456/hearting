@@ -190,7 +190,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/project\/|\] (?:\x1b\[[0-9;]*m)*project/);
+ await waitFor(/project\/|(?:\]|REPO +) (?:\x1b\[[0-9;]*m)*project/);
  const startup={};
  if(cfg.scenario==='startup-state'){
    // No key, no status request (which would run the readiness observation): the
@@ -451,7 +451,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(/NATIVE_ESC_[^\r]*\^\[5~/.test(raw))throw Error('a shown page let PgUp reach the native');
  }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/project\/|\] (?:\x1b\[[0-9;]*m)*project/);
+ if(cfg.scenario==='display')await waitFor(/project\/|(?:\]|REPO +) (?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;

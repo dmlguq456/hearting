@@ -314,29 +314,6 @@ def recover_cleanup_on_startup(args):
         return 70
     emit({"type": "dispatch.supervisor.error", "reason": "terminal-handoff-incomplete"})
     return 3
-# Deliberately UNRESOLVED. The parent session's park guard admits a contract
-# path only under a harness root it recognizes -- its own root, a valid
-# AGENT_HOME, or a cwd ancestor -- and it resolves both sides at check time.
-# Resolving here instead pins the receipt to the versioned release directory
-# behind a managed `current` pointer, so a release rotation between this
-# supervisor's launch and the owner's harvest leaves every delivered command
-# denied and the owner deadlocked (2026-08-14 runtime defect candidate 3).
-# Keeping the launch path means an unrotated install emits exactly the same
-# string as before, while a rotated one re-resolves to the live release.
-def harvest_surface(launch_file: str) -> str:
-    """Shared harvest CLI path as seen from THIS supervisor's launch path."""
-
-    return shlex.quote(
-        str(
-            Path(launch_file).absolute().parents[1]
-            / "adapters" / "codex" / "bin" / "preflight.sh"
-        )
-    )
-
-
-SHARED_HARVEST_SURFACE = harvest_surface(__file__)
-
-
 SupervisorError = DECISIONS.SupervisorError
 
 
@@ -641,7 +618,7 @@ def completion_prompt(
     notice: str = "",
 ) -> str:
     # This command's route-bound success depends on the derived-evidence
-    # fallback in adapters/codex/bin/dispatch-harvest.py /
+    # fallback in utilities/dispatch-harvest.py /
     # adapters/opencode/bin/dispatch-harvest.py (`route_completion_evidence`,
     # round_1 finding 5). Do not silently revert that fallback — without it
     # this exact command is unsatisfiable for a route-bound row and the
@@ -656,7 +633,7 @@ def completion_prompt(
             if outbox is not None
             else ""
         )
-        + completion_followup_text(receipt, jobs=jobs, surface=shlex.split(SHARED_HARVEST_SURFACE)[0])
+        + completion_followup_text(receipt, jobs=jobs)
         + "\nEmit the exact final three-line handoff when no owned registered child remains open."
         + (f"\n{notice}" if notice else "")
     )
