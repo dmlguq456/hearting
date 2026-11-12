@@ -471,6 +471,7 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const p=t=>({text:t}),styles={g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},g_idle:{foreground:186}};
 const routes=[{id:'a',title:'ROUTE_A',kind:'working',elapsed:'42m',tool:'apply_patch',agents:1,
   owner:'owner · claude (Opus 5.5·high)',kind_text:'autopilot-code(dev·std)',profile:'balanced-deep',owner_ctx:'31%',age:'42m',legs:2,
+  after:'before this leg: frame ✓ — outside this snapshot',
   stages:[{name:'plan',mark:'✓',verdict:'PASS',harness:'codex',model:'gpt-fixture',effort:'high',elapsed:'12m',when:'done 22:34',unit:'plan/code',gate:true},
    {name:'execute',mark:'●',current:true,round:2,harness:'codex',model:'gpt-fixture',effort:'high',elapsed:'30m',unit:'dev/backend',note:'NOTE_R2'},
    {name:'review',mark:'',verdict:'pending',unit:'review/code'}],
@@ -492,6 +493,13 @@ assert(rows(short).some(s=>/\+\d+ lines ›/.test(s)),rows(short).join('\n'));
 const more=short.hits.find(h=>h.action==='route'&&rows(short)[h.row]&&/lines ›/.test(rows(short)[h.row]));assert(more,'a press opens the route page');
 const page=rows(view.render({width:40,height:80,side:true,model,configuration:{},routeDetail:true,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
 for(const word of ['owner claude (Opus 5.5·high)','dev/backend','NOTE_R2','resume execute'])assert(page.includes(word),word+'\n'+page);
+// The band's note (Fleet's `detail_after`) follows its head, on the next rows when narrow.
+assert(flat.includes('42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot'),all);
+// The page reads the owner's raw output (Fleet's attempts) only for its own route.
+const attempts=[{route:'a',att:'att-owner',lines:['RAW_FIRST','RAW_LAST']},{route:'other',att:'x',lines:['RAW_OTHER']}];
+const rawPage=rows(view.render({width:40,height:120,side:true,model,configuration:{},routeDetail:true,attempts,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
+for(const word of ['owner raw · attempt-view att-owner RAW_FIRST RAW_LAST'])assert(rawPage.includes(word),word+'\n'+rawPage);
+assert(!rawPage.includes('RAW_OTHER'),rawPage);assert(!page.includes('owner raw'),page);
 // One beat (Fleet's 100 ms frame and one-second blink): the working route's mark spins on the
 // frame; the running stage and the open route count blink between g_work and g_work_off.
 const at=frame=>paint({frame,state:'working'});

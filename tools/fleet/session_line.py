@@ -699,6 +699,15 @@ def route_details(snapshot, panels, routes=None, now=None):
                     row["closed"] = True
             slot = collected.get(row.get("id"))
             jobs = list(slot.get("jobs") or ()) if slot else []
+            # The route's current owner, chosen as Fleet's route row chooses it (the
+            # record's owner_attempt_id, else the single depth-1 owner): the shell's
+            # route page reads this owner's output, not an earlier attempt's.
+            expected = live._text(((slot or {}).get("record") or {}).get("owner_attempt_id"))
+            owner = live._owner_job([job for job in jobs if expected in (None, "-")
+                                     or get(job, "attempt_id") == expected])
+            attempt = get(owner, "attempt_id") if owner is not None else None
+            if isinstance(attempt, str) and 0 < len(attempt) <= 128:
+                row["owner_attempt"] = attempt
             elapsed = [value for value in (_number(get(item, "elapsed_min")) for item in jobs) if value is not None]
             if elapsed:
                 if any(get(item, "liveness") in ("working", "idle", "blocked") for item in jobs):

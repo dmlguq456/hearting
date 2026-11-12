@@ -716,8 +716,11 @@ def read_owner_raw(route_id, attempt_id, rows, live, reader):
         plan = SourcePlan(attempt_id, "owner", harness, _abbr(harness), "owner",
                           log_file=str(_get(job, "_log_file") or ""), meta=meta)
     else:
+        # A named owner is read only as that attempt of this session's route; an
+        # earlier owner of the same route is never read in its place.
         owner = next((row for row in rows if row.worker_type == "owner"
-                      and (row.owner_route_id or row.route_id) == route_id), None)
+                      and (row.owner_route_id or row.route_id) == route_id
+                      and (not attempt_id or row.attempt_id == attempt_id)), None)
         if owner is None:
             return None
         harness = owner.harness or ""

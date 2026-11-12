@@ -3427,6 +3427,12 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 if isinstance(route.get(key), str) and route[key]:
                     row[key] = route[key][:64]
             row["legs"] = len(route.get("legs") or ())
+            # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
+            from .pages import _route_after
+            nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
+            after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
+            if isinstance(after, str) and after.strip():
+                row["after"] = after.strip()[:200]
             gauge = route.get("owner_gauge")
             if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
                 row["owner_ctx_pct"] = round(gauge[0], 1)

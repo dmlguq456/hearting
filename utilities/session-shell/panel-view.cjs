@@ -96,7 +96,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
+function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -192,7 +192,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     for(const w of workers)if(!used.has(w))items.push([text('└ '+w.stage+' '),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]);
     // An older feed row carries only the stage line (`plan ✓ › execute ● › review`).
     if(!stages.length&&r.flow)items.push([text(r.flow)]);
-    const how=join([r.age?[text(r.age)]:[],r.legs?[text(r.legs+' leg'+(r.legs===1?'':'s'))]:[],r.visibility?.summary?[text(r.visibility.summary)]:[]]);
+    // The band's head (age, legs, evidence summary) and the note right of it
+    // (Fleet's `detail_after`); a narrow panel takes the note to the next rows.
+    const how=join([r.age?[text(r.age)]:[],r.legs?[text(r.legs+' leg'+(r.legs===1?'':'s'))]:[],r.visibility?.summary?[text(r.visibility.summary)]:[],r.after?[text(r.after,'dim')]:[]]);
     if(how.length)items.push(how);
     if(r.visibility?.next)items.push([text('next ','dim'),text(r.visibility.next)]);
     // Why it stopped: the worker line Fleet reads, and where it resumes.
@@ -261,6 +263,9 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const [label,value,tone] of route.visibility?.lines||[]){
         wrap(line(label+': '+value,({good:'lvl_g',bad:'lvl_r',mixed:'lvl_y',info:'loc_repo',dim:'dim'})[tone]||'dim'),20);
       }
+      // The owner's own output, as Fleet's route page shows it under the stages.
+      const raw=(Array.isArray(attempts)?attempts:[]).find(a=>a&&a.route===route.id&&Array.isArray(a.lines)&&a.lines.length);
+      if(raw){wrap([text('owner raw','loc_repo'),text(' · attempt-view '+(raw.att||'·'))],Infinity);for(const value of raw.lines)wrap(line(value),Infinity);}
     }
     const detail=content.splice(start),budget=Math.max(1,height-3-start);
     routePages=Math.max(1,Math.ceil(detail.length/budget));
