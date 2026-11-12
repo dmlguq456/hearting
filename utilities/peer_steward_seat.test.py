@@ -47,14 +47,18 @@ class StewardSeatReachTest(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
-    def codex_service(self, **extra):
-        """A Codex tool command running in the shared service, thread `SID`."""
+    def codex_service(self, walk=True):
+        """A Codex tool command running in the shared service, thread `SID`.
+
+        `walk=False` leaves the real `codex_tui_process_bindings`, which the real pane proof
+        itself uses with the caller's own pane as the hint."""
         os.environ["CODEX_THREAD_ID"] = SID
         patches = [mock.patch.object(pane_ownership, "_caller_runtime",
                                      return_value=((1, 1, 1, 1, 1, "1"), True))]
-        walk = mock.patch.object(pane_ownership, "codex_tui_process_bindings", return_value=[])
-        self.walk = walk.start()  # the host-wide Codex pane walk: it must stay uncalled
-        self.addCleanup(walk.stop)
+        if walk:
+            guard = mock.patch.object(pane_ownership, "codex_tui_process_bindings", return_value=[])
+            self.walk = guard.start()  # the host-wide Codex pane walk: it must stay uncalled
+            self.addCleanup(guard.stop)
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
@@ -114,8 +118,14 @@ class StewardSeatReachTest(unittest.TestCase):
         cases = {
             "no TUI process for the thread": dict(processes=[], environ=env, proof="%3"),
             "two TUI processes": dict(processes=[tui, dict(tui, pid=4243)], environ=env, proof="%3"),
-            "TUI without a tmux pane (a Herdr window)": dict(
-                processes=[tui], environ={"HERDR_PANE_ID": "w9:p9"}, proof="%3"),
+            "TUI with no window at all": dict(processes=[tui], environ={}, proof="%3"),
+            "Herdr-hosted TUI whose pane proof is refused": dict(
+                processes=[tui], environ={"HERDR_PANE_ID": "w9:p9"}, proof=""),
+            "Herdr-hosted TUI proved for another pane": dict(
+                processes=[tui], environ={"HERDR_PANE_ID": "w9:p9"}, proof="w9:p1"),
+            "Herdr-hosted TUI of a named server without its socket": dict(
+                processes=[tui], environ={"HERDR_PANE_ID": "w9:p9", "AGENT_HERDR_SESSION": "x"},
+                proof="w9:p9"),
             "pane proof refused": dict(processes=[tui], environ=env, proof=""),
         }
         for label, case in cases.items():
@@ -128,6 +138,45 @@ class StewardSeatReachTest(unittest.TestCase):
                     self.assertIsNone(watch._steward_seat("codex", SID))
                 self.walk.assert_not_called()
         self.assertEqual(self.calls(), [])
+
+    def test_a_herdr_hosted_codex_tui_gives_its_own_pane_seat(self):
+        self.codex_service()
+        tui = {"pid": 4242, "pid_start": "77", "session_id": SID}
+        proven = []
+
+        def verified(pane, harness, sid, **kw):
+            proven.append((pane, harness, sid, kw.get("socket_path")))
+            return pane
+
+        with mock.patch.object(pane_ownership, "codex_tui_processes_for_session", return_value=[tui]), \
+                mock.patch.object(procscan, "read_environ",
+                                  return_value={"HERDR_PANE_ID": "w9:p9",
+                                                "HERDR_SOCKET_PATH": "/run/h.sock"}), \
+                mock.patch.object(pane_ownership, "verified_pane", side_effect=verified):
+            seat = watch._steward_seat("codex", SID)
+        self.assertEqual((seat or {}).get("kind"), "pane", seat)
+        self.assertEqual(seat["pane"], "w9:p9")
+        self.assertEqual(proven, [("w9:p9", "codex", SID, "/run/h.sock")])
+        self.walk.assert_not_called()
+
+    def test_a_herdr_hosted_codex_tui_costs_one_process_info_for_its_own_pane_only(self):
+        """Real proof path over a fake process table: the other TUI's pane is never asked."""
+        self.codex_service(walk=False)
+        records = {11: (11, 1, 50, "/dev/pts/9", 50, "77"), 12: (12, 1, 60, "/dev/pts/8", 60, "88")}
+        envs = {11: {"HERDR_PANE_ID": "w9:p9"}, 12: {"HERDR_PANE_ID": "w9:p8"}}
+        real_listdir = os.listdir
+        tui = {"pid": 11, "pid_start": "77", "session_id": SID}
+        with mock.patch.object(pane_ownership.os, "listdir",
+                               side_effect=lambda path: ["11", "12"] if path == "/proc" else real_listdir(path)), \
+                mock.patch.object(pane_ownership, "codex_tui_processes_for_session", return_value=[tui]), \
+                mock.patch.object(pane_ownership, "_runtime", return_value=("codex", False)), \
+                mock.patch.object(pane_ownership, "_process", side_effect=lambda pid: records.get(int(pid))), \
+                mock.patch.object(pane_ownership, "_native_session", return_value=SID), \
+                mock.patch.object(pane_ownership, "_codex_identity_observation", return_value=None), \
+                mock.patch.object(pane_ownership, "_shell_seat_pane", return_value=None), \
+                mock.patch.object(procscan, "read_environ", side_effect=lambda pid: envs.get(int(pid), {})):
+            self.assertIsNone(watch._steward_seat("codex", SID))  # the logging herdr refuses it
+        self.assertEqual(self.calls(), ["pane process-info --pane w9:p9"])
 
     def test_another_threads_service_caller_has_no_seat(self):
         self.codex_service()

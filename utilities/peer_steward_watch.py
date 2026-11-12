@@ -439,8 +439,8 @@ def _steward_seat(harness, sid):
     Herdr window (`HERDR_PANE_ID`). A tmux pane (`TMUX_PANE`) is read through tmux, and a
     caller with neither window is not searched for: its seat stays unknown and the watch
     arms and settles natively. A Codex tool command runs in a shared service, so its
-    TUI is found from the native process table and its own tmux pane (also through a
-    session shell), never by walking every Codex pane on the host.
+    TUI is found from the native process table and its own tmux or Herdr pane (also
+    through a session shell), never by walking every Codex pane on the host.
     """
     if not harness or harness == "unknown" or not sid:
         return None
@@ -464,11 +464,13 @@ def _steward_seat(harness, sid):
 
 
 def _codex_service_seat(sid):
-    """Seat of the one native Codex TUI whose thread is `sid`, from its own tmux pane.
+    """Seat of the one native Codex TUI whose thread is `sid`, from that TUI's own window.
 
     The TUI's pane address comes from the TUI process's own environment (the caller's
-    inherited values belong to the shared service); the same live proof as every other
-    pane seat decides it, including the session-shell attachment join. No Herdr call.
+    inherited values belong to the shared service): its tmux pane, else the Herdr pane
+    it runs in (`HERDR_PANE_ID`). The same live proof as every other pane seat decides
+    it, including the session-shell attachment join. A Herdr-hosted TUI costs at most
+    one `pane process-info` for its own pane; no other pane is ever asked.
     """
     import pane_ownership
     import session_tidy
@@ -480,13 +482,24 @@ def _codex_service_seat(sid):
     if len(processes) != 1:
         return None
     tui = processes[0]
-    hint, _socket = terminal_surface.caller_tmux_pane(procscan.read_environ(tui["pid"]))
-    if not hint or pane_ownership.verified_pane(
-            hint, "codex", sid, executable="tmux", socket_path="") != hint:
+    tui_env = procscan.read_environ(tui["pid"])
+    hint, _socket = terminal_surface.caller_tmux_pane(tui_env)
+    socket_path = ""
+    if hint:
+        proven = pane_ownership.verified_pane(
+            hint, "codex", sid, executable="tmux", socket_path="")
+    else:
+        hint = str(tui_env.get("HERDR_PANE_ID") or "").strip()
+        socket_path = str(tui_env.get("HERDR_SOCKET_PATH") or "")
+        if not hint or (tui_env.get("AGENT_HERDR_SESSION") and not socket_path):
+            return None  # no window, or a named server whose socket cannot be carried
+        proven = pane_ownership.verified_pane(
+            hint, "codex", sid, socket_path=socket_path)
+    if not hint or proven != hint:
         return None
     seat = session_tidy.session_seat(session_tidy.pane_seat_from_binding(
-        {"pane": hint, "socket_path": "", "pid": tui["pid"], "pid_start": tui["pid_start"],
-         "session_id": sid}), "codex", sid)
+        {"pane": hint, "socket_path": socket_path, "pid": tui["pid"],
+         "pid_start": tui["pid_start"], "session_id": sid}), "codex", sid)
     return seat.as_dict() if seat.kind in {"pane", "native"} else None
 
 
