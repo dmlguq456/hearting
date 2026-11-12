@@ -413,11 +413,13 @@ for(const [state,want] of [['idle','┌ ● [e9] claude ─'],['working','┌ �
  assert(!/running|idle|waiting/.test(rows[0]),rows[0]);
  assert(rows[0].endsWith(' ⚙ ┐')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
 }
-// A steward's number and `⚑` blink in Fleet's steward pink, lit and dark on the shared beat.
+// Spec rule 35 (a): a steward's `⚑` alone blinks in Fleet's steward pink, lit and dark on
+// the shared beat; its number keeps the lit steward color on both beats (Fleet's session row).
 for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
  const v=paint({state:'idle',frame,model:{tag:'[e9]',steward:true,styles:{...model.styles,tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}}}});
- const marks=v.rows[0].filter(x=>x.text==='⚑'||x.text==='e9');
- assert(marks.length===2&&marks.every(x=>x.beat&&x.foreground===219&&(key==='tag_steward'?x.bold:x.dim)),frame+' '+JSON.stringify(marks));
+ const flag=v.rows[0].find(x=>x.text==='⚑'),number=v.rows[0].find(x=>x.text==='e9');
+ assert(flag.beat&&flag.foreground===219&&(key==='tag_steward'?flag.bold:flag.dim),frame+' '+JSON.stringify(flag));
+ assert(!number.beat&&number.foreground===219&&number.bold&&!number.dim,frame+' '+JSON.stringify(number));
  assert(v.animated,'an idle steward still keeps the beat');
 }
 // Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
@@ -447,10 +449,11 @@ assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
 // Repo row, then Git on its own row; the route box high; messages (no box: two rules) fixed at the bottom.
 let rows=text(paint({state:'idle'}));
 assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
-// Spec rule 29 (b), 30 (a): the metadata block is one block (no empty row inside), then a
-// thin rule, then the session's content with its labels; an empty row parts the head from the route box.
-assert(rows[3].includes('fixture high')&&rows[4].includes('context')&&/^│ ─+ │$/.test(rows[5]),rows.join('\n'));
-assert(rows[6].startsWith('│ TITLE  SESSION_TITLE')&&rows[7].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[8])&&rows[9].includes('╭─ route'),rows.join('\n'));
+// Spec rule 29 (b), 30 (a), 35 (b): the metadata block is two groups parted by one empty row
+// ([repository, Git] / [model, context]), then a thin rule, then the session's content with
+// its labels; an empty row parts the head from the route box.
+assert(/^│ +│$/.test(rows[3])&&rows[4].includes('fixture high')&&rows[5].includes('context')&&/^│ ─+ │$/.test(rows[6]),rows.join('\n'));
+assert(rows[7].startsWith('│ TITLE  SESSION_TITLE')&&rows[8].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[9])&&rows[10].includes('╭─ route'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
 // Spec rule 24: a folded route takes two rows beside the native area: the glyph with
@@ -972,6 +975,68 @@ for(let h=16;h<=72;h++){
 }
 const tall=draw(nine,40,60);
 assert(/^│ ─+ │$/.test(tall[tall.findIndex(s=>s.startsWith('│ TITLE'))-1]),tall.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
+    def test_the_steward_number_holds_and_two_structural_empty_rows_part_the_groups(self):
+        # Spec E9 rule 35: (a) a steward's number does not blink, only `⚑` changes between
+        # beats; (b) one empty row parts [repository, Git] from [model, context]; (c) one
+        # empty row parts the route box from the question box or the messages rule, and the
+        # messages' extra rows leave it; (d) both are structural rows: they go after the
+        # values on several rows, the route one first, before the rule under the metadata.
+        script = self.FIXTURE + r'''
+const blank=s=>/^│ +│$/.test(s);
+// (a) An idle steward panel: between the two beats one cell changes, `⚑`, on every face.
+const steward={...head,tag:'[e9]',steward:true,styles:{dim:{dim:true},tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}}};
+const cellsOf=v=>v.rows.flatMap((r,y)=>r.flatMap(p=>[...String(p.text)].map(ch=>JSON.stringify([y,ch,p.foreground??null,p.background??null,!!p.bold,!!p.dim]))));
+for(const [config,background,extra,number] of [[{theme:'terminal'},'dark',{},[219,true]],[{theme:'light'},'',{},[132,true]],[{theme:'terminal',shade:'medium'},'dark',{},[219,true]],
+ [{theme:'terminal'},'',{},[219,true]],[{theme:'mono'},'dark',{},[null,false]],[{},'dark',{no_color:true},[219,false]]]){
+ const at=frame=>view.render({width:40,height:30,side:true,fill:true,model:{...steward,...extra,routes:[waiting],route_count:1},state:'idle',frame,configuration:config,background,questions:()=>[]});
+ const lit=at(0),dark=at(10),a=cellsOf(lit),b=cellsOf(dark);
+ assert.equal(a.length,b.length);
+ const changed=a.map((c,i)=>c===b[i]?null:[JSON.parse(c),JSON.parse(b[i])]).filter(Boolean);
+ assert(changed.length===1&&changed[0][0][1]==='⚑'&&changed[0][0][4]===true&&changed[0][1][4]===false,JSON.stringify(config)+' '+JSON.stringify(changed));
+ for(const v of [lit,dark]){const tag=v.rows[0].find(x=>x.text==='e9');
+  assert(tag&&!tag.beat&&(tag.foreground??null)===number[0]&&!!tag.bold===number[1]&&!tag.dim,JSON.stringify(config)+' '+JSON.stringify(tag));}
+}
+// (b) The metadata's two groups: with Git, and without it (the row parts the repository from the model).
+const r50=draw([oneShot,staged],40,50);
+assert(r50[1].includes('hearting/')&&r50[2].includes('(fix/fleet')&&blank(r50[3])&&r50[4].includes('claude-fable-5-2 high')&&r50[5].includes('context'),r50.join('\n'));
+const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+assert(noGit[1].includes('hearting/')&&blank(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
+// (c) Six routes and eight messages at 40×50: the extra message rows stop one row short of the route box.
+const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄이는 순서를 확인해 주세요, 본문이 길어서 둘째 줄까지 넘어감',6),
+ message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
+const six=[...Array(6)].map((_,i)=>{const r=[oneShot,staged,waiting][i%3];return {...r,id:'s'+i,title:r.title+' '+(i+1)};});
+const QUESTION=[[P('◑ Q_HEAD')],[P('Q_BODY')],[P('› A')],[P('2 B')],[P('↑↓ choose · Enter send · t text')]];
+const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
+ state:'idle',configuration:{},questions:o.q?(q=>o.q.slice(0,q.budget)):()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
+const rule=rows=>rows.findIndex(s=>s.includes('── messages'));
+const full=paint(six,50),m=rule(full);
+assert(full[m-2].includes('╰')&&blank(full[m-1])&&full.slice(m+1).filter(s=>/^│   \S/.test(s)).length>3,full.join('\n'));
+// With a question the row stands between the route box and the question box.
+const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('─ ◑ Q_HEAD'));
+assert(q>2&&asked[q-2].includes('╰')&&blank(asked[q-1])&&asked[rule(asked)-1].includes('╰'),asked.join('\n'));
+// No route box: the head's empty row and spare rows stand above the messages, as before.
+const none=paint([],30,{model:{routes_known:true}});
+assert(!none.join('').includes('╭')&&blank(none[rule(none)-1]),none.join('\n'));
+// (d) Short of rows: values on several rows go before the route row, the route row before
+// the metadata one, the metadata one before the rule under it; extra message rows only
+// while all of them stand.
+for(let h=18;h<=72;h++){
+ const rows=paint(six,h),all=rows.join('\n'),at=rule(rows),git=rows.findIndex(s=>s.includes('(fix/')),title=rows.findIndex(s=>s.startsWith('│ TITLE'));
+ const routeGap=at>1&&blank(rows[at-1]),metaGap=git>0&&blank(rows[git+1]),ruled=title>0&&/^│ ─+ │$/.test(rows[title-1]),multi=title>0&&/^│ {8}\S/.test(rows[title+1]);
+ const body=at<0?[]:rows.slice(at+1,rows.findIndex((s,i)=>i>at&&/^│ ─+( \+\d+ ─)? │$/.test(s)));
+ if(routeGap)assert(metaGap,h+' the route row goes first\n'+all);
+ if(metaGap)assert(ruled,h+' the metadata row goes before the rule\n'+all);
+ if(multi)assert(routeGap&&metaGap,h+' values on several rows go before either row\n'+all);
+ if(body.filter(s=>/^│ [←→] /.test(s)).length>3||body.length>6)assert(routeGap&&metaGap&&multi,h+' extra message rows only after both\n'+all);
+}
+// The steps at this fixture's heights: 41 keeps both rows (TITLE and NOW one row each), 40
+// only the metadata one, 39 neither (the rule stays).
+const flags=h=>{const rows=paint(six,h),at=rule(rows),git=rows.findIndex(s=>s.includes('(fix/')),title=rows.findIndex(s=>s.startsWith('│ TITLE'));
+ return [blank(rows[at-1]),blank(rows[git+1]),/^│ ─+ │$/.test(rows[title-1]),/^│ {8}\S/.test(rows[title+1])];};
+assert.deepEqual([41,40,39].map(flags),[[true,true,true,false],[false,true,true,false],[false,false,true,false]]);
 '''
         self.node(script, "panel-view.cjs")
 

@@ -104,7 +104,8 @@ comes and goes at the bottom. The top border carries Fleet's row head for this
 session on the left: the state glyph (a spinner while it works or an answer is
 being typed in for the person, `●` idle, `◑` waiting on a dialog or question),
 the session number (`[e9]`), the harness name in its Fleet hue and, for a
-steward, Fleet's `⚑`; the state has no word, its glyph and number share the
+steward, Fleet's `⚑` (a steward's number takes Fleet's steward color, fixed,
+as on Fleet's session row); the state has no word, its glyph and number share the
 state's color, and the three glyph shapes still differ in `mono` and under
 `NO_COLOR`. Short of cells the steward mark goes first, then the harness, then
 the number; the glyph stays. The gear `⚙` alone sits on the right, and its press
@@ -136,8 +137,9 @@ color and a running one pulses `route N`; the question box keeps its rose.
 `HEARTING` names the settings screen alone. What runs shares Fleet's one beat
 (its 100 ms spinner frame and one-second blink): this session's spinner, a
 working route's mark, the running stage, the open route count and a steward's
-number and `⚑` (Fleet's steward pink, lit and receding; bold and plain without
-color), which blink even while the session is idle. The host keeps that beat
+`⚑` (Fleet's steward pink, lit and receding; bold and plain without color), which
+blinks even while the session is idle; the steward's number does not blink (plain
+weight without color). The host keeps that beat
 only while the painted panel shows one of them; a spinner turn swaps only its own
 cells, the blink repaints the panel once a second (a panel with only a blink
 wakes once a second and changes only the blinking row), and an idle panel with
@@ -146,7 +148,8 @@ Then the metadata, one block: the repository name ending in `/` (`hearting/`,
 the mark only on a whole name), with Git (branch and dirty mark, `🚧 N`,
 ahead/behind and the existing merge warnings) dim in parentheses on its own
 row below, cut with `…` within that row and absent without a Git reading; no
-folder or branch glyph;
+folder or branch glyph; beside the native area one empty row then parts the
+repository and Git from the model (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the repo row at the bottom);
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
@@ -159,7 +162,8 @@ then `◑답 대기 N` and a tidy notice; one empty row then parts the head from
 route box. The bottom layout keeps the metadata row (or rows) first and one
 content row (`◑답 대기 N │ title │ NOW …`, title and NOW each keeping at least
 half of what is left); the row break parts them. Then the route box, high; free
-space; any question box; the messages section, fixed at the bottom; and
+space (beside the native area at least one empty row under the route box, above
+any question box or the messages rule); any question box; the messages section, fixed at the bottom; and
 `5h … │ 7d …` last. Only the route and the question are boxed, in the same
 thin rounded line with the title in the top border; the messages section has
 no box, only a titled upper rule (`── messages ──`) and a lower rule. They
@@ -232,8 +236,10 @@ short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
 (past three, and a body's rows after its first); an opened route detail (and an
 opened message) shortens and closes; a value on several rows (title, NOW, a
-route title) keeps one row ending in `…`; then the head's rule (it is not an
-empty row: it goes only once TITLE and NOW are one row each); the messages fold
+route title) keeps one row ending in `…`; the empty row under the route box,
+then the one inside the metadata (structural rows, not spare ones: the messages'
+extra rows leave them); then the head's rule (it is not an empty row: it goes
+only once TITLE and NOW are one row each); the messages fold
 to one row each (three of them); the routes' third row goes, then their second;
 fewer messages show (three down to one, `+N` at the end of the lower rule); only
 then does the route box scroll in place, showing fewer

@@ -59,7 +59,8 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     else if(role==='route-dead'){if(known)foreground=F.dead;dim=false;}
     // The steward mark's two beats on a known face: Fleet's pink, then a receding pink
     // (no dim on top, so a shade keeps the hue); the light face takes the deep pair.
-    else if(role==='steward'&&theme!=='mono'&&known){foreground=F.steward[bold?0:1];dim=false;}
+    // The steward's number does not blink (spec rule 35 (a)): it keeps the lit pink.
+    else if(role==='steward'&&theme!=='mono'&&known){foreground=F.steward[part.beat===true&&!bold?1:0];dim=false;}
     else if(role==='steward'&&theme==='mono')dim=false;
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
@@ -349,7 +350,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const top=[],spacers=new Set(),metaGaps=new Set(),rules=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
     // first when rows run short, and the first row then ends in `…`.
     const extra=new Set(),oneRow=new Map();
@@ -373,9 +374,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     if(side){
       // Spec rule 29 (b), 30 (a): the metadata first, one block (the repository, Git,
       // model and effort, context, jobs, the repo's open work), then one thin rule, then
-      // this session's content (title, NOW, the answer wait and a tidy notice).
+      // this session's content (title, NOW, the answer wait and a tidy notice). Spec rule
+      // 35 (b): inside the metadata one empty row parts [repository, Git] from [model and
+      // effort, context]; without Git it parts the repository from the model.
       if(repo.length){top.push(cut(repo,inner));mark(0,'head');}
       putGit();
+      if(top.length){metaGaps.add(top.length);top.push([]);}
       top.push(selected);
       if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}
       if(jobs.length){const from=top.length;put(top,jobs,2);mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
@@ -807,7 +811,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const routeTitle=shown.length?[running?pulse('route '+total):text('route '+total,'g_idle')]:label?[text(label,'g_idle')]:null;
     const routeChecking=!shown.length&&label?[{parts:[text(t('checking','Checking'))],action:'route'}]:[];
     // A press in the panel opens a route's question; the editor keeps its budget.
-    const core=top.length-spacers.size-rules.size-optional.size-gitRows.size-extra.size;
+    const core=top.length-spacers.size-metaGaps.size-rules.size-optional.size-gitRows.size-extra.size;
     // Running jobs keep their row beside a question: its editor pages its own content.
     const q=questions({budget:Math.max(2,rows-core-jobRows.size-1-(quota.length?1:0)),columns:inner-box});
     const ask=[];
@@ -826,12 +830,13 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // empty rows; the messages' extra rows (past three, and a body's rows after its first:
     // they only ever take rows the routes leave in their full form); opened details
     // shorten, then close (an opened message shortens with them); a value on several rows
-    // keeps one (ending in `…`); then the rule under the metadata; the messages fold to
-    // one row each (three of them); the routes' third row, then their second (one-row
+    // keeps one (ending in `…`); spec rule 35 (d): the empty row under the route box, then
+    // the one inside the metadata (structural rows, not spare ones); then the rule under the
+    // metadata; the messages fold to one row each (three of them); the routes' third row, then their second (one-row
     // form); fewer messages (three down to one); only then the route box scrolls in place
     // (fewer rows shown, down to one, none dropped); the Git row; the route box; running
     // jobs; the messages section only last; 5h/7d. Every route in the box takes the same form.
-    let keepGit=true,keepSpacers=true,keepRules=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true,keepPlace=true;
+    let keepGit=true,keepSpacers=true,keepRouteGap=true,keepMetaGap=true,keepRules=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true,keepPlace=true;
     const twoFull=side&&routeRows.some(x=>x.two);
     let twoRows=twoFull;
     const routeSize=x=>twoRows&&x.two?(keepMulti?x.two:x.twoOne).length+(keepPlace&&x.place?1:0):1;
@@ -853,7 +858,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x,i,list)=>n+routeSize(x)
       +(keepDetails?detailsOf(x.action.slice(6)).length:0)+(gapAfter(x,i,list)?1:0),0):routeChecking.length):0;
     const messageSection=()=>keepMessages&&messages.length?2+visibleMessages().length:0;
-    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+messageSection()+(keepQuota?1:0);
+    // Spec rule 35 (c): beside the native area one empty row parts the route box from what
+    // follows it (the question box, else the messages rule); the messages' extra rows leave it.
+    const routeGap=()=>side&&keepRouteGap&&keepRoutes&&(ask.length>0||keepMessages&&messages.length>0)?1:0;
+    const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepMetaGap?metaGaps.size:0)+(keepRules?rules.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+routeGap()+messageSection()+(keepQuota?1:0);
     const budget=rows;
     const baseCount=messageCount;
     // Each step is taken only while rows are short; a later step that frees more rows than
@@ -870,6 +878,8 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     }
     give(()=>messageLimit>2&&messageLimit!==Infinity,()=>{messageLimit--;},()=>{messageLimit++;});
     give(()=>keepMulti,()=>{keepMulti=false;},()=>{keepMulti=true;});
+    give(()=>keepRouteGap,()=>{keepRouteGap=false;},()=>{keepRouteGap=true;});
+    give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     give(()=>keepRules,()=>{keepRules=false;},()=>{keepRules=true;});
     give(()=>messages.length>0&&!messageOne,()=>{messageOne=true;},()=>{messageOne=false;});
     give(()=>keepPlace,()=>{keepPlace=false;},()=>{keepPlace=true;});
@@ -881,15 +891,16 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     give(()=>keepOptional,()=>{keepOptional=false;},()=>{keepOptional=true;});
     give(()=>keepMessages,()=>{keepMessages=false;},()=>{keepMessages=true;});
     give(()=>keepQuota,()=>{keepQuota=false;},()=>{keepQuota=true;});
-    const kept=()=>[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepRules,messageOne,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota];
+    const kept=()=>[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota];
     for(const undo of gave.reverse()){
       const was=kept();undo();
-      if(need()>budget)[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepRules,messageOne,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota]=was;
+      if(need()>budget)[keepSpacers,detailCap,keepDetails,messageLimit,keepMulti,keepRouteGap,keepMetaGap,keepRules,messageOne,keepPlace,twoRows,messageCount,routeLimit,keepGit,keepRoutes,keepOptional,keepMessages,keepQuota]=was;
     }
     // Rows to spare beside the native area once everything above the messages' extra rows
-    // stands whole (the routes in their three-row form, details, values on all their rows):
-    // bodies take up to three rows and more messages show, never past the rows the panel has.
-    const whole=detailCap===detailFull&&keepDetails&&keepMulti&&keepRules&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
+    // stands whole (the routes in their three-row form, details, values on all their rows,
+    // both structural empty rows): bodies take up to three rows and more messages show,
+    // never past the rows the panel has.
+    const whole=detailCap===detailFull&&keepDetails&&keepMulti&&keepRouteGap&&keepMetaGap&&keepRules&&keepPlace&&twoRows===twoFull&&routeLimit===routeRows.length&&keepRoutes===!!routeTitle&&keepGit&&keepOptional;
     if(side&&keepMessages&&whole&&!messageOne&&messageLimit===Infinity&&messageCount===baseCount){
       const grow=()=>{
         let changed=false;
@@ -900,7 +911,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       while(grow());
     }
     const order=[];
-    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
+    top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepRules||!rules.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
       order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i)});});
     let routeBlock=[],messageBlock=[];
     if(keepRoutes){
@@ -936,13 +947,16 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const note=hidden?[text(' +'+hidden+' ','loc_repo'),text('─',key)]:[];
       messageBlock.push({parts:[{...text('─'.repeat(Math.max(0,inner-size(note))),key),role:'messages'},...note.map(x=>x.text==='─'?{...x,role:'messages'}:x)]});
     }
-    // Each section is placed whole or not at all.
+    // Each section is placed whole or not at all; the empty row under the route box goes first.
     const tail=ask.length+messageBlock.length+(keepQuota?1:0);
+    let gap=routeBlock.length?routeGap():0;
+    if(order.length+routeBlock.length+gap+tail>budget)gap=0;
     if(order.length+routeBlock.length+tail>budget)routeBlock=[];
     for(const item of order)add(item.parts,item.action,item.groups);
     // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
     if(routeBlock.length)routeArea={top:content.length+1,bottom:content.length+routeBlock.length,offset:routeOffset,max:routeMax,step:routeStep};
     for(const item of routeBlock)add(item.parts,item.action,item.groups);
+    if(gap&&routeBlock.length)add([]);
     // What comes and goes sits low: the question right above the messages, which keep the bottom.
     if(fill)while(content.length<rows-tail)add([]);
     if(content.length+tail<=budget){
@@ -966,17 +980,19 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // rows' marks; the question box keeps its rose.
   const color=own&&own[1]!=='g_work_off'?own[1]:'dim';
   const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
-  // Spec rule 29: a steward's mark and number blink in Fleet's steward pink
+  // Spec rule 29, 35 (a): a steward's `⚑` alone blinks in Fleet's steward pink
   // (`tag_steward` ↔ `tag_steward_dim`) on the panel's one beat, idle or not; without
-  // color, bold ↔ plain.
+  // color, bold ↔ plain. Its number keeps the steward color without blinking, as on
+  // Fleet's session row (`tag_steward`); without color, plain weight.
   const cellsOf=parts=>parts.reduce((n,p)=>n+measure(clean(p.text)),0);
   const steward=!settings&&model.steward===true;
   const plain=model.no_color===true||cfg.theme==='mono';
   const stewardPart=v=>({...text(v,beat?'tag_steward':'tag_steward_dim'),beat:true,role:'steward',...(plain?{bold:beat,dim:false}:{})});
+  const stewardTag=v=>({...text(v,'tag_steward'),role:'steward',...(plain?{bold:false,dim:false}:{})});
   const tag=/^\[[^\]?]{1,16}\]$/.test(String(model.tag||''))?String(model.tag).slice(1,-1):'';
   const harnessName=['claude','codex','opencode'].includes(harness)?harness:'';
   const glyphPart=own?[{...text(own[0]==='spin'?spinGlyph.text:own[0],own[1]),...(own[0]==='spin'?{spin:true}:{}),role:'session'}]:[];
-  const tagPart=tag?[text('[','dim'),steward?stewardPart(tag):{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
+  const tagPart=tag?[text('[','dim'),steward?stewardTag(tag):{...text(tag,own?own[1]:'dim'),role:'session'},text(']','dim')]:[];
   const harnessPart=harnessName?[text(harnessName,'hb_'+harnessName)]:[];
   const flagPart=steward?[stewardPart('⚑')]:[];
   // Short of cells the steward mark goes first, then the harness, then the number;
