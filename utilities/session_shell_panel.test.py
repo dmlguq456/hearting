@@ -35,6 +35,26 @@ for(const [width,height] of [[37,21],[80,14]]){
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_values_left_unrefreshed_claim_no_route_state(self):
+        # Spec rule 12: the host marks values it could not refresh for a while;
+        # the route rows stay readable but nothing spins and the frame takes no
+        # route color, so an old state never reads as the current one.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const route=state=>({id:'r',title:'Exact route',state,kind:state,stages:[{name:'inline',st:'active'}],paint:{glyph:{text:'⠏'}}});
+for(const [state,color] of [['working','g_work'],['done','lvl_g'],['dead','g_dead']]){
+ const args=extra=>({width:40,height:24,side:true,model:{routes:[route(state)],route_count:1,...extra},questions:()=>[],configuration:{},frame:3});
+ const fresh=view.render(args({})),old=view.render(args({stale:true}));
+ assert.equal(fresh.color,color);assert.equal(old.color,'dim');
+ assert(old.rows.flat().some(p=>p.text.includes('Exact route')));
+ assert(!old.rows.flat().some(p=>p.spin||p.beat&&String(p.text).startsWith('route')));
+ if(state==='working')assert(fresh.animated);
+}
+const asked=view.render({width:40,height:24,side:true,model:{answerable:true,stale:true},questions:()=>[],configuration:{}});
+assert.equal(asked.color,'dim');
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_frame_is_panel_only_neutral_and_keeps_model_route_question_at_80(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

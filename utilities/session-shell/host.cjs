@@ -111,6 +111,19 @@ function publishNativeDisplay() {
 }
 function live() { const row = native && processRow(native.pid); return !!row && row.start === native.start; }
 function status() { return {...identity(),epoch,state,empty:empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !settings && !fleetView,alive:live(),expanded,focused:block.focused||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"}; }
+// A projection reply past the 1.5 s limit is still awaited and painted: one
+// projection is in flight at a time, so no older reply can follow a newer one.
+// Values left unanswered or failed for STALE_MS stop claiming a route state
+// (spec rule 12); the next good reply repaints them.
+const STALE_MS=10000;let staleTimer,stale=false;
+function projectionMissed(){
+  sourceError={ok:false,reason:'source-unavailable'};
+  if(!staleTimer&&!stale)staleTimer=setTimeout(()=>{staleTimer=undefined;stale=true;queueDisplay();},STALE_MS);
+}
+function projectionAnswered(data){
+  if(!data.ok){projectionMissed();return;}
+  clearTimeout(staleTimer);staleTimer=undefined;if(stale){stale=false;projectionKey='';}
+}
 function source(op, extra={}) {
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
@@ -120,8 +133,8 @@ function source(op, extra={}) {
     // must not discard its eventual language/model result before first input.
     // They never delay native start or keys; backend exit settles all callers.
     const timer=['display-bootstrap','display-model'].includes(op)?null:
-      setTimeout(()=>{calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
-    calls.set(id,{resolve,timer});
+      setTimeout(()=>{if(op==='projection'){projectionMissed();return;}calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
+    calls.set(id,{resolve:op==='projection'?data=>{projectionAnswered(data);resolve(data);}:resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
     if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
     backend.stdin.write(frame);
@@ -250,7 +263,7 @@ function readRouteRaw(){
 }
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});

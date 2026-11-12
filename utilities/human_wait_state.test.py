@@ -617,6 +617,80 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertTrue((state.state_root() / "projection.json").is_file())
         self.assertIsNone(state._producer_root)
 
+    def _producer_with_registry(self, *, change_at=None):
+        """Run the real producer loop over a real registry file and an injected wait.
+
+        The registry is appended on the `change_at`-th one-second check (never if
+        None). Returns (refreshes, sleeps); the second pass ends the loop."""
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        registry = Path(self.tmp.name) / "jobs.log"
+        registry.write_text("open\troute-start\n", encoding="utf-8")
+        lock = os.open(Path(self.tmp.name) / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        refreshes, sleeps, clock = [], [], [1000.0]
+
+        class SecondPass(BaseException):   # not swallowed by the loop's ``except Exception``
+            pass
+
+        def refresh():
+            refreshes.append(len(sleeps))
+            if len(refreshes) > 1:
+                raise SecondPass()
+
+        def wait(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            if change_at is not None and len(sleeps) == change_at:
+                with registry.open("a", encoding="utf-8") as handle:
+                    handle.write("done\troute-close\n")
+            if sum(sleeps) > 120:
+                raise SecondPass()
+        import tools.fleet.collectors.dispatch as dispatch
+        with mock.patch.object(state, "_refresh_cache", side_effect=refresh), \
+             mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(registry)]), \
+             mock.patch.object(state.time, "sleep", side_effect=wait), \
+             mock.patch.object(state.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(state, "_REGISTRY_MIN_GAP", 0.0):
+            with self.assertRaises(SecondPass):
+                state._producer_loop(lock)
+        return refreshes, sleeps
+
+    def test_a_registry_write_starts_the_next_pass_before_the_cadence(self):
+        # A route start, stage change or close is a registry write; the panels'
+        # route state follows it on the next check, not after the 30 second wait.
+        refreshes, sleeps = self._producer_with_registry(change_at=3)
+        self.assertEqual(len(refreshes), 2)
+        self.assertEqual(refreshes[1], 3)
+        self.assertLess(sum(sleeps), 30.0)
+
+    def test_an_unchanged_registry_keeps_the_cadence(self):
+        refreshes, sleeps = self._producer_with_registry()
+        self.assertEqual(len(refreshes), 2)
+        self.assertAlmostEqual(sum(sleeps[:refreshes[1]]), 30.0, delta=1.0)
+
+    def test_a_changing_registry_waits_for_the_previous_pass_duration(self):
+        # A registry that changes again at once still gets no pass sooner than
+        # the previous pass took, so a slow pass is never run back to back.
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        registry = Path(self.tmp.name) / "jobs.log"
+        registry.write_text("open\n", encoding="utf-8")
+        import tools.fleet.collectors.dispatch as dispatch
+        sleeps, clock = [], [1000.0]
+        def wait(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+        with mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(registry)]):
+            generation = state._registry_generation()
+            registry.write_text("open\ndone\n", encoding="utf-8")
+            with mock.patch.object(state.time, "sleep", side_effect=wait), \
+                 mock.patch.object(state.time, "monotonic", side_effect=lambda: clock[0]):
+                state._sleep_until_registry_change(30.0, generation, clock[0] + 5.0)
+        self.assertEqual(sleeps[0], 1.0)
+        self.assertEqual(len(sleeps), 2)
+        self.assertEqual(sleeps[1], 4.0)
+
     def test_notification_claim_is_single_under_concurrent_refresh(self):
         bin_dir = Path(self.tmp.name) / "race-bin"
         bin_dir.mkdir()
@@ -3535,6 +3609,52 @@ class MessageCompletionTests(unittest.TestCase):
         self.prompt(signal, "second answer")
         completion = self.source(signal)["completion"]
         self.assertEqual((completion["actor"], completion["answer"]), ("direct", "second answer"))
+
+    def _prompt_with_claims_missing_at_lookup(self, signal, text):
+        from unittest import mock
+        pending, seen = state.message_answer_pending, []
+
+        def missing(value):
+            # Storage fault: the record is away only while the prompt checks it.
+            path = state._cache_path()
+            held = path.with_suffix(".held")
+            path.rename(held)
+            try:
+                seen.append(path.exists())
+                return pending(value)
+            finally:
+                held.rename(path)
+        with mock.patch.object(state, "message_answer_pending", side_effect=missing):
+            self.prompt(signal, text)
+        self.assertTrue(seen)
+        self.assertNotIn(True, seen)
+
+    def test_claim_record_missing_at_lookup_never_lets_a_prompt_take_the_panel_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                signal, envelope = self.f.ask(harness, text="missing " + harness, choices=["A", "B", "C"])
+                self.f.submit(envelope, "B")
+                wire, _ref, recipient = self.f.prepare(signal)
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                self.assertEqual(self.source(signal)["lifecycle"], "open")
+                self.f.peer.receive_peer_message(wire, recipient)
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+                self.assertEqual(state._selected_entry(envelope)["result"]["status"], "applied")
+
+    def test_without_a_claim_a_missing_record_still_lets_the_prompt_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness, record="missing-at-lookup"):
+                signal, _ = self.f.ask(harness, text="no claim " + harness, choices=["A", "B", "C"])
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "A"))
+            with self.subTest(harness=harness, record="never-written"):
+                signal, _ = self.f.ask(harness, text="no record " + harness, choices=["A", "B", "C"])
+                state._cache_path().unlink(missing_ok=True)
+                self.prompt(signal, "2")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "B"))
 
     def test_question_without_choices_still_takes_the_next_prompt(self):
         for harness in ("claude", "codex", "opencode"):
