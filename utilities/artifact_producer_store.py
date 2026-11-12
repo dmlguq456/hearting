@@ -280,41 +280,6 @@ def _write_atomic(path: Path, data: bytes, mode: int = 0o644) -> None:
     _fsync_dir(path.parent)
 
 
-SEED_HISTORY_ROW = re.compile(r"(?:^|/)_internal/versions/v[0-9]+/prd\.md$")
-
-
-def _write_seed_copy(path: Path, data: bytes, source: Optional[Path] = None) -> None:
-    """Seed one spec history row, sharing the immutable shared revision file's inode.
-
-    Only `_internal/versions/vN/prd.md` rows are linked: tools create them once
-    (`O_EXCL` snapshots, `_write_atomic` seeds) and never rewrite them in place.
-    Live spec files are a worker write scope -- a shell `>` rewrites the inode in
-    place, which would change every link -- so they stay byte copies. Any
-    obstacle (another volume, no hard-link support, permission, link limit, or
-    bytes that are not `data`) falls back to the existing copy without error.
-    """
-    if source is not None and SEED_HISTORY_ROW.search(Path(path).as_posix()):
-        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
-        try:
-            if stat.S_ISREG(os.lstat(source).st_mode):
-                os.link(source, tmp, follow_symlinks=False)
-                with open(tmp, "rb") as handle:
-                    st = os.fstat(handle.fileno())
-                    same = (stat.S_ISREG(st.st_mode) and st.st_size == len(data)
-                            and handle.read(len(data) + 1) == data)
-                if same:
-                    os.replace(tmp, path)
-                    _fsync_dir(path.parent)
-                    return
-        except OSError:
-            pass
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-    _write_atomic(path, data)
-
-
 def _json_bytes(payload: Any) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
 

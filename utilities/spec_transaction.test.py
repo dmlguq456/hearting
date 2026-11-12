@@ -376,61 +376,6 @@ class CycleLayoutTest(unittest.TestCase):
   self._close(r,f); self.P.finalize(self.artifact,cycle_id=b["cycle_id"])
   return self.P.admit_shared(self.artifact,cycle_id=b["cycle_id"],kind="spec",source="spec",key="spec")
 
- def test_seed_links_immutable_history_rows_and_copies_live_files(self):
-  # Dedup step 1 (D): a seeded `_internal/versions/vN/prd.md` row shares the
-  # shared revision file's inode; live files stay copies a worker may edit.
-  initial=self._shared_v1(); rev=Path(initial["revision_dir"])
-  r,f,b=self._cycle("seed-link"); spec=Path(b["cycle_dir"])/"artifacts/spec"
-  TX.seed_cycle_spec(spec,self.artifact)
-  row,live=spec/"_internal/versions/v1/prd.md",spec/"prd.md"
-  self.assertEqual(row.read_bytes(),b"v0\n"); self.assertEqual(live.read_bytes(),b"v1\n")
-  self.assertTrue(os.path.samefile(row,rev/"_internal/versions/v1/prd.md"))
-  self.assertFalse(os.path.samefile(live,rev/"prd.md"))
-  self.assertFalse(os.path.samefile(spec/"pipeline_state.yaml",rev/"pipeline_state.yaml"))
-  # A hearting writer replaces the path; the shared revision keeps its bytes.
-  TX.PRODUCER._write_atomic(row,b"edited\n")
-  self.assertEqual((rev/"_internal/versions/v1/prd.md").read_bytes(),b"v0\n")
-  self.P._verified_shared_spec(self.artifact,initial["shared_reference_id"],initial["shared_reference_revision_id"])
-
- def test_component_seed_links_history_rows(self):
-  initial=self._shared_components(); rev=Path(initial["revision_dir"])
-  r,f,b=self._cycle("seed-link-component"); spec=Path(b["cycle_dir"])/"artifacts/spec"
-  TX.seed_cycle_spec(spec,self.artifact,spec_root=spec/"a")
-  self.assertTrue(os.path.samefile(spec/"a/_internal/versions/v3/prd.md",rev/"a/_internal/versions/v3/prd.md"))
-  self.assertFalse(os.path.samefile(spec/"a/prd.md",rev/"a/prd.md"))
-  self.assertFalse((spec/"b").exists())
-
- def test_seed_falls_back_to_a_copy_when_linking_is_impossible(self):
-  import errno
-  from unittest import mock
-  initial=self._shared_v1(); rev=Path(initial["revision_dir"])
-  r,f,b=self._cycle("seed-link-fallback"); spec=Path(b["cycle_dir"])/"artifacts/spec"
-  def cross_device(*args,**kwargs): raise OSError(errno.EXDEV,"Invalid cross-device link")
-  with mock.patch.object(os,"link",cross_device):
-   TX.seed_cycle_spec(spec,self.artifact)
-  row=spec/"_internal/versions/v1/prd.md"
-  self.assertEqual(row.read_bytes(),b"v0\n"); self.assertEqual(os.stat(row).st_nlink,1)
-  self.assertFalse(os.path.samefile(row,rev/"_internal/versions/v1/prd.md"))
-  self.assertEqual(list(spec.rglob(".prd.md.tmp-*")),[])
-
- def test_seed_copy_never_links_a_live_file_or_different_bytes(self):
-  with tempfile.TemporaryDirectory() as td:
-   base=Path(td); source=base/"src.md"; source.write_bytes(b"shared\n")
-   row=base/"spec/_internal/versions/v2/prd.md"; row.parent.mkdir(parents=True)
-   TX.PRODUCER._write_seed_copy(row,b"other\n",source)
-   self.assertEqual(row.read_bytes(),b"other\n"); self.assertFalse(os.path.samefile(row,source))
-   live=base/"spec/prd.md"; TX.PRODUCER._write_seed_copy(live,b"shared\n",source)
-   self.assertFalse(os.path.samefile(live,source))
-   TX.PRODUCER._write_seed_copy(row,b"shared\n",source)
-   self.assertTrue(os.path.samefile(row,source))
-   self.assertEqual(sorted(p.name for p in row.parent.iterdir()),["prd.md"])
-
- def test_revision_history_reports_physical_sources(self):
-  initial=self._shared_v1(); rev=Path(initial["revision_dir"]); sources={}
-  history=TX.revision_history(self.artifact,rev,sources=sources)
-  self.assertEqual(history,{"_internal/versions/v1/prd.md":b"v0\n"})
-  self.assertTrue(os.path.samefile(sources["_internal/versions/v1/prd.md"],rev/"_internal/versions/v1/prd.md"))
-
  def test_normal_direct_component_transaction_snapshots_and_admits_its_exact_base(self):
   initial=self._shared_components()
   r=R.compile_route("autopilot-spec","update","direct",self.repo,self.artifact,

@@ -106,14 +106,22 @@ class Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.base = Path(self._tmp.name)
+        # Fixture files were created just now (fresh ctime); plan as if two days later.
+        self.now_ns = time.time_ns() + 2 * D.RECENT_NS
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def plan(self, store, name="j.jsonl", **kw):
         journal = self.base / name
+        kw.setdefault("now_ns", self.now_ns)
         header, groups, summary = D.plan(store.root, journal, jobs=None, max_seconds=60, **kw)
         return journal, header, groups, summary
+
+    def linked_paths(self, store, groups):
+        """Planned paths that share their group's plan-time primary inode right now."""
+        return [link["path"] for g in groups for link in g["links"]
+                if os.lstat(store.root / link["path"]).st_ino == g["primary"]["ino"]]
 
 
 class PlanTest(Base):
@@ -150,7 +158,8 @@ class PlanTest(Base):
     def test_recent_symlink_external_link_and_restore_target_are_skipped(self):
         s = standard(self.base)
         d6 = s.cycle(6, {"artifacts/spec/_internal/versions/v1/prd.md": HIST1})
-        os.utime(s.root / d6 / "artifacts/spec/_internal/versions/v1/prd.md", None)  # now
+        recent = self.now_ns - 3600 * 10**9  # an hour before the plan
+        os.utime(s.root / d6 / "artifacts/spec/_internal/versions/v1/prd.md", ns=(recent, recent))
         d7 = s.cycle(7, {"artifacts/spec/_internal/versions/v2/prd.md": HIST2})
         target = s.root / d7 / "artifacts/spec/_internal/versions/v2/prd.md"
         os.link(target, self.base / "outside-link")
@@ -233,7 +242,35 @@ class PlanTest(Base):
         run = subprocess.run([sys.executable, str(TOOL), "plan", "--root", str(s.root), "--jobs", "none"],
                              capture_output=True, text=True, env=env)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(json.loads(run.stdout)["link_files"], 3)
+        out = json.loads(run.stdout)
+        # The fixture was written just now, so every candidate is inside the 24 h window.
+        self.assertEqual((out["link_files"], out["skipped"]["recent-24h"]["files"]), (0, 7))
+
+    def test_recent_ctime_counts_even_with_an_old_mtime(self):
+        # `cp -p` / copy2: an old mtime on a file that just arrived; its ctime is now.
+        s = standard(self.base)
+        now = time.time_ns()
+        _, _, groups, summary = self.plan(s, now_ns=now)
+        self.assertEqual(groups, [])
+        self.assertEqual(summary["skipped"]["recent-24h"]["files"], 7)
+        _, _, groups, _ = self.plan(s, name="later.jsonl", now_ns=now + D.RECENT_NS + 60 * 10**9)
+        self.assertEqual(sum(len(g["links"]) for g in groups), 3)
+
+    def test_manifest_locator_leaving_its_cycle_is_skipped(self):
+        s = standard(self.base)
+        open_dir = s.cycle(2, {"artifacts/spec/_internal/versions/v1/prd.md": HIST1}, state="open")
+        target = s.root / open_dir / "artifacts/spec/_internal/versions/v1/prd.md"
+        sealed = s.cycle(3, {})
+        rows = [{"artifact_id": f"x{i}", "revision_sequence": 1, "content_digest": sha(HIST1), "byte_size": len(HIST1),
+                 "locator": {"kind": "cycle-relative", "path": rel}}
+                for i, rel in enumerate([f"artifacts/spec/../../2026-10-01_cycle-2/artifacts/spec/_internal/versions/v1/prd.md",
+                                         str(target)])]
+        (s.root / sealed / "manifest.json").write_text(json.dumps({"artifact_revisions": rows}))
+        journal, _, groups, summary = self.plan(s)
+        self.assertEqual(summary["skipped"]["locator-outside-cycle"]["files"], 2)
+        self.assertFalse(any("cycle-2" in link["path"] or "/../" in link["path"] for g in groups for link in g["links"]))
+        D.apply(journal)
+        self.assertEqual(os.stat(target).st_nlink, 1)
 
 
 class ApplyTest(Base):
@@ -392,6 +429,32 @@ class ApplyTest(Base):
         self.assertEqual(retried["linked"], 3)
         self.assertEqual(D.verify(journal)["linked_ok"], 3)
 
+    def test_one_unreadable_path_is_skipped_not_fatal(self):
+        import errno
+        s = standard(self.base)
+        journal, _, groups, _ = self.plan(s)
+        pair = next(g for g in groups if len(g["links"]) == 2)  # HIST1: one link left, plus HIST2's
+        victim = str(s.root / pair["links"][0]["path"])
+        real = D._open_regular
+
+        def denied(path):
+            if path == victim:
+                raise PermissionError(errno.EACCES, "Permission denied", path)
+            return real(path)
+        with mock.patch.object(D, "_open_regular", denied):
+            totals = D.apply(journal)
+        self.assertEqual(totals["skipped"], {"os-error-EACCES": 1})
+        self.assertEqual(totals["linked"], 2)
+        D.apply(journal)
+        with mock.patch.object(D, "_open_regular", lambda path: (_ for _ in ()).throw(
+                OSError(errno.ESTALE, "Stale file handle", path))):
+            first = D.revert(journal)
+        self.assertEqual(first["skipped"], {"os-error-ESTALE": 2})
+        self.assertEqual((first["remaining_groups"], first["still_linked"]), (2, 2))
+        second = D.revert(journal)
+        self.assertEqual((second["restored"], second["remaining_groups"], second["still_linked"]), (2, 0, 0))
+        self.assertEqual(self.linked_paths(s, groups), [])
+
     def test_concurrent_apply_is_refused(self):
         import fcntl
         s = standard(self.base)
@@ -405,6 +468,79 @@ class ApplyTest(Base):
         finally:
             os.close(fd)
 
+
+class RevertTest(Base):
+    def test_revert_after_a_group_was_cut_short_restores_unjournaled_links(self):
+        # An apply killed after some `os.replace` of a group, before its `applied` line.
+        s = Store(self.base)
+        rows = {"a.md": b"a" * 5000, "b.md": b"b" * 5000}
+        for rid in ("rrev_1", "rrev_2", "rrev_3"):
+            s.revision(rid, rows)
+        original = s.snapshot()
+        journal, _, groups, _ = self.plan(s)
+        self.assertEqual([len(g["links"]) for g in groups], [2, 2])
+        wrapper = self.base / "killer.py"
+        wrapper.write_text(
+            "import importlib.util, os, signal, sys\n"
+            f"spec = importlib.util.spec_from_file_location('t', {str(TOOL)!r})\n"
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            "real, n = os.replace, [0]\n"
+            "def replace(a, b):\n"
+            "    real(a, b); n[0] += 1\n"
+            "    if n[0] == 3: os.kill(os.getpid(), signal.SIGKILL)\n"
+            "m.os.replace = replace\n"
+            "sys.exit(m.main(['apply', sys.argv[1]]))\n")
+        run = subprocess.run([sys.executable, str(wrapper), str(journal)], capture_output=True)
+        self.assertEqual(run.returncode, -9)
+        self.assertEqual(len(D.Journal(journal).applied), 1)  # the 2nd group linked one path, unjournaled
+        self.assertEqual(len(self.linked_paths(s, groups)), 3)
+        report = D.verify(journal)
+        self.assertEqual((report["still_linked"], report["unrecorded_links"]), (3, 1))
+        result = D.revert(journal)  # straight away, without re-running apply
+        self.assertEqual((result["restored"], result["remaining_groups"], result["still_linked"]), (3, 0, 0))
+        self.assertEqual(self.linked_paths(s, groups), [])
+        restored = s.snapshot()
+        for rel, (_, mtime_ns, mode, data) in original.items():
+            self.assertEqual(restored[rel][1:], (mtime_ns, mode, data), rel)
+        report = D.verify(journal)
+        self.assertEqual((report["still_linked"], report["reverted_groups"]), (0, 2))
+        self.assertEqual(D.apply(journal)["groups_done"], 0)  # a reverted journal links nothing more
+        self.assertFalse((s.root / ".runtime/dedup-hardlink").exists())
+
+    def test_a_path_skipped_during_revert_is_retried_and_counted(self):
+        # 2nd/3rd lstat of the path in a revert: `_revert_path`'s first check, and the
+        # re-check just before its `os.replace`. A passing glitch at either keeps the group open.
+        for call in (2, 3):
+            with self.subTest(call=call):
+                (self.base / f"call{call}").mkdir()
+                s = Store(self.base / f"call{call}")
+                for rid in ("rrev_1", "rrev_2", "rrev_3"):
+                    s.revision(rid, {"a.md": b"z" * 4000})
+                journal, _, groups, _ = self.plan(s, name=f"call{call}.jsonl")
+                D.apply(journal)
+                victim = str(s.root / groups[0]["links"][-1]["path"])
+                real, calls = D._lstat, {"n": 0}
+
+                def flaky(path):
+                    st = real(path)
+                    if path == victim:
+                        calls["n"] += 1
+                        if calls["n"] == call:
+                            return type("Stat", (), {"st_ino": -1, "st_mode": st.st_mode})()
+                    return st
+                with mock.patch.object(D, "_lstat", flaky):
+                    first = D.revert(journal)
+                self.assertEqual(first["skipped"], {"changed-during-revert": 1})
+                self.assertEqual((first["restored"], first["remaining_groups"], first["still_linked"]), (1, 1, 1))
+                report = D.verify(journal)
+                self.assertEqual((report["still_linked"], report["reverted_groups"]), (1, 0))
+                second = D.revert(journal)
+                self.assertEqual((second["groups_done"], second["restored"], second["skipped"]), (1, 1, {}))
+                self.assertEqual((second["remaining_groups"], second["still_linked"]), (0, 0))
+                self.assertEqual(self.linked_paths(s, groups), [])
+                report = D.verify(journal)
+                self.assertEqual((report["still_linked"], report["reverted_groups"]), (0, 1))
+                self.assertEqual(D.revert(journal)["groups_done"], 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,10 +10,12 @@ One-off maintenance for one artifact root (`.agent_reports`/`.claude_reports`).
 
 Only immutable classes are linked:
   * shared-revision      physical files of listed `shared/spec/<ref>/revisions/<rrev>/`
-  * cycle-spec-history   `artifacts/spec/**/_internal/versions/vN/prd.md` seeded
-                          into a sealed cycle whose routes are all finished
+  * cycle-spec-history   `artifacts/spec/**/_internal/versions/vN/prd.md` of a
+                          sealed cycle whose routes are all finished
 Every other cycle file is a worker write scope (a shell `>` rewrites the inode
 in place, which would change every link), so it is counted and left alone.
+New cycles keep getting byte copies; to merge the cycles sealed since, run the
+same `plan` -> `apply` again with a new journal name.
 
 Candidates come from `revision.json` and cycle `manifest.json` digests; nothing
 is linked until both files are compared byte for byte immediately before the
@@ -21,7 +23,25 @@ replace. Each duplicate is replaced with `os.link(primary, staging tmp)` and
 `os.replace(tmp, path)` (atomic: a reader never sees the path missing); the
 temp lives in a staging directory on the same volume because a stray file in a
 revision directory fails concurrent revision reads. Each group's result is
-appended to the journal with fsync, so an interrupted apply resumes.
+appended to the journal with fsync, so an interrupted apply resumes. Revert
+checks every planned path, not only the ones the journal records as applied:
+a path that still shares the plan-time primary inode gets its own copy back,
+and its group stays open (retried by the next revert and counted in
+`remaining_groups` and `still_linked`) until none of its paths is linked.
+
+Applying to a real store: while apply runs (estimated 17-21 min for hearting,
+4-6 min for cairn) start no new work and no spec transaction on that store;
+every link changes the primary's ctime, so a reader of that revision fails its
+integrity check in that moment. If apply stops early, rerun the same apply
+until `remaining_groups: 0` before any revert. If revert keeps reporting the
+same skipped path, stop and report that path.
+
+Remaining window: the last re-check and `os.replace` are two steps. An atomic
+writer that lands between them loses its new bytes, and an in-place writer that
+opened a duplicate for writing before the replace keeps writing to the replaced
+inode for as long as it holds that fd, so those writes are lost too. Only
+classes without writers are linked, and files whose mtime or ctime falls in the
+last 24 h are left alone.
 """
 from __future__ import annotations
 
@@ -116,6 +136,13 @@ def _equal_fds(a, b):
             return False
         if not x:
             return True
+
+
+def _error_reason(error):
+    """One path's failure as a skip reason instead of ending the whole run."""
+    if isinstance(error, DedupError):
+        return error.reason
+    return "os-error-" + errno.errorcode.get(error.errno, "?")
 
 
 def _open_regular(path):
@@ -324,6 +351,9 @@ def cycle_rows(root, cycles, excluded, counter, deadline, threads=24):
                 rel, digest, size = locator.get("path"), item.get("content_digest"), item.get("byte_size")
                 if locator.get("kind") != "cycle-relative" or not isinstance(rel, str) or not isinstance(size, int):
                     continue
+                if rel.startswith("/") or ".." in rel.split("/"):
+                    counter.add("locator-outside-cycle", size)  # could name another (open) cycle's file
+                    continue
                 spec = rel.startswith("artifacts/spec/")
                 history = spec and HISTORY.search(rel[len("artifacts/spec/"):]) is not None
                 cls = "cycle-spec-history" if history else ("cycle-spec-live" if spec else "cycle-other")
@@ -415,7 +445,7 @@ def stat_rows(root, rows, counter, deadline, now_ns, threads=32):
             return row, None, "size-differs-from-record"
         if st.st_size == 0:
             return row, None, "empty"
-        if now_ns - st.st_mtime_ns < RECENT_NS:
+        if now_ns - max(st.st_mtime_ns, st.st_ctime_ns) < RECENT_NS:  # ctime: `cp -p` keeps an old mtime
             return row, None, "recent-24h"
         return row, st, None
 
@@ -641,9 +671,12 @@ class Journal:
     def append(self, value):
         data = (json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n").encode()
         view = memoryview(data)
-        while view:
-            view = view[os.write(self.fd, view):]
-        os.fsync(self.fd)
+        try:
+            while view:
+                view = view[os.write(self.fd, view):]
+            os.fsync(self.fd)
+        except OSError as error:  # the group stays unrecorded; revert still finds its paths
+            raise DedupError("journal-write-failed", f"{self.path}: {error}", code=74) from error
 
     def close(self):
         if self.fd is not None:
@@ -654,8 +687,9 @@ class Journal:
 class Staging:
     """Same-volume private temp directory; also proves who owns new files."""
 
-    def __init__(self, path, journal):
+    def __init__(self, path, journal, parent=None):
         self.path = Path(path)
+        self.parent = parent  # the default `<root>/.runtime/dedup-hardlink`, removed again when empty
         self.path.mkdir(parents=True, exist_ok=True)
         self.prefix = f".dedup-{os.getpid()}-"
         self.count = 0
@@ -676,19 +710,74 @@ class Staging:
         return str(self.path / f"{self.prefix}{self.count}.tmp")
 
     def remove_if_empty(self):
-        try:
-            self.path.rmdir()
-        except OSError:
-            pass
+        for directory in (self.path, self.parent):
+            if directory is None:
+                continue
+            try:
+                directory.rmdir()
+            except OSError:
+                return
 
 
-def _default_staging(journal):
-    return journal.root / ".runtime" / "dedup-hardlink" / journal.path.stem
+def _staging(journal, staging):
+    if staging:
+        return Staging(staging, journal)
+    parent = journal.root / ".runtime" / "dedup-hardlink"
+    return Staging(parent / journal.path.stem, journal, parent=parent)
 
 
 # ---------------------------------------------------------------------------
 # apply
 # ---------------------------------------------------------------------------
+
+def _apply_link(root, group, link, primary_path, st_p, pfd, staging):
+    """Link one duplicate; returns "linked", "already", or the reason it was skipped."""
+    primary = group["primary"]
+    path = str(root / link["path"])
+    try:
+        st_d = _lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    if st_d.st_ino == st_p.st_ino and st_d.st_dev == st_p.st_dev:
+        return "already"  # replaced before an interruption
+    if not stat.S_ISREG(st_d.st_mode) or not _same(st_d, link):
+        return "changed-since-plan"
+    if (st_d.st_dev, st_d.st_uid, st_d.st_gid, st_d.st_mode) != (group["dev"], group["uid"], group["gid"], group["mode"]):
+        return "changed-since-plan"
+    if st_d.st_nlink > link["nlink"]:  # only our own replacements may lower it
+        return "external-hardlink"
+    dfd = _open_regular(path)
+    try:
+        before = os.fstat(dfd)
+        if before.st_ino != st_d.st_ino or not _equal_fds(pfd, dfd):
+            return "content-differs"
+    finally:
+        os.close(dfd)
+    tmp = staging.name()
+    try:
+        os.link(primary_path, tmp, follow_symlinks=False)
+    except OSError as error:
+        return "link-failed-" + errno.errorcode.get(error.errno, "?")
+    try:
+        if _lstat(tmp).st_ino != st_p.st_ino:
+            return "changed-during-apply"
+        _before_replace(path)
+        now_d, now_p = _lstat(path), _lstat(primary_path)
+        if ((now_d.st_ino, now_d.st_size, now_d.st_mtime_ns, now_d.st_ctime_ns) !=
+                (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                or now_p.st_ino != st_p.st_ino or not _same(now_p, primary)):
+            return "changed-during-apply"
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    _fsync_dir(os.path.dirname(path))
+    return "linked"
+
 
 def _apply_group(root, group, staging, done):
     primary_path = str(root / group["primary"]["path"])
@@ -712,66 +801,31 @@ def _apply_group(root, group, staging, done):
     if (group["uid"], group["gid"]) != staging.owner:
         result["group_skipped"] = "owner-not-restorable"
         return result
-    pfd = _open_regular(primary_path)
     try:
-        if not _same(os.fstat(pfd), primary):
-            result["group_skipped"] = "primary-changed"
-            return result
-        if _sha256_fd(pfd) != group["digest"]:
-            result["group_skipped"] = "primary-digest-mismatch"
+        pfd = _open_regular(primary_path)
+    except (OSError, DedupError) as error:
+        result["group_skipped"] = "primary-unreadable-" + _error_reason(error)
+        return result
+    try:
+        try:
+            if not _same(os.fstat(pfd), primary):
+                result["group_skipped"] = "primary-changed"
+                return result
+            if _sha256_fd(pfd) != group["digest"]:
+                result["group_skipped"] = "primary-digest-mismatch"
+                return result
+        except OSError as error:
+            result["group_skipped"] = "primary-unreadable-" + _error_reason(error)
             return result
         for link in group["links"]:
-            path = str(root / link["path"])
             try:
-                st_d = _lstat(path)
-            except OSError:
-                result["skipped"].append({"path": link["path"], "reason": "missing"})
-                continue
-            if st_d.st_ino == st_p.st_ino and st_d.st_dev == st_p.st_dev:
-                result["already"].append(link["path"])  # replaced before an interruption
-                continue
-            if not stat.S_ISREG(st_d.st_mode) or not _same(st_d, link):
-                result["skipped"].append({"path": link["path"], "reason": "changed-since-plan"})
-                continue
-            if (st_d.st_dev, st_d.st_uid, st_d.st_gid, st_d.st_mode) != (group["dev"], group["uid"], group["gid"], group["mode"]):
-                result["skipped"].append({"path": link["path"], "reason": "changed-since-plan"})
-                continue
-            if st_d.st_nlink > link["nlink"]:  # only our own replacements may lower it
-                result["skipped"].append({"path": link["path"], "reason": "external-hardlink"})
-                continue
-            dfd = _open_regular(path)
-            try:
-                before = os.fstat(dfd)
-                if before.st_ino != st_d.st_ino or not _equal_fds(pfd, dfd):
-                    result["skipped"].append({"path": link["path"], "reason": "content-differs"})
-                    continue
-            finally:
-                os.close(dfd)
-            tmp = staging.name()
-            try:
-                os.link(primary_path, tmp, follow_symlinks=False)
-            except OSError as error:
-                result["skipped"].append({"path": link["path"],
-                                          "reason": "link-failed-" + errno.errorcode.get(error.errno, "?")})
-                continue
-            try:
-                if _lstat(tmp).st_ino != st_p.st_ino:
-                    result["skipped"].append({"path": link["path"], "reason": "changed-during-apply"})
-                    continue
-                _before_replace(path)
-                now_d, now_p = _lstat(path), _lstat(primary_path)
-                if ((now_d.st_ino, now_d.st_size, now_d.st_mtime_ns, now_d.st_ctime_ns) !=
-                        (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                        or now_p.st_ino != st_p.st_ino or not _same(now_p, primary)):
-                    result["skipped"].append({"path": link["path"], "reason": "changed-during-apply"})
-                    continue
-                os.replace(tmp, path)
-                tmp = None
-            finally:
-                if tmp is not None:
-                    os.unlink(tmp)
-            _fsync_dir(os.path.dirname(path))
-            result["linked"].append(link["path"])
+                outcome = _apply_link(root, group, link, primary_path, st_p, pfd, staging)
+            except (OSError, DedupError) as error:
+                outcome = _error_reason(error)
+            if outcome in ("linked", "already"):
+                result[outcome].append(link["path"])
+            else:
+                result["skipped"].append({"path": link["path"], "reason": outcome})
     finally:
         os.close(pfd)
     return result
@@ -783,7 +837,7 @@ def apply(journal_path, *, staging=None, max_seconds=None, out=None):
     if os.stat(root).st_dev != journal.header["root_dev"]:
         raise DedupError("root-volume-changed", root)
     journal.lock()
-    stage = Staging(staging or _default_staging(journal), journal)
+    stage = _staging(journal, staging)
     deadline = _Deadline(max_seconds)
     totals = {"groups_done": 0, "linked": 0, "already": 0, "skipped": {}, "group_skipped": {},
               "freed_bytes": 0, "stopped_by_deadline": False}
@@ -826,53 +880,97 @@ def apply(journal_path, *, staging=None, max_seconds=None, out=None):
 # verify / revert
 # ---------------------------------------------------------------------------
 
+# A revert event closes its group only when none of its planned paths was left on
+# the plan-time primary inode; any other skip keeps the group open for the next revert.
+REVERT_DONE = {"not-linked-now"}
+LINKED, OTHER, MISSING = "linked", "other", "missing"
+
+
+def _revert_closed(event):
+    return event is not None and all(skip.get("reason") in REVERT_DONE for skip in event.get("skipped") or [])
+
+
+def _link_state(root, group, link):
+    """Whether a planned path shares the plan-time primary inode (what apply links to) now."""
+    try:
+        st = _lstat(str(root / link["path"]))
+    except FileNotFoundError:
+        return MISSING
+    except OSError as error:
+        return _error_reason(error)
+    if (st.st_dev, st.st_ino) == (group["primary"]["dev"], group["primary"]["ino"]) and stat.S_ISREG(st.st_mode):
+        return LINKED
+    return OTHER
+
+
+def _link_states(root, groups, threads=16):
+    pairs = [(group, link) for group in groups for link in group["links"]]
+    with concurrent.futures.ThreadPoolExecutor(threads) as pool:
+        states = list(pool.map(lambda pair: _link_state(root, *pair), pairs))
+    return {(group["id"], link["path"]): state for (group, link), state in zip(pairs, states)}
+
+
 def verify(journal_path, *, hash_primaries=True):
     journal = Journal(journal_path)
     root = journal.root
     report = {"groups": 0, "linked_ok": 0, "diverged": 0, "missing": 0, "primary_bad": 0, "reverted_groups": 0,
-              "diverged_paths": [], "bad_primaries": []}
+              "still_linked": 0, "unrecorded_links": 0, "unreadable": 0,
+              "diverged_paths": [], "bad_primaries": [], "unrecorded_paths": []}
+    states = _link_states(root, journal.groups)
     for group in journal.groups:
         applied = journal.applied.get(group["id"])
-        if group["id"] in journal.reverted:
+        recorded = set(applied["linked"]) | set(applied["already"]) if applied else set()
+        for link in group["links"]:
+            state = states[(group["id"], link["path"])]
+            if state == LINKED:
+                report["still_linked"] += 1  # after a finished revert this is 0
+                if link["path"] not in recorded:  # an apply stopped before it journaled the group
+                    report["unrecorded_links"] += 1
+                    if len(report["unrecorded_paths"]) < 50:
+                        report["unrecorded_paths"].append(link["path"])
+            elif state not in (OTHER, MISSING):
+                report["unreadable"] += 1
+        if _revert_closed(journal.reverted.get(group["id"])):
             report["reverted_groups"] += 1
             continue
-        if not applied:
-            continue
+        if not applied or group["id"] in journal.reverted:
+            continue  # never applied, or a revert is still open: `still_linked` covers it
         report["groups"] += 1
+        primary = str(root / group["primary"]["path"])
         try:
-            st_p = _lstat(str(root / group["primary"]["path"]))
-        except OSError:
+            _lstat(primary)
+            if hash_primaries:
+                fd = _open_regular(primary)
+                try:
+                    good = _sha256_fd(fd) == group["digest"]
+                finally:
+                    os.close(fd)
+            else:
+                good = True
+        except (OSError, DedupError):
+            good = False
+        if not good:
             report["primary_bad"] += 1
             report["bad_primaries"].append(group["primary"]["path"])
-            continue
-        if hash_primaries:
-            fd = _open_regular(str(root / group["primary"]["path"]))
-            try:
-                if _sha256_fd(fd) != group["digest"]:
-                    report["primary_bad"] += 1
-                    report["bad_primaries"].append(group["primary"]["path"])
-            finally:
-                os.close(fd)
         for rel in applied["linked"] + applied["already"]:
-            try:
-                st = _lstat(str(root / rel))
-            except OSError:
-                report["missing"] += 1
-                continue
-            if (st.st_dev, st.st_ino) == (st_p.st_dev, st_p.st_ino):
+            state = states.get((group["id"], rel))
+            if state == LINKED:
                 report["linked_ok"] += 1
-            else:
+            elif state == MISSING:
+                report["missing"] += 1
+            elif state == OTHER:
                 report["diverged"] += 1  # rewritten since apply (atomic writer): no longer shared
                 if len(report["diverged_paths"]) < 50:
                     report["diverged_paths"].append(rel)
     return report
 
 
-def _revert_path(root, group, link, primary_ino, stage):
+def _revert_path(root, group, link, stage):
+    primary_ino = group["primary"]["ino"]
     path = str(root / link["path"])
     st = _lstat(path)
     if st.st_ino != primary_ino or not stat.S_ISREG(st.st_mode):
-        return "not-linked-now"
+        return "changed-during-revert"  # linked a moment ago; the next revert looks again
     src = _open_regular(path)
     tmp = stage.name()
     try:
@@ -927,36 +1025,47 @@ def _revert_path(root, group, link, primary_ino, stage):
 
 
 def revert(journal_path, *, staging=None, max_seconds=None):
+    """Give every planned path that still shares the plan-time primary inode its own copy.
+
+    Every group is checked, whether or not an `applied` event records it: an apply
+    stopped mid-group has replaced paths without journaling them. A group whose
+    revert left a linked path (or could not tell) stays open for the next revert.
+    """
     journal = Journal(journal_path)
     root = journal.root
     journal.lock()
-    stage = Staging(staging or _default_staging(journal), journal)
+    stage = _staging(journal, staging)
     deadline = _Deadline(max_seconds)
     totals = {"groups_done": 0, "restored": 0, "skipped": {}, "stopped_by_deadline": False}
     try:
         for group in reversed(journal.groups):
-            applied = journal.applied.get(group["id"])
-            if not applied or group["id"] in journal.reverted:
+            prior = journal.reverted.get(group["id"])
+            if _revert_closed(prior):
                 continue
             if deadline.expired():
                 totals["stopped_by_deadline"] = True
                 break
-            moved = set(applied["linked"]) | set(applied["already"])
+            applied = journal.applied.get(group["id"]) or {}
+            recorded = set(applied.get("linked") or []) | set(applied.get("already") or [])
             event = {"kind": "reverted", "group": group["id"], "restored": [], "skipped": []}
-            if moved:
-                try:
-                    primary_ino = _lstat(str(root / group["primary"]["path"])).st_ino
-                except OSError:
-                    primary_ino = None
-                for link in group["links"]:
-                    if link["path"] not in moved:
-                        continue
-                    reason = "primary-missing" if primary_ino is None else _revert_path(root, group, link, primary_ino, stage)
-                    if reason is None:
-                        event["restored"].append(link["path"])
-                    else:
-                        event["skipped"].append({"path": link["path"], "reason": reason})
-                        totals["skipped"][reason] = totals["skipped"].get(reason, 0) + 1
+            for link in group["links"]:
+                state = _link_state(root, group, link)
+                if state == LINKED:
+                    try:
+                        reason = _revert_path(root, group, link, stage)
+                    except (OSError, DedupError) as error:
+                        reason = _error_reason(error)
+                elif state in (OTHER, MISSING):
+                    if prior is not None or link["path"] not in recorded:
+                        continue  # never linked, or restored by an earlier revert
+                    reason = "not-linked-now"  # rewritten since apply: left as it is
+                else:
+                    reason = state  # cannot tell; the group stays open
+                if reason is None:
+                    event["restored"].append(link["path"])
+                else:
+                    event["skipped"].append({"path": link["path"], "reason": reason})
+                    totals["skipped"][reason] = totals["skipped"].get(reason, 0) + 1
             event["at_ns"] = time.time_ns()
             journal.append(event)
             journal.reverted[group["id"]] = event
@@ -965,8 +1074,9 @@ def revert(journal_path, *, staging=None, max_seconds=None):
     finally:
         journal.close()
         stage.remove_if_empty()
-    totals["remaining_groups"] = sum(1 for g in journal.groups
-                                     if g["id"] in journal.applied and g["id"] not in journal.reverted)
+    open_groups = [g for g in journal.groups if not _revert_closed(journal.reverted.get(g["id"]))]
+    totals["remaining_groups"] = len(open_groups)
+    totals["still_linked"] = sum(1 for state in _link_states(root, open_groups).values() if state == LINKED)
     return totals
 
 
@@ -1015,6 +1125,9 @@ def main(argv=None):
     except DedupError as error:
         print(json.dumps({"error": error.reason, "detail": error.detail}), file=sys.stderr)
         return error.code
+    except OSError as error:  # e.g. the staging directory cannot be created
+        print(json.dumps({"error": _error_reason(error), "detail": str(error)}), file=sys.stderr)
+        return 74
     return 0
 
 

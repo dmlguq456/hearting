@@ -84,11 +84,8 @@ def select_seed_reference(artifact: Path, receipt: dict | None, *, reference_id:
     return None
 
 
-def revision_history(artifact, revision, *, excluded=(), components=None, sources=None):
-    """Only missing history bytes; never reread obsolete current PRDs.
-
-    `sources`, when given, receives each recorded row's physical shared file
-    (the seed may hard-link it; see `_write_seed_copy`)."""
+def revision_history(artifact, revision, *, excluded=(), components=None):
+    """Only missing history bytes; never reread obsolete current PRDs."""
     from artifact_spec_storage import revision_address, read_inventory, read_files, StorageError
     def wanted(name):
         parts = Path(name).parts
@@ -102,35 +99,12 @@ def revision_history(artifact, revision, *, excluded=(), components=None, source
             paths = [row['path'] for row in record['files'] if wanted(row['path'])]
             if not paths: return {}
             files, _ = read_files(artifact, address[0], address[1], paths=paths)
-            if sources is not None:
-                sources.update({name: file.path for name, file in files.items()})
             return {name: file.data for name, file in files.items()}
         except StorageError as error:
             raise PRODUCER.ProducerError(error.code, str(error)) from error
     return {src.relative_to(revision).as_posix(): src.read_bytes()
             for src in sorted(revision.rglob('prd.md'))
             if wanted(src.relative_to(revision).as_posix()) and src.is_file() and not src.is_symlink()}
-
-
-def _history_sources(artifact, ref_id, revision_id, record, names):
-    """Physical shared file of each `_internal/versions/vN/prd.md` row of one revision."""
-    from artifact_producer_spec import _stored_sources
-    from artifact_producer_store import SEED_HISTORY_ROW
-    stored = _stored_sources(record)
-    sources = {}
-    for name in names:
-        if ref_id and revision_id and SEED_HISTORY_ROW.search(name):
-            provider, source = stored.get(name, (revision_id, name))
-            sources[name] = Path(artifact) / "shared" / "spec" / ref_id / "revisions" / provider / source
-    return sources
-
-
-def _seed_write(dst, data, source):
-    """A history row may share the immutable shared file; everything else is a copy."""
-    if source is not None:
-        PRODUCER._write_seed_copy(dst, data, source)
-    else:
-        PRODUCER._write_atomic(dst, data)
 
 
 def seed_component_spec(spec_base, artifact, reference, receipt, components):
@@ -163,16 +137,13 @@ def seed_component_spec(spec_base, artifact, reference, receipt, components):
     wanted = set(components) if components is not None else PRODUCER.component_set(tree) - {"revision.json"}
     pending = wanted - {c for c, complete in done.items() if complete}
     seed_tree = dict(tree)
-    seed_sources = _history_sources(artifact, ref_id, base, record, tree)
     history_paths = set()
     if base:
         revisions = artifact/"shared/spec"/ref_id/"revisions"
         for other in sorted(revisions.iterdir()):
             if not other.is_dir() or other.name == base:
                 continue
-            other_sources = {}
-            for name, data in revision_history(artifact, other, excluded=seed_tree, components=pending,
-                                               sources=other_sources).items():
+            for name, data in revision_history(artifact, other, excluded=seed_tree, components=pending).items():
                 rel = Path(name)
                 parts = rel.parts
                 if (len(parts) < 4 or parts[0] not in pending or parts[-4] != "_internal"
@@ -180,8 +151,6 @@ def seed_component_spec(spec_base, artifact, reference, receipt, components):
                     continue
                 if parts[-1] == 'prd.md' and name not in seed_tree:
                     seed_tree[name] = data
-                    if name in other_sources:
-                        seed_sources[name] = other_sources[name]
                     history_paths.add(rel.as_posix())
     for path in spec_base.rglob("*"):
         rel = path.relative_to(spec_base).as_posix()
@@ -208,7 +177,7 @@ def seed_component_spec(spec_base, artifact, reference, receipt, components):
         dst = spec_base/rel
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            _seed_write(dst, data, seed_sources.get(rel))
+            PRODUCER._write_atomic(dst, data)
             if rel in history_paths:
                 history += 1
             else:
@@ -265,7 +234,6 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
     ref_id=(reference or {}).get("shared_reference_id")
     revision=artifact/"shared"/"spec"/ref_id/"revisions"/latest if ref_id and latest else None
     original_tree = {}
-    original_record = {}
     if receipt is not None:
         base=PRODUCER._spec_admission_base(artifact,spec_base,ref_id,None)
         # The receipt is the original input, not a pin to today's pointer.
@@ -273,7 +241,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
         if reference and latest not in reference.get("revisions", []):
             raise PRODUCER.ProducerError("shared-base-invalid",str(latest))
         revision=artifact/"shared/spec"/ref_id/"revisions"/base if ref_id and base else None
-        original_tree,original_record=(PRODUCER._verified_shared_spec(artifact,ref_id,base) if revision else ({},{}))
+        original_tree=(PRODUCER._verified_shared_spec(artifact,ref_id,base)[0] if revision else {})
         if receipt.get("seed_complete") is True:
             return {"status":"seed-skipped","reason":"prd-present" if has_prd else "seed-complete",
                     "prd_present":has_prd,"preexisting_files":preexisting,"spec_base":str(spec_base),
@@ -305,7 +273,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
             raise PRODUCER.ProducerError("shared-seed-state-unproven",rel)
     else:
         if revision is not None:
-            original_tree, original_record = PRODUCER._verified_shared_spec(artifact, ref_id, latest)
+            original_tree = PRODUCER._verified_shared_spec(artifact, ref_id, latest)[0]
         # Only known unchanged seed files and explicit worker research can
         # predate the receipt. Unknown/deleted old files must not be resurrected.
         for path in spec_base.rglob("*"):
@@ -331,7 +299,6 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
         PRODUCER._write_atomic(receipt_path,PRODUCER._json_bytes(receipt))
         return {"status":"seed-skipped","reason":"prd-present" if has_prd else "no-shared-revision","prd_present":has_prd,"preexisting_files":preexisting,"spec_base":str(spec_base)}
     copied=0; kept=0; kept_paths=[]
-    sources=_history_sources(artifact, ref_id, revision.name, original_record, original_tree)
     for name, data in sorted(original_tree.items()):
         rel=Path(name)
         if rel.as_posix() in {"revision.json",PRODUCER.SPEC_BASE_RECEIPT}:
@@ -345,7 +312,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
             if len(kept_paths)<20: kept_paths.append(rel.as_posix())
             continue
         dst.parent.mkdir(parents=True,exist_ok=True)
-        _seed_write(dst, data, sources.get(name)); copied+=1
+        PRODUCER._write_atomic(dst, data); copied+=1
     history=0
     history_present = {path.relative_to(spec_base).as_posix() for path in spec_base.rglob('*') if path.is_file()}
     revisions_dir=revision.parent
@@ -353,8 +320,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
         for other in sorted(revisions_dir.iterdir()):
             if other==revision or not other.is_dir():
                 continue
-            other_sources={}
-            for name, data in revision_history(artifact, other, excluded=history_present, sources=other_sources).items():
+            for name, data in revision_history(artifact, other, excluded=history_present).items():
                 rel=Path(name)
                 parts=rel.parts
                 # <component?>/_internal/versions/vN/prd.md -- immutable history rows only
@@ -363,7 +329,7 @@ def _seed_cycle_spec(spec_base: Path, artifact: Path, spec_root: Path | None = N
                 dst=spec_base/rel
                 if dst.exists() or parts[-1] != 'prd.md':
                     continue
-                dst.parent.mkdir(parents=True,exist_ok=True); _seed_write(dst, data, other_sources.get(name)); history+=1
+                dst.parent.mkdir(parents=True,exist_ok=True); PRODUCER._write_atomic(dst, data); history+=1
                 history_present.add(name)
     receipt["seed_complete"]=True
     PRODUCER._write_atomic(receipt_path,PRODUCER._json_bytes(receipt))
