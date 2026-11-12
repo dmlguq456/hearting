@@ -49,6 +49,73 @@ display worker. VT, scratch-display, layout and display-host failures degrade
 to a plain relay of that same process; they never restart the CLI or request
 manual recovery. Normal key bytes still go directly from the display worker
 to the same PTY, without an extra broker hop.
+A running window follows a new install without restarting its CLI. Each
+display host compares the installed link it was started from
+(`HEARTING_SHELL_HOST_PATH`, never resolved) with its own resolved file; it
+notices a change from a watch on the link's directory and at each idle
+transition, with no timer. While a newer host is installed and not yet taken,
+the tidy-notice slot shows one lowest-priority line (`session_shell.upgrade_pending`),
+never over another notice; beside the native area the panel's thin rule that parts the
+session's content from the head goes with it, and nothing else on the screen changes.
+An open route or message page has no notice slot: the same words stand in its head,
+one row under the page counter, until the page closes.
+The host asks the PTY owner for a successor only at a safe moment: idle, an
+empty composer, no open form or answerable question, no route page, settings,
+Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
+action worker. Keys that reached native since the last submitted turn leave the
+composer unproven (an erased draft, a form answered with Enter, history-scroll
+keys, a turn stopped without a stop callback), so the switch then follows the
+next submitted turn. A start or selection (a resume picker's Enter, `/clear`,
+OpenCode's plugin reload) counts the bytes up to the last Enter as submitted, as
+delivery readiness does; keys after that Enter still wait for the next submitted turn.
+A window with no selected session (OpenCode on its home route) has
+no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
+same session, no keys between) keeps an open route page. The owner starts the successor from the same installed path. The old host stops
+reading, withdraws its binding and writes a private seed: the native screen
+with every line above the viewport, cursor, modes, scroll region and display
+state. The successor restores it, takes the same `control.sock` path by an
+atomic rename, registers, paints only the differences, and reads the PTY and
+keyboard only after the owner commits the switch. The native process, its
+conversation, the draft and pending deliveries stay; success shows nothing. A
+failure or timeout before the commit resumes the old host as it was (its
+display is painted whole once, and the successor's stderr never reaches the
+terminal), and keys
+typed meanwhile wait in the terminal buffer for whichever host reads next. An old
+host that loses its own display while frozen falls to the plain relay and ends its
+side of the hand-over channel, so the owner drops the successor before it reads;
+a `retire` that was already sent still ends that host. The PTY and the keys never
+have two readers.
+After three failures toward one installed file the window stops asking and
+keeps the waiting line. When the seed cannot carry the lines above the viewport
+(over 8 MiB, or their serialization fails), the switch still happens with the
+visible screen and shows `session_shell.upgrade_scrollback` until the next
+submitted prompt; an unreadable scroll region keeps the old host. What a person
+scrolls back to is native's own history view (same process) or the outer
+terminal's history from before the shell entered the alternate screen, which
+neither host leaves. A raw relay window is not revived. The protocol version is
+`HEARTING_SHELL_SUCCESSION`; the PTY owner never changes during a window's life,
+so a later host speaks the version of the owner that started it or does not
+succeed. A window started before this protocol (v4.20.0 and earlier) is reopened
+once; later installs need no reopen. The host sees the install through the link
+rather than a signal from the installer, so no install path has to find live
+windows; where the link's directory cannot be watched, only the idle check
+remains.
+A session reopened under the same native session ID (Claude `--resume`, Codex
+`resume`, OpenCode `-s`) takes back the routes it left running. The reopening itself
+(the SessionStart hook with source `resume`, or OpenCode's selected-TUI resume report;
+never the steward's periodic resume pass) starts, once per resume, a detached
+`utilities/session_route_resume.py` that runs `capability-route.py start --route`
+for every route this session's route-chain ledger names whose file exists, has no
+outcome, and has work this session launched still open in the dispatch registry:
+the latest owner attempt is `open`/`running` (a route without an owner: any of its
+attempts). Oldest first, this is the start a person used to run by hand, so a live
+owner is reused, a dead one is replaced, and the existing gates still refuse. A
+route that was only composed, or whose owner ended (`done`, `killed`, `cancelled`),
+waits for a person's own `start`. Each result is kept under the
+session state's `route-resume/`. Only the last started route's receipt reaches
+the next prompt; the others show in the panel and Fleet. Resume aliases are a
+display join and are not read. An automatic display switch keeps the native
+process and needs none of this.
 During an admitted paste, its delayed Enter and held human bytes belong to the
 retained PTY owner. The display publishes a held count only after those bytes
 are retained outside its own memory. Input returns to the direct path after

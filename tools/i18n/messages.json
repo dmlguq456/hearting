@@ -1674,6 +1674,14 @@
    "en": "current-session (tier not recorded)",
    "ko": "current-session(등급 미기록)"
   },
+  "session_shell.upgrade_pending": {
+   "en": "New release waiting",
+   "ko": "새 판 대기"
+  },
+  "session_shell.upgrade_scrollback": {
+   "en": "Switched without scrollback",
+   "ko": "스크롤백 없이 전환됨"
+  },
   "tidy.ago.day": {
    "en": "{count} day ago",
    "ko": "{count}일 전"

@@ -1,0 +1,1357 @@
+#!/usr/bin/env python3
+"""Incremental paths against a fresh full computation, event by event.
+
+The reuse in the registry reader, the stream readers, the Fleet collectors and
+the answer-wait producer must never answer with a value that a process starting
+from nothing would not give for the same inputs.  Every scenario below changes
+one input the way a real writer does, then compares
+
+* WARM  - one long-lived process that keeps all of its caches between steps, and
+* FRESH - a new subprocess with empty caches (and no disk cache), same fixture,
+          same injected clock, same function.
+
+The comparison is exact except for the small allow-list ``ALLOWED``.  There is
+no timing assertion in this file; speed is measured by
+``tools/measure_e2e_latency.py`` and is never a gate here.
+
+A failure message starts with the event id (``E01``..``E20``) and the JSON
+pointer of the first difference, so a falsifier run can tell which event caught
+it.  Weakening a scenario or widening ``ALLOWED`` to make a stale value pass is
+the thing this file exists to prevent.
+"""
+from __future__ import annotations
+
+import contextlib
+import datetime as _datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time as _time
+import types
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+SELF = Path(__file__).resolve()
+for _entry in (ROOT, ROOT / "utilities", ROOT / "tools"):
+    if str(_entry) not in sys.path:
+        sys.path.insert(0, str(_entry))
+
+# ---------------------------------------------------------------------------
+# injected clock
+# ---------------------------------------------------------------------------
+
+CLOCK_BASE = 1_800_000_000.0          # 2027-01-15T08:00:00Z, later than any real mtime
+FLEET_PACKAGES = ("fleet", "tools.fleet")   # the producer imports the second spelling
+
+# Modules that bind the wall clock by name.  ``.now()`` / ``strftime`` readers
+# that import the stdlib names inside a function are covered by the global
+# ``time`` patches below.
+CLOCK_DATETIME_MODULES = tuple(
+    "%s.collectors.%s" % (pkg, name)
+    for pkg in FLEET_PACKAGES for name in ("memory", "dispatch", "shell_jobs")
+) + ("route_authority",)
+
+
+class FixtureClock:
+    """One settable instant for every wall-clock reader the collectors use.
+
+    ``time.monotonic`` is deliberately left real: it only measures durations,
+    and pinning it would hide the 30 s observation-gap rules in the registry
+    reader instead of exercising them.
+    """
+
+    def __init__(self, now: float = CLOCK_BASE):
+        self.now = float(now)
+
+    def advance(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+    def time(self) -> float:
+        return self.now
+
+    def time_ns(self) -> int:
+        return int(round(self.now * 1_000_000_000))
+
+    def frozen_datetime(self):
+        clock = self
+
+        class FrozenDatetime(_datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromtimestamp(clock.now, tz)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.fromtimestamp(clock.now, _datetime.timezone.utc).replace(tzinfo=None)
+
+        return FrozenDatetime
+
+    @contextlib.contextmanager
+    def installed(self):
+        frozen = self.frozen_datetime()
+        shim = types.SimpleNamespace(**{name: getattr(_datetime, name) for name in dir(_datetime)
+                                        if not name.startswith("__")})
+        shim.datetime = frozen
+        real_localtime, real_gmtime = _time.localtime, _time.gmtime
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("time.time", self.time))
+            stack.enter_context(mock.patch("time.time_ns", self.time_ns))
+            stack.enter_context(mock.patch(
+                "time.localtime", lambda secs=None: real_localtime(self.now if secs is None else secs)))
+            stack.enter_context(mock.patch(
+                "time.gmtime", lambda secs=None: real_gmtime(self.now if secs is None else secs)))
+            for name in CLOCK_DATETIME_MODULES:
+                module = sys.modules.get(name)
+                held = getattr(module, "datetime", None)
+                if held is _datetime.datetime:
+                    stack.enter_context(mock.patch.object(module, "datetime", frozen))
+                elif held is _datetime:
+                    stack.enter_context(mock.patch.object(module, "datetime", shim))
+            yield self
+
+
+# ---------------------------------------------------------------------------
+# the allow-list: the only thing the comparison ignores
+# ---------------------------------------------------------------------------
+# Entries come from "same inputs, same clock, two fresh processes" (self-check A)
+# and nowhere else.  Every entry carries its reason.  It is empty on purpose when
+# self-check A shows nothing to allow: an entry is a hole in the comparison.
+# Run metadata that is not part of any observed value is stripped by
+# ``normalize`` below (fixture roots), not listed here.
+
+ALLOWED: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"^/o3_fleet/(fast_first|full)/observations/[^/]+/(last_success_at|age)$"),
+     "health bookkeeping stamped with time.monotonic(): relative to the process start "
+     "(a warm process by definition has an older first success than a new one); "
+     "the state and reason beside them stay compared"),
+)
+
+# Run metadata that names the computing process itself.  A rewrite keeps the rest
+# of the string (here the injected clock) in the comparison; it never drops a value.
+RUN_METADATA_REWRITES: tuple[tuple[re.Pattern, str, str], ...] = (
+    (re.compile(r"^fleet:\d+:(\d+)$"), r"fleet:$PID:\1",
+     "observations.*.generation_identity is 'fleet:<computing pid>:<clock ns>'; "
+     "the pid is the one value that differs between any two processes"),
+)
+
+
+# ---------------------------------------------------------------------------
+# fixture
+# ---------------------------------------------------------------------------
+
+CLAUDE_PID, CODEX_PID = 910_001, 910_002
+CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
+CODEX_SID = "22222222-2222-4222-8222-222222222222"
+OTHER_SID = "33333333-3333-4333-8333-333333333333"
+SECOND_CODEX_SID = "44444444-4444-4444-8444-444444444444"
+
+
+def _canonical(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def iso(epoch: float) -> str:
+    return _datetime.datetime.fromtimestamp(epoch, _datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def touch(path: Path, when: float) -> None:
+    os.utime(path, (when, when))
+
+
+def route_record(root: Path, index: int, *, revision: int = 0, nodes: int = 2) -> dict:
+    """A sealed route record; ``revision`` changes the content and so the hash."""
+    from route_identity import route_hash, route_id_from_hash
+    record = {
+        "schema_version": 1, "capability": "autopilot-code", "capability_mode": "dev",
+        "requested_intensity": "standard", "effective_intensity": "standard",
+        "execution_topology": "staged", "owner_depth": 1, "tracking": "tracked",
+        "spec_touch": False, "cwd": str(root / "work"), "artifact_root": str(root / "artifacts"),
+        "fixture_route": index, "fixture_revision": revision, "slug": "route-slug-%d" % index,
+        "nodes": [{"id": "n%d" % n, "kind": "pipeline-stage", "depth": 2,
+                   "depends_on": ["n%d" % (n - 1)] if n else [], "role": "fast implementer",
+                   "write_scope": ["src/**"], "resource_class": "normal",
+                   "completion_gate": "gate-%d" % n} for n in range(nodes)],
+    }
+    digest = route_hash(record)
+    record["route_hash"], record["route_id"] = digest, route_id_from_hash(digest)
+    return record
+
+
+def write_json(path: Path, value, when: float = CLOCK_BASE - 600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    touch(path, when)
+
+
+def attempt_row(stamp, status: str, slug: str, meta: dict, cwd: str) -> str:
+    pairs = ",".join("%s=%s" % (key, value) for key, value in meta.items())
+    # ISO stamps, as the real writers produce: the displayed "running Xm" derives from them.
+    return "\t".join((stamp if isinstance(stamp, str) else iso(stamp),
+                      status, cwd, cwd, slug, pairs))
+
+
+class Fixture:
+    """A small deterministic state tree.  Everything under ``root`` is ours."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.jobs = self.root / "registry" / ".dispatch" / "jobs.log"
+        self.routes = self.root / "routes"
+        self.claude = self.root / "claude-config"
+        self.codex = self.root / "codex-home"
+        self.work = self.root / "work"
+        self.logs = self.jobs.parent / "logs"      # the registry's own log directory
+        self.liveness = self.root / "liveness.json"
+        self.revision = {0: 0, 1: 0, 2: 0}
+
+    # -- paths ------------------------------------------------------------
+    def route_path(self, index: int) -> Path:
+        return self.routes / ("route-%d.json" % index)
+
+    def outcome_path(self, index: int) -> Path:
+        return self.routes / ("route-%d.outcome.json" % index)
+
+    def node_route_path(self, index: int) -> Path:
+        return self.routes / ("route-%d.node.json" % index)
+
+    def claude_stream(self) -> Path:
+        from claude_project_dir import encode_project_dir
+        return (self.claude / "projects" / encode_project_dir(str(self.work))
+                / (CLAUDE_SID + ".jsonl"))
+
+    def codex_rollout(self, sid: str = CODEX_SID) -> Path:
+        return (self.codex / "sessions" / "2027" / "01" / "15"
+                / ("rollout-2027-01-15T07-50-00-%s.jsonl" % sid))
+
+    def chain_route_path(self, index: int) -> Path:
+        return self.routes / ("route-%d.chain.json" % index)
+
+    def chain_outcome_path(self, index: int) -> Path:
+        return self.routes / ("route-%d.chain.outcome.json" % index)
+
+    def chain_dir(self) -> Path:
+        return self.root / "route-chains"
+
+    def write_chain_ledger(self) -> None:
+        """The session-anchored route chain the Fleet displays for the claude session."""
+        from fleet import route_chain
+        lines = []
+        for index in range(3):
+            record = route_record(self.root, index, revision=self.revision[index])
+            line = route_chain.build_line(
+                {**record, "campaign_key": "camp-1", "slug": "slug-%d" % index},
+                event="compile", harness="claude", session_id=CLAUDE_SID,
+                route_file=self.chain_route_path(index), now=CLOCK_BASE - 4000 + index)
+            lines.append(line)
+        path = self.chain_dir() / "claude" / (CLAUDE_SID + ".jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(line, sort_keys=True, ensure_ascii=False) + "\n"
+                                for line in lines), encoding="utf-8")
+        touch(path, CLOCK_BASE - 300)
+
+    def worker_log(self, attempt: str = "att-child-0") -> Path:
+        return self.logs / ("run.%s.claude.jsonl" % attempt)
+
+    def quota_log(self, attempt: str) -> Path:
+        return self.logs / ("run.%s.claude.jsonl" % attempt)
+
+    # -- rows -------------------------------------------------------------
+    def owner_and_child_rows(self) -> list[str]:
+        out, cwd = [], str(self.work)
+        for index in range(3):
+            record = route_record(self.root, index, revision=self.revision[index])
+            route_file = self.route_path(index)
+            base = {
+                "attempt_schema_version": "2", "capability": "autopilot-code",
+                "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+                "route_id": record["route_id"], "route_hash": record["route_hash"],
+                "route_file": str(route_file), "owner_route_id": record["route_id"],
+                "owner_route_hash": record["route_hash"], "owner_route_file": str(route_file),
+            }
+            out.append(attempt_row(CLOCK_BASE - 3000 + index, "open", "slug-%d" % index, {
+                **base, "harness": "claude", "dispatch_depth": "1", "worker_type": "owner",
+                "attempt_id": "att-owner-%d" % index, "launch_claimed": "1",
+                "launch_started": "1", "pid": str(CLAUDE_PID), "pid_start": "101"}, cwd))
+            child = {**base, "dispatch_depth": "2", "worker_type": "child",
+                     "attempt_id": "att-child-%d" % index, "route_node": "n0",
+                     "parent_attempt_id": "att-owner-%d" % index,
+                     "route_file": str(self.node_route_path(index))}
+            if index == 0:
+                child.update(harness="claude", transport="headless",
+                             log_file=str(self.worker_log("att-child-0")),
+                             pid=str(CODEX_PID), pid_start="102")
+            else:
+                child.update(harness="codex")
+            out.append(attempt_row(CLOCK_BASE - 2900 + index, "open", "slug-%d" % index,
+                                   child, cwd))
+        return out
+
+    def history_rows(self) -> list[str]:
+        out, cwd = [], str(self.work)
+        for index in range(8):
+            out.append(attempt_row(CLOCK_BASE - 90_000 + index, "done", "old-%d" % index, {
+                "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+                "harness": "codex", "attempt_id": "att-old-%d" % index,
+                "parent_sid": OTHER_SID, "parent_harness": "claude",
+                "ended_at": "%.3f" % (CLOCK_BASE - 80_000 + index),
+                "note": "fixture-history", "padding": "p" * 120}, cwd))
+        out.append(attempt_row(CLOCK_BASE - 5000, "open", "dup", {
+            "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+            "harness": "codex", "attempt_id": "att-dup", "parent_sid": OTHER_SID,
+            "parent_harness": "claude"}, cwd))
+        out.append(attempt_row(CLOCK_BASE - 4900, "done", "dup", {
+            "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+            "harness": "codex", "attempt_id": "att-dup", "parent_sid": OTHER_SID,
+            "parent_harness": "claude", "ended_at": "%.3f" % (CLOCK_BASE - 4800)}, cwd))
+        out.append(self.quota_row("att-quota-0"))
+        return out
+
+    def quota_row(self, attempt: str, *, observed: float = CLOCK_BASE - 7200) -> str:
+        """A dead claude attempt whose own log carries a rejected native window."""
+        return attempt_row(iso(observed), "done", "quota", {
+            "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+            "harness": "claude", "attempt_id": attempt, "parent_sid": OTHER_SID,
+            "parent_harness": "claude", "note": "dead-limit", "failure_class": "blocked",
+            "log_file": str(self.quota_log(attempt)), "model": "fixture-model",
+            "quota_scope": "scope-a", "quota_scope_kind": "login",
+            "ended_at": "%.3f" % observed}, str(self.work))
+
+    def write_quota_log(self, attempt: str, *, observed: float = CLOCK_BASE - 7200) -> None:
+        sid = "quota-sid-" + attempt
+        rows = [
+            {"type": "rate_limit_event", "session_id": sid, "rate_limit_info": {
+                "status": "rejected", "rateLimitType": "five_hour",
+                "resetsAt": int(observed + 5 * 3600), "isUsingOverage": False}},
+            {"type": "result", "session_id": sid, "is_error": True, "api_error_status": 429}]
+        path = self.quota_log(attempt)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+                        encoding="utf-8")
+        touch(path, observed)
+
+    def rows(self) -> list[str]:
+        return self.owner_and_child_rows() + self.history_rows()
+
+    # -- streams ----------------------------------------------------------
+    def claude_rows(self, extra: int = 0) -> list[dict]:
+        rows = [{"type": "user", "sessionId": CLAUDE_SID, "timestamp": iso(CLOCK_BASE - 900),
+                 "cwd": str(self.work), "message": {"role": "user", "content": "start"}},
+                {"type": "assistant", "sessionId": CLAUDE_SID, "timestamp": iso(CLOCK_BASE - 800),
+                 "message": {"role": "assistant", "content": [
+                     {"type": "tool_use", "id": "toolu_a", "name": "Agent",
+                      "input": {"subagent_type": "reviewer"}}]}}]
+        for n in range(extra):
+            rows.append({"type": "assistant", "sessionId": CLAUDE_SID,
+                         "timestamp": iso(CLOCK_BASE - 700 + n),
+                         "message": {"role": "assistant", "content": [
+                             {"type": "tool_use", "id": "toolu_x%d" % n, "name": "Agent",
+                              "input": {"subagent_type": "worker-%d" % n}}]}})
+        return rows
+
+    def codex_rows(self, turns: int = 1, *, complete_last: bool = False) -> list[dict]:
+        rows = [{"type": "session_meta", "payload": {
+            "id": CODEX_SID, "cwd": str(self.work), "timestamp": iso(CLOCK_BASE - 1000)}}]
+        for turn in range(turns):
+            rows.append({"type": "event_msg", "timestamp": iso(CLOCK_BASE - 900 + turn * 10),
+                         "payload": {"type": "task_started", "turn_id": "turn-%d" % turn}})
+            if turn < turns - 1 or complete_last:
+                rows.append({"type": "event_msg", "timestamp": iso(CLOCK_BASE - 895 + turn * 10),
+                             "payload": {"type": "task_complete", "turn_id": "turn-%d" % turn}})
+        return rows
+
+    def worker_rows(self, *, open_tool: str | None = None, extra: int = 0) -> list[dict]:
+        sid = "worker-stream-sid"
+        rows = [{"type": "system", "subtype": "init", "session_id": sid, "model": "fixture-model"},
+                {"type": "assistant", "session_id": sid, "message": {
+                    "role": "assistant", "model": "fixture-model", "content": [
+                        {"type": "text", "text": "working"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 5}}}]
+        for n in range(extra):
+            rows.append({"type": "assistant", "session_id": sid, "message": {
+                "role": "assistant", "model": "fixture-model", "content": [
+                    {"type": "tool_use", "id": "toolu_w%d" % n, "name": "Read",
+                     "input": {"file_path": "/x/%d" % n}}]}})
+            rows.append({"type": "user", "session_id": sid, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_w%d" % n, "content": "ok"}]}})
+        if open_tool:
+            rows.append({"type": "assistant", "session_id": sid, "message": {
+                "role": "assistant", "model": "fixture-model", "content": [
+                    {"type": "tool_use", "id": "toolu_open", "name": "Bash",
+                     "input": {"command": open_tool}}]}})
+        return rows
+
+    @staticmethod
+    def jsonl(rows: list[dict]) -> str:
+        return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+
+    # -- liveness ---------------------------------------------------------
+    @staticmethod
+    def default_liveness() -> dict:
+        return {"sessions": [
+            {"harness": "claude", "pid": CLAUDE_PID, "proc_start": "101", "elapsed_min": 60,
+             "cwd": "$WORK"},
+            {"harness": "codex", "pid": CODEX_PID, "proc_start": "102", "elapsed_min": 17,
+             "cwd": "$WORK"}], "alive": True}
+
+    def write_liveness(self, value: dict, when: float = CLOCK_BASE - 600) -> None:
+        write_json(self.liveness, value, when)
+
+    def read_liveness(self) -> dict:
+        return json.loads(self.liveness.read_text(encoding="utf-8"))
+
+    # -- build ------------------------------------------------------------
+    def build(self) -> "Fixture":
+        for directory in (self.work, self.routes, self.claude / "sessions", self.jobs.parent,
+                          self.codex / "sessions", self.logs, self.root / "artifacts"):
+            directory.mkdir(parents=True, exist_ok=True)
+        for index in range(3):
+            record = route_record(self.root, index, revision=self.revision[index])
+            write_json(self.route_path(index), record)
+            write_json(self.node_route_path(index), record)
+            write_json(self.chain_route_path(index), record)
+            for sidecar in (self.outcome_path(index), self.chain_outcome_path(index)):
+                write_json(sidecar, {"route_id": record["route_id"],
+                                     "route_hash": record["route_hash"]})
+        self.write_chain_ledger()
+        self.write_registry()
+        self.write_quota_log("att-quota-0")
+        self.write_stream(self.claude_stream(), self.claude_rows(), CLOCK_BASE - 60)
+        self.write_stream(self.codex_rollout(), self.codex_rows(), CLOCK_BASE - 50)
+        self.write_stream(self.worker_log(), self.worker_rows(open_tool="sleep 1"),
+                          CLOCK_BASE - 20)
+        self.write_liveness(self.default_liveness())
+        write_json(self.claude / "sessions" / ("%d.json" % CLAUDE_PID), {
+            "pid": CLAUDE_PID, "sessionId": CLAUDE_SID, "cwd": str(self.work),
+            "startedAt": int((CLOCK_BASE - 3600) * 1000), "procStart": "101",
+            "status": "busy", "updatedAt": int((CLOCK_BASE - 30) * 1000),
+            "statusUpdatedAt": int((CLOCK_BASE - 30) * 1000), "kind": "interactive"})
+        return self
+
+    def write_stream(self, path: Path, rows: list[dict], when: float) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.jsonl(rows), encoding="utf-8")
+        touch(path, when)
+
+    def write_registry(self, rows: list[str] | None = None) -> None:
+        rows = self.rows() if rows is None else rows
+        self.jobs.parent.mkdir(parents=True, exist_ok=True)
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        touch(self.jobs, CLOCK_BASE - 120)
+
+    # -- real writers -----------------------------------------------------
+    def append_rows(self, rows: list[str]) -> None:
+        import dispatch_contract_registry as registry
+        registry._append_registry_rows(self.jobs, rows)
+
+    def replace_registry(self, rows: list[str]) -> None:
+        import dispatch_contract_registry as registry
+        registry._atomic_registry_replace(self.jobs, rows)
+
+    def current_rows(self) -> list[str]:
+        return self.jobs.read_text(encoding="utf-8").splitlines()
+
+    def lineage_file(self) -> Path:
+        import dispatch_registry_cache as cache
+        return cache.lineage_path(self.jobs)
+
+
+DEMAND_KEY = "claude\0" + CLAUDE_SID
+SECOND_DEMAND_KEY = "codex\0" + CODEX_SID
+
+
+def demand_value(*keys: str) -> dict:
+    return {key: CLOCK_BASE - 5 for key in keys}
+
+
+# ---------------------------------------------------------------------------
+# the one computation both paths run
+# ---------------------------------------------------------------------------
+
+HERMETIC_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "TZ")
+
+
+def _expand(value, work: str):
+    if isinstance(value, str):
+        return value.replace("$WORK", work)
+    if isinstance(value, list):
+        return [_expand(item, work) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand(item, work) for key, item in value.items()}
+    return value
+
+
+@contextlib.contextmanager
+def hermetic(fixture_root, scratch, clock: FixtureClock):
+    """Fixture-only environment, and the patches that turn live inputs into fixture data.
+
+    The process census and liveness verdict come from ``liveness.json`` on every
+    call, so a change there is an input like any other.  No cache is touched.
+    ``scratch`` holds HOME/XDG state of one computing process.
+    """
+    scratch = Path(scratch)
+    root = Path(fixture_root)
+    fx = Fixture(root)
+    state_home = scratch / "state"
+    for directory in ("home", "state", "data", "cache", "tmp"):
+        (scratch / directory).mkdir(parents=True, exist_ok=True)
+
+    def census():
+        return _expand(json.loads(fx.liveness.read_text(encoding="utf-8")), str(fx.work))
+
+    def proc_start(pid):
+        for item in census()["sessions"]:
+            if item["pid"] == int(pid):
+                return item.get("proc_start")
+        return None
+
+    def proc_rollout(pid, _cwd, _home):
+        return str(fx.codex_rollout()) if int(pid) == CODEX_PID else None
+
+    env = {
+        "HOME": str(scratch / "home"), "XDG_STATE_HOME": str(state_home),
+        "XDG_DATA_HOME": str(scratch / "data"), "XDG_CACHE_HOME": str(scratch / "cache"),
+        "TMPDIR": str(scratch / "tmp"), "AGENT_DISPATCH_JOBS": str(fx.jobs),
+        "AGENT_RESOURCE_RUN_INDEX": str(scratch / "resource-runs.index.json"),
+        "AGENT_HOME": str(ROOT), "CLAUDE_CONFIG_DIR": str(fx.claude),
+        "HARNESS_STATE_ROOT": str(scratch / "harness-state"),
+        "PYTHONDONTWRITEBYTECODE": "1", "FLEET_TITLE_DISABLE": "1",
+        "FLEET_ROUTE_CHAIN_DIR": str(fx.chain_dir()),
+    }
+    for key in HERMETIC_ENV_KEYS:
+        if key in os.environ and key != "PATH":
+            env[key] = os.environ[key]
+    # PATH holds only what the computation may run.  No herdr, tmux, ps or harness
+    # binary is reachable, so no live pane census or process table leaks in.
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, target in (("python3", sys.executable), ("sh", shutil.which("sh")),
+                         ("bash", shutil.which("bash")), ("git", shutil.which("git"))):
+        link = bin_dir / name
+        if target and not link.exists():
+            link.symlink_to(target)
+    env["PATH"] = str(bin_dir)
+    # Import everything the clock and the patches name *before* installing them,
+    # so a module first imported inside the patch does not bind a real clock.
+    import importlib
+    for pkg in FLEET_PACKAGES:
+        for name in ("procscan", "codex", "claude", "opencode", "dispatch", "liveness",
+                     "usage_api", "memory", "shell_jobs"):
+            importlib.import_module("%s.collectors.%s" % (pkg, name))
+        importlib.import_module(pkg + ".titles")
+    for name in ("route_authority", "human_wait_state", "dispatch_capacity_evidence",
+                 "dispatch_contract_registry", "dispatch_registry_cache"):
+        importlib.import_module(name)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+        stack.enter_context(clock.installed())
+        # Display-side requests and the detached producer are the driver's job
+        # here (``place_demand``); a computation must not spawn or re-mark anything.
+        producer = sys.modules["human_wait_state"]
+        stack.enter_context(mock.patch.object(producer, "_ensure_producer", return_value=True))
+        stack.enter_context(mock.patch.object(producer, "_request_producer", return_value=None))
+        # The descendant-tag walk reads every process on the machine; there is none here.
+        for name in ("dispatch_contract_process", "dispatch_contract"):
+            module = importlib.import_module(name)
+            empty = module.ProcessTableScan({}, {}) if hasattr(module, "ProcessTableScan") else None
+            if hasattr(module, "scan_process_table") and empty is not None:
+                stack.enter_context(mock.patch.object(
+                    module, "scan_process_table", lambda empty=empty: empty))
+        for pkg in FLEET_PACKAGES:
+            procscan = sys.modules[pkg + ".collectors.procscan"]
+            codex = sys.modules[pkg + ".collectors.codex"]
+            dispatch = sys.modules[pkg + ".collectors.dispatch"]
+            liveness = sys.modules[pkg + ".collectors.liveness"]
+            usage_api = sys.modules[pkg + ".collectors.usage_api"]
+            titles = sys.modules[pkg + ".titles"]
+            model = importlib.import_module(pkg + ".model")
+
+            def fresh_sessions(model=model, **_kwargs):
+                sessions = []
+                for item in census()["sessions"]:
+                    session = model.Session(harness=item["harness"], pid=item["pid"],
+                                            cwd=item["cwd"], elapsed_min=item["elapsed_min"])
+                    session.proc_start = item.get("proc_start")
+                    sessions.append(session)
+                return sessions
+
+            patch = lambda target, name, **kw: stack.enter_context(  # noqa: E731
+                mock.patch.object(target, name, **kw))
+            patch(procscan, "scan", side_effect=fresh_sessions)
+            patch(procscan, "read_proc_start", side_effect=proc_start)
+            patch(dispatch, "_scan_processes", return_value=[])
+            patch(dispatch, "_candidate_jobs_paths", return_value=[str(fx.jobs)])
+            patch(dispatch, "_pid_namespace_identity", return_value="pid:[fixture]")
+            for module in (dispatch, codex, sys.modules[pkg + ".collectors.opencode"]):
+                patch(module, "os", new=_ProcOs(census))
+            patch(dispatch, "_codex_home", return_value=str(fx.codex))
+            patch(dispatch, "_registry_home", return_value=str(root / "registry"))
+            patch(codex, "_proc_rollout", side_effect=proc_rollout)
+            patch(codex, "_home", return_value=str(fx.codex))
+            patch(codex, "_config_model_effort", return_value=("gpt-fixture", "medium"))
+            patch(codex, "account_usage", return_value=None)
+            patch(usage_api, "account_usage", return_value=None)
+            patch(liveness, "_alive", side_effect=lambda *a, **k: census().get("alive", True))
+            patch(titles, "fresh_title", return_value=None)
+            patch(titles, "fresh_summary", return_value=None)
+        yield fx
+
+
+class _ProcOs:
+    """``os`` as one collector module sees it, except that ``/proc/<pid>`` of a census
+    pid exists exactly while the census says the processes are alive."""
+
+    def __init__(self, census):
+        self._census = census
+        outer = self
+
+        class PathProxy:
+            def __getattr__(self, name):
+                return getattr(os.path, name)
+
+            def exists(self, path):
+                text = os.fspath(path)
+                match = re.fullmatch(r"/proc/(\d+)", text)
+                if match:
+                    known = {item["pid"] for item in outer._census()["sessions"]}
+                    if int(match.group(1)) in known:
+                        return bool(outer._census().get("alive", True))
+                return os.path.exists(path)
+
+        self.path = PathProxy()
+
+    def listdir(self, path="."):
+        # A walk of the real process table would read every other process on the
+        # machine; the fixture's table is its census.
+        if os.fspath(path).rstrip("/") == "/proc":
+            if not self._census().get("alive", True):
+                return []
+            return [str(item["pid"]) for item in self._census()["sessions"]]
+        return os.listdir(path)
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+def demand_path() -> Path:
+    import human_wait_state as producer
+    return producer.state_root() / ".demand"
+
+
+def place_demand(fixture_root, scratch, value: dict, when: float) -> None:
+    """The display side's request marker; an external write from the producer's view."""
+    with hermetic(fixture_root, scratch, FixtureClock(when)):
+        path = demand_path()
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(value).encode())
+        finally:
+            os.close(fd)
+        touch(path, when - 1)
+
+
+def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict | None = None) -> dict:
+    """O1..O4 for the fixture as it is now: a pure function of fixture and clock."""
+    clock = FixtureClock(now)
+    if mode == "fresh" and demand is not None:
+        place_demand(fixture_root, scratch, demand, now)
+    with hermetic(fixture_root, scratch, clock) as fx:
+        import dispatch_capacity_evidence as capacity
+        # A fresh process must not borrow the warm side's disk cache either.
+        disk = capacity._DISK_CACHE
+        capacity._DISK_CACHE = disk and mode != "fresh"
+        try:
+            return {
+                "o1_registry": observe_registry(fx, capacity, clock),
+                "o2_streams": observe_streams(fx),
+                "o3_fleet": observe_fleet(Path(scratch)),
+                "o4_producer": observe_producer(),
+            }
+        finally:
+            capacity._DISK_CACHE = disk
+
+
+def _plain(value):
+    if hasattr(value, "_asdict"):
+        value = value._asdict()
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (set, frozenset)):
+        return sorted((_plain(item) for item in value), key=_canonical)
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if hasattr(value, "to_dict"):
+        return _plain(value.to_dict())
+    if hasattr(value, "__slots__") and not hasattr(value, "__dict__"):
+        return {name: _plain(getattr(value, name, None)) for name in value.__slots__
+                if not name.startswith("_")}
+    if hasattr(value, "__dict__") and not isinstance(value, type):
+        return {key: _plain(item) for key, item in vars(value).items() if not key.startswith("_")}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _answer(reader):
+    """What a reader answered, or the failure it raised: both are observed values."""
+    try:
+        return {"value": reader()}
+    except Exception as error:  # noqa: BLE001
+        return {"error": [type(error).__name__, getattr(error, "errno", None),
+                          [str(arg) for arg in error.args if not isinstance(arg, int)]]}
+
+
+def observe_registry(fx: Fixture, capacity, clock) -> dict:
+    import dispatch_registry_cache as cache
+    import dispatch_replacement
+    from fleet.collectors import dispatch as fleet_dispatch
+    token = str(fx.root)
+
+    def view_answer():
+        view = cache.registry_view(fx.jobs)
+        records = [{
+            "order": record.order, "status": record.status,
+            "sha256": hashlib.sha256(record.raw.replace(token, "$FX").encode()).hexdigest(),
+            "metadata": record.completion_metadata()} for record in view.records]
+        return {"complete": not view.completeness_reason, "reason": view.completeness_reason,
+                "lines": view.line_count, "partial_tail": bool(view.has_partial_tail),
+                "records": records, "duplicates": bool(view.has_duplicate_attempts)}
+
+    def replacement_answer():
+        found = dispatch_replacement.registry_rows(fx.jobs)
+        return {key: {"fields": value[0], "meta": value[1]} for key, value in found.items()}
+
+    return {
+        "view": _answer(view_answer),
+        "parsed_rows": _answer(lambda: _plain(fleet_dispatch.parsed_registry_rows(fx.jobs))),
+        "replacement_rows": _answer(replacement_answer),
+        "capacity": _answer(lambda: _plain(capacity.observations(fx.jobs, now=clock.now, env={}))),
+    }
+
+
+def observe_streams(fx: Fixture) -> dict:
+    from fleet.collectors import claude, codex
+    return {
+        "claude_subagents": _plain(claude._tail_subagents(str(fx.claude_stream()))),
+        "codex_lifecycle": _plain(codex._latest_task_lifecycle(str(fx.codex_rollout()))),
+        "codex_lifecycle_exact": _plain(codex._latest_task_lifecycle(
+            str(fx.codex_rollout()), max_scan=None)),
+    }
+
+
+def observe_fleet(scratch: Path) -> dict:
+    """The Fleet snapshot, read against a state directory nobody publishes into.
+
+    The producer's published cache is an output of O4 and an input of the Fleet's
+    answer-wait observation; a warm process has it from its previous pass and a
+    new one does not.  That dependency is the producer's, compared in O4, so O3
+    gets an empty one of its own on both sides.
+    """
+    import fleet.fleet as fleet_main
+    from fleet.collectors import collect_all
+    isolated = scratch / "state-fleet"
+    isolated.mkdir(exist_ok=True)
+    out = {}
+    with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(isolated)}):
+        for label, fast in (("fast_first", True), ("full", False)):
+            snapshot = collect_all(harness_filter=None, include_report_verification=False,
+                                   fast_first=fast)
+            sessions, jobs = snapshot
+            text = fleet_main._snapshot_json(
+                sessions, jobs, resource_jobs=list(snapshot.resources),
+                resource_diagnostics=snapshot.resource_diagnostics,
+                observations=snapshot.observations, show_all=True)
+            out[label] = json.loads(text)
+    return out
+
+
+def observe_producer() -> dict:
+    """One producer pass; the published cache is the output."""
+    import human_wait_state as producer
+    with mock.patch.object(producer, "_notify_result", lambda _result: None):
+        ok = producer._refresh_cache()
+    out = {"ok": bool(ok)}
+    for label, path in (("projection", producer._cache_path()),
+                        ("fleet", producer._fleet_cache_path())):
+        try:
+            out[label] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out[label] = None
+    return out
+
+
+def main_child(argv) -> int:
+    fixture_root, scratch, now, demand = argv[0], argv[1], float(argv[2]), json.loads(argv[3])
+    sys.stdout.write(_canonical(compute(fixture_root, scratch, now, "fresh", demand)))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# comparison
+# ---------------------------------------------------------------------------
+
+def normalize(value, tokens: tuple[tuple[str, str], ...]):
+    """Fixture and scratch roots become tokens; nothing else is rewritten."""
+    if isinstance(value, str):
+        for real, token in tokens:
+            value = value.replace(real, token)
+        for pattern, replacement, _reason in RUN_METADATA_REWRITES:
+            value = pattern.sub(replacement, value)
+        return value
+    if isinstance(value, list):
+        return [normalize(item, tokens) for item in value]
+    if isinstance(value, dict):
+        return {normalize(key, tokens): normalize(item, tokens) for key, item in value.items()}
+    return value
+
+
+def pointer_token(key) -> str:
+    """RFC 6901 escaping; the NUL inside a demand key is shown as ``\\0``."""
+    return str(key).replace("~", "~0").replace("/", "~1").replace("\x00", "\\0")
+
+
+def first_difference(left, right, pointer: str = "", tolerate=()):
+    """``(pointer, left, right)`` of the first unallowed difference, else None.
+
+    ``tolerate`` is a per-step list of patterns for the one documented exception
+    (see ``ONE_PASS_UNKNOWN``): at those pointers the left side may say "unknown"
+    (None) where the right side has a value; a different value is never tolerated.
+    """
+    if any(pattern.search(pointer) for pattern, _reason in ALLOWED):
+        return None
+    if (tolerate and left is None and right is not None
+            and any(pattern.search(pointer) for pattern in tolerate)):
+        return None
+    if type(left) is not type(right):
+        return pointer or "/", left, right
+    if isinstance(left, dict):
+        for key in sorted(set(left) | set(right), key=str):
+            if key not in left or key not in right:
+                found = (pointer + "/" + pointer_token(key),
+                         left.get(key, "<absent>"), right.get(key, "<absent>"))
+                if not any(p.search(found[0]) for p, _r in ALLOWED):
+                    return found
+                continue
+            found = first_difference(left[key], right[key], pointer + "/" + pointer_token(key),
+                                     tolerate)
+            if found:
+                return found
+        return None
+    if isinstance(left, list):
+        for index in range(max(len(left), len(right))):
+            where = pointer + "/%d" % index
+            if index >= len(left) or index >= len(right):
+                if not any(p.search(where) for p, _r in ALLOWED):
+                    return (where, left[index] if index < len(left) else "<absent>",
+                            right[index] if index < len(right) else "<absent>")
+                continue
+            found = first_difference(left[index], right[index], where, tolerate)
+            if found:
+                return found
+        return None
+    return None if left == right else (pointer or "/", left, right)
+
+
+def brief(value, limit: int = 160) -> str:
+    text = _canonical(value) if not isinstance(value, str) else value
+    return text if len(text) <= limit else text[:limit] + "...(%d chars)" % len(text)
+
+
+# ---------------------------------------------------------------------------
+# the lab: one event at a time, warm and fresh side by side
+# ---------------------------------------------------------------------------
+
+class Lab:
+    def __init__(self, base: Path):
+        self.base = Path(base)
+        self.fresh_runs = 0
+
+    def child_env(self) -> dict:
+        env = {key: os.environ[key] for key in HERMETIC_ENV_KEYS if key in os.environ}
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return env
+
+    def fresh(self, fixture_root, now: float, demand: dict) -> dict:
+        scratch = Path(tempfile.mkdtemp(prefix="fresh-", dir=str(self.base)))
+        try:
+            done = subprocess.run(
+                [sys.executable, str(SELF), "--compute", str(fixture_root), str(scratch),
+                 repr(now), json.dumps(demand)],
+                capture_output=True, text=True, env=self.child_env(), timeout=300, cwd=str(self.base))
+            if done.returncode != 0:
+                raise AssertionError("fresh child failed (%d): %s" % (done.returncode, done.stderr[-1500:]))
+            self.fresh_runs += 1
+            return normalize(json.loads(done.stdout), ((str(fixture_root), "$FX"), (str(scratch), "$SCRATCH")))
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+class Run:
+    """The state of one event: its fixture, its clock, its warm process scratch."""
+
+    def __init__(self, lab: Lab, eid: str):
+        self.lab, self.eid = lab, eid
+        self.dir = lab.base / eid
+        self.dir.mkdir()
+        self.fx = Fixture(self.dir / "fx").build()
+        self.warm_scratch = self.dir / "warm"
+        self.clock = FixtureClock(CLOCK_BASE)
+        self.demand = demand_value(DEMAND_KEY)
+        self.history: list[tuple[str, dict]] = []
+
+    @property
+    def tokens(self):
+        return ((str(self.fx.root), "$FX"), (str(self.warm_scratch), "$SCRATCH"))
+
+    def put_demand(self) -> None:
+        place_demand(self.fx.root, self.warm_scratch, self.demand, self.clock.now)
+
+    def warm(self) -> dict:
+        return normalize(compute(self.fx.root, self.warm_scratch, self.clock.now, "warm"),
+                         self.tokens)
+
+    def fresh(self) -> dict:
+        return self.lab.fresh(self.fx.root, self.clock.now, self.demand)
+
+    def mismatch(self, step: str, warm: dict, fresh: dict, tolerate=()) -> str | None:
+        found = first_difference(warm, fresh, tolerate=tolerate)
+        if found is None:
+            return None
+        pointer, left, right = found
+        return "%s %s: warm and fresh differ after step '%s' (warm=%s fresh=%s)" % (
+            self.eid, pointer, step, brief(left), brief(right))
+
+
+def changed(before: dict, after: dict) -> bool:
+    return first_difference(before, after) is not None
+
+
+# ---------------------------------------------------------------------------
+# events
+# ---------------------------------------------------------------------------
+# An event is a list of steps.  Each step mutates the fixture (through the real
+# writer wherever one exists), after which warm and fresh must agree, the fresh
+# answer must have moved (self-check B), and one unchanged pass must still agree.
+
+# The one documented exception.  ``codex._latest_task_lifecycle`` says, in its own
+# docstring, that after rotation or truncation of a rollout it "removes the cursor and
+# returns no lifecycle for that observation; a later clean call may initialize afresh".
+# So for exactly that observation the answer is unknown (None) where a fresh process
+# knows the value.  The tolerance is narrow on purpose: only these pointers, only None
+# against a value, only on the first pass after a truncate/rotate step - the unchanged
+# pass that follows must be byte-equal.  Whether "unknown for one pass" is acceptable or
+# the reader should re-initialize in the same call is an owner decision (see the report).
+ONE_PASS_UNKNOWN = (
+    re.compile(r"^/o2_streams/codex_lifecycle(_exact)?$"),
+    re.compile(r"^/o3_fleet/(fast_first|full)/sessions/\d+/task_lifecycle$"),
+)
+
+
+class Step:
+    def __init__(self, label, mutate, *, clock_only=False, tolerate=()):
+        self.label, self.mutate, self.clock_only = label, mutate, clock_only
+        self.tolerate = tuple(tolerate)
+
+
+def _new_open_row(fx: Fixture, name: str, **extra) -> str:
+    return attempt_row(CLOCK_BASE - 100, "open", name, {
+        "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+        "harness": "codex", "attempt_id": "att-" + name, "parent_sid": OTHER_SID,
+        "parent_harness": "claude", **extra}, str(fx.work))
+
+
+def e01(run):  # registry append: a new attempt (a dead quota attempt with its own log)
+    run.fx.write_quota_log("att-quota-1", observed=CLOCK_BASE - 3600)
+    run.fx.append_rows([run.fx.quota_row("att-quota-1", observed=CLOCK_BASE - 3600),
+                        _new_open_row(run.fx, "fresh-one")])
+
+
+def e02(run):  # the same attempt appended several times, one writer call each
+    for status in ("running", "running", "done"):
+        run.fx.append_rows([attempt_row(run.clock.now - 10, status, "att-child-2", {
+            "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child",
+            "harness": "codex", "attempt_id": "att-child-2", "parent_sid": CLAUDE_SID,
+            "parent_harness": "claude",
+            **({"ended_at": "%.3f" % (run.clock.now - 5)} if status == "done" else {})},
+            str(run.fx.work))])
+
+
+def _replaced_rows(run) -> list[str]:
+    rows = run.fx.current_rows()
+    rows[3] = rows[3].replace("\topen\t", "\tdone\t", 1)       # an early row changes
+    rows.append(_new_open_row(run.fx, "after-replace"))
+    return rows
+
+
+def e03(run):  # whole-file replacement through the real writer, lineage recorded
+    run.fx.replace_registry(_replaced_rows(run))
+
+
+def e04(run):  # replacement, lineage sidecar gone
+    run.fx.replace_registry(_replaced_rows(run))
+    run.fx.lineage_file().unlink()
+
+
+def e05(run):  # replacement, lineage that lies about the preserved prefix
+    run.fx.replace_registry(_replaced_rows(run))
+    path = run.fx.lineage_file()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    import dispatch_registry_cache as cache
+    raw = run.fx.jobs.read_bytes()
+    last = raw.rstrip(b"\n").rfind(b"\n") + 1               # claims all but the last row survived
+    for entry in data["entries"]:
+        entry["n"] = last
+        entry["a"] = hashlib.sha256(raw[max(0, last - 4096):last]).hexdigest()
+    path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    assert cache._read_lineage(run.fx.jobs) is not None, "E05 forged lineage was not even readable"
+
+
+def e06a(run):  # an unfinished last line
+    with run.fx.jobs.open("a", encoding="utf-8") as handle:
+        handle.write(_new_open_row(run.fx, "torn")[:60])
+
+
+def e06b(run):  # the same line completed
+    with run.fx.jobs.open("a", encoding="utf-8") as handle:
+        handle.write(_new_open_row(run.fx, "torn")[60:] + "\n")
+
+
+def e07(run):  # content changes while size and mtime_ns are restored
+    path = run.fx.jobs
+    before = path.stat()
+    raw = path.read_bytes()
+    target = b"att-owner-1"
+    assert target in raw
+    changed_raw = raw.replace(target, b"att-owner-X", 1)
+    assert len(changed_raw) == len(raw)
+    path.write_bytes(changed_raw)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
+def e08(run):  # truncate: the file shrinks (last rows disappear)
+    rows = run.fx.current_rows()[:-3]
+    run.fx.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def e09(run):  # rotation: old file renamed away, a new smaller file takes the name
+    rotated = run.fx.jobs.with_name("jobs.log.1")
+    os.rename(run.fx.jobs, rotated)
+    run.fx.write_registry(run.fx.owner_and_child_rows() + [
+        _new_open_row(run.fx, "rotated-in")])
+
+
+def e10a(run):  # deleted
+    run.fx.jobs.unlink()
+
+
+def e10b(run):  # recreated, different content
+    run.fx.write_registry(run.fx.owner_and_child_rows() + [
+        _new_open_row(run.fx, "recreated")])
+
+
+def e12a(run):
+    run.clock.advance(120)
+
+
+def e12b(run):
+    run.clock.advance(61)
+
+
+def e13a(run):  # liveness only: the processes are no longer alive
+    value = run.fx.read_liveness()
+    value["alive"] = False
+    run.fx.write_liveness(value, run.clock.now - 1)
+
+
+def e13b(run):  # liveness only: the pid is reused, another start time
+    value = run.fx.read_liveness()
+    value["alive"] = True
+    value["sessions"][0]["proc_start"] = "999"
+    run.fx.write_liveness(value, run.clock.now - 1)
+
+
+def e14(run):  # another set of sessions: the codex session is replaced, a new claude session id
+    value = run.fx.read_liveness()
+    value["sessions"][1] = {"harness": "codex", "pid": CODEX_PID + 5, "proc_start": "205",
+                            "elapsed_min": 3, "cwd": "$WORK"}
+    run.fx.write_liveness(value, run.clock.now - 1)
+    write_json(run.fx.claude / "sessions" / ("%d.json" % CLAUDE_PID), {
+        "pid": CLAUDE_PID, "sessionId": OTHER_SID, "cwd": str(run.fx.work),
+        "startedAt": int((CLOCK_BASE - 100) * 1000), "procStart": "101", "status": "idle",
+        "updatedAt": int(run.clock.now * 1000), "statusUpdatedAt": int(run.clock.now * 1000),
+        "kind": "interactive"}, run.clock.now - 1)
+
+
+def e15(run):  # a different generation of route 1: the file is rewritten, its hash changes
+    run.fx.revision[1] = 1
+    record = route_record(run.fx.root, 1, revision=1)
+    write_json(run.fx.route_path(1), record, run.clock.now - 1)
+    write_json(run.fx.node_route_path(1), record, run.clock.now - 1)
+
+
+def e16a(run):  # a worker stream grows: it is now at another tool call
+    run.fx.write_stream(run.fx.worker_log(), run.fx.worker_rows(open_tool="make test", extra=2),
+                        run.clock.now - 1)
+
+
+def e16b(run):  # the same stream grows again, the open call closes
+    rows = run.fx.worker_rows(extra=3)
+    run.fx.write_stream(run.fx.worker_log(), rows, run.clock.now - 1)
+
+
+def e17a(run):  # the sidecar of a route the session chain names
+    record = route_record(run.fx.root, 0)
+    write_json(run.fx.chain_outcome_path(0), {
+        "route_id": record["route_id"], "route_hash": record["route_hash"],
+        "terminal_gate_proven": True, "closed_at": iso(run.clock.now - 30)}, run.clock.now - 1)
+
+
+def e17b(run):  # the sidecar of a route a registry row names
+    record = route_record(run.fx.root, 0)
+    write_json(run.fx.outcome_path(0), {
+        "route_id": record["route_id"], "route_hash": record["route_hash"],
+        "terminal_gate_proven": True, "closed_at": iso(run.clock.now - 20)}, run.clock.now - 1)
+
+
+def e18(run):  # only the file a session-chain node names changes (another round of that route)
+    record = route_record(run.fx.root, 2, revision=3)
+    write_json(run.fx.chain_route_path(2), record, run.clock.now - 1)
+
+
+def e19(run):  # an external write lands in the directory the warm pass itself created
+    run.demand = demand_value(DEMAND_KEY, SECOND_DEMAND_KEY)
+    run.put_demand()
+
+
+def e20a(run):  # codex lifecycle log appended: the running turn completes, a new turn starts
+    rows = run.fx.codex_rows(turns=3, complete_last=False)
+    run.fx.write_stream(run.fx.codex_rollout(), rows, run.clock.now - 1)
+
+
+def e20b(run):  # truncated: the log shrinks back
+    run.fx.write_stream(run.fx.codex_rollout(), run.fx.codex_rows(turns=1), run.clock.now - 1)
+
+
+def e20c(run):  # rotated: renamed away, a new log with another history under the same name
+    path = run.fx.codex_rollout()
+    os.rename(path, path.with_name(path.name + ".old"))
+    rows = run.fx.codex_rows(turns=2, complete_last=True)
+    run.fx.write_stream(path, rows, run.clock.now - 1)
+
+
+EVENTS = [
+    ("E01", "registry append: a new attempt row", [Step("append", e01)]),
+    ("E02", "the same attempt appended several times", [Step("append x3", e02)]),
+    ("E03", "whole registry replaced by the real writer, lineage recorded", [Step("replace", e03)]),
+    ("E04", "whole registry replaced, lineage sidecar missing", [Step("replace", e04)]),
+    ("E05", "whole registry replaced, lineage lies about the preserved prefix", [Step("replace", e05)]),
+    ("E06", "an unfinished last line, completed on the next step",
+     [Step("torn append", e06a), Step("completed", e06b)]),
+    ("E07", "content changed with size and mtime_ns restored", [Step("same stat", e07)]),
+    ("E08", "truncate: the registry shrinks", [Step("truncate", e08)]),
+    ("E09", "rotation: renamed away, a new file under the name", [Step("rotate", e09)]),
+    ("E10", "deleted, then recreated",
+     [Step("deleted", e10a), Step("recreated", e10b)]),
+    ("E12", "the clock only moves (+120 s, +61 s)",
+     [Step("+120 s", e12a, clock_only=True), Step("+61 s", e12b, clock_only=True)]),
+    ("E13", "liveness only: not alive, then another process start",
+     [Step("not alive", e13a), Step("pid reused", e13b)]),
+    ("E14", "a different set of sessions", [Step("replace sessions", e14)]),
+    ("E15", "another route generation: the route file is rewritten", [Step("rewrite route", e15)]),
+    ("E16", "a worker stream grows (an open tool call, then closed)",
+     [Step("open tool", e16a), Step("closed", e16b)]),
+    ("E17", "only the route .outcome.json sidecar changes",
+     [Step("chain sidecar", e17a), Step("registry sidecar", e17b)]),
+    ("E18", "only the file a session-chain node names changes", [Step("chain node file", e18)]),
+    ("E19", "external write into a directory the warm pass created", [Step("demand", e19)]),
+    ("E20", "codex lifecycle log: append, truncate, rotate",
+     [Step("append", e20a), Step("truncate", e20b, tolerate=ONE_PASS_UNKNOWN),
+      Step("rotate", e20c, tolerate=ONE_PASS_UNKNOWN)]),
+]
+
+
+class ReadHook:
+    """E11: append one row the instant the lowest read primitive has served the registry.
+
+    It wraps the ``os`` name inside ``dispatch_registry_cache`` only, so every
+    read the registry reader makes - whole-file or suffix - passes through it
+    whichever path the warm side takes.  ``fired`` and ``via`` prove it ran.
+    """
+
+    def __init__(self, fx: Fixture, row: str):
+        self.fx, self.row = fx, row
+        self.fired, self.via = False, None
+        info = fx.jobs.stat()
+        self.identity = (info.st_dev, info.st_ino)
+
+    def _after_read(self, name, fd, result):
+        if self.fired or not result:
+            return
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            return
+        if (info.st_dev, info.st_ino) != self.identity:
+            return
+        self.fired, self.via = True, name
+        self.fx.append_rows([self.row])
+
+    @contextlib.contextmanager
+    def armed(self):
+        import dispatch_registry_cache as cache
+        hook, real = self, os
+
+        class Proxy:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def read(self, fd, size):
+                result = real.read(fd, size)
+                hook._after_read("os.read", fd, result)
+                return result
+
+            def pread(self, fd, size, offset):
+                result = real.pread(fd, size, offset)
+                hook._after_read("os.pread", fd, result)
+                return result
+
+        with mock.patch.object(cache, "os", Proxy()):
+            yield self
+
+
+class IncrementalEquivalenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._temp = tempfile.TemporaryDirectory(prefix="incremental-equivalence-")
+        cls.lab = Lab(Path(cls._temp.name))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._temp.cleanup()
+
+    # -- machinery --------------------------------------------------------
+    def prime(self, eid: str) -> tuple[Run, dict]:
+        run = Run(self.lab, eid)
+        run.put_demand()
+        run.warm()
+        warm = run.warm()
+        fresh = run.fresh()
+        problem = run.mismatch("prime", warm, fresh)
+        self.assertIsNone(problem, problem)
+        return run, fresh
+
+    def check_step(self, run: Run, step: Step, before: dict) -> dict:
+        step.mutate(run)
+        fresh = run.fresh()
+        warm = run.warm()
+        problem = run.mismatch(step.label, warm, fresh, step.tolerate)
+        self.assertIsNone(problem, problem)
+        # Self-check B: an event that cannot move the answer tests nothing.
+        self.assertTrue(
+            changed(before, fresh),
+            "%s step '%s' did not change the fresh output: the event tests nothing" % (
+                run.eid, step.label))
+        again = run.warm()
+        problem = run.mismatch(step.label + " (unchanged pass)", again, fresh)
+        self.assertIsNone(problem, problem)
+        return fresh
+
+    def run_event(self, eid: str, steps: list[Step]) -> None:
+        run, fresh = self.prime(eid)
+        for step in steps:
+            fresh = self.check_step(run, step, fresh)
+
+    # -- the events -------------------------------------------------------
+    def test_events(self):
+        for eid, _description, steps in EVENTS:
+            with self.subTest(event=eid):
+                self.run_event(eid, steps)
+
+    def test_E11_append_while_reading(self):
+        run, primed = self.prime("E11")
+        run.fx.write_quota_log("att-quota-2", observed=CLOCK_BASE - 1800)
+        run.fx.append_rows([run.fx.quota_row("att-quota-2", observed=CLOCK_BASE - 1800)])
+        first = run.fresh()                                     # state with only the first row
+        self.assertTrue(changed(primed, first), "E11 first append did not change the output")
+        hook = ReadHook(run.fx, _new_open_row(run.fx, "during-read"))
+        with hook.armed():
+            warm = run.warm()
+        self.assertTrue(hook.fired, "E11 injection did not fire: the append never happened "
+                        "during a read, so this test checked nothing")
+        both = run.fresh()                                      # state with both rows
+        self.assertTrue(changed(first, both), "E11 second append did not change the output")
+        if first_difference(warm, first) is not None and first_difference(warm, both) is not None:
+            problem = run.mismatch("read during append (neither state)", warm, both)
+            self.fail(problem + " [injected via %s]" % hook.via)
+        again = run.warm()
+        problem = run.mismatch("unchanged pass after the append", again, both)
+        self.assertIsNone(problem, problem)
+
+    # -- self-checks ------------------------------------------------------
+    def test_self_check_a_fresh_runs_repeat(self):
+        """Same inputs, same clock, two new processes: the bytes must match.
+
+        If they do not, a real clock or the environment leaks into the output and
+        every later comparison would blame the incremental path for it.
+        """
+        run = Run(self.lab, "SELF-A")
+        run.put_demand()
+        first, second = run.fresh(), run.fresh()
+        found = first_difference(first, second)
+        self.assertIsNone(
+            found, "SELF-A %s: two fresh runs of the same fixture and clock differ "
+            "(%s vs %s); look for time.time/datetime.now/os.getpid readers not covered by "
+            "FixtureClock (grep 'datetime.now\\|time.time()' in the module named by the pointer)" % (
+                found[0] if found else "", brief(found[1]) if found else "",
+                brief(found[2]) if found else ""))
+
+    def test_self_check_b_a_noop_event_is_caught(self):
+        """The 'did this event change anything' check must be able to say no."""
+        run, fresh = self.prime("SELF-B")
+        again = run.fresh()
+        self.assertFalse(changed(fresh, again))
+        run.clock.advance(120)
+        self.assertTrue(changed(fresh, run.fresh()), "a moved clock must move the output")
+
+    def test_comparison_sees_a_difference_and_allows_nothing_silently(self):
+        self.assertIsNone(first_difference({"a": [1, {"b": 2}]}, {"a": [1, {"b": 2}]}))
+        pointer, left, right = first_difference({"a": [1, {"b": 2}]}, {"a": [1, {"b": 3}]})
+        self.assertEqual((pointer, left, right), ("/a/1/b", 2, 3))
+        self.assertEqual(first_difference({"a": 1}, {})[0], "/a")
+        self.assertEqual(first_difference({"a": [1]}, {"a": [1, 2]})[0], "/a/1")
+        for pattern, reason in ALLOWED:
+            self.assertTrue(reason.strip(), "every allow-list entry needs its reason")
+
+    def test_stale_registry_reuse_is_caught(self):
+        """The harness itself: a reader that keeps the first view must fail E01."""
+        import dispatch_registry_cache as cache
+        run, fresh = self.prime("SELF-STALE")
+        real = cache._registry_view_fresh
+        first = real(run.fx.jobs)
+
+        def stale(jobs, *, append_only=False):
+            return first
+
+        with mock.patch.object(cache, "_registry_view_fresh", stale):
+            run.fx.append_rows([_new_open_row(run.fx, "stale-probe")])
+            after = run.fresh()
+            warm = run.warm()
+        self.assertTrue(changed(fresh, after))
+        self.assertIsNotNone(first_difference(warm, after),
+                             "a warm reader frozen on the first view was not noticed")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--compute":
+        raise SystemExit(main_child(sys.argv[2:]))
+    unittest.main()
