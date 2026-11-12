@@ -960,7 +960,7 @@ def _context_tokens(job):
     return value if type(value) is int and value >= 0 else None
 
 
-def _route_doer(worker, owner, dead):
+def _route_doer(worker, owner, dead, now=None):
     """Who does the route's work now, for its one-line row: harness, model, effort, context
     (percent, window, or the exact token count when no window is known), the open tool and
     the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
@@ -978,10 +978,37 @@ def _route_doer(worker, owner, dead):
     live = _get(job, "liveness") == "working"
     agents = sum(1 for item in (_get(job, "subagents") or ())
                  if _get(item, "active") is True)
-    return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
+    doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
+    return doer
+
+
+def _doer_activity(job, tool, live, now=None):
+    """What the doer is on now and just finished, from its own stream read (nothing derived):
+    the open tool's summary and age (only from that call's native start time; a process of
+    the same attempt or executable is no evidence of this call), ``idle_tool`` only when its
+    own native activity was read and showed no call open, and the last finished call as
+    ``after_tool`` (``Edit · utilities/x.py``). Values are the collector's allow-listed
+    summaries; nothing the worker wrote is carried."""
+    out = {}
+    if isinstance(tool, Mapping):
+        target = _text(tool.get("target"))
+        if target:
+            out["target"] = target
+        since = _num(tool.get("since"))
+        if since is not None:
+            out["tool_since"] = since
+            out["tool_age"] = _dur(max(0.0, (time.time() if now is None else now) - since) / 60)
+    elif live and _get(job, "_tool_observed") is True:
+        out["idle_tool"] = True
+    done = _get(job, "last_tool")
+    if isinstance(done, Mapping) and _text(done.get("name")):
+        out["after_tool"] = " · ".join(
+            part for part in (_text(done["name"]), _text(done.get("target"))) if part)
+    return out
 
 
 def _route_records(snapshot, session_rows, session_index, resolver, now):
@@ -1213,7 +1240,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             route["worker_context_index"] = worker_context_index
         doer_job = (selected_worker if worker_context_index is not None
                     else context_jobs[0] if len(context_jobs) == 1 else None)
-        doer = _route_doer(doer_job, owner, dead)
+        doer = _route_doer(doer_job, owner, dead, now)
         if doer is not None:
             route["doer"] = doer
         if record:

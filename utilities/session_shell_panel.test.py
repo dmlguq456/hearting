@@ -418,6 +418,27 @@ for(const [w,h] of [[40,14],[40,16],[40,18],[40,19],[40,20],[40,21],[80,10],[80,
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_an_opened_route_shows_its_doers_now_and_last_finished_call(self):
+        # Fleet's unfolded activity rows: the open call with its summary and age (whole),
+        # or that no call is open, and the call it just finished on one row cut with `…`.
+        script = r'''
+const assert=require('node:assert/strict'),view=require(process.argv[1]);
+const after='Edit · utilities/session-shell/'+'deep/'.repeat(20)+'host.cjs';
+const route={id:'r',title:'PR 맞추기',state:'working',kind:'working',elapsed:'47m',tool:'Bash',
+ target:'python3 tools/run-tests.py',tool_age:'3m',after_tool:after,paint:{glyph:{text:'⠏'},harness:{text:'claude'}}};
+const paint=(r,width,side)=>view.render({width,height:30,side,model:{routes:[r],route_count:1,messages:[]},sid:'s',
+ configuration:{},expandedKeys:['route:r'],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
+for(const [width,side] of [[40,true],[80,false]]){
+ const rows=paint(route,width,side),flat=rows.join('').replace(/[│ ]/g,'');
+ assert(flat.includes('>_Bash·python3tools/run-tests.py3m'),rows.join('\n'));
+ const line=rows.filter(x=>x.includes('after Edit'));
+ assert.equal(line.length,1,rows.join('\n'));assert(line[0].includes('…'),line[0]);
+}
+const idle=paint({...route,tool:undefined,target:undefined,tool_age:undefined,idle_tool:true,after_tool:undefined},40,true);
+assert(idle.some(x=>x.includes('>_ no tool')),idle.join('\n'));
+'''
+        self.node(script, "panel-view.cjs")
+
     def test_route_rows_follow_the_route_line_setting_and_open_in_place(self):
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);

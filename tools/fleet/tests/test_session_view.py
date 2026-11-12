@@ -120,7 +120,7 @@ class SessionViewTest(unittest.TestCase):
         self.assertIn(str(exact), watched)
 
     def test_opencode_uses_observed_native_capacity_without_guessing_one(self):
-        def enrich(sess):
+        def enrich(sess, **_options):
             sess.model = "native-model"
             sess.active_context_tokens = 20000
             sess.context_window_tokens = 200000

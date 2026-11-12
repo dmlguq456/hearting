@@ -339,6 +339,124 @@ class SourceReadBoundaryTests(unittest.TestCase):
             self.assertEqual(session_shell.bindings(harness='opencode', raise_unread=True), [])
 
 
+class OpenCodeDatabaseReadTests(unittest.TestCase):
+    """OpenCode without a native feed: a failed SQLite read keeps and retries (the #1518 rule).
+
+    Review RV-PR1518-R3 reproduced it on a private V1 database: a model read, then one
+    OperationalError, left the cell empty until the DB or WAL changed again."""
+
+    def setUp(self):
+        import sqlite3, sys
+        tools = str(Path(fast.__file__).resolve().parents[1])  # the collector imports `fleet.*`
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from tools.fleet import session_view
+        from tools.fleet.collectors import opencode
+        self.sqlite3, self.session_view, self.opencode = sqlite3, session_view, opencode
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.child = subprocess.Popen(['sleep', '60'], cwd=self.root)
+        self.addCleanup(self.child.wait)
+        self.addCleanup(self.child.kill)
+        self.pid = self.child.pid
+        self.start = Path(f'/proc/{self.pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+        self.sid = 'ses_fixture_db_read'
+        self.db = self.root/'opencode.db'
+        con = sqlite3.connect(self.db)
+        con.execute('CREATE TABLE session (id TEXT,slug TEXT,agent TEXT,model TEXT,cost REAL,tokens_input INTEGER,'
+                    'tokens_output INTEGER,tokens_reasoning INTEGER,time_updated INTEGER,parent_id TEXT,directory TEXT)')
+        con.execute('INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                    (self.sid, 'fixture', 'default', json.dumps({'id': 'DB model', 'variant': 'high'}),
+                     0, 100, 20, 0, 1000, None, str(self.root)))
+        con.commit(); con.close()
+        self.snapshot = LiveSnapshot(sessions=[Session('opencode', self.pid, session_id=self.sid, proc_start=self.start,
+                                                       cwd=str(self.root), liveness='idle', model=None)])
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(fast, '_attachment_index', return_value={}).start()
+        mock.patch.object(fast.session_registry, 'read', return_value=None).start()
+        mock.patch.object(fast.session_registry, 'registry_path', return_value=str(self.root/'registry.json')).start()
+        mock.patch.object(opencode, '_db', return_value=str(self.db)).start()
+        mock.patch.object(opencode, '_resolve_current_identity', return_value=self.sid).start()
+        mock.patch.object(opencode, '_enrich_v2', side_effect=lambda *a, **k: False).start()
+
+    def set_model(self, name):
+        con = self.sqlite3.connect(self.db)
+        con.execute('UPDATE session SET model=?', (json.dumps({'id': name, 'variant': 'high'}),))
+        con.commit(); con.close()
+
+    def locked(self):
+        return mock.patch.object(self.sqlite3, 'connect', side_effect=self.sqlite3.OperationalError('database is locked'))
+
+    @staticmethod
+    def model(values):
+        cell = values[0][1].get('model') if values else None
+        return cell[0] if cell else None
+
+    def test_a_failed_database_read_keeps_the_display_and_the_next_request_reads_again(self):
+        reader = fast.NativeDisplayReader()
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')
+        self.set_model('New DB model')
+        with self.locked():
+            self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')
+        # The database and WAL did not change again; the kept value is not the read generation.
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'New DB model')
+
+    def test_the_panel_observation_keeps_its_cells_only_with_a_previous_one(self):
+        first, _paths = self.session_view.observe('opencode', self.pid, self.start, self.sid)
+        self.assertEqual(first['model'], 'DB model')
+        with self.locked():
+            kept, _paths = self.session_view.observe('opencode', self.pid, self.start, self.sid, previous=first)
+            plain, _paths = self.session_view.observe('opencode', self.pid, self.start, self.sid)
+            with self.assertRaises(OSError):
+                self.session_view.observe('opencode', self.pid, self.start, self.sid, raise_unread=True)
+        self.assertEqual((kept['model'], kept['effort']), ('DB model', first['effort']))
+        self.assertIsNone(plain['model'])   # nothing is made up without a previous observation
+
+    def test_a_failed_database_read_after_the_selection_moved_clears(self):
+        # Review RV-PR1556: the TUI selection moved A -> B before a failed DB read; the
+        # unread error must not outrank the existing session check (#1518 rule).
+        reader = fast.NativeDisplayReader()
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')
+        first, _paths = self.session_view.observe('opencode', self.pid, self.start, self.sid)
+        self.set_model('New DB model')   # a new generation the reader has to read
+
+        def moved(sess):
+            sess.session_id = 'ses_fixture_other'
+            return sess.session_id
+        with mock.patch.object(self.opencode, '_resolve_current_identity', side_effect=moved), self.locked():
+            self.assertIsNone(self.model(reader.read(self.snapshot)))
+            self.assertEqual(self.session_view.observe('opencode', self.pid, self.start, self.sid,
+                                                       raise_unread=True), ({}, mock.ANY))
+            self.assertEqual(self.session_view.observe('opencode', self.pid, self.start, self.sid,
+                                                       previous=first)[0], {})
+
+    def test_a_refused_or_absent_database_still_clears(self):
+        reader = fast.NativeDisplayReader()
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'DB model')
+        self.set_model('New DB model')   # a new generation the reader has to read
+        with self.locked(), mock.patch.object(self.opencode.os, 'access', return_value=False):
+            self.assertIsNone(self.model(reader.read(self.snapshot)))
+        reader = fast.NativeDisplayReader()
+        self.assertEqual(self.model(reader.read(self.snapshot)), 'New DB model')
+        self.db.unlink()
+        self.assertIsNone(self.model(reader.read(self.snapshot)))
+
+    def test_a_v2_database_read_failure_is_reported_as_unread(self):
+        runtime = self.opencode._opencode_v2_runtime()
+        mock.patch.object(self.opencode, '_enrich_v2', new=type(self).real_enrich_v2).start()
+        with mock.patch.object(runtime, 'credential_store_present', return_value=True), \
+             mock.patch.object(runtime, 'read_session_observation',
+                               return_value={'state': 'unknown', 'reason': 'database-read-failed'}):
+            session = Session('opencode', self.pid, session_id=self.sid, proc_start=self.start)
+            with self.assertRaises(OSError):
+                self.opencode.enrich(session, raise_unread=True)
+            self.opencode.enrich(Session('opencode', self.pid, session_id=self.sid, proc_start=self.start))
+
+    from tools.fleet.collectors.opencode import _enrich_v2 as real_enrich_v2
+
+
 class NativeLayerTests(unittest.TestCase):
     def model(self, pid='1234'):
         return ExplorerViewModel.from_mapping(dict(
