@@ -197,6 +197,58 @@ class PeerReadContextTest(unittest.TestCase):
         self.assertEqual(context.lineage_graph(signature, rebuilt), "graph-4")
         rebuilt.assert_called_once_with()
 
+    def test_job_holders_answer_as_resolve_recipient_does_and_are_kept_only_per_record_and_graph(self):
+        import dispatch_seat_handover as handover
+        owner = ("job\tdone\t/repo\t/wt\towner\tworker_type=owner,dispatch_depth=1,attempt_id=att-o,"
+                 "parent_sid=sid-parent,parent_harness=claude,route_id=rt-1,route_hash=h1,"
+                 "attempt_schema_version=2")
+        plain = "job\tdone\t/repo\t/wt\tchild\tworker_type=owner,attempt_id=att-p,parent_sid=sid-parent"
+        self.jobs.write_text(owner + "\n" + plain + "\n")
+        records = CACHE.registry_view(self.jobs).records
+        graph = object.__new__(handover.LineageGraph)
+        for name, value in (("edges", ()), ("unresolved", frozenset()), ("ledger_keys", {}),
+                            ("ledger_rows", {}), ("binding_rows", {}), ("generation", ()),
+                            ("seat_edges", ()), ("seat_unresolved", frozenset()),
+                            ("binding_conflicts", frozenset())):
+            object.__setattr__(graph, name, value)
+        context = PeerReadContext()
+        graphs = [graph]
+        with mock.patch.object(handover, "_pass_lineage_graph", lambda read_context=None: graphs[0]), \
+                mock.patch.dict(handover._HOLDER_MEMO, {"graph": None, "answers": {}}):
+            before = handover.holder_metrics()
+            first = handover.job_holders(records, self.jobs, read_context=context)
+            expected = [handover.resolve_recipient("job-holder", metadata=record.handover_metadata(),
+                                                   jobs=self.jobs, read_context=context)
+                        for record in records]
+            self.assertEqual(first, expected)
+            again = handover.job_holders(records, self.jobs, read_context=context)
+            self.assertEqual(again, expected)
+            counted = handover.holder_metrics()
+            self.assertEqual(counted["holder_resolves"] - before["holder_resolves"], 2)   # the first call only
+            self.assertEqual(counted["holder_memo_hits"] - before["holder_memo_hits"], 2)  # the second call
+            # another record object (a rewritten registry) is asked again, the unchanged one is not
+            CACHE.clear_cache()
+            rewritten = CACHE.registry_view(self.jobs).records
+            handover.job_holders(rewritten[:1], self.jobs, read_context=context)
+            self.assertEqual(handover.holder_metrics()["holder_resolves"] - counted["holder_resolves"], 1)
+            # another lineage graph object: nothing carries over
+            counted = handover.holder_metrics()
+            graphs[0] = object.__new__(handover.LineageGraph)
+            for name in ("edges", "unresolved", "ledger_keys", "ledger_rows", "binding_rows", "generation",
+                         "seat_edges", "seat_unresolved", "binding_conflicts"):
+                object.__setattr__(graphs[0], name, getattr(graph, name))
+            handover.job_holders(rewritten, self.jobs, read_context=context)
+            self.assertEqual(handover.holder_metrics()["holder_resolves"] - counted["holder_resolves"], 2)
+            # an unreadable lineage is answered like resolve_recipient does and is never kept
+            graphs[0] = None
+            def unreadable(read_context=None):
+                raise OSError("lineage-unreadable")
+            counted = handover.holder_metrics()
+            with mock.patch.object(handover, "_pass_lineage_graph", unreadable):
+                answers = handover.job_holders(rewritten, self.jobs, read_context=context)
+            self.assertTrue(all(answer.state == "unreadable" or answer.reason == "" for answer in answers))
+            self.assertEqual(handover.holder_metrics(), counted)
+
 
 if __name__ == "__main__":
     unittest.main()
