@@ -1524,6 +1524,40 @@ class PrefixReuseAfterReplacementTest(unittest.TestCase):
         self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
         self._assert_same_as_fresh_read(second)
 
+    def test_only_the_same_file_keeping_a_segment_is_an_append_generation(self):
+        # The parse is still reused in every case; only the append marker, which
+        # owner_candidate_floor pairs with an older cursor's (dev, ino), narrows.
+        def appended_in_place(rows):
+            with self.jobs.open("ab") as stream:
+                stream.write(self._row(len(rows)).encode())
+            return rows + [self._row(len(rows))]
+
+        cases = {
+            "append by rename": (self._rows(8), lambda rows: self._replace(rows + [self._row(8)]), False),
+            "identical rewrite": (self._rows(8), lambda rows: self._replace(rows), False),
+            "replacement of an empty generation": ([], lambda rows: self._replace(self._rows(3)), False),
+            "replacement of a tail-only generation": (
+                ["t\topen\t/repo\t/wt\ts\tattempt_id=att-tail"],
+                lambda rows: self._replace(self._rows(3)), False),
+            "append in place": (self._rows(8), appended_in_place, True),
+        }
+        for scoped in (False, True):
+            for name, (rows, change, expected) in cases.items():
+                with self.subTest(case=name, scoped=scoped):
+                    CACHE.clear_cache()
+                    CACHE.reset_metrics()
+                    self._replace(rows)
+                    first = self._read(scoped)
+                    change(rows)
+                    second = self._read(scoped)
+                    self.assertIsNot(second, first)
+                    self.assertEqual(second.signature[:2] == first.signature[:2], expected)
+                    self.assertIs(second.append_only_generation, expected)
+                    if first._segments:
+                        self.assertIs(second._segments[0], first._segments[0])
+                        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 1)
+                    self._assert_same_as_fresh_read(second)
+
     def test_chunking_does_not_change_the_answers(self):
         rows = self._rows(30)
         rows[7] = "malformed row\n"
