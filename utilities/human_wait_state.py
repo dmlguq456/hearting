@@ -579,6 +579,10 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         return False
     # A physical prompt bumps the sequence; a courier consumes the question's
     # exact recorded sequence. No late old prompt may complete a newer question.
+    # Claims are made under this same seat lock, so this read, before the source
+    # write, is the one that decides: a prompt never ends an answer already chosen.
+    if action_id is None and _message_claim_open(signal):
+        return False
     completion = {"actor": actor, "action_id": action_id, "at": time.time(),
                   "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     if not signal["detail"]["questions"][0].get("is_secret"):
@@ -826,6 +830,10 @@ def message_answer_pending(signal):
     An unreadable claim record is not "no claim": this prompt then registers no
     automatic answer, the question and any claim stay as they are, and the next
     readable prompt or the claim's own delivery decides."""
+    return _message_claim_open(signal)
+
+
+def _message_claim_open(signal):
     entry, known = _selected_lookup(_message_envelope(signal))
     if not known:
         return True
