@@ -487,7 +487,6 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                                                "ObservationTransport", return_value=transport), \
                              mock.patch.object(peer_steward, "_runner_readiness_transport",
                                                return_value=runner_transport), \
-                             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                              mock.patch.object(peer_steward.select, "select", side_effect=deliver_event), \
                              mock.patch.object(peer_steward, "_retire_target", return_value=(native, identity, 0, None)), \
                              mock.patch.object(peer_steward, "_retire_pane_info", return_value={
@@ -3741,32 +3740,6 @@ class WatchTerminalReconcileTest(unittest.TestCase):
             "AGENT_HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/default.sock"})
         self.assertEqual(same_default["HERDR_SOCKET_PATH"], "/default.sock")
 
-    def test_terminal_event_requires_a_fresh_snapshot_that_rejects_reused_pane_id(self):
-        expected = {"harness": "codex", "session_id": "sid-old", "pane": "w1:p9"}
-        initial = SimpleNamespace(endpoint="named", complete=True,
-                                  terminal={"w1:p9": "pane-closed"}, panes=[])
-
-        class Transport:
-            def __init__(self, rows):
-                self.rows = rows
-
-            def resnapshot(self):
-                return SimpleNamespace(endpoint="named", complete=True,
-                                       terminal={}, panes=self.rows)
-
-        reused = Transport([{"pane_id": "w1:p9", "agent": "codex",
-                             "agent_session": {"value": "sid-old"}}])
-        self.assertIsNone(peer_steward._watch_terminal_from_view(
-            initial, expected, "named", reused))
-        new_expected = {"harness": "codex", "session_id": "sid-new", "pane": "w1:p9"}
-        new_occupant = Transport([{"pane_id": "w1:p9", "agent": "codex",
-                                   "agent_session": {"value": "sid-new"}}])
-        self.assertIsNone(peer_steward._watch_terminal_from_view(
-            initial, new_expected, "named", new_occupant))
-        absent = Transport([])
-        self.assertEqual(peer_steward._watch_terminal_from_view(
-            initial, expected, "named", absent), "pane-closed")
-
     def test_ensure_settles_closed_pane_receipt_before_spawning_orphan_observer(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3832,7 +3805,6 @@ class WatchTerminalReconcileTest(unittest.TestCase):
                                    "replace_managed_observer", return_value="replaced") as replace, \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
-                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(peer_steward, "_spawn_watch_observer") as spawn:
                 peer_steward._ensure_watch_observers(service_current=binding)
             replace.assert_called_once_with(

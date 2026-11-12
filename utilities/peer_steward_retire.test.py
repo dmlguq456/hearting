@@ -6405,8 +6405,9 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
 
     def _publish(self, *, deadline=None, readiness=None):
         value=readiness or SimpleNamespace(state="ready",reason="native-ready")
+        patch_readiness=(dict(side_effect=value) if callable(value) else dict(return_value=value))
         with mock.patch.object(peer_steward,"_watch_readiness_identity",return_value=self.identity), \
-             mock.patch.object(peer_steward,"_watch_transition_readiness",return_value=value):
+             mock.patch.object(peer_steward,"_watch_transition_readiness",**patch_readiness):
             return peer_steward._watch_publish_ready_receipt(
                 "target-agent","idle",self.arm,self.arm["agent"],self.server,
                 self.watch_id,self.paths,self.receipt,deadline=deadline)
@@ -6468,6 +6469,209 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
     def test_unknown_readiness_keeps_receipt_pending(self):
         self.assertFalse(self._publish(readiness=SimpleNamespace(state="unknown",reason="native-unknown")))
         self.assertFalse(self.paths.receipt.exists())
+
+    def _probe_jobs_writer_progress(self):
+        fd=os.open(str(self.jobs_path)+".lock",os.O_RDWR|os.O_CREAT,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.fail("jobs writer remained blocked after the seat acquisition failed")
+        finally:
+            with contextlib.suppress(OSError): fcntl.flock(fd,fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _assert_terminal_timeout(self, arm=None):
+        terminal=peer_steward._write_terminal_watch_receipt(
+            self.watch_id,arm or self.arm,"watch-deadline")
+        self.assertEqual((terminal["state"],terminal["reason"]),("timeout","watch-deadline"))
+
+    def test_jobs_then_seat_share_one_remaining_budget(self):
+        import dispatch_seat_handover
+        budget=peer_steward._WATCH_TRANSITION_LOCK_BUDGET_SEC
+        scheduler_delay=budget*0.8
+
+        class _LocalClock:
+            """Inject a scheduler pause without patching process-global time."""
+            def __init__(self):
+                self.now=10.0; self.deadline=None
+                self.delay_after_jobs_lock=False; self.delay_applied=False
+            def monotonic(self):
+                if self.deadline is None: self.deadline=self.now+budget
+                if self.delay_after_jobs_lock:
+                    self.now+=scheduler_delay
+                    self.delay_after_jobs_lock=False; self.delay_applied=True
+                return self.now
+            def __getattr__(self,name): return getattr(time,name)
+
+        clock=_LocalClock(); real_fcntl=peer_steward.fcntl
+
+        class _LocalFcntl:
+            """Advance only peer-steward's clock after its jobs flock succeeds."""
+            def flock(self,fd,operation):
+                result=real_fcntl.flock(fd,operation)
+                if operation&real_fcntl.LOCK_EX and operation&real_fcntl.LOCK_NB:
+                    clock.delay_after_jobs_lock=True
+                return result
+            def __getattr__(self,name): return getattr(real_fcntl,name)
+
+        real_seat_lock=dispatch_seat_handover.readiness_transition_lock
+        process,release=self._holder("seat")
+        try:
+            with patch_split(peer_steward,"time",clock), \
+                 patch_split(peer_steward,"fcntl",_LocalFcntl()), \
+                 mock.patch.object(dispatch_seat_handover,"readiness_transition_lock",
+                                   wraps=real_seat_lock) as seat_lock:
+                result=self._publish()
+            self.assertEqual(result,peer_steward._WATCH_RECEIPT_CONTENDED)
+            self.assertTrue(clock.delay_applied)
+            seat_lock.assert_called_once()
+            self.assertAlmostEqual(seat_lock.call_args.kwargs["wait"],
+                                   clock.deadline-clock.now,places=6)
+            self.assertAlmostEqual(seat_lock.call_args.kwargs["wait"],
+                                   budget-scheduler_delay,places=6)
+            self._probe_jobs_writer_progress()
+        finally: self._release(process,release)
+        self.assertFalse(self.paths.receipt.exists())
+
+    def test_watch_deadline_during_lock_acquisition_uses_terminal_timeout_receipt(self):
+        process,release=self._holder("jobs",hold_seconds=0.4)
+        try:
+            deadline=time.monotonic()+0.07
+            started=time.monotonic()
+            result=self._publish(deadline=deadline)
+            elapsed=time.monotonic()-started
+        finally: self._release(process,release)
+        self.assertEqual(result,peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertLess(elapsed,0.18)
+        self.assertFalse(self.paths.receipt.exists())
+        self._assert_terminal_timeout()
+
+    def test_watch_deadline_during_fresh_authority_blocks_late_receipt(self):
+        deadline=time.monotonic()+0.04
+        def late_ready(*_args,**_kwargs):
+            time.sleep(0.07)
+            return SimpleNamespace(state="ready",reason="native-ready")
+        result=self._publish(deadline=deadline,readiness=late_ready)
+        self.assertEqual(result,peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertFalse(self.paths.receipt.exists())
+        self._assert_terminal_timeout()
+
+    def test_real_500ms_deadline_keeps_timeout_after_valid_late_ready(self):
+        arm={**self.arm,"timeout":500,"deadline":peer_steward._watch_deadline(500)}
+        original_deadline=copy.deepcopy(arm["deadline"])
+        self.arm=arm
+        peer_steward._write_json_atomic(self.paths.arm,arm)
+        # One fixed real wait lets the original absolute deadline expire.
+        time.sleep(0.55)
+        self.assertEqual(peer_steward._watch_timeout_remaining_ms(arm),(0,"expired"))
+        resolved=peer_steward._watch_monotonic_deadline(arm)
+        self.assertEqual(resolved,original_deadline["monotonic_deadline"])
+        self.assertEqual(arm["deadline"],original_deadline)
+        # The native readiness is still valid (late); the receipt edge enforces the arm's deadline.
+        late=SimpleNamespace(state="ready",reason="native-ready")
+        self.assertEqual(self._publish(deadline=resolved,readiness=late),
+                         peer_steward._WATCH_RECEIPT_EXPIRED)
+        self.assertFalse(self.paths.receipt.exists())
+        self._assert_terminal_timeout(arm)
+
+    def _write_pending_transition(self,**extra):
+        observation={"watch_id":self.watch_id,"native_wait":{"state":"result","agent_state":"idle"},
+                     "readiness_transition":{"token":"same-token","identity":self.identity,
+                         "consumer":{"pid":os.getpid(),"pid_start":self.start},
+                         "requested_at":time.time()},**extra}
+        peer_steward._write_json_atomic(self.paths.observation,observation)
+        return observation
+
+    def test_repeated_same_transition_contention_coalesces_runner_wake(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        self._write_pending_transition()
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner") as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner") as ensure:
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+            noted=peer_steward._read_json(self.paths.observation)
+            self.assertEqual(noted["readiness_contention"],{"request_token":"same-token"})
+            self.assertEqual(noted["reason"],"shared-readiness-authority-lock-busy")
+            wake.assert_called_once_with(root)
+            ensure.assert_called_once_with(reconciliation_required=True)
+            # The same unchanged request contending again wakes no live runner.
+            wake.reset_mock(); ensure.reset_mock()
+            with mock.patch.object(peer_steward,"process_start_ticks",return_value=self.start):
+                (root/"readiness-v1").mkdir(parents=True,exist_ok=True)
+                peer_steward._write_json_atomic(root/"readiness-v1"/"runner.json",
+                    {"pid":os.getpid(),"pid_start":self.start})
+                peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+            wake.assert_not_called(); ensure.assert_not_called()
+
+    def _transition_readiness(self,cached):
+        with mock.patch.object(peer_steward,"_watch_readiness_identity",return_value=self.identity), \
+             mock.patch.object(peer_steward,"_watch_shared_readiness",return_value=cached), \
+             mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner",return_value=False) as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner",return_value=True) as ensure:
+            result=peer_steward._watch_transition_readiness(
+                "target-agent","idle",self.arm,self.arm["agent"],self.server,self.watch_id,self.paths)
+        return result,wake,ensure
+
+    def test_missing_initial_projection_ensures_the_existing_runner(self):
+        self._write_pending_transition()
+        observation=peer_steward._read_json(self.paths.observation); observation.pop("readiness_transition")
+        peer_steward._write_json_atomic(self.paths.observation,observation)
+        result,wake,ensure=self._transition_readiness(
+            SimpleNamespace(state="unknown",reason="shared-readiness-unavailable"))
+        self.assertEqual((result.state,result.reason),("pending","shared-readiness-revalidating"))
+        request=peer_steward._read_json(self.paths.observation)["readiness_transition"]
+        self.assertEqual(request["identity"],self.identity)
+        self.assertEqual(request["consumer"],{"pid":os.getpid(),"pid_start":self.start})
+        self.assertTrue(request["token"])
+        wake.assert_called_once_with(peer_steward.peer_obligations.ObligationStore().root)
+        ensure.assert_called_once_with(reconciliation_required=True)
+
+    def test_stale_pending_write_keeps_new_consumer_and_contention_reset(self):
+        previous=self._write_pending_transition(readiness_contention={"request_token":"same-token"})
+        previous["readiness_transition"]={**previous["readiness_transition"],
+            "token":"dead-previous-consumer-token","consumer":{"pid":2147483000,"pid_start":"1"}}
+        previous["readiness_contention"]={"request_token":"dead-previous-consumer-token"}
+        peer_steward._write_json_atomic(self.paths.observation,previous)
+        result,_wake,_ensure=self._transition_readiness(SimpleNamespace(state="ready",reason="fixture-ready"))
+        self.assertEqual((result.state,result.reason),("pending","shared-readiness-revalidating"))
+        fresh=peer_steward._read_json(self.paths.observation)["readiness_transition"]
+        self.assertNotEqual(fresh["token"],"dead-previous-consumer-token")
+        self.assertEqual(fresh["consumer"],{"pid":os.getpid(),"pid_start":self.start})
+        self.assertNotIn("readiness_contention",peer_steward._read_json(self.paths.observation))
+        # The stale local snapshot written right after it must not roll the request back.
+        peer_steward._write_watch_observation(self.paths,{**previous,"state":"pending",
+            "reason":result.reason,"observed_ts":peer_steward._utc_now()})
+        after=peer_steward._read_json(self.paths.observation)
+        self.assertEqual(after["readiness_transition"],fresh)
+        self.assertNotIn("readiness_contention",after)
+
+    def test_same_transition_contention_restarts_a_dead_runner_without_waking(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        self._write_pending_transition(readiness_contention={"request_token":"same-token"})
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner") as wake, \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner") as ensure:
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+        wake.assert_not_called()
+        ensure.assert_called_once_with(reconciliation_required=True)
+
+    def test_stale_pending_write_cannot_roll_back_the_contention_marker(self):
+        root=peer_steward.peer_obligations.ObligationStore().root
+        previous=self._write_pending_transition()
+        with mock.patch.object(peer_steward.shared_readiness,"clear_watch_transition"), \
+             mock.patch.object(peer_steward.shared_readiness,"wake_runner"), \
+             mock.patch.object(peer_steward.peer_obligations,"ensure_normal_runner"):
+            peer_steward._watch_note_transition_lock_contention(root,self.watch_id,self.paths)
+        contention=peer_steward._read_json(self.paths.observation)["readiness_contention"]
+        self.assertEqual(contention,{"request_token":"same-token"})
+        # An ordinary write carrying the old snapshot keeps the newer request and its marker.
+        stale={**previous,"state":"pending","reason":"shared-readiness-revalidating",
+               "observed_ts":peer_steward._utc_now()}
+        peer_steward._write_watch_observation(self.paths,stale)
+        after=peer_steward._read_json(self.paths.observation)
+        self.assertEqual(after["readiness_transition"],previous["readiness_transition"])
+        self.assertEqual(after["readiness_contention"],contention)
 
 
 class SharedReadinessRunnerTest(unittest.TestCase):

@@ -1000,8 +1000,14 @@ class TmuxSurface:
         else:
             harness, pid = found
             session_id = _process_session(harness, pid, pane, self)
-        native_server = ((row.get("env") or {}).get("AGENT_HERDR_SESSION")
-                         or (row.get("env") or {}).get("HERDR_SESSION") or self.socket)
+        # The runtime's own environment names its endpoint; the tmux socket is the fallback.
+        try:
+            from fleet.collectors import procscan
+            runtime_env = procscan.read_environ(pid) or {}
+        except Exception:
+            runtime_env = {}
+        native_server = (runtime_env.get("AGENT_HERDR_SESSION")
+                         or runtime_env.get("HERDR_SESSION") or self.socket)
         self._native_servers[pane] = native_server or "default"
         status = native_turn(harness, pid, session_id, pane=pane, server=native_server) if session_id else "unknown"
         if seat is not None and status == "unknown":

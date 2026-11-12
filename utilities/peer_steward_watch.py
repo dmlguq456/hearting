@@ -216,38 +216,6 @@ def _terminal_watch_request(paths, expected, server):
     return str(observation.get("reason") or "completed-retire")
 
 
-
-
-def _watch_terminal_from_view(view, expected, server, transport=None):
-    """Legacy in-memory view classifier; protocol-3 watches use native lifetime."""
-    if view is None or getattr(view, "complete", False) is not True:
-        return None
-    if str(getattr(view, "endpoint", "default") or "default") != str(server or "default"):
-        return None
-    pane_id = expected.get("pane") if isinstance(expected, dict) else None
-    if not isinstance(pane_id, str) or not pane_id or pane_id == "-":
-        return None
-    terminal = getattr(view, "terminal", {}).get(pane_id)
-    if terminal in {"pane-closed", "pane-exited"}:
-        return terminal
-    rows = [row for row in getattr(view, "panes", ()) if row.get("pane_id") == pane_id]
-    if not rows:
-        return "pane-absent"
-    if len(rows) != 1:
-        return None
-    row = rows[0]
-    session = row.get("agent_session") or {}
-    session = session.get("value") if isinstance(session, dict) else session
-    if (expected.get("harness") not in {None, "", "-"}
-            and row.get("agent") is not None
-            and row.get("agent") not in {None, "", "-", "unknown", expected.get("harness")}):
-        return "session-replaced"
-    if (expected.get("session_id") not in {None, "", "-"}
-            and isinstance(session, str) and session and session != expected.get("session_id")):
-        return "session-replaced"
-    return None
-
-
 class _WatchCloseEvidence:
     """Memoized native lifetime and lineage evidence for one close pass."""
 

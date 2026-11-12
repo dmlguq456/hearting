@@ -116,7 +116,7 @@ from peer_steward_watch import (  # noqa: F401
     _watch_readiness_identity_matches_arm, _WATCH_RECEIPT_CONTENDED, _WATCH_RECEIPT_EXPIRED,
     _WATCH_RECEIPT_PENDING, _watch_root, _WATCH_SCHEMA,
     _watch_selected_readiness_endpoint, _WATCH_SERVER_ENDPOINT_PREFIX, _WATCH_STATES,
-    _watch_timeout_remaining_ms, _watch_terminal_from_view, _WATCH_TRANSITION_LOCK_BUDGET_SEC,
+    _watch_timeout_remaining_ms, _WATCH_TRANSITION_LOCK_BUDGET_SEC,
     _WatchCloseEvidence, _WatchDeadlineExpired, _watcher_present, _WatchPaths,
     _WatchTransitionLockBusy, _write_json_atomic, _write_watch_claim, _write_watch_observation,
     cmd_join,

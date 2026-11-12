@@ -3994,7 +3994,6 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(peer_steward, "_settle_terminal_watch_if_unobserved",
                                    return_value=False), \
                  patch_split(peer_steward, "_herdr_missing", return_value=False), \
-                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch), \

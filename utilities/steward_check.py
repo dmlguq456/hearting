@@ -781,7 +781,7 @@ def advance(duty: dict, store, *, now: float | None = None) -> None:
         store.update(duty["id"], state="complete", cleanup="complete")
         return
     if not _throttled(duty["id"], "window", now):
-        # A polling cadence for `herdr pane list`, not a time condition on the verdict.
+        # A cadence for the native window-closed read, not a time condition on the verdict.
         if _release_if_window_closed(duty, store, harness, session_id, now):
             return
     if phase == "notified":

@@ -54,6 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import Reply, Scenario, PrivateTui, harness_argv, wait_for  # noqa: E402
 from harness_behavior_cases_a import _helper, _install_helper, _shell, _summary  # noqa: E402
 from harness_behavior_cases_b import fixture_python, long_shell, session_id  # noqa: E402
+from dispatch_contract_roots import stable_state_root  # noqa: E402
 
 
 NOTICE_CODE = r"""
@@ -325,13 +326,16 @@ class WatchWakeScenario(Scenario):
     def _answer(self, record, earlier):
         last, kind = record["last_text"], record["last_kind"]
         shells = [r["reply"].get("shell") or "" for r in earlier]
-        if "SCENARIO-WATCH-TARGET INIT" in record["text"]:
+        # The steward TUI and the target TUI share this script. record["text"] is the whole
+        # conversation, so a session is told apart by its own markers and answered from its
+        # current input (last/kind), never from text an earlier turn of the same session left.
+        steward = "SCENARIO-WATCH arm" in record["text"]
+        if not steward and "SCENARIO-WATCH-TARGET" in record["text"]:
+            if kind == "tool":
+                return Reply("target turn done")
+            if "SCENARIO-WATCH-TARGET WORK" in last:
+                return Reply(shell="sleep 12; echo SCENARIO-WATCH-TARGET-DONE")
             return Reply("target initialized")
-        if "SCENARIO-WATCH-TARGET WORK" in record["text"] and not any(
-                "SCENARIO-WATCH-TARGET-DONE" in shell for shell in shells):
-            return Reply(shell="sleep 12; echo SCENARIO-WATCH-TARGET-DONE")
-        if kind == "tool" and "SCENARIO-WATCH-TARGET-DONE" in last:
-            return Reply("target turn done")
         if kind == "tool" and self.NEXT in last:
             return Reply("Watch handled.")
         armed = [r for r in earlier if "state=armed" in r["last_text"]]
@@ -348,7 +352,8 @@ class WatchWakeScenario(Scenario):
                 command = match.group(2).strip().splitlines()[0]
                 return Reply(shell=long_shell(command, wait_ms=600000))
             return Reply("Watch armed; ending my turn as the line says.")
-        if "SCENARIO-WATCH arm" in last and not shells:
+        if "SCENARIO-WATCH arm" in last and not any(
+                "peer-steward.py" in shell and " watch " in shell for shell in shells):
             target = self.target_address or "claude:unresolved"
             return Reply(shell=f'python3 "$AGENT_HOME/utilities/peer-steward.py" watch {shlex.quote(target)} '
                                f'--until idle --timeout 240000')
@@ -457,7 +462,12 @@ class NativeWatchEndScenario(WatchWakeScenario):
     def _read_watch_receipt(run, watch_id):
         if not watch_id:
             return None
-        state = Path(run.home.env["AGENT_PEER_LEDGER_ROOT"])
+        # The fixture env never sets AGENT_PEER_LEDGER_ROOT, so resolve the receipt root the way
+        # peer-message.peer_state_root() does inside the fixture: the override when present, else
+        # the stable per-user state root under that env.
+        env = run.home.env
+        override = env.get("AGENT_PEER_LEDGER_ROOT")
+        state = Path(override) if override else stable_state_root(env)
         path = state / "peer-watches" / f"{watch_id}.receipt.json"
         try:
             return json.loads(path.read_text(encoding="utf-8"))
