@@ -320,10 +320,10 @@ def route_row(row, now=None):
         shown["tool"] = tool
     if type(row.get("agents")) is int and row["agents"] > 0:
         shown["agents"] = row["agents"]
-    # What the doer is on now and last said: Fleet's own unfolded activity rows.
-    for key, limit in (("target", 120), ("tool_age", 16), ("said", 160)):
+    # What the doer is on now and just finished: Fleet's own unfolded activity rows.
+    for key, limit in (("target", 120), ("tool_age", 16), ("after_tool", 160)):
         value = sanitize_title(str(row.get(key) or ""))[:limit]
-        if value and (key == "said" or tool):
+        if value and (key == "after_tool" or tool):
             shown[key] = value
     if row.get("idle_tool") is True and not tool:
         shown["idle_tool"] = True

@@ -2316,25 +2316,7 @@ def _counter(value):
 
 def _shell_command_label(command):
     """Return one privacy-minimal executable label, never the full command."""
-    if not isinstance(command, str):
-        return None
-    for line in command.splitlines():
-        line = line.strip()
-        if (not line or line.startswith("#")
-                or re.match(r"^(?:set|export|cd)(?:\s|$)", line)
-                or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", line)):
-            continue
-        try:
-            words = shlex.split(line, posix=True)
-        except ValueError:
-            words = line.split()
-        while words and words[0] in ("env", "command", "sudo"):
-            words.pop(0)
-        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-            words.pop(0)
-        if words:
-            return os.path.basename(words[0])[:48]
-    return None
+    return _shell_summary(command)[0]
 
 
 def _tool_label(name, tool_input=None, command=None):
@@ -2346,86 +2328,176 @@ def _tool_label(name, tool_input=None, command=None):
     return str(name)[:48] if isinstance(name, str) and name else None
 
 
-_ONE_LINE_LIMIT = 120
-_TOKEN_SHAPED = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,})\b")
-# The input field that names what a native tool acts on. A tool not listed has no
-# target here (its name alone is shown); a URL is never shown (query strings carry keys).
-_TOOL_TARGET_FIELDS = (
-    ("command", "cmd"), ("file_path", "notebook_path", "path", "filePath"),
-    ("pattern", "query"), ("description",))
+# What a tool call acts on reaches the public model only as an allow-listed summary:
+# a file tool's path, or a shell command's executable and at most one first argument
+# that is a short subcommand word or a file in the worktree. No argument, option value,
+# assignment, quoted text, heredoc, pipe tail or URL is carried, and nothing the worker
+# wrote in its own words is either (masking free text cannot be made complete).
+_FILE_TOOLS = frozenset({"read", "edit", "write", "multiedit", "notebookedit", "notebookread"})
+_FILE_FIELDS = ("file_path", "notebook_path", "filePath", "path")
+_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash"})
+_SHELL_PREFIXES = frozenset({"env", "command", "sudo", "nohup", "exec", "time"})
+# Commands that only set up the shell for the next one (``cd x && cmd``).
+_SHELL_SETUP = frozenset({"cd", "pushd", "popd", "set", "export", "unset", "source", ".",
+                          "umask", "shopt", "trap", "true", ":"})
+# First arguments of these are free text, never a subcommand.
+_FREE_TEXT_COMMANDS = frozenset({"echo", "printf", "print", "say", "logger", "notify-send"})
+_EXECUTABLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}")
+_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]{0,19}")
+_PATH_LIKE = re.compile(r"(?=[^-])[A-Za-z0-9._/+-]{1,240}")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_OPERATORS = ";&|<>()"
 
 
-def _one_line(value, limit=_ONE_LINE_LIMIT):
-    """One display line of a worker's own text: control characters removed, whitespace
-    collapsed, credentials masked by the existing shell-job rule, cut with ``…``."""
-    line = shell_jobs.command_summary(value) if isinstance(value, str) else None
-    if not line:
-        return None
-    line = _TOKEN_SHAPED.sub("[redacted]", line.rstrip("…"))
-    return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
-
-
-def _tool_target(name, tool_input=None, command=None):
-    """What one open tool call acts on, as one masked line (``run-tests --select …``,
-    ``/abs/utilities/session-shell/host.cjs``), or None when its input names nothing."""
-    raw = command
-    if raw is None and isinstance(tool_input, Mapping):
-        for fields in _TOOL_TARGET_FIELDS:
-            raw = next((tool_input[key] for key in fields
-                        if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
-            if raw is not None:
-                break
-    if not isinstance(raw, str):
-        return None
+def _shell_words(line):
     try:
-        words = shlex.split(raw) if len(raw) < 4096 else ()
-    except ValueError:
-        words = ()
-    if (len(words) == 3 and os.path.basename(words[0]) in {"sh", "bash", "zsh"}
-            and words[1] in {"-c", "-lc"}):
-        raw = words[2]                     # the command a native shell wrapper runs
-    raw = re.sub(r"^\s*cd\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s*&&\s*", "", raw)   # where it runs is the row's worktree
-    return _one_line(raw, 80)
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except (ValueError, TypeError):
+        return None
 
 
-def _job_activity(job, exec_tool, last_text):
-    """Attach the open tool (its target relative to the job's worktree) and the last line."""
-    if isinstance(exec_tool, Mapping) and isinstance(exec_tool.get("target"), str):
-        cwd = (getattr(job, "cwd", None) or "").rstrip("/")
-        target = exec_tool["target"]
-        if cwd and cwd in target:
-            target = target.replace(cwd + "/", "").replace(cwd, ".")
-        exec_tool = dict(exec_tool, target=target)
-    job.exec_tool = dict(exec_tool) if isinstance(exec_tool, Mapping) else None
-    job.last_text = dict(last_text) if isinstance(last_text, Mapping) and last_text.get("text") else None
+def _shell_summary(command, depth=0):
+    """``(executable, first_argument)`` of the command a shell call runs, else ``(None, None)``.
+
+    The argument is only a candidate (a subcommand word or a path-shaped word); the public
+    boundary keeps a path only when it names a file in the worktree. Unclear input yields
+    less: an unparsable line, a heredoc or anything past the first command stops the read.
+    """
+    if not isinstance(command, str) or len(command) > 16384 or depth > 2:
+        return None, None
+    for line in command.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        words = _shell_words(line)
+        if not words:
+            return None, None
+        segment = []
+        for word in words + [";"]:
+            if word and all(char in _SHELL_OPERATORS for char in word):
+                if word.startswith("<") or word.startswith(">") or word.startswith("("):
+                    if segment:
+                        break       # a redirect or heredoc ends what is read of this command
+                    return None, None
+                if segment:
+                    exe, arg = _segment_summary(segment, depth)
+                    if exe == "":
+                        segment = []
+                        if word in ("&&", ";", "||"):
+                            continue
+                        return None, None
+                    return exe, arg
+                if word not in ("&&", ";", "||"):
+                    return None, None
+                continue
+            segment.append(word)
+        if segment:
+            exe, arg = _segment_summary(segment, depth)
+            if exe != "":
+                return exe, arg
+        if "<<" in line:
+            return None, None
+    return None, None
 
 
-def _said(text, stamp=None):
-    """The worker's last assistant line as one masked line, with its native time."""
-    line = _one_line(text)
-    return {"text": line, "at": shell_jobs.parse_time(stamp)} if line else None
+def _segment_summary(words, depth):
+    """One simple command's ``(exe, arg)``; ``("", None)`` for a setup-only command."""
+    words = list(words)
+    while words and (_ASSIGNMENT.match(words[0]) or words[0] in _SHELL_PREFIXES):
+        words.pop(0)
+    if not words:
+        return "", None
+    exe = os.path.basename(words[0])
+    if exe in _SHELL_SETUP:
+        return "", None
+    if exe in _SHELL_WRAPPERS and len(words) >= 3 and re.fullmatch(r"-[a-z]*c", words[1]):
+        return _shell_summary(words[2], depth + 1)
+    if not _EXECUTABLE.fullmatch(exe):
+        return None, None
+    arg = words[1] if len(words) > 1 else None
+    if (arg is None or exe in _FREE_TEXT_COMMANDS or "://" in arg
+            or not (_SUBCOMMAND.fullmatch(arg) or _PATH_LIKE.fullmatch(arg))):
+        arg = None
+    return exe, arg
 
 
-def _open_tool(label, name=None, tool_input=None, stamp=None, command=None):
-    """One open tool call: its label, the masked line it acts on and its start time."""
-    tool = {"name": label}
-    target = _tool_target(name, tool_input, command)
-    words = target.split(" ") if target else []
-    lead = next((i for i, word in enumerate(words) if word.rsplit("/", 1)[-1] == label), None)
-    if lead is not None and all(word in ("env", "command", "sudo") or "=" in word
-                                for word in words[:lead]):
-        target = " ".join(words[lead + 1:]) or None   # ``python3 · tools/…``, not twice
-    if target and target != label:
-        tool["target"] = target
+def _tool_subject(name, tool_input=None, command=None):
+    """The allow-listed subject of one tool call, kept in the parse result until the job's
+    worktree is known: ``{"path"}`` for a file tool, ``{"exe", "arg"}`` for a shell call."""
+    lowered = name.lower() if isinstance(name, str) else ""
+    if lowered in ("bash", "command_execution", "exec", "shell") or command is not None:
+        raw = command if command is not None else (
+            tool_input.get("command") if isinstance(tool_input, Mapping) else None)
+        exe, arg = _shell_summary(raw)
+        return {"exe": exe, "arg": arg} if exe else {}
+    if lowered in _FILE_TOOLS and isinstance(tool_input, Mapping):
+        path = next((tool_input[key] for key in _FILE_FIELDS
+                     if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
+        if path and len(path) <= 4096 and path.isprintable():
+            return {"path": path.strip()}
+    return {}
+
+
+def _in_worktree(path, cwd):
+    """``path`` relative to the worktree ``cwd`` when it lies inside it, else None."""
+    if not cwd or not isinstance(path, str):
+        return None
+    root = os.path.normpath(cwd)
+    full = os.path.normpath(path if os.path.isabs(path) else os.path.join(root, path))
+    if full != root and full.startswith(root.rstrip("/") + "/"):
+        return os.path.relpath(full, root)
+    return None
+
+
+def _public_tool(tool, cwd):
+    """The public form of one parsed tool call: ``{"name", "target"?, "since"?}`` only."""
+    if not isinstance(tool, Mapping) or not isinstance(tool.get("name"), str):
+        return None
+    out = {"name": tool["name"][:48]}
+    target = None
+    path = tool.get("path")
+    if isinstance(path, str):
+        target = _in_worktree(path, cwd) or os.path.basename(path.rstrip("/")) or None
+    exe = tool.get("exe")
+    if isinstance(exe, str) and _EXECUTABLE.fullmatch(exe):
+        arg = tool.get("arg")
+        if isinstance(arg, str) and not _SUBCOMMAND.fullmatch(arg):
+            relative = _in_worktree(arg, cwd)
+            arg = (relative if relative and os.path.isfile(os.path.join(cwd, relative))
+                   and _PATH_LIKE.fullmatch(relative) else None)
+        words = ([] if exe == out["name"] else [exe]) + ([arg] if isinstance(arg, str) else [])
+        target = " ".join(words) or None
+    if target and target != out["name"] and target.isprintable():
+        out["target"] = target[:120]
+    since = tool.get("since")
+    if isinstance(since, (int, float)) and not isinstance(since, bool) and math.isfinite(since):
+        out["since"] = since
+    return out
+
+
+def _job_activity(job, exec_tool, last_tool, observed=True):
+    """Attach the open and the last finished tool call in their public form, and record
+    that this job's own native activity was read (the only ground for "no tool")."""
+    cwd = (getattr(job, "cwd", None) or "").rstrip("/") or None
+    job.exec_tool = _public_tool(exec_tool, cwd)
+    done = _public_tool(last_tool, cwd)
+    job.last_tool = {key: done[key] for key in ("name", "target") if key in done} if done else None
+    job._tool_observed = bool(observed)
+
+
+def _tool_call(label, name=None, tool_input=None, stamp=None, command=None):
+    """One parsed tool call: its label, allow-listed subject and native start time."""
+    tool = {"name": label, **_tool_subject(name, tool_input, command)}
     since = shell_jobs.parse_time(stamp)
     if since is not None:
         tool["since"] = since
     return tool
 
 
-def _codex_open_command(label, command, stamp=None):
-    return _open_tool(label, "command_execution", stamp=stamp,
-                      command=shell_jobs._codex_shell_command_display(command) or command)
+def _codex_tool_call(label, command, stamp=None):
+    return _tool_call(label, "command_execution", stamp=stamp, command=command)
 
 
 def _supervised_claude_transcript(job, receipt_path):
@@ -2483,7 +2555,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-target-v1"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v2"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -2516,7 +2588,7 @@ def _parse_claude_stream_tail(path):
     model_windows = {}
     model_max_output = {}
     open_tools = {}
-    last_text = None
+    last_tool = None
     for line in lines:
         try:
             payload = json.loads(line)
@@ -2548,19 +2620,16 @@ def _parse_claude_stream_tail(path):
                     tool_id = item.get("id")
                     label = _tool_label(item.get("name"), item.get("input"))
                     if isinstance(tool_id, str) and label:
-                        # Raw here; only the call still open at the end is masked (cost).
+                        # Raw here; only the open and the last finished call are summarized.
                         open_tools[tool_id] = (label, item.get("name"), item.get("input"),
                                                payload.get("timestamp"))
-                for item in content:
-                    if (isinstance(item, dict) and item.get("type") == "text"
-                            and isinstance(item.get("text"), str) and item["text"].strip()):
-                        last_text = (item["text"], payload.get("timestamp"))
         elif row_type == "user" and isinstance(message, dict):
             content = message.get("content")
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        open_tools.pop(item.get("tool_use_id"), None)
+                        done = open_tools.pop(item.get("tool_use_id"), None)
+                        last_tool = done or last_tool
         elif row_type == "result":
             usage = payload.get("usage")
             if isinstance(usage, dict):
@@ -2597,9 +2666,9 @@ def _parse_claude_stream_tail(path):
         "session_input_tokens": _counter(cumulative.get("input_tokens")),
         "session_cached_input_tokens": _counter(cumulative.get("cache_read_input_tokens")),
         "session_output_tokens": _counter(cumulative.get("output_tokens")),
-        "exec_tool": (_open_tool(*next(reversed(open_tools.values())))
+        "exec_tool": (_tool_call(*next(reversed(open_tools.values())))
                       if open_tools else None),
-        "last_text": _said(*last_text) if last_text else None,
+        "last_tool": _tool_call(*last_tool) if last_tool else None,
     }
     _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
@@ -2753,7 +2822,7 @@ def _enrich_claude_stream_session(job, fast_first=False):
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
     job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
     job._context_evidence = None
-    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_text"))
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"))
     if job.ctx_pct is not None:
         try:
             st = os.stat(telemetry_path)
@@ -2837,7 +2906,7 @@ def _parse_codex_attempt_tail(path):
     if cached and cached[0] == cache_key:
         return cached[1]
     disk_key = parse_cache.key("codex-attempt", path, cache_key,
-                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-target-v1"))
+                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-subject-v2"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
@@ -2872,7 +2941,7 @@ def _parse_codex_attempt_tail(path):
     latest_usage = None
     thread_ids = head_thread_ids | _codex_attempt_thread_ids(lines)
     open_commands = {}
-    last_text = None
+    last_tool = None
     activity = None
     current_turn = None
     closed_turns = set()
@@ -2928,17 +2997,16 @@ def _parse_codex_attempt_tail(path):
         elif row_type == "item.completed":
             item = payload.get("item")
             if isinstance(item, dict):
-                open_commands.pop(item.get("id"), None)
-                if (item.get("type") == "agent_message" and isinstance(item.get("text"), str)
-                        and item["text"].strip()):
-                    last_text = (item["text"], payload.get("timestamp"))
+                done = open_commands.pop(item.get("id"), None)
+                last_tool = done or last_tool
     parsed = {"token_usage": latest_usage,
               "thread_id": next(iter(thread_ids)) if len(thread_ids) == 1 else None,
               "thread_ambiguity": len(thread_ids) > 1,
               "activity": activity if len(thread_ids) == 1 else None,
-              "exec_tool": _codex_open_command(*next(reversed(open_commands.values())))
+              "exec_tool": _codex_tool_call(*next(reversed(open_commands.values())))
               if open_commands else None,
-              "last_text": _said(*last_text) if last_text and len(thread_ids) <= 1 else None}
+              "last_tool": _codex_tool_call(*last_tool) if last_tool and len(thread_ids) <= 1
+              else None}
     _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CODEX_ATTEMPT_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
@@ -3001,7 +3069,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
         # supervisor usage event and open command item. Once the exact attempt log
         # contains multiple thread ids, none of its counters, activity, or exec
         # labels can be assigned to this worker without borrowing a thread's data.
-        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None, last_text=None)
+        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None, last_tool=None)
         job._runtime_session_id = None
         job.context = None
         job.ctx_pct = None
@@ -3107,7 +3175,9 @@ def _enrich_codex_attempt_session(job, fast_first=False):
                 observed_at=st.st_mtime, fresh_until=st.st_mtime + 900)
         except OSError:
             pass
-    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_text"))
+    # An ambiguous or thread-less attempt log is no ground for "no tool open".
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"),
+                  observed=bool(thread_id))
     if thread_id and not fast_first:
         job.shell_jobs = shell_jobs.observe_jobs(
             shell_jobs.read_codex_jobs(path, session_id=thread_id, attempt_id=job.attempt_id),
@@ -3305,12 +3375,8 @@ def _enrich_opencode_native_activity(job, session_id, fast_first=False):
                 _OPENCODE_ACTIVITY_CACHE.pop(next(iter(_OPENCODE_ACTIVITY_CACHE)))
         tool = activity.get("tool")
         label = _tool_label(tool.get("name"), tool.get("input")) if tool else None
-        summary = activity.get("summary")
-        # "model responding" / "runtime waiting" are reader states, not the worker's words.
-        said = (_one_line(summary) if summary not in ("model responding", "runtime waiting")
-                else None)
-        _job_activity(job, _open_tool(label, tool.get("name"), tool.get("input")) if label else None,
-                      {"text": said, "at": activity.get("summary_ts")} if said else None)
+        _job_activity(job, _tool_call(label, tool.get("name"), tool.get("input")) if label else None,
+                      None)
         if activity.get("summary"):
             job._native_now = (activity["summary"], activity.get("summary_ts"))
         observed = shell_observation

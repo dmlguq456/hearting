@@ -646,7 +646,7 @@ def route_doer(route, jobs, get, live):
                 "effort": shared.get("effort"), "percent": _number(shared.get("context")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
-                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "said")
+                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
                    if shared.get(key)}}
     stage = (route or {}).get("worker_stage")
     owners = live._owner_jobs(jobs)
@@ -670,7 +670,7 @@ def route_doer(route, jobs, get, live):
             "percent": percent, "tokens": tokens, "tool": name if working else None,
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
                       if working and isinstance(agents, (list, tuple)) else 0,
-            **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "said")
+            **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
                if key in activity}}
 
 
@@ -718,7 +718,7 @@ def route_details(snapshot, panels, routes=None, now=None):
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
-                               ("target", 120), ("tool_age", 16), ("said", 160)):
+                               ("target", 120), ("tool_age", 16), ("after_tool", 160)):
                 if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit:
                     row[key] = doer[key]
             if doer.get("idle_tool") is True:

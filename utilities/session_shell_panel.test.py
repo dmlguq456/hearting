@@ -397,23 +397,23 @@ for(const [w,h] of [[40,14],[40,16],[40,18],[40,19],[40,20],[40,21],[80,10],[80,
 '''
         self.node(script, "panel-view.cjs")
 
-    def test_an_opened_route_shows_its_doers_now_and_last_line(self):
-        # Fleet's unfolded activity rows: the open tool with its target and age (whole),
-        # or that no tool is open, and the doer's last line on one row cut with `…`.
+    def test_an_opened_route_shows_its_doers_now_and_last_finished_call(self):
+        # Fleet's unfolded activity rows: the open call with its summary and age (whole),
+        # or that no call is open, and the call it just finished on one row cut with `…`.
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
-const said='충돌 일곱 곳을 풀었고 두 묶음 시험을 돌리는 중 '+'word '.repeat(20);
+const after='Edit · utilities/session-shell/'+'deep/'.repeat(20)+'host.cjs';
 const route={id:'r',title:'PR 맞추기',state:'working',kind:'working',elapsed:'47m',tool:'Bash',
- target:'tools/run-tests.py --select utilities/peer*',tool_age:'3m',said,paint:{glyph:{text:'⠏'},harness:{text:'claude'}}};
+ target:'python3 tools/run-tests.py',tool_age:'3m',after_tool:after,paint:{glyph:{text:'⠏'},harness:{text:'claude'}}};
 const paint=(r,width,side)=>view.render({width,height:30,side,model:{routes:[r],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:['route:r'],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 for(const [width,side] of [[40,true],[80,false]]){
  const rows=paint(route,width,side),flat=rows.join('').replace(/[│ ]/g,'');
- assert(flat.includes('>_Bash·tools/run-tests.py--selectutilities/peer*3m'),rows.join('\n'));
- const line=rows.filter(x=>x.includes('"충돌'));
+ assert(flat.includes('>_Bash·python3tools/run-tests.py3m'),rows.join('\n'));
+ const line=rows.filter(x=>x.includes('after Edit'));
  assert.equal(line.length,1,rows.join('\n'));assert(line[0].includes('…'),line[0]);
 }
-const idle=paint({...route,tool:undefined,target:undefined,tool_age:undefined,idle_tool:true,said:undefined},40,true);
+const idle=paint({...route,tool:undefined,target:undefined,tool_age:undefined,idle_tool:true,after_tool:undefined},40,true);
 assert(idle.some(x=>x.includes('>_ no tool')),idle.join('\n'));
 '''
         self.node(script, "panel-view.cjs")

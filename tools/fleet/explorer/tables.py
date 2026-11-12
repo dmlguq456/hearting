@@ -845,10 +845,11 @@ def _route_rail_text(route):
 
 
 def route_activity_rows(route):
-    """What the route's doer is on now and last said, one row each, from its own stream:
+    """What the route's doer is on now and just finished, one row each, from its own stream:
 
-    ``>_ python3 · tools/run-tests.py --select …  3m · +1 agent`` (or ``>_ no tool`` while it
-    works with none open) and ``"<its last line>"``. Unreported values are left out."""
+    ``>_ python3 · tools/run-tests.py  3m · +1 agent`` (or ``>_ no tool`` when its read
+    stream shows none open) and ``after Edit · utilities/x.py``. Unreported values are left
+    out; both are allow-listed summaries, never the worker's raw command or words."""
     doer = route.get("doer")
     if not isinstance(doer, Mapping):
         return []
@@ -864,8 +865,8 @@ def route_activity_rows(route):
         rows.append(row)
     elif doer.get("idle_tool"):
         rows.append([(">_ ", "dim"), ("no tool", "dim")])
-    if doer.get("said"):
-        rows.append([('"' + str(doer["said"]) + '"', "dim")])
+    if doer.get("after_tool"):
+        rows.append([("after ", "dim"), (str(doer["after_tool"]), "dim")])
     return rows
 
 
@@ -1484,15 +1485,15 @@ def draw_routes(grid, vm, state, x=34, y=3):
             if line_x is not None:
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
-            # The doer's own now (whole, wrapped like the values above) and its last line
-            # (one row, cut with `…`), each on its own row.
+            # The doer's own now (whole, wrapped like the values above) and the call it
+            # just finished (one row, cut with `…`), each on its own row.
             for item in route_activity_rows(route):
                 grid.fill(x - 1, right, y, " ", tint=236)
                 grid.add_hit(y, x, right, action)
                 line_x = grid.put(x + cols["title"], y, "└ ", "dim", limit=right)
-                if item[0][0].startswith('"'):
-                    grid.put(line_x, y, _clip(item[0][0], max(0, right - line_x)), item[0][1],
-                             limit=right)
+                if item[0][0] == "after ":
+                    grid.put(line_x, y, _clip("".join(text for text, _key in item),
+                                              max(0, right - line_x)), "dim", limit=right)
                 else:
                     line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2,
                                              next_row)

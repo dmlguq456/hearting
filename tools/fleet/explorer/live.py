@@ -987,34 +987,27 @@ def _route_doer(worker, owner, dead, now=None):
 
 
 def _doer_activity(job, tool, live, now=None):
-    """What the doer is on now and last said, from its own stream read (nothing derived):
-    the open tool's target line and start (the native event time, else its running call's
-    process age), ``idle_tool`` while it works with no tool open, and its last line."""
+    """What the doer is on now and just finished, from its own stream read (nothing derived):
+    the open tool's summary and age (only from that call's native start time; a process of
+    the same attempt or executable is no evidence of this call), ``idle_tool`` only when its
+    own native activity was read and showed no call open, and the last finished call as
+    ``after_tool`` (``Edit · utilities/x.py``). Values are the collector's allow-listed
+    summaries; nothing the worker wrote is carried."""
     out = {}
     if isinstance(tool, Mapping):
         target = _text(tool.get("target"))
         if target:
             out["target"] = target
         since = _num(tool.get("since"))
-        child = _get(job, "exec_child")
-        # The running call's age stands in only for the same command (a shell tool or
-        # the executable the label names), never for an unrelated open tool.
-        same = isinstance(child, Mapping) and (
-            _text(tool.get("name")) in ("Bash", "bash", "command_execution", "exec")
-            or _text(child.get("comm")) == _text(tool.get("name")))
-        age = _num(child.get("etime_s")) if same else None
-        if since is None and age is not None:
-            since = (time.time() if now is None else now) - age
         if since is not None:
             out["tool_since"] = since
             out["tool_age"] = _dur(max(0.0, (time.time() if now is None else now) - since) / 60)
-    elif live:
+    elif live and _get(job, "_tool_observed") is True:
         out["idle_tool"] = True
-    said = _get(job, "last_text")
-    if isinstance(said, Mapping) and _text(said.get("text")):
-        out["said"] = _text(said["text"])
-        if _num(said.get("at")) is not None:
-            out["said_at"] = _num(said["at"])
+    done = _get(job, "last_tool")
+    if isinstance(done, Mapping) and _text(done.get("name")):
+        out["after_tool"] = " · ".join(
+            part for part in (_text(done["name"]), _text(done.get("target"))) if part)
     return out
 
 

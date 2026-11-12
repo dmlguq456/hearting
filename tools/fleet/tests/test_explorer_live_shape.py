@@ -62,10 +62,10 @@ def route_extension(key, value):
             for row in value)
     if key == "doer":
         # The one-line route row: who does the work now, its context and its open tool,
-        # with what that tool acts on, since when, and the doer's last line when reported.
+        # with what that tool acts on, since when, and the call it just finished when reported.
         optional_text = lambda item: item is None or isinstance(item, str)
-        activity = {"target": str, "tool_age": str, "said": str,
-                    "tool_since": (int, float), "said_at": (int, float), "idle_tool": bool}
+        activity = {"target": str, "tool_age": str, "after_tool": str,
+                    "tool_since": (int, float), "idle_tool": bool}
         return (isinstance(value, dict)
                 and {"harness", "model", "effort", "context", "window", "tokens",
                      "tool", "agents"} <= set(value)
