@@ -395,6 +395,113 @@ def process_launch_cgroup(pid: int) -> dict[str, str]:
     return launch_cgroup_values(process_unified_cgroup(pid), process_cgroup_namespace_identity() or "")
 
 
+LAUNCH_LINEAGE_METADATA_KEYS = ("launch_lineage", "launch_lineage_ns")
+_LINEAGE_MAX_DEPTH = 256
+
+
+def _stat_parent_and_start(proc_root: Path, pid: int) -> tuple[int, str] | None:
+    """``(ppid, start ticks)`` from one ``stat`` read, or None when it cannot be read."""
+
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        tail = raw[raw.rfind(")") + 2:].split()
+        ppid, start = int(tail[1]), tail[19]
+    except (OSError, ValueError, IndexError):
+        return None
+    return (ppid, start) if start.isdigit() else None
+
+
+def _verified_ancestry(proc_root: Path, pid: int, start: str) -> tuple[tuple[int, str], ...] | None:
+    """The current parent chain above one exact process, outermost last, or None.
+
+    Every hop is read child, parent, child again: the child must keep the same
+    parent and start ticks across the parent read, and the parent must be born
+    no later than the child. A parent that died between the reads reparents the
+    child first, so its reused number can never pass as that parent. Any failed
+    read, change, or a chain longer than the bound answers None."""
+
+    chain: list[tuple[int, str]] = []
+    child, child_start = pid, start
+    for _ in range(_LINEAGE_MAX_DEPTH):
+        first = _stat_parent_and_start(proc_root, child)
+        if first is None or first[1] != child_start:
+            return None
+        if first[0] <= 0:
+            return tuple(chain)
+        parent = _stat_parent_and_start(proc_root, first[0])
+        if parent is None or _stat_parent_and_start(proc_root, child) != first:
+            return None
+        if int(parent[1]) > int(child_start):
+            return None
+        chain.append((first[0], parent[1]))
+        child, child_start = first[0], parent[1]
+    return None
+
+
+def _procfs_is_observer_namespace() -> bool:
+    try:
+        return os.readlink("/proc/self") == str(os.getpid())
+    except OSError:
+        return False
+
+
+def process_launch_lineage(pid: int) -> dict[str, str]:
+    """The fenced leader's parent chain at launch, as ``pid:start`` pairs joined by ``+``.
+
+    Recorded by the launcher while its own child is fenced, so the chain is the
+    leader's ancestry at birth: the launcher and everything above it. Only a
+    leader whose parent is this process and a ``/proc`` of this PID namespace
+    record anything; otherwise the row carries no lineage and keeps today's
+    answers."""
+
+    me = os.getpid()
+    proc_root = Path("/proc")
+    leader = _stat_parent_and_start(proc_root, pid)
+    own = _stat_parent_and_start(proc_root, me)
+    namespace = process_namespace_identity()
+    if leader is None or leader[0] != me or own is None or not namespace or not _procfs_is_observer_namespace():
+        return {}
+    chain = _verified_ancestry(proc_root, me, own[1])
+    if chain is None:
+        return {}
+    return {"launch_lineage": "+".join(f"{p}:{s}" for p, s in ((me, own[1]), *chain)),
+            "launch_lineage_ns": namespace}
+
+
+def _lineage_outside_attempt(ancestry, metadata) -> bool:
+    """A live ancestor born before the leader and absent from its recorded launch lineage.
+
+    A fork copies its parent's place in the process tree, and an orphan is only
+    ever adopted by a live process on its own current chain, so a process's
+    current ancestors are always a subset of its earlier ones. Every process
+    descended from the leader therefore has current ancestors that are the
+    leader's descendants (born no earlier than it), the leader, or members of
+    the leader's ancestry at birth. An ancestor strictly older than the leader
+    and not in that recorded ancestry proves the process is outside the attempt,
+    whatever its group, session, cgroup, or readable environment. The first
+    older ancestor decides: a recorded member's own ancestors are recorded too."""
+
+    recorded, namespace = metadata.get("launch_lineage", ""), metadata.get("launch_lineage_ns", "")
+    origin = metadata.get("pid_start", "")
+    if not (ancestry and recorded and namespace and isinstance(origin, str) and origin.isdigit()):
+        return False
+    members = set(recorded.split("+"))
+    if not all(p.isdigit() and s.isdigit() for p, sep, s in (m.partition(":") for m in members)):
+        return False
+    if process_namespace_identity() != namespace or not _procfs_is_observer_namespace():
+        return False
+    for pid, start in ancestry:
+        if int(start) < int(origin):
+            return f"{pid}:{start}" not in members
+    return False
+
+
+def _denied_process_ancestry(entry: Path, stable_start: str) -> tuple[tuple[int, str], ...]:
+    if not stable_start:
+        return ()
+    return _verified_ancestry(entry.parent, int(entry.name), stable_start) or ()
+
+
 def _recorded_launch_cgroup(metadata) -> tuple[str, str]:
     raw, namespace = metadata.get("launch_cgroup_b64", ""), metadata.get("launch_cgroup_ns", "")
     if not raw or not namespace:
@@ -1270,6 +1377,7 @@ class ProcessTableScan:
     error: str = ""
     tag_access_errors: tuple[tuple[int, str, str], ...] = ()
     tag_access_cgroups: tuple[tuple[tuple[int, str], str], ...] = ()
+    tag_access_ancestry: tuple[tuple[tuple[int, str], tuple[tuple[int, str], ...]], ...] = ()
 
 
 _PROCESS_TABLE_SCAN: contextvars.ContextVar = contextvars.ContextVar(
@@ -1298,6 +1406,7 @@ def scan_process_table() -> ProcessTableScan:
     group_errors: list[tuple[int, int | None, str]] = []
     tag_access_errors: list[tuple[int, str, str]] = []
     tag_access_cgroups: list[tuple[tuple[int, str], str]] = []
+    tag_access_ancestry: list[tuple[tuple[int, str], tuple[tuple[int, str], ...]]] = []
     try:
         entries = tuple(Path("/proc").iterdir())
     except OSError as exc:
@@ -1364,6 +1473,9 @@ def scan_process_table() -> ProcessTableScan:
                     cgroup = _denied_process_cgroup(entry, stable_start)
                     if cgroup:
                         tag_access_cgroups.append(((pid, stable_start), cgroup))
+                    ancestry = _denied_process_ancestry(entry, stable_start)
+                    if ancestry:
+                        tag_access_ancestry.append(((pid, stable_start), ancestry))
                 continue
             incomplete_reason = f"procfs-environ:{entry.name}:{exc.errno or 'error'}"
             continue
@@ -1381,6 +1493,7 @@ def scan_process_table() -> ProcessTableScan:
         tuple(group_errors),
         tag_access_errors=tuple(tag_access_errors),
         tag_access_cgroups=tuple(tag_access_cgroups),
+        tag_access_ancestry=tuple(tag_access_ancestry),
     )
 
 
@@ -1444,10 +1557,12 @@ def _tagged_descendants_from_scan(
             "unverifiable", (), "observer-namespace-mismatch"
         )
     cgroups = dict(scan.tag_access_cgroups)
+    ancestries = dict(scan.tag_access_ancestry)
     access_reason = next((reason for pid, start, reason in scan.tag_access_errors
                           if pid not in excluded_pids and not _denied_process_outside_attempt(
                               start, metadata, host_complete=host_complete,
-                              cgroup=cgroups.get((pid, start), ""))), "")
+                              cgroup=cgroups.get((pid, start), ""),
+                              ancestry=ancestries.get((pid, start), ()))), "")
     if access_reason:
         return ProcessGroupObservation("unverifiable", (), access_reason)
     return ProcessGroupObservation("empty")
@@ -1569,10 +1684,12 @@ def _service_cgroup_outside_launch(cgroup: str, metadata) -> bool:
 
 
 def _denied_process_outside_attempt(
-    start: str, metadata: dict[str, str], *, host_complete=False, cgroup: str = ""
+    start: str, metadata: dict[str, str], *, host_complete=False, cgroup: str = "", ancestry=()
 ) -> bool:
-    """A denied process born before this exact local child, or running in a systemd service
-    unit disjoint from the cgroup recorded at launch, is not its descendant."""
+    """A denied process born before this exact local child, running in a systemd service
+    unit disjoint from the cgroup recorded at launch, or with a live ancestor older than the
+    leader outside its recorded launch lineage (`_lineage_outside_attempt`), is not its
+    descendant."""
     if not metadata.get('pid') and metadata.get('launch_outcome') in {'never-launched', 'reaped-before-publish'}:
         return True  # atomic fenced outcome: no payload could create a descendant
     if (metadata.get("launch_claimed") == "0"
@@ -1588,6 +1705,8 @@ def _denied_process_outside_attempt(
         # can carry this attempt's tag. Readable tags still answer `live`.
         return True
     if _service_cgroup_outside_launch(cgroup, metadata):
+        return True
+    if _lineage_outside_attempt(ancestry, metadata):
         return True
     origin = metadata.get("pid_start", "")
     authority = attempt_scan_namespace_authority(metadata) or (
@@ -1614,7 +1733,9 @@ def attempt_tagged_descendants(
     UID, a fork by a live parent under another real UID (`_forked_across_uid_boundary`),
     an adjacent stable birth earlier than this exact local child, or a systemd
     `.service` unit disjoint from the cgroup recorded at launch (`launch_cgroup_b64`,
-    same cgroup namespace), excludes a denied environment. Readable positive tags always win. ``host_complete`` is used only once the
+    same cgroup namespace), or a live ancestor older than the leader outside the
+    leader's recorded launch lineage (`launch_lineage`, same PID namespace,
+    `_lineage_outside_attempt`), excludes a denied environment. Readable positive tags always win. ``host_complete`` is used only once the
     recorded namespaces are extinct (`attempt_process_quiescence`): then a
     complete walk by a host-like observer, which sees every namespace, is the
     one that may answer ``empty``.
@@ -1671,7 +1792,8 @@ def attempt_tagged_descendants(
                     continue
                 stable_start, reason = _tag_access_observation(entry, start)
                 if reason:
-                    access_errors.append((stable_start, reason, _denied_process_cgroup(entry, stable_start)))
+                    access_errors.append((stable_start, reason, _denied_process_cgroup(entry, stable_start),
+                                          _denied_process_ancestry(entry, stable_start)))
                 continue
             incomplete_reason = f"procfs-environ:{entry.name}:{exc.errno or 'error'}"
             continue
@@ -1691,8 +1813,10 @@ def attempt_tagged_descendants(
         return ProcessGroupObservation(
             "unverifiable", (), "observer-namespace-mismatch"
         )
-    access_reason = next((reason for start, reason, cgroup in access_errors if not _denied_process_outside_attempt(
-        start, metadata, host_complete=host_complete, cgroup=cgroup)), '')
+    access_reason = next((reason for start, reason, cgroup, ancestry in access_errors
+                          if not _denied_process_outside_attempt(
+                              start, metadata, host_complete=host_complete, cgroup=cgroup,
+                              ancestry=ancestry)), '')
     if access_reason:
         return ProcessGroupObservation('unverifiable', (), access_reason)
     return ProcessGroupObservation("empty")

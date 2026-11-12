@@ -313,6 +313,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
             remove=('pid', 'pid_start', 'pid_scope', 'pid_host', 'pid_host_start',
                     'pid_host_ns', 'pid_host_proof', 'pid_ns', 'pid_observer_ns',
                     'pgid', 'pgid_host', 'launch_cgroup_b64', 'launch_cgroup_ns',
+                    'launch_lineage', 'launch_lineage_ns',
                     'group_reap_proof', 'group_reap_pgid',
                     'attempt_descendant_proof', 'attempt_descendant_observer_ns',
                     'attempt_descendant_residue', 'attempt_descendant_residue_count',

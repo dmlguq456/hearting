@@ -2485,6 +2485,8 @@ class DispatchContractTest(unittest.TestCase):
     meta=D.parse_registry_metadata(jobs.read_text().splitlines()[1].split("\t")[5])
     self.assertEqual(D._recorded_launch_cgroup(meta),("/x/session-1.scope","cgroup:[9]"))
     self.assertEqual(meta["launch_cgroup_ns"],"cgroup:[9]")
+    self.assertTrue(meta["launch_lineage"].startswith(f"{os.getpid()}:"))
+    self.assertEqual(meta["launch_lineage_ns"],D.process_namespace_identity())
    finally:
     for proc in (child,parent):
      if proc is not None and proc.poll() is None:proc.kill()
@@ -5593,6 +5595,194 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
   self.assertGreater(len(reads),1)
   self.assertEqual((probe.state,probe.reason),
                    ("unverifiable",f"procfs-environ:{self.late.pid}:same-uid-unobservable"))
+
+
+LINEAGE_FIXTURE=r"""
+import ctypes, os, subprocess, sys, time
+mode=sys.argv[1]
+def sleeper(**kw):
+ return subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"],**kw)
+if mode=="wait-then-child":
+ sys.stdin.readline()
+ print(sleeper().pid,flush=True)
+elif mode=="child":
+ print(sleeper().pid,flush=True)
+elif mode=="setsid":
+ print(sleeper(start_new_session=True).pid,flush=True)
+elif mode in ("orphan","subreaper"):
+ if mode=="subreaper":
+  ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)
+ r,w=os.pipe()
+ middle=os.fork()
+ if middle==0:
+  os.close(r);os.write(w,str(sleeper().pid).encode());os._exit(0)
+ os.close(w);os.waitpid(middle,0)
+ print(os.read(r,64).decode(),flush=True)
+time.sleep(60)
+"""
+
+
+class LaunchLineageDeniedEnvironTest(unittest.TestCase):
+ """A same-UID process whose environment cannot be read is outside the attempt only when a live
+ ancestor older than the leader is absent from the leader's recorded launch lineage."""
+
+ def spawn(self,mode,**kw):
+  proc=subprocess.Popen([sys.executable,"-c",LINEAGE_FIXTURE,mode],stdout=subprocess.PIPE,
+                        stdin=subprocess.PIPE,text=True,**kw)
+  self.addCleanup(self.stop,proc)
+  return proc
+
+ def stop(self,proc):
+  if proc.poll() is None:proc.kill()
+  proc.wait(timeout=5)
+  for stream in (proc.stdout,proc.stdin):
+   if stream:stream.close()
+
+ def adopt(self,pid):
+  def stop():
+   try:os.kill(pid,9)
+   except ProcessLookupError:return
+   for _ in range(100):
+    if D.process_state(pid) in {None,"Z"}:return
+    time.sleep(0.05)
+  self.addCleanup(stop)
+  return pid
+
+ def read_pid(self,proc):
+  return self.adopt(int(proc.stdout.readline()))
+
+ def leader(self,mode="child",attempt="att-launch-lineage"):
+  # The test process is the launcher: it records the fenced leader's lineage exactly as
+  # `spawn_claimed_attempt` does, from the leader's parent.
+  time.sleep(0.02)   # a later clock tick than every older fixture
+  leader=self.spawn(mode,start_new_session=True)
+  plain=dict(D.process_launch_identity(leader.pid),pgid=str(leader.pid),attempt_id=attempt,
+             launch_lifecycle="detached")
+  lineage=D.process_launch_lineage(leader.pid)
+  self.assertEqual(set(lineage),set(D.LAUNCH_LINEAGE_METADATA_KEYS))
+  self.assertTrue(lineage["launch_lineage"].startswith(f"{os.getpid()}:"))
+  return leader,plain,dict(plain,**lineage)
+
+ def denied(self,*pids):
+  real=Path.read_bytes
+  targets={f"/proc/{pid}/environ" for pid in pids}
+  def read_bytes(path):
+   if str(path) in targets:
+    raise PermissionError(errno.EACCES,"denied")
+   return real(path)
+  return mock.patch.object(Path,"read_bytes",read_bytes)
+
+ def probes(self,metadata):
+  single=D.attempt_tagged_descendants(metadata)
+  with D.process_table_scan_scope():
+   batch=D.attempt_tagged_descendants(metadata)
+  self.assertEqual((single.state,single.reason),(batch.state,batch.reason))
+  return single
+
+ def assert_unverifiable(self,metadata,pid):
+  probe=self.probes(metadata)
+  self.assertEqual((probe.state,probe.reason),("unverifiable",f"procfs-environ:{pid}:same-uid-unobservable"))
+  self.assertNotEqual(D.attempt_process_quiescence(metadata,terminal_receipt=True).state,"quiescent")
+
+ def foreign(self):
+  """Another session: its parent was born before the leader, its sandbox child after."""
+  older=self.spawn("wait-then-child")
+  leader,plain,recorded=self.leader()
+  older.stdin.write("go\n");older.stdin.flush()
+  return leader,plain,recorded,self.read_pid(older)
+
+ def test_a_foreign_later_process_under_an_older_parent_is_not_a_descendant(self):
+  leader,plain,recorded,late=self.foreign()
+  self.stop(leader)
+  with self.denied(late):
+   probe=self.probes(plain)          # today's answer, kept for a row without lineage
+   self.assertEqual(probe.state,"unverifiable")
+   self.assertTrue(probe.reason.endswith(":same-uid-unobservable"))
+   self.assertEqual(self.probes(recorded).state,"empty")
+   self.assertEqual(D.attempt_process_quiescence(recorded,terminal_receipt=True).state,"quiescent")
+
+ def test_a_readable_tag_still_wins(self):
+  leader,_plain,recorded=self.leader()
+  tagged=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
+                          env=dict(os.environ,**{D.ATTEMPT_DESCENDANT_ENV:recorded["attempt_id"]}))
+  self.addCleanup(self.stop,tagged)
+  self.stop(leader)
+  probe=self.probes(recorded)
+  self.assertEqual((probe.state,[m[0] for m in probe.members]),("populated",[tagged.pid]))
+
+ def test_real_descendants_stay_unverifiable(self):
+  # (a) orphaned to the nearest reaper, (b) a new session and group, (c) environ denied in every
+  # case, inside the leader and after the leader exits; and one adopted by a subreaper leader.
+  for mode in ("child","orphan","setsid","subreaper"):
+   with self.subTest(mode=mode):
+    leader,_plain,recorded=self.leader(mode,attempt=f"att-lineage-{mode}")
+    child=self.read_pid(leader)
+    with self.denied(child):
+     self.assert_unverifiable(recorded,child)
+     self.stop(leader)
+     self.assert_unverifiable(recorded,child)
+
+ def test_a_descendant_moved_to_another_cgroup_stays_unverifiable(self):
+  # (d) the lineage rule does not read cgroups: a moved descendant keeps its ancestry.
+  leader,_plain,recorded=self.leader()
+  child=self.read_pid(leader)
+  real=Path.read_text
+  def read_text(path,*args,**kwargs):
+   if str(path)==f"/proc/{child}/cgroup":
+    return "0::/user.slice/user-1000.slice/user@1000.service/app.slice/moved.scope\n"
+   return real(path,*args,**kwargs)
+  with self.denied(child),mock.patch.object(Path,"read_text",read_text):
+   self.assert_unverifiable(recorded,child)
+   self.stop(leader)
+   self.assert_unverifiable(recorded,child)
+
+ def test_a_later_sibling_from_the_recorded_launcher_stays_unverifiable(self):
+  leader,_plain,recorded=self.leader()
+  sibling=self.spawn("child")
+  late=self.read_pid(sibling)
+  self.stop(leader)
+  with self.denied(late,sibling.pid):
+   self.assert_unverifiable(recorded,sibling.pid if sibling.pid<late else late)
+
+ def test_an_unproven_lineage_never_excludes(self):
+  leader,_plain,recorded,late=self.foreign()
+  self.stop(leader)
+  with self.denied(late):
+   for broken in (dict(recorded,launch_lineage_ns="pid:[1]"),dict(recorded,launch_lineage_ns=""),
+                  dict(recorded,launch_lineage=""),dict(recorded,launch_lineage="x:1+2:y"),
+                  dict(recorded,pid_start="")):
+    with self.subTest(broken={k:broken[k] for k in ("launch_lineage_ns","pid_start")}):
+     self.assertEqual(self.probes(broken).state,"unverifiable")
+   # Every recorded member of the chain, or a younger ancestor, is not proof.
+   ancestry=D._verified_ancestry(Path("/proc"),late,D.process_start_ticks(late))
+   self.assertTrue(ancestry)
+   members="+".join(f"{p}:{s}" for p,s in ancestry)
+   self.assertFalse(D._lineage_outside_attempt(ancestry,dict(recorded,launch_lineage=members)))
+   self.assertFalse(D._lineage_outside_attempt(ancestry,dict(recorded,pid_start="0")))
+
+ def test_a_parent_change_between_hop_reads_is_not_proof(self):
+  leader,_plain,recorded,late=self.foreign()
+  self.stop(leader)
+  real=Path.read_text
+  reads=[]
+  def read_text(path,*args,**kwargs):
+   text=real(path,*args,**kwargs)
+   if str(path)==f"/proc/{late}/stat":
+    reads.append(text)
+    if len(reads)%2==0:   # the re-read after the parent read sees another parent
+     head,_,tail=text.rpartition(") ")
+     fields=tail.split();fields[1]="1"
+     return head+") "+" ".join(fields)
+   return text
+  with self.denied(late),mock.patch.object(Path,"read_text",read_text):
+   self.assertIsNone(D._verified_ancestry(Path("/proc"),late,D.process_start_ticks(late)))
+   self.assertEqual(D.attempt_tagged_descendants(recorded).state,"unverifiable")
+
+ def test_launch_lineage_needs_the_recorder_as_parent(self):
+  self.assertEqual(D.process_launch_lineage(os.getpid()),{})
+  with patch_split(D,"process_namespace_identity",return_value=None):
+   proc=self.spawn("child")
+   self.assertEqual(D.process_launch_lineage(proc.pid),{})
 
 
 class CancellationReceiptWedgeTest(unittest.TestCase):

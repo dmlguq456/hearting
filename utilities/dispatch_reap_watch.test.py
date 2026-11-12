@@ -1102,6 +1102,70 @@ class DrainScanRetryTest(unittest.TestCase):
             self.assertEqual(self.watch(None, grace=0.0, metadata=metadata), (69, []))   # could be the attempt's own
 
 
+    def test_a_foreign_sandbox_under_an_older_parent_lets_the_first_drain_seal(self):
+        """Another session's sandbox (same UID, environment unreadable, born after the leader) under
+        a parent older than the leader and outside its recorded launch lineage seals on the first
+        pass; the attempt's own orphaned child in the same state still leaves no receipt."""
+        import errno
+        import os
+        import subprocess
+        import sys
+        script = ("import subprocess,sys,time\n"
+                  "sys.stdin.readline()\n"
+                  "print(subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']).pid,flush=True)\n"
+                  "time.sleep(30)\n")
+        older = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        time.sleep(0.02)
+        ended = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True, start_new_session=True)
+        for proc in (older, ended):
+            self.addCleanup(proc.stdout.close)
+            self.addCleanup(proc.stdin.close)
+            self.addCleanup(proc.wait, 5)
+            self.addCleanup(proc.kill)
+        metadata = dict(D.process_launch_identity(ended.pid), pgid=str(ended.pid),
+                        attempt_id="att-foreign-sandbox", launch_lifecycle="detached",
+                        **D.process_launch_lineage(ended.pid))
+        self.assertIn("launch_lineage", metadata)
+        pids = []
+        for proc in (older, ended):
+            proc.stdin.write("go\n")
+            proc.stdin.flush()
+            pids.append(int(proc.stdout.readline()))
+        def reap(pid):
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                return
+            for _ in range(100):
+                if D.process_state(pid) in {None, "Z"}:
+                    return
+                time.sleep(0.05)
+        for pid in pids:
+            self.addCleanup(reap, pid)
+        foreign, own = pids
+        ended.kill()
+        ended.wait(timeout=5)
+        read_bytes = Path.read_bytes
+
+        def denied(*targets):
+            names = {f"/proc/{pid}/environ" for pid in targets}
+
+            def read(path):
+                if str(path) in names:
+                    raise PermissionError(errno.EACCES, "denied")
+                return read_bytes(path)
+            return read
+        with mock.patch.object(Path, "read_bytes", denied(foreign)):
+            code, annotated = self.watch(None, grace=0.0, metadata=metadata)
+            self.assertEqual(code, 65)   # the stubbed receipt write reports no change
+            self.assertEqual(annotated[0]["launch_outcome"], "governed-process-group-drained")
+            plain = {k: v for k, v in metadata.items() if not k.startswith("launch_lineage")}
+            self.assertEqual(self.watch(None, grace=0.0, metadata=plain), (69, []))   # today's answer
+        with mock.patch.object(Path, "read_bytes", denied(foreign, own)):
+            self.assertEqual(self.watch(None, grace=0.0, metadata=metadata), (69, []))   # its own orphan
+
 class WorkerHomeRetentionCarrierTest(unittest.TestCase):
     """The post-exit reaper retires expired homes; no user step is involved."""
 

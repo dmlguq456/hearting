@@ -163,7 +163,9 @@ from dispatch_contract_process import (  # noqa: F401
     attempt_identity_lineage, attempt_process_quiescence, attempt_scan_namespace_authority,
     attempt_tagged_descendants, authoritative_process_identities, cancellation_receipt_reason,
     CLEANUP_RECEIPT_TYPE, exact_process_group_signal_authority, hold_supervisor_lease,
-    LAUNCH_CGROUP_METADATA_KEYS, launch_cgroup_values, local_identity_namespace_authority,
+    LAUNCH_CGROUP_METADATA_KEYS, LAUNCH_LINEAGE_METADATA_KEYS, launch_cgroup_values,
+    local_identity_namespace_authority, _lineage_outside_attempt, process_launch_lineage,
+    _verified_ancestry,
     NAMESPACE_EXTINCT_REASON, namespace_gone, observed_attempt_liveness,
     observed_supervised_owner_liveness, observer_namespace_extinct,
     PARENT_EXTINCTION_TERMINAL_STATUSES, pidfd_open, post_exit_receipt_reason,
@@ -546,10 +548,11 @@ def spawn_claimed_attempt(
         try:
             identity = process_launch_identity(proc.pid)
             identity.update(process_launch_cgroup(proc.pid))
+            identity.update(process_launch_lineage(proc.pid))
             provided = {key: str(value) for key, value in (launch_metadata or {}).items()
                         if value not in (None, "")}
-            conflicts = sorted((_PROCESS_IDENTITY_METADATA_KEYS | set(LAUNCH_CGROUP_METADATA_KEYS))
-                               .intersection(provided))
+            conflicts = sorted((_PROCESS_IDENTITY_METADATA_KEYS | set(LAUNCH_CGROUP_METADATA_KEYS)
+                                | set(LAUNCH_LINEAGE_METADATA_KEYS)).intersection(provided))
             if conflicts:
                 raise DispatchContractError("attempt-launch-identity-metadata-conflict", ",".join(conflicts))
             if not _launch_identity_complete(proc.pid, identity):
@@ -562,7 +565,7 @@ def spawn_claimed_attempt(
                 except BaseException as exc:
                     raise DispatchContractError("attempt-pre-release-callback-failed", str(exc)) from exc
             conflicts = sorted(({*_PROCESS_IDENTITY_METADATA_KEYS, *LAUNCH_CGROUP_METADATA_KEYS,
-                                 "launch_claimed"}).intersection(observer))
+                                 *LAUNCH_LINEAGE_METADATA_KEYS, "launch_claimed"}).intersection(observer))
             if conflicts:
                 raise DispatchContractError("attempt-pre-release-metadata-conflict", ",".join(conflicts))
             identity.update(provided)

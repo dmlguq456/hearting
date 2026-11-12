@@ -35,7 +35,8 @@ from dispatch_contract_policy import (
 
 from dispatch_contract_process import (
     _terminal_cleanup_values, attempt_process_quiescence, exact_process_group_signal_authority,
-    LAUNCH_CGROUP_METADATA_KEYS, process_identity_is_live, process_launch_identity,
+    LAUNCH_CGROUP_METADATA_KEYS, LAUNCH_LINEAGE_METADATA_KEYS, process_identity_is_live,
+    process_launch_identity,
 )
 
 from dispatch_contract_registry import (
@@ -590,6 +591,7 @@ def recover_unstarted_attempt(jobs: Path, attempt_id: str) -> bool:
         remove = {
             *_PROCESS_IDENTITY_METADATA_KEYS,
             *LAUNCH_CGROUP_METADATA_KEYS,
+            *LAUNCH_LINEAGE_METADATA_KEYS,
             "launch_claimed",
             "launch_lifecycle",
             "launch_started",

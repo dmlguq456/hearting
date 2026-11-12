@@ -1372,8 +1372,10 @@ result includes the finished turn; a PASS string, a missing leader, or an
 unreadable same-UID descendant is insufficient. A process born before the
 recorded child cannot be its descendant, nor can a process in a systemd
 `.service` unit disjoint from the cgroup recorded at launch (same cgroup
-namespace); a row without that record keeps the earlier rule, and a readable
-positive attempt tag takes priority. Recovery preserves the live owner, successful siblings and original
+namespace), nor one with a live ancestor born before the child that is absent
+from the child's parent chain recorded at launch (same PID namespace); a row
+without that record keeps the earlier rule, and a readable positive attempt tag
+takes priority. Recovery preserves the live owner, successful siblings and original
 execution evidence. Replacement launchers retain the selected foreground
 watchdog and cleanup grace rather than applying the detached admission timeout;
 Owner replacements use the ordinary owner selector at launch, including the
