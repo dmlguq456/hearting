@@ -3392,7 +3392,8 @@ class ObligationStore:
                     return record
                 if evidence.get("server") != (identity.get("server") or "default"):
                     return record
-                if evidence.get("kind") not in {"recipient-session-absent", "first-input-process-dead"}:
+                if evidence.get("kind") not in {"recipient-session-absent", "recipient-session-ended",
+                                                   "first-input-process-dead"}:
                     return record
                 endpoint = identity.get("server") or "default"
                 recipient_binding = evidence.get("recipient_binding")
@@ -3416,6 +3417,27 @@ class ObligationStore:
                             or evidence.get("census_endpoint") != endpoint
                             or evidence.get("session_id") != effective.get("session_id")
                             or evidence.get("harness") != effective.get("harness")):
+                        return record
+                elif evidence.get("kind") == "recipient-session-ended":
+                    if (evidence.get("harness") != effective.get("harness")
+                            or evidence.get("session_id") != effective.get("session_id")
+                            or evidence.get("lifetime") != "ended"):
+                        return record
+                    try:
+                        tools = str(Path(__file__).resolve().parents[1] / "tools")
+                        if tools not in os.sys.path:
+                            os.sys.path.insert(0, tools)
+                        from fleet.collectors.steward import session_liveness
+                        if session_liveness(effective.get("harness"),
+                                            effective.get("session_id"), agents=()) != "ended":
+                            return record
+                        import dispatch_seat_handover as handover
+                        graph = handover.lineage_graph()
+                        _successor, disposition = handover._chain_end(
+                            graph, effective.get("harness"), effective.get("session_id"))
+                        if disposition != "self":
+                            return record
+                    except Exception:
                         return record
                 else:
                     proof = (message or {}).get("first_input_process")

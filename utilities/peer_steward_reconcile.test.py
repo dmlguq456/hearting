@@ -879,14 +879,13 @@ class LineageBundleRetirementTest(IsolatedCase):
             {"ts": ts, "harness": "claude", "sid": "B", "event": "handover",
              "source": "clear", "from": {"harness": "claude", "sid": "A"}}])
 
-    def census(self):
-        return herdr_observation.PaneCensus("default", (), time.monotonic())
-
     def retire(self, **kwargs):
-        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
-                               return_value=kwargs.pop("census", self.census())):
-            return peer_steward._retire_finished_lineage_bundles(
+        lifetime = kwargs.pop("lifetime", "ended")
+        with mock.patch.object(peer_steward, "native_lifetime", return_value=lifetime) as proof:
+            result = peer_steward._retire_finished_lineage_bundles(
                 self.store, now=time.time(), **kwargs)
+        self.lifetime_proof = proof
+        return result
 
     def archived(self):
         archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
@@ -913,36 +912,19 @@ class LineageBundleRetirementTest(IsolatedCase):
         self.assertEqual(peer_steward._purge_retired_archives()["removed"], 1)
         self.assertEqual(self.archived(), ["seat-A.jsonl"])
 
-    def test_retirement_uses_the_endpoint_session_and_caches_process_checks(self):
+    def test_retirement_uses_native_lifetime_once_per_exact_session(self):
         self.component()
         self.write_ledger("seat-C", [
             {"ts": self.OLD, "harness": "claude", "sid": "C", "event": "start", "source": "startup"}])
         self.write_ledger("seat-D", [
             {"ts": self.OLD, "harness": "claude", "sid": "D", "event": "handover",
              "source": "clear", "from": {"harness": "claude", "sid": "C"}}])
-        peer_steward._HERDR_SESSION = "fixture-server"
-        calls = []
-
-        def census(**kwargs):
-            calls.append(kwargs)
-            return herdr_observation.PaneCensus("fixture-server", (
-                {"agent": "claude", "pane_id": "w1:pA",
-                 "agent_session": {"value": "other-a"}},
-                {"agent": "claude", "pane_id": "w1:pB",
-                 "agent_session": {"value": "other-b"}},
-            ), time.monotonic())
-
-        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
-                               side_effect=census), \
-             mock.patch.object(peer_steward, "_process_session",
-                               return_value="not-a-member") as process:
-            result = peer_steward._retire_finished_lineage_bundles(
-                self.store, now=time.time())
-        self.assertEqual(calls, [{"session": "fixture-server"}])
-        # Two components look at the same two panes; each pane is asked once
-        # per pass instead of once per component.
-        self.assertEqual(process.call_count, 2)
+        result = self.retire()
+        self.assertCountEqual(self.lifetime_proof.call_args_list,
+                              [mock.call("claude", "A"), mock.call("claude", "B"),
+                               mock.call("claude", "C"), mock.call("claude", "D")])
         self.assertEqual(result["retired"], 2)
+
 
     def test_retirement_stamps_the_archive_and_never_overwrites_an_entry(self):
         self.component()
@@ -982,10 +964,6 @@ class LineageBundleRetirementTest(IsolatedCase):
 
         def recent_activity():
             self.component(ts=time.time())
-
-        def unknown_census():
-            self.component()
-            self._census = None
 
         def open_binding():
             self.component()
@@ -1030,7 +1008,7 @@ class LineageBundleRetirementTest(IsolatedCase):
                 self.assertEqual(result["retired"], 0, name)
                 self.assertTrue(self.sessions(), name)
         self.component()
-        result = self.retire(census=None)
+        result = self.retire(lifetime="unknown")
         self.assertEqual(result["retired"], 0)
 
 

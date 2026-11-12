@@ -315,18 +315,18 @@ Portable hook semantics are named by invariant:
 
 Adapters decide whether each invariant is enforced by native hook, wrapper,
 manual preflight, or unsupported fallback. Realized (steward role, `OPERATIONS §5.14`,
-v56 herdr-unified; peer delivery is Hearting-native since 2026-11-11): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
-`hooks/peer-message-record.py`) for the ledger, `utilities/peer-steward.py wait` →
-`herdr agent wait` (measured) for bounded foreground watching, and for detached watching
-`utilities/peer-steward.py watch/join/status/rearm/ack` plus two carriers — a
+peer delivery is Hearting-native since 2026-11-11): Claude — `PostToolUse(SendMessage)` + `UserPromptSubmit` (measured,
+`hooks/peer-message-record.py`) for the ledger; `utilities/peer-steward.py wait` and
+`watch/join/status/rearm/ack` read Hearting's exact shell/native records, not Herdr; detached
+watch readiness is refreshed by the existing obligation runner, plus two carriers — a
 `PostToolUse(Bash)` `asyncRewake` hook (`hooks/peer-steward-rewake.py`, exit 2 wakes,
 spec-only until a live-session measurement) and a `UserPromptSubmit` sweep of un-acked
 receipts in the same `hooks/peer-message-record.py` (fail-soft, ≤5 lines of
 `additionalContext`, bounded by the hook's shared prompt budget). The carrier reaches
 watch state only through the utility (its shared undelivered-receipt reader and `ack`
-subcommand, loaded in the hook process), never through the state files, so a runtime
-without a wake carrier keeps the same schema. Codex — `herdr agent wait` watching is measured;
-the portable `watch/join/status/rearm/ack` subcommands work. A terminal watch receipt is
+subcommand, loaded in the hook process), never by treating a status word as a receipt, so a
+runtime without a wake carrier keeps the same schema. Codex — `wait` reads the exact native
+turn record; `watch/join/status/rearm/ack` uses the same receipt schema. A terminal watch receipt is
 queued as one exact self-addressed notice (`peer-watch:<id>`), which the peer courier hands
 to the thread's native queue like any other Codex delivery, so an idle Codex steward is woken
 by the native queue rather than by a hook. The Codex in-turn carrier
@@ -720,28 +720,22 @@ stamp path in `core/HOOKS.md`.
 ### 7.3. Detached steward watch carrier (SD-122)
 
 **Detached watch realization.** `peer-steward.py watch <target>` persists one logical
-obligation with exact Herdr endpoint, target pane, harness, session and until-set identity
-before starting its observer. A seat-less Claude recipient settles only when an exact local
-native transcript or history record proves prior existence and a complete census finds no
-holder; missing or uncertain existence evidence remains unknown. One logical watch invokes
-`herdr agent wait` once. An explicit
-timeout is one absolute deadline recorded when the duty is armed; reaching it writes the
-terminal timeout receipt and exit 3. Observer restart does not grant another wait or a
-fresh timeout. The supervisor listens for its own wait child's exit, the endpoint event
-stream, its exact steward lifetime, and terminal requests for that watch. It may stop only
-that watch's exact wait child. A complete target-pane census or matching closed event
-settles target disappearance; a proven steward exit or a successful arm by a new native
-session in the same verified seat settles the old observer duty without rewriting the
-target result. A different seat's watch remains independent. Unavailable, partial, or
-ambiguous observations remain unknown; they are not converted into death or a second native
-wait. Reattachment adopts a recorded exact wait child when possible and continues lifecycle
-observation when its consumed wait result is unknown. Existing command, session-start and
-reconnect paths claim the same duty and replace only observer identity, so tab moves do not
-require manual rearm and same-name pane/session reuse cannot inherit the old duty. A tab is a
-current location hint. `join`, `status`, and Fleet report the duty separately from an
-observer receipt. Wake remains adapter-specific and any unmeasured native receipt remains
-unmeasured; no always-on daemon or model polling loop is introduced. Idle/done receipts
-require the shared
+obligation with native endpoint, pane hint, harness, exact session, and until-set identity
+before starting its observer. New arms include native PID birth and PID namespace. The
+existing obligation runner reads the native agent state once per target per pass and wakes
+observers; it does not start a separate poller or Herdr child. A confirmed exact PID/start
+end or confirmed lineage successor settles as `session-ended` or `session-replaced`; unknown
+lifetime, namespace mismatch, unreadable status, and unresolved lineage stay unknown. A
+meaningful idle/done result passes the shared readiness check before its one receipt;
+blocked results carry an exact open `question_id` when available. Working and unknown results
+write no notice. An explicit timeout is one absolute deadline recorded when the duty is
+armed; reaching it writes the terminal timeout receipt and exit 3. Observer restart preserves
+the same watch id and deadline. It listens for its wake pipe, exact native PID death, steward
+lifetime, and terminal requests; it never waits on Herdr. Old arms remain readable but a
+protocol-2 arm without a native PID birth stays unknown. Same-name or same-pane reuse cannot
+inherit the old session. `join`, `status`, and Fleet report the duty separately from an
+observer receipt. Wake remains adapter-specific and is not an immediate-wake guarantee; no
+always-on daemon or model polling loop is introduced. Idle/done receipts require the shared
 completion-readiness policy: exact registered-parent session or confirmed handover
 bindings take precedence over native idle, without requiring a parent-pane field.
 Peer input uses the same policy with an input purpose: a parent's idle native
@@ -784,7 +778,8 @@ exists, and the armed line says `parent_next=end-turn`. The observer's receipt n
 to the normal message courier (the same duty a peer report gets), which starts a turn on the
 idle thread through the native queue; the in-turn carrier's `Stop` still carries a receipt
 that lands before the turn ends. Without the socket the watch stays `wake=none` and the line
-is a bounded `join`. Measured on a private Herdr server, 2026-11-10 (`watch-wake`).
+is a bounded `join`. Detached watch readiness is not an immediate wake guarantee; real
+`watch-wake` and `native-watch-end` observations are recorded by the host-run verification.
 
 ### 7.4. Carrier taxonomy and selection
 
@@ -1085,11 +1080,11 @@ event matches the exact session, pane, foreground PID birth, and PID namespace,
 and was observed within 15 seconds. Missing, stale, or mismatched status stays
 unknown for retire decisions.
 
-An exact pane exit, exact closed-pane event, complete absence census, completed retire,
-confirmed steward exit or unconfirmed replacement, or the original explicit deadline settles the existing
-watch duty before its observer exits. A confirmed same-seat successor keeps the existing duty
-open. A terminal receipt prevents lifecycle reconciliation
-from recreating an observer. Pane closure, steward closure, agent release, goal completion,
+An exact recorded PID/start death, a confirmed session successor, confirmed steward
+exit, or the original explicit deadline settles the existing watch duty before its observer
+exits. A same-pane replacement without lineage, incomplete native reads, and unresolved
+lineage remain unknown. A terminal receipt prevents lifecycle reconciliation from
+recreating an observer. Session end, confirmed successor, steward exit, goal completion,
 and successful work are distinct outcomes.
 
 ## 10. Open harness differences (parity register)
@@ -1165,4 +1160,5 @@ inputs; review `RV-PR1443-1110.md`.
 | PG-51 | Claude, OpenCode ↔ Codex | A `report`-scope (and any quick) owner could push and reach the network on Claude and OpenCode, where only the instruction withholds publication, while a Codex owner had no network for that route | resolved | per the supervisor's direction (add no new block), a dispatch-depth-1 Codex owner gets the network grant whatever its capability (audit included), intensity or entry scope, and a depth-2 worker, a `read-only` sandbox and the mid-merge observation fence get none; one rule, `codex_owner_network_posture`, with no other widening path (RV-PR1474 P2-1); the `report` scope is kept by the owner instruction on all three, and a report owner can read what it reviews. `owner-publish` (2026-11-10): unscoped, `complete` and `report` push to a loopback git daemon and reach the network on all three. A real `gh pr view` needs GitHub credentials the isolated HOME does not carry. Repro: `--scenario owner-publish` |
 | PG-52 | Codex | A shipped Codex custom agent pinned the account model its profile resolves to in `adapters/codex/config/models.conf`; when the active provider could not resolve it, the spawn failed with `agent type is currently not available` and the parent saw only that tool error, while the same agent without the pin spawned | resolved | activation renders the agents for the home they install into: a home whose `config.toml`, profile file `<name>.config.toml` (`codex --profile <name>`, RV-PR1474 P2-2) or `[profiles.*]` table selects a `model_provider` other than `openai` gets them without the `model` line, keeping effort and sandbox, so they follow the session model; the default provider keeps the pins and the shipped files (`adapters/codex/bin/sync-native-agents.py` `runtime_config`). `custom-agent-spawn` (2026-11-10) installs the agent as activation renders it: the shipped `memory-scout` spawns in the TUI and under `codex exec`, no fixture-model copy needed. Repro: `--scenario custom-agent-spawn --harness codex` |
 | PG-53 | OpenCode | Session tidy's memory step could not read an OpenCode 2 conversation: a fresh home failed with `no such table: part`, and an upgraded home (old tables kept) read a new session as empty (`nothing-new`) | resolved | branch `opencode-tidy-v2-reader-1111`: `utilities/tidy_transcripts.py` reads an OpenCode session through `opencode_runtime.read_session_parts` (V1 `part` or OpenCode 2 `session_message`; a session in both stays `session-generation-ambiguous`) and finds recent sessions in `session_v2` too. Measured on an OpenCode 2.0.32 database with the real runner and a fake worker: fresh and upgraded homes `applied` with the session's 4 rows, a V1 session read as before (`BC-OPENCODE-TIDY-V2-READER-1111.md`); regression `OpenCodeV2ReadTest` |
+| PG-54 | Claude, Codex, OpenCode | Detached watch reads native status, but activity detection and wake timing differ by the records/carrier each runtime provides | open | Stage 1 registration: Claude uses its exact process-bound registry, Codex its exact rollout lifecycle, and OpenCode its fresh plugin turn record only when the pane/SID/PID birth match; outside a session-shell pane OpenCode activity can remain unknown. `watch-wake` and `native-watch-end` isolated measurements are handed to the host-run node; no immediate wake is promised |
 <!-- parity-register:end -->

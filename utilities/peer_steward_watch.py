@@ -21,7 +21,6 @@ from dispatch_contract import process_start_ticks
 from parent_next_directive import steward_fields
 import peer_obligations
 import shared_readiness
-import herdr_observation
 
 from peer_steward_base import (
     _AGENT_STATES, _CLAIM_TIMEOUT_MS, _HERDR_GET_TIMEOUT_SECONDS, _interpret_payload,
@@ -36,10 +35,11 @@ from peer_steward_base import (
 _WATCH_SCHEMA = 1
 _WATCH_STATES = _AGENT_STATES + (
     "timeout", "agent-not-found", "herdr-unavailable", "pane-exited",
-    "steward-exited", "superseded",
+    "session-ended", "session-replaced", "steward-exited", "superseded",
 )
 _JOIN_EXIT = {"timeout": 3, "agent-not-found": 2, "herdr-unavailable": 4,
-              "pane-exited": 2, "steward-exited": 0, "superseded": 0}
+              "pane-exited": 2, "session-ended": 0, "session-replaced": 0,
+              "steward-exited": 0, "superseded": 0}
 _WATCH_TRANSITION_LOCK_BUDGET_SEC = 0.2
 _WATCH_RECEIPT_CONTENDED = "contended"
 _WATCH_RECEIPT_PENDING = "pending"
@@ -216,178 +216,96 @@ def _terminal_watch_request(paths, expected, server):
     return str(observation.get("reason") or "completed-retire")
 
 
+
+
 def _watch_terminal_from_view(view, expected, server, transport=None):
-    """Return terminal evidence only for this endpoint and armed pane lifetime."""
-    if (view is None or view.complete is not True
-            or herdr_observation.endpoint_name(view.endpoint) !=
-               herdr_observation.endpoint_name(server)):
+    """Legacy in-memory view classifier; protocol-3 watches use native lifetime."""
+    if view is None or getattr(view, "complete", False) is not True:
         return None
-    pane_id = expected.get("pane")
+    if str(getattr(view, "endpoint", "default") or "default") != str(server or "default"):
+        return None
+    pane_id = expected.get("pane") if isinstance(expected, dict) else None
     if not isinstance(pane_id, str) or not pane_id or pane_id == "-":
         return None
-    terminal = view.terminal.get(pane_id)
+    terminal = getattr(view, "terminal", {}).get(pane_id)
     if terminal in {"pane-closed", "pane-exited"}:
-        if transport is None:
-            return terminal
-        # Event envelopes carry pane IDs but no public lifetime sequence. A
-        # fresh snapshot on the same subscription prevents a delayed terminal
-        # event from retiring a new occupant that reused the public pane ID.
-        view = transport.resnapshot()
-        if (view is None or view.complete is not True
-                or herdr_observation.endpoint_name(view.endpoint) !=
-                   herdr_observation.endpoint_name(server)):
-            return None
-        if not any(row.get("pane_id") == pane_id for row in view.panes):
-            return terminal
-    rows = [row for row in view.panes if row.get("pane_id") == pane_id]
+        return terminal
+    rows = [row for row in getattr(view, "panes", ()) if row.get("pane_id") == pane_id]
     if not rows:
         return "pane-absent"
     if len(rows) != 1:
         return None
-    pane = rows[0]
-    harness = expected.get("harness")
-    session_id = expected.get("session_id")
-    current_harness = pane.get("agent")
-    current_session = pane.get("agent_session") or {}
-    if isinstance(current_session, dict):
-        current_session = current_session.get("value")
-    # An unknown transport label is not evidence of a different native occupant.
-    if (harness not in {None, "", "-"}
-            and current_harness not in {None, "", "-", "unknown", harness}):
+    row = rows[0]
+    session = row.get("agent_session") or {}
+    session = session.get("value") if isinstance(session, dict) else session
+    if (expected.get("harness") not in {None, "", "-"}
+            and row.get("agent") is not None
+            and row.get("agent") not in {None, "", "-", "unknown", expected.get("harness")}):
         return "session-replaced"
-    if (session_id not in {None, "", "-"}
-            and isinstance(current_session, str) and current_session
-            and current_session != session_id):
+    if (expected.get("session_id") not in {None, "", "-"}
+            and isinstance(session, str) and session and session != expected.get("session_id")):
         return "session-replaced"
     return None
 
 
-def _watch_registered_work_pending(view, expected, server):
-    """A fresh blocking fact can defer readiness, never authorize completion."""
-    if (view is None or getattr(view, "complete", False) is not True
-            or herdr_observation.endpoint_name(view.endpoint) !=
-               herdr_observation.endpoint_name(server)):
-        return False
-    pane, harness, sid = (expected.get(key) for key in ("pane", "harness", "session_id"))
-    if not pane or harness not in {"claude", "codex", "opencode"} or not sid or sid == "-":
-        return False
-    matches = [row for row in view.panes if row.get("pane_id") == pane]
-    if len(matches) != 1:
-        return False
-    current_sid = matches[0].get("agent_session")
-    if isinstance(current_sid, dict):
-        current_sid = current_sid.get("value")
-    if matches[0].get("agent") != harness or current_sid != sid:
-        return False
-    try:
-        work, state = peer_obligations.bound_work_for_pane(
-            pane, harness, sid, registry_append_only=True)
-        if state != "observed" or not work:
-            return False
-        states = [peer_obligations.completion_readiness(item).state for item in work]
-    except (OSError, ValueError, TypeError):
-        # Uncertainty takes the ordinary complete readiness path below.
-        return False
-    return "unknown" not in states and "pending" in states
-
-
 class _WatchCloseEvidence:
-    """One pass's evidence for deciding that a watch's supervisor or target is gone.
-
-    Every item is read at most once per pass and only when a watch needs it: the
-    recipient census (seat-less Claude), the session lineage, the live agents and
-    process observation, and one CLI ``herdr pane list`` per endpoint."""
+    """Memoized native lifetime and lineage evidence for one close pass."""
 
     def __init__(self, recipient_census=None):
-        if recipient_census is None:
-            from recipient_lifetime import RecipientCensus
-            recipient_census = RecipientCensus()
-        self.recipient_census = recipient_census
-        self._graph = None
         self._chain = {}
-        self._panes = {}
-        self._agents = self._observation = self._UNSET
         self._liveness = {}
-
-    _UNSET = object()
-
-    def pane_census(self, server):
-        if server not in self._panes:
-            try:
-                self._panes[server] = herdr_observation.pane_census(session=server)
-            except Exception:
-                self._panes[server] = None
-        return self._panes[server]
 
     def chain_end(self, harness, sid):
         key = (harness, sid)
         if key not in self._chain:
             try:
                 import dispatch_seat_handover as handover
-                if self._graph is None:
-                    self._graph = handover.lineage_graph()
-                self._chain[key] = handover._chain_end(self._graph, harness, sid)
+                graph = handover.lineage_graph()
+                self._chain[key] = handover._chain_end(graph, harness, sid)
             except Exception:
                 self._chain[key] = (sid, "unresolved")
         return self._chain[key]
 
-    def liveness(self, harness, sid):
+    def liveness(self, harness, sid, agent=None):
         key = (harness, sid)
         if key not in self._liveness:
             try:
-                check = _steward_check_module()
-                if self._agents is self._UNSET:
-                    self._agents = check._agents()
-                    self._observation = check._end_observation()
-                self._liveness[key] = check._session_liveness(
-                    harness, sid, self._agents, self._observation)
+                from peer_steward_native import native_lifetime
+                agent = agent if isinstance(agent, dict) else {}
+                self._liveness[key] = native_lifetime(
+                    harness, sid, pid=agent.get("pid"),
+                    pid_start=agent.get("pid_start"),
+                    pid_namespace=agent.get("pid_namespace"))
             except Exception:
                 self._liveness[key] = "unknown"
         return self._liveness[key]
 
 
 def _watch_close_reason(watch_id, arm, evidence):
-    """Why this watch can no longer be served, or None when that is not established.
-
-    The target is gone when it left its pane or its session was replaced (a complete
-    pane census, or a confirmed same-seat lineage). The supervisor is gone when its
-    session ended, or, with no live socket, when its seat's pane is absent from a
-    complete census. A pane that now holds some other session never ends the watch."""
+    """Close only on exact native end or a confirmed successor; unknown stays armed."""
     expected = dict(arm.get("agent") or {})
-    server = arm.get("server") or "default"
-    has_socket = bool(herdr_observation.socket_path_for_endpoint(server))
-    if not has_socket:
-        census = evidence.pane_census(server)
-        if census is not None:
-            view = SimpleNamespace(endpoint=census.endpoint, complete=census.complete,
-                                   panes=list(census.panes), terminal={})
-            reason = _watch_terminal_from_view(view, expected, server)
-            if reason in {"pane-absent", "session-replaced"}:
-                return reason
     target_harness, target_sid = expected.get("harness"), expected.get("session_id")
     if (isinstance(target_harness, str) and isinstance(target_sid, str)
             and target_harness not in {"", "-"} and target_sid not in {"", "-"}):
         end, disposition = evidence.chain_end(target_harness, target_sid)
         if disposition == "successor" and end != target_sid:
             return "session-replaced"
+        if evidence.liveness(target_harness, target_sid, expected) == "ended":
+            return "session-ended"
 
     steward = arm.get("steward") or {}
     seat = arm.get("steward_seat") or {}
     holder = (steward.get("harness"), steward.get("session_id"))
     if seat.get("key"):
-        import dispatch_seat_handover as handover
-        relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
-        current = (relation or {}).get("holder") or {}
-        holder = (current.get("harness"), current.get("sid")) if relation else (None, None)
-    if not all(isinstance(value, str) and value for value in holder):
-        return None
-    if evidence.liveness(*holder) == "ended":
-        return "steward-exited"
-    if (holder == (steward.get("harness"), steward.get("session_id")) and not has_socket
-            and seat.get("kind") == "pane" and seat.get("pane")
-            and (arm.get("steward_server") or "default") == server
-            and herdr_observation.confirms_absence(
-                evidence.pane_census(server), seat["pane"], endpoint=server)):
+        try:
+            import dispatch_seat_handover as handover
+            relation = handover.resolve_watch(watch_id, seat_key=seat["key"])
+            current = (relation or {}).get("holder") or {}
+            holder = (current.get("harness"), current.get("sid")) if relation else (None, None)
+        except Exception:
+            holder = (None, None)
+    if (all(isinstance(value, str) and value for value in holder)
+            and evidence.liveness(*holder) == "ended"):
         return "steward-exited"
     return None
 
@@ -1342,6 +1260,7 @@ def _watch_observer_takeover_argvs(watch_id, arm):
 
 
 _WATCH_SERVER_ENDPOINT_PREFIX = "server:"
+_WATCH_NATIVE_ENDPOINT_PREFIX = "native:"
 
 
 def _watch_selected_readiness_endpoint(arm, server=None):
@@ -1352,15 +1271,13 @@ def _watch_selected_readiness_endpoint(arm, server=None):
         if not isinstance(endpoint, str) or not endpoint:
             return None
         if endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX):
-            expected = (_WATCH_SERVER_ENDPOINT_PREFIX
-                        + herdr_observation.endpoint_name(selected_server))
+            expected = _WATCH_SERVER_ENDPOINT_PREFIX + str(selected_server)
+            return endpoint if endpoint == expected else None
+        if endpoint.startswith(_WATCH_NATIVE_ENDPOINT_PREFIX):
+            expected = _WATCH_NATIVE_ENDPOINT_PREFIX + str(selected_server)
             return endpoint if endpoint == expected else None
         return endpoint
-    endpoint = herdr_observation.socket_path_for_endpoint(selected_server)
-    if endpoint:
-        return endpoint
-    return (_WATCH_SERVER_ENDPOINT_PREFIX
-            + herdr_observation.endpoint_name(selected_server))
+    return _WATCH_NATIVE_ENDPOINT_PREFIX + str(selected_server)
 
 
 def _watch_readiness_identity_matches_arm(identity, arm, native_state):
@@ -1382,15 +1299,18 @@ def _watch_readiness_identity_matches_arm(identity, arm, native_state):
             or identity.get("purpose") != "completion"):
         return False
     if endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX):
-        if endpoint != (_WATCH_SERVER_ENDPOINT_PREFIX
-                        + herdr_observation.endpoint_name(server)):
+        if endpoint != _WATCH_SERVER_ENDPOINT_PREFIX + str(server):
             return False
     if ("readiness_endpoint" in arm
             and endpoint != _watch_selected_readiness_endpoint(arm, server)):
         return False
     pane_identity = arm.get("pane_identity") or arm.get("foreground_identity") or {}
-    shell_pid = pane_identity.get("shell_pid")
-    shell_start = str(pane_identity.get("shell_start") or "")
+    if int(arm.get("observer_protocol", 0) or 0) >= 3:
+        shell_pid = agent.get("pid")
+        shell_start = str(agent.get("pid_start") or "")
+    else:
+        shell_pid = pane_identity.get("shell_pid")
+        shell_start = str(pane_identity.get("shell_start") or "")
     if shell_pid is not None:
         try:
             if (int(identity.get("shell_pid")) != int(shell_pid)

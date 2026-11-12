@@ -369,13 +369,13 @@ def _codex_home():
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-def native_turn(harness, pid, session_id):
+def native_turn(harness, pid, session_id, *, pane=None, server=None):
     """``idle`` | ``working`` | ``blocked`` | ``unknown`` from the runtime's own record.
 
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout; a thread with
-    no rollout has no recorded turn and stays unknown. OpenCode has no durable
-    turn record outside Herdr's pane events, so it stays unknown.
+    no rollout has no recorded turn and stays unknown. OpenCode reads the
+    plugin's exact pane/SID/PID-birth status record; absent or stale records stay unknown.
     """
     try:
         import pane_ownership
@@ -400,9 +400,52 @@ def native_turn(harness, pid, session_id):
                 return "working"
             if lifecycle and lifecycle[0] in {"task_complete", "turn_aborted"}:
                 return "idle"
+        if harness == "opencode" and pane and session_id:
+            from herdr_observation import endpoint_name, read_native_status
+            live = pane_ownership._process(pid)
+            if not live:
+                return "unknown"
+            endpoint = endpoint_name(server or "default")
+            record_pane, _socket = tmux_address(pane)
+            record_pane = record_pane or pane
+            record = read_native_status(endpoint, record_pane, harness, session_id, pid, str(live[5]))
+            if isinstance(record, dict):
+                return record.get("status", "unknown")
     except Exception:
         pass
     return "unknown"
+
+
+def wait_native(harness, session_id, until=(), timeout_ms=None, *, pane=None, server=None):
+    """Wait in the caller for one native turn state, returning agent-info shape.
+
+    This is a bounded foreground wait when a timeout is supplied. It reads the
+    existing native status sources; unknown observations never become terminal.
+    """
+    deadline = None if timeout_ms is None else time.monotonic() + max(0, timeout_ms) / 1000
+    first = None
+    while True:
+        from peer_steward_native import native_agent, native_lifetime
+        payload = native_agent(harness, session_id, pane=pane, server=server)
+        agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
+        if isinstance(agent, dict):
+            state = agent.get("agent_status", "unknown")
+            if (state in until) if until else (first is not None and state != first
+                                                and first != "unknown" and state != "unknown"):
+                return payload
+            if first is None:
+                first = state
+            lifetime = native_lifetime(
+                harness, session_id, pid=agent.get("pid"),
+                pid_start=agent.get("pid_start"), pid_namespace=agent.get("pid_namespace"))
+            if lifetime == "ended":
+                return {"error": {"code": "session_ended"}, "agent": agent}
+        elif payload is None:
+            return {"error": {"code": "unknown"}}
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"error": {"code": "timeout"}}
+        delay = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+        time.sleep(delay)
 
 
 def _cwd(pid):
@@ -655,6 +698,7 @@ class TmuxSurface:
     def __init__(self, runner=None, socket=None):
         self.runner = runner or _run
         self.socket = socket or None
+        self._native_servers = {}
 
     def _tmux(self, *args):
         argv = ["tmux"] + (["-S", self.socket] if self.socket else []) + [str(a) for a in args]
@@ -956,7 +1000,10 @@ class TmuxSurface:
         else:
             harness, pid = found
             session_id = _process_session(harness, pid, pane, self)
-        status = native_turn(harness, pid, session_id) if session_id else "unknown"
+        native_server = ((row.get("env") or {}).get("AGENT_HERDR_SESSION")
+                         or (row.get("env") or {}).get("HERDR_SESSION") or self.socket)
+        self._native_servers[pane] = native_server or "default"
+        status = native_turn(harness, pid, session_id, pane=pane, server=native_server) if session_id else "unknown"
         if seat is not None and status == "unknown":
             # The shell host follows the native lifecycle hooks for every harness.
             status = shell_turn(seat)
@@ -1037,7 +1084,8 @@ class TmuxSurface:
                            else max(0.0, min(_WAIT_POLL_SEC, deadline - time.monotonic())))
                 if _process(agent["pid"]) != record:
                     break
-                current = native_turn(agent["agent"], agent["pid"], session) if session else "unknown"
+                current = native_turn(agent["agent"], agent["pid"], session, pane=pane,
+                                      server=self._native_servers.get(pane) or self.socket) if session else "unknown"
                 if current != state:
                     break
 

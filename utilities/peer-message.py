@@ -3622,6 +3622,26 @@ def cancel_message_obligation(ref, *, duty_id, expected_revision, identity,
                 if (effective.get("session_id") != evidence.get("session_id")
                         or effective.get("harness") != evidence.get("harness")):
                     return "changed"
+            elif evidence.get("kind") == "recipient-session-ended":
+                if (effective.get("session_id") != evidence.get("session_id")
+                        or effective.get("harness") != evidence.get("harness")
+                        or evidence.get("lifetime") != "ended"):
+                    return "changed"
+                try:
+                    from peer_steward_native import native_lifetime
+                    if native_lifetime(effective.get("harness"),
+                                       effective.get("session_id")) != "ended":
+                        return "unknown"
+                    import dispatch_seat_handover as handover
+                    graph = handover.lineage_graph()
+                    _end, disposition = handover._chain_end(
+                        graph, effective.get("harness"), effective.get("session_id"))
+                    if disposition == "successor":
+                        return "changed"
+                    if disposition != "self":
+                        return "unknown"
+                except Exception:
+                    return "unknown"
             elif evidence.get("kind") == "first-input-process-dead":
                 if original_process is None:
                     return "unknown"
@@ -4817,7 +4837,7 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                             result.update(status="granted", reason="foreign-target")
                             result["written"] = write_locked()
                             return
-                    supervision = fleet.repo_supervision(repository_key=repository, sessions=rows)
+                    supervision = fleet.repo_supervision(repository_key=repository, sessions=rows, agents=())
                 except Exception as exc:
                     result.update(status="unavailable", reason=f"census-failed:{type(exc).__name__}")
                     return

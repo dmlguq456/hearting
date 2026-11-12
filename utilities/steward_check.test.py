@@ -23,7 +23,6 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 import dispatch_session_sweep as sweep  # noqa: E402
-import herdr_observation  # noqa: E402
 import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import steward_check as SC  # noqa: E402
@@ -940,13 +939,12 @@ class StewardCheckProcessProofTest(CheckBase):
 
 
 class StewardCheckWindowClosedTest(CheckBase):
-    """A role whose seat pane vanished from a complete census is released, never guessed."""
+    """A role is released only when native evidence proves its exact SID ended."""
 
     KEY = "seat-key-1"
 
     def setUp(self):
         super().setUp()
-        self.panes = herdr_observation.PaneCensus("default", (), 1.0, True)
         self.released = mock.Mock(return_value={"roles": 1})
         peer_message = SimpleNamespace(peer_state_root=lambda: self.tmp,
                                        release_closed_session=self.released)
@@ -955,79 +953,44 @@ class StewardCheckWindowClosedTest(CheckBase):
                 (SC, "_relations", lambda: [{"holder": {"harness": HARNESS, "sid": SID},
                                              "origin": {"harness": HARNESS, "sid": SID},
                                              "seat_key": self.KEY, "released": False}]),
-                (SC, "_pane_census", lambda server: self.panes),
                 (SC, "_end_observation", lambda: None)):
             patcher = mock.patch.object(target, name, side_effect=replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
         self.liveness = "unknown"
-
-    def arm(self, name="watch-1", *, pane="w1:p9", server="default", key=None, sid=SID, receipt=False):
-        root = self.tmp / "peer-watches"
-        root.mkdir(exist_ok=True)
-        (root / f"{name}.json").write_text(json.dumps({
-            "watch_id": name, "steward": {"harness": HARNESS, "session_id": sid},
-            "steward_seat": {"kind": "pane", "key": key or self.KEY, "pane": pane},
-            "steward_server": server}))
-        if receipt:
-            (root / f"{name}.receipt.json").write_text(json.dumps({"watch_id": name, "reason": "steward-exited"}))
-
-    def occupied(self, pane="w1:p9", agent="claude"):
-        self.panes = herdr_observation.PaneCensus(
-            "default", ({"pane_id": pane, "agent": agent, "agent_session": {"value": "someone-else"}},), 1.0, True)
+        patcher = mock.patch.object(SC, "_session_liveness",
+                                    side_effect=lambda harness, sid, *args, **kwargs: self.liveness)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def advance(self):
         self.register()
         return self.step(T0 + 1)
 
-    def test_absent_pane_and_unknown_liveness_release_the_role_and_end_the_duty(self):
-        self.arm()
-        duty = self.advance()
-        self.released.assert_called_once_with(HARNESS, SID, reason="window-closed")
-        self.assertEqual((duty["state"], duty["observation"]["reason"]), ("complete", "window-closed"))
-
-    def test_an_arm_that_already_has_its_receipt_still_proves_the_pane(self):
-        self.arm(receipt=True)
-        duty = self.advance()
-        self.released.assert_called_once()
-        self.assertEqual(duty["observation"]["reason"], "window-closed")
-
-    def test_another_session_in_the_same_pane_leaves_the_role_alone_even_with_a_receipt(self):
-        self.arm(receipt=True)
-        self.occupied()
+    def test_unknown_lifetime_keeps_the_role_and_duty(self):
         duty = self.advance()
         self.released.assert_not_called()
         self.assertNotEqual(duty["state"], "complete")
 
-    def test_a_live_session_keeps_its_role(self):
-        self.arm()
+    def test_live_lifetime_keeps_the_role(self):
         self.liveness = "live"
-        self.advance()
+        duty = self.advance()
         self.released.assert_not_called()
+        self.assertNotEqual(duty["state"], "complete")
 
-    def test_an_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
-        self.arm()
+    def test_exact_ended_lifetime_releases_with_session_ended_reason(self):
+        self.liveness = "ended"
+        duty = self.advance()
+        self.released.assert_called_once_with(HARNESS, SID, reason="session-ended")
+        self.assertEqual((duty["state"], duty["observation"]["reason"]),
+                         ("complete", "session-ended"))
+
+    def test_unresolved_role_release_keeps_the_duty_for_the_next_pass(self):
+        self.liveness = "ended"
         self.released.return_value = {"roles": "unresolved", "marker": "kept"}
         duty = self.advance()
-        self.released.assert_called_once()
+        self.released.assert_called_once_with(HARNESS, SID, reason="session-ended")
         self.assertNotEqual(duty["state"], "complete")
-
-    def test_without_a_watch_arm_for_the_seat_nothing_is_concluded(self):
-        self.arm(key="another-seat")
-        self.arm(name="watch-2", sid="someone-else")
-        self.advance()
-        self.released.assert_not_called()
-
-    def test_an_unavailable_pane_census_is_not_absence(self):
-        self.arm()
-        self.panes = None
-        self.advance()
-        self.released.assert_not_called()
-
-    def test_a_census_of_another_endpoint_is_not_absence(self):
-        self.arm(server="other")
-        self.advance()
-        self.released.assert_not_called()
 
 
 class StewardCheckEscTest(CheckBase):

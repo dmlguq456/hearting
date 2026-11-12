@@ -198,14 +198,8 @@ def _role_flagged(harness: str, session_id: str) -> bool:
 
 
 def _agents():
-    try:
-        tools = _UTILITIES.parent / "tools"
-        if str(tools) not in sys.path:
-            sys.path.insert(0, str(tools))
-        from fleet.collectors import herdr
-        return herdr.list_agents()
-    except Exception:  # noqa: BLE001
-        return None
+    """The shared steward pass intentionally has no Herdr inventory input."""
+    return ()
 
 
 def _end_observation():
@@ -249,70 +243,9 @@ def _holder_seat_keys(harness: str, session_id: str):
     return keys
 
 
-def _seat_panes(harness: str, session_id: str, seat_keys):
-    """``{seat_key: {(pane, server)}}`` from this holder's watch arms, or None.
-
-    A watch arm names the pane its supervisor sat in, and the arm file outlives its
-    receipt. A seat with no such arm has no pane evidence, so nothing is concluded."""
-    import json
-    module = getattr(_collector(), "_peer_message_module", None)
-    root = Path(module().peer_state_root()) / "peer-watches" if module else None
-    if root is None or not root.is_dir():
-        return None
-    found = {key: set() for key in seat_keys}
-    for path in sorted(root.glob("*.json")):
-        if path.name.startswith(".") or path.name.endswith(
-                (".receipt.json", ".ack.json", ".observation.json")):
-            continue
-        try:
-            arm = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        steward = arm.get("steward") if isinstance(arm, dict) else None
-        seat = arm.get("steward_seat") if isinstance(arm, dict) else None
-        if (not isinstance(steward, dict) or not isinstance(seat, dict)
-                or (steward.get("harness"), steward.get("session_id")) != (harness, session_id)
-                or seat.get("key") not in found or seat.get("kind") != "pane"
-                or not seat.get("pane") or not arm.get("steward_server")):
-            continue
-        found[seat["key"]].add((str(seat["pane"]), str(arm["steward_server"])))
-    return found if all(found.values()) else None
-
-
-def _pane_census(server: str):
-    try:
-        import herdr_observation
-        return herdr_observation.pane_census(session=server)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _window_closed(harness: str, session_id: str) -> bool:
-    """True only when every seat this holder's role sits in was seen empty in a complete
-    pane census and the session's liveness is not ``live``.
-
-    The ground for release is therefore "unknown (or ended) liveness plus the absence of
-    the same seat's pane", not liveness alone: a holder that is merely unobserved while
-    its pane still exists, or whose pane now shows another session, is left as it is.
-    A holder that moved to a different pane without a herdr row or process evidence is
-    the residual case; it is handled like any session whose proof of life is missing."""
-    keys = _holder_seat_keys(harness, session_id)
-    if not keys:
-        return False
-    panes = _seat_panes(harness, session_id, keys)
-    if panes is None:
-        return False
-    try:
-        import herdr_observation
-    except Exception:  # noqa: BLE001
-        return False
-    censuses = {}
-    for pane, server in sorted({item for values in panes.values() for item in values}):
-        if server not in censuses:
-            censuses[server] = _pane_census(server)
-        if not herdr_observation.confirms_absence(censuses[server], pane, endpoint=server):
-            return False
-    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+    """Release a holder only on positive native proof of exact session end."""
+    return _session_liveness(harness, session_id, (), _end_observation()) == "ended"
 
 
 _ACTIVITY_EVENTS = frozenset({"start", "prompt", "real-prompt", "summary"})
@@ -404,13 +337,14 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
 
 
 def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
-    """Release a role whose session closed through an ordinary path the hook did not see:
-    its seat pane vanished (``window-closed``) or its seat moved on by a confirmed
-    ``/clear`` (``cleared``). The release itself is the one ``release_closed_session``;
-    while it cannot resolve the role, the duty stays for the next pass."""
+    """Release a role only on exact native end or confirmed clear evidence.
+
+    The release itself is the one ``release_closed_session``; if role resolution is
+    uncertain, keep the duty for the next pass.
+    """
     try:
         if _window_closed(harness, session_id):
-            reason = "window-closed"
+            reason = "session-ended"
         elif _seat_cleared(harness, session_id):
             reason = "cleared"
         else:
@@ -521,19 +455,18 @@ def _observe_role(harness: str, session_id: str) -> dict:
     except Exception:  # noqa: BLE001
         module = None
     targets = []
-    agents = _agents()
+    agents = ()
     observation = _end_observation()
-    by_session = {}
-    for agent in agents or ():
-        identity = agent.get("agent_session") or {}
-        sid = identity.get("value") if isinstance(identity, dict) else None
-        if sid:
-            by_session[(str(agent.get("agent") or "").lower(), sid)] = agent
     if collector is not None:
         for target in collector.role_targets(harness, session_id) or ():
             t_harness = str(target.get("harness") or "").lower()
             t_sid = target.get("session_id")
-            agent = by_session.get((t_harness, t_sid))
+            try:
+                from peer_steward_native import native_agent
+                payload = native_agent(t_harness, t_sid)
+                agent = (payload or {}).get("result", {}).get("agent")
+            except Exception:
+                agent = None
             state = (agent or {}).get("agent_status") or "unknown"
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
