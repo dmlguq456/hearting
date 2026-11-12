@@ -681,6 +681,7 @@ REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuse
                      "prefix_segments_reused", "line_parse_reuses",
                      "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
+OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
 
 
 def counters() -> dict:
@@ -698,6 +699,10 @@ def counters() -> dict:
         stats = getattr(module, "_LIFECYCLE_STATS", None) or {}
         for name in CODEX_COUNTERS:
             out["codex_" + name] += int(stats.get(name, 0))
+    owner_input = sys.modules.get("dispatch_owner_input")
+    owner_stats = owner_input.metrics_snapshot() if hasattr(owner_input, "metrics_snapshot") else {}
+    for name in OWNER_INPUT_COUNTERS:
+        out[name] = int(owner_stats.get(name, 0))
     return out
 
 
@@ -1034,9 +1039,12 @@ class Step:
     still (``"0"``) or move by an exact amount (an int) during the step's warm pass, so an event cannot pass without
     taking the incremental path it is about; see ``counters`` and ``UNCHANGED_PASS``."""
 
-    def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None):
+    def __init__(self, label, mutate, *, clock_only=False, resume=None, expect=None, unchanged=False):
         self.label, self.mutate, self.clock_only = label, mutate, clock_only
         self.resume, self.expect = resume, dict(expect or {})
+        # ``unchanged``: the step is an input that, by design, must not move any observed value
+        # (the opposite of self-check B): the fresh output after it must equal the one before.
+        self.unchanged = unchanged
 
 
 # An unchanged pass after any step: every reader answers from what it kept.
@@ -1342,6 +1350,91 @@ def _append_batches(run, names=("batch-a", "batch-b", "batch-c")) -> None:
         run.fx.append_rows([_new_open_row(run.fx, "%s-%d" % (name, row)) for row in range(sizes[number])])
 
 
+# ---------------------------------------------------------------------------
+# BLOCKED owners (answer-wait S3): a route the compiler really emitted, so the owner-input
+# decision runs ``verify_route`` to its end when it runs at all.
+# ---------------------------------------------------------------------------
+
+_REAL_ROUTE: list = []
+
+
+def real_route_record(slug: str) -> dict:
+    """The compiled route of this tree, ``slug`` changed and hash and id derived again."""
+    if not _REAL_ROUTE:
+        import hook_perf_fixture
+        record, reason = hook_perf_fixture.compile_real_route(ROOT)
+        assert record is not None, "no verifiable route for the BLOCKED owners: %s" % reason
+        _REAL_ROUTE.append(record)
+    from route_identity import route_hash, route_id_from_hash
+    record = dict(_REAL_ROUTE[0])
+    record["slug"], record["slug_truncated"] = slug, False
+    digest = route_hash(record)
+    record["route_hash"], record["route_id"] = digest, route_id_from_hash(digest)
+    return record
+
+
+def blocked_owner(run, name: str) -> dict:
+    """One owner that ended BLOCKED with no successor, on its own open route; returns its identity."""
+    record = real_route_record("blocked-" + name)
+    route_file = run.fx.routes / ("blocked-%s.json" % name)
+    write_json(route_file, record, CLOCK_BASE - 3600)
+    attempt = "att-blocked-" + name
+    journal = run.fx.jobs.parent / "workflow" / record["route_id"] / "journal.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps({"route_id": record["route_id"], "route_hash": record["route_hash"],
+                                   "workflow_state": "RUNNING", "at": iso(CLOCK_BASE - 3600)}) + "\n",
+                       encoding="utf-8")
+    row = attempt_row(CLOCK_BASE - 3000, "done", "blocked-" + name, {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": attempt,
+        "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+        "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": str(route_file),
+        "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+        "owner_route_file": str(route_file), "launch_claimed": "1", "launch_started": "1",
+        "note": "dead-worker-blocked", "ended_at": "%.3f" % (CLOCK_BASE - 2900)}, str(run.fx.work))
+    return {"attempt": attempt, "row": row, "route_id": record["route_id"], "journal": journal,
+            "route_file": route_file}
+
+
+def keep_answer(run, attempt: str, state: str = "retained") -> Path:
+    """The owner's own ``.input.json`` with one request in ``state`` (an unconsumed one is a kept answer)."""
+    from dispatch_contract import supervisor_lease_path
+    path = supervisor_lease_path(run.fx.jobs, attempt).with_suffix(".input.json")
+    write_json(path, {"schema_version": 1, "attempt_id": attempt, "requests": [
+        {"id": "req-1", "digest": "sha256:fixture", "state": state, "text": "kept answer"}]},
+        run.clock.now - 1)
+    return path
+
+
+def blocked_setup(run):  # two BLOCKED owners, neither holds an answer
+    owners = [blocked_owner(run, name) for name in ("a", "b")]
+    run.blocked = {owner["attempt"]: owner for owner in owners}
+    run.fx.append_rows([owner["row"] for owner in owners])
+
+
+def e40a(run):  # an answer is kept for owner a: the owner-input decision runs for it (and only it)
+    keep_answer(run, "att-blocked-a")
+
+
+def e40b(run):  # the answer is consumed: nothing kept again
+    keep_answer(run, "att-blocked-a", state="consumed")
+
+
+def _unreadable_journal(run, attempt: str) -> None:
+    journal = run.blocked[attempt]["journal"]
+    journal.unlink()
+    journal.mkdir()         # reading it raises IsADirectoryError, as an unreadable file would
+
+
+def e40c(run):  # owner b holds no answer and its journal cannot be read: the decision is not asked
+    _unreadable_journal(run, "att-blocked-b")
+
+
+def e40d(run):  # owner a holds an answer and its journal cannot be read: the decision raises
+    keep_answer(run, "att-blocked-a")
+    _unreadable_journal(run, "att-blocked-a")
+
+
 def e42_batches(run):
     _append_batches(run)
 
@@ -1442,6 +1535,22 @@ EVENTS = [
       Step("same size and mtime, other content", e28b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E29", "a claude transcript rewritten with the same size and mtime",
      [Step("same stat", e29, expect={**REG_STILL, **CODEX_STILL})]),
+    # E40: the owner-input decision (route verification) runs only for an owner that holds a kept
+    # answer; with nothing kept the answer is [] whatever the decision says.
+    ("E40", "a kept answer appears for a BLOCKED owner, then is consumed",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("answer kept", e40a, expect={**REG_STILL, "owner_decisions": 1, "owner_decision_skips": "+",
+                                        **CODEX_STILL}),
+      Step("answer consumed", e40b, expect={**REG_STILL, "owner_decisions": "0", "owner_decision_skips": "+",
+                                            **CODEX_STILL})]),
+    # E40b: an unreadable journal only matters to an owner whose decision runs. Owner b holds nothing,
+    # so it stays visible and unflagged; owner a holds an answer, so its decision raises as before.
+    ("E40b", "an unreadable route journal: an owner without an answer is unaffected",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("journal of an owner without an answer", e40c, unchanged=True,
+           expect={**REG_STILL, "owner_decisions": "0", "owner_decision_skips": "+", **CODEX_STILL}),
+      Step("journal of an owner holding an answer", e40d,
+           expect={**REG_STILL, "owner_decisions": 1, **CODEX_STILL})]),
     # E42: a rewrite after the registry grew by appended batches (segments of unequal size). Only
     # the segments whose own bytes or first order changed are built again; the others keep their rows.
     ("E42a", "in-place replacement of a middle row with a longer one, after appended batches",
@@ -1552,10 +1661,16 @@ class IncrementalEquivalenceTests(unittest.TestCase):
         self.assertIsNone(problem, problem)
         self.check_counters(run, step.label, counted, step.expect)
         # Self-check B: an event that cannot move the answer tests nothing.
-        self.assertTrue(
-            changed(before, fresh),
-            "%s step '%s' did not change the fresh output: the event tested nothing" % (
-                run.eid, step.label))
+        if step.unchanged:
+            self.assertFalse(
+                changed(before, fresh),
+                "%s step '%s' moved the fresh output, which this step says it must not" % (
+                    run.eid, step.label))
+        else:
+            self.assertTrue(
+                changed(before, fresh),
+                "%s step '%s' did not change the fresh output: the event tested nothing" % (
+                    run.eid, step.label))
         counted = counters()
         again = run.warm()
         problem = run.mismatch(step.label + " (unchanged pass)", again, fresh)
