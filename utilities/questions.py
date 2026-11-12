@@ -3,7 +3,10 @@
 
 ``hearting run questions ask TEXT`` registers an explicit private message question
 for this interactive caller and returns immediately. Fleet or a nonempty answer
-in this session completes that question; native approvals keep their own surface.
+in this session completes that question; with choices, only a choice number or a
+choice's own wording typed in the session does, and any other prompt stays an
+ordinary prompt. A Fleet answer awaiting delivery is not replaced by a later prompt.
+Native approvals keep their own surface.
 
 ``hearting run questions`` lists the same board Fleet's QUESTIONS view shows (one
 shared projection, one count): each wait's question, choices and recommended answer,
@@ -396,7 +399,8 @@ def _ask(args):
         print(json.dumps({"id": value["id"], "state": value["lifecycle"]}))
     else:
         print(value["id"])
-        print(HWS.ui_translator()("questions.registered"))
+        print(HWS.ui_translator()("questions.registered_choices" if args.choice
+                                  else "questions.registered"))
     return 0
 
 

@@ -99,6 +99,9 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
         unavailable = True
         ordinary_passes, discoveries, messages, delays, workers, contexts = [], [], [], [], [], []
         prepared_messages = []
+        # A notice accepted between duties is handed over in the same pass on a
+        # fresh read pass of its own (never the running pass's snapshot).
+        mid_pass_refreshes, reconcile_depth = [], [0]
         watch_calls, batch_calls, external_passes, read_contexts = [], [], [], []
         started = threading.Event()
         real_read, real_stat, real_lstat, real_iterdir = tidy.read_bytes, Path.stat, Path.lstat, Path.iterdir
@@ -165,6 +168,8 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
             real_begin(current)
             if threading.current_thread() is main_thread:
                 ordinary_passes.append(current._active_list_context)
+                if reconcile_depth[0]:
+                    mid_pass_refreshes.append(current._active_list_context)
 
         def discover(current, **kwargs):
             observed = real_discovery(current, **kwargs)
@@ -200,7 +205,11 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
 
         def reconcile(current, duties, **kwargs):
             read_contexts.append(kwargs["read_context"])
-            real_reconcile(current, duties, **kwargs)
+            reconcile_depth[0] += 1
+            try:
+                real_reconcile(current, duties, **kwargs)
+            finally:
+                reconcile_depth[0] -= 1
 
         def snapshot():
             self.assertTrue(started.wait(3), "existing readiness worker started")
@@ -333,8 +342,9 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
             self.assertIn(steward.peer_message._read_pending(ref)["state"], {"pending", "queued"})
         # Each iteration now reads accepted active notices before discovery,
         # then starts a separate full-recovery pass. Neither phase may reuse a
-        # store snapshot or authority context from an earlier phase/iteration.
-        read_phases = 2 * len(discoveries)
+        # store snapshot or authority context from an earlier phase/iteration;
+        # a mid-pass notice handover only adds fresh passes of its own.
+        read_phases = 2 * len(discoveries) + len(mid_pass_refreshes)
         self.assertEqual(len(ordinary_passes), read_phases)
         self.assertEqual(len({id(context) for context in ordinary_passes}), read_phases)
         self.assertGreaterEqual(len(read_contexts), len(discoveries))

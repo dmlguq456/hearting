@@ -3113,7 +3113,10 @@ sessions share one project or pane seat. Replacing a question affects only that
 session. Existing question IDs, seat addresses and answer bindings remain valid;
 legacy seat-only sources are read only for their matching session. The exact
 consumed receipt remains distinct from native gate approval. A queued answer or
-ordinary peer notice closes neither kind of wait.
+ordinary peer notice closes neither kind of wait. Direct input closes a message
+question with choices only as one in-range choice number or a choice's own
+wording; other input stays an ordinary prompt with the question open, and a
+claimed Fleet answer awaiting delivery stays the answer over later direct input.
 
 **S6** ledger — every message sent or received is a typed record in the `peer-messages/`
 ledger under the dispatch state root. Its content is limited to a bounded summary

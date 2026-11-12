@@ -3699,6 +3699,64 @@ class TestContinuation(unittest.TestCase):
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
 
+ def test_draft_fact_verify_blocked_on_unjudged_claims_resumes_in_same_cycle(self):
+  # A document route's fact-verify that ended with claims still unjudged
+  # (io.verdict `unverified` -> BLOCKED) resumes through the existing
+  # continuation from that node: the prefix is reused, the new route reopens
+  # the same producer cycle, so the earlier verdict file sits at the very path
+  # the resumed verifier writes, and the round is admitted (not refused as an
+  # unchanged blocking review).
+  import subprocess,sys
+  import artifact_producer as AP
+  import review_round_cap as RRC
+  from route_authority import decide_continuation
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   cwd=self._source_fixture()
+   gate={
+    "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
+    "drift_verdict":"within-spec","workflow_mode":"tracked",
+    "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"},
+   }
+   source=R.compile_route("autopilot-draft","doc","standard",cwd,artifact,
+    predicates=[],signals=[],transport="headless",tracking="tracked",
+    tracked_gate_evidence=gate,dispatch_evidence=self._dispatch(cwd))
+   ids=[node["id"] for node in source["nodes"]]
+   self.assertLess(ids.index("fact-verify"),ids.index("finalize"))
+   fact=next(node for node in source["nodes"] if node["id"]=="fact-verify")
+   self.assertEqual((fact["unit"],fact["dispatch_depth"]),("research/claim-verify",2))
+   source_path=R.canonical_route_path(artifact,source["route_id"])
+   R.write_once(source_path,source)
+   begun=AP.begin(artifact,route_file=source_path,capability="autopilot-draft",
+                  intensity="standard")
+   self._complete_prefix(source,"fact-verify",Path(begun["cycle_dir"])/"artifacts"/"evidence")
+   # The blocked attempt's verdict: 51 claims, 25 judged, 26 left unjudged.
+   verdict_path=Path(begun["cycle_dir"])/"artifacts"/"reviews"/"draft"/"facts"/"verdict.json"
+   verdict_path.parent.mkdir(parents=True,exist_ok=True)
+   rows=[{"claim":f"c{i}","verdict":"survive" if i<25 else "unverified"} for i in range(51)]
+   verdict_path.write_text(json.dumps({"io":{"verdict":"unverified"},"claims":rows}),encoding="utf-8")
+   command=[sys.executable,str(P),"continuation","--source-route",str(source_path),
+            "--resume-from-node","fact-verify","--requested-boundary","finalize",
+            "--reason","fact-verify-unjudged-claims","--artifact-root",str(artifact)]
+   result=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),
+                         env={**os.environ,"AGENT_HOME":str(R.ROOT)})
+   self.assertEqual(result.returncode,0,result.stderr)
+   route=json.loads(result.stdout)
+   self.assertEqual(route["first_runnable_node"],"fact-verify")
+   self.assertIsNone(route["first_runnable_blocker"])
+   self.assertEqual([node["id"] for node in route["nodes"]],["fact-verify","finalize"])
+   resumed=AP.begin(artifact,route_file=R.canonical_route_path(artifact,route["route_id"]),
+                    capability="autopilot-draft",intensity="standard")
+   self.assertEqual(resumed["cycle_id"],begun["cycle_id"])
+   self.assertEqual(json.loads(verdict_path.read_text(encoding="utf-8"))["claims"][:25],rows[:25])
+   # The earlier attempt reached no judgment on 26 claims: a BLOCKED review row
+   # is verdict-less, so the resumed round is an ordinary admitted round.
+   node=next(row for row in route["nodes"] if row["id"]=="fact-verify")
+   blocked=[("done",{"note":"dead-worker-blocked","failure_class":"blocked","worker_type":"review",
+                     "attempt_id":"att-fact-verify-blocked","route_node":"fact-verify"})]
+   budget=RRC.round_budget(route,node,blocked)
+   self.assertEqual(budget.state,"admit")
+   self.assertTrue(decide_continuation(route,action="round",node=node,facts={"budget":budget}).allowed)
  def test_continuation_cli_defers_cycle_binding_until_begin(self):
   # Publication leaves the existing cycle untouched. Execution's existing
   # begin path records the admitted lineage; publishing a sibling still

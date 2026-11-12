@@ -6480,10 +6480,23 @@ def _reconcile_external_obligations(store, *, service_current=None, snapshot=Non
             pass
 
 
+def _active_index_generation(store):
+    """The obligation active index's inode and mtime; None when unreadable."""
+    try:
+        info = os.stat(store.root / "active", follow_symlinks=False)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
                            notice_selection=None, runner_incarnation=None,
-                           settlement_context=None):
-    """Advance only the accepted duties owned by this runner."""
+                           settlement_context=None, between_duties=None):
+    """Advance only the accepted duties owned by this runner.
+
+    ``between_duties`` runs after each non-notice duty, so the runner can hand
+    a notice accepted meanwhile to its courier instead of the next pass.
+    """
     if duties is None:
         duties = _runner_duties(store, store.list())
     retry_state = {} if retry_state is None else retry_state
@@ -6550,6 +6563,11 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                              observer_error="observer-unavailable:" + type(exc).__name__)
             except Exception:
                 pass
+        if between_duties is not None:
+            try:
+                between_duties()
+            except Exception:
+                pass
         if retryable:
             try:
                 latest = store.get(duty_id)
@@ -6568,11 +6586,32 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                 retry_state.pop(duty_id, None)
 
 
+# A live-tier group that ends with its recipient unavailable sent nothing; the
+# same pass tries the next one, at most this many times. Without this, a backlog
+# of never-tried groups for gone sessions was found out one group per pass.
+NOTICE_UNAVAILABLE_SWEEP_LIMIT = 8
+
+
 def _resume_session_notice_obligations(duties, store, *, read_context=None,
                                        selection=None, runner_incarnation=None):
     try:
-        return _resume_session_notice_pass(duties, store, read_context=read_context,
-            selection=selection, runner_incarnation=runner_incarnation)
+        for _sweep in range(NOTICE_UNAVAILABLE_SWEEP_LIMIT):
+            if selection is not None:
+                selection.pop("last_pick_ids", None)
+            result = _resume_session_notice_pass(duties, store, read_context=read_context,
+                selection=selection, runner_incarnation=runner_incarnation)
+            picked = () if selection is None else selection.get("last_pick_ids") or ()
+            if not picked or selection.get("last_pick_tier") != "live":
+                return result
+            latest = {duty_id: store.get(duty_id) for duty_id in picked}
+            if not all(((value or {}).get("observation") or {}).get("reason")
+                       == "recipient-unavailable" for value in latest.values()):
+                return result
+            # The found-gone group is now parked; stay on the live tier.
+            selection["parked_turn"] = False
+            duties = [latest.get(duty["id"]) or store.get(duty["id"]) or duty
+                      for duty in duties]
+        return result
     finally:
         # Source completion may have recovered from an earlier failed write.
         # Queue its decision after carrier and source/selected locks are gone.
@@ -6667,10 +6706,14 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # and every record/target are re-read through the normal path each pass.
     # d6: terminal (failure/completion) notices go first, both in group order
     # and inside the batch; progress notices share the batch or wait one pass.
+    # A question answer is the person's own reply: it ranks with terminal.
     def _terminal_rank(item):
         try:
+            receipt = item[4].get("receipt")
+            if isinstance(receipt, dict) and "answer_binding" in receipt:
+                return 0
             return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
             return 1
 
     import session_resume
@@ -6690,7 +6733,23 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
             selection.update(state_root=state_root,
                               runner_incarnation=runner_incarnation,
                               last_group=None)
-        last_group = selection.get("last_group")
+    # A group whose every notice already found its recipient unavailable stays
+    # a candidate (the session may come back), but it gets every other pass
+    # only: a backlog for gone sessions must not hold a fresh notice, such as
+    # a question answer, behind it (2026-11-11: 22 such groups starved one).
+    def _parked(key):
+        return all((item[0].get("observation") or {}).get("reason") == "recipient-unavailable"
+                   for item in groups[key])
+
+    live_keys = [key for key in group_keys if not _parked(key)]
+    parked_keys = [key for key in group_keys if key not in live_keys]
+    parked_turn = bool(parked_keys) and (
+        not live_keys or (selection is not None and selection.get("parked_turn") is True))
+    cursor_name = "last_parked_group" if parked_turn else "last_live_group"
+    if selection is not None:
+        last_group = selection.get(cursor_name)
+        if last_group is None and not parked_turn:
+            last_group = selection.get("last_group")
         if not (isinstance(last_group, tuple) and len(last_group) == 2
                 and all(isinstance(value, str) for value in last_group)):
             last_group = None
@@ -6700,13 +6759,19 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     def _pick(keys):
         return next((key for key in keys if last_group is not None and key > last_group), keys[0])
 
-    terminal_keys = sorted(key for key in group_keys if key in terminal_groups)
-    progress_keys = sorted(key for key in group_keys if key not in terminal_groups)
+    pool = parked_keys if parked_turn else live_keys
+    terminal_keys = sorted(key for key in pool if key in terminal_groups)
+    progress_keys = sorted(key for key in pool if key not in terminal_groups)
     group_key = _pick(terminal_keys) if terminal_keys else _pick(progress_keys)
     if selection is not None:
+        selection[cursor_name] = group_key
         selection["last_group"] = group_key
+        selection["last_pick_tier"] = "parked" if parked_turn else "live"
+        selection["parked_turn"] = bool(parked_keys) and not parked_turn
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
+    if selection is not None:
+        selection["last_pick_ids"] = tuple(item[0]["id"] for item in batch)
     # Resume needs idle/empty; ordinary notices keep their existing steering
     # policy. An obsolete resume must not hold a useful completion behind it.
     resume_only = session_resume.is_resume(batch[0][4])
@@ -7272,6 +7337,15 @@ def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
         stop_event.wait(1.0 if duties else 2.0)
 
 
+def _runner_settlement_context():
+    """The runner's settlement context, proving cold owner history a slice per pass."""
+    context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    limit = getattr(context, "limit_owner_scan", None)
+    if callable(limit):
+        limit(dispatch_batch_obligations.RUNNER_OWNER_SCAN_BUDGET_S)
+    return context
+
+
 def cmd_obligation_runner(args):
     """Existing peer steward, scoped to accepted duties and stopped when they settle."""
     store = peer_obligations.ObligationStore(
@@ -7324,7 +7398,7 @@ def cmd_obligation_runner(args):
 
     notice_selection = {"state_root": str(store.root.parents[1].resolve()),
                         "runner_incarnation": runner_incarnation, "last_group": None}
-    settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    settlement_context = _runner_settlement_context()
     retired_for_exec = []
 
     def retire_for_service_exec():
@@ -7388,11 +7462,38 @@ def cmd_obligation_runner(args):
                 duties.append(duty)
         duties = _runner_duties(store, duties)
         observation_context = ObservationContext()
+        handled_notice_ids = set(accepted_notice_ids)
+        active_generation = [_active_index_generation(store)]
+
+        def deliver_new_notices():
+            # One local stat per old duty: a notice accepted while old duties
+            # (role checks, batch proofs on shared artifact roots) run goes to
+            # its courier now, not after the rest of this pass.
+            current = _active_index_generation(store)
+            if current is None or current == active_generation[0]:
+                return
+            active_generation[0] = current
+            store.end_read_pass()
+            try:
+                fresh = [duty for duty in store.list(
+                             kinds={"session-notice", "run-notice"}, fast_active_only=True)
+                         if duty["id"] not in handled_notice_ids]
+            finally:
+                store.begin_read_pass()
+            if not fresh:
+                return
+            handled_notice_ids.update(duty["id"] for duty in fresh)
+            _reconcile_obligations(
+                store, fresh, read_context=PeerReadContext(registry_append_only=True),
+                retry_state=duty_retry_state, notice_selection=notice_selection,
+                runner_incarnation=runner_incarnation)
+
         _reconcile_obligations(store, duties, read_context=read_context,
                                retry_state=duty_retry_state,
                                notice_selection=notice_selection,
                                runner_incarnation=runner_incarnation,
-                               settlement_context=settlement_context)
+                               settlement_context=settlement_context,
+                               between_duties=deliver_new_notices)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
@@ -7402,7 +7503,7 @@ def cmd_obligation_runner(args):
             if retired_for_exec:
                 # The exec failed after the old context retired: continue on a
                 # fresh context under the same lock.
-                settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+                settlement_context = _runner_settlement_context()
                 start_readiness_worker()
         external_snapshot = _external_obligation_snapshot()
         _reconcile_external_obligations(
@@ -7435,8 +7536,11 @@ def cmd_obligation_runner(args):
             pass
         current_duties = store.list()
         external_signature = _external_obligation_signature(external_snapshot)
+        owner_scan = getattr(settlement_context, "owner_scan_unfinished", None)
+        owner_scan = owner_scan() if callable(owner_scan) else ()
+        owner_scan = owner_scan if isinstance(owner_scan, tuple) else ()
         if (notice_discovery_observed and not _runner_duties(store, current_duties)
-                and not any(external_signature)):
+                and not any(external_signature) and not owner_scan):
             # A producer that saw our held lock may already have accepted work.
             # Release before the final read: later producers can start a runner,
             # and work accepted before release is either reclaimed here or owned
@@ -7476,8 +7580,10 @@ def cmd_obligation_runner(args):
             external_signature = latest_external
         # Unknown discovery is an observation, not proof of an empty backlog.
         # Keep the same owner and bounded wait even before legacy duty recovery.
+        # An unfinished owner proof changes this signature on each pass, so it
+        # resumes on the next short wait instead of the growing idle backoff.
         signature = (notice_discovery_observed,
-                     _runner_duty_signature(current_duties), external_signature)
+                     _runner_duty_signature(current_duties), external_signature, owner_scan)
         if previous_signature is None or signature != previous_signature:
             delay = 1.0
         else:
