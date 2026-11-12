@@ -1261,6 +1261,143 @@ while True:
 """
 
 
+_OPENCODE_ENV = ("XDG_STATE_HOME", "XDG_DATA_HOME", "OPENCODE_DB", "OPENCODE_DATA_DIR",
+                 "OPENCODE_DATA_HOME")
+PANE_SID, OTHER_SID = "ses_paneOwnA1", "ses_otherPaneB2"
+USER = ("user", {"text": "hello"})
+ENDED = ("assistant", {"finish": "stop", "time": {"created": 2, "completed": 3}})
+TOOL_STEP = ("assistant", {"finish": "tool-calls", "time": {"created": 2, "completed": 3}})
+RUN_ENDED = ("idle", {"outcome": "succeeded", "time": {"created": 4}})
+# One session as OpenCode 2.0.32 itself wrote it in a tidy-compact scenario run: every
+# run ends with its own `idle` row, and a manual /compact is a run of its own.
+V2_RUNS = [USER, TOOL_STEP, ENDED, RUN_ENDED,
+           ("compaction", {"status": "completed", "reason": "manual", "summary": "done",
+                           "recent": "", "time": {"created": 5}}), RUN_ENDED,
+           USER, ENDED, RUN_ENDED]
+
+
+def _opencode_db(generation, sessions, parents=None):
+    """The isolated HOME's OpenCode database: ``{sid: [(type, data), ...]}`` in order;
+    ``parents`` maps a child (subagent) session to its parent."""
+    import sqlite3
+    import opencode_runtime
+    path = opencode_runtime.opencode_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    con = sqlite3.connect(path)
+    with con:
+        if generation == "v1":
+            con.execute("CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER, "
+                        "time_updated INTEGER, parent_id TEXT)")
+            con.execute("CREATE TABLE message (id TEXT, session_id TEXT, role TEXT, "
+                        "time_created INTEGER, time_updated INTEGER, data TEXT)")
+            con.execute("CREATE TABLE part (session_id TEXT, message_id TEXT, data TEXT)")
+        else:
+            con.execute("CREATE TABLE session_v2 (id TEXT, directory TEXT, time_created INTEGER, "
+                        "time_updated INTEGER, parent_id TEXT)")
+            con.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, "
+                        "seq INTEGER, data TEXT, time_created INTEGER, time_updated INTEGER)")
+        for sid, rows in sessions.items():
+            con.execute(f"INSERT INTO {'session' if generation == 'v1' else 'session_v2'} "
+                        "VALUES (?, '/w', 1, 1, ?)", (sid, (parents or {}).get(sid)))
+            for seq, (kind, data) in enumerate(rows, 1):
+                if generation == "v1":
+                    con.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
+                                (f"msg_{sid}_{seq}", sid, kind, seq, seq, json.dumps(data)))
+                else:
+                    con.execute("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (f"msg_{sid}_{seq}", sid, kind, seq, json.dumps(data), seq, seq))
+    con.close()
+
+
+def _select(pid, sid, start=None):
+    """The TUI selection record the OpenCode TUI identity plugin writes for ``pid``."""
+    start = start or Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    folder = Path(os.environ["HOME"]) / ".local" / "state" / "hearting" / "tui-identity"
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob(f"{pid}-*.json"):
+        old.unlink()
+    if sid:
+        (folder / f"{pid}-{start}.json").write_text(json.dumps(
+            {"schema": "hearting-tui-selection-v1", "sessionID": sid, "pid": pid, "start": start}))
+
+
+class OpenCodeNativeTurnTest(_IsolatedMixin, unittest.TestCase):
+    """OpenCode's turn state outside Herdr: its own session record, for the session the
+    process's TUI selection names and no other."""
+
+    def setUp(self):
+        super().setUp()
+        for key in _OPENCODE_ENV:
+            os.environ.pop(key, None)
+        self.pid = os.getpid()
+        _select(self.pid, PANE_SID)
+
+    def test_the_newest_message_ends_the_turn_by_the_native_rule_in_both_generations(self):
+        question = ("assistant", {"time": {"created": 2}, "content": [
+            {"type": "tool", "name": "question", "state": {"status": "running"}}]})
+        cases = [([USER], "working"), ([USER, TOOL_STEP], "working"),
+                 ([USER, ("assistant", {"time": {"created": 2}})], "working"),
+                 ([USER, ENDED], "idle"), ([USER, ENDED, USER], "working"),
+                 ([USER, ("assistant", {"error": {"name": "MessageAbortedError"},
+                                        "time": {"created": 2, "completed": 3}})], "idle"),
+                 ([], "unknown")]
+        for generation in ("v1", "v2"):
+            for rows, expected in cases + ([([USER, question], "blocked")] if generation == "v2" else []):
+                with self.subTest(generation=generation, rows=rows):
+                    _opencode_db(generation, {PANE_SID: rows})
+                    self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), expected)
+
+    def test_opencode_2_reads_its_own_run_record_not_only_the_last_step(self):
+        compacting = ("compaction", {"status": "running", "reason": "manual", "summary": "",
+                                     "recent": "", "time": {"created": 6}})
+        failure = {"type": "transport", "message": "read ECONNRESET"}
+        # Output streamed, then the stream broke: the step failed and a retry backs off.
+        backing_off = ("assistant", {"finish": "error", "error": failure,
+                                     "retry": {"attempt": 2, "at": 9, "error": failure},
+                                     "time": {"created": 6, "completed": 7}})
+        shell = {"shellID": "sh_probe", "command": "sleep 300", "time": {"created": 6}}
+        cases = [
+            ("turn ended: the newest row is the run's idle row", V2_RUNS, "idle"),
+            ("/compact running, its run not ended", V2_RUNS[:4] + [compacting], "working"),
+            ("retry backing off after output", V2_RUNS[:7] + [backing_off], "working"),
+            ("a `!` shell command running", V2_RUNS + [("shell", dict(shell, status="running"))],
+             "working"),
+            ("the `!` command ended outside any run",
+             V2_RUNS + [("shell", dict(shell, status="exited", exit=0))], "idle"),
+            ("a synthetic row delivered to a new run",
+             V2_RUNS + [("synthetic", {"text": "ran", "time": {"created": 6}})], "working"),
+        ]
+        for label, rows, expected in cases:
+            with self.subTest(label):
+                _opencode_db("v2", {PANE_SID: rows})
+                self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), expected)
+
+    def test_a_child_session_on_screen_never_speaks_for_the_pane(self):
+        # The TUI shows a subagent's session: its finished run says nothing of the parent's.
+        for generation, rows in (("v1", [USER, ENDED]), ("v2", V2_RUNS)):
+            with self.subTest(generation=generation):
+                _opencode_db(generation, {OTHER_SID: [USER], PANE_SID: rows},
+                             parents={PANE_SID: OTHER_SID})
+                self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
+
+    def test_another_sessions_record_is_never_read_as_this_process(self):
+        _opencode_db("v2", {PANE_SID: [USER, ENDED], OTHER_SID: [USER]})
+        self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "idle")
+        self.assertEqual(ts.native_turn("opencode", self.pid, OTHER_SID), "unknown")
+        _select(self.pid, OTHER_SID)  # the TUI switched sessions
+        self.assertEqual(ts.native_turn("opencode", self.pid, OTHER_SID), "working")
+        self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
+        _select(self.pid, PANE_SID, start="1")  # a record of another process birth
+        self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
+        _select(self.pid, "")  # no selection: nothing proves the session
+        self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
+        _select(self.pid, PANE_SID)
+        import opencode_runtime
+        opencode_runtime.opencode_db_path().unlink()
+        self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
+
+
 @unittest.skipUnless(shutil.which("tmux") and shutil.which("bash"), "tmux or bash is not installed")
 class CodexNativeTurnTest(_IsolatedMixin, unittest.TestCase):
     """PG-9: an ended rollout turn is still work while the App Server runs or queues one."""
@@ -1389,6 +1526,28 @@ class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
         agent = self.surface.agent(self.pane)["result"]["agent"]
         self.assertNotIn("agent_session", agent)
         self.assertEqual(agent["agent_status"], "unknown")
+
+    def test_an_opencode_pane_reads_its_own_selected_session_only(self):
+        for key in _OPENCODE_ENV:
+            os.environ.pop(key, None)
+        pid = self.start_runtime(name="opencode")
+        _opencode_db("v2", {PANE_SID: [USER, ENDED], OTHER_SID: [USER]})
+        agent = self.surface.agent(self.pane)["result"]["agent"]
+        # Before its TUI selects a session, nothing proves which one is the pane's.
+        self.assertEqual((agent["agent"], agent["pid"], agent["agent_status"]), ("opencode", pid, "unknown"))
+        self.assertNotIn("agent_session", agent)
+        _select(pid, PANE_SID)
+        agent = self.surface.agent(self.pane)["result"]["agent"]
+        self.assertEqual((agent["agent_session"]["value"], agent["agent_status"]), (PANE_SID, "idle"))
+        _opencode_db("v2", {PANE_SID: [USER, ENDED, USER], OTHER_SID: [USER, ENDED]})
+        self.assertEqual(self.surface.agent(self.pane)["result"]["agent"]["agent_status"], "working")
+        self.assertEqual(self.surface.wait_agent(self.pane, ("idle",), 300), {"error": {"code": "timeout"}})
+        _opencode_db("v2", {PANE_SID: [USER, ENDED, USER, ENDED], OTHER_SID: [USER]})
+        waited = self.surface.wait_agent(self.pane, ("idle", "done"), 5000)
+        self.assertEqual(waited["result"]["agent"]["agent_status"], "idle")
+        _select(pid, OTHER_SID)
+        agent = self.surface.agent(self.pane)["result"]["agent"]
+        self.assertEqual((agent["agent_session"]["value"], agent["agent_status"]), (OTHER_SID, "working"))
 
     def test_a_shell_pane_has_no_agent_and_an_absent_server_is_unanswered(self):
         self.assertEqual(self.surface.agent(self.pane), {"error": {"code": "agent_not_found"}})

@@ -19,8 +19,9 @@ pane id itself: a tmux pane id (``%N``) is tmux, anything else stays Herdr. Pane
 ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. tmux
 has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
 the pane's foreground runtime, its process-proven session and that runtime's own
-turn record (Claude's session registry status, Codex's rollout lifecycle). What
-no record proves stays ``unknown``, which every typing path refuses.
+turn record (Claude's session registry status, Codex's rollout lifecycle,
+OpenCode's own record of that session). What no record proves stays
+``unknown``, which every typing path refuses.
 """
 from __future__ import annotations
 
@@ -375,11 +376,20 @@ def native_turn(harness, pid, session_id):
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout (an ended one is
     still work while its App Server runs a turn or holds a queued item); a thread with
-    no rollout has no recorded turn and stays unknown. OpenCode has no durable
-    turn record outside Herdr's pane events, so it stays unknown.
+    no rollout has no recorded turn and stays unknown. OpenCode: that session's own
+    record in its database (V1 messages; OpenCode 2's run record, whose ``idle`` row
+    ends a turn), read only while this exact process's TUI selection record still
+    names that session.
     """
     try:
         import pane_ownership
+        if harness == "opencode":
+            from fleet.collectors import opencode
+            if opencode.session_of_process(pid) != (session_id, "opencode-tui-selection"):
+                return "unknown"
+            import opencode_runtime
+            return _opencode_turn(opencode_runtime.read_session_observation(
+                session_id, shell_after_seq=None))
         if harness == "claude":
             from fleet.collectors import claude
             record = claude.read_registry(pid) or {}
@@ -426,6 +436,48 @@ def _codex_server_busy(thread_id):
         return bool(codex_queue_delivery.list_queue(endpoint, thread_id, timeout=1.0))
     except Exception:  # noqa: BLE001 - an optional reader never blocks the rollout path
         return False
+
+
+def _opencode_turn(observed):
+    """One OpenCode session's turn state from ``read_session_observation``.
+
+    V1: the newest user or assistant message decides. OpenCode 2 records each run
+    itself, so its newest user, synthetic, assistant, compaction, shell or ``idle``
+    row decides: the ``idle`` row it appends when a run ends is idle; a user or
+    synthetic row, or a compaction (it runs inside a run, which only its ``idle`` row
+    ends), is working; a ``!`` shell command runs outside any run, so its row is
+    working while ``running`` and, once ended, leaves the row before it to decide.
+    An assistant step has ended the turn when it finished for good -- a ``finish``
+    other than ``tool-calls``/``unknown``, or an error -- unless OpenCode 2 has a
+    retry pending on it; a step still running or about to call tools is working,
+    and a running ``question`` tool waits on the person. A child (subagent) session,
+    whose state is not the pane's, an unread session, or one with no message, is
+    unknown.
+    """
+    if not isinstance(observed, dict) or observed.get("state") != "observed":
+        return "unknown"
+    if (observed.get("session") or {}).get("parent_id"):
+        return "unknown"
+    kinds = (("user", "synthetic", "assistant", "compaction", "shell", "idle")
+             if observed.get("generation") == "v2" else ("user", "assistant"))
+    messages = [row for row in observed.get("messages") or ()
+                if isinstance(row, dict) and row.get("type") in kinds
+                and (row["type"] != "shell" or row.get("status") == "running")]
+    if not messages:
+        return "unknown"
+    latest = messages[-1]
+    if latest["type"] == "idle":
+        return "idle"
+    if latest["type"] != "assistant" or latest.get("has_retry"):
+        return "working"
+    if any(isinstance(tool, dict) and tool.get("name") == "question"
+           for tool in latest.get("tools") or ()):
+        return "blocked"
+    finish = latest.get("finish")
+    if latest.get("has_error") or (isinstance(finish, str) and finish
+                                   and finish not in ("tool-calls", "unknown")):
+        return "idle"
+    return "working"
 
 
 def _cwd(pid):

@@ -1929,7 +1929,11 @@ def _read_v2_messages(connection, session_id, after_seq=None):
                          "tokens": data.get("tokens"),
                          "tools": tools,
                          "finish": data.get("finish"),
-                         "has_error": bool(data.get("error"))})
+                         "has_error": bool(data.get("error")),
+                         # compaction/shell rows: running until the native end
+                         # event; an assistant's retry stays while it backs off.
+                         "status": data.get("status"),
+                         "has_retry": bool(data.get("retry"))})
     return messages, max_seq
 
 
