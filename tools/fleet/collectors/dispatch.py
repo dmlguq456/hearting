@@ -93,6 +93,7 @@ _REGISTRY_METADATA_WHITESPACE_RE = re.compile(r"\s")
 _REGISTRY_METADATA_MISSING_EQUALS_RE = re.compile(r"(?:^|,)[^=,]*(?:,|$)")
 _REGISTRY_METADATA_INTERNAL_NAME_RE = re.compile(r"(?:^|,)_name=")
 _REGISTRY_METADATA_WHITESPACE_RUN_RE = re.compile(r"\s+")
+_ASCII_WHITESPACE = " \t\n\v\f\r\x1c\x1d\x1e\x1f"   # the ASCII characters ``\s`` matches
 _MODE = re.compile(r"(?:^|\s)--mode(?:=|\s+)([a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?)")
 _CAPABILITY_MODE = re.compile(r"(?:^|\s)--capability-mode(?:=|\s+)([a-z][a-z0-9-]*)")
 _WORKER_MODE = re.compile(r"(?:^|\s)--worker-mode(?:=|\s+)([a-z][a-z0-9-]*/[a-z][a-z0-9-]*)")
@@ -777,6 +778,12 @@ def _registry_metadata_analysis(raw):
     if ("(" in raw or eq_pos < 0
             or (colon_pos >= 0 and colon_pos < eq_pos)):
         return True, ()
+    if raw.isascii() and not any(ch in raw for ch in _ASCII_WHITESPACE):
+        # Pure computation of the string alone: with no whitespace anywhere there is
+        # nothing to clean up, so only "every comma piece has an '='" is left to
+        # decide (a piece without one needs the legacy parser). Non-ASCII text takes
+        # the full path below, whose ``\s`` also matches Unicode spaces.
+        return any("=" not in part for part in raw.split(",")), ()
     whitespace_keys = set()
     for part in raw.split(","):
         field_eq = part.find("=")
