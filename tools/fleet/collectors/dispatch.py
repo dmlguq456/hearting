@@ -2353,7 +2353,9 @@ def _tool_label(name, tool_input=None, command=None):
 
 # What a tool call acts on reaches the public model only as an allow-listed summary:
 # a file tool's path, or a shell command's executable and at most one first argument
-# that is a short subcommand word or a file in the worktree. No argument, option value,
+# that is either an action listed for that executable in ``_KNOWN_ACTIONS`` or a file in
+# the worktree. A word's shape never admits it (``mysql secretword`` shows ``mysql``).
+# No other argument, option value,
 # assignment, quoted text, heredoc, pipe tail or URL is carried, and nothing the worker
 # wrote in its own words is either (masking free text cannot be made complete).
 _FILE_TOOLS = frozenset({"read", "edit", "write", "multiedit", "notebookedit", "notebookread"})
@@ -2363,10 +2365,29 @@ _SHELL_PREFIXES = frozenset({"env", "command", "sudo", "nohup", "exec", "time"})
 # Commands that only set up the shell for the next one (``cd x && cmd``).
 _SHELL_SETUP = frozenset({"cd", "pushd", "popd", "set", "export", "unset", "source", ".",
                           "umask", "shopt", "trap", "true", ":"})
-# First arguments of these are free text, never a subcommand.
-_FREE_TEXT_COMMANDS = frozenset({"echo", "printf", "print", "say", "logger", "notify-send"})
 _EXECUTABLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}")
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]{0,19}")
+# The only first arguments carried as an action: an executable listed here and a word that
+# equals one of its actions exactly. Anything else shows only the executable name.
+_KNOWN_ACTIONS = {
+    "git": frozenset({"status", "diff", "add", "commit", "push", "pull", "fetch", "merge",
+                      "rebase", "checkout", "switch", "log", "worktree", "stash", "show",
+                      "branch", "restore", "reset", "tag", "clone", "init", "remote",
+                      "cherry-pick", "revert", "blame", "grep", "rev-parse", "ls-files"}),
+    "gh": frozenset({"pr", "run", "issue", "api", "repo", "release", "workflow"}),
+    "cargo": frozenset({"build", "test", "check", "run", "clippy", "fmt"}),
+    "npm": frozenset({"install", "ci", "run", "test", "exec"}),
+    "pnpm": frozenset({"install", "run", "test", "add", "exec"}),
+    "yarn": frozenset({"install", "run", "test", "add"}),
+    "pip": frozenset({"install", "uninstall", "list", "show", "freeze"}),
+    "pip3": frozenset({"install", "uninstall", "list", "show", "freeze"}),
+    "uv": frozenset({"install", "run", "sync", "pip", "add", "venv"}),
+    "docker": frozenset({"build", "run", "ps", "exec", "logs", "pull", "push", "compose",
+                         "images"}),
+    "kubectl": frozenset({"get", "apply", "describe", "logs", "delete"}),
+    "go": frozenset({"build", "test", "run", "vet"}),
+    "make": frozenset(),
+    "hearting": frozenset({"run"}),
+}
 _PATH_LIKE = re.compile(r"(?=[^-])[A-Za-z0-9._/+-]{1,240}")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_OPERATORS = ";&|<>()"
@@ -2385,7 +2406,7 @@ def _shell_words(line):
 def _shell_summary(command, depth=0):
     """``(executable, first_argument)`` of the command a shell call runs, else ``(None, None)``.
 
-    The argument is only a candidate (a subcommand word or a path-shaped word); the public
+    The argument is only a candidate (a listed action or a path-shaped word); the public
     boundary keeps a path only when it names a file in the worktree. Unclear input yields
     less: an unparsable line, a heredoc or anything past the first command stops the read.
     """
@@ -2440,10 +2461,14 @@ def _segment_summary(words, depth):
     if not _EXECUTABLE.fullmatch(exe):
         return None, None
     arg = words[1] if len(words) > 1 else None
-    if (arg is None or exe in _FREE_TEXT_COMMANDS or "://" in arg
-            or not (_SUBCOMMAND.fullmatch(arg) or _PATH_LIKE.fullmatch(arg))):
+    if arg is not None and not (_known_action(exe, arg)
+                                or ("://" not in arg and _PATH_LIKE.fullmatch(arg))):
         arg = None
     return exe, arg
+
+
+def _known_action(exe, arg):
+    return isinstance(arg, str) and arg in _KNOWN_ACTIONS.get(exe, ())
 
 
 def _tool_subject(name, tool_input=None, command=None):
@@ -2486,7 +2511,7 @@ def _public_tool(tool, cwd):
     exe = tool.get("exe")
     if isinstance(exe, str) and _EXECUTABLE.fullmatch(exe):
         arg = tool.get("arg")
-        if isinstance(arg, str) and not _SUBCOMMAND.fullmatch(arg):
+        if isinstance(arg, str) and not _known_action(exe, arg):
             relative = _in_worktree(arg, cwd)
             arg = (relative if relative and os.path.isfile(os.path.join(cwd, relative))
                    and _PATH_LIKE.fullmatch(relative) else None)
@@ -2567,7 +2592,14 @@ def _supervised_claude_transcript(job, receipt_path):
 
 
 def _parse_claude_stream_tail(path):
-    """Read one bounded exact-attempt tail for identity, context, and open tool."""
+    """Read one bounded exact-attempt tail for identity, context, and open tool.
+
+    The tool state is settled only from what was read without a gap (``tool_observed``):
+    a whole small file, or, past the unread middle, a call opened in the tail (its close
+    could only come later) and absence once the tail shows a turn end or a model row after
+    a tool result. Calls opened or closed in the head are not carried across the gap, and
+    an empty or gapped log with no such anchor settles neither a tool nor "no tool".
+    """
     try:
         st = os.stat(path)
     except OSError:
@@ -2578,7 +2610,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v2"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v3"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -2596,13 +2628,18 @@ def _parse_claude_stream_tail(path):
                 tail = stream.read(_CLAUDE_STREAM_TAIL_BYTES)
     except OSError:
         return None
+    gap = tail_start > len(head)
+    if not gap:
+        # Head and tail are contiguous: read them as one, so no row at the seam is lost.
+        head, tail = head + tail, b""
     head_lines = head.decode("utf-8", "replace").splitlines()
-    if head and not head.endswith(b"\n") and head_lines:
+    if gap and head_lines and not head.endswith(b"\n"):
         head_lines.pop()  # the last head item may be a partial JSON line
     tail_lines = tail.decode("utf-8", "replace").splitlines()
-    if tail_start > 0 and tail_lines:
+    if gap and tail_lines:
         tail_lines = tail_lines[1:]  # the first tail item may be a partial JSON line
     lines = head_lines + tail_lines
+    tail_from = len(head_lines) if gap else None
     session_ids = set()
     latest_usage = None
     latest_model = None
@@ -2612,13 +2649,20 @@ def _parse_claude_stream_tail(path):
     model_max_output = {}
     open_tools = {}
     last_tool = None
-    for line in lines:
+    rows = 0
+    settled = not gap      # past a gap, absence needs an anchor read in the tail
+    after_result = False
+    for index, line in enumerate(lines):
+        if index == tail_from:
+            open_tools.clear()   # a head call may have closed in the unread middle
+            last_tool = None
         try:
             payload = json.loads(line)
         except Exception:
             continue
         if not isinstance(payload, dict):
             continue
+        rows += 1
         sid = payload.get("session_id") or payload.get("sessionId")
         if isinstance(sid, str) and sid:
             session_ids.add(sid)
@@ -2629,6 +2673,9 @@ def _parse_claude_stream_tail(path):
                 latest_model = payload["model"]
             if isinstance(payload.get("claude_code_version"), str):
                 runtime_version = payload["claude_code_version"][:32]
+        if gap and index >= tail_from and (
+                row_type == "result" or (row_type == "assistant" and after_result)):
+            settled = True       # every call before this row had returned
         if row_type == "assistant" and isinstance(message, dict):
             usage = message.get("usage")
             if isinstance(usage, dict):
@@ -2653,6 +2700,7 @@ def _parse_claude_stream_tail(path):
                     if isinstance(item, dict) and item.get("type") == "tool_result":
                         done = open_tools.pop(item.get("tool_use_id"), None)
                         last_tool = done or last_tool
+                        after_result = after_result or (gap and index >= tail_from)
         elif row_type == "result":
             usage = payload.get("usage")
             if isinstance(usage, dict):
@@ -2692,6 +2740,7 @@ def _parse_claude_stream_tail(path):
         "exec_tool": (_tool_call(*next(reversed(open_tools.values())))
                       if open_tools else None),
         "last_tool": _tool_call(*last_tool) if last_tool else None,
+        "tool_observed": bool(rows) and settled,
     }
     _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
@@ -2845,7 +2894,8 @@ def _enrich_claude_stream_session(job, fast_first=False):
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
     job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
     job._context_evidence = None
-    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"))
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"),
+                  observed=parsed.get("tool_observed") is True)
     if job.ctx_pct is not None:
         try:
             st = os.stat(telemetry_path)
@@ -2929,7 +2979,7 @@ def _parse_codex_attempt_tail(path):
     if cached and cached[0] == cache_key:
         return cached[1]
     disk_key = parse_cache.key("codex-attempt", path, cache_key,
-                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-subject-v2"))
+                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-subject-v3"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
@@ -2939,6 +2989,10 @@ def _parse_codex_attempt_tail(path):
     head_bytes = _CLAUDE_SUPERVISOR_HEAD_BYTES
     tail_bytes = _CLAUDE_STREAM_TAIL_BYTES
     head_thread_ids = set()
+    # Past the unread middle a command opened there may still be open: "no command open"
+    # is settled only by the whole file or a turn boundary read in the tail.
+    settled = st.st_size <= head_bytes + tail_bytes
+    rows = 0
     if st.st_size <= head_bytes + tail_bytes:
         try:
             with open(path, "rb") as stream:
@@ -2975,11 +3029,13 @@ def _parse_codex_attempt_tail(path):
             continue
         if not isinstance(payload, dict):
             continue
+        rows += 1
         row_type = payload.get("type")
         if row_type == "dispatch.supervisor.turn.started":
             current_turn = payload.get("turn_id")
             activity = None
             open_commands.clear()
+            settled = True
         elif row_type in {
             "dispatch.supervisor.turn.completed", "dispatch.supervisor.parked",
             "dispatch.supervisor.resumed", "dispatch.supervisor.owner-boundary",
@@ -2989,6 +3045,7 @@ def _parse_codex_attempt_tail(path):
                 closed_turns.add(payload["turn_id"])
             activity = None
             open_commands.clear()
+            settled = True
         if row_type == "thread.started":
             thread_id = payload.get("thread_id")
             if isinstance(thread_id, str) and thread_id:
@@ -3029,7 +3086,8 @@ def _parse_codex_attempt_tail(path):
               "exec_tool": _codex_tool_call(*next(reversed(open_commands.values())))
               if open_commands else None,
               "last_tool": _codex_tool_call(*last_tool) if last_tool and len(thread_ids) <= 1
-              else None}
+              else None,
+              "tool_observed": bool(rows) and settled}
     _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CODEX_ATTEMPT_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
@@ -3200,7 +3258,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
             pass
     # An ambiguous or thread-less attempt log is no ground for "no tool open".
     _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"),
-                  observed=bool(thread_id))
+                  observed=bool(thread_id) and parsed.get("tool_observed") is True)
     if thread_id and not fast_first:
         job.shell_jobs = shell_jobs.observe_jobs(
             shell_jobs.read_codex_jobs(path, session_id=thread_id, attempt_id=job.attempt_id),
