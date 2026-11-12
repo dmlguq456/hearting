@@ -42,6 +42,21 @@ class RecipientReceiptTest(unittest.TestCase):
                                     claim_owner="test-carrier")
         self.record = pending.read(self.root, self.storage, self.delivery_id)
 
+    def test_a_prompt_carrying_a_bound_marker_is_that_delivery_for_this_recipient_only(self):
+        # PG-9: a Codex native-queue item arrives as a user message ending in its marker.
+        self._mark_sent_ambiguous()
+        marker = receipt.receipt_marker(self.record, self.storage)
+        prompt = "Hearting supervision needs attention. reason=join-deadline\n" + marker
+        self.assertEqual(receipt.bound_delivery_ids(prompt, self.storage, [self.root]),
+                         [self.delivery_id])
+        self.assertEqual(receipt.bound_delivery_ids(prompt, "another-session", [self.root]), [])
+        forged = prompt[:-4] + ("0000" if not prompt.endswith("0000") else "1111")
+        self.assertEqual(receipt.bound_delivery_ids(forged, self.storage, [self.root]), [])
+        self.assertEqual(receipt.bound_delivery_ids("please continue the work", self.storage,
+                                                    [self.root]), [])
+        self.assertEqual(receipt.bound_delivery_ids(prompt, self.storage,
+                                                    [Path(self.tmp.name) / "elsewhere"]), [])
+
     def test_binding_is_exact_to_immutable_identity(self):
         marker = receipt.receipt_marker(self.record, self.storage)
         self.assertEqual(marker, receipt.receipt_marker(self.record, self.storage))

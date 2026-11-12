@@ -151,6 +151,20 @@ class MakeTuiTest(unittest.TestCase):
             self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "patched")
             fake.SURFACE = "herdr"
             self.assertEqual(hb.Scenario().make_tui(run, Path("/r"), ["x"])[0], "herdr")
+            # A tmux-only factory left by a companion is not consumed on Herdr: the class
+            # comes back, so the next run's companion subclasses a class, not a function.
+            fake._TMUX_TUI = type("Tmux", (), {})
+            hb.Scenario().make_tui(run, Path("/r"), ["x"])
+            self.assertIs(fake.PrivateTui, fake._TMUX_TUI)
+
+    def test_herdr_settle_uses_the_tmux_class_even_when_the_name_is_a_factory(self):
+        """``--surface herdr`` retire died with ``'function' object has no attribute 'settle'``."""
+        tui = hb.PrivateHerdrTui.__new__(hb.PrivateHerdrTui)
+        screens = iter(["a", "b", "b", "b", "b", "b", "b", "b"])
+        tui.screen = lambda: next(screens, "b")
+        with unittest.mock.patch.object(hb, "PrivateTui", lambda *a, **k: None), \
+                unittest.mock.patch.object(hb.time, "sleep", lambda _s: None):
+            self.assertTrue(tui.settle(quiet=0, timeout=5))
 
 
 class TidyCompactFlowTest(unittest.TestCase):

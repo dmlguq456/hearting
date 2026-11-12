@@ -2455,22 +2455,30 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         if accepted != "accepted":
             return accepted
         req = read_reservation(seat_key) or req
-    remaining = float(req.get("deadline", 0)) - st.now_epoch()
-    if remaining <= 0:
-        return "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
-    if (req.get("seat") or {}).get("kind") == "native":
-        from session_tidy_native import wait_idle
-        state = wait_idle(req["seat"].get("native"), req["sid"], int(remaining * 1000))
-    else:
-        state = wait(pane, int(remaining * 1000))
-    if state not in ("idle", "done"):
-        reason = "timeout" if state.startswith(("timeout", "state-")) else state
-        return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-    req, reason = reobserve_request(path, nonce, sleep=sleep)
+    def turn_ended(booked):
+        """``(booking, "")`` once the window's current turn ended and the booking still holds,
+        else ``(None, result)``; one wait inside the booking's own deadline."""
+        remaining = float(booked.get("deadline", 0)) - st.now_epoch()
+        if remaining <= 0:
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
+        if (booked.get("seat") or {}).get("kind") == "native":
+            from session_tidy_native import wait_idle
+            state = wait_idle(booked["seat"].get("native"), booked["sid"], int(remaining * 1000))
+        else:
+            state = wait(pane, int(remaining * 1000))
+        if state not in ("idle", "done"):
+            why = "timeout" if state.startswith(("timeout", "state-")) else state
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        current, why = reobserve_request(path, nonce, sleep=sleep)
+        if current is None:
+            if why == "superseded":
+                return None, "superseded"
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        return current, ""
+
+    req, result = turn_ended(req)
     if req is None:
-        if reason == "superseded":
-            return "superseded"
-        return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
+        return result
     while True:
         verdict = steward(path, nonce, pane)
         outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
@@ -2481,6 +2489,15 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             if why == "superseded":
                 return "superseded"
             return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        if outcome == "queued" and reason.startswith("not-idle-") and req.get("origin") != "idle":
+            # Another turn began after the tidy turn ended: a notice or completion the runtime
+            # had queued (a Codex queue item starts right at the turn end). Nothing was typed and
+            # an automatic turn is not the person's input, so the booking waits for that turn's
+            # end; a prompt the person submits meanwhile still ends it at the next look.
+            req, result = turn_ended(req)
+            if req is None:
+                return result
+            continue
         break
     if req.get("origin") == "idle":
         return _await_idle_compaction(seat_key, nonce, sleep)

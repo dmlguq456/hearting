@@ -1262,6 +1262,61 @@ while True:
 
 
 @unittest.skipUnless(shutil.which("tmux") and shutil.which("bash"), "tmux or bash is not installed")
+class CodexNativeTurnTest(_IsolatedMixin, unittest.TestCase):
+    """PG-9: an ended rollout turn is still work while the App Server runs or queues one."""
+
+    SID = "01a1cfd2-25ba-7d01-abfb-69daf6961f22"
+
+    def setUp(self):
+        super().setUp()
+        home = self.root / "codex-home"
+        os.environ["CODEX_HOME"] = str(home)
+        folder = home / "sessions" / "2026" / "11" / "12"
+        folder.mkdir(parents=True)
+        self.rollout = folder / f"rollout-2026-11-12T00-00-00-{self.SID}.jsonl"
+        self.write("task_started", "task_complete")
+        control = home / "app-server-control"
+        control.mkdir()
+        import socket
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(self.listener.close)
+        self.listener.bind(str(control / "app-server-control.sock"))
+
+    def write(self, *kinds):
+        self.rollout.write_text("".join(json.dumps({
+            "timestamp": f"2026-11-12T00:00:0{index}.000Z", "type": "event_msg",
+            "payload": {"type": kind, "turn_id": f"turn-{index // 2}"}}) + "\n"
+            for index, kind in enumerate(kinds)))
+
+    def turn(self, status, queued=()):
+        import codex_queue_delivery
+        return mock.patch.multiple(codex_queue_delivery,
+                                   _latest_turn_status=mock.Mock(return_value=status),
+                                   list_queue=mock.Mock(return_value=list(queued)))
+
+    def test_a_queued_or_running_app_server_turn_is_not_idle(self):
+        with self.turn("completed"):
+            self.assertEqual(ts.native_turn("codex", 1, self.SID), "idle")
+        with self.turn("inProgress"):
+            self.assertEqual(ts.native_turn("codex", 1, self.SID), "working")
+        with self.turn("completed", [{"id": "queued-1"}]):
+            self.assertEqual(ts.native_turn("codex", 1, self.SID), "working")
+
+    def test_without_an_app_server_answer_the_rollout_decides(self):
+        import codex_queue_delivery
+        with mock.patch.object(codex_queue_delivery, "_latest_turn_status",
+                               side_effect=codex_queue_delivery.QueueDeliveryError("down")):
+            self.assertEqual(ts.native_turn("codex", 1, self.SID), "idle")
+        self.listener.close()
+        os.unlink(Path(os.environ["CODEX_HOME"]) / "app-server-control" / "app-server-control.sock")
+        with self.turn("inProgress"):
+            self.assertEqual(ts.native_turn("codex", 1, self.SID), "idle")
+        with self.rollout.open("a") as handle:   # the rollout reader follows appends only
+            handle.write(json.dumps({"timestamp": "2026-11-12T00:00:05.000Z", "type": "event_msg",
+                                     "payload": {"type": "task_started", "turn_id": "turn-2"}}) + "\n")
+        self.assertEqual(ts.native_turn("codex", 1, self.SID), "working")
+
+
 class TmuxAgentTerminalTest(_IsolatedMixin, unittest.TestCase):
     """The agent terminal operations on a private tmux server, against a fake runtime."""
 

@@ -80,6 +80,27 @@ def receipt_marker_for_identity(delivery_id: str, identity: dict) -> str:
     return f"HEARTING_RECEIPT_V1 {delivery_id} {identity_binding(identity)}"
 
 
+def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
+    """Delivery ids whose markers in ``text`` bind to a record stored for this recipient.
+
+    The same identity a receipt ACK proves (``settle_native_receipt``): a prompt that
+    carries it is that Hearting delivery arriving, not something the person typed.
+    """
+    found: list[str] = []
+    if not isinstance(text, str) or "HEARTING_RECEIPT_V1" not in text or not storage_recipient:
+        return found
+    for delivery_id, digest in sorted({match.groups() for match in MARKER_RE.finditer(text)}):
+        for root in roots:
+            try:
+                record = pending.read(Path(root), storage_recipient, delivery_id)
+                if record is not None and binding_digest(record, storage_recipient) == digest:
+                    found.append(delivery_id)
+                    break
+            except (OSError, ValueError, TypeError, pending.PendingDeliveryError):
+                continue
+    return found
+
+
 def _text_content(value: Any) -> str:
     if isinstance(value, str):
         return value

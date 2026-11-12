@@ -227,7 +227,48 @@ class TmuxPeerStewardTest(unittest.TestCase):
                 rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
                 self.assertNotEqual(rc, 0, line)
                 self.assertIn(reason, line)
+                # A running turn holds the booking for its end; the others are final here.
+                self.assertIn("cleared=queued" if status == "busy" else "cleared=skipped", line)
                 self.assertEqual(self.typed(), b"")
+
+    def test_a_turn_that_starts_after_the_idle_wait_holds_the_booking_until_it_ends(self):
+        # PG-9: a Codex queue item starts right at the tidy turn's end, before the look.
+        import session_tidy_clear as clear
+        path = self.book()
+        key = json.loads(path.read_text())["seat"]["key"]
+        for second_wait, outcome, status in (("idle", ("continued", "cleared"), "cleared"),
+                                             ("timeout", ("skipped",), "skipped")):
+            with self.subTest(second_wait=second_wait):
+                if second_wait == "timeout":
+                    path = self.book()
+                waits = iter(("idle", second_wait))
+                wait = mock.Mock(side_effect=lambda *_a: next(waits))
+                steward = mock.Mock(side_effect=[{"cleared": "queued", "reason": "not-idle-working"},
+                                                 {"cleared": "true"}])
+                result = clear.run_helper(key, "n0nce", wait=wait, steward=steward,
+                                          continuer=mock.Mock(return_value={"continued": "true"}),
+                                          sleep=lambda _s: None)
+                held = clear.read_reservation(key)
+                self.assertIn(result, outcome)
+                self.assertEqual(held["status"], status)
+                self.assertEqual(wait.call_count, 2)
+                self.assertEqual(steward.call_count, 2 if second_wait == "idle" else 1)
+                if second_wait == "timeout":
+                    self.assertEqual(held["reason"], "timeout")
+
+    def test_the_continue_reads_a_shell_seats_codex_thread_like_the_clear_looks(self):
+        foreground = {"pid": 4242, "start": "77", "group": 4242, "argv": ["codex"],
+                      "attachment": {"harness": "codex", "sid": OLD, "native_pid": 4242}}
+        with mock.patch.object(peer_steward, "_retire_foreground", return_value=foreground), \
+                mock.patch.object(peer_steward, "_process_session", return_value=OLD) as reader, \
+                mock.patch.object(peer_steward, "_retire_process_record",
+                                  return_value={"start": "77"}), \
+                mock.patch("pane_ownership.current_codex_thread", return_value="") as bare:
+            found = peer_steward._continue_native_session(
+                self.address, "codex", process_info={"pane_id": self.address})
+        self.assertEqual(found, OLD)
+        reader.assert_called_once_with(self.address, "codex")
+        bare.assert_not_called()
 
     def test_a_pane_that_is_not_the_booked_session_is_not_cleared(self):
         self.start_claude()

@@ -97,6 +97,42 @@ class PromptDisplayTests(unittest.TestCase):
                 self.assertEqual([row["source"] for row in result["received"]],
                                  ["notification", "peer", "runtime"])
 
+    def test_a_hearting_delivery_bound_to_this_session_is_not_the_persons_prompt(self):
+        # PG-9: a Codex native-queue notice arrives as a user message carrying its marker; it
+        # is the delivery, so a manual tidy booked before it still holds (no "new-input").
+        import dispatch_contract
+        import dispatch_pending_delivery as pending
+        import dispatch_recipient_receipt as receipt
+        root = self.iso.root / "dispatch"
+        for harness in st.HARNESSES:
+            with self.subTest(harness=harness):
+                sid = "queued-" + harness
+                body = {"kind": "supervision", "reason": "join-deadline"}
+                record = pending.create(
+                    root, recipient_kind="codex-native-queue", recipient_key=sid,
+                    delivery_id="delivery-" + harness[0] * 32, session_generation="",
+                    session_generation_supported="0", attempt_ids=["att-" + "c" * 28],
+                    parent_attempt_id="att-" + "c" * 28, route_id="route-test",
+                    route_node="one-shot", receipt=body,
+                    receipt_digest=pending._canonical_receipt_digest(body),
+                    row_revisions={"att-" + "c" * 28: "rev-1"})
+                text = ("Hearting supervision needs attention. reason=join-deadline\n"
+                        + receipt.receipt_marker(record, sid))
+                original = self.prompt("내가 쓴 요청", harness, sid, now=1000)
+                seat = self.seat(harness, sid)
+                human = st.last_human_prompt_seq(seat)
+                with mock.patch.object(dispatch_contract, "dispatch_state_roots",
+                                       return_value=(root,)):
+                    shown = self.prompt(text, harness, sid, now=1010)
+                    other = self.seat(harness, sid + "-other")
+                    self.prompt(text, harness, sid + "-other", now=1020)
+                self.assertEqual(st.read_prompt_seq(seat), human + 1)
+                self.assertEqual(st.last_human_prompt_seq(seat), human)
+                self.assertEqual(shown["human"], original["human"])
+                self.assertEqual(shown["received"][-1]["source"], "runtime")
+                # The same text addressed to another session is that session's own prompt.
+                self.assertEqual(st.last_human_prompt_seq(other), st.read_prompt_seq(other))
+
     RUNTIME_NOTICES = (
         ("claude", "<task-notification>\n실제 알림 본문\n</task-notification>", "실제 알림 본문"),
         ("claude", '<task-notification>\n<task-id>background-1</task-id>\n'

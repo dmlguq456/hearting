@@ -8222,7 +8222,11 @@ def _continue_native_session(pane, harness, *, process_info):
     foreground = _retire_foreground(pane, harness, strict=False, info=process_info)
     if not foreground:
         return None
-    if harness == "codex":
+    if harness == "codex" and foreground.get("attachment"):
+        # A shell seat: its Codex TUI is the shell's child, not the pane's foreground, so
+        # the attachment's thread is read by the same current-root reader the clear's looks use.
+        session_id = _process_session(pane, harness)
+    elif harness == "codex":
         try:
             from pane_ownership import current_codex_thread
             session_id = current_codex_thread(
@@ -8330,7 +8334,9 @@ def cmd_clear(args):
 
     `cleared=true` only with the same session's compaction boundary in its native history
     (`compact_confirmed`); otherwise `unverified compact-pending` and the helper waits for it.
-    Exit 0 true / 3 skipped / 1 failed / 5 unverified. One ledger row (`kind=notice`,
+    A working session is `queued` (`not-idle-*`): nothing was typed and the booking holds, so
+    the helper waits for that turn to end. Exit 0 true / 3 skipped or queued / 1 failed /
+    5 unverified. One ledger row (`kind=notice`,
     `action=clear` in the receipt) per judgement.
     """
     import session_tidy_clear as clear
@@ -8515,6 +8521,8 @@ _SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answe
 
 
 def _look_outcome(reason):
+    if reason.startswith("not-idle-"):
+        return "queued"    # a working session took no input and keeps its booking
     return "failed" if reason.startswith(("herdr-", "agent-not-found")) else "skipped"
 
 
