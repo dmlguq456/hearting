@@ -308,7 +308,7 @@ class ScriptTest(unittest.TestCase):
         run.__class__.__module__ = "harness_behavior_scenarios"
         answer = scenario.script(run)
         first = answer(self.record("SCENARIO-RR 1 compose"), [])
-        self.assertIn("compose --shape solo --campaign-key other1", first.shell)
+        self.assertIn("compose --shape solo --owner claude --campaign-key other1", first.shell)
         self.assertIn("FX-COMPOSE-1-RC", first.shell)
         self.assertNotIn("--start", first.shell)
         composed = answer(self.record('FX-COMPOSE-1-RC=0 "route_id": "rt-abc12345"', "tool"), [])

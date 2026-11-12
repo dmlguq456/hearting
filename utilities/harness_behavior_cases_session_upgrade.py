@@ -244,6 +244,23 @@ def release_copy(source: Path, dest: Path, *, label: str = "B", fail: bool = Fal
     return dest
 
 
+def owner_hosts(host_pid: int) -> list[int]:
+    """The session-shell host processes the PTY owner of `host_pid` runs now (its children)."""
+    try:
+        owner = int(Path(f"/proc/{host_pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        tasks = list(Path(f"/proc/{owner}/task").iterdir())
+    except (OSError, ValueError, IndexError):
+        return []
+    found = []
+    for task in tasks:
+        with contextlib.suppress(OSError, ValueError):
+            for pid in (task / "children").read_text().split():
+                with contextlib.suppress(OSError):
+                    if b"session-shell/host.cjs" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                        found.append(int(pid))
+    return sorted(set(found))
+
+
 def host_processes(env: dict) -> list[int]:
     """Live session-shell host processes of this fixture (by its own state root)."""
     mine = ("XDG_STATE_HOME=" + env["XDG_STATE_HOME"]).encode()
@@ -945,9 +962,15 @@ class FailOldScenario(SessionUpgradeScenario):
         def sample():
             while not sampling.is_set():
                 at = time.monotonic()
-                for pid in host_processes(run.home.env):
+                for pid in owner_hosts(old):
                     seen.setdefault(pid, [at, at])[1] = at
-                sampling.wait(0.05)
+                sampling.wait(0.02)
+
+        def settled():
+            end = time.monotonic() + SWITCH_WAIT
+            while time.monotonic() < end and not (set(seen) - {old} and owner_hosts(old) == [old]):
+                time.sleep(0.1)     # until a successor came and went
+            return bool(set(seen) - {old})
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
         try:
@@ -955,10 +978,15 @@ class FailOldScenario(SessionUpgradeScenario):
             if ev["install_b"]["exit"] != 0:
                 run.note("release B activation failed")
                 return "inconclusive"
-            end = time.monotonic() + SWITCH_WAIT
-            while time.monotonic() < end and not (set(seen) - {old}
-                                                  and host_processes(run.home.env) == [old]):
-                time.sleep(0.1)     # until a successor came and went
+            if not settled() and bindings(run.home.env, run.harness):
+                # No attempt got as far as the freeze (one found the moment unsafe, or none came):
+                # the next idle transition asks again, as after any turn.
+                ev["nudged"] = True
+                count = len(run.main_requests())
+                run.prompt("SCENARIO-UPGRADE follow-up")
+                run.wait_requests(count + 1, 60)
+                run.wait_idle(6, 90)
+                settled()
             time.sleep(4)           # past the 2 s the owner gives a retired host
         finally:
             sampling.set()
@@ -1056,8 +1084,10 @@ class RouteResumeScenario(Scenario):
             cr = shlex.quote(str(Path(_base(run).SOURCE) / "utilities/capability-route.py")) \
                 if run is not None else "capability-route.py"
             repo = shlex.quote(str(self.repos[k - 1]))
-            return (f"python3 {cr} compose --shape solo --campaign-key other{k} --slug resume{k} "
-                    f"--cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
+            # The owner is pinned so every harness composes the same solo route: no owner is ever
+            # launched here, and the fixture probes only Claude's headless worker as ready.
+            return (f"python3 {cr} compose --shape solo --owner claude --campaign-key other{k} "
+                    f"--slug resume{k} --cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
 
         def answer(record, earlier):
             text, kind = record["last_text"], record["last_kind"]
