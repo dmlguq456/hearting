@@ -129,9 +129,11 @@ Each clause is one contract line plus the signal that it was violated.
   confirmation above is a separate pre-execution contract. *Violation signal:*
   a pause flag added because the task merely feels important.
 - **Decision requests** — when an option is recommended, within the approved
-  scope, and reversible (or the person has said to use the recommendation), do
-  not ask: proceed and report `고른 안: <안> — <이유 한 줄>`. A clear follow-up
-  such as fixing a defect or running the next approved step is not a decision.
+  scope, and reversible (or the person has said to use the recommendation —
+  never for destructive, irreversible, or external-facing work, which is asked
+  even then), do not ask: proceed and report `고른 안: <안> — <이유 한 줄>`.
+  A clear follow-up such as fixing a defect or running the next approved step
+  is not a decision.
   Ask only about what only the person can decide: goals, scope beyond approval,
   product choices without a justified recommendation, destructive or irreversible
   work, external effects, another project, actual external spending or credentials,

@@ -307,10 +307,18 @@ class RenderTest(unittest.TestCase):
         text = "".join(text for text, _key in segments)
         self.assertEqual(text, "◑ to answer 2 │ 3 to decide")
         self.assertIn(("3 to decide", "lvl_y"), segments)
-        self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("◑ to answer 2", "blocked")])
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DOC, 120, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)), "route 2")
         self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True),
                          [("◑ to answer 2", "blocked")])
+        # A narrow screen keeps what waits on the person; the route count gives way, not them.
+        busy = dict(self.DOC, routes=3, routes_running=1)
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 120)),
+                         "route 3 ⠏1 │ ◑ to answer 2 │ 3 to decide")
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 30, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
+        self.assertEqual(tables.repo_status_segments(self.DERIVED, 120, narrow=True), [])
         stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
         self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)), "3 to decide")
         tight = tables.repo_status_segments(self.DOC, 18)

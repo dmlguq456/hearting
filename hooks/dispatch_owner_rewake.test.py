@@ -767,7 +767,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
                 launch, "attention", "terminal-failure-or-unclosed", self.root)
         flat = " ".join(message.split())
         self.assertIn("ask only what only the person can decide", flat)
-        self.assertIn("(such as fixing and re-testing) as proceeding", flat)
+        self.assertIn("state a recommended in-scope, reversible next step (such as fixing and re-testing) "
+                      "as proceeding", flat)
         self.assertIn("point to the detailed record", flat)
         self.assertIn("do not reproduce it for the person", flat)
         self.assertNotIn("at most one decision", flat)

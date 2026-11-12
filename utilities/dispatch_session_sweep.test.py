@@ -121,6 +121,23 @@ _FROZEN_SHORT_RUNTIME_V1_SUMMARY_FOLLOWUP = (
     "context and record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
     "Receipt/ACK isn't execution; handled exact repeats need no ACK."
 )
+_FROZEN_DECISION_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences, preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+    "decide, state a recommended in-scope next step (such as fixing and re-testing) as proceeding, "
+    "and point to the detailed record.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_DECISION_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences; preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+    "decide and state a recommended in-scope next step (such as fixing and re-testing) as proceeding; "
+    "and point to the detailed record. Keep the runtime summary below as agent context and record; "
+    "do not reproduce it for the person.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
 _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -3353,7 +3370,12 @@ console.log(JSON.stringify({prompts, logs}));
                                     else _FROZEN_SHORT_RUNTIME_V1_FOLLOWUP)
                     short = current.replace(followup, short_frozen + ("\n" + sealed if sealed else ""), 1)
                     self.assertNotEqual(short, current)
-                    accepted_bodies = [current, previous, short] + ([] if sealed else [older])
+                    decision_frozen = (_FROZEN_DECISION_RUNTIME_V1_SUMMARY_FOLLOWUP if sealed
+                                       else _FROZEN_DECISION_RUNTIME_V1_FOLLOWUP)
+                    decision = current.replace(followup, decision_frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(decision, current)
+                    self.assertIn("in-scope, reversible next step", followup)
+                    accepted_bodies = [current, previous, short, decision] + ([] if sealed else [older])
                     for body in accepted_bodies:
                         messages = [{"info": {"sessionID": self.SID, "role": "user"},
                                      "parts": [{"type": "text", "text": body}]}]
@@ -3364,6 +3386,7 @@ console.log(JSON.stringify({prompts, logs}));
                                                     _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
                     for altered in (previous + " ", previous.replace("First close:", "First close :", 1),
                                     short + " ", short.replace(short_frozen, short_frozen[:-1], 1),
+                                    decision + " ", decision.replace(decision_frozen, decision_frozen[:-1], 1),
                                     previous.replace(frozen, frozen[:-1], 1), never_shipped):
                         messages = [{"info": {"sessionID": self.SID, "role": "user"},
                                      "parts": [{"type": "text", "text": altered}]}]

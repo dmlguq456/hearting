@@ -46,18 +46,19 @@ def repo_rule_label(value, limit=None):
 
 
 def repo_status_segments(status, room, narrow=False):
-    """Count-only pieces on OVERVIEW; project prose and recent results stay on its page."""
+    """Count-only pieces on OVERVIEW; project prose and recent results stay on its page.
+
+    A narrow screen keeps only the counts waiting on the person (answers, then decisions);
+    the route count gives way first."""
     room = int(room)
-    pieces = []
-    if int(status.get("routes") or 0):
-        pieces.append(route_count_segment(status))
+    person = []
     if int(status.get("questions") or 0):
-        pieces.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
+        person.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
     decisions = int(status.get("decisions") or 0)
     if status.get("line") is not None and decisions:
-        pieces.append((f"{decisions} to decide", "lvl_y"))
-    if narrow:
-        pieces = pieces[:1]
+        person.append((f"{decisions} to decide", "lvl_y"))
+    routes = [route_count_segment(status)] if int(status.get("routes") or 0) and not narrow else []
+    pieces = routes + person
     out = []
     for text, key in pieces:
         addition = ([(BUNDLE_SEP, "dim")] if out else []) + [(text, key)]

@@ -110,6 +110,10 @@
    "en": "Review completed with findings; the inspected subject has not passed",
    "ko": "검토 완료 · 지적 사항 있음(검토 대상의 통과가 아님)"
   },
+  "completion.result_check": {
+   "en": "check the report's remaining items (below)",
+   "ko": "보고서의 남은 것 확인(아래)"
+  },
   "completion.result_decision": {
    "en": "One decision remains",
    "ko": "결정할 일 남음"
@@ -117,6 +121,10 @@
   "completion.result_done": {
    "en": "Done",
    "ko": "완료"
+  },
+  "completion.result_follow_up": {
+   "en": "follow-ups listed (below)",
+   "ko": "후속 있음(아래)"
   },
   "completion.result_leg": {
    "en": "This leg ({index}/{legs}) is done — a later leg remains",
