@@ -61,7 +61,9 @@ Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
 action worker. Keys that reached native since the last submitted turn leave the
 composer unproven (an erased draft, a form answered with Enter, history-scroll
 keys, a turn stopped without a stop callback), so the switch then follows the
-next submitted turn. The owner starts the successor from the same installed path. The old host stops
+next submitted turn. A window with no selected session (OpenCode on its home route) has
+no such proof and waits for one; OpenCode's plugin reload (deselect, then select of the
+same session, no keys between) keeps that frontier. The owner starts the successor from the same installed path. The old host stops
 reading, withdraws its binding and writes a private seed: the native screen
 with every line above the viewport, cursor, modes, scroll region and display
 state. The successor restores it, takes the same `control.sock` path by an

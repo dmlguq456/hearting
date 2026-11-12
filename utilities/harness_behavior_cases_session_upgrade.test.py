@@ -99,6 +99,12 @@ class DigestTest(unittest.TestCase):
         changed = held.replace("❯", "X")
         self.assertNotEqual(one["sha"], su.screen_digest(changed, blank=su.WAIT_NOTE, native=True)["sha"])
 
+    def test_a_spinner_frame_or_progress_block_alone_does_not_change_the_digest(self):
+        one = "⠧ fixture title +\n⬝⬝■⬝⬝⬝ esc interrupt\nbody"
+        two = "⠦ fixture title +\n■⬝⬝⬝⬝⬝ esc interrupt\nbody"
+        self.assertEqual(su.screen_digest(one)["sha"], su.screen_digest(two)["sha"])
+        self.assertNotEqual(su.screen_digest(one)["sha"], su.screen_digest(two.replace("title", "other"))["sha"])
+
     def test_tool_timers_are_time_only_rows(self):
         base = "Scenario step\nprompt"
         timed = "Scenario step\n⎿ $ python3 x (1m 26s)\n(ctrl+b to run in background)\nprompt"
@@ -219,6 +225,37 @@ class TableTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), su.render_table(self.ROWS))
 
 
+class HeldScreenTest(unittest.TestCase):
+    def test_a_running_turn_drops_spinner_verb_tip_and_blank_rows_only_when_asked(self):
+        before = "native top\n✶ Computing…\n⎿  Tip: try this\n\n──────\n❯"
+        after = "native top\n⎿  Tip: try this\n\n──────\n❯"
+        self.assertEqual(su.screen_digest(before, running=True)["sha"], su.screen_digest(after, running=True)["sha"])
+        self.assertNotEqual(su.screen_digest(before)["sha"], su.screen_digest(after)["sha"])
+        self.assertNotEqual(su.screen_digest(before, running=True)["sha"],
+                            su.screen_digest(after.replace("native top", "changed"), running=True)["sha"])
+
+    def test_the_route_heading_is_found_with_its_one_based_column_past_wide_characters(self):
+        screen = "한글  x\n  abc \x1b[2m╭─ route 1 ─╮\x1b[0m\n"
+        self.assertEqual(su.PageScenario.heading(screen), (1, 6 + 3))
+        wide = "한글 ╭─ route 1"
+        self.assertEqual(su.PageScenario.heading(wide), (0, 5 + 3))
+        self.assertIsNone(su.PageScenario.heading("no heading here"))
+
+
+class RouteRowTest(unittest.TestCase):
+    def test_the_fixture_route_row_is_keyed_for_the_session_and_keeps_the_rest_of_the_cache(self):
+        old = {"schema_version": 3, "items": [], "route_panels": {"claude\0other": [{"id": "x"}]}}
+        value = su.route_cache_value(old, "opencode", "ses_1", 5.0)
+        row = value["route_panels"]["opencode\0ses_1"][0]
+        self.assertEqual((row["title"], row["id"][:3]), (su.ROUTE_TITLE, "rt-"))
+        self.assertRegex(row["id"], r"^rt-[0-9a-f]{16}$")
+        self.assertIn("claude\0other", value["route_panels"])
+        self.assertEqual(value["observed_at"], 5.0)
+        self.assertEqual(old["route_panels"], {"claude\0other": [{"id": "x"}]})   # the input is not edited
+        fresh = su.route_cache_value(None, "codex", "s", 1.0)
+        self.assertEqual(fresh["schema_version"], 3)
+
+
 class ScriptTest(unittest.TestCase):
     def record(self, text, kind="user", index=0):
         return {"last_text": text, "last_kind": kind, "main_index": index, "text": text}
@@ -229,10 +266,15 @@ class ScriptTest(unittest.TestCase):
         scroll = answer(self.record("SCENARIO-UPGRADE-SCROLL fill"), [])
         self.assertGreaterEqual(len(scroll.text.splitlines()), 150)
         self.assertIn("native-question", str(answer(self.record("SCENARIO-UPGRADE-ASK x"), []).shell))
+        scenario = su.SessionUpgradeScenario()
+        answer = scenario.script(None)
         long_turn = answer(self.record("SCENARIO-UPGRADE-LONG run"), [])
-        # Claude Code refuses a foreground `sleep N`; the long step must not start with one.
-        self.assertIn("long-shell: python3 -c", str(long_turn.shell))
-        self.assertNotIn("long-shell: sleep", str(long_turn.shell))
+        # The long turn is the model's own slow reply: no tool step a harness could background.
+        self.assertIsNone(long_turn.shell)
+        self.assertFalse(scenario.gate.is_set())
+        self.assertIs(long_turn.gate, scenario.gate)
+        scenario.cleanup(None)
+        self.assertTrue(scenario.gate.is_set())
         self.assertEqual(answer(self.record(su.KEY_TEXT), []).text, "key noted")
 
     def test_route_resume_script_composes_then_commits_and_finishes_only_the_closed_one(self):

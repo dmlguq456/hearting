@@ -80,7 +80,10 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
-let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
+// `unselected`: the input frontier of the session the native just deselected. OpenCode reloads its
+// plugins when an install rewrites its config, which reports deselect then select of the same session;
+// that is no new input, so the frontier and an open read page survive it (keys typed in between end it).
+let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
 let last = [], nativeLast = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
@@ -842,8 +845,12 @@ async function lifecycle(req) {
     }
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;
-    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
+    projectionKey='';footer='';footerSegments=[];
+    const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
+    submitted=again?unselected.submitted:-1;
+    // The same session selected again with no key between keeps its open read page as well.
+    routeDetail=again?unselected.routeDetail:false;routePage=again?unselected.routePage:0;unselected=null;
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
@@ -854,6 +861,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
+    unselected={sid:req.sid,submitted,nativeEpoch,routeDetail,routePage};
     selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
@@ -1031,7 +1039,7 @@ function successionSafe(skipEmpty=false) {
   const quiet=!relay&&activated&&!ended&&running&&!succeeding&&state==='idle'&&!paste&&!keyTail&&!block.focused&&!settings&&!fleetView
     &&!currentDelivery&&!releasing&&heldBytes===0&&!routeDetail&&!actionWorker&&!panelModel.answerable&&!dragging&&!settingsPaste
     &&displayVTs.size===0&&!rebuilding&&!checkingNativeSelection&&!modelReading&&!mouseInput.pending()&&terminal.modes.bracketedPasteMode;
-  return quiet&&(skipEmpty||empty||harness==='opencode'&&!sid);
+  return quiet&&(skipEmpty||empty);
 }
 function checkRelease() {
   if(!upgrade||upgrade.requested||upgrade.blocked||Date.now()<(upgrade.retryAfter||0)||succeeding||checkingRelease||!successionChannel||!successionSafe(true))return;

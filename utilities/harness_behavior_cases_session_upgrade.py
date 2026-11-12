@@ -41,12 +41,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import (ANSI_RE, Reply, Scenario,  # noqa: E402
                                         enable_session_shell, wait_for)
-from harness_behavior_cases_b import (OPTION_A, fixture_python, long_shell,  # noqa: E402
+from harness_behavior_cases_b import (OPTION_A, fixture_python,  # noqa: E402
                                       native_question, send_peer, session_id)
 from harness_behavior_cases_d import NOTICE_CODE  # noqa: E402
 
@@ -60,8 +62,6 @@ FAIL_LINE = ("if(process.env.%s==='1'&&Number(process.env.HEARTING_SHELL_GENERAT
 NOT_PRODUCED = "not-produced"
 # What a successor that throws at load writes with node's own error printer.
 LOAD_ERROR_MARKS = ("Module._load", "Node.js v", "successor refuses")
-# Claude Code refuses a foreground `sleep N` command, so the long step is a python sleep.
-LONG_COMMAND = ("python3 -c \"import time; time.sleep(90); print('SCENARIO-UPGRADE-LONG-DONE')\"")
 
 # Lines that change with time, not with the session: spinners, clocks, elapsed counters.
 VOLATILE = (
@@ -72,13 +72,17 @@ VOLATILE = (
     re.compile(r"\b\d+m \d+s\b|\(\d+s\)|·\s*\d+s\s*$"),
     re.compile(r"ctrl\+b to run in background"),
 )
+# Animation glyphs: a braille spinner frame, and the moving block of OpenCode's progress bar
+# (``■⬝⬝``). Each frame is the same cell to the comparison; the row's text still compares.
+ANIMATION = (re.compile(r"[⠀-⣿]"), re.compile(r"[■⬝]"))
+ANIMATION_CELL = ("⠿", "⬝")
 # The one-line note the host paints while a new release waits for a safe moment, and the
 # one it paints after a switch without scrollback.  A held state is expected to show it, so
 # the "nothing else changed" comparison drops it (and counts that it was there).
 WAIT_NOTE = (re.compile(r"New release waiting|새 판 대기|새 판 기다"),)
 VOLATILE_RULE = ("drop rows with a spinner glyph plus an elapsed/interrupt hint, a clock "
                  "(h:mm[:ss]), '(12s' or '(1m 5s)' elapsed, '12s ·', or a background-run hint; trailing "
-                 "blanks and ANSI are removed")
+                 "blanks and ANSI are removed; a held turn also drops Claude's spinner-verb and tip rows and blank rows; braille spinner frames and ■/⬝ progress cells count as one cell each")
 
 
 # --------------------------------------------------------------------------
@@ -103,6 +107,8 @@ def screen_rows(text: str, blank=(), native=False) -> list[str]:
     rows = []
     for line in (text or "").splitlines():
         row = ANSI_RE.sub("", line)
+        for rule, cell in zip(ANIMATION, ANIMATION_CELL):
+            row = rule.sub(cell, row)
         if native:
             row = native_part(row)
         if blank:
@@ -117,7 +123,16 @@ def kept_rows(rows: list[str], volatile=VOLATILE) -> list[str]:
     return [row for row in rows if not any(rule.search(row) for rule in volatile)]
 
 
-def screen_digest(text: str, volatile=VOLATILE, blank=(), native=False) -> dict:
+# A running turn paints rows that come and go with time alone: Claude's spinner verb row and its
+# tip row (which also shifts the rows below by one). Held-state comparisons drop them and the
+# blank rows, so only what the turn did not paint has to be the same.
+RUNNING_ROWS = (
+    re.compile(r"^\s*[✶✻✳✢✽·*●]\s+\S+…"),
+    re.compile(r"\bTip:"),
+)
+
+
+def screen_digest(text: str, volatile=VOLATILE, blank=(), native=False, running=False) -> dict:
     """A digest of the screen text without the rows that change with time alone.
 
     ``blank`` patterns (the "new release waiting" note) are cut out of their row instead of
@@ -127,6 +142,8 @@ def screen_digest(text: str, volatile=VOLATILE, blank=(), native=False) -> dict:
     while rows and not rows[-1]:
         rows.pop()
     kept = kept_rows(rows, volatile)
+    if running:
+        kept = [row for row in kept_rows(kept, RUNNING_ROWS) if row.strip()]
     body = "\n".join(kept)
     return {"sha": hashlib.sha256(body.encode("utf-8")).hexdigest()[:16], "rows": len(kept),
             "dropped": len(rows) - len(kept)}
@@ -371,7 +388,13 @@ def host_status(run) -> dict:
             else:
                 os.environ[key] = value
     keep = ("ok", "reason", "state", "empty", "alive", "focused", "held_bytes", "projection_state")
-    return {key: answer.get(key) for key in keep if key in answer}
+    # The session the host has bound (`-` is the seat published with no selected session).
+    return {"bound_sid": found[0].get("sid"), **{key: answer.get(key) for key in keep if key in answer}}
+
+
+def probe(run, label: str) -> None:
+    """Record what the host knows at a measurement point (diagnosis only, never a verdict input)."""
+    run.evidence.setdefault("upgrade", {}).setdefault("host_probes", {})[label] = host_status(run)
 
 
 def wait_host_change(run, old_host: int, timeout: float = SWITCH_WAIT):
@@ -422,6 +445,7 @@ class SessionUpgradeScenario(Scenario):
     # -- model script ------------------------------------------------------
     def script(self, run):
         rows = int(os.environ.get("HEARTING_UPGRADE_ROWS", "50"))
+        self.gate = threading.Event()
 
         def answer(record, earlier):
             text, kind = record["last_text"], record["last_kind"]
@@ -430,13 +454,18 @@ class SessionUpgradeScenario(Scenario):
             if KEY_TEXT in text:
                 return Reply("key noted")
             if "SCENARIO-UPGRADE-LONG" in text:
-                return Reply(shell=long_shell(LONG_COMMAND, 110000))
+                # The turn is held by the model's own slow reply (the gate), not by a tool step the
+                # harness may move to the background and so end the turn (Codex does).
+                return Reply("long turn answered", gate=self.gate)
             if "SCENARIO-UPGRADE-SCROLL" in text:
                 return Reply("\n".join(f"scroll row {i:03d} SCENARIO-UPGRADE" for i in range(rows * 3)))
             if "SCENARIO-UPGRADE-ASK" in text:
                 return Reply(text="I need one choice.", shell=native_question())
             return Reply(f"upgrade idle {record['main_index']}")
         return answer
+
+    def cleanup(self, run):
+        self.gate.set()     # no reply waits on the gate once the run is over
 
     # -- terminal ----------------------------------------------------------
     def prepare(self, run):
@@ -491,16 +520,18 @@ class SessionUpgradeScenario(Scenario):
         if not sid:
             run.note("session id not found")
             return "inconclusive"
+        probe(run, "after-first-turn")
         try:
             held_note = self.hold_state(run) if self.hold else "-"
         except NotProduced as reason:
             ev.update(deferred=f"{NOT_PRODUCED}: {reason}")
             run.note(f"{NOT_PRODUCED}: {reason}")
             return NOT_PRODUCED
+        probe(run, "after-hold")
         quick = (1, 3) if self.hold else (3, 20)
         before = snapshot(run, *quick)
         before_text = run.tui.screen()
-        before_quiet = screen_digest(before_text, blank=WAIT_NOTE, native=True)
+        before_quiet = screen_digest(before_text, blank=WAIT_NOTE, native=True, running=self.hold)
         ev.update(native_before=before["native_pid"], host_before=before["host_pid"])
         if not before["host_pid"] or not before["native_pid"]:
             run.note("no live session-shell binding before the install")
@@ -514,9 +545,10 @@ class SessionUpgradeScenario(Scenario):
         verdict = "pass"
         if self.hold:
             time.sleep(DEFER_WAIT)
+            probe(run, "held")
             held = snapshot(run, *quick)
             shown = run.tui.screen()
-            quiet = screen_digest(shown, blank=WAIT_NOTE, native=True)
+            quiet = screen_digest(shown, blank=WAIT_NOTE, native=True, running=True)
             ev["waiting_note"] = "yes" if any(rule.search(row) for rule in WAIT_NOTE
                                               for row in screen_rows(shown)) else "no"
             same = (held["host_pid"] == before["host_pid"]
@@ -541,6 +573,7 @@ class SessionUpgradeScenario(Scenario):
         if not moved:
             ev["host_status_after_wait"] = host_status(run)
             ev["screen_tail_after_wait"] = "\n".join(run.tui.screen().rstrip().splitlines()[-6:])
+            ev["screen_after_wait"] = "\n".join(screen_rows(run.tui.screen(), native=True))
             if self.hold:
                 # Information only: does one more submitted prompt let the held switch happen?
                 count = len(run.main_requests())
@@ -562,7 +595,7 @@ class SessionUpgradeScenario(Scenario):
             # What the person sees of the native is the same apart from the one waiting line the
             # old host paints (the host's own panel keeps counting time and is left out).
             final_text = run.tui.screen()
-            ev["screen_same"] = (screen_digest(final_text, blank=WAIT_NOTE, native=True)["sha"]
+            ev["screen_same"] = (screen_digest(final_text, blank=WAIT_NOTE, native=True, running=self.hold)["sha"]
                                  == before_quiet["sha"])
             ev["cursor_same"] = after["cursor"] == before["cursor"]
             ev["stderr_on_screen"] = any(mark in final_text for mark in LOAD_ERROR_MARKS)
@@ -636,7 +669,8 @@ class DraftScenario(SessionUpgradeScenario):
 
 class TurnScenario(SessionUpgradeScenario):
     name = "session-upgrade-turn"
-    summary = "A turn is running: the switch waits, the turn keeps running, then the switch happens."
+    summary = ("A turn is running (the model's reply is held): the switch waits, the turn keeps "
+               "running, then the switch happens.")
     hold = True
 
     def hold_state(self, run):
@@ -645,14 +679,12 @@ class TurnScenario(SessionUpgradeScenario):
         if not run.wait_requests(before + 1, 60):
             raise NotProduced("the long turn never started")
         time.sleep(3)
-        self.step_count = len(run.main_requests())
-        return "long shell step running"
+        return "turn running: the model's reply is held"
 
     def release_state(self, run):
-        # The step ends by itself (a turn the person stops with Escape fires no Stop hook on
-        # every harness, which is a different state): wait for the model's next request
-        # (the tool result) and for the turn to be idle again.
-        run.wait_requests(self.step_count + 1, 150)
+        # The model answers now; the turn ends by itself (a turn the person stops with Escape
+        # fires no Stop hook on every harness, which is a different state).
+        self.gate.set()
         run.wait_idle(6, 90)
 
 
@@ -684,6 +716,46 @@ class QuestionScenario(SessionUpgradeScenario):
         run.wait_idle(5, 60)
 
 
+ROUTE_TITLE = "ROUTE_PAGE"
+
+
+def route_cache_value(old: dict | None, harness: str, sid: str, now: float) -> dict:
+    """The panel cache with one fixture route row for this session (what a dispatched route shows).
+
+    The row is the panel's own record shape (the PTY tests of the panel write the same one); no
+    dispatch registry is touched, so only the display sees it.
+    """
+    value = dict(old) if isinstance(old, dict) else {
+        "schema_version": 3, "items": [], "by_session": {}, "total": 0, "older": 0, "complete": True,
+        "route_status": {}, "route_sessions": {}}
+    key = harness + "\0" + sid
+    row = {"id": "rt-0123456789abcdef", "title": ROUTE_TITLE, "state": "working", "worker_stage": "inline",
+           "stages": [{"name": "inline", "st": "active"}], "harness": harness, "model": "fixture-model",
+           "effort": "high", "ctx_pct": 40, "agents": 1,
+           "visibility": {"codes": {"schema": "route_visibility_codes_v1", "shape": "direct",
+                                    "next": {"kind": "closed"}, "verification": {"gate": "unproven"},
+                                    "quoted": [["test", "EVIDENCE_%d bounded detail" % i] for i in range(8)]}}}
+    value["observed_at"] = now
+    value["route_panels"] = {**(value.get("route_panels") or {}), key: [row]}
+    value["route_sessions"] = {**(value.get("route_sessions") or {}), key: now}
+    return value
+
+
+def seed_route_row(run, sid: str) -> bool:
+    """Put a fixture route row in the panel cache of the fixture HOME; False if it cannot be written."""
+    cache = Path(run.home.env["XDG_STATE_HOME"]) / "hearting" / "human-waits" / "projection.json"
+    try:
+        old = json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else None
+        cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = cache.with_name(cache.name + ".new")
+        temporary.write_text(json.dumps(route_cache_value(old, run.harness, sid, time.time())), encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, cache)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 class PageScenario(SessionUpgradeScenario):
     name = "session-upgrade-page"
     summary = "A panel read page is open: the switch waits until it is closed."
@@ -700,34 +772,54 @@ class PageScenario(SessionUpgradeScenario):
             rows.append((index, cut, plain[cut:] if cut >= 0 else ""))
         return rows
 
+    @staticmethod
+    def heading(screen: str):
+        """(row, 1-based column) inside the panel's ``╭─ route`` heading, which opens the route page."""
+        for index, line in enumerate(screen.splitlines()):
+            plain = ANSI_RE.sub("", line)
+            at = plain.find("╭─ route")
+            if at >= 0:
+                cells = sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in plain[:at])
+                return index, cells + 3
+        return None
+
     def openers(self, run):
         """Panel rows that open a read page: a route row, or a message that reads on (``›``)."""
         found = []
         for index, cut, text in self.panel_text(run.tui.screen()):
             inner = text.strip(" │")
-            if cut >= 0 and (re.search(r"\brt-[0-9a-f]{6}", inner) or "⇄" in inner
+            if cut >= 0 and (re.search(r"\brt-[0-9a-f]{6}", inner) or ROUTE_TITLE in inner or "⇄" in inner
                                 or inner.rstrip().endswith("›")):
                 found.append((index, cut, inner))
         return found
 
     def hold_state(self, run):
         ev = run.evidence.setdefault("upgrade", {})
-        sent = send_peer(run, self.LONG, obligation=False)
-        ev["page_message_ref"] = bool(sent.get("ref"))
-        # An idle Claude takes a pending peer message with its next prompt; once it has, the
-        # panel lists it among the received messages.
-        count = len(run.main_requests())
-        run.prompt("SCENARIO-UPGRADE-PAGE-NEXT go on")
-        run.wait_requests(count + 1, 60)
-        run.wait_idle(5, 60)
-        wait_for(lambda: self.openers(run), 30)
+        ev["route_row_seeded"] = seed_route_row(run, session_id(run) or "")
+        wait_for(lambda: self.heading(run.tui.screen()) or self.openers(run), 20)
+        if not (self.heading(run.tui.screen()) or self.openers(run)):
+            # No route row showed: fall back to a long peer message, which an idle harness takes with
+            # its next prompt and the panel then lists among the received messages.
+            sent = send_peer(run, self.LONG, obligation=False)
+            ev["page_message_ref"] = bool(sent.get("ref"))
+            count = len(run.main_requests())
+            run.prompt("SCENARIO-UPGRADE-PAGE-NEXT go on")
+            run.wait_requests(count + 1, 60)
+            run.wait_idle(5, 60)
+            wait_for(lambda: self.openers(run), 30)
         ev["panel_rows"] = [f"{i}:{text.strip(' │')[:60]}" for i, c, text in
                             self.panel_text(run.tui.screen()) if c >= 0 and text.strip(" │┌└┐┘─")][:20]
         rows = self.openers(run)
-        if not rows:
+        found = self.heading(run.tui.screen())
+        if found:
+            # The route section's heading opens the read page (its rows open in place).
+            index, column = found
+            inner = "route heading"
+        elif rows:
+            index, cut, inner = rows[0]
+            column = cut + 4
+        else:
             raise NotProduced("the panel shows no route row or long message to open as a read page")
-        index, cut, inner = rows[0]
-        column = cut + 4
         # An SGR mouse click (press, release) on the row, as a terminal sends it.
         _tmux(run.tui, "send-keys", "-t", "scenario", "-l",
               f"\x1b[<0;{column};{index + 1}M\x1b[<0;{column};{index + 1}m")
@@ -735,7 +827,8 @@ class PageScenario(SessionUpgradeScenario):
         shown = run.tui.screen()
         ev["page_rows"] = [f"{i}:{text.strip(' │')[:60]}" for i, c, text in
                            self.panel_text(shown) if c >= 0 and text.strip(" │┌└┐┘─")][:12]
-        if not any(re.search(r"Back|‹|messages\s*·|route\s*·", text) for _i, _c, text in self.panel_text(shown)):
+        if "PgUp/PgDn" not in shown and not any(re.search(r"Back|‹|messages\s*·|route\s*·", text)
+                                                for _i, _c, text in self.panel_text(shown)):
             raise NotProduced(f"the click at row {index} col {column} did not open a read page")
         return f"clicked panel row {index}: {inner[:40]}"
 
@@ -760,12 +853,16 @@ class DeliveryScenario(SessionUpgradeScenario):
     def release_state(self, run):
         TurnScenario.release_state(self, run)
         # The pending delivery follows the turn; it must reach the model, once.
-        wait_for(lambda: any(self.TOKEN in r["text"] for r in run.main_requests()), 60)
-        run.wait_idle(6, 60)
+        wait_for(lambda: any(self.TOKEN in r["text"] for r in run.main_requests()), 25)
+        run.wait_idle(6, 40)
 
     def drive(self, run):
         verdict = super().drive(run)
         ev = run.evidence.setdefault("upgrade", {})
+        # Codex hands a pending peer message to the model with the next submitted prompt (the key
+        # check's), so give it until that turn is over before counting arrivals.
+        wait_for(lambda: any(self.TOKEN in r["text"] for r in run.main_requests()), 40)
+        run.wait_idle(6, 40)
         # Every later request carries the delivered text in its history, so the most any one
         # request holds is how many times it was delivered.
         arrivals = max([r["text"].count(self.TOKEN) for r in run.main_requests()] or [0])

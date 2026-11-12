@@ -50,7 +50,18 @@ def composer():
     return '❯ \r\n'+'─'*18+'\r\n'
 tty.setraw(0)
 exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
-if harness!='opencode':event('start')
+# OpenCode's plugin reports a selected session as select + idle; a window with no selected
+# session (SUCC_NO_SELECT) reports nothing, like OpenCode on its home route.
+bound=os.environ.get('SUCC_NO_SELECT')!='1'
+if bound:
+    event('select' if harness=='opencode' else 'start')
+    if harness=='opencode':event('idle')
+def reload(signum,frame):
+    # OpenCode reloads its plugins when an install rewrites its config: the old plugin reports
+    # deselect, the new one select (and the session's state), with no key from a person.
+    event('deselect');event('select');event('idle')
+import signal
+signal.signal(signal.SIGUSR1,reload)
 print('\x1b[?2004hREADY\r\n'+composer(),end='',flush=True)
 pending=''
 while True:
@@ -63,9 +74,11 @@ while True:
     while '\r' in pending:
         line,pending=pending.split('\r',1)
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
-        if harness!='opencode':event('prompt')
+        if line=='bind' and not bound:
+            bound=True;event('select')    # the prompt typed on the home route opened a session
+        if bound:event('submit' if harness=='opencode' else 'prompt')
         if line=='slow':time.sleep(2.0)
-        if harness!='opencode':event('stop')
+        if bound:event('stop')
         if line=='flood':
             print(''.join('FLOOD_%03d \x1b[3%dmcolor\x1b[0m wide 한글\r\n'%(i,i%8) for i in range(120)),end='',flush=True)
         else:print('\x1b[2J\x1b[HDONE_'+line+'\r\n'+composer()+pending,end='',flush=True)
@@ -401,8 +414,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
             with self.subTest(harness=harness):
                 window = self.window(harness)
                 first = window.wait_binding()
-                if harness != 'opencode':
-                    self.settle(window)
+                self.settle(window)
                 native = process_row(window.native_pid())
                 before_raw = len(window.raw); window.pump(.5); before_raw = len(window.raw)
                 before = window.screen()
@@ -419,6 +431,44 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 self.assertNotIn(b'\x1b[?1049h', bytes(window.raw[before_raw:]))
                 self.assert_keeps_native(window, native)
                 self.assertEqual(len(window.spawns()), 1)
+
+    def wait_empty_then_switch(self, window, first):
+        window.wait_empty()     # a silent native gives the host no repaint to re-read the composer on
+        self.switched(window, first['host_pid'])
+
+    def test_an_opencode_window_with_no_bound_session_waits_for_one(self):
+        # OpenCode on its home route (or after a deselect) reports no session: that is no evidence
+        # of an idle, empty composer, so the window stays as it is (the panel has no session to
+        # project a waiting line for) and switches only once a session is selected and idle.
+        window = self.window('opencode', extra={'SUCC_NO_SELECT': '1'})
+        first = window.wait_binding()
+        native = process_row(window.native_pid())
+        window.point('rel-b'); window.pump(3.0)
+        self.assertEqual(window.binding()['host_pid'], first['host_pid'])
+        self.assertEqual(window.spawns(), [])
+        window.type('bind\r'); window.until('DONE_bind')
+        self.wait_empty_then_switch(window, first)
+        self.assert_keeps_native(window, native)
+
+    def test_an_opencode_plugin_reload_is_not_new_input_but_a_typed_draft_still_blocks(self):
+        # A reload reports deselect then select of the same session. The submitted frontier survives
+        # it, so an empty composer is proven again and the window switches; a draft typed before it
+        # keeps the window where it is.
+        window = self.window('opencode')
+        first = window.wait_binding(); self.settle(window)
+        native = process_row(window.native_pid())
+        os.kill(native['pid'], signal.SIGUSR1); window.pump(1.0)
+        window.wait_empty()
+        window.point('rel-b')
+        self.switched(window, first['host_pid'])
+        self.assert_keeps_native(window, native)
+        drafted = self.window('opencode')
+        held = drafted.wait_binding(); self.settle(drafted)
+        drafted.type('draft'); self.until_read(drafted, b'draft')
+        os.kill(process_row(drafted.native_pid())['pid'], signal.SIGUSR1); drafted.pump(1.0)
+        drafted.point('rel-b'); drafted.pump(3.0)
+        self.assertEqual(drafted.binding()['host_pid'], held['host_pid'])
+        self.assertEqual(drafted.spawns(), [])
 
     # ---------------------------------------------------------------- S1b
     def test_scrollback_and_modes_survive_two_hand_overs_unchanged(self):
@@ -506,11 +556,9 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.type(b'\x1d'); window.pump(.3)
         self.switched(window, first['host_pid'])
 
-    def test_an_open_read_page_defers_the_hand_over_until_it_is_closed(self):
-        window = self.window()
-        first = window.wait_binding(); self.settle(window)
+    def open_read_page(self, window):
         cache = Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits/projection.json'
-        value = json.loads(cache.read_text()); key = 'claude\0'+window.sid
+        value = json.loads(cache.read_text()); key = window.harness+'\0'+window.sid
         value['observed_at'] = time.time()
         value['route_panels'] = {key: [{'id': 'rt-detail', 'title': 'ROUTE_PAGE', 'state': 'working', 'worker_stage': 'inline',
             'stages': [{'name': 'inline', 'st': 'active'}], 'harness': 'codex', 'model': 'gpt-fixture', 'effort': 'high',
@@ -526,12 +574,31 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 point = (line.index('╭─ r')+4, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
         window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
+
+    def test_an_open_read_page_defers_the_hand_over_until_it_is_closed(self):
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        self.open_read_page(window)
         native = process_row(window.native_pid())
         window.point('rel-b'); window.pump(2.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
         window.type(b'\x1b')  # closes the page; nothing else happens
         self.switched(window, first['host_pid'])
+        self.assert_keeps_native(window, native)
+
+    def test_an_opencode_plugin_reload_keeps_an_open_read_page_and_the_hand_over_waits_for_its_close(self):
+        window = self.window('opencode')
+        first = window.wait_binding(); self.settle(window)
+        self.open_read_page(window)
+        native = process_row(window.native_pid())
+        os.kill(native['pid'], signal.SIGUSR1); window.pump(1.0)
+        window.until('PgUp/PgDn')
+        window.point('rel-b'); window.pump(2.5)
+        self.assertEqual(window.binding()['host_pid'], first['host_pid'])
+        self.assertEqual(window.spawns(), [])
+        window.type(b'\x1b')
+        self.wait_empty_then_switch(window, first)
         self.assert_keeps_native(window, native)
 
     def test_a_delivery_in_flight_defers_the_hand_over_and_is_delivered_once(self):
