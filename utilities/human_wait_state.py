@@ -4462,6 +4462,22 @@ def _refresh_cache() -> bool:
         publish_cache({"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]})
         return False
+    finally:
+        if _producer_root is not None:
+            _release_memory()
+
+
+def _release_memory():
+    """Hand the pass's freed heap back to the OS; the parse caches stay warm.
+
+    A pass frees hundreds of MiB of transient parse objects that glibc otherwise
+    keeps mapped for the producer's lifetime (measured: ~35 MiB per pass, 3 ms).
+    """
+    try:
+        import ctypes
+        ctypes.CDLL(None).malloc_trim(0)
+    except (OSError, AttributeError, ImportError, TypeError):
+        pass
 
 
 def _claim_notification(item_id: str, boundary: str):

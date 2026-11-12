@@ -3403,7 +3403,8 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                         key=lambda r: r["result_at"], reverse=True)
         selected += recent[:2]
         records = []
-        for route in selected[:8]:
+        # Spec rule 23: every current route (the panel shows them all, scrolling in place).
+        for route in selected:
             row = {key: str(route.get(key) or "")[:320] for key in
                    ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
             # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).

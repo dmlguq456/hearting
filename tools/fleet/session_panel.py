@@ -385,7 +385,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
     routes = []
-    for row in raw[:8] if isinstance(raw, list) else ():
+    for row in raw if isinstance(raw, list) else ():
         if not isinstance(row, dict):
             continue
         clean = lambda value: sanitize_title(str(value or ""))[:320]
@@ -432,8 +432,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
     gauge = gauge_parts(values.get("ctx_pct"))
     count = values.get("answer_wait")
-    # The producer's count is the session's whole current-route count; the panel
-    # keeps at most eight rows, so the kept current rows are counted apart from it.
+    # The producer's count is the session's whole current-route count; the kept
+    # current rows (the recent finished ones follow them) are counted apart from it.
     current, total = len(routes), None
     from .session_line import ROUTE_LABEL
     match = ROUTE_LABEL.match(values.get("route_label") or "")
