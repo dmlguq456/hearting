@@ -3536,6 +3536,52 @@ class MessageCompletionTests(unittest.TestCase):
         completion = self.source(signal)["completion"]
         self.assertEqual((completion["actor"], completion["answer"]), ("direct", "second answer"))
 
+    def _prompt_with_claims_missing_at_lookup(self, signal, text):
+        from unittest import mock
+        pending, seen = state.message_answer_pending, []
+
+        def missing(value):
+            # Storage fault: the record is away only while the prompt checks it.
+            path = state._cache_path()
+            held = path.with_suffix(".held")
+            path.rename(held)
+            try:
+                seen.append(path.exists())
+                return pending(value)
+            finally:
+                held.rename(path)
+        with mock.patch.object(state, "message_answer_pending", side_effect=missing):
+            self.prompt(signal, text)
+        self.assertTrue(seen)
+        self.assertNotIn(True, seen)
+
+    def test_claim_record_missing_at_lookup_never_lets_a_prompt_take_the_panel_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                signal, envelope = self.f.ask(harness, text="missing " + harness, choices=["A", "B", "C"])
+                self.f.submit(envelope, "B")
+                wire, _ref, recipient = self.f.prepare(signal)
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                self.assertEqual(self.source(signal)["lifecycle"], "open")
+                self.f.peer.receive_peer_message(wire, recipient)
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+                self.assertEqual(state._selected_entry(envelope)["result"]["status"], "applied")
+
+    def test_without_a_claim_a_missing_record_still_lets_the_prompt_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness, record="missing-at-lookup"):
+                signal, _ = self.f.ask(harness, text="no claim " + harness, choices=["A", "B", "C"])
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "A"))
+            with self.subTest(harness=harness, record="never-written"):
+                signal, _ = self.f.ask(harness, text="no record " + harness, choices=["A", "B", "C"])
+                state._cache_path().unlink(missing_ok=True)
+                self.prompt(signal, "2")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "B"))
+
     def test_question_without_choices_still_takes_the_next_prompt(self):
         for harness in ("claude", "codex", "opencode"):
             signal, _ = self.f.ask(harness, text="free " + harness)
