@@ -464,9 +464,13 @@ _SECTION_FIELDS = (
 _FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "unverified", "failed", "skipped")
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
+_UNRUN_WORDS = (r"not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안"
+                r"|돌리지 못|실행하지 못|못 돌|실행 못|could not (?:be )?run|couldn['’]t (?:be )?run|unable to run")
 _UNRUN_CHECK = re.compile(
-    r"(?:\b(?:test|tests|suite|CI|live)\b|시험|검사|검증|실기).{0,160}"
-    r"(?:not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안)", re.I)
+    r"(?:\b(?:test|tests|suite|CI|live)\b|시험|검사|검증|실기).{0,160}(?:" + _UNRUN_WORDS + ")", re.I)
+# The verification section's not-run wording is _UNRUN_CHECK's alone to move; a line it left
+# in place ("통과해서 다시 실행하지 않았다") is not read again as a failure.
+_UNRUN_WORD = re.compile(_UNRUN_WORDS, re.I)
 
 
 def _ui_text():
@@ -667,15 +671,17 @@ def _is_none_item(item) -> bool:
 def _failure_kind(line, *, verified=False) -> str | None:
     """``failure``, ``check`` (cannot tell, or something left without a failure word) or None.
 
-    A verification line counts only as a command row its folded count calls failed, and then as
-    ``check``: the checks line already shows the count, and whether it is this task's, an earlier
-    round's or a baseline's is the report's to say. The section's prose decides nothing."""
+    A verification line counts only as ``check``: a command row its folded count calls failed, or
+    a prose line the remaining-work reading calls a failure. Whether it is this task's, an earlier
+    round's or a baseline's is the report's to say."""
     text = str(line or "").strip()
     if _is_none_item(text):
         return None
     rest = _unnegated(text)
     if verified:
-        return "check" if _COMMAND_LINE.search(text) and _command_failures(text) else None
+        if _COMMAND_LINE.search(text):
+            return "check" if _command_failures(text) else None
+        return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None
     if not _FAILURE_TEXT.search(rest):
         if rest != text and not re.search(r"[\w가-힣]", rest):
             return None  # "실패한 단계 없음 (errors: 0)": only a statement that nothing failed
@@ -691,8 +697,8 @@ def _result_line(route, t, remaining=(), *, limits=(), follow_up=(), verified=()
     """Name a failure only from the failed/skipped, unverified and remaining-work lines.
 
     Follow-ups never make a finished task read as failed. A line that cannot be told apart (a
-    fixed past failure, a possible one), a limit or risk, and a failed check row point at the
-    report instead of asserting a failure or a clean close."""
+    fixed past failure, a possible one), a limit or risk, and a failed check row or verification
+    line point at the report instead of asserting a failure or a clean close."""
     kinds = ({_failure_kind(item) for item in remaining}
              | {"check" for item in limits if _failure_kind(item)}
              | {_failure_kind(line, verified=True) for line in verified})

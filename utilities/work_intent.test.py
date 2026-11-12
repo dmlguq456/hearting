@@ -360,13 +360,36 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertEqual(self._result("## 알려진 한계\n- 실제 창 확인 미실행\n"), check)
         self.assertEqual(self._result("## 남은 위험\n- 부하에서 1회 실패\n"), check)
         self.assertEqual(self._result("## 미검증·한계\n- 실제 창 확인 미실행\n"), "결과: 끝남 — 실패·못 한 것 있음(아래)")
-        # A failed check row is counted on the checks line; prose about earlier rounds decides nothing.
+        # A failed check row is counted on the checks line and points at the report; so does a
+        # verification line that names a failure, whichever round it belongs to.
         self.report.write_text("## 검증\n- `pytest -q` → 3 failed\n\n## 5. 실패·건너뛴 단계\n없음\n")
         text = WI.completion_summary(self.route, self.report)
         self.assertIn(check, text)
         self.assertIn("검증: 명령 1개 · 통과 0 · 실패 1", text)
-        self.assertEqual(self._result("## 검증\n- round 1 FAIL, round 2 PASS\n\n## 5. 실패·건너뛴 단계\n없음\n"),
-                         "결과: 완료")
+        self.assertEqual(self._result("## 검증\n- round 1 FAIL, round 2 PASS\n\n## 5. 실패·건너뛴 단계\n없음\n"), check)
+
+    def test_a_failure_or_unrun_check_written_only_in_verification_reaches_the_result_line(self):
+        # The PR #1563 second review's forms C·C2·E·H2·L: the failed/skipped section says none.
+        check = "결과: 완료 — 보고서의 남은 것 확인(아래)"
+        failed = "결과: 끝남 — 실패·못 한 것 있음(아래)"
+        ko = "## 4. QA 요약\n- {0}\n\n## 5. 실패·건너뛴 단계\n없음\n"
+        en = "## 4. Verification\n- {0}\n\n## 5. Failed / Skipped Steps\n- none\n"
+        for form, line, expected in (
+                ("C", ko.format("단위 시험 20개 중 3개 실패"), check),
+                ("C2", ko.format("전체 시험: PASS=17 FAIL=3"), check),
+                ("E", ko.format("부하 시험을 돌리지 못했다"), failed),
+                ("H2", en.format("Unit tests: 37 passed, 3 failed"), check),
+                ("L", ko.format("오류 없음. 단 한글 이름 내보내기는 실패"), check),
+                ("FAIL=0", ko.format("전체 시험: PASS=20 FAIL=0"), "결과: 완료"),
+                ("실패 없음", ko.format("단위 시험 40개 통과, 실패 없음"), "결과: 완료"),
+                ("X", ko.format("통과해서 보고 단계에서 다시 실행하지 않았다"), "결과: 완료")):
+            with self.subTest(form=form):
+                self.assertEqual(self._result(line), expected)
+        for line in ("부하 시험을 돌리지 못했다", "e2e 시험을 실행하지 못했다", "부하 시험은 못 돌렸다", "부하 시험 실행 못 함",
+                     "The e2e suite could not be run", "e2e tests could not run", "e2e tests couldn't run",
+                     "live check unable to run here"):
+            with self.subTest(line=line):
+                self.assertEqual(WI.report_sections(f"## 검증\n- {line}\n").get("remaining"), [line])
 
     def test_bold_and_table_remaining_labels_are_read(self):
         for report in ("**남은 것:** 저장 오류를 고치지 못함\n",
