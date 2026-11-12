@@ -504,8 +504,16 @@ def _codex_rollout_waits():
     return codex_rollouts.open_rollout_questions()
 
 
-def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None):
+class _SkipSource(Exception):
+    """A narrowed read does not observe this source."""
+
+
+def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None, only_id=None):
     """Project current and folded older answer waits without changing sources.
+
+    ``only_id`` names one S2/S3 wait: the registry is read the same way, but
+    only that wait's route and owner are observed, so opening one question
+    does not re-observe every older wait on the board.
 
     A damaged or partial registry is reported as unknown and is never used to
     prove that an owner has no successor. The existing owner-input reader may
@@ -551,9 +559,12 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
             except (TypeError, ValueError, OverflowError):
                 return float(fallback)
 
+    only_source = only_id.split(":", 1)[0] if isinstance(only_id, str) else None
     # S1 stores exact identity, timing, and optional native request refs only.
     # Native question text is private to the runtime and never recovered from prose.
     try:
+        if only_source in ("S2", "S3"):
+            raise _SkipSource
         project_root = str(Path(__file__).resolve().parents[1])
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
@@ -605,12 +616,16 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                 item.update({key: record[key] for key in ("request_id", "turn_id", "item_id")
                              if key in record})
                 add(item)
+    except _SkipSource:
+        pass
     except Exception as exc:
         health.append({"source": "S1", "state": "unknown", "reason": type(exc).__name__})
 
     # S1 also keeps a Codex question that exists only in its live rollout (no hook
     # sidecar). The sidecar for the same session wins; the id has the sidecar shape.
     try:
+        if only_source in ("S2", "S3"):
+            raise _SkipSource
         observed = _codex_rollout_waits()
         if observed is None:
             health.append({"source": "S1", "state": "unknown", "reason": "codex-rollouts-unreadable"})
@@ -635,12 +650,16 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                      "owner": {"harness": "codex", "session_id": sid},
                      # A live Codex process holds this rollout open.
                      "owner_state": "live", "attribution": "exact"})
+    except _SkipSource:
+        pass
     except Exception as exc:
         health.append({"source": "S1", "state": "unknown", "reason": type(exc).__name__})
 
     # S4's writer owns its private file format; importing is lazy to keep the
     # legacy S1/S2 API independent from the new producer.
     try:
+        if only_source in ("S2", "S3"):
+            raise _SkipSource
         import human_wait_state
         for record in human_wait_state.read_signals(now=instant):
             message = record.get("mode") == "message"
@@ -650,6 +669,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                  "since": record["since"], "owner": {"harness": record.get("harness"),
                  "session_id": record.get("session_id"), "seat_key": record.get("seat_key")},
                  "attribution": "exact", "stale": bool(record.get("stale"))})
+    except _SkipSource:
+        pass
     except Exception as exc:
         health.append({"source": "S4", "state": "unknown", "reason": type(exc).__name__})
 
@@ -674,6 +695,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                 import route_authority
                 for attempt, (status, meta, fields, row_order, row) in latest.items():
                     if meta.get("worker_type") != "owner" or attempt in successor_sources:
+                        continue
+                    if only_id is not None and only_id != "S3:" + str(attempt):
                         continue
                     if route_authority.answerable_owner_end(status, meta) != "BLOCKED":
                         continue
@@ -762,6 +785,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None)
                     sys.path.insert(0, project_root)
                 from tools.fleet import route as route_module
                 for (route_id, route_digest, route_file), (row, _candidate_meta, route_activity) in route_candidates.items():
+                    if only_id is not None and not only_id.startswith("S2:" + str(route_id) + ":"):
+                        continue
                     if not math.isfinite(route_activity):
                         health.append({"source": "S2", "route_id": route_id,
                                        "state": "unknown", "reason": "invalid-timestamp"})

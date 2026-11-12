@@ -2362,7 +2362,8 @@ def _workflow_current_item(item_id, source):
     matches = []
     for path in paths:
         try:
-            result = human_gate_observation.read_answer_waits(jobs_paths=(path,))
+            result = human_gate_observation.read_answer_waits(
+                jobs_paths=(path,), only_id=item_id)
         except Exception:
             return None, "workflow-wait-source-unknown"
         # Only the registry/route sources bind an S2/S3 answer; an unobserved native
