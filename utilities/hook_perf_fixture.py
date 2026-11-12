@@ -454,9 +454,36 @@ def _history_row(index: int, row_bytes: int, now: float, total: int | None = Non
     status = ("open", "open", "done")[phase]
     if total is not None and attempt_index == (total - 1) // HISTORY_ROWS_PER_ATTEMPT:
         status = "done"
-    stamp = _iso(now - 86_400 - (900_000 - index) * 5)
-    return _padded_row(stamp, status, f"hist-{attempt_index:06d}",
-                       _history_metadata(attempt, attempt_index), row_bytes)
+    age = _history_age_s(index, total)
+    metadata = _history_metadata(attempt, attempt_index)
+    if age < 86_400:
+        # A first-screen row bound to a route needs that route's record (``required-details``
+        # stays partial without it and Fleet never leaves loading), so the recently finished
+        # attempts are standalone dispatches here: they exercise the afterglow and stall
+        # windows, not the route-detail path (which the open routes cover).
+        for key in ("route_id", "route_hash", "route_node"):
+            metadata.pop(key, None)
+    return _padded_row(_iso(now - age), status, f"hist-{attempt_index:06d}", metadata, row_bytes)
+
+
+# Live 2026-11-12: of ~7,740 registry rows, ~61 are younger than 6 h and ~161 younger than 24 h
+# (the open attempts' rows included). They are what Fleet's 15-minute afterglow and
+# 361-minute stall windows act on. The history part takes 50 / 150; the e2e fixture's ~12
+# open route rows (a few minutes old) bring the whole registry to the live counts.
+HISTORY_RECENT_6H_ROWS = 50
+HISTORY_RECENT_24H_ROWS = 150
+
+
+def _history_age_s(index: int, total: int | None) -> float:
+    """Seconds before ``now`` of history row ``index`` (the older rows keep one spread, > 24 h)."""
+    if total is not None:
+        from_end = total - 1 - index
+        if from_end < HISTORY_RECENT_6H_ROWS:
+            return (from_end + 0.5) / HISTORY_RECENT_6H_ROWS * 6 * 3600
+        if from_end < HISTORY_RECENT_24H_ROWS:
+            span = HISTORY_RECENT_24H_ROWS - HISTORY_RECENT_6H_ROWS
+            return 6 * 3600 + (from_end - HISTORY_RECENT_6H_ROWS + 0.5) / span * 18 * 3600
+    return 86_400 + (900_000 - index) * 5
 
 
 def e2e_session_id(index: int) -> str:
@@ -562,7 +589,9 @@ def _write_e2e_state(fixture: dict, *, open_routes: int, live_sessions: int,
     from fleet import route_chain
     base = Path(fixture["base"])
     routes_dir = _private_dir(base / "routes")
-    streams_dir = _private_dir(base / "streams")
+    # The reader (``attempt_view.owned_attempt_log_path``) admits a worker stream only
+    # inside ``<registry dir>/logs`` and only as ``<name>.<attempt_id>.claude.jsonl``.
+    streams_dir = _private_dir(Path(jobs).parent / "logs")
     sessions_dir = _private_dir(home / ".claude" / "sessions")
     cwd = _private_dir(work / "e2e-project")
     sessions, routes, streams, rows = [], [], [], []
@@ -584,7 +613,7 @@ def _write_e2e_state(fixture: dict, *, open_routes: int, live_sessions: int,
         _write(route_file, json.dumps(record, sort_keys=True) + "\n")
         log_file = None
         if worker_streams:
-            log_file = streams_dir / f"att-e2e-owner-{index:05d}.jsonl"
+            log_file = streams_dir / f"e2e.att-e2e-owner-{index:05d}.claude.jsonl"
             _write(log_file, json.dumps({
                 "type": "system", "subtype": "init", "session_id": sid}) + "\n")
             streams.append(str(log_file))

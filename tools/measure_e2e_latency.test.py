@@ -28,7 +28,7 @@ for entry in (str(ROOT / "tools"), str(ROOT / "utilities"), str(ROOT)):
 
 import hook_perf_fixture as hpf  # noqa: E402
 import fixture_processes  # noqa: E402
-from e2e_latency import events, fixture as fx, shim_pass, t12  # noqa: E402
+from e2e_latency import events, fixture as fx, shapes, shim_pass, t12, visible  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("measure_e2e_latency", ROOT / "tools" / "measure_e2e_latency.py")
 tool = importlib.util.module_from_spec(_spec)
@@ -157,20 +157,28 @@ class InjectorTests(unittest.TestCase):
     def jobs_rows(self):
         return Path(self.fixture["jobs"]).read_text().splitlines()
 
-    def test_route_start_appends_then_replaces_and_leaves_lineage(self):
+    def test_route_start_follows_the_launch_order_and_the_reader_can_find_it(self):
         before = len(self.jobs_rows())
         stamp = events.route_start(self.fixture, 1)
         rows = self.jobs_rows()
         self.assertEqual(len(rows), before + 1)
-        self.assertIn(stamp["marker"], rows[-1])
+        attempt = stamp["expect"]["attempt_id"]
+        self.assertIn(f"attempt_id={attempt}", rows[-1])
         self.assertIn("pid_ns=pid:[e2e]", rows[-1])  # the whole-file replacement ran
+        self.assertRegex(rows[-1], r",pid=\d+,pid_start=\d+,")  # launch identity of a live fixture process
         lineage = Path(self.fixture["jobs"] + ".lineage.json")
         self.assertTrue(lineage.is_file())
-        self.assertGreater(stamp["done_ns"], stamp["t_ns"])
+        # the session route-chain line, as the original routes got it
+        from fleet import route_chain
+        with events.applied(self.fixture):
+            ledger = Path(route_chain.ledger_path("claude", stamp["expect"]["session_id"]))
+        self.assertIn(stamp["expect"]["route_id"], ledger.read_text())
+        log = Path(self.fixture["jobs"]).parent / "logs" / f"e2e.{attempt}.claude.jsonl"
+        self.assertTrue(log.is_file())
 
     def test_stage_transition_rewrites_route_file_and_registry_row(self):
         stamp = events.stage_transition(self.fixture, 0)
-        route = self.fixture["routes"][0]
+        route = next(r for r in self.fixture["routes"] if r["route_id"] == stamp["expect"]["route_id"])
         record = json.loads(Path(route["route_file"]).read_text())
         self.assertEqual(record["_fleet_e2e_state"], "test:running")
         # the file moved on, its identity did not: the real reader still accepts it for the row's hash
@@ -191,18 +199,28 @@ class InjectorTests(unittest.TestCase):
                                                   expect_hash=hpf.e2e_route_hash(route["index"])))
 
     def test_route_end_writes_outcome_sidecar_and_closing_row(self):
-        route = self.fixture["routes"][1]
+        route = events._open_routes(self.fixture)[0]
+        before = [row for row in self.jobs_rows() if f"attempt_id={route['attempt_id']}" in row]
         stamp = events.route_end(self.fixture, 1)
         sidecar = Path(route["route_file"]).with_suffix(".outcome.json")
-        self.assertEqual(json.loads(sidecar.read_text())["marker"], stamp["marker"])
-        last = [row for row in self.jobs_rows() if f"attempt_id={route['attempt_id']}" in row][-1]
-        self.assertEqual(last.split("\t")[1], "done")
+        data = json.loads(sidecar.read_text())
+        self.assertEqual(data["marker"], stamp["marker"])
+        self.assertTrue(data["closed_at"] and data["terminal_gate_proven"] is True)  # what the reader calls closed
+        rows = [row for row in self.jobs_rows() if f"attempt_id={route['attempt_id']}" in row]
+        # closed in place by a whole-registry replacement (no extra row), content changed
+        self.assertEqual(len(rows), len(before))
+        self.assertEqual(rows[-1].split("\t")[1], "done")
+        self.assertNotEqual(rows[-1], before[-1])
 
-    def test_worker_tool_appends_a_tool_use_line(self):
-        route = self.fixture["routes"][2]
+    def test_worker_tool_appends_a_tool_use_line_at_a_path_the_reader_admits(self):
         stamp = events.worker_tool(self.fixture, 2)
+        route = next(r for r in self.fixture["routes"] if r["route_id"] == stamp["expect"]["route_id"])
         last = json.loads(Path(route["log_file"]).read_text().splitlines()[-1])
         self.assertEqual(last["message"]["content"][0]["name"], stamp["marker"])
+        from attempt_view import owned_attempt_log_path
+        job = types_namespace(_log_file=route["log_file"], attempt_id=route["attempt_id"], harness="claude",
+                              _registry_path=self.fixture["jobs"], artifact_root=None, _launch_home=None)
+        self.assertEqual(owned_attempt_log_path(job), os.path.realpath(route["log_file"]))
 
     def test_answer_wait_uses_the_real_signal_writer(self):
         stamp = events.answer_wait(self.fixture, 3)
@@ -210,9 +228,9 @@ class InjectorTests(unittest.TestCase):
         self.assertTrue(any(stamp["marker"] in path.read_text() for path in found))
 
     def test_owner_dead_signals_only_the_fixture_owner(self):
-        route = self.fixture["routes"][0]
+        stamp = events.owner_dead(self.fixture, 0)
+        route = next(r for r in self.fixture["routes"] if r["route_id"] == stamp["expect"]["route_id"])
         self.assertTrue(route["owner_pid"])
-        events.owner_dead(self.fixture, 0)
         deadline = __import__("time").monotonic() + 5
         while fx._process_start(route["owner_pid"]) == route["owner_pid_start"]:
             try:
@@ -222,6 +240,63 @@ class InjectorTests(unittest.TestCase):
             if state == b"Z" or __import__("time").monotonic() > deadline:
                 break
         self.assertTrue(route["_killed"])
+
+
+    def test_registry_replace_changes_one_line_and_nothing_else(self):
+        before = self.jobs_rows()
+        stamp = events.registry_replace(self.fixture, 3)
+        after = self.jobs_rows()
+        self.assertEqual(len(after), len(before))
+        changed = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+        self.assertEqual(changed, [len(before) - 1])
+        self.assertEqual(len(after[-1]), len(before[-1]))          # same size: a digest, not a length, tells
+        self.assertEqual(stamp["kind"], "registry-replace")
+
+    def test_closing_events_never_take_the_same_route(self):
+        fixture = {"routes": [{"route_id": f"rt-{i}", "owner_pid": 100 + i} for i in range(10)]}
+        ended, killed = [], []
+        for _ in range(4):
+            route = events._pick(fixture, "route-end")
+            route["_closed"] = True
+            ended.append(route["route_id"])
+            route = events._pick(fixture, "owner-dead")
+            route["_killed"] = True
+            killed.append(route["route_id"])
+        self.assertFalse(set(ended) & set(killed))
+        self.assertEqual(len(set(ended)), 4)
+        self.assertEqual(len(set(killed)), 4)
+
+
+class ShapeTests(unittest.TestCase):
+    """The fixture shapes the registry alone does not give."""
+
+    def test_recent_history_rows_fall_in_the_fleet_windows(self):
+        total = 400
+        ages = [hpf._history_age_s(index, total) for index in range(total)]
+        self.assertEqual(sum(1 for a in ages if a < 6 * 3600), hpf.HISTORY_RECENT_6H_ROWS)
+        self.assertEqual(sum(1 for a in ages if a < 24 * 3600), hpf.HISTORY_RECENT_24H_ROWS)
+        self.assertTrue(any(a < 15 * 60 for a in ages))                       # an afterglow-window row
+        self.assertTrue(any(361 * 60 < a < 24 * 3600 for a in ages))          # past the stall window, within a day
+        self.assertEqual(ages, sorted(ages, reverse=True))                    # rows stay in time order
+        self.assertGreater(min(a for a in ages[:-hpf.HISTORY_RECENT_24H_ROWS]), 24 * 3600)
+
+    def test_codex_rollout_is_one_the_lifecycle_scan_reads_to_a_finished_task(self):
+        from fleet.collectors import codex
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            facts = shapes.write_codex_rollout(Path(tmp) / "rollout-x.jsonl", cwd="/w", session_id="s", megabytes=0.3)
+            self.assertLess(facts["bytes"], shapes.MAX_CODEX_LOG_BYTES)
+            cursor = codex._initialize_lifecycle_cursor(facts["path"])
+            self.assertEqual(cursor.lifecycle[0], "task_complete")
+            self.assertEqual(cursor.offset, facts["bytes"])                       # every byte consumed
+            self.assertEqual(codex._rollout_meta(facts["path"]).get("cwd"), "/w")
+
+    def test_claude_transcript_has_finished_and_active_subagents(self):
+        from fleet.collectors import claude
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            facts = shapes.write_claude_transcript(Path(tmp) / "t.jsonl", session_id="s", megabytes=1)
+            subs = claude._tail_subagents(facts["path"])
+            self.assertEqual(len(subs), facts["agent_calls"])
+            self.assertTrue(any(sub.active for sub in subs) and any(not sub.active for sub in subs))
 
 
 class ShimTests(unittest.TestCase):
@@ -363,18 +438,137 @@ class ReportTests(unittest.TestCase):
         self.assertIn("표를 그리지 못함", text)
         self.assertIn("## 실행 정보", text)
 
-    def test_history_verdicts_follow_the_numbers(self):
-        def side(warm, after):
-            return {"roles": {"producer": {"warm_median_s": warm, "after_replace_s": after,
-                                           "extra_s": after - warm}}}
-        flat = {"pairs": [{"label": "A", "small": side(0.40, 0.45), "large": side(0.42, 0.47)}]}
+    def test_history_verdicts_read_the_pass_right_after_the_change(self):
+        def side(warm, after, parses=1):
+            return {"roles": {"producer": {
+                "warm_median_s": warm, "after_replace_s": after, "extra_s": after - warm,
+                "after_row": {"metrics": {"full_metadata_parses": parses}}}}}
+        # unchanged passes grow 5 %, but what a change adds doubles: not the unchanged pass decides
+        steep = {"pairs": [{"label": "A", "small": side(0.40, 0.70), "large": side(0.42, 1.30)}]}
+        text = "\n".join(tool.history_verdicts(steep))
+        self.assertIn("주원인 후보", text)
+        self.assertIn("(참고, 판정 아님)", text)
+        self.assertIn("full parses 1/1", text)
+        flat = {"pairs": [{"label": "A", "small": side(0.40, 0.46), "large": side(0.42, 0.49)}]}
         text = "\n".join(tool.history_verdicts(flat))
         self.assertIn("history 비례는 주원인 아님", text)
         self.assertIn("[다] 먼저", text)
-        steep = {"pairs": [{"label": "A", "small": side(0.40, 0.90), "large": side(0.80, 1.40)}]}
-        text = "\n".join(tool.history_verdicts(steep))
-        self.assertIn("주원인 후보", text)
-        self.assertIn("조건 불충족", text)
+
+    def test_history_verdict_needs_a_reparse_on_both_sides(self):
+        def side(after, parses):
+            return {"roles": {"producer": {
+                "warm_median_s": 0.4, "after_replace_s": after, "extra_s": after - 0.4,
+                "after_row": {"metrics": {"full_metadata_parses": parses}}}}}
+        # the large side's pass answered from a digest cache (no parse): no verdict, however the times look
+        pairs = {"pairs": [{"label": "A", "small": side(0.9, 1), "large": side(0.45, 0)}]}
+        text = "\n".join(tool.history_verdicts(pairs))
+        self.assertIn("history 비례 판정 불가", text)
+        self.assertIn("판정 불가 (full parses 1/0", text)
+        self.assertNotIn("주원인 후보", text)
+
+    def test_table_says_how_many_events_were_seen(self):
+        report = self.sample()
+        report["results"][0]["events"]["route-start"].update(n=2, n_total=3)
+        text = tool.render_markdown(report)
+        self.assertIn("| T1 | route-start | 2/3 |", text)
+
+
+class VisibleTests(unittest.TestCase):
+    """An event arrives only when the reader's output holds the value it changed."""
+
+    EXPECT = {"session_id": "S1", "route_id": "rt-1", "attempt_id": "att-1"}
+
+    def projection(self, **row):
+        base = {"id": "rt-1", "state": "working", "worker_stage": "execute", "outcome": "",
+                "owner_attempt": "att-1", "stages": [{"name": "execute", "st": "active"}], "tool": None}
+        base.update(row)
+        return {"route_panels": {"claude\0S1": [base]}, "items": []}
+
+    def ev(self, kind, **expect):
+        return {"kind": kind, "expect": {**self.EXPECT, **expect}}
+
+    def test_a_publish_without_the_value_is_not_an_arrival(self):
+        # the same publish passes every check that only compared observed_at with the write time
+        shown = self.projection()
+        self.assertFalse(visible.t1(self.ev("worker-tool", tool="E2eTool0004"), shown))
+        self.assertFalse(visible.t1(self.ev("route-end"), shown))
+        self.assertFalse(visible.t1(self.ev("stage-transition", stage="test"), shown))
+        self.assertFalse(visible.t1(self.ev("route-start", attempt_id="att-2", route_id="rt-2"), shown))
+        self.assertFalse(visible.t1(self.ev("owner-dead"), shown))
+
+    def test_each_kind_arrives_on_its_own_value(self):
+        self.assertTrue(visible.t1(self.ev("worker-tool", tool="E2eTool0004"), self.projection(tool="E2eTool0004")))
+        self.assertTrue(visible.t1(self.ev("route-end"), self.projection(outcome="success")))
+        self.assertTrue(visible.t1(self.ev("stage-transition", stage="test"), self.projection(
+            worker_stage="test", stages=[{"name": "test", "st": "active"}])))
+        self.assertTrue(visible.t1(self.ev("route-start"), self.projection()))
+        self.assertTrue(visible.t1(self.ev("owner-dead"), self.projection(state="idle")))
+        self.assertTrue(visible.t1(self.ev("answer-wait", item_id="S4:x"), {"items": [{"id": "S4:x"}]}))
+
+    def test_gone_counts_only_for_a_route_that_was_shown(self):
+        gone = {"route_panels": {"claude\0S1": []}, "items": []}
+        self.assertFalse(visible.t1(self.ev("owner-dead", was_present=False), gone))
+        self.assertTrue(visible.t1(self.ev("owner-dead", was_present=True), gone))
+        self.assertTrue(visible.t1(self.ev("route-end", was_present=True), gone))
+
+    def test_fleet_model_digest_follows_the_same_rules(self):
+        digest = {"routes": {"rt-1": {"state": "working", "outcome": None, "active": ["execute"],
+                                      "tool": None, "attempt": "att-1"}}, "questions": ["S4:x"]}
+        self.assertTrue(visible.t2(self.ev("route-start"), digest))
+        self.assertFalse(visible.t2(self.ev("stage-transition", stage="test"), digest))
+        self.assertFalse(visible.t2(self.ev("worker-tool", tool="T"), digest))
+        self.assertFalse(visible.t2(self.ev("route-end"), digest))
+        self.assertTrue(visible.t2(self.ev("answer-wait", item_id="S4:x"), digest))
+        self.assertFalse(visible.t2(self.ev("answer-wait", item_id="S4:y"), digest))
+        digest["routes"]["rt-1"].update(state="idle")
+        self.assertTrue(visible.t2(self.ev("owner-dead"), digest))
+        self.assertFalse(visible.t2(self.ev("owner-dead"), None))
+
+
+class PhasePlanTests(unittest.TestCase):
+    def test_every_kind_covers_the_whole_cadence_and_the_plan_reproduces(self):
+        kinds = ("worker-tool", "answer-wait", "owner-dead")
+        plan = t12.slow_phase_plan(kinds, 8, 30.0)
+        self.assertEqual(plan, t12.slow_phase_plan(kinds, 8, 30.0))            # fixed seed
+        self.assertNotEqual(plan, t12.slow_phase_plan(kinds, 8, 30.0, seed=1))
+        for kind in kinds:
+            slices = sorted(int(plan[(rep, kind)] // (30.0 / 8)) for rep in range(8))
+            self.assertEqual(slices, list(range(8)))                           # one sample in each eighth
+        self.assertTrue(all(0.0 <= v < 30.0 for v in plan.values()))
+
+    def test_kinds_do_not_share_one_phase_schedule(self):
+        plan = t12.slow_phase_plan(("worker-tool", "answer-wait", "owner-dead"), 8, 30.0)
+        orders = [[int(plan[(rep, k)] // (30.0 / 8)) for rep in range(8)]
+                  for k in ("worker-tool", "answer-wait", "owner-dead")]
+        self.assertEqual(len({tuple(o) for o in orders}), 3)
+
+    def test_model_digest_carries_forward_between_changes(self):
+        rows = [{"root": "render._explorer_compose", "t0": 1, "t1": 2, "seg": {}, "model": {"routes": {"a": {}}}},
+                {"root": "render._explorer_compose", "t0": 3, "t1": 4, "seg": {}},
+                {"root": "render._explorer_compose", "t0": 5, "t1": 6, "seg": {}, "model": {"routes": {}}}]
+        now = [r["model_now"] for r in shim_pass.with_models(rows)]
+        self.assertEqual(now, [{"routes": {"a": {}}}, {"routes": {"a": {}}}, {"routes": {}}])
+
+
+class PublishWatchTests(unittest.TestCase):
+    def test_only_a_publish_that_holds_the_value_stamps_the_event(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            cache = Path(tmp) / "projection.json"
+            cache.write_text(json.dumps({"observed_at": 1.0, "items": []}))
+            watch = t12.PublishWatch(cache)
+            ev = {"kind": "answer-wait", "wall": 0.0, "expect": {"session_id": "S1", "item_id": "S4:x"}}
+            watch.add(ev)
+            self.assertNotIn("detect_ns", ev)
+            cache.write_text(json.dumps({"observed_at": 2.0, "items": []}))     # a later publish, still without it
+            os.utime(cache, ns=(2, 2))
+            watch.poll()
+            self.assertNotIn("detect_ns", ev)
+            self.assertIsNotNone(watch.last_publish_ns)
+            cache.write_text(json.dumps({"observed_at": 3.0, "items": [{"id": "S4:x"}]}))
+            os.utime(cache, ns=(3, 3))
+            watch.poll()
+            self.assertIn("detect_ns", ev)
+            self.assertEqual(watch.pending, [])
 
 
 class PathsTests(unittest.TestCase):

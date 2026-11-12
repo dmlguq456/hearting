@@ -121,6 +121,8 @@ def child_env(fixture: dict, extra: dict | None = None) -> dict:
         "PYTHONDONTWRITEBYTECODE": "1",
         MARKER_ENV: fixture["marker"],
     }
+    if fixture.get("codex_home"):
+        env["CODEX_HOME"] = fixture["codex_home"]
     env.update(extra or {})
     return {key: value for key, value in env.items()
             if not key.startswith(_DROPPED_PREFIXES) or key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
@@ -128,7 +130,8 @@ def child_env(fixture: dict, extra: dict | None = None) -> dict:
 
 def build(*, history_rows: int | None = None, row_bytes: int = ROW_BYTES, open_routes: int | None = None,
           live_sessions: int | None = None, parent: str | None = None, prime: bool = False,
-          probe: bool = True, scale_history: int = 1) -> dict:
+          probe: bool = True, scale_history: int = 1, min_open_routes: int = 0,
+          shape: bool = False, codex_log_mb: float | None = None, transcript_mb: float | None = None) -> dict:
     """Create the fixture and its sleeper processes; returns the orchestrator's dict.
 
     Keys: ``root``, ``marker``, ``jobs``, ``env`` (child env), ``sessions``,
@@ -138,6 +141,7 @@ def build(*, history_rows: int | None = None, row_bytes: int = ROW_BYTES, open_r
     baseline = production_baseline() if probe else {**DEFAULT_BASELINE, "source": "default"}
     rows = history_rows if history_rows is not None else int(baseline["rows"]) * scale_history
     routes = open_routes if open_routes is not None else max(1, int(baseline.get("open", 19) or 19))
+    routes = max(routes, min_open_routes)  # closing events consume routes: enough for every rep
     sessions = live_sessions if live_sessions is not None else DEFAULT_BASELINE["sessions"]
     marker = new_marker()
     root = Path(tempfile.mkdtemp(prefix=marker + "-", dir=parent or "/tmp"))
@@ -165,8 +169,40 @@ def build(*, history_rows: int | None = None, row_bytes: int = ROW_BYTES, open_r
         "streams": base["e2e_streams"], "baseline": baseline, "base_fixture": base,
         "rows": rows, "open_routes": routes,
     }
+    fixture.update(recent_rows_6h=None, recent_rows_24h=None)
+    try:
+        fixture.update(_recent_counts(base["jobs"]))
+        if shape:
+            from . import shapes
+            fixture["claude_transcripts"] = shapes.add_claude_transcripts(
+                fixture, **({"megabytes": transcript_mb} if transcript_mb is not None else {}))
+            shapes.add_codex_session(fixture, **({"megabytes": codex_log_mb} if codex_log_mb is not None else {}))
+    except BaseException:
+        cleanup(fixture)
+        raise
     # The hook fixture's own env (state under ``root/state``) is what T4 replays.
     return fixture
+
+
+def _recent_counts(jobs: str) -> dict:
+    """Registry rows younger than 6 h and 24 h (Fleet's afterglow and stall windows act on them)."""
+    import datetime
+    import time
+    now = time.time()
+    six = day = 0
+    with open(jobs, "rb") as handle:
+        for line in handle:
+            stamp = line.split(b"\t", 1)[0]
+            try:
+                age = now - datetime.datetime.strptime(stamp.decode(), "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+                    tzinfo=datetime.timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if age < 86_400:
+                day += 1
+                if age < 21_600:
+                    six += 1
+    return {"recent_rows_6h": six, "recent_rows_24h": day}
 
 
 def cleanup(fixture: dict, *, keep_files: bool = False) -> dict:
