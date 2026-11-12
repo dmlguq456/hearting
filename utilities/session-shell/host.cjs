@@ -633,7 +633,7 @@ async function refreshReadiness() {
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||currentDelivery){empty=false;return;}
   empty=result.ok===true&&result.ready===true;
-  if(empty&&state!=='idle'){state='idle';queueProjection();}
+  if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
@@ -840,7 +840,7 @@ async function lifecycle(req) {
     return {ok:true};
   }
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
-  sequence=req.seq;
+  sequence=req.seq;const was=state;
   if(req.event==='deselect'){
     selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
@@ -852,6 +852,8 @@ async function lifecycle(req) {
   } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
   else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
+  // The border's state is the host's own: paint it now, not after the projection.
+  if(state!==was)queueDisplay();
   projection();return {ok:true,...status()};
 }
 async function request(req) {
