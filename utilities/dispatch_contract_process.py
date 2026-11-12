@@ -471,15 +471,25 @@ def process_launch_lineage(pid: int) -> dict[str, str]:
 def _lineage_outside_attempt(ancestry, metadata) -> bool:
     """A live ancestor born before the leader and absent from its recorded launch lineage.
 
-    A fork copies its parent's place in the process tree, and an orphan is only
-    ever adopted by a live process on its own current chain, so a process's
-    current ancestors are always a subset of its earlier ones. Every process
-    descended from the leader therefore has current ancestors that are the
-    leader's descendants (born no earlier than it), the leader, or members of
-    the leader's ancestry at birth. An ancestor strictly older than the leader
-    and not in that recorded ancestry proves the process is outside the attempt,
+    Within one PID namespace a fork copies its parent's place in the process
+    tree, and an orphan is adopted only by a live subreaper on its dying
+    parent's chain or by that namespace's init, so when the recorded lineage
+    reaches that init a process's current ancestors are always a subset of its
+    earlier ones. Every process descended from the leader in the leader's
+    namespace therefore has current ancestors that are the leader's
+    descendants (born no earlier than it), the leader, or members of the
+    leader's ancestry at birth. An ancestor strictly older than the leader and
+    not in that recorded ancestry proves the process is outside the attempt,
     whatever its group, session, cgroup, or readable environment. The first
-    older ancestor decides: a recorded member's own ancestors are recorded too."""
+    older ancestor decides: a recorded member's own ancestors are recorded too.
+
+    The proof holds only inside that one namespace: a descendant that entered
+    another, older PID namespace (``setns``) is adopted by that namespace's
+    init, which was never on the leader's chain. ``ancestry`` is therefore
+    supplied only for a process proven to be in the observer's PID namespace
+    (`_denied_process_ancestry`), and both chains must end at the same init
+    (``1:<start>``), which also fixes the clock both starts were read with.
+    Anything else keeps the earlier answer."""
 
     recorded, namespace = metadata.get("launch_lineage", ""), metadata.get("launch_lineage_ns", "")
     origin = metadata.get("pid_start", "")
@@ -490,14 +500,33 @@ def _lineage_outside_attempt(ancestry, metadata) -> bool:
         return False
     if process_namespace_identity() != namespace or not _procfs_is_observer_namespace():
         return False
+    init_pid, init_start = ancestry[-1]
+    if init_pid != 1 or f"1:{init_start}" not in members:
+        return False
     for pid, start in ancestry:
         if int(start) < int(origin):
             return f"{pid}:{start}" not in members
     return False
 
 
+def _in_observer_pid_namespace(entry: Path) -> bool:
+    """True only when ``status`` names exactly one PID level, the namespace of this ``/proc``.
+
+    ``NSpid`` is readable for every process, unlike ``ns/pid``; a nested or
+    unreadable namespace answers False."""
+
+    try:
+        lines = (entry / "status").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    levels = next((line.split(":", 1)[1].split() for line in lines if line.startswith("NSpid:")), [])
+    return levels == [entry.name]
+
+
 def _denied_process_ancestry(entry: Path, stable_start: str) -> tuple[tuple[int, str], ...]:
-    if not stable_start:
+    # The namespace is read before the chain, whose first read re-checks the
+    # exact start, so a reused number cannot lend its namespace.
+    if not stable_start or not _in_observer_pid_namespace(entry):
         return ()
     return _verified_ancestry(entry.parent, int(entry.name), stable_start) or ()
 

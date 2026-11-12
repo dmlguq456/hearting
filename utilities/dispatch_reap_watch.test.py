@@ -1165,6 +1165,16 @@ class DrainScanRetryTest(unittest.TestCase):
             self.assertEqual(self.watch(None, grace=0.0, metadata=plain), (69, []))   # today's answer
         with mock.patch.object(Path, "read_bytes", denied(foreign, own)):
             self.assertEqual(self.watch(None, grace=0.0, metadata=metadata), (69, []))   # its own orphan
+        status = Path.read_text
+
+        def nested(path, *args, **kwargs):
+            text = status(path, *args, **kwargs)
+            if str(path) == f"/proc/{foreign}/status":   # another PID namespace (see the contract test)
+                return "".join(line + "\t3\n" if line.startswith("NSpid:") else line + "\n"
+                               for line in text.splitlines())
+            return text
+        with mock.patch.object(Path, "read_bytes", denied(foreign)), mock.patch.object(Path, "read_text", nested):
+            self.assertEqual(self.watch(None, grace=0.0, metadata=metadata), (69, []))   # no receipt
 
 class WorkerHomeRetentionCarrierTest(unittest.TestCase):
     """The post-exit reaper retires expired homes; no user step is involved."""

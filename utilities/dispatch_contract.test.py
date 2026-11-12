@@ -5778,6 +5778,54 @@ class LaunchLineageDeniedEnvironTest(unittest.TestCase):
    self.assertIsNone(D._verified_ancestry(Path("/proc"),late,D.process_start_ticks(late)))
    self.assertEqual(D.attempt_tagged_descendants(recorded).state,"unverifiable")
 
+ def nested(self,pid):
+  """``status`` as seen for a process in a deeper PID namespace (``NSpid`` of two levels)."""
+  real=Path.read_text
+  def read_text(path,*args,**kwargs):
+   text=real(path,*args,**kwargs)
+   if str(path)==f"/proc/{pid}/status":
+    return "".join(line+"\t3\n" if line.startswith("NSpid:") else line+"\n" for line in text.splitlines())
+   return text
+  return mock.patch.object(Path,"read_text",read_text)
+
+ def test_a_process_in_another_pid_namespace_is_not_excluded(self):
+  # A descendant that entered an older PID namespace (setns) is adopted by that namespace's init,
+  # which was never on the leader's chain: the same shape as a foreign process. Only the PID
+  # namespace tells them apart, so a process outside the observer's namespace keeps the earlier
+  # answer. Real private-namespace reproduction: BC-PR1544-FIX-1112 evidence; CI cannot create
+  # one, so the boundary is the ``NSpid`` line ``/proc`` reports for such a process.
+  leader,_plain,recorded,late=self.foreign()
+  self.stop(leader)
+  with self.denied(late):
+   self.assertEqual(self.probes(recorded).state,"empty")   # same namespace: excluded
+   with self.nested(late):
+    self.assertFalse(D._in_observer_pid_namespace(Path("/proc")/str(late)))
+    self.assert_unverifiable(recorded,late)
+  real=Path.read_text
+  def no_nspid(path,*args,**kwargs):
+   text=real(path,*args,**kwargs)
+   if str(path)==f"/proc/{late}/status":
+    return "".join(l+"\n" for l in text.splitlines() if not l.startswith("NSpid:"))
+   return text
+  with self.denied(late),mock.patch.object(Path,"read_text",no_nspid):
+   self.assert_unverifiable(recorded,late)   # an unknown namespace is not proof either
+
+ def test_both_chains_must_end_at_the_same_init(self):
+  leader,_plain,recorded,late=self.foreign()
+  self.stop(leader)
+  ancestry=D._verified_ancestry(Path("/proc"),late,D.process_start_ticks(late))
+  self.assertEqual(ancestry[-1][0],1)
+  self.assertTrue(D._lineage_outside_attempt(ancestry,recorded))
+  members=recorded["launch_lineage"].split("+")
+  self.assertEqual(members[-1],f"1:{ancestry[-1][1]}")
+  # Another clock (time namespace) or another init: the recorded init no longer matches.
+  shifted="+".join([*members[:-1],f"1:{int(ancestry[-1][1])+1}"])
+  self.assertFalse(D._lineage_outside_attempt(ancestry,dict(recorded,launch_lineage=shifted)))
+  # A recorded chain that stops short of init (a launcher that entered from outside the namespace).
+  self.assertFalse(D._lineage_outside_attempt(ancestry,dict(recorded,launch_lineage="+".join(members[:-1]))))
+  # A candidate chain that stops short of init.
+  self.assertFalse(D._lineage_outside_attempt(ancestry[:-1],recorded))
+
  def test_launch_lineage_needs_the_recorder_as_parent(self):
   self.assertEqual(D.process_launch_lineage(os.getpid()),{})
   with patch_split(D,"process_namespace_identity",return_value=None):
