@@ -62,6 +62,13 @@ class SessionRouteStatusTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in rows[0]["stages"]], ["inline"])
         self.assertNotIn("opencode\0sid-current", panels)
 
+    def test_shell_detail_keeps_every_current_route(self):
+        # Spec rule 23: the panel shows every current route, so none is cut at eight.
+        snapshot = self.snapshot(12)
+        labels, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(labels["claude\0sid-current"].split(" · ")[0], "route 12")
+        self.assertEqual(len(panels["claude\0sid-current"]), 12)
+
     def test_shell_detail_carries_what_routes_unfolds_from_the_same_records(self):
         # Spec rule 21: kind, owner, each stage's doer and box, workers and age come from
         # the very route records and node boxes ROUTES draws; nothing is read again.

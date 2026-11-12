@@ -9,8 +9,10 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
+import random
 import subprocess
 import sys
 import tempfile
@@ -1867,6 +1869,373 @@ class DeliveryDutyLifetimeTest(unittest.TestCase):
             seen.clear()
             self.assertEqual(obligations.ensure_observers(self.jobs), 0)
         self.assertEqual(seen, [812])
+
+
+class RestoredOwnerProofTest(unittest.TestCase):
+    """A proof restored after a runner restart is reselected when its basis changes."""
+
+    setUp = BatchObligationTest.setUp
+    _runtime_owner_row = BatchObligationTest._runtime_owner_row
+
+    def _passes_after_restart(self, *, watched):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        proofs = self.base / "runner-duties" / "settled-owners.json"
+        before = obligations.OwnerSettlementReadContext()
+        restarted = obligations.OwnerSettlementReadContext()
+        for context in (before, restarted):
+            context._dependency_watcher_fallback = not watched
+            self.addCleanup(context.close)
+        state = lambda *_args: COMPLETE if dependency.read_text() == "sealed" else PENDING
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            obligations._resume_owner_settlements(self.jobs, context=before)
+            self.assertTrue(before.save_settled_proofs(proofs))
+            self.assertEqual(restarted.load_settled_proofs(proofs), 1)
+            # The normal first pass after the restart: the registry is unchanged.
+            obligations._resume_owner_settlements(self.jobs, context=restarted)
+            self.assertEqual(settle.call_count, 0)
+            dependency.write_text("changed", encoding="utf-8")
+            outputs = [obligations._resume_owner_settlements(self.jobs, context=restarted)
+                       for _ in range(3)]
+            return settle.call_count, outputs
+
+    def test_a_dependency_written_during_the_settlement_read_is_not_its_basis(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+        context._dependency_watcher_fallback = True
+        self.addCleanup(context.close)
+        reads = []
+
+        def state(*_args):
+            reads.append(dependency.read_text())
+            if len(reads) == 1:
+                # Rewritten after this read observed it, before the proof is stored.
+                os.utime(dependency, ns=(1, 1))
+            return COMPLETE
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertEqual(context._settled, {}, "a proof must not adopt a mid-read change")
+            first_pass_reads = len(reads)
+            obligations._resume_owner_settlements(self.jobs, context=context)
+        self.assertGreater(len(reads), first_pass_reads, "the next pass observes the owner again")
+        self.assertEqual(len(context._settled), 1)
+
+    def _assert_reselected(self, watched):
+        settled, outputs = self._passes_after_restart(watched=watched)
+        self.assertGreater(settled, 0, "the restored proof's change must reach a pass")
+        self.assertTrue(any(outputs), outputs)
+
+    def test_dependency_change_after_restart_reselects_the_owner_by_stat_rotation(self):
+        self._assert_reselected(watched=False)
+
+    def test_dependency_change_after_restart_reselects_the_owner_by_watch(self):
+        self._assert_reselected(watched=True)
+
+    def _earlier_proof_invalidated_during_budgeted_resume(self, *, restored):
+        """An earlier owner whose proof became invalid is not hidden by the resume order.
+
+        2026-11-12 review [52]: owner 0 proven, the 5 s budget resumed after
+        owner 1, then owner 0's dependency turned pending; `order <= resume`
+        skipped it on every later pass (re-observed 0, settled 0).
+        """
+        attempts = [f"att-cold-{index}" for index in range(5)]
+        self.jobs.write_text("\n".join(self._runtime_owner_row(attempt) for attempt in attempts)
+                             + "\n", encoding="utf-8")
+        dependencies = {}
+        for attempt in attempts:
+            dependencies[attempt] = self.base / f"{attempt}.json"
+            dependencies[attempt].write_text("sealed", encoding="utf-8")
+        proofs = self.base / "runner-duties" / "settled-owners.json"
+        now = [0.0]
+        observed = []
+
+        def state(_jobs, _status, metadata):
+            observed.append(metadata["attempt_id"])
+            now[0] += 10.0  # each proof costs more than the pass budget
+            sealed = dependencies[metadata["attempt_id"]].read_text() == "sealed"
+            return COMPLETE if sealed else PENDING
+
+        def budgeted():
+            context = obligations.OwnerSettlementReadContext()
+            context._dependency_watcher_fallback = True
+            context._clock = lambda: now[0]
+            context.limit_owner_scan(5.0)
+            self.addCleanup(context.close)
+            return context
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               side_effect=lambda _j, _s, meta: (dependencies[meta["attempt_id"]],)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            context = budgeted()
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            if restored:
+                self.assertTrue(context.save_settled_proofs(proofs))
+                context = budgeted()
+                self.assertEqual(context.load_settled_proofs(proofs), 1)
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertEqual(observed, attempts[:2])
+            self.assertTrue(context.owner_scan_unfinished(self.jobs), "resume after owner 1")
+            dependencies[attempts[0]].write_text("pending", encoding="utf-8")
+            observed.clear()
+            outputs = [obligations._resume_owner_settlements(self.jobs, context=context)
+                       for _ in range(8)]
+        settled_zero = [call for call in settle.call_args_list if call.args[1] == attempts[0]]
+        # Each 5 s pass proves one owner: the never-proved owners 2-4 keep
+        # their turn first ([e7]), then owner 0 is observed again.
+        self.assertEqual(observed[:4], [*attempts[2:], attempts[0]],
+                         "owner 0 is re-observed right after the unproven suffix")
+        self.assertTrue(settled_zero, "owner 0 reaches its settlement path")
+        self.assertTrue(any(signature[2] == attempts[0] for signature in outputs[3]), outputs[3])
+        for attempt in attempts[2:]:
+            self.assertEqual(observed.count(attempt), 1,
+                             f"{attempt} is still proved exactly once by the resumed scan")
+        self.assertEqual(observed.count(attempts[1]), 0, "owner 1 keeps its valid proof")
+
+    def test_invalidated_restored_proof_is_reobserved_despite_the_resume_order(self):
+        self._earlier_proof_invalidated_during_budgeted_resume(restored=True)
+
+    def test_invalidated_fresh_proof_is_reobserved_despite_the_resume_order(self):
+        self._earlier_proof_invalidated_during_budgeted_resume(restored=False)
+
+
+
+class OwnerProofBudgetFairnessTest(unittest.TestCase):
+    """Budgeted owner-proof resumption under any order of proof invalidations.
+
+    2026-11-12 review [e7]: owner 0's dependency moved to a new complete
+    generation before every pass; each 5 s pass re-proved owner 0 alone, the
+    resume order stayed at owner 1, and owners 2-4 were never observed in
+    eight passes (fresh and restored proofs alike). Instead of one more
+    counterexample this asserts the four properties of the resumption over
+    seeded random invalidations, plus the [e7] six and [52] four probe cells:
+
+    1. progress: while an owner was never proved, every pass proves one;
+    2. re-observation: an owner whose proof became invalid is proved again
+       within a bounded number of passes, several such owners in turn;
+    3. once: no valid proof is re-proved, no owner is proved twice in a
+       pass, every due owner is proved and the totals match the invalidations;
+    4. budget: a pass proves exactly what its soft budget admits, and a
+       caller without a budget proves every due owner in one pass.
+    """
+
+    setUp = BatchObligationTest.setUp
+    _runtime_owner_row = BatchObligationTest._runtime_owner_row
+
+    def _owner_proof_run(self, count, *, cost=10.0, budget=5.0):
+        """A private registry of `count` finished owners with one dependency each."""
+        attempts = [f"att-fair-{index}" for index in range(count)]
+        self.jobs.write_text("\n".join(self._runtime_owner_row(attempt) for attempt in attempts)
+                             + "\n", encoding="utf-8")
+        registry_cache.clear_cache()
+        dependencies = {attempt: self.base / f"{attempt}.json" for attempt in attempts}
+        revision = [0]
+        for path in dependencies.values():
+            path.write_text("complete:initial", encoding="utf-8")
+        run = Namespace(attempts=attempts, now=[0.0], proofs=[], classifying=[False],
+                        settled=[], contexts=[], cost=cost, budget=budget)
+
+        def change(attempt, text=None):
+            revision[0] += 1
+            path = dependencies[attempt]
+            path.write_text(text or f"complete:revision-{revision[0]}", encoding="utf-8")
+            stamp = 10 ** 9 * (revision[0] + 1000)
+            os.utime(path, ns=(stamp, stamp))  # a new generation regardless of fs resolution
+
+        def state(_jobs, _status, metadata):
+            if run.classifying[0]:
+                run.proofs.append(metadata["attempt_id"])
+                run.now[0] += cost
+            text = dependencies[metadata["attempt_id"]].read_text()
+            return COMPLETE if text.startswith("complete") else PENDING
+
+        classify = obligations._classify_owner_candidates
+
+        def observed_classify(*args, **kwargs):
+            run.classifying[0] = True
+            try:
+                return classify(*args, **kwargs)
+            finally:
+                run.classifying[0] = False
+
+        def context(limit=budget):
+            created = obligations.OwnerSettlementReadContext()
+            created._dependency_watcher_fallback = True
+            created._clock = lambda: run.now[0]
+            created.limit_owner_scan(limit)
+            run.contexts.append(created)
+            self.addCleanup(created.close)
+            return created
+
+        def one_pass(current):
+            before = len(run.proofs)
+            output = obligations._resume_owner_settlements(self.jobs, context=current)
+            return run.proofs[before:], output
+
+        run.change, run.context, run.one_pass = change, context, one_pass
+        run.patches = contextlib.ExitStack()
+        run.patches.enter_context(mock.patch.object(
+            obligations, "_owner_settlement_dependency_paths",
+            side_effect=lambda _j, _s, meta: (dependencies[meta["attempt_id"]],)))
+        run.patches.enter_context(mock.patch.object(
+            obligations, "_classify_owner_candidates", side_effect=observed_classify))
+        run.patches.enter_context(mock.patch(
+            "dispatch_terminal_commit.owner_completion_state", side_effect=state))
+        run.patches.enter_context(mock.patch(
+            "dispatch_completion_join.materialize_after_terminal_close",
+            side_effect=lambda _jobs, attempt, *a, **k: run.settled.append(attempt)))
+        run.patches.enter_context(split_patch(
+            "dispatch_contract.supervisor_lease_is_held", return_value=False))
+        self.addCleanup(run.patches.close)
+        return run
+
+    def _checked_pass(self, run, current, model, since, pass_index, label, *, budgeted=True):
+        """One pass checked against properties 1, 3 and 4; returns its proofs."""
+        due = [attempt for attempt in run.attempts if model[attempt] != "valid"]
+        never = {attempt for attempt in run.attempts if model[attempt] == "never"}
+        proved, _output = run.one_pass(current)
+        where = f"{label} pass {pass_index}: proved {proved}, due {due}"
+        self.assertEqual(len(proved), len(set(proved)), f"once per pass — {where}")
+        self.assertFalse([a for a in proved if model[a] == "valid"],
+                         f"a valid proof is not proved again — {where}")
+        if budgeted:
+            admitted = math.ceil(run.budget / run.cost)
+            self.assertEqual(len(proved), min(len(due), admitted),
+                             f"the soft budget admits exactly this many proofs — {where}")
+            if never:
+                self.assertTrue(never & set(proved), f"progress: a never-proved owner — {where}")
+        else:
+            self.assertEqual(sorted(proved), sorted(due), f"no budget: one full pass — {where}")
+        for attempt in proved:
+            model[attempt] = "valid"
+            since.pop(attempt, None)
+        return proved
+
+    def _invalidate(self, run, model, since, attempt, pass_index, counts):
+        run.change(attempt)
+        if model[attempt] == "valid":
+            model[attempt] = "invalid"
+            since[attempt] = pass_index
+            counts[attempt] += 1
+
+    def _seeded_case(self, seed):
+        rng = random.Random(seed)
+        count = rng.randint(5, 8)
+        passes = rng.randint(20, 40)
+        cost = rng.choice((10.0, 10.0, 2.0))  # one proof per 5 s pass, or a few
+        hot = rng.sample(range(count), rng.choice((1, 1, 2, 3)))  # invalidated every pass
+        rate = rng.choice((0.0, 0.3, 0.6))
+        restore_at = rng.choice((None, rng.randint(1, passes - 2)))
+        label = (f"seed {seed} owners={count} passes={passes} cost={cost} hot={hot} "
+                 f"rate={rate} restore={restore_at}")
+        run = self._owner_proof_run(count, cost=cost)
+        attempts = run.attempts
+        model = {attempt: "never" for attempt in attempts}
+        since, counts = {}, {attempt: 0 for attempt in attempts}
+        proofs_of = {attempt: 0 for attempt in attempts}
+        bound = 2 * count + 1
+        proofs_file = self.base / f"proofs-{seed}.json"
+        current = run.context()
+        for pass_index in range(passes):
+            if pass_index:
+                for index in hot:
+                    self._invalidate(run, model, since, attempts[index], pass_index, counts)
+                if rng.random() < rate:
+                    self._invalidate(run, model, since, rng.choice(attempts), pass_index, counts)
+            for attempt in self._checked_pass(run, current, model, since, pass_index, label):
+                proofs_of[attempt] += 1
+            late = {a: pass_index - s for a, s in since.items() if pass_index - s >= bound}
+            self.assertFalse(late, f"re-observation within {bound} passes — {label}: {late}")
+            if pass_index == restore_at:
+                self.assertTrue(current.save_settled_proofs(proofs_file))
+                current = run.context()
+                current.load_settled_proofs(proofs_file)
+                # Only valid proofs were saved: to the restarted runner an
+                # invalidated owner is one it has not proved yet.
+                for attempt, state in model.items():
+                    if state == "invalid":
+                        model[attempt] = "never"
+        for index in range(len(attempts)):  # the invalidations stop: everything settles
+            if all(state == "valid" for state in model.values()):
+                break
+            for attempt in self._checked_pass(run, current, model, since, passes + index, label):
+                proofs_of[attempt] += 1
+        self.assertEqual(set(model.values()), {"valid"}, f"no owner is skipped — {label}")
+        self.assertEqual(proofs_of, {a: 1 + counts[a] for a in attempts},
+                         f"one proof per invalidation — {label}")
+        # A caller without a budget still finishes in one pass.
+        for attempt in rng.sample(attempts, rng.randint(1, count)):
+            self._invalidate(run, model, since, attempt, passes, counts)
+        current.limit_owner_scan(None)
+        self._checked_pass(run, current, model, since, passes + count, label, budgeted=False)
+        self.assertEqual(run.one_pass(current)[0], [], f"nothing left — {label}")
+
+    def _probe_cell(self, *, restored, budget, churn, pending=False):
+        """[e7] six cells (churn) and [52] four cells (pending) on five owners."""
+        label = f"restored={restored} budget={budget} churn={churn} pending={pending}"
+        run = self._owner_proof_run(5)
+        attempts = run.attempts
+        model = {attempt: "never" for attempt in attempts}
+        since, counts = {}, {attempt: 0 for attempt in attempts}
+        current = run.context()
+        self.assertEqual(run.one_pass(current)[0], attempts[:1])
+        if restored:
+            proofs_file = self.base / "proofs.json"
+            self.assertTrue(current.save_settled_proofs(proofs_file))
+            current = run.context()
+            self.assertEqual(current.load_settled_proofs(proofs_file), 1)
+        self.assertEqual(run.one_pass(current)[0], attempts[1:2])
+        self.assertTrue(current.owner_scan_unfinished(self.jobs), "resume after owner 1")
+        model.update({attempts[0]: "valid", attempts[1]: "valid"})
+        if not budget:
+            current.limit_owner_scan(None)
+        if pending:
+            run.change(attempts[0], "pending")
+            seen = []
+            for _ in range(8):
+                seen.extend(run.one_pass(current)[0])
+            self.assertIn(attempts[0], seen, f"owner 0 is re-observed — {label}")
+            self.assertIn(attempts[0], run.settled, f"owner 0 reaches settlement — {label}")
+            for attempt in attempts[2:]:
+                self.assertEqual(seen.count(attempt), 1, f"{attempt} proved once — {label}")
+            self.assertEqual(seen.count(attempts[1]), 0, f"owner 1 keeps its proof — {label}")
+            return
+        seen = []
+        for pass_index in range(8):
+            if churn:
+                self._invalidate(run, model, since, attempts[0], pass_index, counts)
+            seen.extend(self._checked_pass(run, current, model, since, pass_index, label,
+                                           budgeted=budget))
+        self.assertEqual([a for a in attempts[2:] if a not in seen], [],
+                         f"tail owners are observed within eight passes — {label}")
+
+    def test_budgeted_resumption_keeps_its_four_properties_under_random_invalidations(self):
+        for seed in range(12):
+            with self.subTest(seed=seed):
+                self._seeded_case(seed)
+
+    def test_review_probe_cells_hold(self):
+        cells = [dict(restored=r, budget=b, churn=c) for r, b, c in (
+            (False, True, False), (True, True, False), (False, False, True),
+            (True, False, True), (False, True, True), (True, True, True))]
+        cells += [dict(restored=r, budget=b, churn=False, pending=True)
+                  for r in (False, True) for b in (False, True)]
+        for cell in cells:
+            with self.subTest(**cell):
+                self._probe_cell(**cell)
 
 
 if __name__ == "__main__":

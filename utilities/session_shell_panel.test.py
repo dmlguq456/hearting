@@ -158,9 +158,11 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['[e9] project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','ROUTE_4','+1 more','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['[e9] project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
- assert(!idle.some(s=>s.includes('ROUTE_5')));assert(/^└─+┘$/.test(idle.at(-1)));
+ // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
+ const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
+ assert.equal(listed+below,6,idle.join('\n'));assert(!idle.join('').includes('more'),idle.join('\n'));assert(/^└─+┘$/.test(idle.at(-1)));
  assert(idle.at(-2).includes('7d 60%'),'quota is the last row');
 }
 for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;height<=24;height+=2){
@@ -175,7 +177,7 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
-assert(r.hits.some(h=>h.action.startsWith('message:1:←:')));assert(r.hits.some(h=>h.action==='fleet'));
+assert(r.hits.some(h=>h.action.startsWith('message:1:←:')));assert(!r.hits.some(h=>h.action==='fleet'));
 '''
         self.node(script, "panel-view.cjs")
 
@@ -267,18 +269,29 @@ const base={head:[{text:'[52] project'}],selected:[{text:'fixture'},{text:' high
  jobs:[{text:'>_ running: JOB'}],quota:[{text:'5h 12%'}],session_title:'TITLE'};
 const paint=(model,width,height,extra={})=>{const r=view.render({width,height,side:width<80,model,sid:'s',configuration:{},questions:()=>[],...extra});
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
-// Twelve current routes, eight kept rows: the head and `+N more` count all twelve.
-const twelve={...base,routes:Array.from({length:8},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:8,route_total:12};
-let r=paint(twelve,40,30);assert(r.plain.some(s=>s.includes('route 12')),r.plain.join('\n'));
-assert(r.plain.some(s=>s.includes('+7 more')),r.plain.join('\n'));
-// Fewer rows: the rows shown plus `+N more` are always the whole count.
+// Spec rule 23: twelve current routes all have rows; the head counts all twelve
+// and nothing folds into `+N more` or opens Fleet.
+const twelve={...base,routes:Array.from({length:12},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:12,route_total:12};
+let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('route 12')),r.plain.join('\n'));
+assert(r.plain.some(s=>s.includes('ROUTE_11'))&&!r.plain.join('').includes('more'),r.plain.join('\n'));
+// Fewer rows: the rows shown plus the border counts (`↑N` above, `↓N` below) are always the whole count.
 const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
+const hidden=(plain,arrow)=>Number((plain.join('\n').match(new RegExp(' '+arrow+'(\\d+) ─[╮╯]'))||[0,0])[1]);
 for(let height=10;height<=22;height++){
- for(const model of [six,twelve]){
-  r=paint(model,40,height);const shown=new Set(r.hits.filter(h=>h.action.startsWith('route:')).map(h=>h.action)).size,m=r.plain.join('\n').match(/\+(\d+) more/);
-  if(m)assert.equal(shown+Number(m[1]),model.route_total,height+'\n'+r.plain.join('\n'));
+ for(const model of [six,twelve])for(const scroll of [0,3,99]){
+  r=paint(model,40,height,{routeScroll:scroll});const shown=new Set(r.hits.filter(h=>h.action.startsWith('route:')).map(h=>h.action)).size;
+  assert(!r.plain.join('').includes('more')&&!r.hits.some(h=>h.action==='fleet'),height+'\n'+r.plain.join('\n'));
+  if(r.routeArea){
+   assert.equal(shown+hidden(r.plain,'↑')+hidden(r.plain,'↓'),model.route_total,height+'\n'+r.plain.join('\n'));
+   assert.equal(hidden(r.plain,'↑'),r.routeArea.offset);assert(r.routeArea.offset<=r.routeArea.max);
+  }
  }
 }
+// A producer total above the rows it sent is counted in the lower border.
+r=paint({...six,route_total:9},40,40);assert(r.plain.some(s=>/ ↓3 ─╯/.test(s)),r.plain.join('\n'));
+// While the box scrolls, a working route comes before waiting, stopped and finished ones.
+const mixed={...base,route_count:4,routes:[{...route('d','DONE_R'),kind:'done'},{...route('x','DEAD_R'),kind:'dead'},{...route('b','WAIT_R'),kind:'blocked'},route('w','WORK_R')]};
+for(let height=10;height<=16;height++){r=paint(mixed,40,height);if(r.routeArea?.max){const first=r.plain.find(s=>/_R/.test(s));assert(first.includes('WORK_R'),height+'\n'+r.plain.join('\n'));}}
 // An opened message reads to its recorded end where rows allow, else counts the rest and reads on.
 const long='START '+'word '.repeat(60)+'END_1517';
 const msg={...base,routes:[],route_count:0,messages:[{way:'←',who:'[e7]',text:long,at:1}]};
@@ -318,6 +331,10 @@ for(let height=10;height<=22;height++){
         panel = session_panel.presentation(values, {"route_panels": {"opencode\0s": rows}}, "opencode", "s", 40)
         self.assertEqual((panel["route_count"], panel["route_total"]), (8, 12))
         self.assertEqual("".join(text for text, _key in panel["mcp"]), "MCP 2/3")
+        # Spec rule 23: every current route reaches the panel, beyond the former eight rows.
+        many = rows + [{"id": "rt-x" + str(i), "title": "ROUTE", "state": "working", "marker": "working"} for i in range(7)]
+        panel = session_panel.presentation({"harness": "codex", "route_label": "route 15 ⠏15"}, {"route_panels": {"codex\0s": many}}, "codex", "s", 40)
+        self.assertEqual((len(panel["routes"]), panel["route_count"], panel["route_total"]), (15, 15, 15))
         panel = session_panel.presentation({"harness": "codex"}, {"route_panels": {"codex\0s": rows[:2]}}, "codex", "s", 40)
         self.assertEqual((panel["route_count"], panel["route_total"], panel["mcp"]), (2, None, []))
         # A label an earlier release left in the shared cache still gives its whole count,
@@ -367,13 +384,14 @@ assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).inclu
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(r,'╭').dim,true);
 for(const s of rows)assert.equal(cells(s),40,s);
-// Short of rows: the route side gives way first (two rows -> one row -> `+N more`); messages fold to
-// one row only after that, and go last.
+// Short of rows (spec rule 23): two rows fold to one and messages fold to one row
+// before the route box scrolls in place; messages go last.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
 for(const q of [[],question])for(let h=12;h<=30;h++){
  const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   codex'));
- if(!all.includes('MESSAGE_2')&&all.includes('MESSAGE_1'))assert(!two&&rows.filter(s=>s.includes('ROUTE_')).length<=1&&/ \+2 ─ │/.test(all),h+'\n'+all);
- if(all.includes('MESSAGE_3')&&all.includes('ROUTE_0'))assert(two||all.includes('more')||rows.filter(s=>s.includes('ROUTE_')).length===3,h+'\n'+all);
+ if(!all.includes('MESSAGE_2')&&all.includes('MESSAGE_1'))assert(!two&&/ \+2 ─ │/.test(all),h+'\n'+all);
+ if(all.includes('MESSAGE_3')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
+ if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2'),h+'\n'+all);
  if(!all.includes('MESSAGE_1'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box.

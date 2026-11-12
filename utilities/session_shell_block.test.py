@@ -117,6 +117,43 @@ setImmediate(()=>{assert.deepEqual(sent,[{question_id:'q',revision:'r1',answers:
                               text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
 
+    def test_split_page_keys_page_the_route_box_like_whole_ones(self):
+        # PR #1549 P2: the panel-mouse decoder lets a held `ESC [` go after 8ms, so
+        # PgUp/PgDn can reach the block parser in two reads. With no question it pages
+        # the route box all the same; with one the question's body reads on.
+        code=r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]),decoder=require(process.argv[2]);
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+(async()=>{
+ let pages=[],native=[];
+ const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},page:dir=>pages.push(dir)});
+ const mouse=decoder({suppressed:()=>false,mouse(){},bytes:data=>{const rest=block.focused?block.input(data):data;if(rest.length)native.push(rest.toString('latin1'));}});
+ block.update([]);block.enter();
+ mouse.feed(Buffer.from('\x1b[6~'));assert.deepEqual(pages,[1]);
+ for(const gap of [0,12,40]){
+  pages=[];mouse.feed(Buffer.from('\x1b['));await wait(gap);mouse.feed(Buffer.from('6~'));await wait(20);
+  assert.deepEqual(pages,[1],'split PgDn after '+gap+'ms');
+  pages=[];mouse.feed(Buffer.from('\x1b'));await wait(gap?gap/2:0);mouse.feed(Buffer.from('[5~'));await wait(20);
+  assert.deepEqual(pages,[-1],'split PgUp after '+gap+'ms');
+ }
+ assert.deepEqual(native,[]);assert.ok(block.focused);
+ // A question owns the same split keys: its body pages, the route box stays.
+ pages=[];
+ const body=Array.from({length:12},(_,i)=>[{text:'BODY_LINE_'+i}]);
+ block.update([{id:'q',revision:'r1',answerable:true,request_state:'open',questions:[{id:'a',question:'LONG',choices:['A','B'],
+  display:{head:[{text:'Q_HEAD'}],body,options:[[{text:'1 '},{text:'A'}],[{text:'2 '},{text:'B'}]]}}]}]);
+ const draw=()=>block.detail({budget:7,columns:40}).map(r=>r.map(x=>x.text).join('')).join('\n');
+ const first=draw();
+ mouse.feed(Buffer.from('\x1b['));await wait(40);mouse.feed(Buffer.from('6~'));await wait(20);
+ assert.deepEqual(pages,[]);assert.notEqual(draw(),first);
+ // Unfocused, the whole key goes to the native unchanged.
+ block.leave();mouse.feed(Buffer.from('\x1b[6~'));assert.deepEqual(native,['\x1b[6~']);assert.deepEqual(pages,[]);
+ console.log('PASS');
+})().catch(error=>{console.error(error);process.exit(1);});"""
+        result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs'),
+                               str(ROOT/'utilities/session-shell/panel-mouse.cjs')],text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn('PASS',result.stdout)
+
     def test_split_controls_drafts_and_replaced_questions_never_retarget_native_input(self):
         code=r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);

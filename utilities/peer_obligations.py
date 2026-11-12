@@ -962,6 +962,35 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
         return False
 
 
+_UNCACHED = object()
+
+
+_MEMORY_RELEASED_AT = [0.0]
+_LIBC_TRIM = []
+
+
+def release_freed_memory(*, min_interval=5.0):
+    """Hand heap pages freed by large one-pass reads back to the system.
+
+    A runner pass reads whole spec trees and ledgers and drops them; glibc keeps
+    the freed heap mapped, so the long-lived runner otherwise stays at its peak
+    size. Rate limited; a no-op where ``malloc_trim`` is unavailable.
+    """
+    now = time.monotonic()
+    if now - _MEMORY_RELEASED_AT[0] < min_interval:
+        return
+    _MEMORY_RELEASED_AT[0] = now
+    if not _LIBC_TRIM:
+        try:
+            import ctypes
+            _LIBC_TRIM.append(ctypes.CDLL("libc.so.6").malloc_trim)
+        except (OSError, AttributeError, ImportError):
+            _LIBC_TRIM.append(None)
+    if _LIBC_TRIM[0] is not None:
+        with contextlib.suppress(Exception):
+            _LIBC_TRIM[0](0)
+
+
 def _safe_id(value: str) -> str:
     if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
         raise ObligationError("peer-obligation-id-invalid")
@@ -2468,25 +2497,51 @@ class ObligationStore:
             self._mark_active_rebuild(active_fd)
         return tuple(ids), live_pending
 
+    def _cached_list_record(self, key: str):
+        """The cached record of one unchanged file, or ``_UNCACHED``.
+
+        The active-index read stats every listed record on every pass; this is
+        the same stat signature ``_read_list_record`` compares, taken on the
+        record's path string so an unchanged file costs one ``lstat`` instead
+        of a ``Path`` construction per record.
+        """
+        cached = self._list_cache.get(key)
+        if cached is None:
+            return _UNCACHED
+        try:
+            info = os.lstat(key)
+        except OSError:
+            return _UNCACHED
+        if not stat.S_ISREG(info.st_mode):
+            return _UNCACHED
+        self._discovery_metrics["stat_calls"] += 1
+        if cached[0] != (info.st_dev, info.st_ino, info.st_mtime_ns,
+                         info.st_ctime_ns, info.st_size):
+            return _UNCACHED
+        return cached[1]
+
     def _read_active_records(self, root_fd, active_fd, *, live_pending=False):
         ids, live_pending = self._active_names(active_fd)
         self._discovery_metrics["active_index_scans"] += 1
         self._discovery_metrics["active_index_entries"] += len(ids)
         output = {}
         stale = []
+        prefix = os.path.join(str(self.root), "")
         for duty_id in ids:
-            path = self._record_path(duty_id)
-            try:
-                record = self._read_list_record(path)
-            except ObligationError:
-                continue
+            key = prefix + duty_id + ".json"
+            record = self._cached_list_record(key)
+            if record is _UNCACHED:
+                try:
+                    record = self._read_list_record(Path(key))
+                except ObligationError:
+                    continue
             if record is None:
                 continue
             if not self._active_record(record):
                 stale.append(duty_id)
                 if not live_pending:
                     continue
-            output[str(path)] = record
+            output[key] = record
         if stale and not live_pending:
             # A stale marker means a writer crashed between record and index
             # updates. Rebuild under the index lock on the next pass.

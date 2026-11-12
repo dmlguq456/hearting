@@ -34,6 +34,14 @@ _LOCK = threading.RLock()
 def resolve_gitdir(cwd):
     if not cwd:
         return None, None
+    try:
+        from .pass_scope import cached
+    except ImportError:  # run as the --display-refresh script
+        return _resolve_gitdir(cwd)
+    return cached(("gitdir", os.path.abspath(cwd)), lambda: _resolve_gitdir(cwd))
+
+
+def _resolve_gitdir(cwd):
     directory = os.path.abspath(cwd)
     for _ in range(30):
         pointer = os.path.join(directory, ".git")

@@ -842,6 +842,9 @@ def enrich(snapshot, *, include_report_verification=True, required_only=False):
             stack.enter_context(collection_read_scope())
         stack.enter_context(artifact_producer.artifact_index_observation_scope())
         stack.enter_context(dispatch_registry_cache.registry_read_scope())
+        from .pass_scope import collection_pass, install
+        install()
+        stack.enter_context(collection_pass())
         return _enrich(snapshot, include_report_verification=include_report_verification,
                        required=required, required_only=required_only)
 
