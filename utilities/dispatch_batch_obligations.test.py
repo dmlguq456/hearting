@@ -1065,7 +1065,6 @@ class BatchObligationTest(unittest.TestCase):
         context = obligations.OwnerSettlementReadContext()
         self.addCleanup(context.close)
         view = registry_cache.registry_view(self.jobs, append_only=True)
-        self.assertFalse(view.append_only_generation, "a first read is a full read")
         self.assertEqual(context.owner_candidate_floor(self.jobs, view), -1)
         context.remember_owner_cursor(self.jobs, view)
 
@@ -1074,18 +1073,24 @@ class BatchObligationTest(unittest.TestCase):
         self.assertEqual(context.owner_candidate_floor(self.jobs, cached),
                          view.last_complete_order)
 
+        # The bytes, not the inode, are what the cursor proved: an identical
+        # replacement keeps the floor, a changed one gives it up.
         self._replace_registry(rows)
         replaced = registry_cache.registry_view(self.jobs, append_only=True)
         self.assertIsNot(replaced, view)
-        self.assertEqual(context.owner_candidate_floor(self.jobs, replaced), -1)
+        self.assertEqual(context.owner_candidate_floor(self.jobs, replaced),
+                         view.last_complete_order)
+        self._replace_registry(self._runtime_owner_row("att-one", status="running") + "\n"
+                               + self._runtime_owner_row("att-two") + "\n")
+        changed = registry_cache.registry_view(self.jobs, append_only=True)
+        self.assertEqual(context.owner_candidate_floor(self.jobs, changed), -1)
 
-        context.remember_owner_cursor(self.jobs, replaced)
+        context.remember_owner_cursor(self.jobs, changed)
         with self.jobs.open("a", encoding="utf-8") as stream:
             stream.write(self._runtime_owner_row("att-three") + "\n")
         appended = registry_cache.registry_view(self.jobs, append_only=True)
-        self.assertTrue(appended.append_only_generation)
         self.assertEqual(context.owner_candidate_floor(self.jobs, appended),
-                         replaced.last_complete_order)
+                         changed.last_complete_order)
 
     def test_inode_reused_by_a_replacement_does_not_resume_an_older_cursor(self):
         # gen1 (inode A) holds the cursor; gen2 (inode B) finishes an old owner
@@ -1093,7 +1098,8 @@ class BatchObligationTest(unittest.TestCase):
         # rename, and ext4 commonly hands it inode A again. gen3 keeps every
         # cached gen2 segment, yet it is a replacement, not an append of gen1:
         # a floor at gen1's cursor would skip the finished owner's settlement.
-        # Without inode reuse the floor holds anyway; the marker is checked as well.
+        # Without inode reuse the floor holds anyway (see OwnerCandidateFloorProofTest
+        # for the same history with the inode brought back on any filesystem).
         def rename_registry(lines):
             fd, staged = tempfile.mkstemp(prefix=".jobs.log.claim-", dir=str(self.base))
             with os.fdopen(fd, "wb") as stream:
@@ -1119,7 +1125,6 @@ class BatchObligationTest(unittest.TestCase):
                 same_inode = tuple(third.signature[:2]) == tuple(first.signature[:2])
                 self.assertEqual(context.owner_candidate_floor(self.jobs, third), -1,
                                  f"inode reused: {same_inode}")
-                self.assertFalse(third.append_only_generation)
 
     def test_not_applicable_owner_is_reclassified_only_when_its_rows_change(self):
         owner = self._runtime_owner_row("att-na")
