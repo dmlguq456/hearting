@@ -128,7 +128,7 @@ from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_supervisor_terminal import (  # noqa: E402
     classify_supervisor_log, missing_result_terminal,
 )
-from dispatch_registry_cache import registry_lines, registry_view  # noqa: E402
+from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
 INVALID_ENVELOPE_CLASSIFIER_SOURCE = "completion-join-invalid-envelope-v1"
 OPEN_STATES = frozenset({"open", "running"})
@@ -160,6 +160,11 @@ PARENT_SESSION_STATE_SCHEMA_VERSION = 1
 STATE_PHASES = frozenset({"parked", "deliverable", "running-turn", "recovery", "terminal"})
 MAX_STATE_BYTES = 16384
 MAX_BATCH_ATTEMPTS = 4
+# A child unverifiable this long (per child, continuously) asks for supervision;
+# one that ended normally and only awaits its post-exit receipt gets the longer
+# settling ceiling first.
+UNVERIFIABLE_NOTICE_SECONDS = 30
+SETTLING_NOTICE_SECONDS = 600
 SESSION_PARENT_DELIVERY = "codex-stop-hook"
 MANAGED_SESSION_PARENT_DELIVERY = "codex-managed-gateway"
 CODEX_QUEUE_PARENT_DELIVERY = "codex-native-queue"
@@ -703,6 +708,135 @@ def expire_pending_for_dead_recipient(
             and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
 
 
+NOTICE_LINEAGE_PREFIX = "session-notice-lineage-v1:"
+
+
+class NoticeOwnerObservation:
+    """What one reconcile pass saw of the registry, for the notice TTL alone.
+
+    ``attempts`` is the set of attempt ids of a registry generation the shared
+    reader called complete and whose every row was parsed (six fields, an
+    attempt id); anything else -- an unreadable, missing, broken-link or
+    directory path, a torn last line or invalid UTF-8, a row that did not
+    parse -- leaves it ``None``: nothing was observed, so no owner is absent.
+    The archive is read lazily, after the live file, with the same rule: the
+    archive writes and syncs a row before the live file drops it, so a row is
+    always in one of the two reads.
+    """
+
+    def __init__(self, root: Path, lines) -> None:
+        self.root = root
+        self.attempts = self._attempts(lines)
+        self._archived: frozenset | None = None
+        self._archive_read = False
+
+    @staticmethod
+    def _attempts(lines):
+        if lines is None:
+            return None
+        attempts = set()
+        for line in lines:
+            fields = line.split("\t") if isinstance(line, str) else ()
+            if len(fields) != 6:
+                return None
+            attempt_id = parse_registry_metadata(fields[5]).get("attempt_id", "")
+            if not attempt_id:
+                return None
+            attempts.add(attempt_id)
+        return frozenset(attempts)
+
+    def archived_attempts(self):
+        if not self._archive_read:
+            self._archive_read = True
+            self._archived = self._read_archive()
+        return self._archived
+
+    def _read_archive(self):
+        from dispatch_registry_archive import SEGMENT_PREFIX
+        archive = self.root / "archive"
+        attempts = set()
+        try:
+            segments = sorted(archive.iterdir())
+        except OSError:   # no archive, or one that cannot be listed: not observed
+            return None
+        for segment in segments:
+            if not segment.name.startswith(SEGMENT_PREFIX):
+                continue
+            try:
+                data = (segment / "rows.jsonl").read_bytes()
+            except OSError:
+                return None
+            for raw_line in data.split(b"\n"):
+                if not raw_line:
+                    continue
+                try:
+                    row = json.loads(raw_line)
+                except ValueError:
+                    return None
+                raw = row.get("raw") if isinstance(row, dict) else None
+                found = self._attempts([raw]) if isinstance(raw, str) else None
+                if not found:
+                    return None
+                attempts |= found
+        return frozenset(attempts)
+
+
+def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
+    """The notice TTL's one eligibility rule (SD-111 §(7)).
+
+    True only when a successful, valid registry observation confirms that no
+    owner the record names (its attempt ids, parent attempt, or session-notice
+    lineage binding) has a row, live or archived. Every other case -- an
+    unobserved registry or archive, a record or lineage that does not parse, a
+    lineage naming another registry, a named owner whose row exists (the
+    dead-recipient rule alone decides it), a person's question answer, a
+    claimed or ambiguous delivery -- keeps the record.
+    """
+    try:
+        if observation.attempts is None or not isinstance(record, dict):
+            return False
+        receipt = record.get("receipt")
+        if (record.get("state") != "pending" or record.get("route_node") != "notice"
+                or not isinstance(receipt, dict) or "answer_binding" in receipt):
+            return False
+        names = record.get("attempt_ids")
+        parent = record.get("parent_attempt_id")
+        lineage = record.get("lineage")
+        if (not isinstance(names, list) or not isinstance(parent, str)
+                or not isinstance(lineage, list)
+                or not all(isinstance(name, str) and name for name in names)):
+            return False
+        names = set(names) | ({parent} if parent else set())
+        for entry in lineage:
+            if not isinstance(entry, str) or not entry.startswith(NOTICE_LINEAGE_PREFIX):
+                return False
+            stored = json.loads(entry[len(NOTICE_LINEAGE_PREFIX):])
+            if isinstance(stored, dict) and set(stored) == {"jobs", "binding"}:
+                raw_jobs = stored["jobs"]
+                if (not isinstance(raw_jobs, str) or not Path(raw_jobs).is_absolute()
+                        or Path(raw_jobs).resolve(strict=False).parent != observation.root):
+                    return False
+                stored = stored["binding"]
+            if not isinstance(stored, dict):
+                return False
+            kind = stored.get("kind")
+            if kind in {"attempt-parent", "owner-session"}:
+                attempt_id = stored.get("attempt_id")
+                if not isinstance(attempt_id, str) or not attempt_id:
+                    return False
+                names.add(attempt_id)
+            elif kind != "provenance":
+                return False
+        if not names:
+            return True
+        if names & observation.attempts:
+            return False
+        archived = observation.archived_attempts()
+        return archived is not None and not names & archived
+    except Exception:  # noqa: BLE001 -- an unjudged record is kept
+        return False
+
+
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                                time_budget_s: float | None = None,
                                start_after: str | None = None,
@@ -731,6 +865,10 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
        ``dispatch-reconcile`` (§10.2). A record whose liveness cannot be
        determined -- fields absent, owning row gone, digest mismatch -- is
        left untouched: unknown liveness never expires.
+       A pending notice with no live owning row expires as
+       ``pending-delivery-ttl-exceeded`` past ``NOTICE_TTL_SECONDS`` only when
+       ``notice_ttl_eligible`` confirms its owner's absence on this pass's
+       valid registry (and archive) observation; a question answer never does.
 
     Never raises; each row/record is handled independently so one bad row or
     record cannot stop the sweep. Observers (fleet, sweep hooks) have no call
@@ -789,9 +927,17 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     registry_complete = True
     registry_cursor = None
     try:
-        lines = registry_lines(jobs)
-    except OSError:
+        snapshot = registry_snapshot(jobs)
+        lines = snapshot.view.lines
+        # The shared reader already says when a generation is not whole (a torn
+        # last line, invalid UTF-8, a malformed row): such a read observed nothing.
+        observed_lines = lines if snapshot.complete else None
+    except (OSError, ValueError):
         lines = []
+        observed_lines = None
+    # The notice TTL alone reads this: only a registry read here, whole and
+    # parsed, can confirm that a notice's owner has no row.
+    notice_owners = NoticeOwnerObservation(root, observed_lines)
     rows_by_attempt: dict[str, dict[str, str]] = {}
     parsed: list[dict[str, str] | None] = []
     for line in lines:
@@ -874,7 +1020,19 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                         owner_metadata = rows_by_attempt[candidate]
                         break
             if owner_metadata is None:
-                result["skipped"] += 1
+                # No live owning row. The notice TTL may end the record only
+                # when ``notice_ttl_eligible`` confirms that absence on a
+                # valid observation; every other record is kept as it is.
+                expiry = "skipped"
+                if (notice_owners.attempts is not None
+                        and record.get("route_node") == "notice"):
+                    try:
+                        expiry = pending_delivery.expire_notice_past_ttl(
+                            record_file, actor="dispatch-reconcile",
+                            eligible=lambda value: notice_ttl_eligible(value, notice_owners))
+                    except (pending_delivery.PendingDeliveryError, OSError):
+                        expiry = "skipped"
+                result["expired" if expiry == "expired" else "skipped"] += 1
                 continue
             expiry = expire_pending_for_dead_recipient(
                 jobs, owner_metadata, record, attempt_id=owner_attempt_id)
@@ -4023,7 +4181,7 @@ def _join_snapshot(
         "started": time.monotonic(), "last_recovery": {}, "last_settlement": {},
         "settlement_backoff": {}, "recovery_results": {},
         "last_observation": float("-inf"), "last_signature": "",
-        "observation_error": "", "unverifiable_since": {},
+        "observation_error": "", "unverifiable_since": {}, "settling_attempt_ids": set(),
         "notified_attempt_ids": set(),
         "last_notice_attempt": float("-inf"), "blocked_notice_published": False,
         "last_blocked_notice_attempt": float("-inf"), "registry_generation": None,
@@ -4037,6 +4195,7 @@ def _join_snapshot(
     last_signature = state["last_signature"]
     observation_error = state["observation_error"]
     unverifiable_since = state["unverifiable_since"]
+    settling_attempt_ids = state.setdefault("settling_attempt_ids", set())
     notified_attempt_ids = state["notified_attempt_ids"]
     last_notice_attempt = state["last_notice_attempt"]
     blocked_notice_published = state["blocked_notice_published"]
@@ -4079,12 +4238,11 @@ def _join_snapshot(
                     "reason": "cancelled-by-parent" if settled else "termination-pending",
                     "required_action": "advance-completed" if settled else "complete-open"})
                 continue
+            finished = terminal_envelope_observed(row.metadata.get("log_file"))
             observed = observed_attempt_liveness(
                 row.status,
                 row.metadata,
-                terminal_envelope=terminal_envelope_observed(
-                    row.metadata.get("log_file")
-                ),
+                terminal_envelope=finished,
                 # A join is itself a terminal gate.  Namespace-local workers
                 # must therefore carry the wrapper-issued portable post-exit
                 # receipt before any liveness fallback may make them ready,
@@ -4106,8 +4264,19 @@ def _join_snapshot(
             readiness, reason = choice.state, choice.reason
             if reason == "process-unverifiable":
                 unverifiable_since.setdefault(row.attempt_id, time.monotonic())
+                # A worker that ended normally and only awaits its post-exit
+                # receipt is settling, not stuck: the receipt waits on a clean
+                # host process scan, which other sessions' short-lived
+                # unreadable processes can delay for minutes. Notice it only
+                # past the settling ceiling.
+                if (observed.process_reason == "post-exit-receipt-incomplete"
+                        and (finished or row.status == "done")):
+                    settling_attempt_ids.add(row.attempt_id)
+                else:
+                    settling_attempt_ids.discard(row.attempt_id)
             else:
                 unverifiable_since.pop(row.attempt_id, None)
+                settling_attempt_ids.discard(row.attempt_id)
             pending = pending or choice.state == "pending"
             closure_eligible[row.attempt_id] = choice.census["closure_eligible"]
             if choice.census["settle"]:
@@ -4159,6 +4328,7 @@ def _join_snapshot(
         current_attempt_ids = {child["attempt_id"] for child in children}
         for attempt_id in set(unverifiable_since) - current_attempt_ids:
             unverifiable_since.pop(attempt_id, None)
+        settling_attempt_ids &= current_attempt_ids
         if recovered:
             # Re-read the canonical rows and all process evidence. The helper's
             # exit code or JSON alone never makes a child ready.
@@ -4203,7 +4373,9 @@ def _join_snapshot(
         eligible = {
             child["attempt_id"] for child in children
             if child["reason"] == "process-unverifiable"
-            and now - unverifiable_since[child["attempt_id"]] >= 30
+            and now - unverifiable_since[child["attempt_id"]] >= (
+                SETTLING_NOTICE_SECONDS if child["attempt_id"] in settling_attempt_ids
+                else UNVERIFIABLE_NOTICE_SECONDS)
         }
         signature = json.dumps({"children": children, "eligible": sorted(eligible)}, sort_keys=True)
         if observation_jobs is not None and (signature != last_signature

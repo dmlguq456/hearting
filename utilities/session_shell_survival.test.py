@@ -134,7 +134,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
             self.assertIn(needle,raw,'original CLI I/O lost: '+repr(bytes(raw[-1200:])))
         try:
             until(b'READY');os.write(master,b'WARM\r');until(b'DONE_WARM')
-            if mode=='scratch':until(b'HEARTING')  # Wait for the actual branded scratch view before injecting failure.
+            if mode=='scratch':until('⚙'.encode())  # Wait for the actual branded scratch view before injecting failure.
             original=process(json.loads(native_file.read_text())['pid']);entry_identity=process(entry.pid)
             children=Path('/proc')/str(entry.pid)/'task'/str(entry.pid)/'children'
             hosts=[int(pid) for pid in children.read_text().split() if b'host.cjs' in (Path('/proc')/pid/'cmdline').read_bytes()]

@@ -65,6 +65,16 @@ def main() -> int:
         interaction.set_wait(
             session_id, "codex", "approval", "codex-permissionrequest"
         )
+        try:
+            # This session's shell border shows the same wait now.
+            utilities = str(ROOT / "utilities")
+            if utilities not in sys.path:
+                sys.path.insert(0, utilities)
+            from session_shell import lifecycle
+
+            lifecycle("codex", "blocked", session_id)
+        except Exception:
+            pass
     except Exception:
         pass
     return 0

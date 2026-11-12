@@ -19,6 +19,7 @@ import re
 import secrets
 import stat
 import tempfile
+import threading
 
 from artifact_identity import IdAllocator, is_well_formed
 
@@ -410,60 +411,138 @@ def append(root, binding, *, origin, body, summary, session=None, turn=None, at=
         return {**row, "reference": reference(path, row), "replay": False}
 
 
-def rows(root, *, session=None, limit=READ_ROWS):
-    """Common row source for entrance/Fleet/history/tidy; latest revisions only."""
+_SCAN_SCOPE = threading.local()
+
+
+@contextlib.contextmanager
+def scan_scope():
+    """Share one journal scan per root among the rows() readers of one pass.
+
+    Fleet asks for every session's rows in the same project root. The scan
+    (safe path checks and day reads) does not depend on the session filter.
+    """
+    outer = getattr(_SCAN_SCOPE, "cache", None)
+    if outer is None:
+        _SCAN_SCOPE.cache = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _SCAN_SCOPE.cache = None
+
+
+def _scan_events(root):
+    """``("unknown", error)``, ``("campaign-error", error)``, ``("day", path, day)``,
+    or a final ``("scan-limit",)`` in the order rows() consumes them."""
     from artifact_locator import iter_campaign_dirs
-    root = Path(root)
-    result = {"rows": [], "coverage": "complete", "errors": []}
-    scanned = 0
     try:
         campaigns = list(iter_campaign_dirs(root))
     except (OSError, ValueError) as exc:
-        return {"rows": [], "coverage": "unknown", "errors": [type(exc).__name__]}
+        yield ("unknown", type(exc).__name__)
+        return
+    scanned = 0
     for campaign in campaigns:
         folder = campaign / "journals"
         try:
             safe_path(root, folder)
             paths = sorted(folder.glob("????-??-??.md"), reverse=True)
         except (OSError, ValueError) as exc:
-            result["coverage"] = "partial"; result["errors"].append(type(exc).__name__)
+            yield ("campaign-error", type(exc).__name__)
             continue
         for path in paths:
             scanned += 1
             if scanned > 128:
-                result["rows"].sort(key=lambda row: row["at"])
-                return {**result, "coverage": "partial", "errors": [*result["errors"], "scan-limit"]}
+                yield ("scan-limit",)
+                return
             try:
                 safe_path(root, path, missing=False)
-                day = read_day(path, limit=READ_ROWS, newest=True)
+                day = _read_day_generation(path)
             except (OSError, ValueError) as exc:
                 day = {"rows": [], "coverage": "unknown", "errors": [type(exc).__name__]}
-            if day["coverage"] != "complete":
-                result["coverage"] = "partial"
-            result["errors"].extend(day["errors"])
-            latest = {}
-            for entry in day["rows"]:
-                latest[entry["artifact_id"]] = entry
-            for entry in sorted(latest.values(), key=lambda row: row["at"], reverse=True):
-                if session and entry.get("session") != session:
-                    continue
-                anchor = entry["artifact_id"] + "-" + entry["revision_id"]
-                rel = path.relative_to(root).as_posix()
-                result["rows"].append({"kind": "journal-entry", "artifact_id": entry["artifact_id"],
-                    "revision_id": entry["revision_id"], "digest": entry["digest"], "path": rel,
-                    "anchor": anchor, "record_target": rel + "#" + anchor,
-                    "result_targets": result_targets(root, entry)[:3], "results_total": len(entry.get("results") or []),
-                    "results_coverage": "partial" if len(entry.get("results") or []) > 3 else "complete",
-                    "title": entry["summary"][:256],
-                    "summary": entry["body"].encode("utf-8")[:6000].decode("utf-8", "ignore"),
-                    "campaign_id": entry["campaign_id"], "route_id": entry["route_id"],
-                    "session": entry["session"], "turn": entry["turn"], "at": entry["at"],
-                    "status": entry["status"], "coverage": day["coverage"], "checks": entry["checks"]})
-            if len(result["rows"]) >= limit:
-                result["rows"] = result["rows"][:limit]
-                result["rows"].sort(key=lambda row: row["at"])
-                result["coverage"] = "partial"
-                return result
+            yield ("day", path, day)
+
+
+_DAY_GENERATIONS = {}
+_DAY_GENERATION_LIMIT = 512
+
+
+def _day_generation(path):
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _read_day_generation(path):
+    """A day file unchanged since its last read (same full generation) is not re-read."""
+    key = str(path)
+    before = _day_generation(path)
+    cached = _DAY_GENERATIONS.get(key)
+    if before is not None and cached is not None and cached[0] == before:
+        return cached[1]
+    day = read_day(path, limit=READ_ROWS, newest=True)
+    if before is not None and day.get("coverage") != "unknown" and _day_generation(path) == before:
+        if len(_DAY_GENERATIONS) >= _DAY_GENERATION_LIMIT and key not in _DAY_GENERATIONS:
+            _DAY_GENERATIONS.pop(next(iter(_DAY_GENERATIONS)))
+        _DAY_GENERATIONS[key] = (before, day)
+    else:
+        _DAY_GENERATIONS.pop(key, None)
+    return day
+
+
+def _journal_events(root):
+    cache = getattr(_SCAN_SCOPE, "cache", None)
+    if cache is None:
+        return _scan_events(root)
+    key = str(root.absolute())
+    if key not in cache:
+        try:
+            cache[key] = tuple(_scan_events(root))
+        except Exception:
+            return _scan_events(root)  # an unexpected failure keeps the lazy order
+    return cache[key]
+
+
+def rows(root, *, session=None, limit=READ_ROWS):
+    """Common row source for entrance/Fleet/history/tidy; latest revisions only."""
+    root = Path(root)
+    result = {"rows": [], "coverage": "complete", "errors": []}
+    for event in _journal_events(root):
+        if event[0] == "unknown":
+            return {"rows": [], "coverage": "unknown", "errors": [event[1]]}
+        if event[0] == "campaign-error":
+            result["coverage"] = "partial"; result["errors"].append(event[1])
+            continue
+        if event[0] == "scan-limit":
+            result["rows"].sort(key=lambda row: row["at"])
+            return {**result, "coverage": "partial", "errors": [*result["errors"], "scan-limit"]}
+        _kind, path, day = event
+        if day["coverage"] != "complete":
+            result["coverage"] = "partial"
+        result["errors"].extend(day["errors"])
+        latest = {}
+        for entry in day["rows"]:
+            latest[entry["artifact_id"]] = entry
+        for entry in sorted(latest.values(), key=lambda row: row["at"], reverse=True):
+            if session and entry.get("session") != session:
+                continue
+            anchor = entry["artifact_id"] + "-" + entry["revision_id"]
+            rel = path.relative_to(root).as_posix()
+            result["rows"].append({"kind": "journal-entry", "artifact_id": entry["artifact_id"],
+                "revision_id": entry["revision_id"], "digest": entry["digest"], "path": rel,
+                "anchor": anchor, "record_target": rel + "#" + anchor,
+                "result_targets": result_targets(root, entry)[:3], "results_total": len(entry.get("results") or []),
+                "results_coverage": "partial" if len(entry.get("results") or []) > 3 else "complete",
+                "title": entry["summary"][:256],
+                "summary": entry["body"].encode("utf-8")[:6000].decode("utf-8", "ignore"),
+                "campaign_id": entry["campaign_id"], "route_id": entry["route_id"],
+                "session": entry["session"], "turn": entry["turn"], "at": entry["at"],
+                "status": entry["status"], "coverage": day["coverage"], "checks": entry["checks"]})
+        if len(result["rows"]) >= limit:
+            result["rows"] = result["rows"][:limit]
+            result["rows"].sort(key=lambda row: row["at"])
+            result["coverage"] = "partial"
+            return result
     result["rows"].sort(key=lambda row: row["at"])
     return result
 

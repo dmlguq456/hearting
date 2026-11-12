@@ -225,6 +225,21 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(missing["result_targets"][0]["availability"], "missing")
         self.assertEqual(result.exists(), False)
 
+    def test_scan_scope_shares_one_scan_and_keeps_every_reader_result(self):
+        self.add("a"); self.add("b")
+        expected = [J.rows(self.root, limit=limit, session=session)
+                    for limit in (1, 200) for session in (None, {"harness": "codex", "sid": "x"})]
+        real = J.read_day
+        with mock.patch.object(J, "read_day", side_effect=real) as reads:
+            with J.scan_scope():
+                actual = [J.rows(self.root, limit=limit, session=session)
+                          for limit in (1, 200) for session in (None, {"harness": "codex", "sid": "x"})]
+            # One scan per scope; an unchanged day file is not even re-read.
+            self.assertLessEqual(reads.call_count, 1)
+        self.assertEqual(actual, expected)
+        self.add("c")  # outside the scope every read is fresh again
+        self.assertEqual(len(J.rows(self.root)["rows"]), 3)
+
     def test_A14_corrupt_day_does_not_become_an_empty_complete_entrance(self):
         import artifact_entrance as entrance
         entry = self.add()

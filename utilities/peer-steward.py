@@ -6059,6 +6059,28 @@ def _dispatch_ready_api():
     return _DISPATCH_READY_API
 
 
+def _readiness_projection_still_fresh(observation, projection, result):
+    """Whether the stored projection already says the same thing and is young.
+
+    Readers accept a projection up to ``MAX_AGE_SECONDS`` old; refreshing
+    an unchanged one at a third of that keeps every reader's view current
+    while the readiness thread stops rewriting the record every second.
+    """
+    previous = observation.get("shared_readiness")
+    if (not isinstance(previous, dict)
+            or observation.get("readiness_state") != result.get("state", "unknown")
+            or observation.get("reason") != result.get("reason", "")):
+        return False
+    try:
+        age = float(projection["observed_at"]) - float(previous.get("observed_at"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not 0 <= age < shared_readiness.MAX_AGE_SECONDS / 3:
+        return False
+    same = {key: value for key, value in previous.items() if key != "observed_at"}
+    return same == {key: value for key, value in projection.items() if key != "observed_at"}
+
+
 def _reconcile_readiness_observations(store, duties, *, read_context,
                                       observation_context, incarnation):
     """Publish one bounded classification per exact selection for live consumers."""
@@ -6118,6 +6140,10 @@ def _reconcile_readiness_observations(store, duties, *, read_context,
                 identity, result, producer_pid=os.getpid(), producer_start=producer_start,
                 incarnation=incarnation, generation=generation)
             observation = dict(duty.get("observation") or {})
+            if _readiness_projection_still_fresh(observation, projection, result):
+                # Same result, same producer, recent enough for every reader's
+                # max age: skip rewriting the record only to move observed_at.
+                continue
             observation.update(shared_readiness=projection,
                                readiness_state=result.get("state", "unknown"),
                                reason=result.get("reason", ""))
@@ -6311,15 +6337,19 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                 from peer_read_context import PeerReadContext
                 transition_read_context = PeerReadContext(registry_append_only=True)
                 transition_authority = {"rows": [], "handover_keys": []}
-                readiness = _pane_readiness(
-                    target, native_state,
-                    expected_harness=identity["harness"],
-                    expected_sid=identity["session_id"] or "-",
-                    expected_pane=identity["pane"],
-                    target_observation=(observed_state, observed_ident),
-                    pane_info=pane_info, registry_append_only=True,
-                    read_context=transition_read_context, server=server,
-                    authority_out=transition_authority)
+                # The transition proof keeps its own fresh context; one lineage
+                # observation serves all of this pane's recipient resolutions
+                # instead of re-stating every seat ledger per registry row.
+                with transition_read_context.pinned_lineage():
+                    readiness = _pane_readiness(
+                        target, native_state,
+                        expected_harness=identity["harness"],
+                        expected_sid=identity["session_id"] or "-",
+                        expected_pane=identity["pane"],
+                        target_observation=(observed_state, observed_ident),
+                        pane_info=pane_info, registry_append_only=True,
+                        read_context=transition_read_context, server=server,
+                        authority_out=transition_authority)
                 readiness_identity = dict(readiness.identity)
                 expected_readiness_identity = {
                     "server": identity["server"], "pane": identity["pane"],
@@ -6480,10 +6510,23 @@ def _reconcile_external_obligations(store, *, service_current=None, snapshot=Non
             pass
 
 
+def _active_index_generation(store):
+    """The obligation active index's inode and mtime; None when unreadable."""
+    try:
+        info = os.stat(store.root / "active", follow_symlinks=False)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+
 def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state=None,
                            notice_selection=None, runner_incarnation=None,
-                           settlement_context=None):
-    """Advance only the accepted duties owned by this runner."""
+                           settlement_context=None, between_duties=None):
+    """Advance only the accepted duties owned by this runner.
+
+    ``between_duties`` runs after each non-notice duty, so the runner can hand
+    a notice accepted meanwhile to its courier instead of the next pass.
+    """
     if duties is None:
         duties = _runner_duties(store, store.list())
     retry_state = {} if retry_state is None else retry_state
@@ -6550,6 +6593,12 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                              observer_error="observer-unavailable:" + type(exc).__name__)
             except Exception:
                 pass
+        _release_freed_memory()
+        if between_duties is not None:
+            try:
+                between_duties()
+            except Exception:
+                pass
         if retryable:
             try:
                 latest = store.get(duty_id)
@@ -6568,11 +6617,32 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                 retry_state.pop(duty_id, None)
 
 
+# A live-tier group that ends with its recipient unavailable sent nothing; the
+# same pass tries the next one, at most this many times. Without this, a backlog
+# of never-tried groups for gone sessions was found out one group per pass.
+NOTICE_UNAVAILABLE_SWEEP_LIMIT = 8
+
+
 def _resume_session_notice_obligations(duties, store, *, read_context=None,
                                        selection=None, runner_incarnation=None):
     try:
-        return _resume_session_notice_pass(duties, store, read_context=read_context,
-            selection=selection, runner_incarnation=runner_incarnation)
+        for _sweep in range(NOTICE_UNAVAILABLE_SWEEP_LIMIT):
+            if selection is not None:
+                selection.pop("last_pick_ids", None)
+            result = _resume_session_notice_pass(duties, store, read_context=read_context,
+                selection=selection, runner_incarnation=runner_incarnation)
+            picked = () if selection is None else selection.get("last_pick_ids") or ()
+            if not picked or selection.get("last_pick_tier") != "live":
+                return result
+            latest = {duty_id: store.get(duty_id) for duty_id in picked}
+            if not all(((value or {}).get("observation") or {}).get("reason")
+                       == "recipient-unavailable" for value in latest.values()):
+                return result
+            # The found-gone group is now parked; stay on the live tier.
+            selection["parked_turn"] = False
+            duties = [latest.get(duty["id"]) or store.get(duty["id"]) or duty
+                      for duty in duties]
+        return result
     finally:
         # Source completion may have recovered from an earlier failed write.
         # Queue its decision after carrier and source/selected locks are gone.
@@ -6667,10 +6737,14 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # and every record/target are re-read through the normal path each pass.
     # d6: terminal (failure/completion) notices go first, both in group order
     # and inside the batch; progress notices share the batch or wait one pass.
+    # A question answer is the person's own reply: it ranks with terminal.
     def _terminal_rank(item):
         try:
+            receipt = item[4].get("receipt")
+            if isinstance(receipt, dict) and "answer_binding" in receipt:
+                return 0
             return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
             return 1
 
     import session_resume
@@ -6690,7 +6764,23 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
             selection.update(state_root=state_root,
                               runner_incarnation=runner_incarnation,
                               last_group=None)
-        last_group = selection.get("last_group")
+    # A group whose every notice already found its recipient unavailable stays
+    # a candidate (the session may come back), but it gets every other pass
+    # only: a backlog for gone sessions must not hold a fresh notice, such as
+    # a question answer, behind it (2026-11-11: 22 such groups starved one).
+    def _parked(key):
+        return all((item[0].get("observation") or {}).get("reason") == "recipient-unavailable"
+                   for item in groups[key])
+
+    live_keys = [key for key in group_keys if not _parked(key)]
+    parked_keys = [key for key in group_keys if key not in live_keys]
+    parked_turn = bool(parked_keys) and (
+        not live_keys or (selection is not None and selection.get("parked_turn") is True))
+    cursor_name = "last_parked_group" if parked_turn else "last_live_group"
+    if selection is not None:
+        last_group = selection.get(cursor_name)
+        if last_group is None and not parked_turn:
+            last_group = selection.get("last_group")
         if not (isinstance(last_group, tuple) and len(last_group) == 2
                 and all(isinstance(value, str) for value in last_group)):
             last_group = None
@@ -6700,13 +6790,19 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     def _pick(keys):
         return next((key for key in keys if last_group is not None and key > last_group), keys[0])
 
-    terminal_keys = sorted(key for key in group_keys if key in terminal_groups)
-    progress_keys = sorted(key for key in group_keys if key not in terminal_groups)
+    pool = parked_keys if parked_turn else live_keys
+    terminal_keys = sorted(key for key in pool if key in terminal_groups)
+    progress_keys = sorted(key for key in pool if key not in terminal_groups)
     group_key = _pick(terminal_keys) if terminal_keys else _pick(progress_keys)
     if selection is not None:
+        selection[cursor_name] = group_key
         selection["last_group"] = group_key
+        selection["last_pick_tier"] = "parked" if parked_turn else "live"
+        selection["parked_turn"] = bool(parked_keys) and not parked_turn
     harness, recipient_sid = group_key
     batch = groups[group_key][:NOTICE_BATCH_LIMIT]
+    if selection is not None:
+        selection["last_pick_ids"] = tuple(item[0]["id"] for item in batch)
     # Resume needs idle/empty; ordinary notices keep their existing steering
     # policy. An obsolete resume must not hold a useful completion behind it.
     resume_only = session_resume.is_resume(batch[0][4])
@@ -7242,11 +7338,42 @@ def _runner_maintenance_pass(store):
     return result
 
 
+def _release_freed_memory(*, min_interval=5.0):
+    peer_obligations.release_freed_memory(min_interval=min_interval)
+
+
+def _runner_settlement_context(store):
+    """The runner's owner-settlement context: proofs kept across restarts, cold
+    owner history proved a slice per pass."""
+    context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    try:
+        path = store.root.parent / "runner-duties" / "settled-owners.json"
+        context.proof_path = path
+        context.load_settled_proofs(path)
+    except Exception:  # noqa: BLE001 - without it history is re-proved as before
+        context.proof_path = None
+    # Cold owner history is proved a slice per pass; the next pass resumes.
+    limit = getattr(context, "limit_owner_scan", None)
+    if callable(limit):
+        limit(dispatch_batch_obligations.RUNNER_OWNER_SCAN_BUDGET_S)
+    return context
+
+
+def _shared_revision_pass():
+    """One runner pass proves each immutable shared spec revision it reads once."""
+    try:
+        from artifact_producer_spec import shared_revision_read_scope
+    except Exception:  # noqa: BLE001 - without it each read verifies as before
+        return contextlib.nullcontext()
+    return shared_revision_read_scope()
+
+
 def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
     """Keep attempt projections independent of slow obligation reconciliation."""
     from peer_read_context import PeerReadContext
     from runtime_observation import ObservationContext
 
+    _trust_unchanged_ledgers()
     store = peer_obligations.ObligationStore(
         state_root, allow_state_root_creation=False)
     while not stop_event.is_set():
@@ -7272,8 +7399,18 @@ def _runner_readiness_loop(state_root, lock_fd, incarnation, stop_event):
         stop_event.wait(1.0 if duties else 2.0)
 
 
+def _trust_unchanged_ledgers():
+    """The runner re-reads the same seat ledgers every pass; reuse unchanged ones."""
+    try:
+        import dispatch_seat_handover
+        dispatch_seat_handover.trust_unchanged_ledgers()
+    except Exception:  # noqa: BLE001 - without it every read is fresh, as before
+        pass
+
+
 def cmd_obligation_runner(args):
     """Existing peer steward, scoped to accepted duties and stopped when they settle."""
+    _trust_unchanged_ledgers()
     store = peer_obligations.ObligationStore(
         args.state_root, allow_state_root_creation=False)
     try:
@@ -7324,7 +7461,7 @@ def cmd_obligation_runner(args):
 
     notice_selection = {"state_root": str(store.root.parents[1].resolve()),
                         "runner_incarnation": runner_incarnation, "last_group": None}
-    settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+    settlement_context = _runner_settlement_context(store)
     retired_for_exec = []
 
     def retire_for_service_exec():
@@ -7388,11 +7525,39 @@ def cmd_obligation_runner(args):
                 duties.append(duty)
         duties = _runner_duties(store, duties)
         observation_context = ObservationContext()
-        _reconcile_obligations(store, duties, read_context=read_context,
-                               retry_state=duty_retry_state,
-                               notice_selection=notice_selection,
-                               runner_incarnation=runner_incarnation,
-                               settlement_context=settlement_context)
+        handled_notice_ids = set(accepted_notice_ids)
+        active_generation = [_active_index_generation(store)]
+
+        def deliver_new_notices():
+            # One local stat per old duty: a notice accepted while old duties
+            # (role checks, batch proofs on shared artifact roots) run goes to
+            # its courier now, not after the rest of this pass.
+            current = _active_index_generation(store)
+            if current is None or current == active_generation[0]:
+                return
+            active_generation[0] = current
+            store.end_read_pass()
+            try:
+                fresh = [duty for duty in store.list(
+                             kinds={"session-notice", "run-notice"}, fast_active_only=True)
+                         if duty["id"] not in handled_notice_ids]
+            finally:
+                store.begin_read_pass()
+            if not fresh:
+                return
+            handled_notice_ids.update(duty["id"] for duty in fresh)
+            _reconcile_obligations(
+                store, fresh, read_context=PeerReadContext(registry_append_only=True),
+                retry_state=duty_retry_state, notice_selection=notice_selection,
+                runner_incarnation=runner_incarnation)
+
+        with _shared_revision_pass():
+            _reconcile_obligations(store, duties, read_context=read_context,
+                                   retry_state=duty_retry_state,
+                                   notice_selection=notice_selection,
+                                   runner_incarnation=runner_incarnation,
+                                   settlement_context=settlement_context,
+                                   between_duties=deliver_new_notices)
         if service_current:
             retired_for_exec.clear()
             peer_obligations.exec_service_runner(
@@ -7402,12 +7567,16 @@ def cmd_obligation_runner(args):
             if retired_for_exec:
                 # The exec failed after the old context retired: continue on a
                 # fresh context under the same lock.
-                settlement_context = dispatch_batch_obligations.OwnerSettlementReadContext()
+                settlement_context = _runner_settlement_context(store)
                 start_readiness_worker()
         external_snapshot = _external_obligation_snapshot()
-        _reconcile_external_obligations(
-            store, service_current=service_current, snapshot=external_snapshot,
-            settlement_context=settlement_context)
+        with _shared_revision_pass():
+            _reconcile_external_obligations(
+                store, service_current=service_current, snapshot=external_snapshot,
+                settlement_context=settlement_context)
+        _release_freed_memory(min_interval=0.0)
+        with contextlib.suppress(Exception):
+            settlement_context.checkpoint_settled_proofs(min_interval=0.0)
         try:
             store.prune_terminal_obligations(time_budget=0.1)
         except (OSError, ValueError, RuntimeError, peer_obligations.ObligationError):
@@ -7419,7 +7588,9 @@ def cmd_obligation_runner(args):
                 # rows so every owner gate in the pass sees the same full view.
                 readiness_context = PeerReadContext(registry_append_only=True)
                 from dispatch_registry_cache import registry_read_scope
-                with registry_read_scope():
+                # One lineage observation serves every pane of this publish
+                # pass (each pane otherwise re-stats every seat ledger).
+                with registry_read_scope(), readiness_context.pinned_lineage():
                     _publish_watch_readiness(
                         store, external_snapshot, read_context=readiness_context,
                         incarnation=runner_incarnation)
@@ -7435,8 +7606,11 @@ def cmd_obligation_runner(args):
             pass
         current_duties = store.list()
         external_signature = _external_obligation_signature(external_snapshot)
+        owner_scan = getattr(settlement_context, "owner_scan_unfinished", None)
+        owner_scan = owner_scan() if callable(owner_scan) else ()
+        owner_scan = owner_scan if isinstance(owner_scan, tuple) else ()
         if (notice_discovery_observed and not _runner_duties(store, current_duties)
-                and not any(external_signature)):
+                and not any(external_signature) and not owner_scan):
             # A producer that saw our held lock may already have accepted work.
             # Release before the final read: later producers can start a runner,
             # and work accepted before release is either reclaimed here or owned
@@ -7476,8 +7650,10 @@ def cmd_obligation_runner(args):
             external_signature = latest_external
         # Unknown discovery is an observation, not proof of an empty backlog.
         # Keep the same owner and bounded wait even before legacy duty recovery.
+        # An unfinished owner proof changes this signature on each pass, so it
+        # resumes on the next short wait instead of the growing idle backoff.
         signature = (notice_discovery_observed,
-                     _runner_duty_signature(current_duties), external_signature)
+                     _runner_duty_signature(current_duties), external_signature, owner_scan)
         if previous_signature is None or signature != previous_signature:
             delay = 1.0
         else:
@@ -7489,6 +7665,7 @@ def cmd_obligation_runner(args):
             if active_readiness:
                 delay = min(5.0, delay)
         previous_signature = signature
+        _release_freed_memory(min_interval=0.0)
         readiness_fds = _runner_readiness_fds()
         wait_fds = ([wake_fd] if wake_fd is not None else []) + readiness_fds
         if wait_fds:
@@ -7954,24 +8131,29 @@ def _read_screen(target):
     judged key into a shell seat's pane reads here first: while the host says a
     shell editor holds the outer keys, or gives no answer, there is no screen to
     type into (None), never the framed pane read again as an empty box."""
+    return _read_screen_reason(target)[0]
+
+
+def _read_screen_reason(target):
+    """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
     seat = _shell_seat(target)
     if seat is not None:
         import session_shell
-        lines = session_shell.native_screen(seat)
+        lines, why = session_shell.native_screen_reason(seat)
         if lines != session_shell.PASSTHROUGH:
-            return lines
+            return lines, why
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)
         text = tmux.read_visible(target, ansi=True) if tmux else None
-        return _screen_lines(text) if text and text.strip() else None
+        return (_screen_lines(text) if text and text.strip() else None), ""
     try:
         proc = subprocess.run(_herdr_argv("agent", "read", target, "--source", "visible", "--format", "ansi"),
                               capture_output=True, text=True, errors="replace", timeout=_herdr_get_timeout())
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, ""
     if proc.returncode != 0 or not (proc.stdout or "").strip():
-        return None
-    return _screen_lines(proc.stdout)
+        return None, ""
+    return _screen_lines(proc.stdout), ""
 
 
 _CODEX_UNMATERIALIZED = "not materialized yet"
@@ -8096,7 +8278,9 @@ def _clear_look(target, req):
         return refusal, agent, None
     lines = _read_screen(target)
     if lines is None:
-        return "screen-unknown", agent, None
+        # A shell seat says why (an older host, an open shell editor, no answer); the
+        # tidy notice names that cause instead of one undifferentiated line.
+        return _read_screen_reason(target)[1] or "screen-unknown", agent, None
     return _screen_ready(req.get("harness"), lines), agent, lines
 
 
@@ -8279,7 +8463,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -8289,7 +8473,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     claim, why = clear.claim_idle_card_request(path, args.nonce)
@@ -8300,7 +8484,7 @@ def cmd_idle_card_request(args):
         reason = "target-changed"
     if reason:
         clear.release_unsent_idle_request(claim)
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     checked, why = clear.validate_idle_request(path, args.nonce, _sending_claim=claim.get("idle_request"))
@@ -8324,6 +8508,10 @@ def cmd_idle_card_request(args):
     if clear.finish_idle_card_request(claim, accepted=True):
         return finish("true")
     return finish("unverified", "arrival-not-observed")
+
+
+# Screen doubts that pass on their own; an older shell host does not, so it is not waited for.
+_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer"})
 
 
 def _look_outcome(reason):

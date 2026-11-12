@@ -136,8 +136,10 @@ console.log(JSON.stringify(out));'''
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # The title row repeats the first route's title; its route row adds harness and time.
-            rows = [line for line in side.splitlines() if "Fixture solo route" in line]
+            # Beside the native area a folded route takes two rows (spec rule 19): its title,
+            # then harness and time on the row below.
+            lines = side.splitlines()
+            rows = [lines[i + 1] for i, line in enumerate(lines[:-1]) if "│ │ " in line and "Fixture solo route" in line]
             self.assertTrue(any("codex" in line and "5m" in line for line in rows), side)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)

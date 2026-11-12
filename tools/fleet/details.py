@@ -842,6 +842,9 @@ def enrich(snapshot, *, include_report_verification=True, required_only=False):
             stack.enter_context(collection_read_scope())
         stack.enter_context(artifact_producer.artifact_index_observation_scope())
         stack.enter_context(dispatch_registry_cache.registry_read_scope())
+        from .pass_scope import collection_pass, install
+        install()
+        stack.enter_context(collection_pass())
         return _enrich(snapshot, include_report_verification=include_report_verification,
                        required=required, required_only=required_only)
 
@@ -959,6 +962,10 @@ def merge(basic, detail):
                 # to an unchanged observation, but cannot erase current evidence.
                 if not isinstance(row, Session) and current.exec_tool is None:
                     current.exec_tool = getattr(previous, "exec_tool", None)
+                if not isinstance(row, Session) and getattr(current, "last_tool", None) is None:
+                    current.last_tool = getattr(previous, "last_tool", None)
+                if not isinstance(row, Session) and getattr(previous, "_tool_observed", False):
+                    current._tool_observed = True
                 if not getattr(row, "shell_jobs", None):
                     current.shell_jobs = list(getattr(previous, "shell_jobs", None) or [])
                 if (not getattr(row, "shell_job_observation", None)

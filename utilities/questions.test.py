@@ -200,6 +200,21 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
 
+    def test_registration_notice_names_choice_answers_only_when_choices_exist(self):
+        import session_tidy as tidy
+        from fleet import process_identity
+        with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
+             mock.patch.object(tidy, "resolve_seat", return_value=self.f.seat()), \
+             mock.patch.object(process_identity, "current_launch_context", return_value=None), \
+             mock.patch.dict(os.environ, {"HEARTING_LANG": "ko"}):
+            plain = _run("ask", "free question")
+            choice = _run("ask", "choice question", "--choice", "A", "--choice", "B")
+        self.assertEqual((plain[0], choice[0]), (0, 0))
+        self.assertIn(state.ui_translator()("questions.registered"), plain[1])
+        self.assertIn(state.ui_translator()("questions.registered_choices"), choice[1])
+        self.assertNotEqual(state.ui_translator()("questions.registered"),
+                            state.ui_translator()("questions.registered_choices"))
+
     def test_one_line_cli_resolves_each_harness_without_a_supplied_sid_or_tag(self):
         import session_tidy as tidy
         from fleet import process_identity

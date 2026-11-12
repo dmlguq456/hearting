@@ -212,6 +212,39 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertIn("opencode" + model + "high", flat(opened[model_at:model_at + 3]))
         self.assertFalse([line for line in opened[model_at:model_at + 3] if "…" in line])
 
+    def test_route_doer_now_and_last_finished_call_come_from_its_own_stream_and_unfold(self):
+        # A one-shot owner is its route's doer: its open call's summary and native age and
+        # the call it just finished ride the route record and unfold, each on one row.
+        now = 1_800_000_000.0
+        vm = build_view_model(self.route_snapshot(
+            exec_tool={"name": "Bash", "target": "python3 tools/run-tests.py", "since": now - 185},
+            last_tool={"name": "Edit", "target": "utilities/session-shell/host.cjs"},
+            _tool_observed=True), now=now)
+        doer = vm.routes[0]["doer"]
+        self.assertEqual((doer["tool"], doer["target"], doer["tool_age"], doer["after_tool"]),
+                         ("Bash", "python3 tools/run-tests.py", "3m",
+                          "Edit · utilities/session-shell/host.cjs"))
+        for width in (120, 150):
+            text = "\n".join(unfolded_rows(draw(vm, OPENED, width, 60)))
+            self.assertIn(">_ Bash · python3 tools/run-tests.py  3m", text)
+            self.assertIn("after Edit · utilities/session-shell/host.cjs", text)
+        # No native start time: the age is left out (another process is no evidence).
+        timeless = build_view_model(self.route_snapshot(
+            exec_tool={"name": "Bash", "target": "sleep"},
+            exec_child={"comm": "python3", "etime_s": 180.0}), now=now)
+        self.assertNotIn("tool_age", timeless.routes[0]["doer"])
+        # "No tool" only when its own native activity was read and showed none open.
+        idle = build_view_model(self.route_snapshot(_tool_observed=True), now=now)
+        self.assertTrue(idle.routes[0]["doer"]["idle_tool"])
+        self.assertIn(">_ no tool", "\n".join(unfolded_rows(draw(idle, OPENED, 120, 60))))
+        unread = build_view_model(self.route_snapshot(), now=now)
+        self.assertNotIn("idle_tool", unread.routes[0]["doer"])
+        self.assertNotIn(">_ no tool", "\n".join(unfolded_rows(draw(unread, OPENED, 120, 60))))
+        snapshot = self.route_snapshot(_tool_observed=True)
+        snapshot["jobs"][0].liveness = "idle"
+        quiet = build_view_model(snapshot, now=now)
+        self.assertFalse({"target", "tool_age", "after_tool", "idle_tool"} & set(quiet.routes[0]["doer"]))
+
     def test_session_page_and_route_owner_use_the_model_cell_words(self):
         vm = build_view_model(self.route_snapshot())
         session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")

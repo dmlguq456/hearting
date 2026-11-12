@@ -2808,6 +2808,14 @@ _EXPLORER_QUESTION_QUEUE = None
 _EXPLORER_QUESTION_PUMP = None
 _EXPLORER_QUESTION_GENERATION = 0
 _EXPLORER_QUESTION_REFRESH_AT = 0.0
+# Every finished selected-request action, in order. The pump hands over only
+# its latest value, so an empty follow-up run could replace a finished read and
+# leave the opened row on "loading" for good (2026-11-11).
+_EXPLORER_QUESTION_RESULTS = deque()
+# A read still running after this many seconds ends on the native-prompt
+# status; its late result is still adopted while the row stays selected.
+QUESTION_READ_WAIT_S = 15.0
+_EXPLORER_QUESTION_LOADING = (None, 0.0)
 
 
 def set_explorer_mode(enabled=True):
@@ -3298,10 +3306,19 @@ def _explorer_question_worker():
                 state.view != "QUESTIONS"
                 or state.opened_for("qsel:QUESTIONS", "") != ref.get("id")
                 or not _explorer_question_ref_current(ref)))):
-        return {"effect": effect, "result": {
-            "state": "unknown", "reason": "selected request changed before the action ran"}}
+        return _explorer_question_finished({"effect": effect, "result": {
+            "state": "unknown", "reason": "selected request changed before the action ran"}})
     from .explorer.runtime import ExplorerRuntime
-    return {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)}
+    return _explorer_question_finished(
+        {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)})
+
+
+def _explorer_question_finished(update):
+    """Keep every finished action for the next tick, in order."""
+    update["_queued"] = True
+    with _EXPLORER_QUESTION_QUEUE_LOCK:
+        _EXPLORER_QUESTION_RESULTS.append(update)
+    return update
 
 
 def _explorer_question_ref_current(ref):
@@ -3416,15 +3433,49 @@ def _explorer_accept_question_result(update):
         _explorer_queue_question_effect(("questions.read", ref))
 
 
+def _explorer_question_loading_expired():
+    """End an opened row's "loading" after QUESTION_READ_WAIT_S on the native-prompt status."""
+    global _EXPLORER_STATE, _EXPLORER_QUESTION_LOADING
+    state = _explorer_state_for(_EXPLORER_STATE, 0)
+    overlay = state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
+    ref = overlay.get("ref") if isinstance(overlay.get("ref"), Mapping) else {}
+    if overlay.get("state") != "loading" or not ref.get("id"):
+        _EXPLORER_QUESTION_LOADING = (None, 0.0)
+        return
+    now = time.monotonic()
+    key = (ref.get("id"), id(state.question_overlay))
+    if _EXPLORER_QUESTION_LOADING[0] != key:
+        _EXPLORER_QUESTION_LOADING = (key, now)
+        return
+    if now - _EXPLORER_QUESTION_LOADING[1] < QUESTION_READ_WAIT_S:
+        return
+    _EXPLORER_QUESTION_LOADING = (None, 0.0)
+    overlay = dict(overlay)
+    overlay.update(state="unknown", pending=False,
+                   status="Selected request could not be read in time; use the native prompt.")
+    from dataclasses import replace
+    _EXPLORER_STATE = replace(state, question_overlay=overlay)
+
+
 def _explorer_question_pump_tick():
     global _EXPLORER_QUESTION_GENERATION, _EXPLORER_QUESTION_REFRESH_AT
     pump = _EXPLORER_QUESTION_PUMP
     if pump is None:
         return
     update = pump.poll(_EXPLORER_QUESTION_GENERATION)
+    with _EXPLORER_QUESTION_QUEUE_LOCK:
+        finished = list(_EXPLORER_QUESTION_RESULTS)
+        _EXPLORER_QUESTION_RESULTS.clear()
     if update is not None:
         _EXPLORER_QUESTION_GENERATION, value = update
+        # A value that never went through the result queue (another producer)
+        # is still adopted; a queued one was taken from the queue already.
+        if (not finished and isinstance(value, Mapping)
+                and not value.get("_queued")):
+            finished = [value]
+    for value in finished:
         _explorer_accept_question_result(value)
+    _explorer_question_loading_expired()
     with _EXPLORER_QUESTION_QUEUE_LOCK:
         pending = bool(_EXPLORER_QUESTION_QUEUE)
     if pending:

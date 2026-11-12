@@ -1159,6 +1159,21 @@ def _validate_tuple_parent_identity(row, parent_dispatch_depth):
         )
 
 
+def _pass_registry_lines(jobs: Path):
+    """The registry's text lines (``read_text(errors="replace").splitlines()``).
+
+    A runner pass proves hundreds of owner markers against the same jobs log;
+    each read it whole (46 MB on the live store). The shared registry cache
+    returns the same lines from its generation-checked view: the pinned one in
+    an open read pass, otherwise the current stable generation.
+    """
+    import dispatch_registry_cache
+    if dispatch_registry_cache.registry_scope_active():
+        return dispatch_registry_cache.registry_text_lines(jobs)
+    with dispatch_registry_cache.registry_read_scope():
+        return dispatch_registry_cache.registry_text_lines(jobs)
+
+
 def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_terminal=False,
                          registry_lines=None):
     """One completion marker's on-disk truth, in the shared gate vocabulary."""
@@ -1218,7 +1233,9 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             registry = path.parents[2] / "jobs.log"
         if registry_lines is None:
             try:
-                lines = registry.read_text(encoding="utf-8").splitlines()
+                lines = _pass_registry_lines(registry)
+                if lines is None:
+                    lines = registry.read_text(encoding="utf-8").splitlines()
             except FileNotFoundError:
                 lines = []  # Existing semantic-history contract permits archived process rows.
             except OSError:
@@ -1232,7 +1249,9 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             return {"passed": False, "reason": "completion-marker-not-current"}
         if registry_lines is None:
             try:
-                lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = _pass_registry_lines(Path(jobs))
+                if lines is None:
+                    lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 return {"passed": False, "reason": "registry-unreadable", "current": False,
                         "attempt_id": marker.get("attempt_id")}

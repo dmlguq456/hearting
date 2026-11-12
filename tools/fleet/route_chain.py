@@ -16,6 +16,7 @@ directory on ``sys.path`` (``from fleet import route_chain``, mirroring
 are imported lazily, inside the functions that need them.
 """
 import json
+import contextlib
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -648,6 +649,16 @@ def enrich(sessions, jobs=(), node_evidence=None, now=None, fast_first=False,
     while all eligible sessions remain available as handoff context. Exceptions are per-session."""
     if fast_first:
         return  # route/outcome and ledger reads belong to the next detail tick
+    try:
+        from artifact_journal import scan_scope
+    except ImportError:
+        scan_scope = contextlib.nullcontext
+    # Sessions of one project read the same journal folder; scan it once.
+    with scan_scope():
+        return _enrich(sessions, jobs, node_evidence, now, only_sessions)
+
+
+def _enrich(sessions, jobs, node_evidence, now, only_sessions):
     from . import route as _route
 
     node_evidence = node_evidence or {}

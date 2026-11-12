@@ -32,9 +32,30 @@ def weekly_quota(payload):
     return payload.get("rl_7d")
 
 
-def observe(harness, pid, proc_start, sid):
-    """Read the selected session through Fleet's parsers and report watch inputs."""
+# The cells each native source supplies. A source that exists but was not read
+# (``session_registry.unread_error``, or a replacement during the read) did not
+# observe these cells empty.
+_TAP_CELLS = ("model", "effort", "ctx_pct", "active_context_tokens", "context_window_tokens")
+_TAP_QUOTA = ("weekly_pct", "quota_windows", "model_quotas")
+_MODEL_CELLS = ("model", "effort")
+_TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
+
+
+def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False):
+    """Read the selected session through Fleet's parsers and report watch inputs.
+
+    ``previous`` is the caller's last observation of this exact live session
+    (harness, SID, PID and start). When given, a native source that was not
+    read keeps the cells it supplies from it, as Fleet's native reader keeps
+    its last display, and the next call reads the source again. Absence,
+    refusal, another session and an ended process still clear; a cell that
+    was never observed stays empty. Without it the result is unchanged.
+    ``raise_unread`` lets an unread OpenCode database raise ``OSError`` for a
+    caller that keeps its own last display (Fleet's native reader).
+    """
     from .collectors.procscan import read_proc_start
+    keep = previous if isinstance(previous, dict) else None
+    unread = []
     if harness not in {"claude", "codex", "opencode"} or read_proc_start(pid) != proc_start:
         return {}, []
     try:
@@ -59,7 +80,11 @@ def observe(harness, pid, proc_start, sid):
             sess.model, sess.effort, _at = claude._subagent_budget(transcript)
         tap_path = Path(home) / ".statusline" / (sid + ".json")
         paths.append(tap_path)
-        callback = _claude_callback(tap_path, sid, pid, proc_start)
+        try:
+            callback = _claude_callback(tap_path, sid, pid, proc_start, raise_unread=keep is not None)
+        except OSError:
+            callback = None
+            unread.extend(_TAP_CELLS + _TAP_QUOTA)
         if callback:
             claude._apply_statusline(sess, callback)
             # Native context use is distinct from the compaction-trigger %.
@@ -67,8 +92,15 @@ def observe(harness, pid, proc_start, sid):
     elif harness == "codex":
         transcript = codex.exact_rollout_for_session_id(sid)
         if transcript:
-            sess.model, sess.effort = codex._rollout_model_effort(transcript)
-            count = codex._tail_token_count(transcript)
+            try:
+                sess.model, sess.effort = codex._rollout_model_effort(transcript, raise_unread=keep is not None)
+            except OSError:
+                unread.extend(_MODEL_CELLS)
+            try:
+                count = codex._tail_token_count(transcript, raise_unread=keep is not None)
+            except OSError:
+                count = None
+                unread.extend(_TOKEN_CELLS)
             if count:
                 telemetry = parse_codex_token_count(count, session_id=sid)
                 sess.ctx_pct = telemetry.context_used_pct
@@ -77,14 +109,21 @@ def observe(harness, pid, proc_start, sid):
                 from .token_budget import codex_compaction_pressure
                 sess.compaction_pressure = codex_compaction_pressure(
                     sid, transcript, count, home=codex._rollout_home(transcript))
-        if not sess.model:
+        if not sess.model and not ("model" in unread and keep.get("model")):
             from .native_display import codex_selected_model
             selected = codex_selected_model(pid, proc_start, sid)
             sess.model, sess.effort = selected.get("model"), selected.get("effort")
     else:
         db = opencode._db()
         paths.extend((db, db + "-wal"))
-        opencode.enrich(sess)
+        try:
+            opencode.enrich(sess, raise_unread=raise_unread or keep is not None)
+        except OSError:
+            # Identity first: an unread DB of another session or process birth clears
+            # (below) instead of letting the caller keep the previous selection's cells.
+            if raise_unread and sess.session_id == sid and read_proc_start(pid) == proc_start:
+                raise
+            unread.extend(_TAP_CELLS)
         if sess.session_id != sid:
             # A delayed callback must never borrow the newly selected session.
             return {}, [str(path) for path in paths if path]
@@ -130,4 +169,7 @@ def observe(harness, pid, proc_start, sid):
                   branch=branch + "*" if branch and observed_git.get("dirty") == 1 else branch,
                   weekly_pct=weekly_quota(quota), quota_windows=quota_windows(quota),
                   model_quotas=quota.get("rl_ms") or [], jobs=observed_git.get("jobs"))
+    for name in unread if keep is not None else ():
+        if name in keep:
+            values[name] = keep[name]
     return values, sorted({os.fspath(path) for path in paths if path})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import contextlib
 import hashlib
 import json
 import os
@@ -758,16 +759,63 @@ def _directory_stamp(path: Path):
     return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _digest_value(value) -> str:
+    """Stable digest of a persisted proof's row identity (rows can be large)."""
+    if isinstance(value, _DigestMatch):
+        return value.digest
+    return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class _DigestMatch:
+    """A loaded proof's row identity: equal exactly to the value it digested."""
+
+    __slots__ = ("digest",)
+
+    def __init__(self, digest: str):
+        self.digest = digest
+
+    def __eq__(self, other):
+        if isinstance(other, _DigestMatch):
+            return other.digest == self.digest
+        try:
+            return _digest_value(other) == self.digest
+        except (TypeError, ValueError):
+            return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = None
+
+
+_PASS_CLOCK = time.perf_counter  # bound at import: fixtures replace ``time`` itself
+
+
+_UNOBSERVED = object()
+
+
+# A runner pass proves at most this much historical owner completion before it
+# returns to its delivery work; the next pass resumes after the last proven row.
+# A runner that has just started (after every install) has nothing cached and
+# would otherwise re-prove every finished owner on the shared artifact roots in
+# one pass while accepted notices wait (2026-11-11: 882 s, 816,956 NAS reads).
+RUNNER_OWNER_SCAN_BUDGET_S = 5.0
+
+
 class OwnerSettlementReadContext:
     """Reuse exact settled-owner observations while rechecking their dependencies."""
 
     def __init__(self):
+        self._owner_scan_budget_s = None
+        # jobs key -> (view path identity, resolved path, last proven order)
+        self._owner_scan_resume = {}
         self._seen = {}
         self._settled = {}
         self._active_owners = {}
         self._route_owners = {}
         self._cursors = {}
-        self._invalidated_owners = set()
+        # Insertion-ordered: the oldest invalidation or deferral is proved first.
+        self._invalidated_owners = {}
         self._pass_file_generations = {}
         self._dependency_queues = {}
         self._dependency_queued = set()
@@ -787,6 +835,10 @@ class OwnerSettlementReadContext:
         self._unsettled_noted = {}
         self._deferred = set()
         self._clock = time.monotonic
+        # Optional runner-private file holding settled-owner proofs across
+        # restarts (`load_settled_proofs` / `save_settled_proofs`).
+        self._settled_version = 0
+        self._saved_version = None
         self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
                          "dependency_checks": 0, "dependency_invalidations": 0,
                          "deferred_owner_checks": 0, "unsettled_retries": 0}
@@ -1026,15 +1078,39 @@ class OwnerSettlementReadContext:
         self._metrics["settled_cache_hits"] += 1
         return True
 
-    def remember_settled_owner(self, jobs: Path, status: str, raw: str,
-                               metadata: dict, related_rows, dependencies) -> bool | None:
-        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
-        paths = tuple(dict.fromkeys(
+    @staticmethod
+    def _dependency_keys(dependencies):
+        return tuple(dict.fromkeys(
             os.path.abspath(os.path.expanduser(os.fspath(path)))
             for path in dependencies))
+
+    def observe_dependencies(self, dependencies):
+        """Generations of a proof's dependencies taken before its settlement read.
+
+        ``remember_settled_owner(observed=...)`` compares them with the
+        generations after watch installation, so a write during the read itself
+        invalidates the proof instead of being recorded as its basis.
+        """
+        if not dependencies:
+            return None
         try:
-            before_registration = self._current_generations(
-                paths, self._pass_file_generations)
+            return self._current_generations(self._dependency_keys(dependencies))
+        except OSError:
+            return None
+
+    def remember_settled_owner(self, jobs: Path, status: str, raw: str,
+                               metadata: dict, related_rows, dependencies,
+                               observed=_UNOBSERVED) -> bool | None:
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        paths = self._dependency_keys(dependencies)
+        try:
+            if observed is _UNOBSERVED:
+                before_registration = self._current_generations(
+                    paths, self._pass_file_generations)
+            elif observed is None:
+                raise OSError("dependency generations were not observed before the read")
+            else:
+                before_registration = tuple(observed)
         except OSError:
             self.forget_owner(jobs, metadata.get("attempt_id", ""))
             return None
@@ -1056,15 +1132,25 @@ class OwnerSettlementReadContext:
             self._metrics["dependency_invalidations"] += 1
             self.forget_owner(jobs, metadata.get("attempt_id", ""))
             return False
-        self._settled[key] = ((status, raw), self._fingerprint_rows(related_rows),
-                              paths, generations, aliases)
-        self._queue_settled_dependency_check(key)
-        for alias in aliases:
-            self._route_owners.setdefault((key[0], alias), set()).add(key[1])
+        self._adopt_settled(key, ((status, raw), self._fingerprint_rows(related_rows),
+                                  paths, generations, aliases))
+        self._settled_version += 1
         if len(self._settled) > 4096:
             oldest = next(iter(self._settled))
             self.forget_owner(Path(oldest[0]), oldest[1])
         return True
+
+    def _adopt_settled(self, key, entry):
+        """The one path a settled proof joins: dependency checks and route aliases.
+
+        A proof taken in this process and one restored from a previous runner
+        both pass through here, so either is reselected when its dependencies
+        change, independent of later registry changes.
+        """
+        self._settled[key] = entry
+        self._queue_settled_dependency_check(key)
+        for alias in entry[4]:
+            self._route_owners.setdefault((key[0], alias), set()).add(key[1])
 
     def _queue_settled_dependency_check(self, key):
         if key in self._dependency_queued:
@@ -1098,7 +1184,7 @@ class OwnerSettlementReadContext:
                             for pair in self._dependency_watch_keys.get(key, ()))
                 if dirty:
                     self._metrics["dependency_invalidations"] += 1
-                    self._invalidated_owners.add(key)
+                    self._invalidated_owners.setdefault(key)
                     self.forget_owner(jobs, key[1])
                     invalidated = True
                     continue
@@ -1122,16 +1208,109 @@ class OwnerSettlementReadContext:
             self._metrics["dependency_checks"] += len(current)
             if tuple(current) != expected:
                 self._metrics["dependency_invalidations"] += 1
-                self._invalidated_owners.add(key)
+                self._invalidated_owners.setdefault(key)
                 self.forget_owner(jobs, key[1])
                 invalidated = True
                 continue
             self._queue_settled_dependency_check(key)
         return bool(queue) or invalidated
 
+    _PROOF_SCHEMA = 2
+
+    def load_settled_proofs(self, path) -> int:
+        """Load settled-owner proofs a previous runner recorded.
+
+        Each proof joins the same dependency watch and rotating check as a
+        proof taken in this process and is still checked on use: the owner
+        row, its related rows and every dependency's stat generation must be
+        unchanged, otherwise it is dropped and re-proved.
+        """
+        try:
+            with open(path, "rb") as handle:
+                data = json.loads(handle.read(64 * 1024 * 1024))
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(data, dict) or data.get("schema") not in {1, self._PROOF_SCHEMA}:
+            return 0
+        full_rows = data.get("schema") == 1  # earlier files carried the rows themselves
+        loaded = 0
+        for item in data.get("owners") or ():
+            try:
+                root, attempt = item["key"]
+                if full_rows:
+                    row_match = _DigestMatch(_digest_value(tuple(item["row"])))
+                    related = _DigestMatch(_digest_value(
+                        tuple(tuple(row) for row in item["related"])))
+                else:
+                    row_match = _DigestMatch(str(item["row"]))
+                    related = _DigestMatch(str(item["related"]))
+                paths = tuple(str(value) for value in item["paths"])
+                generations = tuple((str(key), tuple(int(v) for v in generation))
+                                    for key, generation in item["generations"])
+                aliases = tuple(str(value) for value in item["aliases"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            key = (str(root), str(attempt))
+            if key in self._settled or len(self._settled) >= 4096:
+                continue
+            # Watch before first use: the first pass after a restart compares
+            # every restored generation with a fresh stat (no owner cursor is
+            # restored), and a later change marks the watch or the rotating
+            # stat check exactly as for a proof taken in this process.
+            self._register_dependency_watch(key, paths)
+            self._adopt_settled(key, (row_match, related, paths, generations, aliases))
+            loaded += 1
+        self._saved_version = self._settled_version
+        return loaded
+
+    proof_path = None
+    _proof_saved_at = 0.0
+
+    def checkpoint_settled_proofs(self, *, min_interval=120.0) -> None:
+        """Persist proofs during a long first pass, so a restart keeps them."""
+        if self.proof_path is None:
+            return
+        now = _PASS_CLOCK()
+        if now - self._proof_saved_at < min_interval:
+            return
+        self._proof_saved_at = now
+        self.save_settled_proofs(self.proof_path)
+
+    def save_settled_proofs(self, path) -> bool:
+        """Write this context's settled-owner proofs when they changed."""
+        if self._saved_version == self._settled_version:
+            return False
+        owners = [{"key": list(key), "row": _digest_value(entry[0]),
+                   "related": _digest_value(entry[1]),
+                   "paths": list(entry[2]),
+                   "generations": [[name, list(generation)] for name, generation in entry[3]],
+                   "aliases": list(entry[4])}
+                  for key, entry in self._settled.items()]
+        payload = json.dumps({"schema": self._PROOF_SCHEMA, "owners": owners},
+                             separators=(",", ":")).encode("utf-8")
+        target = os.fspath(path)
+        temporary = f"{target}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            return False
+        self._saved_version = self._settled_version
+        return True
+
     def forget_owner(self, jobs: Path, attempt_id: str):
         key = (str(jobs.resolve(strict=False)), attempt_id)
         entry = self._settled.pop(key, None)
+        if entry is not None:
+            self._settled_version += 1
         self._forget_dependency_watch(key)
         if entry is not None:
             if key in self._dependency_queued:
@@ -1298,11 +1477,19 @@ class OwnerSettlementReadContext:
                 affected.add(attempt)
         return tuple(affected)
 
+    def has_settled_owner(self, jobs: Path, attempt_id: str) -> bool:
+        return (str(jobs.resolve(strict=False)), attempt_id) in self._settled
+
+    def reselect_owner(self, jobs: Path, attempt_id: str):
+        """Keep an owner with an invalid proof due on the next candidate selection."""
+        self._invalidated_owners.setdefault((str(jobs.resolve(strict=False)), attempt_id))
+
     def take_invalidated_owner_ids(self, jobs: Path):
         root = str(jobs.resolve(strict=False))
         affected = tuple(attempt for item_root, attempt in self._invalidated_owners
                          if item_root == root)
-        self._invalidated_owners.difference_update((root, attempt) for attempt in affected)
+        for attempt in affected:
+            self._invalidated_owners.pop((root, attempt), None)
         return affected
 
     def owner_candidate_floor(self, jobs: Path, view):
@@ -1324,6 +1511,35 @@ class OwnerSettlementReadContext:
         self._cursors[key] = (view.path_identity, view.resolved_path,
                               tuple(view.signature[:2]), view.last_complete_order,
                               tuple(view.signature))
+
+    def limit_owner_scan(self, seconds):
+        """Bound each pass's historical owner proof; the next pass resumes."""
+        self._owner_scan_budget_s = seconds
+
+    def owner_scan_deadline(self):
+        if self._owner_scan_budget_s is None:
+            return None
+        return self._clock() + max(0.0, float(self._owner_scan_budget_s))
+
+    def owner_scan_resume_order(self, jobs: Path, view):
+        """The last owner row an unfinished historical scan already proved."""
+        prior = self._owner_scan_resume.get(str(jobs.resolve(strict=False)))
+        if prior is None or prior[:2] != (view.path_identity, view.resolved_path):
+            return None
+        return prior[2]
+
+    def continue_owner_scan(self, jobs: Path, view, order):
+        self._owner_scan_resume[str(jobs.resolve(strict=False))] = (
+            view.path_identity, view.resolved_path, order)
+
+    def finish_owner_scan(self, jobs: Path):
+        self._owner_scan_resume.pop(str(jobs.resolve(strict=False)), None)
+
+    def owner_scan_unfinished(self, jobs: Path | None = None):
+        """Rows proved so far by unfinished scans; empty once every scan finished."""
+        if jobs is not None:
+            return str(jobs.resolve(strict=False)) in self._owner_scan_resume
+        return tuple(sorted((key, value[2]) for key, value in self._owner_scan_resume.items()))
 
     def metrics(self):
         return dict(self._metrics)
@@ -1559,7 +1775,8 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
                     selected[attempt_id] = record
             changed_rows = view.records_since(floor) if floor >= 0 else ()
             impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
-            impacted.update(context.take_invalidated_owner_ids(jobs))
+            reselected = context.take_invalidated_owner_ids(jobs)
+            impacted.update(reselected)
             impacted.update(context.active_owner_ids(jobs))
             impacted.update(context.due_unsettled_owner_ids(jobs))
             for attempt_id in impacted:
@@ -1575,25 +1792,56 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             candidates = tuple(selected.values())
     except FileNotFoundError:
         return ()
-    if context is not None:
+    resume_after = None
+    if context is None:
+        reselected = ()
+    else:
         context.begin_dependency_pass()
+        resume_after = context.owner_scan_resume_order(jobs, view)
+        candidates = tuple(sorted(candidates, key=lambda record: record.order))
     # One read-only classification section observes the generation that
     # selected its candidates; settlement writes run after this returns.
     with registry_read_scope(pinned=view):
-        pending = _classify_owner_candidates(jobs, view, candidates, context)
+        # Classification only observes history: one /proc walk serves every
+        # candidate of this pass instead of one walk per owner proof.
+        from dispatch_contract import process_table_scan_scope
+        with process_table_scan_scope():
+            pending, proven_through = _classify_owner_candidates(
+                jobs, view, candidates, context, resume_after=resume_after,
+                reselected=reselected)
     if context is not None:
-        context.remember_owner_cursor(jobs, view)
+        if proven_through is None:
+            context.finish_owner_scan(jobs)
+            context.remember_owner_cursor(jobs, view)
+        else:
+            # Unproven finished owners stay owed: the next pass resumes after
+            # the last proven row and keeps the old candidate floor.
+            context.continue_owner_scan(jobs, view, proven_through)
     return pending
 
 
-def _classify_owner_candidates(jobs: Path, view, candidates, context):
+def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_after=None,
+                               reselected=()):
     from dispatch_contract import (
         SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
     )
     from dispatch_terminal_commit import owner_completion_state
 
+    import peer_obligations
+
     pending = []
-    for candidate in candidates:
+    deadline = None if context is None else context.owner_scan_deadline()
+    proved_this_pass = False
+    walk = _OwnerProofWalk(candidates, resume_after, reselected, budgeted=deadline is not None)
+    # The resume order only marks rows an earlier pass already proved; an owner
+    # whose proof became invalid since then is due again whatever its order.
+    reselected = set(reselected)
+    for candidate in walk:
+        # Each historical proof reads and drops large inputs; return the freed
+        # heap while the long candidate walk continues (rate limited).
+        peer_obligations.release_freed_memory()
+        if context is not None:
+            context.checkpoint_settled_proofs()
         order, raw, fields = candidate.order, candidate.raw, candidate.fields
         if fields[1] not in {"open", "running", "done"}:
             if context is not None and candidate.completion_metadata().get("attempt_id"):
@@ -1625,11 +1873,17 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                 meta.get("attempt_id", ""),
                 meta.get("owner_route_id") or meta.get("route_id", ""),
                 meta.get("owner_route_hash") or meta.get("route_hash", ""))
+            had_proof = context is not None and context.has_settled_owner(jobs, attempt_id)
             if (context is not None and context.settled_owner_current(
                     jobs, fields[1], raw, meta, related_rows)):
                 context.forget_active_owner(jobs, attempt_id)
                 context.forget_unsettled_owner(jobs, attempt_id)
                 continue
+            if had_proof:
+                reselected.add(attempt_id)
+                if walk.divert(candidate):
+                    # Found invalid before the suffix's turn: proved after it.
+                    continue
             deferred = (None if context is None else context.unsettled_current(
                 jobs, fields[1], raw, meta, related_rows, supervisor_lease_is_held))
             if deferred == "not-applicable":
@@ -1639,10 +1893,30 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                 # Unchanged inputs before the retry time: keep the unfinished
                 # owner visible without observing it again.
                 context.remember_active_owner(jobs, candidate)
+            elif (resume_after is not None and order <= resume_after
+                    and attempt_id not in reselected):
+                # An earlier pass of this unfinished scan already proved it.
+                continue
+            elif (deadline is not None and proved_this_pass
+                    and context._clock() >= deadline):
+                # This pass spent its proof budget; prove the rest next pass.
+                walk.defer(order)
+                if attempt_id in reselected:
+                    # Behind the resume order: keep it on the reselection path.
+                    context.reselect_owner(jobs, attempt_id)
+                continue
             else:
+                proved_this_pass = True
+                walk.proving()
                 try:
+                    observed = dependencies = None
                     if context is not None:
                         context.record_historical_check()
+                        # The proof's basis belongs to the read it guards:
+                        # dependency generations are taken before that read.
+                        dependencies = _owner_settlement_dependency_paths(
+                            jobs, fields[1], meta)
+                        observed = context.observe_dependencies(dependencies)
                     state = owner_completion_state(jobs, fields[1], meta).state
                     if state == "not-applicable":
                         if context is not None:
@@ -1653,11 +1927,10 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                     if state not in {"pending", "unknown"}:
                         if context is not None:
                             context.forget_unsettled_owner(jobs, attempt_id)
-                            dependencies = _owner_settlement_dependency_paths(
-                                jobs, fields[1], meta)
                             if dependencies:
                                 remembered = context.remember_settled_owner(
-                                    jobs, fields[1], raw, meta, related_rows, dependencies)
+                                    jobs, fields[1], raw, meta, related_rows, dependencies,
+                                    observed=observed)
                                 if remembered is not True:
                                     # An invalidated or unavailable snapshot cannot
                                     # prove settlement; keep the row on its normal
@@ -1690,7 +1963,88 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
         except (OSError, ValueError):
             lease_held = True
         pending.append((order, fields[1], raw, meta, lease_held))
-    return tuple(pending)
+    return tuple(pending), walk.proven_through()
+
+
+class _OwnerProofWalk:
+    """The order one budgeted pass proves owners in.
+
+    The rows after the resume order (owners not yet proved by this scan) take
+    the pass's first proof, so they advance on every pass however many earlier
+    proofs become invalid. Owners due again (proof invalidated, or deferred by
+    an earlier budget) follow, oldest first, so a repeatedly invalidated owner
+    neither takes every pass's proof nor stays hidden behind the resume order;
+    the remaining rows keep registry order. A pass without a budget proves
+    every owner, so its order is the registry order.
+    """
+
+    def __init__(self, candidates, resume_after, reselected, *, budgeted):
+        self._candidates = candidates
+        self._resume_after = resume_after
+        self._reselected = tuple(reselected)
+        self._budgeted = budgeted
+        self._suffix_turn_taken = not budgeted
+        self._diverted = []
+        self._deferred = False
+        self._first_gap = None
+
+    def __iter__(self):
+        if not self._budgeted:
+            yield from self._candidates
+            return
+        due = set(self._reselected)
+        by_attempt = {}
+        for candidate in self._candidates:
+            attempt_id = candidate.completion_metadata().get("attempt_id")
+            if attempt_id in due:
+                by_attempt[attempt_id] = candidate
+        visited = set()
+        for candidate in self._candidates:
+            if self._suffix_turn_taken:
+                break
+            if self._resume_after is not None and candidate.order <= self._resume_after:
+                continue
+            if candidate.completion_metadata().get("attempt_id") in due:
+                continue
+            visited.add(id(candidate))
+            yield candidate
+        self._suffix_turn_taken = True
+        again = set()
+        for candidate in [by_attempt[attempt_id] for attempt_id in self._reselected
+                          if attempt_id in by_attempt] + self._diverted:
+            if id(candidate) in again:
+                continue
+            again.add(id(candidate))
+            visited.add(id(candidate))
+            yield candidate
+        for candidate in self._candidates:
+            if id(candidate) not in visited:
+                yield candidate
+
+    def divert(self, candidate) -> bool:
+        """Hold an owner found invalid during the suffix's turn until after it."""
+        if self._suffix_turn_taken:
+            return False
+        self._diverted.append(candidate)
+        return True
+
+    def proving(self):
+        self._suffix_turn_taken = True
+
+    def defer(self, order):
+        self._deferred = True
+        if self._resume_after is None or order > self._resume_after:
+            if self._first_gap is None or order < self._first_gap:
+                self._first_gap = order
+
+    def proven_through(self):
+        """The resume order: every due row up to it was proved or stays reselected."""
+        if not self._deferred:
+            return None
+        floor = -1 if self._resume_after is None else self._resume_after
+        if self._first_gap is None:
+            return floor
+        return max(floor, self._first_gap - 1)
 
 
 def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
@@ -1715,7 +2069,7 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
             context.remember(jobs, before_stamp, (), retry_required=True)
         return ((str(jobs), "owner-settlement-unavailable"),)
     live_leases = []
-    retry_required = False
+    retry_required = context is not None and context.owner_scan_unfinished(jobs)
     signatures = []
     for order, status, raw, meta, lease_held in pending:
         attempt_id = meta.get("attempt_id", "")

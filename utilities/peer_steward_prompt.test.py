@@ -711,7 +711,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         peer = peer_steward.peer_message
         # A queue that did not take the row, or raised before taking it, leaves it
         # pending: the receipt is queued for the carrier and one duty keeps it.
-        for failure, expected in (("retryable", 3), ("unverified", 3), ("raises", 3), ("rpc-error", 3)):
+        for failure, expected in (("retryable", 0), ("unverified", 0), ("raises", 0), ("rpc-error", 0)):
             with self.subTest(failure=failure), contextlib.ExitStack() as stack:
                 self._native_address_retry_observations(stack)
                 # Older same-sender rows from sibling subtests would be delivered first;
@@ -818,7 +818,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 self.assertFalse(submissions)
                 self._set_inventory(saved_rows)
                 if recovery == "caller":
-                    self.assertEqual(peer_steward.cmd_prompt(args), 3 if submitted == "queued" else 5)
+                    self.assertEqual(peer_steward.cmd_prompt(args), 0 if submitted == "queued" else 5)
                 else:
                     peer_steward._resume_message_obligation(duty, store)
                 row = peer._read_pending(original["ref"])
@@ -1072,7 +1072,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 # The production typed caller and its on_prepared callback run.
                 with mock.patch("builtins.print", side_effect=real_print):
                     _line, code = runner.handoff(tidy.Seat("project", "original-source"), first)
-                self.assertEqual(code, 3, _line)
+                self.assertEqual(code, 0, _line)
                 self.assertIn("prompted=queued", _line)
                 original, = [r for r in peer._pending_rows() if r["ref"] not in prior]
                 kwargs["handoff"] = original["handoff"]
@@ -1201,7 +1201,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             args = peer_steward.build_parser().parse_args(['prompt', 'child', '[handoff] retained context', '--ref', 'context-ref'])
             context = {'card_id': 'original-card', 'predecessor': {'harness': 'claude', 'session_id': 'original-sender'},
                        'successor': {'harness': 'codex', 'session_id': 'exact-native-thread'}}
-            self.assertEqual(peer_steward.cmd_prompt(args, handoff=context, on_prepared=prepared.append), 3)
+            self.assertEqual(peer_steward.cmd_prompt(args, handoff=context, on_prepared=prepared.append), 0)
             ref, = prepared
             original = peer._read_pending(ref)
             self._set_inventory([])
@@ -1234,7 +1234,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 return {"status": "queued"}
             stack.enter_context(mock.patch("codex_queue_delivery.send_at_least_once", side_effect=submit))
             args, kwargs, duty, code = self._canonical_runtime_notice("runtime retained context", prepared)
-            self.assertEqual(code, 3)
+            self.assertEqual(code, 0)
             ref, = prepared
             original = peer._read_pending(ref)
             intent = dict(duty["intent"])
@@ -1243,7 +1243,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             # session observed the retry still reuses the queued row, never resends.
             self._set_inventory([])
             for _ in range(3):
-                self.assertEqual(peer_steward.cmd_prompt(args, **kwargs), 3)
+                self.assertEqual(peer_steward.cmd_prompt(args, **kwargs), 0)
                 self.assertEqual(prepared[-1], ref)
                 self.assertEqual(peer._read_pending(ref), original)
             self.assertEqual(prepared, [ref] * 4)
@@ -1251,7 +1251,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(len(store.list()), 1)
             self._set_inventory([self._inventory_row(harness="codex", sid="other-native"),
                 self._inventory_row(harness="codex", sid="exact-native-thread", name="original moved", pane="w1:pOriginal")])
-            self.assertEqual(peer_steward.cmd_prompt(args, **kwargs), 3)
+            self.assertEqual(peer_steward.cmd_prompt(args, **kwargs), 0)
             self.assertEqual(prepared[-1], ref)
             self.assertEqual(adds, ["delivery-peer-" + ref])
             self._set_inventory(inventory)
@@ -1278,7 +1278,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             # The queue did not take it: the sealed row stays pending with its duty.
             with mock.patch.object(peer, "deliver_pending_codex",
                                    return_value={"status": "retryable", "reason": "queue-outage"}):
-                self.assertEqual(peer_steward.cmd_prompt(args), 3)
+                self.assertEqual(peer_steward.cmd_prompt(args), 0)
             store = peer_steward.peer_obligations.ObligationStore()
             duty, = store.list()
             original = peer._read_pending(duty["intent"]["ref"])
@@ -1754,7 +1754,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_schedule_message_obligation"), \
              mock.patch("builtins.print") as printed:
             rc = peer_steward.main(["prompt", "child", "[steer] deliver once"])
-        self.assertEqual(rc, 3)
+        self.assertEqual(rc, 0)
         self.assertIn("prompted=queued", printed.call_args[0][0])
         self.assertEqual(self._pane_io_calls(calls), [])
         row = peer_steward.peer_message._read_pending(self._all_records()[-1]["transfer_ref"])
@@ -1888,7 +1888,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
     def test_busy_claude_uses_callback_without_reading_or_typing_into_pane(self):
         # Outside a shell the Claude session receives the row at its own next callback.
         rc, line, row, sent, schedule = self._run_claude_prompt()
-        self.assertEqual(rc, 3, line)
+        self.assertEqual(rc, 0, line)
         self.assertIn("reason=awaiting-native-callback", line)
         self.assertEqual(row["state"], "pending")
         self.assertEqual(sent, [])
@@ -1943,7 +1943,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=accept), \
              mock.patch("builtins.print") as printed:
             rc = peer_steward.main(["prompt", "child", "[handoff] continue"])
-        self.assertEqual(rc, 3)
+        self.assertEqual(rc, 0)
         self.assertEqual(len(queued), 1)
         self.assertEqual(queued[0][0], "exact-thread")
         self.assertEqual(self._pane_io_calls(calls), [])
@@ -2051,7 +2051,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         server = self._AppServer(turn_status="interrupted")
         with self._codex_e2e(server, shell=self._SHELL_IDLE_EMPTY) as env:
             rc, line, ref = env.run("[steer] resume the work")
-        self.assertEqual(rc, 3, line)
+        self.assertEqual(rc, 0, line)
         self.assertIn("reason=native-queue-started", line)
         self.assertIn("via=session-shell", line)
         self.assertIn("status", [op for _seat, op in env.controls])
@@ -2074,7 +2074,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 server = self._AppServer(turn_status="interrupted", queue=queue)
                 with self._codex_e2e(server, shell=shell) as env:
                     rc, line, ref = env.run("[steer] resume the work %d" % index)
-                self.assertEqual(rc, 3, line)
+                self.assertEqual(rc, 0, line)
                 self.assertEqual(server.params("thread/queue/start"), [])
                 self.assertIn("reason=native-queue-held-interrupted:" + expected, line)
                 self.assertEqual(server.methods().count("thread/queue/add"), 1)
@@ -2084,7 +2084,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         server = self._AppServer(turn_status="inProgress")
         with self._codex_e2e(server) as env:
             rc, line, ref = env.run("plain adjustment for the running turn")
-        self.assertEqual(rc, 3, line)
+        self.assertEqual(rc, 0, line)
         self.assertIn("prompted=queued", line)
         self.assertIn("reason=native-steer-accepted", line)
         text = peer_steward.peer_message._read_pending(ref)["text"]
@@ -2103,7 +2103,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             "queue-rpc-refused:turn/steer:-32600:expected turn mismatch", ambiguous=False)
         with self._codex_e2e(server) as env:
             rc, line, ref = env.run("plain adjustment, steer will be refused")
-        self.assertEqual(rc, 3, line)
+        self.assertEqual(rc, 0, line)
         self.assertIn("reason=native-queue-behind-active-turn", line)
         self.assertEqual(server.methods().count("thread/queue/add"), 1)
 
@@ -2152,7 +2152,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
             server.calls.clear()
             server.turn_status = "inProgress"
             rc, line, new_ref = env.run("newest note while running")
-        self.assertEqual(rc, 3, line)
+        self.assertEqual(rc, 0, line)
         steers = [params["clientUserMessageId"] for params in server.params("turn/steer")]
         self.assertEqual(steers, ["delivery-peer-" + first_ref, "delivery-peer-" + second_ref,
                                   "delivery-peer-" + new_ref])
@@ -2192,13 +2192,13 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
     def test_codex_prompt_passes_the_screen_gate_and_reports_the_real_receipt(self):
         idle = {"ok": True, "state": "idle", "empty": True, "focused": False}
         cases = (
-            (idle, True, {"status": "queued", "reason": "native-queue-started"}, 3, "session-shell:"),
+            (idle, True, {"status": "queued", "reason": "native-queue-started"}, 0, "session-shell:"),
             ({**idle, "empty": False}, False,
-             {"status": "queued", "reason": "native-queue-held-interrupted:screen-unknown"}, 3, "session-shell:"),
+             {"status": "queued", "reason": "native-queue-held-interrupted:screen-unknown"}, 0, "session-shell:"),
             (None, False, {"status": "queued", "reason": "native-queue-held-interrupted:screen-unknown"},
-             3, "codex-queue:"),
-            (idle, True, {"status": "queued", "reason": "native-steer-accepted"}, 3, "session-shell:"),
-            (idle, True, {"status": "unverified", "reason": "queue-websocket-timeout"}, 3, "session-shell:"),
+             0, "codex-queue:"),
+            (idle, True, {"status": "queued", "reason": "native-steer-accepted"}, 0, "session-shell:"),
+            (idle, True, {"status": "unverified", "reason": "queue-websocket-timeout"}, 0, "session-shell:"),
         )
         for index, (shell, gate, result, rc_expected, via) in enumerate(cases):
             with self.subTest(reason=result["reason"], shell=shell):
@@ -2212,7 +2212,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
 
     def test_immediate_codex_restart_queues_the_original_sealed_thread_and_ref(self):
         rc, proofs, submissions, ref, pending = self._run_immediate_codex_restart("same-thread")
-        self.assertEqual(rc, 3)
+        self.assertEqual(rc, 0)
         self.assertEqual(proofs, ["codex-thread-original", "codex-thread-original"])
         self.assertEqual(len(submissions), 1)
         self.assertEqual(submissions[0]["thread_id"], "codex-thread-original")
@@ -2229,7 +2229,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(len(proofs), 2)
                 self.assertEqual(submissions, [])
                 self.assertEqual(pending["state"], "pending")
-                self.assertEqual(rc, 3)
+                self.assertEqual(rc, 0)
 
     def test_deferred_codex_restart_queues_the_original_sealed_thread_and_ref(self):
         store, duty, _proofs, submissions, ref, pending = \
@@ -2310,7 +2310,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload)), \
              mock.patch("builtins.print"):
             for _ in range(2):
-                self.assertEqual(peer_steward.main(["prompt", "child", "retry this exact body"]), 3)
+                self.assertEqual(peer_steward.main(["prompt", "child", "retry this exact body"]), 0)
                 refs.append(self._all_records()[-1]["transfer_ref"])
         self.assertEqual(refs[0], refs[1])
         self.assertEqual(peer_steward.peer_message._read_pending(refs[0])["state"], "pending")
@@ -2361,13 +2361,13 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                     for address in ("child", "[3e]", "w1:pX"):
                         rc = peer_steward.main([
                             "prompt", address, f"[steer] {harness} via {address}"])
-                        self.assertEqual(rc, 0 if harness == "claude" else 3,
+                        self.assertEqual(rc, 0,
                                          printed.call_args[0][0])
                     if harness == "claude":
                         callback_sid["value"] = "wrong-current-session"
                         rc = peer_steward.main([
                             "prompt", "child", "[steer] mismatched callback cannot receive"])
-                        self.assertEqual(rc, 3, printed.call_args[0][0])
+                        self.assertEqual(rc, 0, printed.call_args[0][0])
                         self.assertIn("prompted=queued", printed.call_args[0][0])
 
                 records = [row for row in self._all_records()
@@ -2473,7 +2473,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_from_name", return_value="sender"), \
              mock.patch("builtins.print") as printed:
             rc = peer_steward.main(["prompt", "child", "[steer] keep the original process"])
-        self.assertEqual(rc, 3)
+        self.assertEqual(rc, 0)
         self.assertIn("reason=target-process-changed", printed.call_args[0][0])
         deliver.assert_not_called()
         record = self._all_records()[-1]
@@ -2511,7 +2511,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_from_name", return_value="sender"), \
              mock.patch("builtins.print"):
             self.assertEqual(peer_steward.main(
-                ["prompt", "child", "[steer] defer on the original recipient"]), 3)
+                ["prompt", "child", "[steer] defer on the original recipient"]), 0)
         record = self._all_records()[-1]
         ref = record["transfer_ref"]
         store = peer_steward.peer_obligations.ObligationStore()
@@ -4679,7 +4679,7 @@ class PromptDraftGuardTest(_TmpRootMixin, unittest.TestCase):
         return peer_steward.main(["prompt", "child", body])
 
     def test_non_codex_peer_prompt_retains_exact_ref_for_native_callback(self):
-        self.assertEqual(self.prompt("[steer] native callback body"), 3)
+        self.assertEqual(self.prompt("[steer] native callback body"), 0)
         ref = self._all_records()[-1]["transfer_ref"]
         row = peer_steward.peer_message._read_pending(ref)
         self.assertEqual(row["state"], "pending")
@@ -4698,7 +4698,7 @@ class PromptDraftGuardTest(_TmpRootMixin, unittest.TestCase):
         # The queue path never reads or types into the composer (setUp fails any
         # screen read). Without a shell host's input status there is no start evidence.
         with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=queue):
-            self.assertEqual(self.prompt("[steer] exact queue"), 3)
+            self.assertEqual(self.prompt("[steer] exact queue"), 0)
         self.assertEqual(gates, [False])
         self.assertEqual(len(accepted), 1)
         self.assertEqual(accepted[0]["to"]["session_id"], "thread-exact")
@@ -4706,7 +4706,7 @@ class PromptDraftGuardTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(accepted[0]["text"].splitlines()[0], "[steer] exact queue")
 
     def test_reconnected_obligation_keeps_claude_payload_pending_without_ptysend(self):
-        self.assertEqual(self.prompt("parent duty stays sealed"), 3)
+        self.assertEqual(self.prompt("parent duty stays sealed"), 0)
         ref = self._all_records()[-1]["transfer_ref"]
         store = peer_steward.peer_obligations.ObligationStore()
         duty = store.get("message-" + ref)
@@ -4723,7 +4723,7 @@ class PromptDraftGuardTest(_TmpRootMixin, unittest.TestCase):
         parser = peer_steward.build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(["prompt", "child", "body", "--no-verify"])
-        self.assertEqual(self.prompt("ordinary native body"), 3)
+        self.assertEqual(self.prompt("ordinary native body"), 0)
         row = peer_steward.peer_message._read_pending(self._all_records()[-1]["transfer_ref"])
         self.assertEqual(row["state"], "pending")
 

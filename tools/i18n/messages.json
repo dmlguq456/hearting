@@ -659,8 +659,8 @@
    "ko": "질문 변경됨 · Tab 다음"
   },
   "fleet.session_block.choose": {
-   "en": "1–9 choose · t text",
-   "ko": "1–9 선택 · t 직접 입력"
+   "en": "↑↓ choose · Enter send · t text",
+   "ko": "↑↓ choose · Enter send · t text"
   },
   "fleet.session_block.compact_applied": {
    "en": "✓ consumed",
@@ -717,6 +717,10 @@
   "fleet.session_block.more": {
    "en": "more · focus and ↑↓ to read",
    "ko": "더 있음 · 포커스 후 ↑↓ 읽기"
+  },
+  "fleet.session_block.more_choose": {
+   "en": "more · PgUp/PgDn to read",
+   "ko": "더 있음 · PgUp/PgDn 읽기"
   },
   "fleet.session_block.navigate": {
    "en": "Tab next · Esc/Ctrl+] back",
@@ -1269,6 +1273,10 @@
   "questions.registered": {
    "en": "Waiting for your answer. Reply in Fleet or in this session.",
    "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요."
+  },
+  "questions.registered_choices": {
+   "en": "Waiting for your answer. Reply in Fleet, or in this session with a choice number or the choice's wording.",
+   "ko": "질문 대기 중입니다. Fleet에서 답하거나 이 창에 선택지 번호나 선택지 문구로 답해 주세요."
   },
   "reports.empty": {
    "en": "No user-facing document yet.",
@@ -1937,6 +1945,18 @@
   "tidy.hold.screen-unknown": {
    "en": "the screen could not be read",
    "ko": "화면을 읽지 못했습니다"
+  },
+  "tidy.hold.shell-editor-open": {
+   "en": "the Hearting shell's settings, Fleet explorer or question view was open",
+   "ko": "하팅 셸의 설정·Fleet 탐색기·질문 화면이 열려 있습니다"
+  },
+  "tidy.hold.shell-host-outdated": {
+   "en": "this window's Hearting shell is an older version that cannot show its input box, and reopening the window brings the new version",
+   "ko": "이 창의 하팅 셸이 이전 판이라 입력창을 확인할 수 없고, 창을 다시 열면 새 판으로 바뀝니다"
+  },
+  "tidy.hold.shell-no-answer": {
+   "en": "the Hearting shell did not answer the screen request",
+   "ko": "하팅 셸이 화면 요청에 답하지 않았습니다"
   },
   "tidy.hold.target-changed": {
    "en": "the session in that seat changed",

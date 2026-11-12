@@ -279,6 +279,12 @@ def pane_seat(info, harness: str | None = None, *, rows=None, birth=None) -> dic
 PASSTHROUGH = "passthrough"
 
 
+# Why a shell seat's screen could not be read; tidy names the cause in its one notice line.
+SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learned `screen`
+SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
+SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
+
+
 def native_screen(binding: dict):
     """The screen a key typed into this seat's pane reaches, as ``(char, faint)`` cell lines.
 
@@ -290,25 +296,35 @@ def native_screen(binding: dict):
     ``PASSTHROUGH`` only when the host relays the pane raw: the pane is then the
     native screen and its keys go straight to native.
     """
+    return native_screen_reason(binding)[0]
+
+
+def native_screen_reason(binding: dict):
+    """``(lines | None | PASSTHROUGH, reason)``: :func:`native_screen` and, for None, why."""
     result = control(binding, "screen")
-    if isinstance(result, dict) and result.get("ok") is False and result.get("reason") == "display-unavailable":
-        return PASSTHROUGH
+    if isinstance(result, dict) and result.get("ok") is False:
+        if result.get("reason") == "display-unavailable":
+            return PASSTHROUGH, ""
+        if result.get("reason") == "unsupported-operation":
+            return None, SCREEN_HOST_OUTDATED
+    if isinstance(result, dict) and result.get("ok") and result.get("focused") is True:
+        return None, SCREEN_EDITOR_OPEN
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
     if not isinstance(screen, list) or len(screen) > 512:
-        return None
+        return None, SCREEN_NO_ANSWER
     lines = []
     for runs in screen:
         if not isinstance(runs, list):
-            return None
+            return None, SCREEN_NO_ANSWER
         line = []
         for run in runs:
             if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
                     or type(run[1]) is not bool):
-                return None
+                return None, SCREEN_NO_ANSWER
             line.extend((char, run[1]) for char in run[0])
         lines.append(line)
-    return lines
+    return lines, ""
 
 
 def open_panel(harness: str, sid: str) -> dict:
@@ -731,11 +747,12 @@ def _panel_common_rows(panel, columns):
     from fleet.explorer.grid import cell_width
     text = lambda name: "".join(part["text"] for part in panel.get(name) or ()).strip()
     head, selected, context, quota = text("head"), text("selected"), text("context"), text("quota")
+    git = text("git")  # Its own row below the repo row (spec rule 15).
     if columns >= 64:
         first = " │ ".join(part for part in (head, selected, context) if part)
-        rows = [first] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context]
+        rows = [first, git] if cell_width(first) <= columns - 4 else [" │ ".join(p for p in (head, selected) if p), context, git]
     else:
-        rows = [head, selected, context]
+        rows = [head, git, selected, context]
     return [row for row in rows + [quota] if row]
 
 
@@ -788,6 +805,21 @@ def _sent_peer_messages(sid, limit=3):
     return rows, [str(shard)]
 
 
+# This backend's last observation of its one exact live native session. A source
+# that was not read keeps these cells (Fleet's native-reader rule); the next
+# projection reads it again. Another SID, PID or start never borrows them.
+_LAST_OBSERVED: dict = {}
+
+
+def _observe_session(observe, harness, sid, pid, start):
+    key = (harness, sid, pid, start)
+    values, watched = observe(harness, pid, start, sid, previous=_LAST_OBSERVED.get(key, {}))
+    _LAST_OBSERVED.clear()
+    if values:
+        _LAST_OBSERVED[key] = dict(values)
+    return values, watched
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
@@ -817,7 +849,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
              + " · " + _plain(row.get("text"), 160) for row in received[-2:]]
     tag = assigned_tag(harness, sid)
     tag = f"[{tag}]" if tag and not str(tag).startswith("[") else str(tag or "[?]")
-    values, watched = observe(harness, native_pid, native_start, sid) if native_pid else ({}, [])
+    values, watched = _observe_session(observe, harness, sid, native_pid, native_start) if native_pid else ({}, [])
     # The native OpenCode sidebar already owns this display value. It does not
     # establish an effective policy, process liveness or input readiness.
     if (harness == "opencode" or harness == "codex" and values.get("ctx_pct") is None) and type(native_context) in (int, float) and 0 <= native_context <= 100:
@@ -853,7 +885,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
                                    for key, value in question["display"].items()}
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         "open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable",
-        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more")}
+        "choose", "send", "navigate", "text", "changed", "complete", "busy", "empty", "more", "more_choose")}
     if columns < 64:
         for key in ("open", "submitted", "received", "applied", "expired", "cancelled", "unknown", "unavailable"):
             labels[key] = ui_text("fleet.session_block.compact_" + key)
@@ -883,7 +915,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -904,7 +936,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r")}
+                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
+                                   "g_spin", "g_work_off")}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
@@ -940,6 +973,37 @@ def _block_action(binding, request):
         value, _ = observe(binding["harness"], binding["native_pid"], binding["native_start"], binding["sid"])
         rows, _ = work(value.get("cwd"))
         return {"ok": True, "lines": [_plain(row.get("headline")) for row in rows[:32]] or ["◌ ·"]}
+    if key == "raw":
+        # The route page's owner output, read once when the person opens the page,
+        # through the same reader Fleet uses when its route page is opened.
+        # Only the routes the page shows (the panel's own rows), each through the
+        # current owner Fleet's route row names; a row without one is not guessed.
+        import human_wait_state
+        from fleet.explorer.focus import read_attempts, read_owner_raw
+        from fleet.explorer.output import OutputReader
+        view = human_wait_state.cached_view(request=False) or {}
+        shown = (view.get("route_panels") or {}).get(binding["harness"] + "\0" + binding["sid"])
+        routes = []
+        for row in shown[:8] if isinstance(shown, list) else ():
+            route = row.get("id") if isinstance(row, dict) else None
+            owner = row.get("owner_attempt") if isinstance(row, dict) else None
+            if (isinstance(route, str) and re.fullmatch(r"rt-[0-9a-f]{16}", route)
+                    and isinstance(owner, str) and owner):
+                routes.append((route, owner))
+        rows = read_attempts(None, binding["sid"]) if routes else []
+        reader, attempts, budget = OutputReader(), [], 40000
+        for route, owner in routes[:4]:
+            raw = read_owner_raw(route, owner, rows, {}, reader)
+            lines = []
+            for text in reversed((raw or {}).get("lines") or ()):
+                text = _plain(text, 240)
+                if not text or len(lines) >= 30 or budget - len(text.encode()) < 0:
+                    continue
+                budget -= len(text.encode())
+                lines.append(text)
+            if lines:
+                attempts.append({"route": route, "att": _plain(raw.get("att"), 64), "lines": lines[::-1]})
+        return {"ok": True, "attempts": attempts}
     if key == "\r":
         import subprocess
         from fleet.explorer.focus import session_entries
@@ -1078,11 +1142,12 @@ def _backend_operation(request: dict) -> dict:
             panel["status"] = []
             panel["summary"] = []
             panel["session"] = panel["brief"] = []
-            for name in ("head", "selected", "context", "quota", "jobs", "mcp"):
+            for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
                 panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r")}
+                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r",
+                                           "g_spin", "g_work_off")}
             panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:

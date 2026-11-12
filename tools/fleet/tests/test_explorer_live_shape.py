@@ -61,11 +61,18 @@ def route_extension(key, value):
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
     if key == "doer":
-        # The one-line route row: who does the work now, its context and its open tool.
+        # The one-line route row: who does the work now, its context and its open tool,
+        # with what that tool acts on, since when, and the call it just finished when reported.
         optional_text = lambda item: item is None or isinstance(item, str)
+        activity = {"target": str, "tool_age": str, "after_tool": str,
+                    "tool_since": (int, float), "idle_tool": bool}
         return (isinstance(value, dict)
-                and set(value) == {"harness", "model", "effort", "context", "window", "tokens",
-                                   "tool", "agents"}
+                and {"harness", "model", "effort", "context", "window", "tokens",
+                     "tool", "agents"} <= set(value)
+                and all(key in activity and isinstance(value[key], activity[key])
+                        and not (key == "idle_tool" and value[key] is not True)
+                        for key in set(value) - {"harness", "model", "effort", "context",
+                                                 "window", "tokens", "tool", "agents"})
                 and optional_text(value["harness"]) and optional_text(value["effort"])
                 and optional_text(value["tool"])
                 and (value["model"] is None or pair(value["model"]) and all(

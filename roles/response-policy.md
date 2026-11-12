@@ -164,7 +164,11 @@ Each clause is one contract line plus the signal that it was violated.
   session and question closes its wait.
 - **Register ordinary questions** — use `hearting run questions ask "question"`
   for an ordinary question, write decisions in the self-contained Decision requests
-  form, then say “질문 대기 중입니다. Fleet에서 답하거나 이 창에 답해 주세요.”
+  form, then say the notice it prints (“질문 대기 중입니다. Fleet에서 답하거나
+  이 창에 답해 주세요.”; with `--choice`, “… 이 창에 선택지 번호나 선택지 문구로 답해 주세요.”).
+  With choices, a prompt that is not one choice number or a choice's wording leaves
+  the question open; if that prompt was in fact the answer, record it with
+  `hearting run questions answer <id>`.
   Registration returns immediately; only work dependent on the answer waits.
   Plain question marks do not register a wait. The private S4 message is the
   source for this question; structured frame interviews, the §0.4 entry card,

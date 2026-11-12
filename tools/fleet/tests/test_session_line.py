@@ -112,7 +112,8 @@ class CommonSessionLineTest(unittest.TestCase):
             # A Claude headless worker reports tokens but no window: no percent is made up.
             "rt-b": [job(attempt_id="o2", depth=1, worker_type="owner", route_node="one-shot", liveness="working",
                          harness="claude", model="opus", effort="medium", active_context_tokens=250_136,
-                         exec_tool={"name": "Bash"}, elapsed_min=5.0)],
+                         exec_tool={"name": "python3", "target": "tools/run-tests.py"},
+                         last_tool={"name": "Edit", "target": "utilities/x.py"}, elapsed_min=5.0)],
             "rt-c": [job(attempt_id="o3", depth=1, worker_type="owner", liveness="dead", harness="claude",
                          ctx_pct=12, elapsed_min=54.0)],
         }
@@ -139,10 +140,28 @@ class CommonSessionLineTest(unittest.TestCase):
                          ("codex", "gpt-fixture", "high", round(fleet_percent, 1), "apply_patch", 1))
         self.assertEqual(a["since"], 10_000.0 - 87 * 60)   # absolute: a re-published pass still ages
         # No window known: the exact token count, never a made-up percent.
-        self.assertNotIn("ctx_pct", b); self.assertEqual(b["ctx_tokens"], 250_136); self.assertEqual(b["tool"], "Bash")
+        self.assertNotIn("ctx_pct", b); self.assertEqual(b["ctx_tokens"], 250_136); self.assertEqual(b["tool"], "python3")
+        # The doer's own now and last line reach the panel row and its painted values.
+        self.assertEqual((b["target"], b["after_tool"]), ("tools/run-tests.py", "Edit · utilities/x.py"))
+        from tools.fleet.session_panel import route_row
+        painted = route_row(b, now=10_000.0)
+        self.assertEqual((painted["tool"], painted["target"], painted["after_tool"]),
+                         ("python3", "tools/run-tests.py", "Edit · utilities/x.py"))
+        self.assertNotIn("after_tool", c); self.assertNotIn("idle_tool", c)
         self.assertNotIn("ctx_pct", c); self.assertNotIn("tool", c); self.assertEqual(c["elapsed_min"], 54.0)
         self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
         self.assertTrue(d["closed"])
+        # The route page reads the owner Fleet's route row names: the single depth-1 owner.
+        self.assertEqual([row.get("owner_attempt") for row in (a, b, c, d)], ["o", "o2", "o3", "o4"])
+        # The record's owner_attempt_id picks the current owner over an earlier one;
+        # two owners without a record choice name none (nothing is guessed).
+        two = [job(attempt_id="old", depth=1, worker_type="owner", liveness="dead"),
+               job(attempt_id="new", depth=1, worker_type="owner", liveness="working")]
+        for record, want in (({"owner_attempt_id": "new"}, "new"), ({}, None), ({"owner_attempt_id": "-"}, None)):
+            rows = {"claude\0s": [{"id": "rt-e"}]}
+            with mock.patch.object(live, "_collect_routes", return_value={"rt-e": {"jobs": two, "record": record}}):
+                session_line.route_details(object(), rows, {}, now=10_000.0)
+            self.assertEqual(rows["claude\0s"][0].get("owner_attempt"), want)
         # Fleet's judgment: an owner waiting on its worker is ●, a closed route is in no count.
         self.assertEqual(session_line.route_badge("route 4 · execute", panels["claude\0s"]), "route 4 ⠏1 ●1 ✕1")
         self.assertEqual(session_line.token_text(250_136), "250K")
