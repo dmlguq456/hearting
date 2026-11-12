@@ -1139,15 +1139,22 @@ async function resumeHost(failed=true) {
   if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
   // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
   if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
+  let listenFailed=false;
   try{
     let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
     if(ino!==socketIno){
       fs.rmSync(nextPath,{force:true});
       staleServers.push(server);
-      await new Promise(resolve=>{server=listenControl(nextPath,()=>{fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;resolve();});});
+      // A listen that fails settles too: a rollback never leaves the host frozen with the queue blocked.
+      await new Promise(resolve=>{
+        server=listenControl(nextPath,()=>{try{fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;}catch{listenFailed=true;}resolve();});
+        server.once('error',()=>{listenFailed=true;resolve();});
+      });
     }
     if(seedFile){fs.rmSync(seedFile,{force:true});fs.rmSync(seedFile+'.tmp',{force:true});}
   }catch{}
+  // No control socket to serve: the display keeps nothing frozen and falls back to the plain relay.
+  if(listenFailed){for(const entry of bound.splice(0))entry.conn.destroy();rawRelay();return;}
   succeeding=false;
   if(upgrade)upgrade.requested=false;
   await source('register');

@@ -154,7 +154,10 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             if gen.host.pid<=1:raise ValueError('unsafe display pid')
             try:
                 if birth(gen.host.pid)!=gen.start:return
-                signal.pidfd_send_signal(gen.fd,signal.SIGTERM);gen.term_sent=True
+                # No pidfd (pidfd_open failed after Popen): the birth check above already proved the pid is ours.
+                if gen.fd is None:gen.host.terminate()
+                else:signal.pidfd_send_signal(gen.fd,signal.SIGTERM)
+                gen.term_sent=True
             except (FileNotFoundError,ProcessLookupError):pass
     def spawn_display(number,successor,c):
         """Start one display generation; its channels are closed on the parent side as it takes them over."""
@@ -186,10 +189,13 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
     def send(gen,message):
         try:gen.succ.send((json.dumps(message,separators=(',',':'))+'\n').encode());return True
         except OSError:return False
-    def retire_generation(gen,term=True):
-        """Drop a display this owner no longer routes to; it exits on its own, or by SIGTERM after a bound."""
+    def retire_generation(gen,term=True,keep_channel=False):
+        """Drop a display this owner no longer routes to; it exits on its own, or by SIGTERM after a bound.
+        keep_channel: the old display still forwards the requests it held during the freeze, and its input
+        owner exits on end of this channel, so the channel stays open until the display is gone."""
         unwatch(gen.succ);gen.succ.close()
-        unwatch(gen.writer.channel);gen.writer.channel.close()
+        if not keep_channel:
+            unwatch(gen.writer.channel);gen.writer.channel.close()
         if gen.ready_r is not None:close(gen.ready_r);gen.ready_r=None
         if gen.status_w is not None:close(gen.status_w);gen.status_w=None
         if gen.host is not None and gen.host.poll() is None:
@@ -259,7 +265,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             old,new=done['old'],done['new']
             pending=None;failures.pop(done['release'],None)
             send(old,{'op':'retire'});send(new,{'op':'run'})
-            retire_generation(old,term=False)
+            retire_generation(old,term=False,keep_channel=True)
     def on_ready(gen,chunk):
         nonlocal state
         if chunk:gen.ready+=chunk
@@ -309,6 +315,8 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             for gen in list(retiring):
                 if gen.host.poll() is not None:
                     retiring.remove(gen)
+                    try:gen.writer.channel.close()
+                    except OSError:pass
                     if gen.fd is not None:
                         try:os.close(gen.fd)
                         except OSError:pass
