@@ -268,15 +268,9 @@
 <text x="756" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">34%</text>
 <text x="810" y="414" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="891" y="414" textLength="117" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Rate limiting</text>
-<text x="1062" y="414" textLength="36" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">plan</text>
-<text x="1107" y="414" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">✓</text>
-<text x="1125" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">›</text>
-<text x="1143" y="414" textLength="63" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">execute</text>
-<text x="1215" y="414" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
-<text x="1233" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">›</text>
-<text x="1251" y="414" textLength="36" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">test</text>
-<text x="1296" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">›</text>
-<text x="1314" y="414" textLength="54" lengthAdjust="spacing" fill="#858656" xml:space="preserve">report</text>
+<text x="1062" y="414" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">staged 2/4</text>
+<text x="1161" y="414" textLength="63" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">execute</text>
+<text x="1233" y="414" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
 <text x="1395" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">31m</text>
 <text x="9" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="432" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
@@ -298,13 +292,9 @@
 <text x="756" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">22%</text>
 <text x="810" y="432" textLength="81" lengthAdjust="spacing" fill="#858689" xml:space="preserve">ml-train/</text>
 <text x="900" y="432" textLength="135" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Checkpoint eval</text>
-<text x="1062" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">+1✓</text>
-<text x="1098" y="432" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">eval-asr</text>
-<text x="1179" y="432" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
-<text x="1197" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">›</text>
-<text x="1215" y="432" textLength="72" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">eval-sep</text>
-<text x="1296" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">›</text>
-<text x="1314" y="432" textLength="54" lengthAdjust="spacing" fill="#858656" xml:space="preserve">report</text>
+<text x="1062" y="432" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">staged 2/4</text>
+<text x="1161" y="432" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">eval-asr</text>
+<text x="1242" y="432" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
 <text x="1395" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">24m</text>
 <text x="9" y="450" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─</text>
 <text x="36" y="450" textLength="90" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">docs-site/</text>

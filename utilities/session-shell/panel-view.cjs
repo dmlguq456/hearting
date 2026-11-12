@@ -438,23 +438,86 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const room=inner-2-size(right)-(right.length?1:0),name=cut(line(r.title||'·','loc_repo'),Math.max(1,room));
       return cut([...lead,...name,pad(inner-2-size(name)-size(right)),...right],inner);
     }
+    // Spec rule 32: an opened route reads like a table. Its rows hang two cells in under
+    // the route behind a thin dim guide: OWNER and KIND as label rows, one row per stage
+    // in columns (mark, name, verdict, doer model, context, time right-aligned), the
+    // running stage's tool and further workers under it, then INFO, NEXT, WHY, RESUME and
+    // OUT. A label stands in one dim column and its value starts in one column, its next
+    // rows too; a stage column that does not fit goes whole (context, then model, then
+    // verdict), and no row is folded. Every value the route carries keeps a place (INFO
+    // holds what has no column). Rows carry their item so a cut never splits one.
     function details(r){
-      const p=r.paint||{},out=[];
-      if(side){
-        // Inside the box a full gauge may not fit: the bar gives way before its
-        // number, so a cut row never hides the percent behind `…`.
-        const gauge=p.gauge||[],percent=gauge.length?[gauge.at(-1)]:[];
-        const fit=(lead,end=[])=>{for(const g of [gauge,percent,[]]){const row=[...lead,...g];if(size(row)+(end.length?1+size(end):0)<=inner)return row;}return cut(lead,inner-(end.length?1+size(end):0));};
-        if(routeLine==='model'){
-          const end=r.elapsed?[text(r.elapsed)]:[],left=fit([text('  '),...(p.effort?[p.effort,text('  ')]:[])],end);
-          out.push(end.length?[...left,pad(inner-size(left)-size(end)),...end]:left);
-        }else{
-          const left=fit([text('  '),...(p.model_text?[p.model_text,text(' ')]:[]),...(p.effort?[p.effort,text('  ')]:[])]);
-          if(size(left)>2)out.push(left);
-        }
-      }
-      out.push(...itemRows(routeItems(r)));
-      if(!out.length)out.push([text('  '),text(t('checking','Checking'))]);
+      const out=[];let item=0;
+      const guide=[text('  '),{...text('┆','dim'),role:'messages'},text(' ')],W=Math.max(8,inner-4);
+      const labels=W>=24,L=labels?7:0;
+      const push=(parts,sub=false)=>out.push({parts:[...guide,...(sub?[text('  ')]:[]),...parts],item});
+      const field=(label,parts,sub=false)=>{
+        if(!parts.length)return;
+        const width=W-(sub?2:0)-L,rows=wrapAll(parts,width);
+        rows.forEach((row,i)=>push([...(L?[text((i?'':label).padEnd(L),'dim')]:[]),...row],sub));item++;
+      };
+      const stages=Array.isArray(r.stages)?r.stages:[],workers=Array.isArray(r.workers)?r.workers:[];
+      const owner=String(r.owner||'').replace(/^owner · /,'');
+      field('OWNER',join([owner?[text(owner,'loc_repo')]:[],r.owner_ctx?[text(r.owner_ctx,'loc_repo')]:[],r.profile?[text(r.profile,'dim')]:[]]));
+      // Who works now, whole (the folded first row may have let its effort or model go):
+      // a stage worker, or a doer with no owner row.
+      const pd=r.paint||{};
+      if(r.doer_worker||!owner)field('DOER',join([[pd.harness,pd.model_text,pd.effort].filter(Boolean).flatMap((x,i)=>i?[text(' '),x]:[x]),pd.ctx?[pd.ctx]:[]]));
+      if(r.kind_text)field('KIND',[text(r.kind_text,'loc_repo')]);
+      const nameOf=stage=>(stage.name||'·')+(stage.round>1?' R'+stage.round:'');
+      const mineOf=stage=>workers.filter(w=>w.stage===stage.name);
+      const verdictOf=stage=>stage.verdict&&stage.verdict!=='running'?stage.verdict:'';
+      const modelOf=stage=>stage.model||mineOf(stage)[0]?.model||'';
+      const ctxOf=stage=>mineOf(stage)[0]?.ctx||'';
+      const widest=(pick,cap)=>Math.min(cap,Math.max(0,...stages.map(stage=>measure(pick(stage)))));
+      const nameW=widest(nameOf,16),vW=widest(verdictOf,9),mW=widest(modelOf,14),cW=widest(ctxOf,6),eW=widest(x=>x.elapsed||'',8);
+      const width=(v,m,c)=>2+nameW+(v&&vW?1+vW:0)+(m&&mW?1+mW:0)+(c&&cW?1+cW:0)+(eW?1+eW:0);
+      const [V,M,C]=[[1,1,1],[1,1,0],[1,0,0],[0,0,0]].find(([v,m,c])=>width(v,m,c)<=W)||[0,0,0];
+      const used=new Set();
+      const sub=parts=>push(parts,true);
+      const doing=()=>{
+        // The open call is whole (its next rows start under it); the finished one keeps one row.
+        if(r.tool)wrapAll([text('>_ ','lvl_g'),text(r.tool,'loc_repo'),...(r.target?[text(' · '+r.target)]:[]),...(r.tool_age?[text('  '+r.tool_age,'dim')]:[]),...(r.agents?[text(' · +'+r.agents+' agent')]:[])],W-2).forEach(row=>sub(row));
+        else if(r.idle_tool)sub([text('>_ ','dim'),text('no tool','dim'),...(r.agents?[text(' · +'+r.agents+' agent')]:[])]);
+        else if(r.agents)sub([text('+'+r.agents+' agent')]);
+        if(r.after_tool)sub(cut([text('after '+r.after_tool,'dim')],W-2));
+      };
+      let doingShown=false;
+      const extras=[];
+      stages.forEach(stage=>{
+        const mark=stage.mark||'',current=!!stage.current,done=mark==='✓',failed=mark==='✕';
+        const markPart=mark==='●'?pulse('●'):done?text('✓','lvl_g'):failed?text('✕','g_dead'):text('·','dim');
+        const tone=current?'loc_repo':failed?'g_dead':'dim';
+        const name=cut([text(nameOf(stage),tone)],nameW),nameCell=current?[{...pulse(clean(name.map(x=>x.text).join(''))),beat:true}]:name;
+        const verdict=verdictOf(stage),key=/^(PASS|done)$/i.test(verdict)?'lvl_g':/^(FAIL|BLOCKED)/i.test(verdict)?'g_dead':'dim';
+        const cells=[markPart,text(' '),...nameCell,pad(nameW-size(name)),
+          ...(V&&vW?[text(' '),text(verdict,key),pad(vW-measure(verdict))]:[]),
+          ...(M&&mW?[text(' '),...cut([text(modelOf(stage),current?'loc_repo':'dim')],mW),pad(mW-Math.min(mW,measure(modelOf(stage))))]:[]),
+          ...(C&&cW?[text(' '),pad(cW-measure(ctxOf(stage))),text(ctxOf(stage),current?'loc_repo':'dim')]:[])];
+        const end=eW&&stage.elapsed?[text(stage.elapsed,current?'loc_repo':'dim')]:[];
+        push([...cells,pad(W-size(cells)-size(end)),...end]);item++;
+        const mine=mineOf(stage);mine.forEach(w=>used.add(w));
+        if(current&&!doingShown){doing();doingShown=true;item++;}
+        // More than one live worker on a stage: each its own row (Fleet's `└ stage · n`).
+        mine.slice(1).forEach((w,n)=>{sub([text('└ '+(n+2)+' ','dim'),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]);});
+        if(mine.length>1)item++;
+        if(stage.out)field('OUT',[text(stage.out)],true);
+        for(const note of [stage.note,stage.says])if(note)field('NOTE',[text(note)],true);
+        const more=[stage.when,stage.unit,stage.gate?'gate ✓':''].filter(Boolean);
+        if(more.length)extras.push((stage.name||'·')+' '+more.join(' '));
+      });
+      if(!doingShown&&(r.tool||r.idle_tool||r.agents||r.after_tool)){doing();item++;}
+      for(const w of workers)if(!used.has(w)){sub([text('└ '+w.stage+' ','dim'),text([w.harness,w.model].filter(Boolean).join(' ')),...(w.ctx?[text(' '),text(w.ctx,'loc_repo')]:[])]);item++;}
+      // An older feed row carries only the stage line (`plan ✓ › execute ● › review`).
+      if(!stages.length&&r.flow){push([text(r.flow)]);item++;}
+      field('INFO',join([r.age?[text(r.age)]:[],r.legs?[text(r.legs+' leg'+(r.legs===1?'':'s'))]:[],r.visibility?.summary?[text(r.visibility.summary)]:[],
+        r.after?[text(r.after,'dim')]:[],...extras.map(x=>[text(x,'dim')])]));
+      if(r.visibility?.next)field('NEXT',[text(r.visibility.next)]);
+      if(!live(r)&&(r.reason||r.state_label))field('WHY',[text(r.reason||r.state_label,r.kind==='dead'?'g_dead':'loc_repo')]);
+      if(r.resume)field('RESUME',[text(r.resume,'loc_repo')]);
+      if(r.outcome)field('OUT',[text(r.outcome,'lvl_g')]);
+      if(r.stage_more){push([text('+'+r.stage_more+' · Fleet','dim')]);item++;}
+      if(!out.length)push([text(t('checking','Checking'))]);
       return out;
     }
     // Spec rule 14: every group is one box of the same thin rounded line; the
@@ -530,10 +593,54 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const got=build(...pick);
         if(got.empty)return null;
         if(got.width>inner)continue;
-        const more=tool.length?build(...pick,tool):null;
+        const more=tool.length&&!placeRow(r)?build(...pick,tool):null;
         return more&&!more.empty&&more.width<=inner?more.row:got.row;
       }
       return null;
+    }
+    // Spec rule 24 (11-12): the third row says which kind of route it is and where it
+    // stands, its kind word first (dim): `one-shot` (the owner does the work itself)
+    // and what it is on now; `staged N/M` (a worker per stage) and the current stage
+    // with its mark, then `owner <model>` when a stage worker leads the first row; with
+    // no stage running, the next stage and what it waits for. A kind the record does not
+    // name draws no third row. Short of cells the values go from the back, whole.
+    function placeRow(r){
+      const shape=String(r.shape||''),stages=Array.isArray(r.stages)?r.stages:[];
+      const markOf=stage=>stage.mark==='●'?pulse('●'):stage.mark==='✓'?text('✓','lvl_g'):stage.mark==='✕'?text('✕','g_dead'):text('·','dim');
+      const current=stages.findIndex(stage=>stage.current||stage.mark==='✕'),next=stages.findIndex(stage=>stage.mark!=='✓');
+      let word,pieces=[];
+      if(shape==='one-shot-owner'){
+        word='one-shot';
+        if(r.tool){
+          const base=String(r.target||'').replace(/\/+$/,'').split('/').pop();
+          const age=r.tool_age?[text(' '+r.tool_age,'dim')]:[],tool=[text(r.tool,'loc_repo')];
+          pieces.push([[...tool,...(r.target?[text(' '+r.target,'loc_repo')]:[]),...age],[...tool,...(base?[text(' '+base,'loc_repo')]:[]),...age],
+            [...tool,...(base?[text(' '+base,'loc_repo')]:[])],tool]);
+        }else if(r.after_tool)pieces.push([[text('after '+r.after_tool,'dim')]]);
+      }else if(/^staged/.test(shape)&&stages.length){
+        const at=current>=0?current:next>=0?next:stages.length-1;
+        word='staged '+(at+1)+'/'+stages.length;
+        if(current>=0){
+          pieces.push([[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]]);
+          if(r.doer_worker&&r.owner_model)pieces.push([[text('owner '+r.owner_model,'dim')]]);
+        }else{
+          pieces.push([[text(stages[at].name||'·','loc_repo')]]);
+          if(r.visibility?.next)pieces.push([[text(r.visibility.next,'dim')]]);
+        }
+      }else if(shape&&shape!=='unknown'){
+        word=shape;
+        if(current>=0)pieces.push([[text(stages[current].name||'·','loc_repo'),text(' '),markOf(stages[current])]]);
+      }else return null;
+      const lead=[text('  '),text(word,'dim')];
+      for(let n=pieces.length;n>=0;n--){
+        const kept=pieces.slice(0,n);
+        // The last kept piece may take a shorter whole form (path → file name → tool).
+        for(const last of n?kept[n-1]:[[]]){
+          const row=[...lead,...kept.slice(0,Math.max(0,n-1)).flatMap(choices=>[text(' · ','dim'),...choices[0]]),...(n?[text(' · ','dim'),...last]:[])];
+          if(size(row)<=inner)return row;
+        }
+      }
+      return size(lead)<=inner?lead:null;
     }
     const routeRows=[],detailRows=[];
     within(()=>{
@@ -543,39 +650,56 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const names=side?wrapAll(title,inner-2):[],name=cut(title,inner-2),glyph=[routeGlyph(r),text(' ')];
         const two=side?(first?[first,...names.map(row=>[text('  '),...row])]:[[...glyph,...names[0]],...names.slice(1).map(row=>[text('  '),...row])]):null;
         const twoOne=side?(first?[first,[text('  '),...name]]:[[...glyph,...name]]):null;
-        routeRows.push({parts:folded(r),two,twoOne,action:key,kind:r.kind});
-        if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
+        const place=side?placeRow(r):null;
+        routeRows.push({parts:folded(r),two,twoOne,place,action:key,kind:r.kind});
+        if(open.has(key))for(const d of details(r))detailRows.push({...d,action:key,after:r.id});
       }
     });
-    const messages=painted(model.messages).slice(-3),messageRows=[];
-    for(const m of messages){
-      const key=messageKey(m),parts=messageParts(m);
-      // Opened: every recorded row. When rows run short it ends in a row that counts the rest.
-      if(open.has(key)){const out=[];inner-=2;try{wrap(parts,Infinity,undefined,out);}finally{inner+=2;}out.forEach((row,i)=>messageRows.push({parts:i?[text('  '),...row]:row,action:key,body:key}));}
-      else messageRows.push({parts:cut(parts,inner),action:key});
-    }
-    let messageLimit=Math.max(0,...messageRows.map(x=>x.body?messageRows.filter(y=>y.body===x.body).length:0));
-    let messageOne=false;
-    const visibleMessages=()=>{
-      const out=[];
-      for(const row of messageRows){
-        if(!row.body){out.push(row);continue;}
-        const group=messageRows.filter(y=>y.body===row.body),index=group.indexOf(row);
-        // Folded to one message, an opened body keeps one row and its read row.
-        const limit=messageOne?Math.min(messageLimit,2):messageLimit;
-        if(group.length<=limit&&!(messageOne&&group.length>1))out.push(row);
-        else if(index<limit-1)out.push(row);
-        else if(index===limit-1)out.push({parts:[text('  '),text('+'+(group.length-index)+' lines ›','loc_repo')],action:'read:'+row.body});
+    // Spec rule 31: a message takes two rows: a head (the direction arrow in its color,
+    // the other session's number, then dim harness, time, kind and a sent one's delivery
+    // state) and, two cells in, its first meaningful text in the body color. More body
+    // rows and more messages (from three) take rows that are left; short of rows a body
+    // keeps one row, then a message folds to the one-row form (arrow, number, bright
+    // text), then fewer messages show (the lower rule counts the rest).
+    const messages=painted(model.messages);
+    let messageCount=Math.min(3,messages.length),messageBody=1,messageOne=false,messageLimit=Infinity;
+    const messageHead=m=>{
+      const arrow=text(m.way,m.way==='←'?'lvl_g':'loc_repo'),who=text(String(m.who||''),'loc_repo');
+      const delivery=Array.isArray(m.delivery)&&m.delivery[0]?[text(' · ','dim'),text(String(m.delivery[0]),m.delivery[1]||'dim')]:[];
+      const pieces=[m.harness?[text(' '+m.harness,'dim')]:[],m.when?[text(' · '+m.when,'dim')]:[],m.kind?[text(' · '+m.kind,'dim')]:[]];
+      // Short of cells kind, harness and time go first; the delivery state stays.
+      for(const drop of [[],[2],[2,0],[2,0,1]]){
+        const row=[arrow,text(' '),who,...pieces.flatMap((x,i)=>drop.includes(i)?[]:x),...delivery];
+        if(size(row)<=inner)return row;
       }
-      if(!messageOne)return out;
-      // Folded to one message: an opened one stays (its first row and the
-      // `+N lines ›` row to its read page), else the first; the lower rule counts the rest.
-      const opened=out.find(row=>row.body);
-      if(!opened)return out.slice(0,1);
-      const read=out.find(row=>row.action==='read:'+opened.body);
-      return read?[opened,read]:[opened];
+      return cut([arrow,text(' '),who,...delivery],inner);
     };
-    const hiddenMessages=()=>messageOne?Math.max(0,messages.length-1):0;
+    const bodyOf=m=>String(m.body||m.text||'');
+    const messageRowsOf=()=>{
+      const rows=[];
+      for(const m of messages.slice(messages.length-messageCount)){
+        const key=messageKey(m);
+        if(open.has(key)){
+          // Opened: the head and every retained row; short of rows its last row counts the rest.
+          const body=wrapAll([text(String(m.text||''),'loc_repo')],inner-2).map(row=>[text('  '),...row]);
+          const cap=Math.max(1,messageLimit-1);
+          rows.push({parts:messageHead(m),action:key,body:key});
+          if(body.length<=cap)body.forEach(row=>rows.push({parts:row,action:key,body:key}));
+          else{body.slice(0,cap-1).forEach(row=>rows.push({parts:row,action:key,body:key}));
+            rows.push({parts:[text('  '),text('+'+(body.length-cap+1)+' lines ›','loc_repo')],action:'read:'+key,body:key});}
+        }else if(messageOne)rows.push({parts:cut([text(m.way,m.way==='←'?'lvl_g':'loc_repo'),text(' '),text(String(m.who||''),'loc_repo'),text(' '),text(bodyOf(m),'loc_repo')],inner),action:key});
+        else{
+          rows.push({parts:messageHead(m),action:key});
+          const body=wrapAll([text(bodyOf(m),'loc_repo')],inner-2);
+          const kept=body.slice(0,messageBody);
+          if(body.length>kept.length)kept[kept.length-1]=cut([...kept[kept.length-1],text(' '),...body[kept.length].slice(0,1)],inner-2);
+          kept.forEach(row=>rows.push({parts:[text('  '),...row],action:key}));
+        }
+      }
+      return rows;
+    };
+    const visibleMessages=messageRowsOf;
+    const hiddenMessages=()=>Math.max(0,messages.length-messageCount);
     // No rows yet: the producer's own label stands alone; a known empty list draws no box.
     const label=clean(model.route_label||'').trim();
     // An open route count pulses on the shared beat while one of them runs (Fleet's g_work/g_work_off).
@@ -598,43 +722,63 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
       ask.push(boxBottom(key,[],'question'));
     }
-    // Short of rows (spec rules 14, 19, 23 and 29 (c)): a value on several rows keeps
-    // one (ending in `…`); spacers; two-row routes fold to one row; opened details
-    // close; messages fold to one row; only then the route box scrolls in place
-    // (fewer rows shown, down to one, none dropped); the Git row; the route box;
-    // running jobs; the messages section only last; 5h/7d.
-    let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true;
+    // Short of rows (spec rules 14, 19, 23, 24, 29 (c) and 31): spacers; opened details
+    // shorten, then close; a value on several rows keeps one (ending in `…`); the
+    // routes' third row, then their second (one-row form); an opened message shortens;
+    // messages fold to one row each, then fewer show; only then the route box scrolls
+    // in place (fewer rows shown, down to one, none dropped); the Git row; the route
+    // box; running jobs; the messages section only last; 5h/7d. Every route in the box
+    // takes the same form. Rows left over give message bodies more rows, then more messages.
+    let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0,keepMulti=true,keepPlace=true;
     let twoRows=side&&routeRows.some(x=>x.two);
-    const routeSize=x=>twoRows&&x.two?(keepMulti?x.two:x.twoOne).length:1;
-    // An opened route's detail that outgrows its rows keeps its first rows and a
+    const routeSize=x=>twoRows&&x.two?(keepMulti?x.two:x.twoOne).length+(keepPlace&&x.place?1:0):1;
+    const routeForm=x=>twoRows&&x.two?[...(keepMulti?x.two:x.twoOne),...(keepPlace&&x.place?[x.place]:[])]:[x.parts];
+    // An opened route's detail that outgrows its rows keeps its first whole items and a
     // `+N lines ›` row to the route read page, where every value reads whole.
     let detailCap=Math.max(0,...listed.map(r=>detailRows.filter(d=>d.after===r.id).length));
     const detailsOf=id=>{
       const rows=detailRows.filter(d=>d.after===id);
       if(rows.length<=detailCap)return rows;
-      const keep=Math.max(1,detailCap-1);
-      return [...rows.slice(0,keep),{parts:[text('  '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:'route',after:id}];
+      let keep=0;
+      for(let i=0;i<rows.length&&i<detailCap-1;i++)if(i+1===rows.length||rows[i+1].item!==rows[i].item)keep=i+1;
+      keep=Math.max(1,keep||detailCap-1);
+      return [...rows.slice(0,keep),{parts:[text('  '),{...text('┆','dim'),role:'messages'},text(' '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:'route',after:id}];
     };
-    // Whole rows are counted from the top while the box shows every route; once it
-    // scrolls, twoRows and details are already gone and every route takes one row.
-    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x)=>n+routeSize(x),0)
-      +(keepDetails?routeRows.slice(0,routeLimit).reduce((n,x)=>n+detailsOf(x.action.slice(6)).length,0):0):routeChecking.length):0;
-    const messageSection=()=>keepMessages&&messageRows.length?2+visibleMessages().length:0;
+    // One empty row parts an opened route's detail from the next route.
+    const gapAfter=(x,i,list)=>keepDetails&&i<list.length-1&&detailsOf(x.action.slice(6)).length>0;
+    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x,i,list)=>n+routeSize(x)
+      +(keepDetails?detailsOf(x.action.slice(6)).length:0)+(gapAfter(x,i,list)?1:0),0):routeChecking.length):0;
+    const messageSection=()=>keepMessages&&messages.length?2+visibleMessages().length:0;
     const need=()=>core+(keepMulti?extra.size:0)+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+messageSection()+(keepQuota?1:0);
     const budget=rows;
-    if(need()>budget)keepMulti=false;
     if(need()>budget)keepSpacers=false;
-    if(need()>budget)twoRows=false;
     while(need()>budget&&detailCap>2)detailCap--;
     if(need()>budget)keepDetails=false;
+    if(need()>budget)keepMulti=false;
+    if(need()>budget)keepPlace=false;
+    if(need()>budget)twoRows=false;
+    if(need()>budget&&messageLimit===Infinity)messageLimit=Math.max(2,...visibleMessages().map(x=>x.body?visibleMessages().filter(y=>y.body===x.body).length:0));
     while(need()>budget&&messageLimit>2)messageLimit--;
-    if(need()>budget&&visibleMessages().length>1)messageOne=true;
+    if(need()>budget&&messages.length)messageOne=true;
+    while(need()>budget&&messageCount>1)messageCount--;
     while(need()>budget&&routeLimit>1)routeLimit--;
     if(need()>budget)keepGit=false;
     if(need()>budget)keepRoutes=false;
     if(need()>budget)keepOptional=false;
     if(need()>budget)keepMessages=false;
     if(need()>budget)keepQuota=false;
+    // Rows to spare beside the native area (left over whole, or after a route form gave
+    // way, the messages themselves never shortened): bodies take up to three rows and more
+    // messages show, never past the rows the panel has.
+    if(side&&keepMessages&&!messageOne&&messageLimit===Infinity){
+      const grow=()=>{
+        let changed=false;
+        if(messageBody<3){messageBody++;if(need()>budget)messageBody--;else changed=true;}
+        if(messageCount<messages.length){messageCount++;if(need()>budget)messageCount--;else changed=true;}
+        return changed;
+      };
+      while(grow());
+    }
     const order=[];
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i)))
       order.push({parts:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i)});});
@@ -653,16 +797,19 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const above=routeOffset,below=routeRows.length-routeOffset-kept.length+unsent;
       const hiddenNote=n=>[text(n,'loc_repo')];
       routeBlock=[{...boxTop(routeTitle,key,{action:'route',note:above?hiddenNote('↑'+above):[]}),groups:['route']}];
-      for(const item of shown.length?kept:routeChecking){
-        // A press on either row of a two-row route opens it.
-        for(const parts of twoRows&&item.two?(keepMulti?item.two:item.twoOne):[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
-        if(keepDetails&&item.action.startsWith('route:'))for(const d of detailsOf(item.action.slice(6)))routeBlock.push(boxRow(d,key));
-      }
+      (shown.length?kept:routeChecking).forEach((item,i,list)=>{
+        // A press on any row of a folded route opens it.
+        for(const parts of item.two?routeForm(item):[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
+        if(keepDetails&&item.action.startsWith('route:')){
+          for(const d of detailsOf(item.action.slice(6)))routeBlock.push(boxRow(d,key));
+          if(gapAfter(item,i,list))routeBlock.push(boxRow({parts:[],action:item.action},key));
+        }
+      });
       routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
     // Messages have no box: a titled upper rule and a lower rule, fixed at the
     // bottom right above 5h/7d (spec rule 14, 11-11 night final layout).
-    if(keepMessages&&messageRows.length){
+    if(keepMessages&&messages.length){
       const key=tone.messages,hidden=hiddenMessages();
       messageBlock=[{parts:rule([{...text('messages',key),role:'title'}]).map(x=>({...x,...(styles[key]||{dim:true}),role:x.role||'messages'}))}];
       messageBlock.push(...visibleMessages());

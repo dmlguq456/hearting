@@ -230,7 +230,10 @@ class ClaudeRegisteredTest(unittest.TestCase):
         job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}, rows)
         payload, _ = self._collect(job)
         self.assertEqual(payload["active_context_tokens"], 123_456)
-        self.assertIsNone(payload["context_window_tokens"])
+        # Spec E9 rule 33: the window this launch recorded as configured stands until the
+        # attempt's own result; another model's result is not this model's window.
+        self.assertEqual(payload["context_window_tokens"], 800_000)
+        self.assertEqual(job._context_window_source, "claude-launch-configured-window")
         self.assertIsNone(payload["context_display_window_tokens"])
         self.assertIsNone(payload["ctx_pct"])
 
@@ -246,14 +249,20 @@ class ClaudeRegisteredTest(unittest.TestCase):
         self.assertEqual(payload["context_policy"]["state"], "disabled")
         self.assertIsNone(payload["ctx_pct"])
 
-    def test_live_run_before_the_terminal_window_never_guesses_one_million(self):
-        # At or under 200K the attempt's own usage fits either window: nothing is chosen.
+    def test_live_run_before_the_terminal_window_reads_the_configured_window_not_a_guess(self):
+        # At or under 200K the attempt's own usage fits either window; the window its
+        # launch recorded as configured (spec E9 rule 33) is the gauge's from the start,
+        # never a guessed 1M, and the compaction policy still waits for a reported window.
         job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"},
                         self._rows(200_000, result=False))
         payload, row = self._collect(job)
         self.assertEqual(payload["active_context_tokens"], 200_000)
-        self.assertIsNone(payload["context_window_tokens"])
+        self.assertEqual(payload["context_window_tokens"], 800_000)
+        self.assertEqual(render._native_context_gauge(job), (25, 800_000))
         self.assertIsNone(payload["ctx_pct"])
+        bare = self._job({}, self._rows(200_000, result=False))
+        payload, row = self._collect(bare)
+        self.assertIsNone(payload["context_window_tokens"])
         self.assertNotIn("%", row.replace("—", ""))
 
     def test_its_own_usage_over_200k_is_the_one_million_window_before_the_result(self):

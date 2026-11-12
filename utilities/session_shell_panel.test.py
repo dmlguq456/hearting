@@ -174,8 +174,10 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
  for(const want of ['project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // 11-11 night final layout: the route side gives way first (its opened detail
  // before its rows), and the messages fixed at the bottom go only last.
- if(text.includes('plan ✓ › execute ●'))assert(text.includes('MESSAGE_TWO'),text);
- if(text.includes('ROUTE_0'))assert(text.includes('MESSAGE_ONE'),text);
+  // Spec rules 23, 31: messages fold to one row and fewer (the newest stays) before the
+  // route box scrolls; the messages section goes only last.
+ if(text.includes('plan ✓ › execute ●'))assert(text.includes('MESSAGE_TWO')&&text.includes('MESSAGE_ONE'),text);
+ if(text.includes('ROUTE_0'))assert(text.includes('MESSAGE_TWO'),text);
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
@@ -191,7 +193,8 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const wide=c=>{const n=c.codePointAt(0);return n>=0x300&&n<=0x36f?0:n>0x2e7f?2:1;},cellWidth=s=>[...s].reduce((n,c)=>n+wide(c),0);
 const draw=(messages,width,height,extra={})=>{const r=view.render({width,height,side:width<80,fill:false,model:{messages},cellWidth,questions:()=>[],configuration:{},...extra});
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
-const keyOf=(messages,i)=>draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:'))[i].action;
+// Spec rule 31: a message takes a head row and a body row, both open the same message.
+const keyOf=(messages,i)=>[...new Set(draw(messages,40,40).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))][i];
 const read=(messages,key,width,height)=>{const first=draw(messages,width,height,{routeDetail:key}),out=[];
  for(let page=0;page<first.routePages;page++)out.push(...draw(messages,width,height,{routeDetail:key,routePage:page}).plain.slice(1,-1).filter(s=>!/messages · |‹ \d+\/\d+ ›/.test(s)));return out;};
 // A row's text without its frame and indent: a body read across rows, end to end.
@@ -238,7 +241,7 @@ const one=(tag,at,way='→',who='peer')=>({way,who,at,text:tag+' '+'word '.repea
 const F=one('FIRST',7),S=one('SECOND',7),T=one('THIRD',8),U=one('FOURTH',9),X=one('INSERTED',7),A=one('SAME',7),A2=one('SAME',7);
 const draw=(messages,extra={})=>{const r=view.render({width:40,height:40,side:true,fill:false,model:{messages},questions:()=>[],configuration:{},...extra});
  return {...r,plain:r.rows.map(r=>r.map(p=>p.text).join(''))};};
-const keys=messages=>draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action);
+const keys=messages=>[...new Set(draw(messages).hits.filter(h=>h.action.startsWith('message:')).map(h=>h.action))];
 const ends=rows=>['FIRST','SECOND','THIRD','FOURTH','INSERTED','SAME'].filter(t=>rows.some(s=>s.includes(t+'_END')));
 const page=(messages,key)=>{const first=draw(messages,{routeDetail:key,height:10}),out=[];
  for(let p=0;p<first.routePages;p++)out.push(...draw(messages,{routeDetail:key,routePage:p,height:10}).plain);
@@ -448,24 +451,30 @@ assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows
 // harness, context and time, then its title two cells in.
 const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
 assert(/│ │ \S codex +72% 42m │ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
-assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-7&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
+// Spec rule 31: each message takes a head row and a body row (three messages: six rows).
+assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-10&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
+assert(rows[m+1].includes('← [e7]')&&rows[m+2].includes('│   MESSAGE_1'),rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
 const asked=paint({state:'working',q:question,model:{answerable:true}});rows=text(asked);
 const qTop=rows.findIndex(s=>s.includes('─ ◑ Q_HEAD ')),mq=rows.findIndex(s=>s.includes('── messages '));
-assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-7&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
+assert(qTop>r&&rows[mq-1].includes('╰')&&mq===rows.length-10&&rows.at(-2).includes('7d 60%'),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
-assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(r,'╭').dim,true);
+const ra=rows.findIndex(s=>s.includes('╭─ route 3 '));
+assert.equal(border(qTop,'╭').foreground,174);assert.equal(asked.rows[mq].find(x=>x.text.includes('messages')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
 // before the route box scrolls in place; messages go last.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
 for(const q of [[],question])for(let h=12;h<=30;h++){
  const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
- if(!all.includes('MESSAGE_2')&&all.includes('MESSAGE_1'))assert(!two&&/ \+2 ─ │/.test(all),h+'\n'+all);
- if(all.includes('MESSAGE_3')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
- if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2'),h+'\n'+all);
- if(!all.includes('MESSAGE_1'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
+ // Spec rules 23, 31: fewer messages show from the oldest (the lower rule counts them),
+ // before the route box scrolls; the newest message goes only with the section, last.
+ const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
+ if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp(' \\+'+hidden+' ─ │').test(all),h+'\n'+all);
+ if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
+ if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
+ if(!all.includes('MESSAGE_3'))assert(!all.includes('╭─ route'),h+' messages go last\n'+all);
 }
 // Every box is closed, whatever the height; an empty route list or message list draws no box.
 for(let h=10;h<=30;h++)for(const q of [[],question]){const rows=text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model,state:'idle',questions:o=>q.slice(0,o.budget)}));
@@ -502,7 +511,7 @@ const route={id:'r',title:'PR 맞추기',state:'working',kind:'working',elapsed:
 const paint=(r,width,side)=>view.render({width,height:30,side,model:{routes:[r],route_count:1,messages:[]},sid:'s',
  configuration:{},expandedKeys:['route:r'],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 for(const [width,side] of [[40,true],[80,false]]){
- const rows=paint(route,width,side),flat=rows.join('').replace(/[│ ]/g,'');
+ const rows=paint(route,width,side),flat=rows.join('').replace(/[│┆ ]/g,'');
  assert(flat.includes('>_Bash·python3tools/run-tests.py3m'),rows.join('\n'));
  const line=rows.filter(x=>x.includes('after Edit'));
  assert.equal(line.length,1,rows.join('\n'));assert(line[0].includes('…'),line[0]);
@@ -567,14 +576,18 @@ assert.equal(hitRows.length,2);assert.equal(hitRows[1],hitRows[0]+1);
 // Unreported context is left out, never `?`.
 assert(!time.join('\n').includes('?'));
 const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+1,opened.findIndex(s=>s.includes('제목만')));
-assert(detail.some(s=>s.includes('gpt-6.1-sol high')&&s.includes('72%')),detail.join('\n'));
+// Spec rule 32: the doer's model and context are the folded first row's; the detail hangs behind its guide.
+assert(opened.some(s=>s.includes('gpt-6.1-sol')&&s.includes('72%'))&&detail.slice(0,-2).every(s=>/┆|│ │ +│ │/.test(s)),detail.join('\n'));
 assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert(detail.some(s=>s.includes('>_ apply_patch · +1 agent')));
 const openedModel=paint({route_line:'model'},['route:a']);
-assert(openedModel.some(s=>s.includes('high')&&s.includes('42m')),openedModel.join('\n'));
+assert(openedModel.join('\n').includes('high')&&openedModel.some(s=>s.includes('42m')),openedModel.join('\n'));
 // A message row opens to its whole retained text and closes again.
 const messageKey=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.find(h=>h.action.startsWith('message:')).action;
 const message=paint({},[messageKey]);assert(message.join('').includes('RV-PR1506-R2-1111.md'));
-assert(!paint({}).join('').includes('RV-PR1506-R2-1111.md'));
+// Folded, a message keeps its head and at most three body rows (spec rule 31), fewer when rows run short.
+const folded=paint({}),head=folded.findIndex(s=>s.includes('← [e7]'));
+assert(head>0&&folded.slice(head+1).filter(s=>/^│   \S/.test(s)).length<=3,folded.join('\n'));
+assert(!view.render({width:40,height:16,side:true,model,configuration:{},questions:()=>[]}).rows.map(r=>r.map(x=>x.text).join('')).join('').includes('RV-PR1506-R2-1111.md'));
 // Every row keeps the panel width with two-cell Hangul and emoji.
 for(const rows of [time,byModel,opened,message,paint({},['route:a'],80)])for(const s of rows)assert([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=80);
 '''
@@ -623,20 +636,30 @@ const routes=[{id:'a',title:'ROUTE_A',kind:'working',elapsed:'42m',tool:'apply_p
 const model={routes,route_count:2,styles};
 const paint=(extra={})=>view.render({width:40,height:60,side:true,model,configuration:{},expandedKeys:['route:a','route:b'],questions:()=>[],...extra});
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
-const all=rows(paint()).join('\n'),flat=all.replace(/[│ \n]+/g,' ');
-for(const word of ['kind autopilot-code(dev·std)','owner claude (Opus 5.5·high) balanced-deep 31%','✓ plan · PASS · codex gpt-fixture high · 12m · done 22:34 · plan/code · gate ✓',
- '● execute R2 · codex gpt-fixture high · 72% · 30m · dev/backend','autopilot-code(dev·std) · owner claude (Opus 5.5·high) balanced-deep 31% >_ apply_patch · +1 agent','NOTE_R2','└ execute · 2 claude Sonnet 5.5 12%',
- '· review · pending · review/code','42m · 2 legs · staged · test ✓','next resume · execute','✕ execute','worker claude · failed 3m','resume execute'])
+// Spec rule 32: label rows and one row per stage in columns, behind a guide; every value kept.
+const wide=rows(paint({width:60})),all=wide.join('\n'),flat=all.replace(/[│┆ \n]+/g,' ');
+for(const word of ['OWNER claude (Opus 5.5·high) · 31% · balanced-deep','KIND autopilot-code(dev·std)','✓ plan PASS gpt-fixture 12m',
+ '● execute R2 gpt-fixture 72% 30m','>_ apply_patch · +1 agent','NOTE NOTE_R2','└ 2 claude Sonnet 5.5 12%','· review pending',
+ 'INFO 42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot · plan done 22:34 plan/code gate ✓ · execute dev/backend · review review/code',
+ 'NEXT resume · execute','✕ execute','WHY worker claude · failed 3m','RESUME execute'])
  assert(flat.includes(word),word+'\n'+all);
-for(const s of rows(paint()))assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
+// One stage, one row: its columns stand one above the other (the time right-aligned).
+const stageRows=wide.filter(s=>/┆ [✓●·] (plan|execute|review)/.test(s));
+assert.equal(stageRows.length,3,all);assert.equal(new Set(stageRows.map(s=>s.indexOf('┆'))).size,1);
+assert.equal(stageRows[0].indexOf('12m')+3,stageRows[1].indexOf('30m')+3,all);
+// Narrow: whole columns go (context, then model) and no stage row folds.
+const narrow=rows(paint());
+for(const s of narrow)assert.equal([...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0),40,s);
+assert(narrow.some(s=>/┆ ✓ plan +PASS +12m/.test(s))&&!narrow.join('').includes('gpt-fixture  '),narrow.join('\n'));
+// An opened route's detail is parted from the next route by one empty row.
+const gap=narrow.findIndex(s=>s.includes('┆ RESUME')||s.includes('┆ NEXT'));
+assert(narrow.slice(gap+1).some(s=>/^│ │ +│ │$/.test(s)),narrow.join('\n'));
 // Short of rows the detail keeps its first rows and a `+N lines ›` row that opens the route page.
 const short=view.render({width:40,height:22,side:true,model,configuration:{},expandedKeys:['route:a'],questions:()=>[]});
 assert(rows(short).some(s=>/\+\d+ lines ›/.test(s)),rows(short).join('\n'));
 const more=short.hits.find(h=>h.action==='route'&&rows(short)[h.row]&&/lines ›/.test(rows(short)[h.row]));assert(more,'a press opens the route page');
 const page=rows(view.render({width:40,height:80,side:true,model,configuration:{},routeDetail:true,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
 for(const word of ['owner claude (Opus 5.5·high)','dev/backend','NOTE_R2','resume execute'])assert(page.includes(word),word+'\n'+page);
-// The band's note (Fleet's `detail_after`) follows its head, on the next rows when narrow.
-assert(flat.includes('42m · 2 legs · staged · test ✓ · before this leg: frame ✓ — outside this snapshot'),all);
 // The page reads the owner's raw output (Fleet's attempts) only for its own route.
 const attempts=[{route:'a',att:'att-owner',lines:['RAW_FIRST','RAW_LAST']},{route:'other',att:'x',lines:['RAW_OTHER']}];
 const rawPage=rows(view.render({width:40,height:120,side:true,model,configuration:{},routeDetail:true,attempts,questions:()=>[]})).join('\n').replace(/[│ \n]+/g,' ');
@@ -759,11 +782,15 @@ assert(r.rows.flat().map(p=>p.text).join('').includes('route line'));assert(r.hi
             shard.parent.mkdir(parents=True)
             stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             rows = [{"ts": stamp, "from": {"session_id": sid}, "to": {"harness": "codex", "session_id": "x", "name": "n"},
-                     "kind": "note", "summary": "SENT_" + str(n)} for n in range(5)]
+                     "kind": "note", "summary": "SENT_" + str(n), "message_id": "m" + str(n),
+                     "delivery": {"status": "unknown"}} for n in range(10)]
             rows.append({"ts": stamp, "from": {"session_id": "other"}, "to": {}, "kind": "note", "summary": "FOREIGN"})
+            # A later record of the same message updates its delivery state (spec E9 rule 31).
+            rows.append({**rows[9], "delivery": {"status": "received"}})
             shard.write_text("\n".join(json.dumps(row) for row in rows) + "\nnot json\n")
             sent, watched = shell._sent_peer_messages(sid)
-            self.assertEqual([row["summary"] for row in sent], ["SENT_2", "SENT_3", "SENT_4"])
+            self.assertEqual([row["summary"] for row in sent], ["SENT_" + str(n) for n in range(2, 10)])
+            self.assertEqual((sent[-1]["kind"], sent[-1]["status"], sent[0]["status"]), ("note", "received", "unknown"))
             self.assertEqual(watched, [str(shard)])
             self.assertIs(shell._sent_peer_messages(sid)[0], sent)  # unchanged file: no reparse
             self.assertEqual(shell._sent_peer_messages("absent-session"), ([], []))
@@ -970,7 +997,8 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
  // Nothing is dimmed on top of a shade: secondary text, messages and lines take their own color.
  assert(!parts.some(p=>p.dim&&[f.body,f.secondary,f.frame,f.route,f.messages,f.title].includes(p.foreground)),label);
  const at=ch=>parts.find(p=>p.text.startsWith(ch));
- assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.secondary,label);
+ // Spec rule 31: a message's text is body text; its head's own values are secondary.
+ assert.equal(at('┌').foreground,f.frame,label);assert.equal(r.rows.flat().find(p=>p.text==='note').foreground,f.body,label);
  assert(parts.some(p=>p.text.includes('messages')&&p.foreground===f.title),label);
  if(theme!=='mono'){
   // The question's border, `◑` and `›` are rose; its words are body text.
@@ -981,7 +1009,7 @@ for(const background of ['','dark','light'])for(const theme of ['terminal','ligh
 }
 // The light theme without a shade: the reviewed deep hues, secondary text without a dim.
 const light=paint({theme:'light'}).rows.flat();
-assert(!light.some(p=>[253,186,150,217,28,124,91].includes(p.foreground)));assert.equal(light.find(p=>p.text==='note').foreground,241);
+assert(!light.some(p=>[253,186,150,217,28,124,91].includes(p.foreground)));assert.equal(light.find(p=>p.text==='note').foreground,237);
 // The question rose on the terminal's own background too; mono keeps it by weight.
 assert(base.rows.flat().some(p=>p.text==='◑'&&p.foreground===174));
 assert(paint({theme:'mono'}).rows.flat().find(p=>p.text==='◑').bold===true);

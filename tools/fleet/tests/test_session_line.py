@@ -187,8 +187,35 @@ class CommonSessionLineTest(unittest.TestCase):
         sent = [{"to": {"harness": "codex", "session_id": "s73", "name": "x"}, "summary": "second", "at": 3},
                 {"to": {"name": "named"}, "summary": "fourth", "at": 5}]
         tags = {("claude", "e7"): "e7", ("codex", "s73"): "73"}
-        rows = peer_message_rows(received, sent, lambda h, s: tags.get((h, s)))
+        rows = peer_message_rows(received, sent, lambda h, s: tags.get((h, s)), limit=3)
         self.assertEqual([(r["way"], r["who"], r["text"]) for r in rows],
                          [("→", "[73]", "second"), ("←", "someone", "third"), ("→", "named", "fourth")])
+        self.assertEqual(len(peer_message_rows(received, sent, lambda h, s: tags.get((h, s)))), 4)
+
+    def test_a_message_row_carries_its_head_values_and_first_meaningful_text(self):
+        # Spec E9 rule 31: harness, time, kind and a sent one's delivery state come from
+        # the records as they are; the body drops only leading bracket frames and heading marks.
+        import time
+        from tools.fleet.session_line import peer_message_rows, message_body
+        self.assertEqual(message_body("[52 → 감독 wB:pBA] [review]\n\n## 결과\n#1556 병합"), "결과 #1556 병합")
+        self.assertEqual(message_body("plain [kept] text"), "plain [kept] text")
+        now = time.mktime((2026, 11, 12, 15, 0, 0, 0, 0, -1))
+        received = [{"source": "peer", "sender_harness": "codex", "sender_session_id": "s52",
+                     "text": "[notice] 검토 결과", "at": now - 600}]
+        sent = [{"to": {"harness": "claude", "session_id": "se8"}, "summary": "설치됨", "kind": "steer",
+                 "status": status, "at": now - age} for status, age in
+                (("received", 60), ("sent", 120), ("unknown", 5 * 3600), ("unknown", 300), ("failed", 3 * 86400))]
+        rows = peer_message_rows(received, sent, lambda h, s: {"s52": "52", "se8": "e8"}.get(s), now=now)
+        by_age = sorted(rows, key=lambda row: row["at"])
+        failed, old, first, quick, sent_row, delivered = by_age
+        self.assertEqual((first["way"], first["who"], first["harness"], first["body"], first["delivery"]),
+                         ("←", "[52]", "codex", "검토 결과", None))
+        self.assertEqual(first["when"], "14:50")
+        self.assertEqual(failed["when"], "11-09")
+        self.assertEqual(failed["delivery"][1], "lvl_r")
+        self.assertEqual(old["delivery"][1], "lvl_y")
+        self.assertEqual(quick["delivery"][1], "dim")
+        self.assertEqual(delivered["delivery"][1], "dim")
+        self.assertEqual((sent_row["kind"], sent_row["delivery"][1]), ("steer", "dim"))
 
 if __name__ == "__main__": unittest.main()

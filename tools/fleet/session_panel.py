@@ -411,6 +411,10 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                        "visibility": route_evidence(visibility),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
+                       # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
+                       # stage worker leads the row, the owner's own model for its third row.
+                       "shape": clean(row.get("shape"))[:32], "owner_model": clean(row.get("owner_model"))[:64],
+                       "doer_worker": row.get("doer_worker") is True,
                        **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")

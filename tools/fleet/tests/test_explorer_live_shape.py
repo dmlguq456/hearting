@@ -65,7 +65,7 @@ def route_extension(key, value):
         # with what that tool acts on, since when, and the call it just finished when reported.
         optional_text = lambda item: item is None or isinstance(item, str)
         activity = {"target": str, "tool_age": str, "after_tool": str,
-                    "tool_since": (int, float), "idle_tool": bool}
+                    "tool_since": (int, float), "idle_tool": bool, "worker": bool}
         return (isinstance(value, dict)
                 and {"harness", "model", "effort", "context", "window", "tokens",
                      "tool", "agents"} <= set(value)

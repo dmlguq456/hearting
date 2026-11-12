@@ -646,6 +646,7 @@ def route_doer(route, jobs, get, live):
         pair = shared.get("model")
         return {"harness": shared.get("harness"), "model": pair[0] if isinstance(pair, (list, tuple)) and pair else None,
                 "effort": shared.get("effort"), "percent": _number(shared.get("context")),
+                "worker": shared.get("worker") is True,
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
                 **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
@@ -726,6 +727,8 @@ def route_details(snapshot, panels, routes=None, now=None):
                     row[key] = doer[key]
             if doer.get("idle_tool") is True:
                 row["idle_tool"] = True
+            if doer.get("worker") is True:
+                row["doer_worker"] = True
             if doer.get("percent") is not None:
                 row["ctx_pct"] = round(doer["percent"], 1)
             elif type(doer.get("tokens")) is int:
@@ -811,25 +814,83 @@ def stage_glyph(state):
 
 # -- messages: what this session and other sessions sent each other -----------------------
 
-def peer_message_rows(received, sent, tag_of, limit=3):
-    """The latest ``limit`` peer messages, oldest first: ``{"way", "who", "text", "at"}``.
+_MESSAGE_FRAME = re.compile(r"^(?:\s*\[[^\]\n]{0,160}\]\s*|\s*#{1,6}\s+|\s+)")
 
-    ``received`` are the exact session's retained received inputs (source
-    ``peer``); ``sent`` are its own ledger records. Bodies are what those
-    records already keep; nothing is fetched or reconstructed here.
+
+def message_body(text):
+    """The message's first meaningful text: its leading bracket frames (``[52 → e9]``,
+    ``[notice]``), markdown heading marks and blank lines left out; nothing else changes."""
+    body = str(text or "")
+    for _ in range(16):
+        stripped = _MESSAGE_FRAME.sub("", body, count=1)
+        if stripped == body:
+            break
+        body = stripped
+    return " ".join(body.split()) or " ".join(str(text or "").split())
+
+
+def _message_when(at, now):
+    """``HH:MM`` today, ``MM-DD`` otherwise (local time); empty without a time."""
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+        return ""
+    stamp, today = time.localtime(at), time.localtime(now)
+    return time.strftime("%H:%M" if stamp[:3] == today[:3] else "%m-%d", stamp)
+
+
+# The sender's ledger status (peer-message `record --status`): the receiver's own
+# acknowledgement, the transport's acceptance, an unconfirmed delivery, a failure.
+_MESSAGE_PENDING_WARN_SECONDS = 1800
+
+
+def _message_delivery(status, at, now):
+    from .config import ui_text
+    if status == "received":
+        return [ui_text("fleet.session_panel.message_delivered"), "dim"]
+    if status == "sent":
+        return [ui_text("fleet.session_panel.message_sent"), "dim"]
+    if status == "failed":
+        return [ui_text("fleet.session_panel.message_failed"), "lvl_r"]
+    if status == "unknown" and isinstance(at, (int, float)) and at > 0:
+        age = max(0.0, now - at)
+        return [ui_text("fleet.session_panel.message_pending").format(age=elapsed_text(age / 60)),
+                "lvl_y" if age >= _MESSAGE_PENDING_WARN_SECONDS else "dim"]
+    return None
+
+
+def peer_message_rows(received, sent, tag_of, limit=8, now=None):
+    """The latest ``limit`` peer messages, oldest first.
+
+    Each row: ``way`` (``←`` received, ``→`` sent), ``who`` (the other session's Fleet
+    number, else its name), ``harness``, ``when``, ``kind`` and, for a sent one, its
+    ``delivery`` (spec E9 rule 31), the whole kept ``text`` and its first meaningful
+    ``body``. ``received`` are the exact session's retained received inputs (source
+    ``peer``); ``sent`` are its own ledger records. Values are what those records
+    already keep; nothing is fetched or reconstructed here, and an absent one is left out.
     """
+    now = time.time() if now is None else now
     rows = []
     for row in received or ():
         if not isinstance(row, dict) or row.get("source") != "peer":
             continue
         tag = tag_of(row.get("sender_harness"), row.get("sender_session_id"))
         who = "[" + tag.strip("[]") + "]" if tag else _text(row.get("sender"), "peer")
-        rows.append({"way": "←", "who": who, "text": _text(row.get("text"), ""), "at": row.get("at") or 0})
+        rows.append({"way": "←", "who": who, "harness": _text(row.get("sender_harness"), ""),
+                     "kind": _text(row.get("kind"), ""), "text": _text(row.get("text"), ""),
+                     "at": row.get("at") or 0, "delivery": None})
     for record in sent or ():
         target = record.get("to") if isinstance(record.get("to"), dict) else {}
         tag = tag_of(target.get("harness"), target.get("session_id"))
         who = "[" + tag.strip("[]") + "]" if tag else _text(target.get("name"), "peer")
-        rows.append({"way": "→", "who": who, "text": _text(record.get("summary"), ""), "at": record.get("at") or 0})
+        rows.append({"way": "→", "who": who, "harness": _text(target.get("harness"), ""),
+                     "kind": _text(record.get("kind"), ""), "text": _text(record.get("summary"), ""),
+                     "at": record.get("at") or 0,
+                     "delivery": _message_delivery(record.get("status"), record.get("at"), now)})
     rows = [row for row in rows if row["text"]]
     rows.sort(key=lambda row: row["at"])
-    return rows[-limit:]
+    rows = rows[-limit:]
+    for row in rows:
+        row["when"] = _message_when(row["at"], now)
+        row["body"] = message_body(row["text"])
+        if row["harness"] not in ("claude", "codex", "opencode"):
+            row["harness"] = ""
+    return rows

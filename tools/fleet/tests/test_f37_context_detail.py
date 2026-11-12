@@ -622,7 +622,9 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertEqual(render._native_context_gauge(running), (25, 200000))
 
     def test_an_unset_or_disagreeing_disable_1m_switch_keeps_the_window_unknown(self):
-        cases = ({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}},
+        # Spec E9 rule 33: a configured window would stand (see the test below), so the
+        # unknown cases carry none.
+        cases = ({"env": {}},
                  {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"},
                   "settings_env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"}})
         for index, case in enumerate(cases):
@@ -633,6 +635,24 @@ class ClaudeStreamSessionTest(unittest.TestCase):
             dispatch_collector._enrich_claude_stream_session(job)
             self.assertIsNone(job.context_window_tokens, case)
             self.assertEqual(render._native_context_gauge(job), (None, None))
+
+    def test_a_configured_window_stands_from_the_first_observation(self):
+        # Spec E9 rule 33: the window the launch recorded as configured (launch env and
+        # settings env agreeing) is the gauge's before the first result; disagreeing ones
+        # leave it unknown.
+        for index, (case, want) in enumerate(((
+                {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}}, 1000000),
+                ({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"},
+                  "settings_env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}}, None))):
+            job = self._job("att-configured-%d" % index)
+            job._registry_metadata = self._launch_metadata(**case)
+            self._write_log(job, [self._init("sid-c%d" % index, version="9.9.9"),
+                                  self._assistant("sid-c%d" % index, "claude-fable-5", 150136)])
+            dispatch_collector._enrich_claude_stream_session(job)
+            self.assertEqual(job.context_window_tokens, want, case)
+            if want:
+                self.assertEqual(job._context_window_source, "claude-launch-configured-window")
+                self.assertEqual(render._native_context_gauge(job), (15, 1000000))
 
     def test_its_own_usage_over_200k_settles_the_one_million_window(self):
         # 250136 tokens cannot sit in a 200K window: this attempt's own stream settles 1M

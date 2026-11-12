@@ -2745,6 +2745,7 @@ def _parse_claude_stream_tail(path):
 
 _CLAUDE_STANDARD_WINDOW = 200_000
 _CLAUDE_EXTENDED_WINDOW = 1_000_000
+_CLAUDE_MIN_CONFIGURED_WINDOW = 100_000
 
 
 def _claude_own_window(metadata, model_id, active_tokens=None):
@@ -2765,8 +2766,20 @@ def _claude_own_window(metadata, model_id, active_tokens=None):
                                             "claude_settings_disable_1m")} - {None, "", "absent"}
     if len(values) == 1 and _truthy(next(iter(values))):
         return _CLAUDE_STANDARD_WINDOW, "claude-launch-disable-1m"
+    # Spec E9 rule 33 (a): the window this attempt's launch recorded as configured
+    # (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env and its settings `env`), read
+    # as Claude reads it (100K..1M), is a recorded fact from the first observation.
+    # Its own usage above 200K is its own evidence and wins over a configured value.
     if type(active_tokens) is int and active_tokens > _CLAUDE_STANDARD_WINDOW:
         return _CLAUDE_EXTENDED_WINDOW, "claude-own-usage-over-standard"
+    configured = set()
+    for key in ("claude_context_window_request", "claude_settings_window"):
+        value = metadata.get(key)
+        if value not in (None, "", "absent"):
+            configured.add(str(value).strip())
+    if len(configured) == 1 and next(iter(configured)).isdigit():
+        return (max(_CLAUDE_MIN_CONFIGURED_WINDOW, min(int(next(iter(configured))), _CLAUDE_EXTENDED_WINDOW)),
+                "claude-launch-configured-window")
     return None, None
 
 
@@ -2886,7 +2899,7 @@ def _enrich_claude_stream_session(job, fast_first=False):
     metadata = getattr(job, "_registry_metadata", None) or {}
     # The gauge may read 1M from this attempt's own usage over 200K; the compaction policy
     # (JSON ``ctx_pct``) keeps its reported or launch-settled raw window only.
-    policy_window = (None if job._context_window_source == "claude-own-usage-over-standard"
+    policy_window = (None if job._context_window_source in ("claude-own-usage-over-standard", "claude-launch-configured-window")
                      else context_window_tokens)
     policy = _claude_attempt_policy(
         metadata, runtime_version=parsed.get("runtime_version"), model_id=parsed.get("model"),

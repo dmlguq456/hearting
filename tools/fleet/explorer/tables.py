@@ -1182,6 +1182,37 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
+    # Spec E9 rule 24: a route that runs a worker per stage reads `staged 3/7 execute ●`
+    # (short of cells `3/7 execute ●`), the shell panel's third row; earlier legs stay in
+    # front of it. A one-step route's own word (`one-shot`) is its stage rail already.
+    staged_parts = None
+    if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
+        at_stage = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
+                        next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
+        staged_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at_stage][0]
+    # Only where the stage keeps its whole name and mark; else the rail as before.
+    if staged_parts is not None and end - x - (sum(_seg_width(t) for t, _k in _fold_items(items[:-1], max(8, (end - x) // 3))) + 3 if not same and items[:-1] else 0) >= sum(_seg_width(t) for t, _k in staged_parts):
+        at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
+                  next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
+        stage_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at][0]
+        cursor = x
+        earlier = items[:-1] if not same else []
+        if earlier:
+            cursor = _put_segments(grid, cursor, y, _fold_items(earlier, max(8, (end - x) // 3)), end)
+            cursor = grid.put(cursor, y, " › ", "dim", limit=end)
+        need = sum(_seg_width(text) for text, _key in stage_parts)
+        position = f"{at + 1}/{len(stages)}"
+        # Short of cells the word goes, then the position; the stage and its mark stay.
+        room = end - cursor
+        word = ("staged " + position if room >= need + len(position) + 8
+                else position if room >= need + len(position) + 1 else "")
+        if word:
+            cursor = grid.put(cursor, y, word + " ", "dim", limit=end)
+        cursor = _put_segments(grid, cursor, y, stage_parts, end)
+        cursor = _put_segments(grid, cursor, y, after, end)
+        if card:
+            _put_route_card(grid, cursor, end, y, route)
+        return
     stage_index = next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1)
     current_stage = str(stages[stage_index].get("name", "·")) if stages else str(name)
     after_width = sum(_seg_width(text) for text, _key in after)

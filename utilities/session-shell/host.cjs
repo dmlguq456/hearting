@@ -916,7 +916,10 @@ async function lifecycle(req) {
       nativeSelected={model:req.native_model,...(nativeSelected.model===req.native_model?{effort:nativeSelected.effort}:{})};
     }
     displayValues={...nativeSelected};
-    panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
+    // Spec E9 rule 33 (c): this seat's own values (its folder, Git, the account usage)
+    // stay drawn across a start, resume, /clear or switch; session values clear.
+    panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,
+      head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();

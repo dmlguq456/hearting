@@ -983,6 +983,8 @@ def _route_doer(worker, owner, dead, now=None):
                  if _get(item, "active") is True)
     doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            # Spec E9 rule 24: a stage worker (not the owner) does the work now.
+            **({"worker": True} if worker is not None and worker is not owner else {}),
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
     doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
@@ -3441,6 +3443,9 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                 row["result_at"] = route["result_at"]
             row["worker"] = _worker_pieces(route.get("worker"))
             row["owner"] = _owner_text(route)
+            pair = route.get("model")
+            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+                row["owner_model"] = pair[0][:64]
             visibility = route.get("visibility")
             if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
                 row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],

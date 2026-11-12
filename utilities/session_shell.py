@@ -743,8 +743,9 @@ def _panel_common_rows(panel, columns):
 _SENT_CACHE: dict = {}
 
 
-def _sent_peer_messages(sid, limit=3):
-    """This session's own sent peer records (``to`` and ``summary``), newest last.
+def _sent_peer_messages(sid, limit=8):
+    """This session's own sent peer records (``to``, ``summary``, ``kind`` and the
+    delivery ``status``; a later record of the same message updates its status), newest last.
 
     One bounded tail read of the existing ledger shard this session writes,
     reparsed only when the file changes; nothing else is opened. The record
@@ -779,8 +780,17 @@ def _sent_peer_messages(sid, limit=3):
                 at = datetime.fromisoformat(record["ts"].replace("Z", "+00:00")).timestamp()
             except ValueError:
                 continue
+            delivery = record.get("delivery") if isinstance(record.get("delivery"), dict) else {}
+            status = delivery.get("status") if isinstance(delivery.get("status"), str) else None
+            message_id = record.get("message_id") if isinstance(record.get("message_id"), str) else None
+            earlier = next((row for row in rows if message_id and row.get("message_id") == message_id), None)
+            if earlier is not None:
+                earlier["status"] = status or earlier.get("status")
+                continue
             rows.append({"to": record.get("to") if isinstance(record.get("to"), dict) else {},
-                         "summary": record["summary"][:400], "at": at})
+                         "summary": record["summary"][:400], "at": at, "message_id": message_id,
+                         "kind": record.get("kind") if isinstance(record.get("kind"), str) else None,
+                         "status": status})
     except OSError:
         return [], [str(shard)]
     rows = rows[-limit:]
@@ -929,7 +939,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["work"] = styled([("◌ ", "dim"), (str(open_count(work)) + " open · " + _plain(work[0].get("headline")), "loc_repo")]) if work else []
     sent, sent_paths = _sent_peer_messages(sid)
     watched.extend(sent_paths)
-    panel["messages"] = peer_message_rows(received, sent, assigned_tag)
+    panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
     if harness == "claude":
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
