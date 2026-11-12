@@ -1938,6 +1938,71 @@ class RestoredOwnerProofTest(unittest.TestCase):
     def test_dependency_change_after_restart_reselects_the_owner_by_watch(self):
         self._assert_reselected(watched=True)
 
+    def _earlier_proof_invalidated_during_budgeted_resume(self, *, restored):
+        """An earlier owner whose proof became invalid is not hidden by the resume order.
+
+        2026-11-12 review [52]: owner 0 proven, the 5 s budget resumed after
+        owner 1, then owner 0's dependency turned pending; `order <= resume`
+        skipped it on every later pass (re-observed 0, settled 0).
+        """
+        attempts = [f"att-cold-{index}" for index in range(5)]
+        self.jobs.write_text("\n".join(self._runtime_owner_row(attempt) for attempt in attempts)
+                             + "\n", encoding="utf-8")
+        dependencies = {}
+        for attempt in attempts:
+            dependencies[attempt] = self.base / f"{attempt}.json"
+            dependencies[attempt].write_text("sealed", encoding="utf-8")
+        proofs = self.base / "runner-duties" / "settled-owners.json"
+        now = [0.0]
+        observed = []
+
+        def state(_jobs, _status, metadata):
+            observed.append(metadata["attempt_id"])
+            now[0] += 10.0  # each proof costs more than the pass budget
+            sealed = dependencies[metadata["attempt_id"]].read_text() == "sealed"
+            return COMPLETE if sealed else PENDING
+
+        def budgeted():
+            context = obligations.OwnerSettlementReadContext()
+            context._dependency_watcher_fallback = True
+            context._clock = lambda: now[0]
+            context.limit_owner_scan(5.0)
+            self.addCleanup(context.close)
+            return context
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               side_effect=lambda _j, _s, meta: (dependencies[meta["attempt_id"]],)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=state), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            context = budgeted()
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            if restored:
+                self.assertTrue(context.save_settled_proofs(proofs))
+                context = budgeted()
+                self.assertEqual(context.load_settled_proofs(proofs), 1)
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertEqual(observed, attempts[:2])
+            self.assertTrue(context.owner_scan_unfinished(self.jobs), "resume after owner 1")
+            dependencies[attempts[0]].write_text("pending", encoding="utf-8")
+            observed.clear()
+            outputs = [obligations._resume_owner_settlements(self.jobs, context=context)
+                       for _ in range(8)]
+        settled_zero = [call for call in settle.call_args_list if call.args[1] == attempts[0]]
+        self.assertIn(attempts[0], observed[:2], "the next pass re-observes owner 0")
+        self.assertTrue(settled_zero, "owner 0 reaches its settlement path")
+        self.assertTrue(any(signature[2] == attempts[0] for signature in outputs[0]), outputs[0])
+        for attempt in attempts[2:]:
+            self.assertEqual(observed.count(attempt), 1,
+                             f"{attempt} is still proved exactly once by the resumed scan")
+        self.assertEqual(observed.count(attempts[1]), 0, "owner 1 keeps its valid proof")
+
+    def test_invalidated_restored_proof_is_reobserved_despite_the_resume_order(self):
+        self._earlier_proof_invalidated_during_budgeted_resume(restored=True)
+
+    def test_invalidated_fresh_proof_is_reobserved_despite_the_resume_order(self):
+        self._earlier_proof_invalidated_during_budgeted_resume(restored=False)
+
 
 if __name__ == "__main__":
     unittest.main()

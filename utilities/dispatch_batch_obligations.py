@@ -1476,6 +1476,13 @@ class OwnerSettlementReadContext:
                 affected.add(attempt)
         return tuple(affected)
 
+    def has_settled_owner(self, jobs: Path, attempt_id: str) -> bool:
+        return (str(jobs.resolve(strict=False)), attempt_id) in self._settled
+
+    def reselect_owner(self, jobs: Path, attempt_id: str):
+        """Keep an owner with an invalid proof due on the next candidate selection."""
+        self._invalidated_owners.add((str(jobs.resolve(strict=False)), attempt_id))
+
     def take_invalidated_owner_ids(self, jobs: Path):
         root = str(jobs.resolve(strict=False))
         affected = tuple(attempt for item_root, attempt in self._invalidated_owners
@@ -1766,7 +1773,8 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
                     selected[attempt_id] = record
             changed_rows = view.records_since(floor) if floor >= 0 else ()
             impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
-            impacted.update(context.take_invalidated_owner_ids(jobs))
+            reselected = context.take_invalidated_owner_ids(jobs)
+            impacted.update(reselected)
             impacted.update(context.active_owner_ids(jobs))
             impacted.update(context.due_unsettled_owner_ids(jobs))
             for attempt_id in impacted:
@@ -1783,7 +1791,9 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
     except FileNotFoundError:
         return ()
     resume_after = None
-    if context is not None:
+    if context is None:
+        reselected = ()
+    else:
         context.begin_dependency_pass()
         resume_after = context.owner_scan_resume_order(jobs, view)
         candidates = tuple(sorted(candidates, key=lambda record: record.order))
@@ -1795,7 +1805,8 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
         from dispatch_contract import process_table_scan_scope
         with process_table_scan_scope():
             pending, proven_through = _classify_owner_candidates(
-                jobs, view, candidates, context, resume_after=resume_after)
+                jobs, view, candidates, context, resume_after=resume_after,
+                reselected=reselected)
     if context is not None:
         if proven_through is None:
             context.finish_owner_scan(jobs)
@@ -1807,7 +1818,8 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
     return pending
 
 
-def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_after=None):
+def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_after=None,
+                               reselected=()):
     from dispatch_contract import (
         SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
     )
@@ -1819,6 +1831,10 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
     deadline = None if context is None else context.owner_scan_deadline()
     proven_through = None
     last_proven = resume_after
+    proved_this_pass = False
+    # The resume order only marks rows an earlier pass already proved; an owner
+    # whose proof became invalid since then is due again whatever its order.
+    reselected = set(reselected)
     for candidate in candidates:
         # Each historical proof reads and drops large inputs; return the freed
         # heap while the long candidate walk continues (rate limited).
@@ -1856,11 +1872,14 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
                 meta.get("attempt_id", ""),
                 meta.get("owner_route_id") or meta.get("route_id", ""),
                 meta.get("owner_route_hash") or meta.get("route_hash", ""))
+            had_proof = context is not None and context.has_settled_owner(jobs, attempt_id)
             if (context is not None and context.settled_owner_current(
                     jobs, fields[1], raw, meta, related_rows)):
                 context.forget_active_owner(jobs, attempt_id)
                 context.forget_unsettled_owner(jobs, attempt_id)
                 continue
+            if had_proof:
+                reselected.add(attempt_id)
             deferred = (None if context is None else context.unsettled_current(
                 jobs, fields[1], raw, meta, related_rows, supervisor_lease_is_held))
             if deferred == "not-applicable":
@@ -1870,16 +1889,22 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_
                 # Unchanged inputs before the retry time: keep the unfinished
                 # owner visible without observing it again.
                 context.remember_active_owner(jobs, candidate)
-            elif resume_after is not None and order <= resume_after:
+            elif (resume_after is not None and order <= resume_after
+                    and attempt_id not in reselected):
                 # An earlier pass of this unfinished scan already proved it.
                 continue
-            elif (deadline is not None and last_proven != resume_after
+            elif (deadline is not None and proved_this_pass
                     and context._clock() >= deadline):
                 # This pass spent its proof budget; prove the rest next pass.
                 proven_through = last_proven
+                if attempt_id in reselected:
+                    # Behind the resume order: keep it on the reselection path.
+                    context.reselect_owner(jobs, attempt_id)
                 continue
             else:
-                last_proven = order
+                proved_this_pass = True
+                if last_proven is None or order > last_proven:
+                    last_proven = order
                 try:
                     observed = dependencies = None
                     if context is not None:
