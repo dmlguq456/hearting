@@ -157,6 +157,47 @@ class ProducerTest(unittest.TestCase):
         self.run_hook(CODEX_STOP, {"thread_id": "sid"}, env=env)
         self.assertIsNotNone(interaction.read_wait("sid", "codex"))
 
+    def shell_reports(self, script, payload, *args):
+        """Run one hook in process; return the session-shell lifecycle reports it made."""
+        import io
+        import runpy
+        import types
+        from unittest import mock
+        calls = []
+        fake = types.ModuleType("session_shell")
+        fake.lifecycle = lambda harness, event, sid, **_: calls.append((harness, event, sid))
+        with mock.patch.dict(sys.modules, {"session_shell": fake}), \
+                mock.patch.dict(os.environ, {"FLEET_INTERACTION_STATE_DIR": self.tmp.name}), \
+                mock.patch.object(sys, "argv", [str(script), *args]), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(sys, "stdout", io.StringIO()):
+            for key in WORKER_KEYS:
+                os.environ.pop(key, None)
+            try:
+                runpy.run_path(str(script), run_name="__main__")
+            except SystemExit:
+                pass
+        return calls
+
+    def test_a_wait_reaches_the_session_shell_border_from_the_same_hook(self):
+        # The border shows `waiting` when the wait is recorded and leaves it when
+        # the waited tool ran; a turn's end or a tool without a wait sends nothing.
+        claude = {"session_id": "sid", "hook_event_name": "PermissionRequest", "tool_name": "Bash"}
+        self.assertEqual(self.shell_reports(CLAUDE, claude, "set", "--kind", "permission"),
+                         [("claude", "blocked", "sid")])
+        after = dict(claude, hook_event_name="PostToolUse")
+        self.assertEqual(self.shell_reports(CLAUDE, after, "clear"), [("claude", "working", "sid")])
+        self.assertIsNone(interaction.read_wait("sid", "claude"))
+        self.assertEqual(self.shell_reports(CLAUDE, after, "clear"), [])
+        self.shell_reports(CLAUDE, claude, "set", "--kind", "permission")
+        self.assertEqual(self.shell_reports(CLAUDE, dict(claude, hook_event_name="Stop"), "clear"), [])
+        asked = dict(claude, tool_name="AskUserQuestion")
+        self.assertEqual(self.shell_reports(CLAUDE, asked, "set", "--kind", "permission"), [])
+        codex = {"context": {"thread_id": "codex-sid"}, "tool_name": "exec"}
+        self.assertEqual(self.shell_reports(CODEX_SET, codex), [("codex", "blocked", "codex-sid")])
+        self.assertEqual(self.shell_reports(CODEX_CLEAR, codex), [("codex", "working", "codex-sid")])
+        self.assertEqual(self.shell_reports(CODEX_CLEAR, codex), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,21 @@ def _payload():
     return value if isinstance(value, dict) else {}
 
 
+def _shell_state(event, session_id):
+    """Tell this session's shell border the same change (its existing lifecycle report)."""
+    try:
+        root = Path(os.environ["AGENT_HOME"]) if os.environ.get("AGENT_HOME") else ROOT
+        if not (root / "core" / "CORE.md").is_file():
+            root = ROOT
+        utilities = str(root / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from session_shell import lifecycle
+        lifecycle("claude", event, session_id)
+    except Exception:
+        pass
+
+
 def main():
     try:
         payload = _payload()
@@ -62,7 +77,14 @@ def main():
             if (harness == "opencode" and payload.get("request_id") is None
                     and payload.get("scope") != "session"):
                 return 0
+            # A Claude tool that ran after its wait resumes the turn: the border
+            # leaves `waiting` now, not at the turn's end.
+            resumed = (harness == "claude"
+                       and payload.get("hook_event_name") in ("PostToolUse", "PostToolUseFailure")
+                       and interaction.read_wait(session_id, harness) is not None)
             interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"))
+            if resumed:
+                _shell_state("working", session_id)
             return 0
         if action != "set" or "--kind" not in sys.argv:
             return 0
@@ -87,6 +109,8 @@ def main():
             interaction.set_wait(session_id, harness, kind, source,
                                  request_id=payload.get("request_id"),
                                  turn_id=payload.get("turn_id"), item_id=payload.get("item_id"))
+            if harness == "claude":
+                _shell_state("blocked", session_id)
     except Exception:
         pass
     return 0
