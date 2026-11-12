@@ -46,52 +46,26 @@ def repo_rule_label(value, limit=None):
 
 
 def repo_status_segments(status, room, narrow=False):
-    """``(text, key)`` pieces of a project's status line on its OVERVIEW group rule.
+    """Count-only pieces on OVERVIEW; project prose and recent results stay on its page.
 
-    With a status document: its one line, what waits on the person (yellow when any), the
-    questions waiting (when any), and when the project last changed. Without one: routes
-    with live work, the questions, and the newest completed result. The free text (the
-    line, or the result) gives way first; a narrow screen keeps only the count waiting on
-    the person.
-    """
+    A narrow screen keeps only the counts waiting on the person (answers, then decisions);
+    the route count gives way first."""
     room = int(room)
-    has_doc = status.get("line") is not None
+    person = []
+    if int(status.get("questions") or 0):
+        person.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
     decisions = int(status.get("decisions") or 0)
-    decide = (f"{decisions} to decide", "lvl_y" if decisions else "dim")
-    if narrow:
-        return [decide] if has_doc and decisions and _seg_width(decide[0]) <= room else []
-    tail = []
-    if has_doc:
-        tail.append(decide)
-    elif status.get("routes"):
-        tail.append(route_count_segment(status))
-    if status.get("questions"):
-        tail.append((f"{answer_wait_word()} {int(status['questions'])}", "blocked"))
-    if has_doc:
-        free = str(status["line"])
-        stale = bool(status.get("stale") and status.get("doc_age"))
-        if stale:
-            free = f"{status['doc_age']} · {free}"
-        if status.get("changed") and not (stale and status["changed"] == status["doc_age"]):
-            tail.append((str(status["changed"]), "dim"))
-    else:
-        done = status.get("done")
-        free = (f"{status['done_age']} ✓ {done}" if status.get("done_age") else f"✓ {done}") if done else ""
-    if not tail and not free:
-        return []
-    pieces = []
-    for text, key in tail:
-        pieces += [(BUNDLE_SEP, "dim"), (text, key)] if pieces else [(text, key)]
-    fixed = sum(_seg_width(text) for text, _key in pieces)
-    if has_doc:
-        lead_room = room - fixed - 3
-        if lead_room >= 8:
-            return [(_clip(free, lead_room), "now_sub"), (BUNDLE_SEP, "dim")] + pieces
-        return pieces if fixed <= room else []
-    tail_room = room - fixed - (3 if pieces else 0)
-    if free and tail_room >= 8:
-        return pieces + ([(BUNDLE_SEP, "dim")] if pieces else []) + [(_clip(free, tail_room), "now_sub")]
-    return pieces if fixed <= room else []
+    if status.get("line") is not None and decisions:
+        person.append((f"{decisions} to decide", "lvl_y"))
+    routes = [route_count_segment(status)] if int(status.get("routes") or 0) and not narrow else []
+    pieces = routes + person
+    out = []
+    for text, key in pieces:
+        addition = ([(BUNDLE_SEP, "dim")] if out else []) + [(text, key)]
+        if sum(_seg_width(value) for value, _ in out + addition) > room:
+            break
+        out.extend(addition)
+    return out
 
 
 BUNDLE_SEP = " │ "
@@ -240,7 +214,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
     harn_end = _overview_harness_end(use, c)
     for offset, label in ((IND + 3, "ID"), (c["h"], "MODEL"), (c["ctx"], "CTX" if c["bare"] else "CONTEXT"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()),
-                          *(([(c["now"], ui_text("fleet.input.label"))] if c["now"] is not None else [])),
+                          *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
         if label == "MODEL" and harn_end is None or label == "CTX" and not c.get("ctx_w", 1):
             continue                      # a table this narrow has no room for the harness cell
@@ -397,10 +371,12 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 if compaction_imminent(pressure):
                     now_start = grid.put(now_start, y, ui_text("fleet.context.compaction_imminent") + " · ",
                                          "lvl_r", limit=now_end)
-                now_text = _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
-                                 max(0, now_end - now_start))
-                # Input is muted grey; unfolded NOW keeps its existing white.
-                grid.put(now_start, y, now_text, "dim",
+                # Spec rule 28: the folded row's cell is what the session is on now, in
+                # the NOW cell's own colors (bright while it works or waits); the last
+                # input moves to the unfolded lines.
+                now = session.get("now")
+                now_text = _clip(str(now or "·"), max(0, now_end - now_start))
+                grid.put(now_start, y, now_text, _now_key(session) if now else "dim",
                          limit=now_end)
             y += 1
             if restart_text and not restart_inline:
@@ -408,12 +384,10 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 y += 1
             if session_table and c["now"] is None:
                 # The repo page keeps the same table columns; a narrow pane puts
-                # the existing last-input projection directly below its session.
-                grid.put(x + IND + 3, y,
-                         _clip(str(session.get("last_input") or ui_text("fleet.input.unknown")),
-                               max(0, right - x - IND - 4)),
-                         "head" if session.get("state") in ("working", "blocked") else "title_dim",
-                         limit=right)
+                # the session's NOW directly below its session.
+                now = session.get("now")
+                grid.put(x + IND + 3, y, _clip(str(now or "·"), max(0, right - x - IND - 4)),
+                         _now_key(session) if now else "dim", limit=right)
                 y += 1
             gpu_count = sum(1 for host in (vm.compute or ()) for gpu in host[5]
                             if tag in (gpu[7] or ()))
@@ -423,7 +397,7 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3, *, session_table=False):
                 y += 1
             if state.opened == tag:
                 _tint_row(grid, row_y, x - 1, right, 236)
-                y = _session_unfold(grid, vm, x, use, y, session, c, input_shown=session_table,
+                y = _session_unfold(grid, vm, x, use, y, session, c, now_shown=session_table,
                                     title_whole=title_whole)
             if y >= grid.rows - 5:
                 if sticky:
@@ -681,11 +655,17 @@ def _put_wrapped(grid, x, y, parts, right, cont_x, newline=None):
     return x, y
 
 
-def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_whole=True):
-    """Under an unfolded session row: NOW in full, each route on a line, its question.
+def _now_key(session):
+    """The NOW cell's color: bright while the session works or waits, else the title's dim."""
+    return "head" if session.get("state") in ("working", "blocked") else "title_dim"
+
+
+def _session_unfold(grid, vm, x, use, y, session, c, now_shown=False, title_whole=True):
+    """Under an unfolded session row: the last input, each route on a line, its question.
 
     What the folded row left out or cut is given in full here: the title and checkout, a
-    clipped MODEL cell's whole ``harness model effort``, and LAST INPUT on a narrow row."""
+    clipped MODEL cell's whole ``harness model effort``, and NOW on a narrow row that drew
+    none (spec rule 28: the folded row's NOW is not drawn twice)."""
     tag = str(session.get("tag"))
     right = x + use + 1
     x_lab, x_val = x + c["h"], x + c["h"] + 7
@@ -707,20 +687,19 @@ def _session_unfold(grid, vm, x, use, y, session, c, input_shown=False, title_wh
                              model_cell_parts(session.get("harness"), session.get("model"),
                                               str(session.get("effort") or "")), x + use, x_lab)
         y += 1
-    if c["now"] is None:
-        if not input_shown:
-            label = ui_text("fleet.input.label")
-            input_x = max(x_val, x_lab + _seg_width(label) + 2)
-            grid.put(x_lab, y, label, "label", limit=right)
-            for line in _wrap_cells(str(session.get("last_input") or ui_text("fleet.input.unknown")),
-                                    max(1, right - input_x)):
-                grid.put(input_x, y, line, "soft", limit=right)
-                y += 1
-    grid.put(x_lab, y, "NOW", "label")
-    now = session.get("now")
-    for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
-        grid.put(x_val, y, line, "now_sub" if now else "dim")
+    label = ui_text("fleet.input.label")
+    input_x = max(x_val, x_lab + _seg_width(label) + 2)
+    grid.put(x_lab, y, label, "label", limit=right)
+    for line in _wrap_cells(str(session.get("last_input") or ui_text("fleet.input.unknown")),
+                            max(1, right - input_x)):
+        grid.put(input_x, y, line, "soft", limit=right)
         y += 1
+    if c["now"] is None and not now_shown:
+        grid.put(x_lab, y, "NOW", "label")
+        now = session.get("now")
+        for line in (_wrap_cells(now, x + use - x_val) if now else ["·"]):
+            grid.put(x_val, y, line, "now_sub" if now else "dim")
+            y += 1
     received_label = ui_text("fleet.input.received")
     message_x = max(x_val, x_lab + _seg_width(received_label) + 2)
     grid.put(x_lab, y, received_label, "label", limit=right)
@@ -832,6 +811,94 @@ def route_doer_cells(route):
     return parts, route_owner_context(route), None, 0
 
 
+TOOL_TARGET_W = 40          # ``>_ python3 · tools/run-tests.py --sel…`` on a folded route row
+
+
+def _route_rail_text(route):
+    """The stage rail's plain words, to size it before drawing (``one-shot ●``)."""
+    stages = route.get("stages") or ()
+    current = next((stage for stage in stages if stage.get("st") in ("active", "failed")), None)
+    if len(stages) <= 1:
+        return (str((current or (stages[0] if stages else {})).get("name") or "·") + " ●")
+    return " › ".join(str(stage.get("name") or "·") for stage in stages)
+
+
+def route_now_texts(route):
+    """What a one-step route's folded row shows in its progress cell while its doer works:
+    the open tool's allow-listed summary, widest first and each a whole value
+    (``python3 tools/run-tests.py``, ``python3 run-tests.py``, ``python3``); a path gives way
+    to its file name, then the tool name stands alone. Empty for a staged or chained route,
+    or when nothing open is observed (the row keeps ``one-shot ●``)."""
+    doer = route.get("doer")
+    stages = route.get("stages") or ()
+    if (not isinstance(doer, Mapping) or not doer.get("tool") or len(stages) != 1
+            or len(route.get("legs") or ()) > 1 or route.get("resume")
+            or route.get("state") == "stale" or stages[0].get("st") != "active"
+            or route.get("capability") == "frame"):
+        return []
+    tool = str(doer["tool"])
+    target = str(doer.get("target") or "")
+    out = [tool + " " + target] if target else []
+    name = target.rstrip("/").rsplit("/", 1)[-1] if target else ""
+    if name and name != target:
+        out.append(tool + " " + name)
+    out.append(tool)
+    return out
+
+
+def _draw_route_now(grid, x, end, y, route, texts):
+    """``one-shot ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
+    cell: its stage word and mark first (spec E9 rule 24: the kind word stays, as on the
+    shell panel's third row), then the widest summary that fits, with the tool's time and
+    agent count when they fit too (the agent count goes first). False when not even the
+    tool name fits beside the word (the caller keeps the stage rail, ``one-shot ●``)."""
+    doer = route["doer"]
+    age = ("  " + str(doer["tool_age"])) if doer.get("tool_age") else ""
+    agents = int(doer.get("agents") or 0)
+    agent_text = f" · +{agents} agent" if agents else ""
+    lit = bool(getattr(grid, "beat", 1))
+    stages = route.get("stages") or ()
+    lead = _stage_items(stages[:1], lit=lit)[0][0] if stages else [("●", "work" if lit else "g_work_off")]
+    room = end - x - sum(_seg_width(text) for text, _key in lead) - 1
+    for text in texts:
+        for extras in ((age, agent_text), (age, ""), ("", "")):
+            if _seg_width(text) + sum(_seg_width(part) for part in extras) <= room:
+                cursor = _put_segments(grid, x, y, lead, end)
+                cursor = grid.put(cursor, y, " " + text, "soft", limit=end)
+                if extras[0]:
+                    cursor = grid.put(cursor, y, extras[0], "dim", limit=end)
+                if extras[1]:
+                    grid.put(cursor, y, extras[1], "dim", limit=end)
+                return True
+    return False
+
+
+def route_activity_rows(route):
+    """What the route's doer is on now and just finished, one row each, from its own stream:
+
+    ``>_ python3 · tools/run-tests.py  3m · +1 agent`` (or ``>_ no tool`` when its read
+    stream shows none open) and ``after Edit · utilities/x.py``. Unreported values are left
+    out; both are allow-listed summaries, never the worker's raw command or words."""
+    doer = route.get("doer")
+    if not isinstance(doer, Mapping):
+        return []
+    rows = []
+    if doer.get("tool"):
+        row = [(">_ ", "soft"), (str(doer["tool"]), "soft")]
+        if doer.get("target"):
+            row.append((" · " + str(doer["target"]), "soft"))
+        if doer.get("tool_age"):
+            row.append(("  " + str(doer["tool_age"]), "dim"))
+        if int(doer.get("agents") or 0):
+            row.append((f" · +{int(doer['agents'])} agent", "dim"))
+        rows.append(row)
+    elif doer.get("idle_tool"):
+        rows.append([(">_ ", "dim"), ("no tool", "dim")])
+    if doer.get("after_tool"):
+        rows.append([("after ", "dim"), (str(doer["after_tool"]), "dim")])
+    return rows
+
+
 def route_row_columns(use, routes, session_need=0):
     """The session row's columns for route rows: the MODEL cell fits the widest doer of either."""
     need = max([session_need] + [_seg_width("".join(text for text, _key in route_doer_cells(route)[0]))
@@ -929,11 +996,30 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     title = str(route.get("title") or "")
     if not title_below and title and _seg_width(title) > (title_room if room else 0):
         dropped.insert(0, [(title, "soft")])
+    # A one-step route shows what its doer is on now in the progress cell (``● python3
+    # tools/run-tests.py  3m``); the tool cell then gives its room to that summary and time.
+    now = route_now_texts(route)
+    if now and _draw_route_now(grid, cursor, age_x - GAP, y, route, now):
+        grid.put(age_x, y, age, "dim")
+        return dropped
     # ``>_ Bash · +1 agent``: the open tool and live sub-agents, only while the work runs.
     tool_text = ">_ " + str(tool) if tool else ""
     agent_text = f" · +{agents} agent" if tool_text and agents else ""
     progress_end = age_x - GAP
     full_tool = [(tool_text, "soft")] + ([(agent_text, "dim")] if agent_text else [])
+    # What the tool acts on rides with it while the row has room for it and a stage rail;
+    # the unfolded activity row below gives it whole (with its time) either way.
+    activity = route_activity_rows(route)
+    target = (route.get("doer") or {}).get("target") if tool_text else None
+    if target:
+        # Only where the cut target fits beside a whole stage rail (a wide row); otherwise the
+        # folded row keeps the tool name and the unfolded activity row gives the target.
+        wide = _clip(tool_text + " · " + str(target), TOOL_TARGET_W)
+        rail = max(12, _seg_width(_route_rail_text(route)))
+        if age_x - GAP - _seg_width(wide + agent_text) - cursor >= rail + GAP:
+            tool_text = wide
+    if activity:
+        full_tool = []          # the activity row carries the tool, its target and agents
     if tool_text:
         width = max(TOOL_W, _seg_width(tool_text + agent_text))
         if age_x - GAP - width - cursor < 12:
@@ -944,9 +1030,9 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
             if agent_text:
                 grid.put(end, y, agent_text, "dim", limit=tool_x + width)
             progress_end = tool_x - GAP
-            if _seg_width(tool_text) > width or len(full_tool) > 1 and not agent_text:
+            if full_tool and (_seg_width(tool_text) > width or len(full_tool) > 1 and not agent_text):
                 dropped.append(full_tool)
-        else:
+        elif full_tool:
             dropped.append(full_tool)
     if progress_end > cursor:
         _draw_route_progress(grid, cursor, progress_end, y, route, card=False)
@@ -987,9 +1073,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
     # The routed owner's harness, model and effort, as the ROUTES HARNESS column reads
     # them, whenever the title keeps its room; otherwise the harness alone, as before.
-    state = "working" if route.get("activity") == "running" else route.get("state")
-    if route.get("owner_waits"):
-        state = "idle"                    # the owner waits on its worker; the worker line spins
+    state = route_marker_state(route)
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim")}.get(state, ("●", "g_work_off"))
@@ -1075,6 +1159,37 @@ def _draw_route_progress(grid, x, end, y, route, card=True):
         after.extend([("  resume ", "dim"), (str(route["resume"]), "g_idle")])
     elif route.get("loops"):
         after.append(("  " + str(route["loops"]), "dim"))
+    # Spec E9 rule 24: a route that runs a worker per stage reads `staged 3/7 execute ●`
+    # (short of cells `3/7 execute ●`), the shell panel's third row; earlier legs stay in
+    # front of it. A one-step route's own word (`one-shot`) is its stage rail already.
+    staged_parts = None
+    if str(route.get("shape") or "").startswith("staged") and len(stages) > 1:
+        at_stage = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
+                        next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
+        staged_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at_stage][0]
+    # Only where the stage keeps its whole name and mark; else the rail as before.
+    if staged_parts is not None and end - x - (sum(_seg_width(t) for t, _k in _fold_items(items[:-1], max(8, (end - x) // 3))) + 3 if not same and items[:-1] else 0) >= sum(_seg_width(t) for t, _k in staged_parts):
+        at = next((i for i, stage in enumerate(stages) if stage.get("st") in ("active", "failed")),
+                  next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1))
+        stage_parts = _stage_items(stages, lit=bool(getattr(grid, "beat", 1)))[at][0]
+        cursor = x
+        earlier = items[:-1] if not same else []
+        if earlier:
+            cursor = _put_segments(grid, cursor, y, _fold_items(earlier, max(8, (end - x) // 3)), end)
+            cursor = grid.put(cursor, y, " › ", "dim", limit=end)
+        need = sum(_seg_width(text) for text, _key in stage_parts)
+        position = f"{at + 1}/{len(stages)}"
+        # Short of cells the word goes, then the position; the stage and its mark stay.
+        room = end - cursor
+        word = ("staged " + position if room >= need + len(position) + 8
+                else position if room >= need + len(position) + 1 else "")
+        if word:
+            cursor = grid.put(cursor, y, word + " ", "dim", limit=end)
+        cursor = _put_segments(grid, cursor, y, stage_parts, end)
+        cursor = _put_segments(grid, cursor, y, after, end)
+        if card:
+            _put_route_card(grid, cursor, end, y, route)
+        return
     stage_index = next((i for i, stage in enumerate(stages) if stage.get("st") != "done"), len(stages) - 1)
     current_stage = str(stages[stage_index].get("name", "·")) if stages else str(name)
     after_width = sum(_seg_width(text) for text, _key in after)
@@ -1207,7 +1322,7 @@ def _overview_harness_width(sessions):
 
 
 def _overview_columns(use, harn_need=0, tail_need=0):
-    """ID │ MODEL │ CONTEXT │ TITLE │ LAST INPUT … AGE — the session row, and the route row after it.
+    """ID │ MODEL │ CONTEXT │ TITLE │ NOW … AGE — the session row, and the route row after it.
 
     MODEL keeps the observed display text (model and effort included) up to the room TITLE,
     CONTEXT and AGE leave; a long model is clipped inside its own cell. TITLE is the cell
@@ -1432,6 +1547,20 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 # A value longer than the row goes on under it, whole.
                 line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2, next_row)
             if line_x is not None:
+                _tint_row(grid, y, x - 1, right, 236)
+                y += 1
+            # The doer's own now (whole, wrapped like the values above) and the call it
+            # just finished (one row, cut with `…`), each on its own row.
+            for item in route_activity_rows(route):
+                grid.fill(x - 1, right, y, " ", tint=236)
+                grid.add_hit(y, x, right, action)
+                line_x = grid.put(x + cols["title"], y, "└ ", "dim", limit=right)
+                if item[0][0] == "after ":
+                    grid.put(line_x, y, _clip("".join(text for text, _key in item),
+                                              max(0, right - line_x)), "dim", limit=right)
+                else:
+                    line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2,
+                                             next_row)
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
             if link:

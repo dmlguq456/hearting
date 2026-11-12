@@ -59,6 +59,48 @@ class SessionRouteStatusTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in rows[0]["stages"]], ["inline"])
         self.assertNotIn("opencode\0sid-current", panels)
 
+    def test_shell_detail_keeps_every_current_route(self):
+        # Spec rule 23: the panel shows every current route, so none is cut at eight.
+        snapshot = self.snapshot(12)
+        labels, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(labels["claude\0sid-current"].split(" · ")[0], "route 12")
+        self.assertEqual(len(panels["claude\0sid-current"]), 12)
+
+    def test_shell_detail_carries_what_routes_unfolds_from_the_same_records(self):
+        # Spec rule 21: kind, owner, each stage's doer and box, workers and age come from
+        # the very route records and node boxes ROUTES draws; nothing is read again.
+        snapshot = self.snapshot(stage="execute")
+        view = snapshot["jobs"][0].work_projection._route_view["view"]
+        view["nodes"] = [{"id": "plan", "state": "done", "harness": "codex", "model": "gpt-fixture",
+                          "effort": "high", "elapsed_min": 12, "unit": "plan/code"},
+                         {"id": "execute", "state": "active", "harness": "claude", "unit": "dev/backend",
+                          "route_attempt_round": 2},
+                         {"id": "review", "state": "todo"}]
+        view.update(capability="autopilot-code", capability_mode="dev", effective_intensity="standard")
+        with mock.patch.object(live, "_route_records", wraps=live._route_records) as reader:
+            _, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(reader.call_count, 1)
+        row = panels["claude\0sid-current"][0]
+        routes, nodes = live._route_records(snapshot, *live._session_records(snapshot, None, live._resolver(snapshot))[:2],
+                                            live._resolver(snapshot), __import__("time").time())
+        route = routes[0]
+        self.assertEqual([stage["name"] for stage in row["stages"]], ["plan", "execute", "review"])
+        plan, execute = row["stages"][0], row["stages"][1]
+        self.assertEqual((plan["h"], plan["m"], plan["e"], plan["el"]), ("codex", "gpt-fixture", "high", "12m"))
+        self.assertEqual(plan["unit"], "plan/code")
+        self.assertEqual(execute.get("r"), 2)
+        self.assertEqual(row["mode"], route["mode"])
+        self.assertEqual(row["intensity"], route["intensity"])
+        self.assertEqual(row["legs"], len(route["legs"]))
+        boxes = {item["n"]: item for group in nodes[route["id"]] for item in group.get("detail") or ()}
+        self.assertEqual(execute.get("verdict"), boxes["execute"]["verdict"])
+        from tools.fleet import session_panel
+        shown = session_panel.presentation({}, {"route_panels": panels}, "claude", "sid-current", 40)["routes"][0]
+        self.assertEqual(shown["kind_text"], "code(dev·std)")
+        self.assertEqual([stage["mark"] for stage in shown["stages"]], ["✓", "●", ""])
+        self.assertEqual(shown["stages"][0]["harness"], "codex")
+        self.assertEqual(shown["stages"][1]["round"], 2)
+
     def test_shell_carries_exact_route_visibility_without_another_read(self):
         snapshot = self.snapshot(stage="inline")
         interpret = live._route_records

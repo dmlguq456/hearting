@@ -3,7 +3,10 @@
 
 ``hearting run questions ask TEXT`` registers an explicit private message question
 for this interactive caller and returns immediately. Fleet or a nonempty answer
-in this session completes that question; native approvals keep their own surface.
+in this session completes that question; with choices, only a choice number or a
+choice's own wording typed in the session does, and any other prompt stays an
+ordinary prompt. A Fleet answer awaiting delivery is not replaced by a later prompt.
+Native approvals keep their own surface.
 
 ``hearting run questions`` lists the same board Fleet's QUESTIONS view shows (one
 shared projection, one count): each wait's question, choices and recommended answer,
@@ -178,6 +181,7 @@ def render(board, rows, folded):
     if not board.get("complete"):
         head += " · observation incomplete"
     lines = [head]
+    recommended_label = HWS.ui_translator()("fleet.session_block.recommended")
     for row in rows:
         place = " · " + row["project"] if row.get("project") else ""
         lines.append("%s  %s · %s%s · %s" % (row["id"], row["kind"], row["age"], place,
@@ -186,9 +190,14 @@ def render(board, rows, folded):
             lines.append("  folded: %s" % row["state"])
         for index, question in enumerate(row.get("questions") or (), 1):
             prefix = "  q%d " % index if len(row["questions"]) > 1 else "  "
-            lines.append(prefix + (question["question"] or "(question text is in that session)"))
+            body = question["question"] or "(question text is in that session)"
+            body_lines = str(body).splitlines() or [""]
+            lines.append(prefix + body_lines[0])
+            continuation = " " * len(prefix)
+            lines.extend(continuation + line for line in body_lines[1:])
             for number, choice in enumerate(question["choices"], 1):
-                mark = "  (recommended)" if question["recommended"] == number - 1 else ""
+                mark = ("  (" + recommended_label + ")"
+                        if question["recommended"] == number - 1 else "")
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
         if row.get("answerable"):
             listed = row.get("questions") or ()
@@ -396,7 +405,8 @@ def _ask(args):
         print(json.dumps({"id": value["id"], "state": value["lifecycle"]}))
     else:
         print(value["id"])
-        print(HWS.ui_translator()("questions.registered"))
+        print(HWS.ui_translator()("questions.registered_choices" if args.choice
+                                  else "questions.registered"))
     return 0
 
 

@@ -42,6 +42,13 @@ assert.deepEqual([...d.claudeStatusRows(screen,'exact',{...record,lines:['📁 p
 const two=['x',...box,'  📁 a · ⎇ b','  >_ running: job','  footer'];
 assert.deepEqual([...d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: job']})],[4,5]);
 assert.equal(d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: other']}).size,0,'partial block');
+// The bottom layout's short native screen ends on the record's first row (live
+// 80x24 capture, 2026-11-11): that row is the recorded one and yields; a second
+// row that differs, or a first row that differs, keeps everything.
+const cut=['x',...box,'  📁 a · ⎇ b'];
+assert.deepEqual([...d.claudeStatusRows(cut,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','5h 12% 7d 66%']})],[4],'record cut by the screen end');
+assert.equal(d.claudeStatusRows(cut,'exact',{session_id:'exact',lines:['📁 a · ⎇ c','5h 12% 7d 66%']}).size,0,'cut and changed');
+assert.equal(d.claudeStatusRows([...cut,'  5h 12% 7d 67%'],'exact',{session_id:'exact',lines:['📁 a · ⎇ b','5h 12% 7d 66%']}).size,0,'whole block shown and changed');
 const emoji=[...box,'  📁 a · ⎇ b ⚠ ? 🚧 ?   '];
 assert.deepEqual([...d.claudeStatusRows(emoji,'exact',{session_id:'exact',lines:['📁 a · ⎇ b ⚠️? 🚧 ?']})],[3],'wide-glyph cell spacing');
 const clipped=[...box,'  📁 project · ⎇ main · cont…'];
@@ -209,14 +216,17 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
    questions:()=>question?[[{text:'Choose the destination'}],[{text:'1 Current project'}],[{text:state==='draft'?'› My draft':'Ctrl+] answer'}]]:[]};
- const rows=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
+ all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
+ const rows=all.map(r=>r.slice(1));
  assert.deepEqual(rows[1],rows[0],state+' codex');assert.deepEqual(rows[2],rows[0],state+' opencode');
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
- if(question){assert(text.includes('│ Choose the destination'),state+' inner padding');}
+ if(question){assert(text.includes('─ Choose the destination ')&&text.includes('│ │ 1 Current project'),state+' question box title and inner padding');}
  if(state!=='start')assert(text.includes('route 1')&&text.includes('Current task'),state+' route row missing');
- else assert(text.includes('── route 0 '),state+' known-empty route list');
+ else assert(!text.includes('route'),state+' a known-empty route list draws no box');
 }
 '''
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],

@@ -3699,6 +3699,64 @@ class TestContinuation(unittest.TestCase):
     if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
     else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
 
+ def test_draft_fact_verify_blocked_on_unjudged_claims_resumes_in_same_cycle(self):
+  # A document route's fact-verify that ended with claims still unjudged
+  # (io.verdict `unverified` -> BLOCKED) resumes through the existing
+  # continuation from that node: the prefix is reused, the new route reopens
+  # the same producer cycle, so the earlier verdict file sits at the very path
+  # the resumed verifier writes, and the round is admitted (not refused as an
+  # unchanged blocking review).
+  import subprocess,sys
+  import artifact_producer as AP
+  import review_round_cap as RRC
+  from route_authority import decide_continuation
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact=Path(tmp)/"artifacts"
+   cwd=self._source_fixture()
+   gate={
+    "spec_read":{"satisfied":True,"source":"canonical-prd-sha256"},
+    "drift_verdict":"within-spec","workflow_mode":"tracked",
+    "artifact_guard":{"satisfied":True,"source":"conductor-prechecked"},
+   }
+   source=R.compile_route("autopilot-draft","doc","standard",cwd,artifact,
+    predicates=[],signals=[],transport="headless",tracking="tracked",
+    tracked_gate_evidence=gate,dispatch_evidence=self._dispatch(cwd))
+   ids=[node["id"] for node in source["nodes"]]
+   self.assertLess(ids.index("fact-verify"),ids.index("finalize"))
+   fact=next(node for node in source["nodes"] if node["id"]=="fact-verify")
+   self.assertEqual((fact["unit"],fact["dispatch_depth"]),("research/claim-verify",2))
+   source_path=R.canonical_route_path(artifact,source["route_id"])
+   R.write_once(source_path,source)
+   begun=AP.begin(artifact,route_file=source_path,capability="autopilot-draft",
+                  intensity="standard")
+   self._complete_prefix(source,"fact-verify",Path(begun["cycle_dir"])/"artifacts"/"evidence")
+   # The blocked attempt's verdict: 51 claims, 25 judged, 26 left unjudged.
+   verdict_path=Path(begun["cycle_dir"])/"artifacts"/"reviews"/"draft"/"facts"/"verdict.json"
+   verdict_path.parent.mkdir(parents=True,exist_ok=True)
+   rows=[{"claim":f"c{i}","verdict":"survive" if i<25 else "unverified"} for i in range(51)]
+   verdict_path.write_text(json.dumps({"io":{"verdict":"unverified"},"claims":rows}),encoding="utf-8")
+   command=[sys.executable,str(P),"continuation","--source-route",str(source_path),
+            "--resume-from-node","fact-verify","--requested-boundary","finalize",
+            "--reason","fact-verify-unjudged-claims","--artifact-root",str(artifact)]
+   result=subprocess.run(command,capture_output=True,text=True,cwd=str(R.ROOT),
+                         env={**os.environ,"AGENT_HOME":str(R.ROOT)})
+   self.assertEqual(result.returncode,0,result.stderr)
+   route=json.loads(result.stdout)
+   self.assertEqual(route["first_runnable_node"],"fact-verify")
+   self.assertIsNone(route["first_runnable_blocker"])
+   self.assertEqual([node["id"] for node in route["nodes"]],["fact-verify","finalize"])
+   resumed=AP.begin(artifact,route_file=R.canonical_route_path(artifact,route["route_id"]),
+                    capability="autopilot-draft",intensity="standard")
+   self.assertEqual(resumed["cycle_id"],begun["cycle_id"])
+   self.assertEqual(json.loads(verdict_path.read_text(encoding="utf-8"))["claims"][:25],rows[:25])
+   # The earlier attempt reached no judgment on 26 claims: a BLOCKED review row
+   # is verdict-less, so the resumed round is an ordinary admitted round.
+   node=next(row for row in route["nodes"] if row["id"]=="fact-verify")
+   blocked=[("done",{"note":"dead-worker-blocked","failure_class":"blocked","worker_type":"review",
+                     "attempt_id":"att-fact-verify-blocked","route_node":"fact-verify"})]
+   budget=RRC.round_budget(route,node,blocked)
+   self.assertEqual(budget.state,"admit")
+   self.assertTrue(decide_continuation(route,action="round",node=node,facts={"budget":budget}).allowed)
  def test_continuation_cli_defers_cycle_binding_until_begin(self):
   # Publication leaves the existing cycle untouched. Execution's existing
   # begin path records the admitted lineage; publishing a sibling still
@@ -7666,6 +7724,45 @@ class ComposeRouteTest(TestRoute):
    self.assertEqual(json.loads(out.getvalue())["state"],"inline")
    self.assertEqual(err.getvalue().count(exact),1)
 
+ def test_non_git_explain_reaches_the_same_refusal_as_start(self):
+  # BC-SMALL-SURFACE-1112 #1: the same arguments get the same judgment; explain is a preview of start.
+  route=self.compose()
+  self.assertTrue(R._isolates_worktree(route))
+  with tempfile.TemporaryDirectory(prefix="compose-explain-non-git-") as tmp, \
+       mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT),"AGENT_DISPATCH_ATTEMPT_ID":"",
+                                   "AGENT_DISPATCH_DEPTH":"0"}):
+   root=Path(tmp); cwd=root/"project"; cwd.mkdir()
+   prompt=root/"task.md"; prompt.write_text("Fix one line")
+   base=[str(P),"compose","--shape","staged","--graph","execute,test,report","--slug","explain-start",
+         "--unassigned","--cwd",str(cwd),"--artifact-root",str(root/"artifacts"),"--prompt-file",str(prompt)]
+   messages=[]
+   for action in ("--explain","--start"):
+    with self.subTest(action=action), mock.patch.object(sys,"argv",base+[action]), \
+         mock.patch.object(R,"compose_route",return_value=route), \
+         contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+     with self.assertRaises(ValueError) as raised:
+      R.main()
+     messages.append(str(raised.exception))
+  self.assertEqual(messages[0],messages[1])
+  self.assertIn("source-mutating worker route",messages[0])
+  self.assertIn("--shape direct",messages[0])
+
+ def test_mini_owner_refusal_names_the_profiles_that_can_run(self):
+  # BC-SMALL-SURFACE-1112 #2: help and refusal say when mini applies and what to give instead.
+  registry=R.TOPO.load_registry()
+  with self.assertRaises(ValueError) as raised:
+   R._resolve_owner_profile("quick",registry,explicit_profile="mini")
+  message=str(raised.exception)
+  self.assertTrue(message.startswith("owner-profile-ineligible-for-registered-dispatch: mini"),message)
+  self.assertIn("--profile deep|balanced-deep|balanced|light",message)
+  self.assertIn("--shape direct",message)
+  self.assertEqual(R._resolve_owner_profile("direct",registry,explicit_profile="mini")[0],None)
+  out=io.StringIO()
+  with mock.patch.object(sys,"argv",[str(P),"compose","--help"]),contextlib.redirect_stdout(out), \
+       self.assertRaises(SystemExit):
+   R.main()
+  self.assertIn("mini only with --shape direct"," ".join(out.getvalue().split()))
+
  def test_non_git_classified_research_modes_compile_and_seal_as_direct(self):
   with tempfile.TemporaryDirectory() as tmp:
    for mode in ("academic","market","technology"):
@@ -9662,7 +9759,13 @@ class ExactFenceFailureModeTest(unittest.TestCase):
    if path_self==self.jobs:
     raise OSError("simulated registry read failure")
    return real_read_text(path_self,*a,**kw)
-  with mock.patch.object(Path,"read_text",flaky_read_text):
+  import capability_route_continuation as continuation
+  def flaky_registry_lines(jobs):
+   if Path(jobs)==self.jobs:
+    raise OSError("simulated registry read failure")
+   return None
+  with mock.patch.object(Path,"read_text",flaky_read_text), \
+       mock.patch.object(continuation,"_pass_registry_lines",flaky_registry_lines):
    result=R._marker_identity_row(route,node,node["id"],node.get("completion_gate"),
                                  jobs=self.jobs,exact_terminal=True)
   self.assertFalse(result["passed"])

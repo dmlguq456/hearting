@@ -1694,7 +1694,7 @@ def main():
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
     cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
-                    help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence")
+                    help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
     cp.add_argument("--graph",default=None,help="optional staged subgraph in your order (see `capability-route.py stages --capability <cap>` for valid ids); incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
@@ -1918,7 +1918,8 @@ def main():
         non_git_decision = None
         capability_source = None
         capability_unresolved = False
-        if a.start and not a.explain:
+        # `--explain` previews the same start: it reaches the same Git placement judgment.
+        if a.start or a.explain:
             diagnosis = {**_compose_git_diagnosis(cwd), "cwd": str(Path(cwd).resolve())}
             try:
                 dispatch_depth = int(os.environ.get("AGENT_DISPATCH_DEPTH") or 0)
@@ -2047,6 +2048,9 @@ def main():
         # original choice instead of calling the newly-created stream a join.
         _campaign_for_card = compose_campaign_selection(route)
         if a.explain:
+            if (non_git_decision or {}).get("kind") == "worker-candidate" and _isolates_worktree(route):
+                raise ValueError(f"{non_git_decision['cause']}; source-mutating worker route; "
+                                 f"{non_git_decision['next']}")
             import work_intent
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                campaign_selection=_campaign_for_card,

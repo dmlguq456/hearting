@@ -984,34 +984,38 @@ approval; an absent answer stays absent.
 
 ### 0.5. Post-Execution Completion Report
 
-After a material-work attempt, the user-facing main agent's first close follows
-the content contract below. A five-field card can present that content when it
-fits; neither the card nor its field order is required. Render any labels in the
-user's communication language. In Korean, one optional card is:
+After a material-work attempt, the user-facing main agent's first close gives
+the result in one or two sentences, names any remaining failure, unfinished
+work, or user-impacting limit, asks for at most one decision the person must
+make in the self-contained form of `roles/response-policy.md` Decision requests
+(a clear recommended follow-up is reported as proceeding, not asked), and gives
+one pointer to the detailed record. Preserve unknowns and explicitly requested
+output or format. Render any labels in the
+user's communication language. In Korean, one optional presentation is:
 
 ```text
 [완료 보고]
-
-작업: <수행한 작업>
-결과: <완료 | 부분 완료 | 실패 | 차단 — 실제 결과>
-검증: <실행한 검증과 결과>
-산출물: <사용자가 확인할 경로 또는 없음>
-남은 사항: <미완료 항목, 위험, 차단 요인 또는 없음>
+<결과 한두 문장; 남은 사항과 필요한 결정이 있으면 포함>
+기록: <상세 내용>
 ```
 
-When using this card, values may use a short connected explanation or compact
-bullets when a single line would hide evidence. `결과` names the honest outcome
-status — completed, partial, failed, or blocked, localized for the audience —
-and must not present partial, failed, or blocked work as completed. Use `없음`
-(or its audience-language equivalent) when there is no artifact or remaining item.
-In `작업` and `남은 사항`, retain the source description and any comparison condition needed to identify the target; append its original number as a reference. Report a completion condition using its existing `text`, with its internal ID only where traceability helps. For example: “2명 고정·다중 참조·드롭아웃 없는 모델(E2 best48) 검증 완료; 0~3명 가변·참조 드롭아웃 FT 모델(var03 FT LAST3)은 평가 중단, checkpoint 재개 확인 필요.”
+An optional decision request has this shape:
 
-For the first close of material work, explain what changed and why, the observed
-before/after, the checks actually run (including reused, skipped, and unrun
-checks), the applicable commit/PR/deployment/serving state, and limits or work
-that remains. Preserve explicit user-requested content and output formats even
-when they differ from the default presentation. Deployment and operating claims
-require observed evidence.
+```text
+[결정 필요] <무엇을 정하는지 한 문장>
+- <안 1>: <고르면 달라지는 것>
+- <안 2>: <고르면 달라지는 것>
+추천: <안> — <이유 한 줄>
+답이 없으면: <기다리는 일>은 멈춰 있고, <다른 일>은 계속합니다.
+```
+
+Preserve the honest outcome (completed, partial, failed, or blocked), what the
+person needs to know about what remains, and the decision they need to make.
+Keep detailed changes, comparisons, checks, deployment
+state, and supporting evidence in the record; the runtime summary is preserved
+there and carried as agent context, not text to reproduce for the person.
+Deployment and operating claims require observed evidence. Preserve explicit
+user-requested content and output formats even when they differ from the default.
 Owner correction receipts distinguish delivery from verified application and say
 that a one-shot owner's next turn is not guaranteed. Completion reports count
 inputs without delivery evidence (`미반영 correct N건` in Korean), separating
@@ -1035,10 +1039,10 @@ artifact path, in the shared UI-text catalog's language (English by default,
 Korean when declared). Section meaning, rather than ordinal numbers, capability
 or filename, determines its summary field. Mixed or unknown headings stay
 unclassified and linked to the report; missing extracted checks or remaining
-work mean unknown, not absent. Existing report formats remain valid. The Claude wake receipt, the Codex queue item
-and the OpenCode carrier all carry this same text; the parent shows it first as
-written, then adds what it does not show of the content contract above. Without
-a sealed summary the contract above applies unchanged.
+work mean unknown, not absent. Existing report formats remain valid. The Claude
+wake receipt, Codex queue item, and OpenCode carrier preserve this text for
+agent context and record keeping; it does not change the short first-close
+contract above.
 
 If any review gate of the work closed without an independent reviewer's PASS —
 the route outcome's `review_independence_degraded`, or a

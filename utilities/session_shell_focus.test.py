@@ -20,7 +20,7 @@ function declaration(name){
 const observation=declaration('refreshReadiness')+'\n'+declaration('observeInput');
 function make(){
   const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
-    relay:false,currentDelivery:null,sid:'owned-sid',selection:0,screenRevision:0,state:'idle',
+    relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',
     screenSnapshot:()=>[],queueProjection:()=>{},source:async()=>({ok:true,ready:true})};
   vm.createContext(s);vm.runInContext(observation,s);return s;
 }
@@ -68,7 +68,7 @@ function declaration(name){
 const code=['refreshReadiness','observeInput','observeReport','nativePointer'].map(declaration).join('\n');
 function make(){
   const s={Buffer,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,empty:true,keyTail:'',paste:false,
-    relay:false,currentDelivery:null,sid:'owned-sid',selection:0,screenRevision:0,state:'idle',heldBytes:0,
+    relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',heldBytes:0,
     left:0,written:[],held:[],screenSnapshot:()=>[],queueProjection:()=>{},queueDisplay:()=>{},
     source:async()=>({ok:true,ready:true})};
   s.block={leave:()=>s.left++};s.child={write:d=>s.written.push(d)};s.inputOwner={hold:d=>s.held.push(d)};
@@ -101,6 +101,38 @@ const packet=(c,release=false)=>Buffer.from(`\x1b[<${c};60;20${release?'m':'M'}`
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+
+    def test_late_ready_answer_never_overwrites_a_newer_lifecycle_event(self):
+        # An idle observation started before a newer blocked event is older than it,
+        # even when the native screen has not been redrawn yet.
+        script = r"""
+const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict');
+const text=fs.readFileSync(process.argv[1],'utf8');
+const code=text.slice(text.indexOf('async function lifecycle(req)'),text.indexOf('async function request(req)'))
+  +text.slice(text.indexOf('async function refreshReadiness()'),text.indexOf('function observeInput('));
+(async()=>{
+  for(const harness of ['claude','codex','opencode'])for(const between of [true,false]){
+    let resolve;const s={Promise,harness,token:'t',rootNative:{pid:10,start:'1'},sequence:1,sid:'A',state:'idle',
+      empty:true,submitted:0,lastEnter:0,currentDelivery:null,epoch:5,selection:1,screenRevision:10,nativeEpoch:0,
+      relay:false,paste:false,keyTail:'',clock:0,eventMark:0,formSeen:false,painted:[],source:()=>new Promise(r=>resolve=r),screenSnapshot:()=>[],
+      processRow:pid=>({pid,start:'1'}),descends:()=>true,sameTerminal:()=>true,projection(){},
+      queueProjection(){},status:()=>({})};
+    s.queueDisplay=()=>s.painted.push(s.state);
+    vm.createContext(s);vm.runInContext(code,s);
+    const pending=s.refreshReadiness();
+    if(between)a.equal((await s.lifecycle({event:'blocked',seq:2,sid:'A',pid:11,start:'1',token:'t',harness})).ok,true);
+    resolve({ok:true,ready:true});await pending;
+    const shown=s.painted[s.painted.length-1];
+    if(between){a.equal(s.state,'blocked',harness);a.equal(s.empty,false,harness);a.equal(shown,'blocked',harness);}
+    else{a.equal(s.state,'idle',harness);a.equal(s.empty,true,harness);}
+  }
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(
+            ["node", "-e", script, str(ROOT / "utilities/session-shell/host.cjs")],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

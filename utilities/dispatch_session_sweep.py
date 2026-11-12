@@ -1054,12 +1054,52 @@ _LEGACY_COMPLETION_DELIVERY_HEADER = (
     "and direct user questions. "
     "Do not start Monitor, dispatch-wait, or a polling loop."
 )
-_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX = (
-    "Original request/format apply. Review result; do approved follow-through or existing "
-    "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
-    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
-    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
-)
+# Exact first lines the immediately previous release shipped for a completed
+# runtime-v1 owner, keyed like dispatch_completion_join.RUNTIME_V1_FOLLOWUP_PREFIXES
+# by whether runtime summaries follow. Receipt recovery only.
+_PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review result; do approved follow-through or existing "
+           "continuation. First close: show the runtime summary below to the person first, as written; "
+           "then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
+           "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review result; do approved follow-through or existing "
+            "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
+            "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+# The follow-up the short first close shipped just before the decision wording
+# (ask for at most one decision), same current headers. Receipt recovery only.
+_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask for at most one decision the "
+           "person must make; and point to the detailed record. Keep the runtime summary below as agent "
+           "context and record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask for at most one necessary "
+            "decision, and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+# The follow-up the decision wording shipped just before the recommended next step was
+# limited to reversible work, same current headers. Receipt recovery only.
+_DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+           "decide and state a recommended in-scope next step (such as fixing and re-testing) as proceeding; "
+           "and point to the detailed record. Keep the runtime summary below as agent context and record; "
+           "do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+            "decide, state a recommended in-scope next step (such as fixing and re-testing) as proceeding, "
+            "and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
 _LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -1097,16 +1137,29 @@ def _previous_opencode_delivery_body(text: str, *, legacy_completion: bool = Fal
     return "\n\n".join(blocks)
 
 
-def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
-    """Render the exact previous full body for receipt recovery only."""
-    legacy = _previous_opencode_delivery_body(text, legacy_completion=True)
+def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[dict],
+                                  frozen: dict[bool, str]) -> str:
+    """Swap each record's exact current follow-up prefix for a frozen shipped one."""
+    from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
     for root, record in zip(roots, records):
         follow = _followup(root, record)
-        if follow.startswith(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):
-            replacement = _LEGACY_RUNTIME_V1_FOLLOWUP + follow[
-                len(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):]
-            legacy = legacy.replace(follow, replacement, 1)
-    return legacy
+        for has_summary, prefix in RUNTIME_V1_FOLLOWUP_PREFIXES.items():
+            if has_summary in frozen and follow.startswith(prefix):
+                text = text.replace(follow, frozen[has_summary] + follow[len(prefix):], 1)
+                break
+    return text
+
+
+def _previous_runtime_v1_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
+    """The immediately previous body: same headers, previous follow-up wording."""
+    return _replace_runtime_v1_followups(text, roots, records, _PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES)
+
+
+def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
+    """Render the exact previous full body for receipt recovery only."""
+    return _replace_runtime_v1_followups(
+        _previous_opencode_delivery_body(text, legacy_completion=True), roots, records,
+        {False: _LEGACY_RUNTIME_V1_FOLLOWUP})
 
 
 def _followup(root: Path, record: dict) -> str:
@@ -1852,11 +1905,20 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         for root, record in selected:
             grouped_selected.setdefault(root, []).append(record)
         rendered = delivery_context(list(grouped_selected.items()))
-        previous_rendered = _previous_opencode_delivery_body(rendered)
+        previous_rendered = _previous_runtime_v1_completion_body(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected]) if rendered else ""
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
-        variants = {rendered, previous_rendered, legacy_rendered}
+        # Shipped forms: current; the three previous follow-ups under current headers
+        # (the earliest one also under the older headers); and the legacy full body.
+        short_rendered, decision_rendered = (_replace_runtime_v1_followups(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected], frozen) if rendered else ""
+            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES))
+        variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
+                    _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):
             # Recover the previous wording from the same stored diagnosis.

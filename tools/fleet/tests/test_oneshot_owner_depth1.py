@@ -118,9 +118,10 @@ console.log(JSON.stringify(out));'''
         for harness in ("claude", "codex", "opencode"):
             # Wall clock: the row keeps an absolute start time and the panel ages it.
             labels, panels = shell_route_status(_snapshot(harness), include_details=True)
-            # Fleet's own judgment: the staged route's owner waits on its worker (●).
-            self.assertEqual(set(labels.values()), {"route 2 ⠏1 ●1"})
-            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏1 ●1"},
+            # Fleet's own judgment (spec rule 27): the staged route's owner waits on its
+            # running worker, so that route runs too.
+            self.assertEqual(set(labels.values()), {"route 2 ⠏2"})
+            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏2"},
                                                    {"route_panels": panels}, harness, "sid-main", 60)
             solo = next(route for route in presented["routes"] if route["id"] == "rt-solo")
             self.assertEqual(solo["owner"], "owner · codex (Opus 5.5·high)")
@@ -136,8 +137,10 @@ console.log(JSON.stringify(out));'''
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            # The title row repeats the first route's title; its route row adds harness and time.
-            rows = [line for line in side.splitlines() if "Fixture solo route" in line]
+            # Beside the native area a folded route takes two rows (spec rules 19, 24): its
+            # glyph with harness and time, then its title on the row below.
+            lines = side.splitlines()
+            rows = [lines[i - 1] for i, line in enumerate(lines) if i and "│ │ " in line and "Fixture solo route" in line]
             self.assertTrue(any("codex" in line and "5m" in line for line in rows), side)
             self.assertIn("Opus 5.5 high", side)                      # the opened row
             self.assertIn("codex Opus 5.5 high", bottom)

@@ -128,7 +128,7 @@ from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_supervisor_terminal import (  # noqa: E402
     classify_supervisor_log, missing_result_terminal,
 )
-from dispatch_registry_cache import registry_lines, registry_view  # noqa: E402
+from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
 INVALID_ENVELOPE_CLASSIFIER_SOURCE = "completion-join-invalid-envelope-v1"
 OPEN_STATES = frozenset({"open", "running"})
@@ -160,6 +160,11 @@ PARENT_SESSION_STATE_SCHEMA_VERSION = 1
 STATE_PHASES = frozenset({"parked", "deliverable", "running-turn", "recovery", "terminal"})
 MAX_STATE_BYTES = 16384
 MAX_BATCH_ATTEMPTS = 4
+# A child unverifiable this long (per child, continuously) asks for supervision;
+# one that ended normally and only awaits its post-exit receipt gets the longer
+# settling ceiling first.
+UNVERIFIABLE_NOTICE_SECONDS = 30
+SETTLING_NOTICE_SECONDS = 600
 SESSION_PARENT_DELIVERY = "codex-stop-hook"
 MANAGED_SESSION_PARENT_DELIVERY = "codex-managed-gateway"
 CODEX_QUEUE_PARENT_DELIVERY = "codex-native-queue"
@@ -703,6 +708,135 @@ def expire_pending_for_dead_recipient(
             and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
 
 
+NOTICE_LINEAGE_PREFIX = "session-notice-lineage-v1:"
+
+
+class NoticeOwnerObservation:
+    """What one reconcile pass saw of the registry, for the notice TTL alone.
+
+    ``attempts`` is the set of attempt ids of a registry generation the shared
+    reader called complete and whose every row was parsed (six fields, an
+    attempt id); anything else -- an unreadable, missing, broken-link or
+    directory path, a torn last line or invalid UTF-8, a row that did not
+    parse -- leaves it ``None``: nothing was observed, so no owner is absent.
+    The archive is read lazily, after the live file, with the same rule: the
+    archive writes and syncs a row before the live file drops it, so a row is
+    always in one of the two reads.
+    """
+
+    def __init__(self, root: Path, lines) -> None:
+        self.root = root
+        self.attempts = self._attempts(lines)
+        self._archived: frozenset | None = None
+        self._archive_read = False
+
+    @staticmethod
+    def _attempts(lines):
+        if lines is None:
+            return None
+        attempts = set()
+        for line in lines:
+            fields = line.split("\t") if isinstance(line, str) else ()
+            if len(fields) != 6:
+                return None
+            attempt_id = parse_registry_metadata(fields[5]).get("attempt_id", "")
+            if not attempt_id:
+                return None
+            attempts.add(attempt_id)
+        return frozenset(attempts)
+
+    def archived_attempts(self):
+        if not self._archive_read:
+            self._archive_read = True
+            self._archived = self._read_archive()
+        return self._archived
+
+    def _read_archive(self):
+        from dispatch_registry_archive import SEGMENT_PREFIX
+        archive = self.root / "archive"
+        attempts = set()
+        try:
+            segments = sorted(archive.iterdir())
+        except OSError:   # no archive, or one that cannot be listed: not observed
+            return None
+        for segment in segments:
+            if not segment.name.startswith(SEGMENT_PREFIX):
+                continue
+            try:
+                data = (segment / "rows.jsonl").read_bytes()
+            except OSError:
+                return None
+            for raw_line in data.split(b"\n"):
+                if not raw_line:
+                    continue
+                try:
+                    row = json.loads(raw_line)
+                except ValueError:
+                    return None
+                raw = row.get("raw") if isinstance(row, dict) else None
+                found = self._attempts([raw]) if isinstance(raw, str) else None
+                if not found:
+                    return None
+                attempts |= found
+        return frozenset(attempts)
+
+
+def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
+    """The notice TTL's one eligibility rule (SD-111 §(7)).
+
+    True only when a successful, valid registry observation confirms that no
+    owner the record names (its attempt ids, parent attempt, or session-notice
+    lineage binding) has a row, live or archived. Every other case -- an
+    unobserved registry or archive, a record or lineage that does not parse, a
+    lineage naming another registry, a named owner whose row exists (the
+    dead-recipient rule alone decides it), a person's question answer, a
+    claimed or ambiguous delivery -- keeps the record.
+    """
+    try:
+        if observation.attempts is None or not isinstance(record, dict):
+            return False
+        receipt = record.get("receipt")
+        if (record.get("state") != "pending" or record.get("route_node") != "notice"
+                or not isinstance(receipt, dict) or "answer_binding" in receipt):
+            return False
+        names = record.get("attempt_ids")
+        parent = record.get("parent_attempt_id")
+        lineage = record.get("lineage")
+        if (not isinstance(names, list) or not isinstance(parent, str)
+                or not isinstance(lineage, list)
+                or not all(isinstance(name, str) and name for name in names)):
+            return False
+        names = set(names) | ({parent} if parent else set())
+        for entry in lineage:
+            if not isinstance(entry, str) or not entry.startswith(NOTICE_LINEAGE_PREFIX):
+                return False
+            stored = json.loads(entry[len(NOTICE_LINEAGE_PREFIX):])
+            if isinstance(stored, dict) and set(stored) == {"jobs", "binding"}:
+                raw_jobs = stored["jobs"]
+                if (not isinstance(raw_jobs, str) or not Path(raw_jobs).is_absolute()
+                        or Path(raw_jobs).resolve(strict=False).parent != observation.root):
+                    return False
+                stored = stored["binding"]
+            if not isinstance(stored, dict):
+                return False
+            kind = stored.get("kind")
+            if kind in {"attempt-parent", "owner-session"}:
+                attempt_id = stored.get("attempt_id")
+                if not isinstance(attempt_id, str) or not attempt_id:
+                    return False
+                names.add(attempt_id)
+            elif kind != "provenance":
+                return False
+        if not names:
+            return True
+        if names & observation.attempts:
+            return False
+        archived = observation.archived_attempts()
+        return archived is not None and not names & archived
+    except Exception:  # noqa: BLE001 -- an unjudged record is kept
+        return False
+
+
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                                time_budget_s: float | None = None,
                                start_after: str | None = None,
@@ -731,6 +865,10 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
        ``dispatch-reconcile`` (§10.2). A record whose liveness cannot be
        determined -- fields absent, owning row gone, digest mismatch -- is
        left untouched: unknown liveness never expires.
+       A pending notice with no live owning row expires as
+       ``pending-delivery-ttl-exceeded`` past ``NOTICE_TTL_SECONDS`` only when
+       ``notice_ttl_eligible`` confirms its owner's absence on this pass's
+       valid registry (and archive) observation; a question answer never does.
 
     Never raises; each row/record is handled independently so one bad row or
     record cannot stop the sweep. Observers (fleet, sweep hooks) have no call
@@ -789,9 +927,17 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
     registry_complete = True
     registry_cursor = None
     try:
-        lines = registry_lines(jobs)
-    except OSError:
+        snapshot = registry_snapshot(jobs)
+        lines = snapshot.view.lines
+        # The shared reader already says when a generation is not whole (a torn
+        # last line, invalid UTF-8, a malformed row): such a read observed nothing.
+        observed_lines = lines if snapshot.complete else None
+    except (OSError, ValueError):
         lines = []
+        observed_lines = None
+    # The notice TTL alone reads this: only a registry read here, whole and
+    # parsed, can confirm that a notice's owner has no row.
+    notice_owners = NoticeOwnerObservation(root, observed_lines)
     rows_by_attempt: dict[str, dict[str, str]] = {}
     parsed: list[dict[str, str] | None] = []
     for line in lines:
@@ -874,7 +1020,19 @@ def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
                         owner_metadata = rows_by_attempt[candidate]
                         break
             if owner_metadata is None:
-                result["skipped"] += 1
+                # No live owning row. The notice TTL may end the record only
+                # when ``notice_ttl_eligible`` confirms that absence on a
+                # valid observation; every other record is kept as it is.
+                expiry = "skipped"
+                if (notice_owners.attempts is not None
+                        and record.get("route_node") == "notice"):
+                    try:
+                        expiry = pending_delivery.expire_notice_past_ttl(
+                            record_file, actor="dispatch-reconcile",
+                            eligible=lambda value: notice_ttl_eligible(value, notice_owners))
+                    except (pending_delivery.PendingDeliveryError, OSError):
+                        expiry = "skipped"
+                result["expired" if expiry == "expired" else "skipped"] += 1
                 continue
             expiry = expire_pending_for_dead_recipient(
                 jobs, owner_metadata, record, attempt_id=owner_attempt_id)
@@ -1075,6 +1233,32 @@ def _owner_handed_over_lines(route: dict, route_file: Path, node_id) -> list[str
             + worker_bootstrap.handed_over_lines(found, "- "))
 
 
+# The fixed first line of a completed runtime-v1 owner follow-up, keyed by
+# whether runtime summaries follow it. Delivery recovery maps exactly these
+# bytes back to earlier shipped wording (dispatch_session_sweep).
+RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: "
+           "give the result in one or two sentences; preserve any important remaining failure, "
+           "unfinished work, or user-impacting limit; ask only what only the person can decide and "
+           "state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+           "proceeding; "
+           "and point to the detailed record. Keep the runtime summary below as "
+           "agent context and record; do not reproduce it for the person. "
+           " No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: "
+            "give the result in one or two sentences, preserve any important remaining failure, "
+            "unfinished work, or user-impacting limit, ask only what only the person can decide, "
+            "state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+            "proceeding, "
+            "and point to the detailed record. "
+            " No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+
+
 def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -1131,14 +1315,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
         notes = [f"The approved route plan names a next leg (index {child['next_leg']['index']}): "
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
-        return ("Original request/format apply. Review result; do approved follow-through or existing "
-                "continuation. First close: "
-                + ("show the runtime summary below to the person first, as written; then add what it "
-                   "does not show of " if summaries else "")
-                + "changes/why, before/after, checks run/reused/skipped/unrun, "
-                "commit/PR/deployment/serving, limits."
-                + " No harvest/restart/manual finalize. "
-                "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+        return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
@@ -3905,13 +4082,20 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
                 "reason": "recovery-process-failed"}
 
 
-def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
+def settle_finished_attempt(
+    jobs: Path, row: ChildRow, previous: tuple[object, object] | None = None
+) -> dict[str, object]:
     """Commit exact terminal evidence before a runtime join can deliver it.
 
     Reapers and joiners use the same terminal writers. The canonical row, not
     a writer's exit code, proves that the transition actually committed.
+    ``previous`` is the join's own last ``(closed, reason)`` for this attempt:
+    a completion refusal that repeats it closes the row typed.
     """
     reason = ""
+    refused_before = ""
+    if previous and previous[0] is False and str(previous[1]).startswith("completion-"):
+        refused_before = str(previous[1])
     try:
         support = _route_free_support_row(row)
         if support:
@@ -3950,7 +4134,7 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
             reason = apply_exact_route_free_review_classification(
                 fresh, jobs=jobs, classification=classification)
         else:
-            reason = close_finished_child(row, jobs=jobs)
+            reason = close_reaped_child(row, jobs=jobs, refused_before=refused_before)
         current = exact_attempt_row(jobs, row.attempt_id)
         if support and launched_attempt_identity(current.raw.split("\t")) != selected_identity:
             return {"attempt_id": row.attempt_id, "closed": False,
@@ -3981,7 +4165,7 @@ def _join_snapshot(
     env: dict[str, str] | None,
     recovery: Callable[[ChildRow], dict[str, object]] | None = None,
     observation_jobs: Path | None = None,
-    settlement: Callable[[ChildRow], dict[str, object]] | None = None,
+    settlement: Callable[[ChildRow, tuple[object, object] | None], dict[str, object]] | None = None,
     observation_context=None,
     registry_append_only: bool = False,
 ) -> dict[str, object]:
@@ -4006,7 +4190,7 @@ def _join_snapshot(
         "started": time.monotonic(), "last_recovery": {}, "last_settlement": {},
         "settlement_backoff": {}, "recovery_results": {},
         "last_observation": float("-inf"), "last_signature": "",
-        "observation_error": "", "unverifiable_since": {},
+        "observation_error": "", "unverifiable_since": {}, "settling_attempt_ids": set(),
         "notified_attempt_ids": set(),
         "last_notice_attempt": float("-inf"), "blocked_notice_published": False,
         "last_blocked_notice_attempt": float("-inf"), "registry_generation": None,
@@ -4020,6 +4204,7 @@ def _join_snapshot(
     last_signature = state["last_signature"]
     observation_error = state["observation_error"]
     unverifiable_since = state["unverifiable_since"]
+    settling_attempt_ids = state.setdefault("settling_attempt_ids", set())
     notified_attempt_ids = state["notified_attempt_ids"]
     last_notice_attempt = state["last_notice_attempt"]
     blocked_notice_published = state["blocked_notice_published"]
@@ -4062,12 +4247,11 @@ def _join_snapshot(
                     "reason": "cancelled-by-parent" if settled else "termination-pending",
                     "required_action": "advance-completed" if settled else "complete-open"})
                 continue
+            finished = terminal_envelope_observed(row.metadata.get("log_file"))
             observed = observed_attempt_liveness(
                 row.status,
                 row.metadata,
-                terminal_envelope=terminal_envelope_observed(
-                    row.metadata.get("log_file")
-                ),
+                terminal_envelope=finished,
                 # A join is itself a terminal gate.  Namespace-local workers
                 # must therefore carry the wrapper-issued portable post-exit
                 # receipt before any liveness fallback may make them ready,
@@ -4089,8 +4273,19 @@ def _join_snapshot(
             readiness, reason = choice.state, choice.reason
             if reason == "process-unverifiable":
                 unverifiable_since.setdefault(row.attempt_id, time.monotonic())
+                # A worker that ended normally and only awaits its post-exit
+                # receipt is settling, not stuck: the receipt waits on a clean
+                # host process scan, which other sessions' short-lived
+                # unreadable processes can delay for minutes. Notice it only
+                # past the settling ceiling.
+                if (observed.process_reason == "post-exit-receipt-incomplete"
+                        and (finished or row.status == "done")):
+                    settling_attempt_ids.add(row.attempt_id)
+                else:
+                    settling_attempt_ids.discard(row.attempt_id)
             else:
                 unverifiable_since.pop(row.attempt_id, None)
+                settling_attempt_ids.discard(row.attempt_id)
             pending = pending or choice.state == "pending"
             closure_eligible[row.attempt_id] = choice.census["closure_eligible"]
             if choice.census["settle"]:
@@ -4113,12 +4308,19 @@ def _join_snapshot(
                     backoff["interval"] = 2.0
                 if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= backoff["interval"]:
                     last_settlement[row.attempt_id] = time.monotonic()
-                    outcome = settlement(row)
+                    outcome = settlement(row, backoff["result"])
                     recovery_results[row.attempt_id] = outcome
                     recovered = recovered or outcome.get("closed") is True
                     result_key = (outcome.get("closed"), outcome.get("reason"))
+                    # A completion refusal is not new progress: it keeps the
+                    # backed-off cadence, so the pass that confirms it (and
+                    # closes the row typed) comes after a short NAS or
+                    # finish-in-progress hiccup has had time to clear.
+                    refused = (outcome.get("closed") is False
+                               and str(outcome.get("reason") or "").startswith("completion-"))
                     backoff["interval"] = (
-                        2.0 if result_key != backoff["result"] else min(60.0, backoff["interval"] * 2)
+                        2.0 if result_key != backoff["result"] and not refused
+                        else min(60.0, backoff["interval"] * 2)
                     )
                     backoff["result"] = result_key
                     backoff["registry_key"] = registry_key
@@ -4142,6 +4344,7 @@ def _join_snapshot(
         current_attempt_ids = {child["attempt_id"] for child in children}
         for attempt_id in set(unverifiable_since) - current_attempt_ids:
             unverifiable_since.pop(attempt_id, None)
+        settling_attempt_ids &= current_attempt_ids
         if recovered:
             # Re-read the canonical rows and all process evidence. The helper's
             # exit code or JSON alone never makes a child ready.
@@ -4186,7 +4389,9 @@ def _join_snapshot(
         eligible = {
             child["attempt_id"] for child in children
             if child["reason"] == "process-unverifiable"
-            and now - unverifiable_since[child["attempt_id"]] >= 30
+            and now - unverifiable_since[child["attempt_id"]] >= (
+                SETTLING_NOTICE_SECONDS if child["attempt_id"] in settling_attempt_ids
+                else UNVERIFIABLE_NOTICE_SECONDS)
         }
         signature = json.dumps({"children": children, "eligible": sorted(eligible)}, sort_keys=True)
         if observation_jobs is not None and (signature != last_signature
@@ -4282,7 +4487,7 @@ def join_selected_attempts(*, jobs: Path, expected_attempts: set[str],
         liveness_probe_timeout=30.0, env=None,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover else None,
         observation_jobs=jobs if recover else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4318,7 +4523,7 @@ def join_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -4365,7 +4570,7 @@ def join_session_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
-        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
+        settlement=(lambda row, previous=None: settle_finished_attempt(jobs, row, previous)) if recover_receiptless else None,
         observation_context=observation_context,
         registry_append_only=registry_append_only,
     )
@@ -5169,19 +5374,47 @@ def close_wrapper_pass(
     reason = close_finished_child(row, jobs=jobs)
     if not reason:
         return ""
+    return _close_refused_completion(row, jobs=jobs, reason=reason)
+
+
+def close_reaped_child(
+    row: ChildRow, *, jobs: str | Path, refused_before: str | bool = False
+) -> str:
+    """Close one route-bound child whose process is already proven gone.
+
+    The wrapper's reap watcher, and the runtime join that repeats its drain
+    when that watcher was lost, both reach this state. They share this one
+    step: commit the exact terminal evidence, and when ``complete`` refuses
+    it again, close the still-open row as the typed contract failure the
+    watcher has always written. A first refusal may be transient (a route
+    file briefly unreadable on NAS, a finish in progress), so it stays open
+    for the next attempt; ``refused_before`` names the refusal that attempt
+    repeats (the join's previous pass), or ``True`` for the watcher's own
+    second attempt. The join therefore no longer retries a refusal in silence
+    while the owner waits.
+    """
+
+    reason = close_finished_child(row, jobs=jobs)
+    if (reason.startswith("completion-") and row.status in OPEN_STATES
+            and (refused_before is True or (refused_before and refused_before == reason))):
+        return _close_refused_completion(row, jobs=jobs, reason=reason)
+    return reason
+
+
+def _close_refused_completion(row: ChildRow, *, jobs: str | Path, reason: str) -> str:
+    """Record a refused or transport-failed completion on its exact row."""
+
     try:
         current = exact_attempt_row(Path(jobs), row.attempt_id)
     except JoinContractError:
         return reason
     if current.status == "done" and success_note(current.metadata):
         return ""
-    if current.status == "done" and deferred_completion(current.metadata):
-        # C13: already closed typed-deferred by an earlier budget exhaustion
-        # (this attempt's own retry above just failed transiently again).
-        # Re-closing a terminal row here would only manufacture a terminal
-        # conflict (`completion-deferred` -> `dead-route-completion-rejected`)
-        # against a row that already has a committed outcome; the caller
-        # keeps retrying via the ordinary settlement path instead.
+    if current.status not in OPEN_STATES:
+        # C13: another writer (an earlier budget exhaustion's
+        # `completion-deferred`, or the join's own typed close) already
+        # committed this row. Re-closing it would only manufacture a terminal
+        # conflict against a row that has a committed outcome.
         return reason
     if reason.startswith("completion-transient:"):
         try:

@@ -172,7 +172,7 @@ class SessionShellTest(unittest.TestCase):
                        "HEARTING_SHELL_TOKEN": "synthetic-private-control-token"}
                 session_tidy.run_hook(harness, "start", sid, source="resume",
                                       cwd=str(self.root), env=env)
-                report.assert_called_once_with(harness, "start", sid, env=env)
+                report.assert_called_once_with(harness, "start", sid, env=env, source="resume")
 
     def test_hook_reports_proven_native_owner_instead_of_its_helper_process(self):
         row = self.binding(); received = self.serve(row)
@@ -187,6 +187,13 @@ class SessionShellTest(unittest.TestCase):
         self.assertEqual(received[0]["start"], row["native_start"])
         self.assertEqual(received[0]["native_model"], "native-selected-model")
         self.assertEqual(received[0]["sid"], row["sid"])
+        self.assertNotIn("source", received[0])
+        # Spec E9 rule 34 (f): a start carries the native's own start reason to the host.
+        for event, want in (("start", "clear"), ("prompt", None)):
+            os.unlink(row["socket"]); received = self.serve(row)
+            with mock.patch("pane_ownership._caller_runtime", return_value=(owner, False)):
+                shell.lifecycle("claude", event, row["sid"], env=env, source="clear")
+            self.assertEqual(received[0].get("source"), want, event)
 
     def test_native_callback_can_register_before_the_passive_session_registry_exists(self):
         row = self.binding()

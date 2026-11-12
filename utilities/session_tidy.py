@@ -3452,6 +3452,24 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None,
              sid=str(previous.get("sid", ""))[:8], availability=availability)
 
 
+def _open_question_line(waits, harness, sid, seat_key):
+    """After a physical prompt, one context line for this session's still-open question.
+
+    The prompt was handled as an ordinary prompt; if it was in fact the answer,
+    the agent records it through the existing ``questions answer`` path."""
+    own = waits._read(waits._signal_path({"harness": harness, "session_id": sid,
+                                          "seat_key": seat_key}))
+    if not own or own.get("mode") != "message" or own.get("lifecycle") != "open":
+        return None
+    question = " ".join(str(own.get("question") or "").split())[:120]
+    if waits.message_answer_pending(own):
+        return "[답변 필요] 질문 %s: Fleet에서 고른 답이 전달 대기 중입니다(방금 입력은 답으로 기록하지 않음). %s" % (
+            own["id"], question)
+    return ("[답변 필요] 질문 %s이 아직 열려 있습니다(방금 입력은 답으로 기록하지 않음): %s — 방금 입력이 "
+            "이 질문의 답이면 `hearting run questions answer %s --choice N` 또는 `--text-file`로 기록하세요."
+            % (own["id"], question, own["id"]))
+
+
 def run_hook(*args, **kwargs) -> str:
     """Record the session and print its card / notices (see ``_run_hook``).
 
@@ -3502,13 +3520,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # applies its worker/attachment checks before selecting a terminal.
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
     if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness == "claude":
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if event == "runtime-status":
         if harness == "opencode":
             observed = False
@@ -3667,6 +3685,10 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                         human_wait_state.close_signal(seat.key, sequence=sequence,
                                                       harness=harness, session_id=sid,
                                                       answer=prompt_text)
+                        line = render_context and _open_question_line(
+                            human_wait_state, harness, sid, seat.key)
+                        if line:
+                            answer_wait_lines.append(line)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)

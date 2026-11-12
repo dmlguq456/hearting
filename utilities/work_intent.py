@@ -445,23 +445,32 @@ SUMMARY_NAME = "completion-summary.md"
 MAX_FIELD_CHARS = 320
 MAX_SUMMARY_CHARS = 1600
 _SECTION = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$")
+_BOLD_FIELD = re.compile(r"^\s*\*\*(?P<title>[^*]+?)\*\*[:：]?\s*(?P<value>.*)$")
 _NUMBER = re.compile(r"^(?P<num>\d+(?:\.\d+)?)[.)]?\s")
 # (field, sections of the code-report template by number, words of any other heading). The numbers
 # hold only for a code report (`code-report` writes `## 1. Change Overview` … `## 6. Follow-Ups`);
 # other documents number their own sections, so their headings are read by words only.
 _SECTION_FIELDS = (
-    ("remaining", ("5", "6"), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "후속", "한계", "unverified", "failed",
-                               "skipped", "follow-up", "follow up", "follow-ups", "remaining", "limitation", "limits",
-                               "open risk")),
+    ("remaining", ("5",), ("미검증", "실패", "건너뛴", "건너뜀", "남은", "unverified", "failed", "skipped",
+                           "remaining")),
+    # Limits, residual risks and follow-ups are shown with the rest, but only a failed/skipped,
+    # unverified or remaining-work heading (and the checks) can say that something failed.
+    ("limits", (), ("한계", "limitation", "limits", "open risk")),
+    ("follow_up", ("6",), ("후속", "follow-up", "follow up", "follow-ups")),
     ("verified", ("4",), ("검증", "시험", "검사", "qa", "verification", "validation", "checks", "tests", "testing")),
     ("changed", ("1",), ("변경 개요", "변경 사항", "변경 내용", "수정 사항", "수정 내용", "변경 파일", "바뀐 것", "고친 것", "고친 행동", "사용자용",
                          "change overview", "changes", "what changed")),
 )
+_FAILURE_HEADINGS = ("미검증", "실패", "건너뛴", "건너뜀", "unverified", "failed", "skipped")
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _CARRIER_MARKERS = ("HEARTING_RECEIPT_V1", "AGENT_HARNESS_COMPLETION_V1")
+_UNRUN_WORDS = (r"not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안"
+                r"|돌리지 못|실행하지 못|못 돌|실행 못|could not (?:be )?run|couldn['’]t (?:be )?run|unable to run")
 _UNRUN_CHECK = re.compile(
-    r"(?:\b(?:test|tests|suite|CI|live)\b|시험|검사|검증|실기).{0,160}"
-    r"(?:not (?:re[- ]?)?run|not exercised|unverified|미실행|미확인|미검증|중단|돌리지 않|실행하지 않|재실행 안)", re.I)
+    r"(?:\b(?:test|tests|suite|CI|live)\b|시험|검사|검증|실기).{0,160}(?:" + _UNRUN_WORDS + ")", re.I)
+# The verification section's not-run wording is _UNRUN_CHECK's alone to move; a line it left
+# in place ("통과해서 다시 실행하지 않았다") is not read again as a failure.
+_UNRUN_WORD = re.compile(_UNRUN_WORDS, re.I)
 
 
 def _ui_text():
@@ -500,6 +509,13 @@ def _section_field(title: str, *, numbered: bool) -> str | None:
         return None
     matches = [field for field, _numbers, words in _SECTION_FIELDS
                if any(_has_word(lowered, word) for word in words)]
+    if matches and set(matches) <= {"remaining", "limits", "follow_up"}:
+        # "미검증·한계", "남은 위험", "남은 것·후속": a failure heading word wins, then a limit or risk.
+        if any(_has_word(lowered, word) for word in _FAILURE_HEADINGS):
+            return "remaining"
+        if "limits" in matches or re.search(r"위험|\brisks?\b", lowered):
+            return "limits"
+        return "remaining" if "remaining" in matches else "follow_up"
     return matches[0] if len(matches) == 1 else None
 
 
@@ -522,7 +538,28 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
         if match:
             current = _section_field(match["title"].strip(), numbered=numbered)
             continue
+        bold = _BOLD_FIELD.match(raw)
+        if bold:
+            label = bold["title"].strip().rstrip(":：")
+            current = _section_field(label, numbered=numbered)
+            value = bold["value"].strip()
+            if current and value:
+                sections.setdefault(current, []).append(value)
+            continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip()
+        if line.startswith("|"):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            normalized_cells = [re.sub(r"[*:]", "", cell).strip().casefold() for cell in cells]
+            if len(normalized_cells) >= 2 and normalized_cells[:2] in (["검사", "결과"], ["check", "result"], ["item", "result"]):
+                continue
+            label = re.sub(r"[*:]", "", cells[0]).strip() if cells else ""
+            field = _section_field(label, numbered=numbered)
+            if field:
+                value = " · ".join(cell for cell in cells[1:] if cell and not re.fullmatch(r"[-: ]+", cell))
+                if value:
+                    sections.setdefault(field, []).append(value)
+                current = None
+                continue
         if (current and line and not re.fullmatch(r"[|:\-\s]+", line)
                 and not any(marker in line for marker in _CARRIER_MARKERS)):
             # A verification section can explicitly say a check was not run.
@@ -533,7 +570,60 @@ def report_sections(text: str, *, numbered: bool = False) -> dict[str, list[str]
 
 
 def _joined(lines, cap=MAX_FIELD_CHARS) -> str:
-    return _line(" · ".join(item for item in lines if item), cap)
+    return _line(" · ".join(dict.fromkeys(item for item in lines if item)), cap)
+
+
+_COMMAND_LINE = re.compile(
+    r"^(?:[$>]\s*|`|(?:python3?|pytest|uv|git|make|npm|npx|cargo|go)(?=\s|$)|\.?/?tools/"
+    r"|[\w./-]+\.(?:test\.py|test\.sh|py|sh)\b)", re.I)
+_COMMAND_RESULT = re.compile(r"\b(?:pass(?:ed)?|fail(?:ed)?(?![-_][a-z])|통과|실패)\b", re.I)
+# A failure signal that is not a pass/fail word: it must never read as "0 failures".
+_ERROR_WORD = re.compile(r"error|exception|traceback|오류|에러|예외", re.I)
+# "no error", "오류 없음", "실패한 단계 없음", "FAIL=0", "errors: 0", "0 failed" say nothing went
+# wrong; strip them before looking for failure words.
+_NEGATED_FAILURE = re.compile(
+    r"\b(?:no|without|zero|0|nothing|none)\s+(?:new\s+|test\s+|unit\s+)?"
+    r"(?:errors?|failures?|failed|failing|fails?|exceptions?)\b"
+    r"|\b(?:errors?|failures?|failed|fails?|exceptions?)\s*[=:：]?\s*0(?![\w가-힣]|[.,]\d)"
+    r"|(?:오류|에러|실패|예외)\s*[=:：]?\s*0\s*(?:건|개)?(?![\w가-힣]|[.,]\d)"
+    r"|(?:오류|에러|실패|예외)(?:한|된|난|가|이|은|는|도)?\s*(?:[가-힣]{1,8}\s+)?없[가-힣]*"
+    r"|(?:오류|에러|실패)(?:가|는|이|도)?\s*아니[가-힣]*|\bnot an? (?:failure|error)\b"
+    r"|\berror-?free\b|깨지지\s*않[가-힣]*",
+    re.I)
+
+
+def _unnegated(text: str) -> str:
+    return _NEGATED_FAILURE.sub(" ", text)
+
+
+def _command_failures(line) -> int:
+    """Fail words on one command row; an error word alone counts once, never as zero."""
+    rest = _unnegated(line)
+    words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(rest)]
+    failed = sum(value in {"fail", "failed", "실패"} for value in words)
+    return failed or (1 if _ERROR_WORD.search(rest) else 0)
+
+
+def _verified_summary(lines, t):
+    """Keep commands intact in the record; summarize bare command rows for people.
+
+    Only lines that start like a command are folded; every other line stays as written.
+    A folded group with no pass/fail word says so instead of reading as zero failures.
+    """
+    commands = [line for line in lines if _COMMAND_LINE.search(line.strip())]
+    prose = [line for line in lines if line not in commands]
+    if not commands:
+        return _joined(lines) or t("completion.no_checks")
+    passed = failures = 0
+    for line in commands:
+        words = [match.group(0).lower() for match in _COMMAND_RESULT.finditer(_unnegated(line))]
+        failures += _command_failures(line)
+        passed += sum(value in {"pass", "passed", "통과"} for value in words)
+    if not passed and not failures:
+        summary = t("completion.command_checks_unmarked", count=len(commands))
+    else:
+        summary = t("completion.command_checks", count=len(commands), passed=passed, failed=failures)
+    return _joined([*prose, summary])
 
 
 def _review_degraded(route_file) -> list[str]:
@@ -548,8 +638,76 @@ def _review_degraded(route_file) -> list[str]:
     return [str(node) for node in nodes] if isinstance(nodes, list) else []
 
 
-def _result_line(route, t) -> str:
-    """Completed; for one leg of an approved plan, say that a later leg remains."""
+_NONE_ITEMS = {"없음", "해당 없음", "없습니다", "none", "n/a", "not applicable"}
+_NONE_LEAD = re.compile(r"^(?:없음|해당 없음|없습니다|none|n/a|not applicable)(?=$|[\s.:：,;()（）—–-])", re.I)
+# What a failed/skipped, unverified or remaining-work line says went wrong or was not done.
+_FAILURE_TEXT = re.compile(
+    r"실패|오류|에러|깨[짐지진]|쓰면 안|사용할 수 없|못\s?했|하지 못|지 못|미실행|미확인|미검증|미관측|중단"
+    r"|돌리지 않|실행하지 않|건너뛰|건너뛴|건너뜀"
+    r"|\bfail(?:s|ed|ing|ures?)?\b(?![-_][a-z])|\berrors?\b|\bnot (?:re-?)?run\b|\bunrun\b|\bskipped\b"
+    r"|\bunverified\b|\bunavailable\b|\bblocked\b|not usable", re.I)
+# A failure word in a fixed-past, conditional, possible or pre-existing context: the line alone
+# cannot say it failed now, so the result points at the report instead of asserting either way.
+_UNSURE_FAILURE = re.compile(
+    r"고쳤|고침|수정했|수정함|해결했|해결함|해결됨|해결 완료|교정|닫았|닫음|닫혔|닫힘|복구했"
+    r"|재시도\s*후|재실행\s*후|재실행에서|재시도에서|재시험에서|단독으로 돌리면|단독 재실행|후\s*통과"
+    r"|(?:하|되|않으|못하|다르|나)면(?=[\s,.]|$)|(?:실패|오류|에러)\s*(?:시|때)(?![가-힣])|때는|할 때|될 때|경우"
+    r"|수\s*있|가능성|baseline|기준선|기준에서도|기준 트리|base에서도|기존에도|기존부터|기존 실패|이전부터|원래부터|원래 있던"
+    r"|무관|관계\s*없|상관\s*없|main에서도|main에도|새 실패 아|회귀가 아|회귀 아님|간헐|flaky|flake|재현되지 않|재현 불가|일회성"
+    r"|필요\s*없|불필요|범위 밖|비범위|의도적으로"
+    r"|\b(?:fixed|resolved|addressed|corrected|closed|recovered|if|when|may|might|could|possibly"
+    r"|pre-?existing|unrelated|known[- ]fail\w*|not a regression|not needed|unnecessary|out of scope|by design)\b",
+    re.I)
+# Stated as still broken: a context word above does not soften it.
+_STILL_FAILING = re.compile(r"못\s?했|미해결|여전히|\b(?:still (?:fail\w*|broken)|unresolved|not (?:yet )?fixed)\b", re.I)
+_DECISION_WORDS = ("사용자가 정해야", "사용자 결정", "결정 후", "답을 기다", "must decide", "decision needed")
+
+
+def _is_none_item(item) -> bool:
+    text = str(item or "").strip()
+    return not text or re.sub(r"[.!。 ]+$", "", text).casefold() in _NONE_ITEMS
+
+
+def _failure_kind(line, *, verified=False) -> str | None:
+    """``failure``, ``check`` (cannot tell, or something left without a failure word) or None.
+
+    A verification line counts only as ``check``: a command row its folded count calls failed, or
+    a prose line the remaining-work reading calls a failure. Whether it is this task's, an earlier
+    round's or a baseline's is the report's to say."""
+    text = str(line or "").strip()
+    if _is_none_item(text):
+        return None
+    rest = _unnegated(text)
+    if verified:
+        if _COMMAND_LINE.search(text):
+            return "check" if _command_failures(text) else None
+        return "check" if _failure_kind(_UNRUN_WORD.sub(" ", text)) == "failure" else None
+    if not _FAILURE_TEXT.search(rest):
+        if rest != text and not re.search(r"[\w가-힣]", rest):
+            return None  # "실패한 단계 없음 (errors: 0)": only a statement that nothing failed
+        if _NONE_LEAD.match(text):
+            return None  # "없음 — 모든 단계 수행"
+        return "check"
+    if _UNSURE_FAILURE.search(rest) and not _STILL_FAILING.search(rest):
+        return "check"
+    return "failure"
+
+
+def _result_line(route, t, remaining=(), *, limits=(), follow_up=(), verified=()) -> str:
+    """Name a failure only from the failed/skipped, unverified and remaining-work lines.
+
+    Follow-ups never make a finished task read as failed. A line that cannot be told apart (a
+    fixed past failure, a possible one), a limit or risk, and a failed check row or verification
+    line point at the report instead of asserting a failure or a clean close."""
+    kinds = ({_failure_kind(item) for item in remaining}
+             | {"check" for item in limits if _failure_kind(item)}
+             | {_failure_kind(line, verified=True) for line in verified})
+    has_failure = "failure" in kinds
+    has_decision = any(word in str(item).casefold() for item in (*remaining, *limits, *follow_up)
+                       if not _is_none_item(item) for word in _DECISION_WORDS)
+    note = (t("completion.result_check") if "check" in kinds
+            else t("completion.result_follow_up") if any(not _is_none_item(item) for item in follow_up)
+            else "")
     plan = route.get("route_plan")
     if isinstance(plan, dict):
         try:
@@ -559,8 +717,19 @@ def _result_line(route, t) -> str:
         except (OSError, ValueError, KeyError, TypeError):
             legs = index = None
         if legs is not None and index + 1 < legs:
-            return t("completion.result_leg", index=index + 1, legs=legs)
-    return t("completion.result_done")
+            result = t("completion.result_leg", index=index + 1, legs=legs)
+            if has_failure:
+                return result + " · " + t("completion.result_with_remaining")
+            if has_decision:
+                return result + " · " + t("completion.result_decision")
+            return result + " · " + note if note else result
+    if has_failure:
+        return t("completion.result_with_remaining")
+    if has_decision:
+        return t("completion.result_decision")
+    if "check" in kinds:
+        return t("completion.result_done") + " — " + note
+    return t("completion.result_done") + " · " + note if note else t("completion.result_done")
 
 
 def _elapsed_text(seconds) -> str | None:
@@ -642,7 +811,14 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         original = (t("completion.intent_original", original=_line(intent["original"], 100))
                     if intent.get("original") else "")
         lines.append(t("completion.intent", intent=_line(goal, 200), original=original))
-    result = _result_line(route, t)
+    try:
+        text = Path(primary).read_text(encoding="utf-8") if primary else ""
+    except (OSError, UnicodeError):
+        text = ""
+    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
+    sections = report_sections(text, numbered=code_report)
+    result = _result_line(route, t, sections.get("remaining") or [], limits=sections.get("limits") or [],
+                          follow_up=sections.get("follow_up") or [], verified=sections.get("verified") or [])
     if route.get("capability") == "audit" and assessment == "FAIL":
         findings = t("completion.result_audit_findings")
         result = findings if result == t("completion.result_done") else result + " · " + findings
@@ -652,20 +828,14 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
             lines.append(t("completion.corrections_" + state, count=corrections[state]))
     if cost is not None:
         lines.append(cost_line(cost, t))
-    try:
-        text = Path(primary).read_text(encoding="utf-8") if primary else ""
-    except (OSError, UnicodeError):
-        text = ""
-    code_report = route.get("capability") == "autopilot-code" or Path(str(primary or "")).name == "final_report.md"
-    sections = report_sections(text, numbered=code_report)
     degraded = _review_degraded(route_file)
     if sections:
         if sections.get("changed"):
             lines.append(t("completion.changed", items=_joined(sections["changed"])))
-        checks = _joined(sections.get("verified") or []) or t("completion.no_checks")
+        checks = _verified_summary(sections.get("verified") or [], t)
         lines.append(t("completion.checks", items=checks))
-        lines.append(t("completion.remaining", items=_joined(sections.get("remaining") or [])
-                       or t("completion.no_remaining")))
+        rest = [line for field in ("remaining", "limits", "follow_up") for line in sections.get(field) or []]
+        lines.append(t("completion.remaining", items=_joined(rest) or t("completion.no_remaining")))
     else:
         lines.append(t("completion.unreadable"))
     if degraded:

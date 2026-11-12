@@ -1517,7 +1517,16 @@ def _daemon_thread_origins(environ, *, expected_service=None, fresh=False):
 
 
 def _socket_owners_by_inode():
-    """Map each socket inode to the same-UID PIDs holding it, or unknown."""
+    """Map each socket inode to the same-UID PIDs holding it, or unknown.
+
+    One collection pass walks the fd table once and every pane's listener check
+    shares it; the next pass walks it again.
+    """
+    from ..pass_scope import cached
+    return cached("codex:socket-owners", _socket_owners_by_inode_walk)
+
+
+def _socket_owners_by_inode_walk():
     owners = {}
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit()]
@@ -1551,7 +1560,15 @@ def _socket_owners_by_inode():
 
 
 def _proc_net_tcp_rows(path):
-    """The data rows of one ``/proc/net/tcp*`` table as field lists, or None if unreadable."""
+    """The data rows of one ``/proc/net/tcp*`` table as field lists, or None if unreadable.
+
+    Read once per collection pass, coherent with that pass's fd-table walk.
+    """
+    from ..pass_scope import cached
+    return cached(("codex:tcp-rows", path), lambda: _proc_net_tcp_rows_read(path))
+
+
+def _proc_net_tcp_rows_read(path):
     try:
         with open(path, encoding="ascii", errors="strict") as handle:
             return [row.split() for row in handle.read().splitlines()[1:]]

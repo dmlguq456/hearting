@@ -75,6 +75,77 @@ def route_evidence(visibility):
     return {"summary": summary[0] + " · " + " ".join(summary[1:]), "next": following, "lines": lines}
 
 
+def stage_mark(state):
+    """A stage's mark as Fleet's stage rail draws it: done ✓, running ●, failed ✕, else none."""
+    return {"active": "●", "running": "●", "working": "●", "reconciling": "●", "recovering": "●",
+            "done": "✓", "completed": "✓", "failed": "✕", "dead": "✕"}.get(str(state or ""), "")
+
+
+def stage_doer(node):
+    """The stage's own doer values from Fleet's route record: harness, model, effort, time, round."""
+    from .session_line import _clean_model, effort_label
+    shown = {}
+    harness = sanitize_title(str(node.get("h") or ""))[:32]
+    if harness:
+        shown["harness"] = harness
+    if node.get("m"):
+        shown["model"] = _clean_model(node["m"]) or sanitize_title(str(node["m"]))[:64]
+    if effort_label(node.get("e")):
+        shown["effort"] = effort_label(node.get("e"))
+    if node.get("el"):
+        shown["elapsed"] = sanitize_title(str(node["el"]))[:32]
+    if type(node.get("r")) is int and node["r"] > 1:
+        shown["round"] = node["r"]
+    if node.get("gate") is True:
+        shown["gate"] = True
+    for key in ("verdict", "when", "unit", "out", "note", "says"):
+        if node.get(key):
+            shown[key] = sanitize_title(str(node[key]))[:160]
+    return shown
+
+
+def route_kind(row):
+    """``autopilot-code (dev·q)``, the owner's model words and context: Fleet's unfolded kind line."""
+    from .session_line import _clean_model, effort_label, token_text, _percent
+    short = {"standard": "std", "light": "lt", "quick": "q", "thorough": "thr", "adversarial": "adv"}
+    suffix = "·".join(short.get(value, value) for value in (row.get("mode"), row.get("intensity")) if value)
+    kind = sanitize_title(str(row.get("capability") or ""))[:64]
+    shown = {"kind_text": (kind or "·") + ("(" + suffix + ")" if suffix else "") if kind or suffix else ""}
+    profile = sanitize_title(str(row.get("profile") or ""))[:32]
+    if profile and profile != "deep":
+        shown["profile"] = profile
+    if _percent(row.get("owner_ctx_pct")) != "?":
+        shown["owner_ctx"] = _percent(row["owner_ctx_pct"])
+    elif token_text(row.get("owner_ctx_tokens")):
+        shown["owner_ctx"] = token_text(row["owner_ctx_tokens"])
+    for key in ("age", "resume", "worker_unit"):
+        if row.get(key):
+            shown[key] = sanitize_title(str(row[key]))[:64]
+    if row.get("after"):
+        shown["after"] = sanitize_title(str(row["after"]))[:200]
+    if type(row.get("legs")) is int and row["legs"] > 0:
+        shown["legs"] = row["legs"]
+    return shown
+
+
+def route_workers(row):
+    """Each live worker's stage, harness, model and context (Fleet's ``└ stage · n`` rows)."""
+    from .session_line import _clean_model, _percent
+    workers = []
+    for item in row.get("worker_contexts") or ():
+        if not isinstance(item, dict) or not item.get("stage"):
+            continue
+        worker = {"stage": sanitize_title(str(item["stage"]))[:64]}
+        if item.get("harness"):
+            worker["harness"] = sanitize_title(str(item["harness"]))[:32]
+        if item.get("model"):
+            worker["model"] = _clean_model(item["model"]) or sanitize_title(str(item["model"]))[:64]
+        if _percent(item.get("ctx_pct")) != "?":
+            worker["ctx"] = _percent(item["ctx_pct"])
+        workers.append(worker)
+    return {"workers": workers[:8]} if workers else {}
+
+
 def compact_status(values, columns, native_owned=()):
     """One common bottom row; native-owned fields and full IDs are not repeated."""
     groups = []
@@ -243,11 +314,19 @@ def route_row(row, now=None):
         minutes = row["elapsed_min"]
     if minutes is not None:
         shown["elapsed"] = elapsed_text(minutes)
+    # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
     tool = sanitize_title(str(row.get("tool") or ""))[:48]
-    if tool and shown["kind"] == "working":
+    if tool:
         shown["tool"] = tool
     if type(row.get("agents")) is int and row["agents"] > 0:
         shown["agents"] = row["agents"]
+    # What the doer is on now and just finished: Fleet's own unfolded activity rows.
+    for key, limit in (("target", 120), ("tool_age", 16), ("after_tool", 160)):
+        value = sanitize_title(str(row.get(key) or ""))[:limit]
+        if value and (key == "after_tool" or tool):
+            shown[key] = value
+    if row.get("idle_tool") is True and not tool:
+        shown["idle_tool"] = True
     stages = [node for node in (row.get("stages") or ()) if isinstance(node, dict)][:16]
     if len(stages) > 1:
         flow = []
@@ -263,10 +342,21 @@ def route_row(row, now=None):
     return shown
 
 
+def _git_part(part):
+    return part[1] == "dim" and str(part[0]).startswith(" (")
+
+
 def session_head(values):
-    """``[e9] hearting (main 🚧 3)``: the session number, project and dim Git."""
+    """``[e9] hearting``: the session number and project (the panel's top row)."""
     from .session_line import line_segments
-    return line_segments(values, 10000, complete=True, fields={"folder"})
+    return [part for part in line_segments(values, 10000, complete=True, fields={"folder"}) if not _git_part(part)]
+
+
+def session_git(values):
+    """``(main 🚧 3)``: the dim Git observation the panel paints on the row below."""
+    from .session_line import line_segments
+    return [(str(text).lstrip(), key) for text, key in line_segments(values, 10000, complete=True, fields={"folder"})
+            if _git_part((text, key))]
 
 
 def quota_row(values):
@@ -295,14 +385,18 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
     routes = []
-    for row in raw[:8] if isinstance(raw, list) else ():
+    for row in raw if isinstance(raw, list) else ():
         if not isinstance(row, dict):
             continue
         clean = lambda value: sanitize_title(str(value or ""))[:320]
         stages = []
         for node in (row.get("stages") or ())[:16]:
             if isinstance(node, dict):
-                stages.append({"name": clean(node.get("name")), "state": state_label(node.get("st")), "current": node.get("st") in {"active", "running", "working"}})
+                stage = {"name": clean(node.get("name")), "state": state_label(node.get("st")),
+                         "current": node.get("st") in {"active", "running", "working"},
+                         "mark": stage_mark(node.get("st"))}
+                stage.update(stage_doer(node))
+                stages.append(stage)
         worker = row.get("worker") or []
         reason = "".join(str(part[0]) for part in worker if isinstance(part, (list, tuple)) and part)
         # The route's depth-1 owner, as Fleet's route row reads it. A one-shot owner runs its
@@ -317,6 +411,11 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
                        "visibility": route_evidence(visibility),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
+                       # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
+                       # stage worker leads the row, the owner's own model for its third row.
+                       "shape": clean(row.get("shape"))[:32], "owner_model": clean(row.get("owner_model"))[:64],
+                       "doer_worker": row.get("doer_worker") is True,
+                       **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
     model = values.get("model")
     model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
@@ -337,8 +436,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
     gauge = gauge_parts(values.get("ctx_pct"))
     count = values.get("answer_wait")
-    # The producer's count is the session's whole current-route count; the panel
-    # keeps at most eight rows, so the kept current rows are counted apart from it.
+    # The producer's count is the session's whole current-route count; the kept
+    # current rows (the recent finished ones follow them) are counted apart from it.
     current, total = len(routes), None
     from .session_line import ROUTE_LABEL
     match = ROUTE_LABEL.match(values.get("route_label") or "")
@@ -350,7 +449,15 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
                                     "lvl_r" if mcp.get("failed") else "lvl_g")]
                  if isinstance(mcp, dict) and mcp.get("total") else [])
-    return {"head": session_head(values), "selected": selected,
+    # Spec E9 rule 29: Fleet's session-row head (number, harness, steward mark) goes to the
+    # top border; the repository row keeps the project alone (`hearting/`).
+    head = session_head(values)
+    tag = sanitize_title(str(values.get("tag") or "")).strip()
+    return {"head": head, "repo": [part for part in head if part[1] != "tag"],
+            "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
+            "steward": values.get("steward") is True,
+            "now": sanitize_title(str(values.get("now") or ""))[:320],
+            "git": session_git(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",

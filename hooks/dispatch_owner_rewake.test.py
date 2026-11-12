@@ -758,6 +758,21 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             1,
         )
 
+    def test_success_receipt_close_directive_asks_only_the_persons_decision(self) -> None:
+        self.write_marker_bound_owner()
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        with mock.patch.object(rewake, "_sealed_summary", return_value="[완료 요약] fixture"):
+            _state, message = rewake.classified_receipt(
+                launch, "attention", "terminal-failure-or-unclosed", self.root)
+        flat = " ".join(message.split())
+        self.assertIn("ask only what only the person can decide", flat)
+        self.assertIn("state a recommended in-scope, reversible next step (such as fixing and re-testing) "
+                      "as proceeding", flat)
+        self.assertIn("point to the detailed record", flat)
+        self.assertIn("do not reproduce it for the person", flat)
+        self.assertNotIn("at most one decision", flat)
+
     def test_marker_open_row_failed_advance_is_nonblocking_attention(self) -> None:
         self.write_marker_bound_owner()
         launch = rewake.parse_launch(self.payload())

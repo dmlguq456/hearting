@@ -32,9 +32,32 @@ def weekly_quota(payload):
     return payload.get("rl_7d")
 
 
-def observe(harness, pid, proc_start, sid):
-    """Read the selected session through Fleet's parsers and report watch inputs."""
+# The cells each native source supplies. A source that exists but was not read
+# (``session_registry.unread_error``, or a replacement during the read) did not
+# observe these cells empty.
+_TAP_CELLS = ("model", "effort", "ctx_pct", "active_context_tokens", "context_window_tokens")
+_TAP_QUOTA = ("weekly_pct", "quota_windows", "model_quotas")
+_MODEL_CELLS = ("model", "effort")
+# Claude session record `waitingFor` reasons that wait for the person (its own words).
+_ANSWER_WAITS = frozenset(("permission prompt", "input needed", "worker request", "sandbox request", "goal proposal"))
+_TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
+
+
+def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False):
+    """Read the selected session through Fleet's parsers and report watch inputs.
+
+    ``previous`` is the caller's last observation of this exact live session
+    (harness, SID, PID and start). When given, a native source that was not
+    read keeps the cells it supplies from it, as Fleet's native reader keeps
+    its last display, and the next call reads the source again. Absence,
+    refusal, another session and an ended process still clear; a cell that
+    was never observed stays empty. Without it the result is unchanged.
+    ``raise_unread`` lets an unread OpenCode database raise ``OSError`` for a
+    caller that keeps its own last display (Fleet's native reader).
+    """
     from .collectors.procscan import read_proc_start
+    keep = previous if isinstance(previous, dict) else None
+    unread = []
     if harness not in {"claude", "codex", "opencode"} or read_proc_start(pid) != proc_start:
         return {}, []
     try:
@@ -48,18 +71,34 @@ def observe(harness, pid, proc_start, sid):
              context_policy.policy_path(harness, pid=pid, proc_start=proc_start)]
     transcript = None
     callback = None
+    # The runtime's own turn record (spec E9 rule 26, rule 6 of 11-12): Claude's REPL writes
+    # its UI state (`busy` while it shows progress, `waiting` with a dialog or question open,
+    # `idle`) into its session record; Codex appends each turn's start and end to its rollout.
+    # Display only: it never stands for input readiness.
+    turn = None
     if harness == "claude":
         home = claude._home()
         paths.append(Path(home) / "sessions" / f"{pid}.json")
-        record = claude.read_registry(pid, home)
+        record = claude.read_registry(pid, home, extra=("waitingFor",))
         if record and record.get("sessionId") == sid:
             claude._apply_registry(sess, record)
+            if str(record.get("procStart") or "") == str(proc_start):
+                # `waiting` is an answer wait only for these `waitingFor` reasons; a menu or
+                # settings dialog (`dialog open`) and an unlisted reason are left to the hooks.
+                if record.get("status") == "waiting":
+                    turn = "blocked" if record.get("waitingFor") in _ANSWER_WAITS else None
+                else:
+                    turn = {"busy": "working", "idle": "idle"}.get(record.get("status"))
         transcript = claude._newest_transcript_path(home, cwd, sid)
         if transcript:
             sess.model, sess.effort, _at = claude._subagent_budget(transcript)
         tap_path = Path(home) / ".statusline" / (sid + ".json")
         paths.append(tap_path)
-        callback = _claude_callback(tap_path, sid, pid, proc_start)
+        try:
+            callback = _claude_callback(tap_path, sid, pid, proc_start, raise_unread=keep is not None)
+        except OSError:
+            callback = None
+            unread.extend(_TAP_CELLS + _TAP_QUOTA)
         if callback:
             claude._apply_statusline(sess, callback)
             # Native context use is distinct from the compaction-trigger %.
@@ -67,8 +106,22 @@ def observe(harness, pid, proc_start, sid):
     elif harness == "codex":
         transcript = codex.exact_rollout_for_session_id(sid)
         if transcript:
-            sess.model, sess.effort = codex._rollout_model_effort(transcript)
-            count = codex._tail_token_count(transcript)
+            try:
+                sess.model, sess.effort = codex._rollout_model_effort(transcript, raise_unread=keep is not None)
+            except OSError:
+                unread.extend(_MODEL_CELLS)
+            try:
+                count = codex._tail_token_count(transcript, raise_unread=keep is not None)
+            except OSError:
+                count = None
+                unread.extend(_TOKEN_CELLS)
+            try:
+                lifecycle = codex._latest_task_lifecycle(transcript)
+            except OSError:
+                lifecycle = None
+            if lifecycle:
+                turn = {"task_started": "working", "task_complete": "idle",
+                        "turn_aborted": "idle"}.get(lifecycle[0])
             if count:
                 telemetry = parse_codex_token_count(count, session_id=sid)
                 sess.ctx_pct = telemetry.context_used_pct
@@ -77,14 +130,21 @@ def observe(harness, pid, proc_start, sid):
                 from .token_budget import codex_compaction_pressure
                 sess.compaction_pressure = codex_compaction_pressure(
                     sid, transcript, count, home=codex._rollout_home(transcript))
-        if not sess.model:
+        if not sess.model and not ("model" in unread and keep.get("model")):
             from .native_display import codex_selected_model
             selected = codex_selected_model(pid, proc_start, sid)
             sess.model, sess.effort = selected.get("model"), selected.get("effort")
     else:
         db = opencode._db()
         paths.extend((db, db + "-wal"))
-        opencode.enrich(sess)
+        try:
+            opencode.enrich(sess, raise_unread=raise_unread or keep is not None)
+        except OSError:
+            # Identity first: an unread DB of another session or process birth clears
+            # (below) instead of letting the caller keep the previous selection's cells.
+            if raise_unread and sess.session_id == sid and read_proc_start(pid) == proc_start:
+                raise
+            unread.extend(_TAP_CELLS)
         if sess.session_id != sid:
             # A delayed callback must never borrow the newly selected session.
             return {}, [str(path) for path in paths if path]
@@ -119,6 +179,8 @@ def observe(harness, pid, proc_start, sid):
         paths.append(name_path)
     names = session_handle.resolve_display_inputs(harness, sid, pid=pid)
     title = session_handle.current_session_subject(names.get("runtime_name"), titles.last_title(sid, harness=harness))
+    # Fleet's NOW (`summary.now`): the same fresh one-line summary from the same sidecar.
+    now_line = titles.fresh_summary_with_ts(sid, harness=harness)[0]
     quota = dict(usage_cache.read(harness).get("payload") or {})
     if callback:
         native_quota = claude_quota(callback)
@@ -126,8 +188,11 @@ def observe(harness, pid, proc_start, sid):
             # This terminal mirrors its exact native callback; Fleet account
             # quota admission remains credential-bound and unchanged.
             quota = native_quota
-    values.update(harness=harness, title=title or None, git=observed_git,
+    values.update(harness=harness, title=title or None, now=now_line or None, native_turn=turn, git=observed_git,
                   branch=branch + "*" if branch and observed_git.get("dirty") == 1 else branch,
                   weekly_pct=weekly_quota(quota), quota_windows=quota_windows(quota),
                   model_quotas=quota.get("rl_ms") or [], jobs=observed_git.get("jobs"))
+    for name in unread if keep is not None else ():
+        if name in keep:
+            values[name] = keep[name]
     return values, sorted({os.fspath(path) for path in paths if path})

@@ -69,6 +69,7 @@ class OwnerNowTest(unittest.TestCase):
             "input":{"command":"env DEVICE=1 python train.py"},"output":"PRIVATE OUTPUT"}}, stamp=2000)
         self.enrich()
         self.assertEqual(self.job.exec_tool,{"name":"python"})
+        self.assertIsNone(self.job.last_tool)
         self.assertEqual(self.job.summary,"데이터를 확인하고 학습을 준비합니다")
         self.assertEqual(self.job.summary_ts,1.0)
         row = render._plain(render._context_detail_row(self.job,term_width=168)[0])

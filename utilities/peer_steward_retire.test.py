@@ -8486,7 +8486,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
         pm = peer_steward.peer_message
         with self._world(harness, sid, empty=False):
             rc, line, ref = self._prompt(harness, sid)
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertIn("reason=not-idle-empty", line)
             self.assertEqual(self.sent, [])
             self.assertEqual(pm._read_pending(ref)["state"], "pending")
@@ -8574,7 +8574,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
         self.server = self._AppServer(turn_status="interrupted")
         with self._codex_world("codex", "codex-thread", empty=False):
             rc, line, ref = self._prompt("codex", "codex-thread")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertIn("reason=native-queue-held-interrupted:", line)
             self.assertEqual(self.server.params("thread/queue/start"), [])
             self.assertEqual(len(self.server.params("thread/queue/add")), 1)
@@ -8613,7 +8613,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 rc, line, ref = self._prompt("claude", "sid-child")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             self.assertTrue(line.startswith("prompted=queued "), line)
             self.assertIsNotNone(self._duty(ref))
             self.assertIn(f"next: nothing to resend - the runtime delivers ref={ref} to claude:sid-child",
@@ -8626,7 +8626,7 @@ class ReceiverStateRetentionCycleTest(_TmpRootMixin, unittest.TestCase):
             self.host.before_input = lambda _binding: {
                 "ok": False, "reason": "control-unavailable", "not_started": True}
             rc, line, ref = self._prompt("claude", "sid-child")
-            self.assertEqual(rc, 3, line)
+            self.assertEqual(rc, 0, line)
             # The printed line names the held outcome, not a submission that
             # never happened: queued + the start-failure reason, row pending.
             self.assertIn("prompted=queued", line)

@@ -45,6 +45,27 @@ class BuildResponseTest(unittest.TestCase):
         self.assertIsNone(questions.build_response(self.INTERVIEW, text="note")[0])
         self.assertEqual(questions.questions_of(self.INTERVIEW)[1]["recommended"], 1)
 
+    def test_render_reuses_the_shared_recommended_label(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "Pick one", "choices": ["A", "B"], "recommended": 0}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}), \
+             mock.patch.object(questions.HWS, "ui_translator", return_value=lambda _key: "추천"):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        self.assertIn("(추천)", out)
+
+    def test_render_indents_continuation_lines_of_decision_questions(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "[결정 필요] 보관 기간\n- 30일: 유지\n추천: 30일 — 복구 가능",
+                              "choices": [], "recommended": None}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        lines = out.splitlines()
+        self.assertIn("  [결정 필요] 보관 기간", lines)
+        self.assertIn("  - 30일: 유지", lines)
+        self.assertIn("  추천: 30일 — 복구 가능", lines)
+
     def test_single_question_text_answers_file_and_approval_shapes(self):
         single = {"kind": "question", "question_id": "owner-correction",
                   "detail": {"question": "blocked", "choices": []}}
@@ -178,6 +199,21 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertNotIn(text, out)
         self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
+
+    def test_registration_notice_names_choice_answers_only_when_choices_exist(self):
+        import session_tidy as tidy
+        from fleet import process_identity
+        with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
+             mock.patch.object(tidy, "resolve_seat", return_value=self.f.seat()), \
+             mock.patch.object(process_identity, "current_launch_context", return_value=None), \
+             mock.patch.dict(os.environ, {"HEARTING_LANG": "ko"}):
+            plain = _run("ask", "free question")
+            choice = _run("ask", "choice question", "--choice", "A", "--choice", "B")
+        self.assertEqual((plain[0], choice[0]), (0, 0))
+        self.assertIn(state.ui_translator()("questions.registered"), plain[1])
+        self.assertIn(state.ui_translator()("questions.registered_choices"), choice[1])
+        self.assertNotEqual(state.ui_translator()("questions.registered"),
+                            state.ui_translator()("questions.registered_choices"))
 
     def test_one_line_cli_resolves_each_harness_without_a_supplied_sid_or_tag(self):
         import session_tidy as tidy

@@ -575,7 +575,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
     def _first_turn_and_finished_turn(self, finished_model="claude-fable-5", version="9.9.9"):
         running = self._job("att-running-first-turn")
         self._write_log(running, [self._init("sid-run", version="9.9.9"),
-                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+                                  self._assistant("sid-run", "claude-fable-5", 150136)])
         finished = self._job("att-finished-turn")
         finished.liveness = "done"
         self._write_log(finished, [
@@ -589,23 +589,123 @@ class ClaudeStreamSessionTest(unittest.TestCase):
     def test_a_running_turn_never_takes_another_attempts_window(self):
         # Same model, same Claude Code version: the other attempt's window is still not this
         # attempt's (CLAUDE_CODE_DISABLE_1M_CONTEXT alone splits 1M and 200K), so the running
-        # first turn keeps its exact token count and no percent.
+        # first turn whose own usage fits either window keeps its exact token count.
         running, finished = self._first_turn_and_finished_turn()
         for job in (running, finished):
             dispatch_collector._enrich_claude_stream_session(job)
         self.assertEqual(finished.context_window_tokens, 1000000)
-        self.assertEqual(running.active_context_tokens, 250136)
+        self.assertEqual(running.active_context_tokens, 150136)
         self.assertIsNone(running.context_window_tokens)
         self.assertIsNone(running.ctx_pct)
         self.assertEqual(render._native_context_gauge(running), (None, None))
         # A later pass without the finished attempt keeps nothing from it either.
         later = self._job("att-later-first-turn")
         self._write_log(later, [self._init("sid-later", version="9.9.9"),
-                                self._assistant("sid-later", "claude-fable-5", 250136)])
+                                self._assistant("sid-later", "claude-fable-5", 150136)])
         dispatch_collector._enrich_claude_stream_session(later)
         self.assertIsNone(later.context_window_tokens)
         self.assertEqual(render._native_context_gauge(later), (None, None))
         self.assertFalse(hasattr(dispatch_collector, "_CLAUDE_OBSERVED_WINDOWS"))
+
+    def test_a_launch_that_disables_1m_knows_its_200k_window_from_the_first_turn(self):
+        # The attempt's own sealed launch switch, recorded by the real wrapper function,
+        # settles 200K before any result: the gauge shows from the first observation.
+        running = self._job("att-disable-1m")
+        running._registry_metadata = self._launch_metadata(
+            {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000", "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
+        self.assertEqual(running._registry_metadata["claude_compaction_disable_1m"], "1")
+        self._write_log(running, [self._init("sid-d1m", version="9.9.9"),
+                                  self._assistant("sid-d1m", "claude-fable-5", 50000)])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 200000)
+        self.assertEqual(running._context_window_source, "claude-launch-disable-1m")
+        self.assertEqual(render._native_context_gauge(running), (25, 200000))
+
+    def test_an_unset_or_disagreeing_disable_1m_switch_keeps_the_window_unknown(self):
+        # Spec E9 rule 33: a configured window would stand (see the test below), so the
+        # unknown cases carry none.
+        cases = ({"env": {}},
+                 {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"},
+                  "settings_env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"}})
+        for index, case in enumerate(cases):
+            job = self._job("att-d1m-unknown-%d" % index)
+            job._registry_metadata = self._launch_metadata(**case)
+            self._write_log(job, [self._init("sid-u%d" % index, version="9.9.9"),
+                                  self._assistant("sid-u%d" % index, "claude-fable-5", 150136)])
+            dispatch_collector._enrich_claude_stream_session(job)
+            self.assertIsNone(job.context_window_tokens, case)
+            self.assertEqual(render._native_context_gauge(job), (None, None))
+
+    def test_a_configured_window_stands_from_the_first_observation(self):
+        # Spec E9 rule 33 (a), narrowed (review R4): the window this launch requested for the
+        # model it chose (its settings env setting none other) is the gauge's before the first
+        # result. No request (a settings value alone), a disagreeing setting, or a run of
+        # another model than the launch chose leaves it unknown (#1558's rule).
+        window = {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}
+        for index, (case, want) in enumerate(((
+                {"env": window, "model": "fable"}, 1000000),
+                ({"env": window, "settings_env": window, "resolved_model": "claude-fable-5"}, 1000000),
+                ({"env": window, "settings_env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}, "model": "fable"}, None),
+                ({"settings_env": window, "model": "fable"}, None),
+                ({"env": window, "settings_env": window, "model": "sonnet"}, None),
+                ({"env": window, "settings_env": window}, None))):
+            job = self._job("att-configured-%d" % index)
+            job._registry_metadata = self._launch_metadata(**case)
+            self._write_log(job, [self._init("sid-c%d" % index, version="9.9.9"),
+                                  self._assistant("sid-c%d" % index, "claude-fable-5", 150136)])
+            dispatch_collector._enrich_claude_stream_session(job)
+            self.assertEqual(job.context_window_tokens, want, case)
+            if want:
+                self.assertEqual(job._context_window_source, "claude-launch-configured-window")
+                self.assertEqual(render._native_context_gauge(job), (15, 1000000))
+
+    def test_its_own_usage_over_200k_settles_the_one_million_window(self):
+        # 250136 tokens cannot sit in a 200K window: this attempt's own stream settles 1M
+        # from its first observation, whatever another attempt reported (#1514 F1 holds).
+        running, _finished = self._first_turn_and_finished_turn()
+        self._write_log(running, [self._init("sid-run", version="9.9.9"),
+                                  self._assistant("sid-run", "claude-fable-5", 250136)])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 1000000)
+        self.assertEqual(running._context_window_source, "claude-own-usage-over-standard")
+        self.assertEqual(render._native_context_gauge(running), (25, 1000000))
+        self.assertIsNone(running.ctx_pct)       # the compaction policy is not derived
+        # Exactly 200K fits a 200K window: still unknown.
+        edge = self._job("att-edge")
+        self._write_log(edge, [self._init("sid-edge", version="9.9.9"),
+                               self._assistant("sid-edge", "claude-fable-5", 200000)])
+        dispatch_collector._enrich_claude_stream_session(edge)
+        self.assertIsNone(edge.context_window_tokens)
+
+    def test_open_tool_summary_start_and_last_finished_call_come_from_the_attempts_own_stream(self):
+        tree = os.path.join(self.tmp.name, "tree")
+        os.makedirs(os.path.join(tree, "tools"))
+        Path(tree, "tools", "run-tests.py").write_text("")
+        job = self._job("att-activity")
+        job.cwd = tree
+        row = self._assistant("sid-act", "claude-fable-5", 1000)
+        row["timestamp"] = "2026-11-12T01:00:00Z"
+        row["message"]["content"] = [
+            {"type": "tool_use", "name": "Edit", "id": "toolu-edit",
+             "input": {"file_path": tree + "/utilities/session-shell/host.cjs",
+                       "old_string": "PRIVATE_OLD", "new_string": "PRIVATE_NEW"}}]
+        done = {"type": "user", "session_id": "sid-act", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu-edit", "content": "PRIVATE_RESULT"}]}}
+        running = self._assistant("sid-act", "claude-fable-5", 1000)
+        running["timestamp"] = "2026-11-12T01:00:00Z"
+        running["message"]["content"] = [
+            {"type": "text", "text": "API_KEY=PRIVATE_WORDS 두 묶음 시험을 돌린다"},
+            {"type": "tool_use", "name": "Bash", "id": "toolu-act",
+             "input": {"command": "cd " + tree + " && python3 tools/run-tests.py --select 'PRIVATE*'"}}]
+        self._write_log(job, [self._init("sid-act"), row, done, running])
+        dispatch_collector._enrich_claude_stream_session(job)
+        # Only the executable and a worktree file reach the public model; no option, no words.
+        self.assertEqual(job.exec_tool, {"name": "python3", "target": "tools/run-tests.py",
+                                         "since": 1794445200.0})
+        self.assertEqual(job.last_tool, {"name": "Edit", "target": "utilities/session-shell/host.cjs"})
+        self.assertTrue(job._tool_observed)
+        self.assertNotIn("PRIVATE", json.dumps(job.to_dict()))
+        self.assertNotIn("last_text", job.to_dict())
 
     def test_a_running_turn_shows_its_percent_once_its_own_result_reports_the_window(self):
         running, _finished = self._first_turn_and_finished_turn()
@@ -737,7 +837,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertIsNone(job._context_evidence)
         self.assertEqual(job.to_dict()["subagents"][0]["agent_type"], "fact-check")
 
-    def test_attempt_stream_projects_only_open_tool_executable_label(self):
+    def test_attempt_stream_projects_open_tool_label_and_masked_target(self):
         job = self._job()
         row = self._assistant("sid-child", "claude-fable-5", 160)
         row["message"]["content"] = [{
@@ -746,6 +846,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         }]
         self._write_log(job, [row])
         dispatch_collector._enrich_claude_stream_session(job)
+        # train.py is not a file in a worktree here, and an option value is never carried.
         self.assertEqual(job.exec_tool, {"name": "python3"})
         self.assertNotIn("SECRET", json.dumps(job.to_dict()))
 
@@ -1134,7 +1235,7 @@ class CodexAttemptTelemetryTest(unittest.TestCase):
         self.assertEqual(job.context_window_tokens, 200000)
         self.assertEqual(job._runtime_session_id, thread_id)
         self.assertEqual(job.exec_tool, {"name": "python3"})
-        self.assertNotIn("secret", json.dumps(job.to_dict()))
+        self.assertNotIn("omitted", json.dumps(job.to_dict()))
         visible = text(render._dispatch_summary_detail_row(job, term_width=168))
         self.assertIn("⚙ python3", visible)
 
