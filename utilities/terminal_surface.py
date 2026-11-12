@@ -20,7 +20,7 @@ ids are only unique per tmux server, so the core loop carries ``%N@<socket>``. t
 has no agent API, so ``TmuxSurface.agent`` answers Herdr's ``agent get`` shape from
 the pane's foreground runtime, its process-proven session and that runtime's own
 turn record (Claude's session registry status, Codex's rollout lifecycle,
-OpenCode's newest message in that session). What no record proves stays
+OpenCode's own record of that session). What no record proves stays
 ``unknown``, which every typing path refuses.
 """
 from __future__ import annotations
@@ -375,9 +375,10 @@ def native_turn(harness, pid, session_id):
 
     Claude: its session registry entry for this exact process (PID start) and
     session. Codex: the latest task lifecycle in that thread's rollout; a thread with
-    no rollout has no recorded turn and stays unknown. OpenCode: the newest message
-    of that session in its own database (V1 or OpenCode 2), read only while this
-    exact process's TUI selection record still names that session.
+    no rollout has no recorded turn and stays unknown. OpenCode: that session's own
+    record in its database (V1 messages; OpenCode 2's run record, whose ``idle`` row
+    ends a turn), read only while this exact process's TUI selection record still
+    names that session.
     """
     try:
         import pane_ownership
@@ -417,20 +418,34 @@ def native_turn(harness, pid, session_id):
 def _opencode_turn(observed):
     """One OpenCode session's turn state from ``read_session_observation``.
 
-    The turn has ended when its newest message is an assistant step that finished
-    for good: a ``finish`` other than ``tool-calls``/``unknown``, or an error -- the
-    rule OpenCode's own loop and TUI use to end a turn. A newer user message or a
-    step still running or about to call tools is working; a running ``question``
-    tool waits on the person. An unread session, or one with no message, is unknown.
+    V1: the newest user or assistant message decides. OpenCode 2 records each run
+    itself, so its newest user, synthetic, assistant, compaction, shell or ``idle``
+    row decides: the ``idle`` row it appends when a run ends is idle; a user or
+    synthetic row, or a compaction (it runs inside a run, which only its ``idle`` row
+    ends), is working; a ``!`` shell command runs outside any run, so its row is
+    working while ``running`` and, once ended, leaves the row before it to decide.
+    An assistant step has ended the turn when it finished for good -- a ``finish``
+    other than ``tool-calls``/``unknown``, or an error -- unless OpenCode 2 has a
+    retry pending on it; a step still running or about to call tools is working,
+    and a running ``question`` tool waits on the person. A child (subagent) session,
+    whose state is not the pane's, an unread session, or one with no message, is
+    unknown.
     """
     if not isinstance(observed, dict) or observed.get("state") != "observed":
         return "unknown"
+    if (observed.get("session") or {}).get("parent_id"):
+        return "unknown"
+    kinds = (("user", "synthetic", "assistant", "compaction", "shell", "idle")
+             if observed.get("generation") == "v2" else ("user", "assistant"))
     messages = [row for row in observed.get("messages") or ()
-                if isinstance(row, dict) and row.get("type") in ("user", "assistant")]
+                if isinstance(row, dict) and row.get("type") in kinds
+                and (row["type"] != "shell" or row.get("status") == "running")]
     if not messages:
         return "unknown"
     latest = messages[-1]
-    if latest["type"] == "user":
+    if latest["type"] == "idle":
+        return "idle"
+    if latest["type"] != "assistant" or latest.get("has_retry"):
         return "working"
     if any(isinstance(tool, dict) and tool.get("name") == "question"
            for tool in latest.get("tools") or ()):

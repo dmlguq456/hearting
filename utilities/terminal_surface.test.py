@@ -1267,10 +1267,18 @@ PANE_SID, OTHER_SID = "ses_paneOwnA1", "ses_otherPaneB2"
 USER = ("user", {"text": "hello"})
 ENDED = ("assistant", {"finish": "stop", "time": {"created": 2, "completed": 3}})
 TOOL_STEP = ("assistant", {"finish": "tool-calls", "time": {"created": 2, "completed": 3}})
+RUN_ENDED = ("idle", {"outcome": "succeeded", "time": {"created": 4}})
+# One session as OpenCode 2.0.32 itself wrote it in a tidy-compact scenario run: every
+# run ends with its own `idle` row, and a manual /compact is a run of its own.
+V2_RUNS = [USER, TOOL_STEP, ENDED, RUN_ENDED,
+           ("compaction", {"status": "completed", "reason": "manual", "summary": "done",
+                           "recent": "", "time": {"created": 5}}), RUN_ENDED,
+           USER, ENDED, RUN_ENDED]
 
 
-def _opencode_db(generation, sessions):
-    """The isolated HOME's OpenCode database: ``{sid: [(type, data), ...]}`` in order."""
+def _opencode_db(generation, sessions, parents=None):
+    """The isolated HOME's OpenCode database: ``{sid: [(type, data), ...]}`` in order;
+    ``parents`` maps a child (subagent) session to its parent."""
     import sqlite3
     import opencode_runtime
     path = opencode_runtime.opencode_db_path()
@@ -1291,7 +1299,7 @@ def _opencode_db(generation, sessions):
                         "seq INTEGER, data TEXT, time_created INTEGER, time_updated INTEGER)")
         for sid, rows in sessions.items():
             con.execute(f"INSERT INTO {'session' if generation == 'v1' else 'session_v2'} "
-                        "VALUES (?, '/w', 1, 1, NULL)", (sid,))
+                        "VALUES (?, '/w', 1, 1, ?)", (sid, (parents or {}).get(sid)))
             for seq, (kind, data) in enumerate(rows, 1):
                 if generation == "v1":
                     con.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?)",
@@ -1339,6 +1347,39 @@ class OpenCodeNativeTurnTest(_IsolatedMixin, unittest.TestCase):
                 with self.subTest(generation=generation, rows=rows):
                     _opencode_db(generation, {PANE_SID: rows})
                     self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), expected)
+
+    def test_opencode_2_reads_its_own_run_record_not_only_the_last_step(self):
+        compacting = ("compaction", {"status": "running", "reason": "manual", "summary": "",
+                                     "recent": "", "time": {"created": 6}})
+        failure = {"type": "transport", "message": "read ECONNRESET"}
+        # Output streamed, then the stream broke: the step failed and a retry backs off.
+        backing_off = ("assistant", {"finish": "error", "error": failure,
+                                     "retry": {"attempt": 2, "at": 9, "error": failure},
+                                     "time": {"created": 6, "completed": 7}})
+        shell = {"shellID": "sh_probe", "command": "sleep 300", "time": {"created": 6}}
+        cases = [
+            ("turn ended: the newest row is the run's idle row", V2_RUNS, "idle"),
+            ("/compact running, its run not ended", V2_RUNS[:4] + [compacting], "working"),
+            ("retry backing off after output", V2_RUNS[:7] + [backing_off], "working"),
+            ("a `!` shell command running", V2_RUNS + [("shell", dict(shell, status="running"))],
+             "working"),
+            ("the `!` command ended outside any run",
+             V2_RUNS + [("shell", dict(shell, status="exited", exit=0))], "idle"),
+            ("a synthetic row delivered to a new run",
+             V2_RUNS + [("synthetic", {"text": "ran", "time": {"created": 6}})], "working"),
+        ]
+        for label, rows, expected in cases:
+            with self.subTest(label):
+                _opencode_db("v2", {PANE_SID: rows})
+                self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), expected)
+
+    def test_a_child_session_on_screen_never_speaks_for_the_pane(self):
+        # The TUI shows a subagent's session: its finished run says nothing of the parent's.
+        for generation, rows in (("v1", [USER, ENDED]), ("v2", V2_RUNS)):
+            with self.subTest(generation=generation):
+                _opencode_db(generation, {OTHER_SID: [USER], PANE_SID: rows},
+                             parents={PANE_SID: OTHER_SID})
+                self.assertEqual(ts.native_turn("opencode", self.pid, PANE_SID), "unknown")
 
     def test_another_sessions_record_is_never_read_as_this_process(self):
         _opencode_db("v2", {PANE_SID: [USER, ENDED], OTHER_SID: [USER]})
