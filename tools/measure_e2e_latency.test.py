@@ -100,6 +100,22 @@ class FixtureExtensionTests(unittest.TestCase):
                 ledger = Path(route_chain.ledger_path("claude", route["session_id"]))
             self.assertIn(route["route_id"], ledger.read_text())  # written by the real route_chain.append
 
+    def test_no_attempt_other_than_the_open_routes_is_left_open(self):
+        """Fleet's required details wait on every open row: a stray open one keeps it loading for good."""
+        with small_state(freeze=False), tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            built = hpf.build(tmp + "/b", history_rows=91, record_size=2900, open_routes=3, live_sessions=2,
+                              worker_streams=True, depth1_rows=6, depth1_open_every=0,
+                              min_jobs_bytes=0, prime=False)          # 91 cuts the last history attempt short
+            last: dict[str, str] = {}
+            for row in Path(built["jobs"]).read_text().splitlines():
+                fields = row.split("\t")
+                if len(fields) >= 6:
+                    for item in fields[5].split(","):
+                        if item.startswith("attempt_id="):
+                            last[item[len("attempt_id="):]] = fields[1]
+            still_open = sorted(a for a, status in last.items() if status in ("open", "running"))
+            self.assertEqual(still_open, [f"att-e2e-owner-{i:05d}" for i in range(3)])
+
     def test_oversize_registry_is_refused(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             path = Path(tmp) / "jobs.log"
@@ -156,10 +172,23 @@ class InjectorTests(unittest.TestCase):
         stamp = events.stage_transition(self.fixture, 0)
         route = self.fixture["routes"][0]
         record = json.loads(Path(route["route_file"]).read_text())
-        self.assertEqual([n["status"] for n in record["nodes"]][-1], "pending")
+        self.assertEqual(record["_fleet_e2e_state"], "test:running")
+        # the file moved on, its identity did not: the real reader still accepts it for the row's hash
+        from fleet import route as fleet_route
+        self.assertIsNotNone(fleet_route.load(route["route_file"], expect_id=route["route_id"],
+                                              expect_hash=hpf.e2e_route_hash(route["index"])))
         self.assertTrue(any(f"attempt_id={route['attempt_id']}" in row and "route_node=test" in row
                             for row in self.jobs_rows()))
         self.assertIn(":test:", stamp["marker"])
+
+    def test_every_fixture_route_is_one_the_fleet_reader_accepts(self):
+        """A route the reader rejects leaves 'required details' partial and Fleet in loading for good."""
+        from fleet import route as fleet_route
+        for route in self.fixture["routes"]:
+            rows = [r for r in self.jobs_rows() if f"attempt_id={route['attempt_id']}" in r]
+            self.assertIn(f"route_hash={hpf.e2e_route_hash(route['index'])}", rows[0])
+            self.assertIsNotNone(fleet_route.load(route["route_file"], expect_id=route["route_id"],
+                                                  expect_hash=hpf.e2e_route_hash(route["index"])))
 
     def test_route_end_writes_outcome_sidecar_and_closing_row(self):
         route = self.fixture["routes"][1]
@@ -299,6 +328,40 @@ class ReportTests(unittest.TestCase):
         contrast = self.sample()["replace_contrast"]["producer"]
         self.assertAlmostEqual(contrast["extra_s"], 0.5)
         self.assertGreaterEqual(contrast["extra_share"], 0.2)
+
+    def test_mixed_passes_with_and_without_kind_still_give_the_top_table(self):
+        report = self.sample()
+        t3_pass = {"condition": "cold-empty", "rep": 0, "first_byte_s": 0.2, "first_nonloading_s": 3.1,
+                   "first_observed_s": 3.1, "details_complete_s": 3.1, "paints": 60, "persisted": True}
+        t4_pass = {"event": "prompt", "harness": "claude"}
+        report["passes"] = report["passes"] + [t3_pass, t4_pass]
+        report["results"].append({"metric": "T3", "events": {
+            "cold-empty": {"n": 1, "median_s": 3.1, "p95_s": 3.1, "max_s": 3.1, "p95_basis": "max-of-n"},
+            "second-launch": {"n": 0, "median_s": None, "p95_s": None, "max_s": None,
+                              "no_observed_within_s": 60.0}}, "segments": {}})
+        text = tool.render_markdown(report)
+        self.assertEqual(text.splitlines()[2], "## 기준 T1~T4")
+        self.assertIn("| T1 | route-start |", text)
+        self.assertIn("| T3 | cold-empty | 1 | 3.100 |", text)
+        self.assertIn("loading을 60s 안에 벗어나지 못함", text)
+        self.assertIn("| T4 | (측정 안 됨)", text)
+        self.assertIn("| cold-empty | 0 | 0.200 |", text)               # the T3 launch table
+        self.assertNotIn("표를 그리지 못함", text)
+
+    def test_orchestrator_tags_a_kind_on_t3_and_t4_passes(self):
+        passes = tool.tag_kinds("T3", [{"condition": "second-launch", "rep": 1}])
+        passes += tool.tag_kinds("T4", [{"event": "tool"}, {"x": 1}, {"kind": "keep"}])
+        self.assertEqual([p["kind"] for p in passes], ["t3-second-launch", "t4-tool", "t4-pass", "keep"])
+        self.assertIsNone(tool.replace_contrast(passes))                  # no role: not a producer/Fleet pass
+
+    def test_one_section_failing_does_not_erase_the_others(self):
+        report = self.sample()
+        report["passes"] = [{"role": "producer", "kind": "cold-1", "dur_s": 1.0, "segments": "broken"}]
+        report["replace_contrast"] = {"producer": {}}                     # KeyError in its section
+        text = tool.render_markdown(report)
+        self.assertIn("| T1 | route-start |", text)
+        self.assertIn("표를 그리지 못함", text)
+        self.assertIn("## 실행 정보", text)
 
     def test_history_verdicts_follow_the_numbers(self):
         def side(warm, after):

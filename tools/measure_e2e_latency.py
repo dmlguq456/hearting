@@ -64,6 +64,15 @@ def _module(name: str):
         raise
 
 
+def tag_kinds(metric: str, passes: list[dict]) -> list[dict]:
+    """Give every pass record a ``kind``: ``t3-<condition>``, ``t4-<event>`` (T1/T2 already have one)."""
+    for record in passes:
+        if isinstance(record, dict) and not record.get("kind"):
+            what = record.get("condition") or record.get("event") or record.get("hook") or "pass"
+            record["kind"] = f"{metric.lower()}-{what}"
+    return passes
+
+
 def _load() -> list[float]:
     try:
         return [round(v, 2) for v in os.getloadavg()]
@@ -85,7 +94,9 @@ def _t1_t2_rows(results: list[dict]) -> list[dict]:
     rows = []
     for item in results:
         for kind, stats in item.get("events", {}).items():
-            rows.append({"metric": item["metric"], "kind": kind, **{k: stats.get(k) for k in (
+            label = kind if not stats.get("no_observed_within_s") else (
+                f"{kind} (loading을 {stats['no_observed_within_s']:g}s 안에 벗어나지 못함)")
+            rows.append({"metric": item["metric"], "kind": label, **{k: stats.get(k) for k in (
                 "n", "median_s", "p95_s", "max_s", "p95_basis")}})
     return rows
 
@@ -98,9 +109,9 @@ def replace_contrast(passes: list[dict]) -> dict | None:
     """
     out = {}
     for role in ("producer", "fleet"):
-        warm = [p["dur_s"] for p in passes if p["role"] == role and p["kind"] == "warm-unchanged"]
-        replaced = [p["dur_s"] for p in passes if p["role"] == role
-                    and p["kind"] in ("after-route-start", "after-stage-transition", "after-replace")]
+        warm = [p["dur_s"] for p in passes if p.get("role") == role and p.get("kind") == "warm-unchanged"]
+        replaced = [p["dur_s"] for p in passes if p.get("role") == role
+                    and p.get("kind") in ("after-route-start", "after-stage-transition", "after-replace")]
         if warm and replaced:
             warm_m = sorted(warm)[len(warm) // 2]
             rep_m = sorted(replaced)[len(replaced) // 2]
@@ -144,26 +155,12 @@ def history_verdicts(scale: dict) -> list[str]:
     return lines
 
 
-def render_markdown(report: dict) -> str:
-    out = ["# 끝-끝 반응 속도 측정", ""]
-    scale = report.get("history_scale")
-    if scale and not report.get("results"):
-        out += ["## history 2배 대조와 통째 교체", "", "(`--history-scale` 실행: T1~T4 사건 측정은 하지 않았다. "
-                "기준 T1~T4 표는 기본 `run`의 보고서에 있다.)", ""] + history_verdicts(scale) + [""]
-        for pair in scale["pairs"]:
-            out.append(f"- fixture {pair['label']}: small {pair['small'].get('rows')} rows / "
-                       f"{pair['small'].get('fixture_bytes')} bytes, large {pair['large'].get('rows')} rows / "
-                       f"{pair['large'].get('fixture_bytes')} bytes")
-        scale = None
-        out += ["", "## 실행 정보", "", f"- elapsed_s: {report.get('elapsed_s')}",
-                f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
-                f"- cleanup: {json.dumps(report.get('cleanup'))}"]
-        return "\n".join(out) + "\n"
+def _md_baseline(report: dict) -> list[str]:
     rows = []
     for item in report.get("results", ()):
         rows.extend(_t1_t2_rows([item]))
-    out += ["## 기준 T1~T4", "", "| T | 사건 종류 | n | 중앙값 s | p95 s | 최대 s | 목표 중앙/p95 |",
-            "|---|---|---|---|---|---|---|"]
+    out = ["## 기준 T1~T4", "", "| T | 사건 종류 | n | 중앙값 s | p95 s | 최대 s | 목표 중앙/p95 |",
+           "|---|---|---|---|---|---|---|"]
     seen = set()
     for row in rows:
         target = TARGETS.get(row["metric"], ("-", "-"))
@@ -175,41 +172,95 @@ def render_markdown(report: dict) -> str:
         if metric not in seen:
             out.append(f"| {metric} | (측정 안 됨) | 0 | - | - | - | {TARGETS[metric][0]} / {TARGETS[metric][1]} |")
     out += ["", "`*` n < 20: p95는 nearest-rank로 n개 중 최대(`max-of-n`)다.", ""]
+    return out
+
+
+def _md_contrast(report: dict) -> list[str]:
     contrast = report.get("replace_contrast")
-    if contrast:
-        out += ["## 무변화 pass 대 통째 교체 직후 pass (사건 측정에서)", ""]
-        for role, entry in contrast.items():
-            out.append(f"- {role}: unchanged {_fmt(entry['warm_median_s'])}s, after replace "
-                       f"{_fmt(entry['after_replace_median_s'])}s (extra {entry['extra_s']:+.3f}s, "
-                       f"{(entry['extra_share'] or 0):.0%} of the pass)")
-        out.append("")
-    passes = report.get("passes") or []
-    if passes:
-        out += ["## warm·cold pass 구간 내역", "",
-                "| role | # | kind | pass s | 구간(합 s, 호출 수) | full parses | open |", "|---|---|---|---|---|---|---|"]
-        interesting = [p for p in passes if p["kind"] != "warm-unchanged"][:40]
-        warm = [p for p in passes if p["kind"] == "warm-unchanged"]
-        for role in ("producer", "fleet"):
-            group = [p for p in warm if p["role"] == role]
-            if group:
-                interesting.append(sorted(group, key=lambda p: p["dur_s"])[len(group) // 2])
-        for p in interesting:
-            segs = ", ".join(f"{name} {s['total_s']:.3f}({s['n']})" for name, s in p["segments"].items()
-                             if s["total_s"] >= 0.01)
-            out.append(f"| {p['role']} | {p['index']} | {p['kind']} | {p['dur_s']:.3f} | {segs} | "
-                       f"{p.get('metrics', {}).get('full_metadata_parses', 0)} | {p.get('open_calls')} |")
-        out.append("")
+    if not contrast:
+        return []
+    out = ["## 무변화 pass 대 통째 교체 직후 pass (사건 측정에서)", ""]
+    for role, entry in contrast.items():
+        out.append(f"- {role}: unchanged {_fmt(entry['warm_median_s'])}s, after replace "
+                   f"{_fmt(entry['after_replace_median_s'])}s (extra {entry['extra_s']:+.3f}s, "
+                   f"{(entry['extra_share'] or 0):.0%} of the pass)")
+    return out + [""]
+
+
+def _md_passes(report: dict) -> list[str]:
+    """The T1/T2 producer and Fleet passes with their segments (a T3/T4 record has none)."""
+    passes = [p for p in (report.get("passes") or ())
+              if isinstance(p.get("segments"), dict) and p.get("role")]
+    if not passes:
+        return []
+    out = ["## warm·cold pass 구간 내역", "",
+           "| role | # | kind | pass s | 구간(합 s, 호출 수) | full parses | open |", "|---|---|---|---|---|---|---|"]
+    interesting = [p for p in passes if p.get("kind") != "warm-unchanged"][:40]
+    warm = [p for p in passes if p.get("kind") == "warm-unchanged"]
+    for role in ("producer", "fleet"):
+        group = [p for p in warm if p["role"] == role]
+        if group:
+            interesting.append(sorted(group, key=lambda p: p.get("dur_s") or 0)[len(group) // 2])
+    for p in interesting:
+        segs = ", ".join(f"{name} {s['total_s']:.3f}({s['n']})" for name, s in p["segments"].items()
+                         if s["total_s"] >= 0.01)
+        out.append(f"| {p['role']} | {p.get('index')} | {p.get('kind')} | {p.get('dur_s') or 0:.3f} | {segs} | "
+                   f"{p.get('metrics', {}).get('full_metadata_parses', 0)} | {p.get('open_calls')} |")
+    return out + [""]
+
+
+def _md_launches(report: dict) -> list[str]:
+    """T3 launches: one row per new Fleet run (no producer/Fleet segments)."""
+    launches = [p for p in (report.get("passes") or ()) if p.get("condition")]
+    if not launches:
+        return []
+    out = ["## T3 launch별 (새 실행 → 화면)", "",
+           "| 조건 | # | 첫 byte s | 첫 비-loading s | 첫 관측 화면 s | 상세 완료 s | paints | 저장 |",
+           "|---|---|---|---|---|---|---|---|"]
+    for p in launches:
+        out.append(f"| {p.get('condition')} | {p.get('rep')} | {_fmt(p.get('first_byte_s'))} | "
+                   f"{_fmt(p.get('first_nonloading_s'))} | {_fmt(p.get('first_observed_s'))} | "
+                   f"{_fmt(p.get('details_complete_s'))} | {p.get('paints')} | {p.get('persisted')} |")
+    return out + [""]
+
+
+def _seg_value(value) -> str:
+    """A segment is a stats dict (median_s), a plain number (T4 opencode) or a small dict of those."""
+    if isinstance(value, dict):
+        if value.get("median_s") is not None:
+            return f"{value['median_s']:.3f}"
+        return "{" + ", ".join(f"{k} {_seg_value(v)}" for k, v in value.items()
+                               if isinstance(v, (int, float, dict)) and not isinstance(v, bool)) + "}"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _md_segments(report: dict) -> list[str]:
+    out = []
     for item in report.get("results", ()):
-        for kind, segs in item.get("segments", {}).items():
-            line = ", ".join(f"{name} {s['median_s']:.3f}" for name, s in segs.items() if s.get("median_s") is not None)
-            if line:
-                out.append(f"- {item['metric']} {kind}: {line}")
-    out += ["", "## 실행 정보", "",
-            f"- elapsed_s: {report.get('elapsed_s')}",
-            f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
-            f"- fixture: registry {report.get('fixture', {}).get('bytes')} bytes, "
-            f"rows {report.get('fixture', {}).get('rows')}, baseline {report.get('fixture', {}).get('baseline')}",
-            f"- cleanup: {json.dumps(report.get('cleanup'))}"]
+        for kind, segs in (item.get("segments") or {}).items():
+            if isinstance(segs, list):          # T4: one record per hook of the chain
+                parts = [f"{str(h.get('hook', '?')).rsplit('/', 1)[-1]} {h.get('median_ms', 0):.0f}ms"
+                         f"{' (하한)' if h.get('denied') or h.get('path_gaps') else ''}"
+                         for h in segs if isinstance(h, dict)]
+                if parts:
+                    out.append(f"- {item['metric']} {kind}: {', '.join(parts)}")
+                continue
+            if isinstance(segs, dict):
+                line = ", ".join(f"{name} {_seg_value(value)}" for name, value in segs.items())
+                if line:
+                    out.append(f"- {item['metric']} {kind}: {line}")
+    return out
+
+
+def _md_info(report: dict) -> list[str]:
+    out = ["", "## 실행 정보", "",
+           f"- elapsed_s: {report.get('elapsed_s')}",
+           f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
+           f"- fixture: registry {report.get('fixture', {}).get('bytes')} bytes, "
+           f"rows {report.get('fixture', {}).get('rows')}, baseline {report.get('fixture', {}).get('baseline')}",
+           f"- cleanup: {json.dumps(report.get('cleanup'))}"]
     failures = (report.get("self_check") or {}).get("failures") or []
     if failures:
         out += ["", f"**자체 점검 실패: {failures}** (이 지표는 측정값으로 내지 않았다)"]
@@ -217,6 +268,35 @@ def render_markdown(report: dict) -> str:
         out.append(f"- not measured: {entry.get('what')} — {entry.get('reason')}")
     for note in report.get("notes", ()):
         out.append(f"- note: {note}")
+    return out
+
+
+def _guarded(name: str, build, report: dict) -> list[str]:
+    """One section failing to render must not erase the others."""
+    try:
+        return build(report)
+    except Exception as exc:  # noqa: BLE001
+        return [f"(`{name}` 표를 그리지 못함: {type(exc).__name__}: {exc})", ""]
+
+
+def render_markdown(report: dict) -> str:
+    out = ["# 끝-끝 반응 속도 측정", ""]
+    scale = report.get("history_scale")
+    if scale and not report.get("results"):
+        out += ["## history 2배 대조와 통째 교체", "", "(`--history-scale` 실행: T1~T4 사건 측정은 하지 않았다. "
+                "기준 T1~T4 표는 기본 `run`의 보고서에 있다.)", ""] + history_verdicts(scale) + [""]
+        for pair in scale["pairs"]:
+            out.append(f"- fixture {pair['label']}: small {pair['small'].get('rows')} rows / "
+                       f"{pair['small'].get('fixture_bytes')} bytes, large {pair['large'].get('rows')} rows / "
+                       f"{pair['large'].get('fixture_bytes')} bytes")
+        out += ["", "## 실행 정보", "", f"- elapsed_s: {report.get('elapsed_s')}",
+                f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
+                f"- cleanup: {json.dumps(report.get('cleanup'))}"]
+        return "\n".join(out) + "\n"
+    for name, build in (("기준 T1~T4", _md_baseline), ("무변화 대 교체", _md_contrast),
+                        ("pass 구간", _md_passes), ("T3 launch", _md_launches),
+                        ("구간 중앙값", _md_segments), ("실행 정보", _md_info)):
+        out += _guarded(name, build, report)
     return "\n".join(out) + "\n"
 
 
@@ -295,7 +375,7 @@ def cmd_run(args) -> int:
                     code = 1
                     continue
                 report["results"].append({k: sub.get(k) for k in ("metric", "events", "segments")})
-                report["passes"].extend(sub.get("passes") or [])
+                report["passes"].extend(tag_kinds(key, sub.get("passes") or []))
                 report["notes"].extend(sub.get("notes") or [])
                 report["not_measured"].extend(sub.get("not_measured") or [])
                 if sub.get("violations"):
@@ -315,7 +395,12 @@ def cmd_run(args) -> int:
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(text + "\n", encoding="utf-8")
-    markdown = render_markdown(report)
+    try:
+        markdown = render_markdown(report)
+    except Exception as exc:  # noqa: BLE001 - the JSON is already written; never lose the run to its report
+        markdown = f"# 끝-끝 반응 속도 측정\n\n(Markdown을 그리지 못함: {type(exc).__name__}: {exc}; JSON에는 전부 있다)\n"
+        code = code or 1
+        report["exit_code"] = code
     if args.markdown:
         Path(args.markdown).parent.mkdir(parents=True, exist_ok=True)
         Path(args.markdown).write_text(markdown, encoding="utf-8")

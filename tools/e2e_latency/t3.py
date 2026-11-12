@@ -137,6 +137,26 @@ def _patch_procscan(mod):
             return keep
 
     mod._ps_lines = _ps_lines
+    # The fixture's sleepers are not Claude processes, so process discovery cannot find
+    # them: serve the fixture's own sessions instead (as the T1/T2 shim does), so the
+    # screen carries the operating-size session set and not an empty one.
+    listing = os.environ.get("E2E_T3_SESSIONS")
+    if listing:
+        items = json.load(open(listing))
+
+        def scan(**_kw):
+            rows = []
+            for item in items:
+                session = mod.Session(harness=item["harness"], pid=item["pid"],
+                                      cwd=item["cwd"], elapsed_min=30)
+                session.proc_start = item.get("pid_start")
+                rows.append(session)
+            return rows
+
+        mod.scan = scan
+        starts = {int(i["pid"]): i.get("pid_start") for i in items}
+        orig_start = mod.read_proc_start
+        mod.read_proc_start = lambda pid: starts.get(int(pid)) or orig_start(pid)
 
 
 _PATCHES = {"fleet.render": _patch_render, "tools.fleet.render": _patch_render,
@@ -301,7 +321,7 @@ def _prepare_bin(scratch):
     return bindir, shim
 
 
-def child_env(fixture, *, scratch, cache_dir, marker, tag, records, bindir, shim):
+def child_env(fixture, *, scratch, cache_dir, marker, tag, records, bindir, shim, sessions=None):
     """A cleared environment: nothing from the caller's shell reaches the child."""
     given = dict(fixture.get("env") or {})
     root = Path(fixture.get("root") or fixture.get("base") or scratch)
@@ -322,7 +342,21 @@ def child_env(fixture, *, scratch, cache_dir, marker, tag, records, bindir, shim
         "PYTHONDONTWRITEBYTECODE": "1", "COLUMNS": str(COLS), "LINES": str(ROWS),
         "E2E_T3_MARKER": marker, "E2E_T3_TAG": tag, "E2E_T3_RECORDS": str(records),
     })
+    if sessions:
+        env["E2E_T3_SESSIONS"] = str(sessions)
     return env
+
+
+def write_sessions(fixture, scratch):
+    """The fixture's sessions as the shim's process-discovery answer; None when it has none."""
+    items = [{"harness": s.get("harness") or "claude", "pid": s["pid"], "cwd": s["cwd"],
+              "pid_start": s.get("pid_start")} for s in (fixture.get("sessions") or ())
+             if s.get("pid")]
+    if not items:
+        return None
+    path = Path(scratch) / "sessions.json"
+    path.write_text(json.dumps(items), encoding="utf-8")
+    return path
 
 
 def _fixture_processes():
@@ -403,7 +437,7 @@ def launch(env, *, records, timeout, linger, want_persist):
     return result
 
 
-def once_full_collect(env, timeout=180):
+def once_full_collect(env, timeout=90):
     argv = [sys.executable, str(WORKTREE / "tools/fleet/fleet.py"), "--once", "--json"]
     t0 = time.monotonic()
     try:
@@ -415,16 +449,26 @@ def once_full_collect(env, timeout=180):
         None, "exit %s" % done.returncode)
 
 
-def measure(fixture, *, reps=5, scratch, launch_timeout=240.0, linger=4.0,
-            conditions=CONDITIONS):
-    """Result contract: ``{"metric":"T3","events","segments","passes","notes","not_measured"}``."""
+LAUNCH_TIMEOUT_S = 60.0
+
+
+def measure(fixture, *, reps=5, scratch, launch_timeout=LAUNCH_TIMEOUT_S, linger=4.0,
+            conditions=CONDITIONS, launch_fn=None):
+    """Result contract: ``{"metric":"T3","events","segments","passes","notes","not_measured"}``.
+
+    A launch that shows no observed frame within ``launch_timeout`` is a result ("did not
+    leave loading in N s"), and it ends its condition: the remaining launches would only
+    repeat the wait, so they are skipped and the reason is written down.
+    """
+    launch_fn = launch_fn or launch
     scratch = Path(scratch) / "t3"
     scratch.mkdir(parents=True, exist_ok=True)
     marker = str(fixture.get("marker") or "hearting-e2e-t3-%d-%s" % (os.getpid(), os.urandom(3).hex()))
     fproc = _fixture_processes()
     bindir, shim = _prepare_bin(scratch)
+    sessions_file = write_sessions(fixture, scratch)
     events, segments, passes, notes, not_measured = {}, {}, [], [], []
-    tags, leftovers = [], []
+    tags, leftovers, timed_out = [], [], {}
 
     def run_condition(cond):
         samples = {k: [] for k in ("first_byte_s", "first_nonloading_s", "replay_s",
@@ -437,15 +481,15 @@ def measure(fixture, *, reps=5, scratch, launch_timeout=240.0, linger=4.0,
             records = scratch / ("rec-%s-%d.jsonl" % (cond, i))
             records.unlink(missing_ok=True)
             env = child_env(fixture, scratch=scratch, cache_dir=cache, marker=marker, tag=tag,
-                            records=records, bindir=bindir, shim=shim)
+                            records=records, bindir=bindir, shim=shim, sessions=sessions_file)
             if cond == "cold-empty":
                 for stale in _observation_files(env):
                     stale.unlink()
             elif not _observation_files(env):
                 not_measured.append({"what": "T3/second-launch/%d" % i,
                                      "reason": "no saved last-complete model before this launch"})
-            row = launch(env, records=records, timeout=launch_timeout, linger=linger,
-                         want_persist=True)
+            row = launch_fn(env, records=records, timeout=launch_timeout, linger=linger,
+                            want_persist=True)
             row.update(condition=cond, rep=i)
             passes.append(row)
             for key in samples:
@@ -454,9 +498,19 @@ def measure(fixture, *, reps=5, scratch, launch_timeout=240.0, linger=4.0,
                 fproc.reap(tag)
             except TimeoutError as exc:
                 leftovers.append(str(exc))
+            if row.get("first_observed_s") is None:
+                skipped = reps - i - 1
+                timed_out[cond] = {"after_s": launch_timeout, "launch": i, "skipped": skipped}
+                not_measured.append({"what": "T3/%s" % cond, "reason":
+                                     "launch %d never showed an observed frame within %ss (still loading); "
+                                     "the remaining %d launch(es) of this condition were not run"
+                                     % (i, launch_timeout, skipped)})
+                break
         events[cond] = summarize(samples["first_observed_s"])
+        if cond in timed_out:
+            events[cond]["no_observed_within_s"] = launch_timeout
         segments[cond] = {k: summarize(v) for k, v in samples.items() if k != "first_observed_s"}
-        if events[cond]["n"] < reps:
+        if events[cond]["n"] < reps and cond not in timed_out:
             not_measured.append({"what": "T3/%s" % cond, "reason":
                                  "%d of %d launches never showed an observed frame within %ss"
                                  % (reps - events[cond]["n"], reps, launch_timeout)})
@@ -473,7 +527,7 @@ def measure(fixture, *, reps=5, scratch, launch_timeout=240.0, linger=4.0,
             run_condition(cond)
         once_env = child_env(fixture, scratch=scratch, cache_dir=scratch / "cache-once",
                              marker=marker, tag=marker + "-t3-once", records=scratch / "rec-once.jsonl",
-                             bindir=bindir, shim=shim)
+                             bindir=bindir, shim=shim, sessions=sessions_file)
         (scratch / "cache-once").mkdir(exist_ok=True)
         tags.append(marker + "-t3-once")
         once = []

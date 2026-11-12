@@ -48,6 +48,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 
@@ -362,7 +363,7 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
         depth1 = max(0, min(depth1, rows - written))
         holders = max(1, ledgers - 1)
         for index in range(depth1):
-            status = "open" if index % depth1_open_every == 0 else "done"
+            status = "open" if depth1_open_every > 0 and index % depth1_open_every == 0 else "done"
             depth1_open += status == "open"
             parent = f"perf-from-{index % holders + 1:05d}"
             metadata = {
@@ -390,9 +391,10 @@ def _write_registry(jobs: Path, *, rows: int, depth1: int, row_bytes: int,
         for raw in open_rows or ():
             handle.write(raw)
             written += 1
-        for index in range(max(0, rows - written)):
+        history_total = max(0, rows - written)
+        for index in range(history_total):
             if history_style == "history":
-                handle.write(_history_row(index, row_bytes, now))
+                handle.write(_history_row(index, row_bytes, now, history_total))
                 written += 1
                 continue
             metadata = {
@@ -441,11 +443,17 @@ def _history_metadata(attempt: str, index: int) -> dict:
     return metadata
 
 
-def _history_row(index: int, row_bytes: int, now: float) -> str:
-    """One finished-attempt row: ~3 rows per attempt (open, progress, done), rich metadata."""
+def _history_row(index: int, row_bytes: int, now: float, total: int | None = None) -> str:
+    """One finished-attempt row: ~3 rows per attempt (open, progress, done), rich metadata.
+
+    ``total`` is the history row count: when it cuts the last attempt short, that attempt's
+    rows are all ``done`` so history never holds an attempt that looks still open.
+    """
     attempt_index, phase = divmod(index, HISTORY_ROWS_PER_ATTEMPT)
     attempt = f"att-hist-{attempt_index:06d}"
     status = ("open", "open", "done")[phase]
+    if total is not None and attempt_index == (total - 1) // HISTORY_ROWS_PER_ATTEMPT:
+        status = "done"
     stamp = _iso(now - 86_400 - (900_000 - index) * 5)
     return _padded_row(stamp, status, f"hist-{attempt_index:06d}",
                        _history_metadata(attempt, attempt_index), row_bytes)
@@ -455,29 +463,55 @@ def e2e_session_id(index: int) -> str:
     return f"00000000-0000-4000-8000-{index:012d}"
 
 
-def e2e_route_id(index: int) -> str:
-    return f"rt-e2e-{index:05d}"
+def _e2e_route_body(index: int, slug: str | None = None) -> dict:
+    """The sealed part of an e2e route record: what the reader hashes.
 
-
-def e2e_route_record(index: int, *, slug: str | None = None, stage: str = "execute",
-                     state: str = "running", route_hash: str | None = None) -> dict:
-    """A small route record in the shape the route-chain reader consumes."""
-    nodes = []
-    ids = ("plan", "execute", "test", "report")
-    for node_id in ids:
-        status = "done" if ids.index(node_id) < ids.index(stage) else (
-            state if node_id == stage else "pending")
-        nodes.append({"id": node_id, "kind": "pipeline-stage", "unit": f"{node_id}/e2e",
-                      "dispatch_depth": 2, "status": status})
+    Node status is not in a sealed record (the registry rows carry it), so a stage
+    move never changes the hash or the id. Shape: schema 2, contract 3, the keys
+    ``tools/fleet/route.py::_load_uncached`` checks.
+    """
+    nodes = [{"id": node_id, "kind": "pipeline-stage", "unit": f"{node_id}/e2e",
+              "dispatch_depth": 2} for node_id in ("plan", "execute", "test", "report")]
     return {
         "schema_version": 2, "capability": "autopilot-code", "capability_mode": "dev",
         "requested_intensity": "standard", "effective_intensity": "standard",
         "execution_topology": "staged", "slug": slug or f"e2e-route-{index:05d}",
-        "route_id": e2e_route_id(index),
-        "route_hash": route_hash or f"sha256:e2e{index:05d}",
-        "selection": {"shape": "staged", "route_origin": "compose"},
-        "nodes": nodes, "owner_attempt_id": f"att-e2e-owner-{index:05d}",
+        "dispatch_contract_version": 3, "owner_dispatch_depth": 1, "max_dispatch_depth": 2,
+        "selection": {"shape": "staged", "route_origin": "compose"}, "nodes": nodes,
     }
+
+
+def _route_identity():
+    """``utilities/route_identity.py``: the one hash/id derivation the reader also uses."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import route_identity
+    return route_identity
+
+
+def e2e_route_hash(index: int, slug: str | None = None) -> str:
+    """The real ``route_hash`` of the index-th e2e route (the reader recomputes it)."""
+    return _route_identity().route_hash(_e2e_route_body(index, slug))
+
+
+def e2e_route_id(index: int) -> str:
+    """``rt-`` + 16 hex of the hash: the reader rejects any other id for a record."""
+    return _route_identity().route_id_from_hash(e2e_route_hash(index))
+
+
+def e2e_route_record(index: int, *, slug: str | None = None, stage: str = "execute",
+                     state: str = "running", route_hash: str | None = None) -> dict:
+    """A route record the Fleet reader accepts (hash recomputed, id derived, schema 2).
+
+    ``stage``/``state`` only move an unhashed ``_fleet_`` key, so rewriting the file
+    for a stage move changes its bytes, not its identity.
+    """
+    body = _e2e_route_body(index, slug)
+    digest = route_hash or e2e_route_hash(index, slug)
+    return {**body, "route_hash": digest, "route_id": _route_identity().route_id_from_hash(digest),
+            "owner_attempt_id": f"att-e2e-owner-{index:05d}",
+            "_fleet_e2e_state": f"{stage}:{state}"}
 
 
 def e2e_open_row(index: int, *, jobs_log: Path, route_file: Path, session_id: str,
@@ -488,7 +522,7 @@ def e2e_open_row(index: int, *, jobs_log: Path, route_file: Path, session_id: st
         "attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
         "harness": "claude", "parent_sid": session_id, "parent_harness": "claude",
         "worker_type": "owner", "route_file": str(route_file),
-        "route_id": e2e_route_id(index), "route_hash": f"sha256:e2e{index:05d}",
+        "route_id": e2e_route_id(index), "route_hash": e2e_route_hash(index),
         "route_node": stage, "attempt_id": f"att-e2e-owner-{index:05d}",
         "launch_claimed": "1", "launch_started": "1",
     }

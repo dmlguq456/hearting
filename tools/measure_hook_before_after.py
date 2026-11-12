@@ -362,6 +362,7 @@ import atexit
 import json
 import os
 import sys
+import threading
 
 _LOG = os.environ.get("HOOK_AUDIT_LOG")
 _SCRATCH = os.path.realpath(os.environ.get("CHAIN_SCRATCH") or "/nonexistent-scratch")
@@ -403,6 +404,25 @@ def _outside(path, dir_fd=None):
     return not (real == _SCRATCH or real.startswith(_SCRATCH + os.sep))
 
 
+# The "open" audit event has no dir_fd: ``os.open(name, flags, dir_fd=fd)`` would be resolved against
+# the cwd and a lock file under a fixture directory looked like a write into the code root. The
+# wrapper below tells the audit hook which directory the open that is in flight is relative to.
+_PENDING = threading.local()
+_REAL_OS_OPEN = os.open
+
+
+def _os_open(path, flags, mode=0o777, *, dir_fd=None):
+    previous = getattr(_PENDING, "dir_fd", None)
+    _PENDING.dir_fd = dir_fd
+    try:
+        return _REAL_OS_OPEN(path, flags, mode, dir_fd=dir_fd)
+    finally:
+        _PENDING.dir_fd = previous
+
+
+os.open = _os_open
+
+
 def _deny(event, detail):
     _STATE["blocked"].append(event + ":" + detail)
     raise PermissionError("measurement-scratch-only: " + event)
@@ -417,8 +437,9 @@ def _audit(event, args):
         writing = (isinstance(mode, str) and any(ch in mode for ch in "wax+")) or (
             isinstance(flags, int) and flags & (
                 os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-        if writing and args and _outside(args[0]):
-            _deny("open-write", str(_resolve(args[0])))
+        fd = getattr(_PENDING, "dir_fd", None)
+        if writing and args and _outside(args[0], fd):
+            _deny("open-write", str(_resolve(args[0], fd)))
         return
     if event in _SOCKET_EVENTS:
         _deny(event, "socket")

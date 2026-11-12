@@ -319,6 +319,48 @@ class MeasureTest(unittest.TestCase):
             self.assertIn("T3/second-launch/0", whats)
             self.assertIn("T3/once-full-collect", whats)
 
+    def test_first_timeout_skips_the_rest_of_that_condition_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "xdg").mkdir()
+            fixture = {"env": {"HOME": str(tmp), "XDG_STATE_HOME": str(tmp / "xdg")}, "marker": "mk3"}
+            seen = []
+
+            def fake_launch(env, *, records, timeout, linger, want_persist):
+                cond = "second" if "cache-second" in env["XDG_CACHE_HOME"] else "cold"
+                seen.append((cond, timeout))
+                (tmp / "xdg" / "hearting").mkdir(exist_ok=True)
+                (tmp / "xdg" / "hearting" / "fleet2-observation-x.json").write_text("{}")
+                # the cold condition never leaves loading; the second one does
+                return {"first_observed_s": None if cond == "cold" else 1.0, "late_cells": {}}
+
+            fake_fp = mock.Mock()
+            fake_fp.marked_processes.return_value = {}
+            with mock.patch.object(t3, "once_full_collect", return_value=(1.0, None)), \
+                    mock.patch.object(t3, "_fixture_processes", return_value=fake_fp):
+                out = t3.measure(fixture, reps=3, scratch=tmp / "s", launch_fn=fake_launch)
+            # one cold launch (timed out) and then all three second launches
+            self.assertEqual([c for c, _ in seen], ["cold"] + ["second"] * 3)
+            self.assertEqual({t for _, t in seen}, {t3.LAUNCH_TIMEOUT_S})
+            self.assertEqual(len(out["passes"]), 4)
+            cold = [n for n in out["not_measured"] if n["what"] == "T3/cold-empty"]
+            self.assertEqual(len(cold), 1)
+            self.assertIn("still loading", cold[0]["reason"])
+            self.assertIn("remaining 2 launch(es)", cold[0]["reason"])
+            self.assertEqual(out["events"]["cold-empty"]["n"], 0)
+            self.assertEqual(out["events"]["cold-empty"]["no_observed_within_s"], t3.LAUNCH_TIMEOUT_S)
+            self.assertEqual(out["events"]["second-launch"]["n"], 3)
+            self.assertNotIn("no_observed_within_s", out["events"]["second-launch"])
+
+    def test_write_sessions_lists_only_fixture_sessions_with_a_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = {"sessions": [{"pid": 11, "cwd": "/w", "pid_start": "5", "harness": "claude"},
+                                    {"pid": None, "cwd": "/w"}]}
+            path = t3.write_sessions(fixture, tmp)
+            self.assertEqual(json.loads(Path(path).read_text()),
+                             [{"harness": "claude", "pid": 11, "cwd": "/w", "pid_start": "5"}])
+            self.assertIsNone(t3.write_sessions({"sessions": []}, tmp))
+
 
 if __name__ == "__main__":
     unittest.main()

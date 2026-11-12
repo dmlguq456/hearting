@@ -193,6 +193,17 @@ class ShimTests(unittest.TestCase):
             "    finally:",
             "        os.close(fd)",
             "attempt('mkdir-dirfd-outside', mkdir_fd)",
+            "def open_dirfd(directory, cwd):",
+            "    os.chdir(cwd)",
+            "    fd = os.open(directory, os.O_RDONLY)",
+            "    try:",
+            "        os.close(os.open('lockfile', os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))",
+            "    finally:",
+            "        os.close(fd); os.chdir(scratch)",
+            # relative name + dir_fd inside the fixture is allowed even when the cwd is outside
+            "attempt('open-dirfd-inside', lambda: open_dirfd(os.path.join(scratch, 'inside'), outside))",
+            # and the same name with a dir_fd outside the fixture is refused even when the cwd is inside
+            "attempt('open-dirfd-outside', lambda: open_dirfd(outside, scratch))",
             "def link_escape():",
             "    os.symlink(outside, os.path.join(scratch, 'escape'))",
             "    open(os.path.join(scratch, 'escape', 'viasymlink'), 'w').close()",
@@ -213,12 +224,14 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(res["write-inside"], "ok")
         self.assertEqual(res["read-outside"], "ok")
         self.assertEqual(res["devnull"], "ok")
+        self.assertEqual(res["open-dirfd-inside"], "ok")
+        self.assertTrue((scratch / "inside" / "lockfile").is_file())
         for name in ("write-outside", "append-outside", "remove-outside", "rename-into-outside",
-                     "mkdir-outside", "mkdir-dirfd-outside", "write-through-symlink",
+                     "mkdir-outside", "mkdir-dirfd-outside", "open-dirfd-outside", "write-through-symlink",
                      "socket-connect"):
             self.assertEqual(res[name], "denied", name)
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
-        self.assertEqual(sorted(path.name for path in rig.outside.iterdir()), ["victim.txt"])
+        self.assertEqual(sorted(path.name for path in rig.outside.iterdir()), ["victim.txt"])  # no 'lockfile' either
         denied = mh._gather_audit(str(scratch / "audit"))
         self.assertTrue(any(item.startswith("socket.connect") for item in denied), denied)
         self.assertTrue(any(item.startswith("open-write:") for item in denied), denied)

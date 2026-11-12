@@ -152,7 +152,7 @@ def build(*, history_rows: int | None = None, row_bytes: int = ROW_BYTES, open_r
         base = hook_perf_fixture.build(
             root, jobs_rows=rows, history_rows=rows, record_size=row_bytes,
             open_routes=routes, live_sessions=sessions, worker_streams=True,
-            session_pids=pids, depth1_rows=400, depth1_open_every=10**9,
+            session_pids=pids, depth1_rows=400, depth1_open_every=0,
             min_jobs_bytes=0, prime=prime)
         size = refuse_oversize(base["jobs"])
     except BaseException:
