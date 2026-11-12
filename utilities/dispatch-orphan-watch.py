@@ -241,8 +241,8 @@ def _finish_recovery(args, *, clock=time.monotonic, sleep=time.sleep) -> bool:
 
     When every owned attempt ended normally with PASS and only Hearting's own
     settlement remains, the notice waits for the same settling ceiling the join
-    uses (SETTLING_NOTICE_SECONDS) and is never recorded when settlement
-    finishes first. Anything else -- an open row, a live or unknown process --
+    uses (SETTLING_NOTICE_SECONDS), is never recorded when settlement finishes
+    first, and past that ceiling is the ordinary attention notice. Anything else -- an open row, a live or unknown process --
     is noticed at once, as before.
     """
     from dispatch_completion_join import SETTLING_NOTICE_SECONDS

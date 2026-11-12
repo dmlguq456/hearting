@@ -64,19 +64,11 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 "workflow_completion": "runtime-v1", "failure_class": "pass", "note": "completed-supervisor",
                 "parent_sid": "parent", **extra}
 
-    def test_a_pass_owner_still_settling_is_not_called_a_blockage_in_any_harness(self):
-        for harness in ("claude", "codex", "opencode"):
-            with self.subTest(harness=harness):   # completion not delivered yet, nothing running
-                text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))}, "quiescent")
-                self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
-                self.assertIn("att-owner finished with PASS", text)
-                self.assertIn("Do not report this to the user as blocked", text)
-                self.assertIn("dispatch-registry.py reconcile --jobs", text)
-                self.assertNotIn("Explain the blockage", text)
-
-    def test_a_pass_owner_whose_cleanup_proof_is_incomplete_gets_only_the_settlement_text(self):
-        """BC-SETTLE-NOTICE-1112: the same settlement rendered while its cleanup proof is still
-        unverifiable (hook context) and after it drained (Stop feedback) says one thing."""
+    def test_a_settlement_past_the_ceiling_is_the_attention_notice_in_any_harness(self):
+        """RV-PR1559-1112: the watcher records a PASS owner's settlement-only exit only past
+        SETTLING_NOTICE_SECONDS, so that one notice -- an undelivered completion, an incomplete
+        cleanup proof, or a live descendant whose environment cannot be read -- is attention,
+        never "not a blockage"."""
         for harness in ("claude", "codex", "opencode"):
             for process_state, process_reason in [("unverifiable", "post-exit-receipt-incomplete"),
                                                   ("unverifiable", "attempt-descendant-unverifiable"),
@@ -84,9 +76,11 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 with self.subTest(harness=harness, process=process_reason):
                     text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))},
                                        process_state, process_reason=process_reason)
-                    self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
-                    self.assertNotIn("needs attention", text)
-                    self.assertNotIn("Explain the blockage", text)
+                    self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
+                    self.assertIn("Explain the blockage", text)
+                    self.assertIn("dispatch-registry.py reconcile --jobs", text)
+                    for claim in ("not a blockage", "Do not report this to the user as blocked"):
+                        self.assertNotIn(claim, text)
         for status, extra in (("open", {}), ("done", {"failure_class": "fail", "note": "dead-runtime"})):
             with self.subTest(status=status, **extra):   # no committed PASS: the attention text alone
                 text = self.render({"att-owner": (status, self.owner("claude", attempt_id="att-owner", **extra))},

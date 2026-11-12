@@ -1690,12 +1690,11 @@ def settlement_only(jobs: Path, attempts) -> bool:
 
 def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
     """(attempt, settlement action) of a `supervisor-exited` notice when every attempt ended
-    with a committed PASS and only its settlement remains; [] whenever anything else is true
-    or unreadable.
+    with a committed PASS, only its settlement remains and a process it started is still
+    running; [] whenever anything else is true or unreadable.
 
-    The supervisor's exit then is the ordinary end of a finished worker: the route's own
-    completion notice follows from the completion controller, which keeps its own deadline
-    notices. Display only -- the record, its delivery and the controller's duty are unchanged."""
+    The supervisor's exit then is the ordinary end of a finished worker whose process is still
+    draining. Display only -- the record, its delivery and the controller's duty are unchanged."""
     if receipt.get("reason") != "supervisor-exited":
         return []
     settled = []
@@ -1709,7 +1708,11 @@ def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
             settled.append((aid, action))
     except Exception:  # noqa: BLE001 -- unknown evidence keeps the ordinary attention text
         return []
-    return settled
+    # The orphan watcher records a batch whose only remainder is settlement after it has
+    # waited SETTLING_NOTICE_SECONDS past the owner's end; one that never finishes within
+    # that ceiling -- including a live descendant whose environment cannot be read -- is
+    # the ordinary attention notice, not settlement. A running process keeps its own text.
+    return settled if any(action == "wait" for _aid, action in settled) else []
 
 
 def _live_pids(receipt: dict, attempts: list[str]) -> list[int]:
@@ -1730,29 +1733,20 @@ def _settling_text(receipt: dict, settled: list[tuple[str, str]]) -> str:
                           f"{shlex.quote(receipt['job_registry'])} --attempt {shlex.quote(aid)}"
                           for aid in attempts)
     running = [aid for aid, action in settled if action == "wait"]
-    if running:
-        # A tagged descendant may be a Hearting helper or work the worker started (training,
-        # a server); nothing here tells them apart, so the notice does not call it settlement.
-        residue = _residue_text(receipt)   # a sealed residue already names its pids
-        pids = [] if residue else _live_pids(receipt, running)
-        named = f" (pid {', '.join(map(str, pids))})" if pids else ""
-        return ("Hearting supervision: the worker ended normally, but a process it started is still running "
-                "-- not a blockage, and not finished either. "
-                f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
-                f"{', '.join(attempts)} finished with PASS; {', '.join(running)} still has a running "
-                f"process{named}. It may be Hearting's own cleanup or work the worker started. Do not report "
-                "the work as finished while it runs; if it is the user's work, tell the user it is still "
-                "running. Hearting signals nothing; the row closes by itself once that process exits and the "
-                "route's completion notice follows from the existing completion controller. Read-only diagnosis: "
-                + commands + residue)
-    return ("Hearting settlement in progress -- not a blockage. "
+    # A tagged descendant may be a Hearting helper or work the worker started (training,
+    # a server); nothing here tells them apart, so the notice does not call it settlement.
+    residue = _residue_text(receipt)   # a sealed residue already names its pids
+    pids = [] if residue else _live_pids(receipt, running)
+    named = f" (pid {', '.join(map(str, pids))})" if pids else ""
+    return ("Hearting supervision: the worker ended normally, but a process it started is still running "
+            "-- not a blockage, and not finished either. "
             f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
-            f"{', '.join(attempts)} finished with PASS; only Hearting's own settlement remains (its "
-            "post-exit cleanup check, completion summary or completion delivery). The route's completion notice "
-            "follows from the existing completion controller. Do not report this to the user as blocked, "
-            "and do not restart, retry, cancel, or erase anything. If that completion never arrives, the "
-            "controller keeps the duty and its own deadline notice follows. Read-only diagnosis: "
-            + commands + _residue_text(receipt))
+            f"{', '.join(attempts)} finished with PASS; {', '.join(running)} still has a running "
+            f"process{named}. It may be Hearting's own cleanup or work the worker started. Do not report "
+            "the work as finished while it runs; if it is the user's work, tell the user it is still "
+            "running. Hearting signals nothing; the row closes by itself once that process exits and the "
+            "route's completion notice follows from the existing completion controller. Read-only diagnosis: "
+            + commands + residue)
 
 
 def render_text(receipt: dict, *, continued: dict | None = None, notice_context=None) -> str:
