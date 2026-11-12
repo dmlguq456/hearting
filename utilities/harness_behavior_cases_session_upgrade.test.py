@@ -308,7 +308,7 @@ class ScriptTest(unittest.TestCase):
         run.__class__.__module__ = "harness_behavior_scenarios"
         answer = scenario.script(run)
         first = answer(self.record("SCENARIO-RR 1 compose"), [])
-        self.assertIn("compose --shape solo --owner claude --campaign-key other1", first.shell)
+        self.assertIn("compose --shape solo --campaign-key other1", first.shell)
         self.assertIn("FX-COMPOSE-1-RC", first.shell)
         self.assertNotIn("--start", first.shell)
         composed = answer(self.record('FX-COMPOSE-1-RC=0 "route_id": "rt-abc12345"', "tool"), [])
@@ -316,6 +316,12 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(scenario.state["routes"][1], "rt-abc12345")
         second = answer(self.record("SCENARIO-RR 2 compose"), [])
         self.assertIn("--cwd /fx/o2", second.shell)
+        # A fixture without a ready headless owner composes the same route directly, once.
+        direct = answer(self.record("capability-route: quick-headless-unavailable\nFX-COMPOSE-2-RC=64", "tool"), [])
+        self.assertIn("compose --shape direct --campaign-key other2", direct.shell)
+        answer(self.record('FX-COMPOSE-2-RC=0 "route_id": "rt-def67890"', "tool"), [])
+        self.assertEqual(scenario.state["routes"][2], "rt-def67890")
+        self.assertEqual(scenario.state["shapes"], {1: "solo", 2: "direct"})
         self.assertEqual([label for label, _status in scenario.ROUTES], ["never-started", "running", "ended"])
 
     def test_owner_row_is_the_registry_shape_the_route_resume_filter_reads(self):

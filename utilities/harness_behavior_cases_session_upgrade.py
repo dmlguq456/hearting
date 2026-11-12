@@ -302,7 +302,7 @@ COLUMNS = ("native_before", "native_after", "host_before", "host_after", "deferr
            "waiting_note", "held_screen_same", "switched", "switched_after_release", "switched_after_next_prompt",
            "screen_same", "cursor_same", "key_reached",
            "l1_before", "l1_after", "l3_before", "l3_after", "scrollback_line", "fail_injection",
-           "routes", "running_start", "notice", "delivery_arrivals")
+           "routes", "route_shape", "running_start", "notice", "delivery_arrivals")
 
 
 def render_table(rows: list[dict]) -> str:
@@ -967,10 +967,12 @@ class FailOldScenario(SessionUpgradeScenario):
                 sampling.wait(0.02)
 
         def settled():
+            # Until the old host froze (its binding is withdrawn) and its owner runs it alone again.
             end = time.monotonic() + SWITCH_WAIT
-            while time.monotonic() < end and not (set(seen) - {old} and owner_hosts(old) == [old]):
-                time.sleep(0.1)     # until a successor came and went
-            return bool(set(seen) - {old})
+            while time.monotonic() < end and not (not bindings(run.home.env, run.harness)
+                                                  and owner_hosts(old) == [old]):
+                time.sleep(0.1)
+            return not bindings(run.home.env, run.harness)
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
         try:
@@ -1080,14 +1082,13 @@ class RouteResumeScenario(Scenario):
                                run.home.workspace)
 
     def script(self, run):
-        def compose(k):
+        def compose(k, shape="solo"):
             cr = shlex.quote(str(Path(_base(run).SOURCE) / "utilities/capability-route.py")) \
                 if run is not None else "capability-route.py"
             repo = shlex.quote(str(self.repos[k - 1]))
-            # The owner is pinned so every harness composes the same solo route: no owner is ever
-            # launched here, and the fixture probes only Claude's headless worker as ready.
-            return (f"python3 {cr} compose --shape solo --owner claude --campaign-key other{k} "
-                    f"--slug resume{k} --cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
+            self.state.setdefault("shapes", {})[k] = shape
+            return (f"python3 {cr} compose --shape {shape} --campaign-key other{k} --slug resume{k} "
+                    f"--cwd {repo} 2>&1; echo FX-COMPOSE-{k}-RC=$?")
 
         def answer(record, earlier):
             text, kind = record["last_text"], record["last_kind"]
@@ -1100,6 +1101,11 @@ class RouteResumeScenario(Scenario):
             k = self.state["current"]
             if not k:
                 return Reply("nothing to do")
+            if f"FX-COMPOSE-{k}-RC=" in text and "quick-headless-unavailable" in text \
+                    and self.state.get("shapes", {}).get(k) == "solo":
+                # A fixture with no ready headless owner for this harness (only the measured harness
+                # is enabled) cannot compose a solo route: the same three owner rows go on a direct one.
+                return Reply(shell=compose(k, "direct"))
             if f"FX-COMPOSE-{k}-RC=" in text:
                 found = re.findall(r'"route_id": "(rt-[A-Za-z0-9_-]+)"', text) or \
                     re.findall(r"\b(rt-[0-9a-f]{8,})\b", text)
@@ -1167,6 +1173,7 @@ class RouteResumeScenario(Scenario):
             return "inconclusive"
         routes = self.state["routes"]
         ev["created_routes"] = {label: routes.get(k) for k, (label, _s) in enumerate(self.ROUTES, 1)}
+        ev["route_shape"] = sorted(set((self.state.get("shapes") or {}).values()))
         if len(routes) < len(self.ROUTES):
             run.note("not every project got a route; the live conditions were not built")
             return "inconclusive"
