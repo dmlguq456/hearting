@@ -920,9 +920,13 @@ class LineageBundleRetirementTest(IsolatedCase):
             {"ts": self.OLD, "harness": "claude", "sid": "D", "event": "handover",
              "source": "clear", "from": {"harness": "claude", "sid": "C"}}])
         result = self.retire()
-        self.assertCountEqual(self.lifetime_proof.call_args_list,
-                              [mock.call("claude", "A"), mock.call("claude", "B"),
-                               mock.call("claude", "C"), mock.call("claude", "D")])
+        calls = self.lifetime_proof.call_args_list
+        self.assertCountEqual([call.args for call in calls],
+                              [("claude", "A"), ("claude", "B"), ("claude", "C"), ("claude", "D")])
+        # One shared session-holder reading serves the whole pass.
+        observations = {id(call.kwargs.get("observation")) for call in calls}
+        self.assertEqual(len(observations), 1)
+        self.assertIsNotNone(calls[0].kwargs.get("observation"))
         self.assertEqual(result["retired"], 2)
 
 

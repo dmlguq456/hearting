@@ -217,6 +217,36 @@ class NativeWatchTest(unittest.TestCase):
         self.assertEqual(peer_steward_native.native_lifetime(
             "claude","sid",pid=os.getpid(),pid_start=start,pid_namespace="pid:[999999]"),"unknown")
 
+    def test_one_runner_pass_reads_the_session_holders_once_for_many_recipients(self):
+        """A pass that asks about N recipients scans the process table once, not N times
+        (the per-message loss check ran one scan per message and slowed every pass)."""
+        import peer_read_context
+        import peer_steward_native
+        from fleet.collectors import steward as fleet_steward
+        readings = []
+        real_fresh = fleet_steward.end_observation
+
+        def counted():
+            readings.append(1)
+            return real_fresh()
+
+        context = peer_read_context.PeerReadContext()
+        seen = []
+
+        def liveness(harness, sid, *, agents=None, observation=None):
+            seen.append(observation)
+            return "unknown"
+
+        with mock.patch.object(fleet_steward, "end_observation", counted), \
+                mock.patch.object(fleet_steward, "session_liveness", liveness):
+            for index in range(25):
+                self.assertEqual(peer_steward_native.native_lifetime(
+                    "claude", f"sid-{index}", observation=context.end_observation(
+                        peer_steward_native.end_observation)), "unknown")
+        self.assertEqual(len(readings), 1)
+        self.assertEqual(len({id(item) for item in seen}), 1)
+        self.assertIsNotNone(seen[0])
+
     def test_blocked_receipt_carries_only_its_exact_open_question(self):
         signals = [
             {"harness": "claude", "session_id": "other", "question_id": "other-q", "stale": False},

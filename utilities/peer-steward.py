@@ -5455,8 +5455,10 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
         checkpoint(state="unknown", observation={"ref": ref, "reason": attachment_reason})
         return
     if attachment is None:
-        from peer_steward_native import native_lifetime
-        lifetime = native_lifetime(harness, sid)
+        from peer_steward_native import end_observation, native_lifetime
+        lifetime = native_lifetime(
+            harness, sid, observation=(read_context.end_observation(end_observation)
+                                       if read_context is not None else None))
         if lifetime == "ended":
             binding = peer_message.pending_delivery_binding(row, include_acked=True)
             evidence = {
@@ -6867,14 +6869,14 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                 pass  # The original lease and prepared transfer remain recoverable.
 
 
-def _component_proven_ended(component, process_cache=None):
+def _component_proven_ended(component, process_cache=None, observation=None):
     """A lineage component is ended only when native lifetime proves every SID ended."""
     for harness, session_id in component:
         key = (harness, session_id)
         if process_cache is not None and key in process_cache:
             observed = process_cache[key]
         else:
-            observed = native_lifetime(harness, session_id)
+            observed = native_lifetime(harness, session_id, observation=observation)
             if process_cache is not None:
                 process_cache[key] = observed
         if observed != "ended":
@@ -6903,6 +6905,8 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
     sessions = tidy.state_root() / "sessions"
     archive = tidy.state_root() / RETIRE_ARCHIVE_DIRECTORY
     process_cache = {}
+    from peer_steward_native import end_observation
+    pass_observation = end_observation()
     for component in components:
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
             result["skipped"] += 1
@@ -6929,7 +6933,7 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
         if last is None or now - last < RETIRE_ACTIVITY_SECONDS:
             result["skipped"] += 1
             continue
-        if not _component_proven_ended(component, process_cache):
+        if not _component_proven_ended(component, process_cache, pass_observation):
             result["skipped"] += 1
             continue
         try:

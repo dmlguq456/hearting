@@ -19,6 +19,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -26,7 +27,13 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from dispatch_contract import process_start_ticks  # noqa: E402
+import peer_address  # noqa: E402
 import shared_readiness  # noqa: E402
+
+# The production procfs reader. The regression modules selected below swap in a
+# simulated-inventory bridge when they load, and a forked runner inherits whatever
+# this process holds; the process-level cases restore the real reader.
+_REAL_NATIVE_SESSIONS = peer_address.native_sessions
 
 
 def _load(name, path):
@@ -38,110 +45,47 @@ def _load(name, path):
 
 peer_steward = _load("lifecycle_peer_steward", HERE / "peer-steward.py")
 
-_FAKE_HERDR = r'''#!/usr/bin/env python3
+# Communication and watch work never reaches Herdr. A `herdr` on PATH logs any call and
+# fails it, so a regression shows as a logged call instead of a silent fallback.
+_HERDR_GUARD = r'''#!/usr/bin/env python3
 import json, os, sys
-argv = sys.argv[1:]
 log = os.environ.get("LIFECYCLE_HERDR_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(argv) + "\n")
-if argv[:1] == ["--session"]:
-    argv = argv[2:]
-if argv[:2] == ["agent", "get"]:
-    target = next((item for item in argv[2:] if not item.startswith("-")), "peer-0")
-    control = target == "peer-control"
-    sid, pane = ("sid-b", "w1:p2") if control else ("sid-a", "w1:p1")
-    if os.environ.get("LIFECYCLE_SIDLESS") == "1":
-        sid = "-"
-    try:
-        state = json.loads(open(os.environ["LIFECYCLE_STATE_FILE"], encoding="utf-8").read())
-        status = state.get("status", "working")
-    except Exception:
-        status = "working"
-    print(json.dumps({"result": {"agent": {
-        "agent": "claude", "agent_session": {"value": sid},
-        "agent_status": status, "name": target, "pane_id": pane}}}))
-    raise SystemExit(0)
-if argv[:2] == ["pane", "process-info"]:
-    pane = argv[-1]
-    pid = int(os.environ["LIFECYCLE_SHELL_PID"])
-    pgid = int(os.environ["LIFECYCLE_SHELL_PGID"])
-    process_argv = json.loads(os.environ["LIFECYCLE_SHELL_ARGV"])
-    print(json.dumps({"result": {"process_info": {
-        "pane_id": pane, "shell_pid": pid,
-        "foreground_process_group_id": pgid,
-        "foreground_processes": [{"pid": pid, "argv": process_argv}]}}}))
-    raise SystemExit(0)
-print(json.dumps({"result": {}}))
+        stream.write(json.dumps(sys.argv[1:]) + "\n")
+raise SystemExit(1)
 '''
 
 
-class FakeReadinessTransport:
-    """Pipe-woken runner transport; avoids host Herdr and socket dependencies."""
+class ReadinessGate:
+    """Counts the runner's native reads and can hold the first one.
 
-    def __init__(self, state_file, count_path, *, sidless=False):
-        self.state_file = Path(state_file)
+    The runner is a forked child, so the counters and events are fork-shared. The
+    runner reads the target's native state once per exact target group per pass; the
+    gate wraps exactly that read, so "paused before its first snapshot" keeps its meaning.
+    """
+
+    def __init__(self, count_path):
         self.count_path = Path(count_path)
-        self.sidless = sidless
         context = multiprocessing.get_context("fork")
         self.observe_count = context.Value("i", 0)
         self.pause_after = context.Value("i", 2**31 - 1)
         self.pause_entered = context.Event()
         self.resume = context.Event()
-        self.read_fd, self.write_fd = os.pipe()
-        os.set_blocking(self.read_fd, False)
-        os.set_blocking(self.write_fd, False)
 
-    def fileno(self):
-        return self.read_fd if self.read_fd >= 0 else None
-
-    def observe(self):
-        with self.observe_count.get_lock():
-            self.observe_count.value += 1
-            sequence = self.observe_count.value
-        if sequence > self.pause_after.value:
-            self.pause_entered.set()
-            if not self.resume.wait(20):
-                raise TimeoutError("lifecycle observation gate was not released")
-        while self.read_fd >= 0:
-            try:
-                if not os.read(self.read_fd, 4096):
-                    break
-            except BlockingIOError:
-                break
-            except OSError:
-                break
-        with self.count_path.open("a", encoding="utf-8") as stream:
-            stream.write("snapshot\n")
-        state = json.loads(self.state_file.read_text(encoding="utf-8"))
-        status = state.get("status", "working")
-        sid_a = "-" if self.sidless else "sid-a"
-        agents = [{"name": f"peer-{index}", "agent": "claude",
-                   "agent_session": {"value": sid_a}, "pane_id": "w1:p1",
-                   "agent_status": status}
-                  for index in range(5)]
-        agents.append({"name": "peer-control", "agent": "claude",
-                       "agent_session": {"value": "-" if self.sidless else "sid-b"},
-                       "pane_id": "w1:p2",
-                       "agent_status": status})
-        return SimpleNamespace(agents=tuple(agents))
-
-    def set_idle(self):
-        self.state_file.write_text(json.dumps({"status": "idle"}), encoding="utf-8")
-        try:
-            os.write(self.write_fd, b"changed")
-        except (BlockingIOError, OSError):
-            pass
-
-    def close(self):
-        for name in ("read_fd", "write_fd"):
-            fd = getattr(self, name)
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                setattr(self, name, -1)
+    def wrap(self, native_agent):
+        def observed(*args, **kwargs):
+            with self.observe_count.get_lock():
+                self.observe_count.value += 1
+                sequence = self.observe_count.value
+            if sequence > self.pause_after.value:
+                self.pause_entered.set()
+                if not self.resume.wait(20):
+                    raise TimeoutError("lifecycle observation gate was not released")
+            with self.count_path.open("a", encoding="utf-8") as stream:
+                stream.write("snapshot\n")
+            return native_agent(*args, **kwargs)
+        return observed
 
 
 class LifecycleProjectionTest(unittest.TestCase):
@@ -214,20 +158,15 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.home = self.base / "home"
         self.bin = self.base / "bin"
         self.bin.mkdir()
-        self.target_shell = subprocess.Popen(
-            ["/bin/sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
-        self.addCleanup(self._stop_target_shell)
-        fake = self.bin / "herdr"
-        fake.write_text(_FAKE_HERDR, encoding="utf-8")
-        fake.chmod(0o755)
+        herdr_guard = self.bin / "herdr"
+        herdr_guard.write_text(_HERDR_GUARD, encoding="utf-8")
+        herdr_guard.chmod(0o755)
+        # The state the fixture last drove its native targets to (the acceptance
+        # wrapper reports it before and after).
         self.state_file = self.base / "target-state.json"
-        self.state_file.write_text(json.dumps({"status": "working"}), encoding="utf-8")
         self.snapshot_count_path = self.base / "runner-snapshots.log"
         self.herdr_log_path = self.base / "herdr-argv.jsonl"
-        self.api_path = self.base / "herdr.sock"
-        self.endpoint = FakeReadinessTransport(self.state_file, self.snapshot_count_path)
+        self.endpoint = ReadinessGate(self.snapshot_count_path)
         self.old_env = dict(os.environ)
         for key in tuple(os.environ):
             if key.startswith(("AGENT_DISPATCH_", "AGENT_PEER_", "AGENT_HERDR_",
@@ -237,23 +176,26 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         os.environ.update({
             "AGENT_DISPATCH_JOBS": str(self.jobs),
             "AGENT_PEER_LEDGER_ROOT": str(self.state_root),
-            "AGENT_HERDR_SESSION": "fixture",
-            "HERDR_SOCKET_PATH": str(self.api_path),
             "HOME": str(self.home),
+            "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "XDG_DATA_HOME": str(self.home / ".local/share"),
-            "LIFECYCLE_STATE_FILE": str(self.state_file),
-            "LIFECYCLE_SHELL_PID": str(self.target_shell.pid),
-            "LIFECYCLE_SHELL_PGID": str(os.getpgid(self.target_shell.pid)),
-            "LIFECYCLE_SHELL_ARGV": json.dumps([
-                part.decode("utf-8", errors="replace") for part in
-                Path(f"/proc/{self.target_shell.pid}/cmdline").read_bytes().split(b"\0")
-                if part]),
             "LIFECYCLE_HERDR_LOG": str(self.herdr_log_path),
             "PATH": str(self.bin) + os.pathsep + self.old_env.get("PATH", ""),
         })
+        # Real native sessions the runner and watchers read: the runtime's own
+        # registry record plus a live process. `sid-a` is the target five stewards
+        # watch; `sid-b` is an independent target.
+        import fixture_processes
+        self.native_a = fixture_processes.NativeSession(
+            self, sid="sid-a", home=self.home, pane="w1:p1", name="peer-0")
+        self.native_b = fixture_processes.NativeSession(
+            self, sid="sid-b", home=self.home, pane="w1:p2", name="peer-control")
+        self.set_status("working")
         self.addCleanup(self._restore_env)
-        self.addCleanup(self.endpoint.close)
+        real_sessions = mock.patch.object(peer_address, "native_sessions", _REAL_NATIVE_SESSIONS)
+        real_sessions.start()
+        self.addCleanup(real_sessions.stop)
         self.watch_root = peer_steward._watch_root()
         self.watch_root.mkdir(parents=True, exist_ok=True)
         self.arms = []
@@ -266,14 +208,17 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.old_env)
 
-    def _stop_target_shell(self):
-        if self.target_shell.poll() is None:
-            self.target_shell.terminate()
-        try:
-            self.target_shell.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.target_shell.kill()
-            self.target_shell.wait(timeout=2)
+    def set_status(self, status):
+        """The targets' runtime records change, as the runtime does."""
+        self.native_a.set(status)
+        self.native_b.set(status)
+        self.state_file.write_text(json.dumps({"status": status}), encoding="utf-8")
+
+    def set_idle(self):
+        """The targets finish their turn; the shared runner is woken for its next pass."""
+        self.set_status("idle")
+        store = peer_steward.peer_obligations.ObligationStore(self.state_root)
+        shared_readiness.wake_runner(store.root)
 
     def _cleanup_processes(self):
         self.endpoint.resume.set()
@@ -353,27 +298,20 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             peer_steward._write_json_atomic(paths.arm, arm)
             self.watchers.append(process)
 
-    def _start_runner(self, transport_selector=None, *, reconcile_barrier=None):
+    def _start_runner(self, *, reconcile_barrier=None):
         import traceback
 
         control_read, control_write = os.pipe()
-        old_transport = peer_steward._runner_readiness_transport
-        old_transports = dict(peer_steward._RUNNER_READINESS_TRANSPORTS)
-        peer_steward._RUNNER_READINESS_TRANSPORTS.clear()
-        peer_steward._runner_readiness_transport = (
-            transport_selector or (lambda _server, endpoint=None: self.endpoint))
         try:
             child = os.fork()
         except BaseException:
-            peer_steward._runner_readiness_transport = old_transport
-            peer_steward._RUNNER_READINESS_TRANSPORTS.clear()
-            peer_steward._RUNNER_READINESS_TRANSPORTS.update(old_transports)
             raise
         if child == 0:
             os.close(control_write)
             try:
                 os.read(control_read, 1)
                 os.close(control_read)
+                peer_steward.native_agent = self.endpoint.wrap(peer_steward.native_agent)
                 if reconcile_barrier is not None:
                     entered, release, snapshot_rows = reconcile_barrier
                     original_reconcile = peer_steward._reconcile_external_obligations
@@ -402,9 +340,6 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
                 traceback.print_exc()
                 code = 1
             os._exit(int(code or 0))
-        peer_steward._runner_readiness_transport = old_transport
-        peer_steward._RUNNER_READINESS_TRANSPORTS.clear()
-        peer_steward._RUNNER_READINESS_TRANSPORTS.update(old_transports)
         self.runner_pid = child
         os.close(control_read)
         os.write(control_write, b"go")
@@ -412,15 +347,20 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         os.close(self.runner_lock_fd)
         self.runner_lock_fd = None
 
-    def _arm(self, index, *, legacy=False, separate=False, previous_consumer=None,
+    def _arm(self, index, *, separate=False, previous_consumer=None,
              server="fixture", target_override=None, session_override=None):
         import session_tidy
 
         watch_id = hashlib.sha256(f"lifecycle-{index}".encode()).hexdigest()[:16]
         target = target_override or ("peer-control" if separate else f"peer-{index}")
+        native = self.native_b if separate else self.native_a
         pane, sid = ("w1:p2", "sid-b") if separate else ("w1:p1", "sid-a")
         if session_override is not None:
             sid = session_override
+        # The exact native birth rides with the target, as `watch` arms it.
+        birth = {} if session_override == "-" else {
+            "pid": native.pid, "pid_start": native.birth,
+            "pid_namespace": os.readlink("/proc/self/ns/pid")}
         arm = {
             "schema_version": peer_steward._WATCH_SCHEMA,
             "watch_id": watch_id,
@@ -429,11 +369,12 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             "timeout": 300000,
             "refs": [f"receipt-{index}"],
             "server": server,
-            "readiness_endpoint": (
-                peer_steward.herdr_observation.socket_path_for_endpoint(server)
-                or "server:" + peer_steward.herdr_observation.endpoint_name(server)),
+            "steward_server": server,
+            "readiness_endpoint": "native:" + server,
             "agent": {"harness": "claude", "session_id": sid,
-                      "name": target, "pane": pane},
+                      "name": target, "pane": pane, **birth},
+            "initial_state": "working",
+            "wake": "none",
             "steward": {"harness": "claude", "session_id": f"steward-{index}",
                         "project": str(self.base)},
             "steward_seat": session_tidy.Seat(
@@ -441,19 +382,15 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
                 sid=f"steward-{index}", endpoint=server).as_dict(),
             "armed_ts": peer_steward._utc_now(),
             "deadline": peer_steward._watch_deadline(300000),
-            "observer_protocol": 2,
+            "observer_protocol": 3,
             "observer_generation": 1,
             "rearm_count": 0,
             "watcher": {},
         }
-        if not legacy:
-            arm["pane_identity"] = {
-                "shell_pid": self.target_shell.pid,
-                "shell_start": str(process_start_ticks(self.target_shell.pid)),
-            }
         paths = peer_steward._watch_paths(watch_id, self.watch_root)
         peer_steward._write_json_atomic(paths.arm, arm)
-        native_state = "done" if index == 1 else "idle"
+        # A native session reports idle/working/blocked; there is no native `done`.
+        native_state = "idle"
         native_agent = {"harness": "claude", "session_id": sid,
                         "name": target, "pane": pane}
         observation = {
@@ -509,6 +446,11 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.fail(f"{message}; runner_pid={self.runner_pid} runner_start={runner_start} "
                   f"marker={marker} snapshots={snapshot_count} projections={projections} "
                   f"watches={watches}")
+
+    def _herdr_calls(self):
+        return ([json.loads(line) for line in
+                 self.herdr_log_path.read_text(encoding="utf-8").splitlines()]
+                if self.herdr_log_path.exists() else [])
 
     def _watch_notice_records(self):
         root = peer_steward.peer_message.peer_state_root() / "peer-messages"
@@ -569,7 +511,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
                             "observer publication must postdate the runner snapshot")
         self.assertTrue(peer_steward._pid_identity_ok(
             current_watcher["pid"], current_watcher["pid_start"]))
-        self.endpoint.set_idle()
+        self.set_idle()
         release.set()
 
         token = observed["request"]["token"]
@@ -646,10 +588,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.assertTrue(shared_readiness.consumer_is_current(
             {"consumer": observed["request"]["consumer"]}))
         self.assertEqual(original_native_wait["state"], "result")
-        herdr_calls = ([json.loads(line) for line in
-                        self.herdr_log_path.read_text(encoding="utf-8").splitlines()]
-                       if self.herdr_log_path.exists() else [])
-        self.assertFalse(any(call[:2] == ["agent", "wait"] for call in herdr_calls))
+        self.assertEqual(self._herdr_calls(), [], "a watch recovery must never reach Herdr")
 
         notices = []
 
@@ -691,8 +630,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.assertFalse(Path(f"/proc/{previous_consumer['pid']}/stat").exists(),
                          "preseeded previous consumer must be dead and reaped")
         for index in range(5):
-            self._arm(index, legacy=(index == 0),
-                      previous_consumer=previous_consumer if index == 0 else None)
+            self._arm(index, previous_consumer=previous_consumer if index == 0 else None)
         self._arm(5, separate=True)
         original_deadlines = {watch_id: arm["deadline"]
                               for watch_id, arm, _paths in self.arms}
@@ -705,16 +643,14 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         gate_deadline = gate_started_at + 13.0
         self._start_runner()
 
-        def pending_projection_exists():
+        def every_recovered_watch_asked_for_readiness():
+            # A working target publishes no projection: the recovered idle result of
+            # each watch only becomes a request, never a settled receipt.
             for watch_id, arm, _paths in self.arms:
                 observation = peer_steward._read_json(
                     peer_steward._watch_paths(watch_id, self.watch_root).observation) or {}
-                native = observation.get("native_wait") or {}
-                identity = peer_steward._watch_readiness_identity(arm, native["agent_state"])
-                if identity is None:
-                    return False
-                result = shared_readiness.target_result(store.root, identity)
-                if not result or result.get("state") != "pending":
+                request = observation.get("readiness_transition")
+                if not isinstance(request, dict) or not request.get("token"):
                     return False
             return True
 
@@ -774,10 +710,15 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.assertLessEqual(gate_pause_seconds, 15.0,
                              "first-observation gate exceeded its 15-second pause budget")
 
-        self._wait_until(pending_projection_exists,
-                         "real runner did not publish pending projections for recovered native results")
-        self.assertFalse(any(paths.receipt.exists() for _watch, _arm, paths in self.arms))
-        self.endpoint.set_idle()
+        self._wait_until(every_recovered_watch_asked_for_readiness,
+                         "recovered watches did not each request a runner readiness read")
+        self.assertFalse(any(paths.receipt.exists() for _watch, _arm, paths in self.arms),
+                         "a working target must settle no watch")
+        for watch_id, arm, _paths in self.arms:
+            identity = peer_steward._watch_readiness_identity(arm, "idle")
+            self.assertIsNone(shared_readiness.target_result(store.root, identity),
+                              "a working target must publish no ready projection")
+        self.set_idle()
 
         self._wait_until(
             lambda: all(paths.receipt.exists() for _watch, _arm, paths in self.arms),
@@ -792,10 +733,9 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         for watch_id, arm, paths in self.arms:
             receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
             self.assertEqual(receipt.get("watch_id"), watch_id)
-            expected_state = "done" if arm["target"] == "peer-1" else "idle"
+            expected_state = "idle"
             # Terminal receipt settlement removes the mutable observation; the
             # receipt itself must retain the original native result.
-            self.assertIn(receipt.get("state"), {"idle", "done"})
             self.assertEqual(receipt.get("state"), expected_state)
             self.assertEqual(receipt.get("agent", {}).get("session_id"), arm["agent"]["session_id"])
             self.assertEqual(arm["deadline"], original_deadlines[watch_id])
@@ -828,10 +768,9 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             self.assertEqual(acknowledge_watch(
                 watch_id, "claude", f"steward-{index}", "lifecycle-test"), "created")
         self.assertTrue(all(paths.ack.exists() for _id, _arm, paths in self.arms))
-        herdr_calls = [json.loads(line) for line in
-                       self.herdr_log_path.read_text(encoding="utf-8").splitlines()]
-        self.assertFalse(any(call[:2] == ["agent", "wait"] for call in herdr_calls),
-                         "recovery must consume the durable native result without replaying wait")
+        herdr_calls = self._herdr_calls()
+        self.assertEqual(herdr_calls, [],
+                         "recovery must consume the durable native result without any Herdr call")
         self.assertEqual(hashlib.sha256(self.jobs.read_bytes()).hexdigest(), self.jobs_before,
                          "target readiness changed while jobs.log stayed byte-identical")
         runner_snapshots = len(self.snapshot_count_path.read_text().splitlines())
@@ -853,7 +792,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             "same_target_count": 5,
             "legacy_watch_count": 1,
             "distinct_stewards": 6,
-            "native_result_counts": {"idle": 5, "done": 1},
+            "native_result_counts": {"idle": 6},
             "native_result_by_watch": {row["watch_id"]: row["state"] for row in receipts},
             "jobs_sha256_before_after": [self.jobs_before,
                                          hashlib.sha256(self.jobs.read_bytes()).hexdigest()],
@@ -883,74 +822,53 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
                     recovered["observation"],
                 "native_wait_replayed": False,
             },
-            "herdr_wait_calls_during_recovery": sum(
-                call[:2] == ["agent", "wait"] for call in herdr_calls),
+            "herdr_calls_during_recovery": len(herdr_calls),
             "fixture_target_pid": os.getpid(),
             "host_production_pid_claim": False,
         })
 
-    def test_one_runner_serves_concurrent_endpoints_when_secondary_starts_first(self):
-        # Start the shared runner under the secondary session, then make it
-        # process pending duties for both endpoint names through each watch's
-        # persisted selected identity and explicit CLI server argument.
-        self.state_file.write_text(json.dumps({"status": "working"}), encoding="utf-8")
-        os.environ["AGENT_HERDR_SESSION"] = "secondary"
-        os.environ["HERDR_SESSION"] = "secondary"
-        os.environ["HERDR_SOCKET_PATH"] = "/fixture/secondary.sock"
+    def test_one_runner_serves_concurrent_server_groups_when_secondary_starts_first(self):
+        # One shared runner, started under the secondary server name, serves the watch
+        # groups of both server names. The name only labels a group: each watch keeps the
+        # `native:<server>` identity it was armed with, and both read the same native
+        # target through the one runner.
         self._arm(20, server="secondary", target_override="peer-0")
-        os.environ["AGENT_HERDR_SESSION"] = "default"
-        os.environ.pop("HERDR_SESSION", None)
-        os.environ["HERDR_SOCKET_PATH"] = "/fixture/default.sock"
         self._arm(21, server="default", target_override="peer-0")
         self.assertEqual([arm["readiness_endpoint"] for _watch_id, arm, _paths in self.arms],
-                         ["/fixture/secondary.sock", "/fixture/default.sock"])
-        # Runner startup context is secondary, while the default watch keeps
-        # the exact URI selected when it was armed.
-        os.environ["AGENT_HERDR_SESSION"] = "secondary"
-        os.environ["HERDR_SESSION"] = "secondary"
-        os.environ["HERDR_SOCKET_PATH"] = "/fixture/secondary.sock"
+                         ["native:secondary", "native:default"])
         store = peer_steward.peer_obligations.ObligationStore(self.state_root)
         self._hold_runner_lock()
         self._launch_watchers()
-        selected_endpoints = {("secondary", "/fixture/secondary.sock"),
-                              ("default", "/fixture/default.sock")}
-
-        def endpoint_transport(server, endpoint=None):
-            if (server, endpoint) not in selected_endpoints:
-                raise AssertionError(f"runner borrowed the wrong endpoint: {server}/{endpoint}")
-            return self.endpoint
-
-        self._start_runner(endpoint_transport)
+        self._start_runner()
 
         endpoint_identities = {
             watch_id: peer_steward._watch_readiness_identity(arm, "idle")
             for watch_id, arm, _paths in self.arms
         }
+        for watch_id, arm, _paths in self.arms:
+            identity = endpoint_identities[watch_id]
+            self.assertEqual(identity["endpoint"], arm["readiness_endpoint"])
+            self.assertTrue(peer_steward._watch_readiness_identity_matches_arm(
+                identity, arm, "idle"))
 
-        def both_endpoint_projections_are_pending():
-            found = {}
-            for watch_id, arm, _paths in self.arms:
-                identity = endpoint_identities[watch_id]
-                if (identity["endpoint"] != arm["readiness_endpoint"]
-                        or not peer_steward._watch_readiness_identity_matches_arm(
-                            identity, arm, "idle")):
-                    return False
-                projection = shared_readiness.target_result(store.root, identity)
-                if (not projection or projection.get("state") != "pending"
-                        or projection.get("reason") != "native-turn-busy"):
-                    return False
-                found[arm["server"]] = identity
-            return set(found) == {"default", "secondary"}
+        def runner_read_both_groups():
+            # Each server name is its own exact target group in the runner's pass.
+            return (self.endpoint.observe_count.value >= 2
+                    and self.snapshot_count_path.exists())
 
-        self._wait_until(both_endpoint_projections_are_pending,
-                         "the secondary-started runner did not project both pending endpoint groups")
+        self._wait_until(runner_read_both_groups,
+                         "the secondary-started runner did not read both server groups")
         runner_marker = peer_steward._read_json(
             store.root / "readiness-v1" / "runner.json") or {}
         runner_start = str(process_start_ticks(self.runner_pid) or "")
         self.assertEqual((int(runner_marker.get("pid", 0)), runner_marker.get("pid_start")),
                          (self.runner_pid, runner_start))
+        # The target is still working: nothing is projected and nothing settles.
+        self.assertFalse(any(paths.receipt.exists() for _watch_id, _arm, paths in self.arms))
+        for identity in endpoint_identities.values():
+            self.assertIsNone(shared_readiness.target_result(store.root, identity))
 
-        self.endpoint.set_idle()
+        self.set_idle()
         self._wait_until(lambda: all(paths.receipt.exists()
                                      for _watch_id, _arm, paths in self.arms),
                          "the one runner did not publish both endpoint receipts")
@@ -967,12 +885,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         self.assertEqual([receipt["server"] for receipt in receipts],
                          ["secondary", "default"])
         self.assertTrue(all(receipt["state"] == "idle" for receipt in receipts))
-        calls = [json.loads(line) for line in self.herdr_log_path.read_text(
-            encoding="utf-8").splitlines()]
-        self.assertTrue(any(call[:3] == ["--session", "secondary", "agent"]
-                            and call[3:5] == ["get", "peer-0"] for call in calls), calls)
-        self.assertTrue(any(call[:2] == ["agent", "get"] and call[2] == "peer-0"
-                            for call in calls), calls)
+        self.assertEqual(self._herdr_calls(), [], "no server name may reach Herdr")
 
         from dispatch_seat_handover import acknowledge_watch
         first_id = self.arms[0][0]
@@ -993,26 +906,25 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         endpoint_values = {watch_id: identity["endpoint"]
                            for watch_id, identity in endpoint_identities.items()}
         self.assertEqual(set(endpoint_values.values()),
-                         {"/fixture/default.sock", "/fixture/secondary.sock"})
+                         {"native:default", "native:secondary"})
         self.assertEqual(len(set(endpoint_values.values())), 2)
 
         runner_pid = self.runner_pid
         watcher_pids = [process.pid for process in self.watchers]
         self._cleanup_processes()
         ENDPOINT_EVIDENCE_ROWS.append({
-            "case": "one-normal-runner-concurrent-secondary-first-qualified-endpoints",
+            "case": "one-normal-runner-concurrent-secondary-first-native-server-groups",
             "runner_starter_server": "secondary",
             "runner_pid": runner_pid,
             "runner_process_count": 1,
             "server_groups": ["secondary", "default"],
             "selected_endpoint_identities": endpoint_values,
-            "qualified_endpoint_paths": ["/fixture/secondary.sock",
-                                          "/fixture/default.sock"],
+            "native_endpoints": ["native:secondary", "native:default"],
             "receipts": {receipt["watch_id"]: receipt["state"] for receipt in receipts},
             "notices": {watch_id: 1 for watch_id, _arm, _paths in self.arms},
             "acknowledgements": {watch_id: paths.ack.exists()
                                  for watch_id, _arm, paths in self.arms},
-            "cli_calls_scoped_by_server": True,
+            "herdr_calls": 0,
             "cleanup": {
                 "runner_reaped": self.runner_pid is None,
                 "runner_lock_fd_closed": self.runner_lock_fd is None,
@@ -1021,44 +933,54 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             },
         })
 
-    def test_sidless_native_result_is_published_consumed_and_acknowledged(self):
-        self.endpoint.sidless = True
-        os.environ["LIFECYCLE_SIDLESS"] = "1"
-        self.state_file.write_text(json.dumps({"status": "idle"}), encoding="utf-8")
+    def test_unattributed_native_session_stays_unknown_while_the_attributed_target_settles(self):
+        # Native evidence is exact or it is unknown: a target the runtime has not
+        # attributed to a session id (`-`) has no native read, so unknown is never turned
+        # into an idle receipt, while the attributed target next to it settles normally.
         self._arm(30, server="fixture", target_override="peer-0", session_override="-")
-        watch_id, arm, paths = self.arms[0]
+        self._arm(31, server="fixture", target_override="peer-control", separate=True)
+        sidless_id, sidless_arm, sidless_paths = self.arms[0]
+        bound_id, bound_arm, bound_paths = self.arms[1]
+        self.assertEqual(sidless_arm["agent"]["session_id"], "-")
+        store = peer_steward.peer_obligations.ObligationStore(self.state_root)
         self._hold_runner_lock()
         self._launch_watchers()
-        self._start_runner(lambda _server, endpoint=None: self.endpoint)
+        self._start_runner()
+        self.set_idle()
 
-        self._wait_until(lambda: paths.receipt.exists(),
-                         "sidless native result did not reach the watch receipt")
-        receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-        observation = peer_steward._read_json(paths.observation) or {}
-        native_session_id = (observation.get("native_wait") or {}).get(
-            "agent", {}).get("session_id")
-        if native_session_id in {None, ""}:
-            native_session_id = "-"
-        identity = peer_steward._watch_readiness_identity(arm, "idle")
-        store = peer_steward.peer_obligations.ObligationStore(self.state_root)
+        self._wait_until(lambda: bound_paths.receipt.exists(),
+                         "the attributed native target did not reach its watch receipt")
+        receipt = json.loads(bound_paths.receipt.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["state"], "idle")
+        identity = peer_steward._watch_readiness_identity(bound_arm, "idle")
         projection = shared_readiness.target_result(store.root, identity)
-        self.assertEqual((arm["agent"]["session_id"],
-                          native_session_id,
-                          receipt["state"], projection["state"], projection["reason"]),
-                         ("-", "-", "idle", "ready", "native-turn-ready"))
+        self.assertEqual((projection["state"], projection["reason"]),
+                         ("ready", "native-turn-ready"))
+        # Several more runner passes later the sidless watch has still settled nothing.
+        before = self.endpoint.observe_count.value
+        for _ in range(3):
+            self.set_idle()
+            time.sleep(0.3)
+        self.assertFalse(sidless_paths.receipt.exists(),
+                         "an unattributed native session must never settle as idle")
+        self.assertIsNone(shared_readiness.target_result(
+            store.root, peer_steward._watch_readiness_identity(sidless_arm, "idle")))
+        self.assertEqual(self._herdr_calls(), [])
         from dispatch_seat_handover import acknowledge_watch
         self.assertEqual(acknowledge_watch(
-            watch_id, "claude", "steward-30", "sidless-lifecycle-test"), "created")
-        self.assertTrue(paths.ack.exists())
+            bound_id, "claude", "steward-31", "sidless-lifecycle-test"), "created")
+        self.assertTrue(bound_paths.ack.exists())
+        self.assertFalse(sidless_paths.ack.exists())
         runner_pid = self.runner_pid
         watcher_pids = [process.pid for process in self.watchers]
         self._cleanup_processes()
         SIDLESS_EVIDENCE_ROWS.append({
-            "case": "sidless-complete-census-native-to-runner-to-receipt-ack",
-            "sidless_arm_and_native_result": True,
-            "projection": {"state": projection["state"], "reason": projection["reason"]},
-            "receipt": receipt["state"],
-            "acknowledged": paths.ack.exists(),
+            "case": "unattributed-native-session-stays-unknown-attributed-target-settles",
+            "sidless_arm_settled": False,
+            "attributed_projection": {"state": projection["state"], "reason": projection["reason"]},
+            "attributed_receipt": receipt["state"],
+            "acknowledged": bound_paths.ack.exists(),
+            "runner_reads_during_sidless_passes": self.endpoint.observe_count.value - before,
             "runner_pid": runner_pid,
             "runner_reaped": self.runner_pid is None,
             "watcher_pids": watcher_pids,
@@ -1145,9 +1067,9 @@ def main(argv=None):
         LifecycleRunnerProcessTest(
             "test_runner_recovers_independent_watches_and_refreshes_without_jobs_change"),
         LifecycleRunnerProcessTest(
-            "test_one_runner_serves_concurrent_endpoints_when_secondary_starts_first"),
+            "test_one_runner_serves_concurrent_server_groups_when_secondary_starts_first"),
         LifecycleRunnerProcessTest(
-            "test_sidless_native_result_is_published_consumed_and_acknowledged"),
+            "test_unattributed_native_session_stays_unknown_while_the_attributed_target_settles"),
     ])
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(LifecycleProjectionTest))
     regression_suite, selected = _selected_regressions()
@@ -1183,7 +1105,7 @@ def main(argv=None):
         "endpoint_fixtures": ENDPOINT_EVIDENCE_ROWS,
         "sidless_fixtures": SIDLESS_EVIDENCE_ROWS,
         "limitations": [
-            "The detached production watcher entrypoints and production cmd_obligation_runner ran as isolated local processes; only the runner observation transport was pipe-backed test data because this sandbox denies local Unix-socket bind.",
+            "The detached production watcher entrypoints and production cmd_obligation_runner ran as isolated local processes against real native session processes with their runtime registry records; no Herdr, socket or transport double is involved (a logging `herdr` on PATH asserts zero calls).",
             "All process and RSS/identity evidence in this phase is from an isolated local fixture.",
             "No host production PID was inspected or declared dead.",
         ],

@@ -88,8 +88,30 @@ def native_agent(harness, session_id, *, pane=None, server=None):
         return None
 
 
-def native_lifetime(harness, session_id, *, pid=None, pid_start=None, pid_namespace=None):
-    """Return live/ended/unknown using exact process birth or complete native proof."""
+def end_observation():
+    """A fresh per-pass reading of the live session holders for ``native_lifetime``.
+
+    The reading is lazy and taken at most once per harness, so a pass that asks about
+    many sessions scans the process table once instead of once per session. ``None``
+    (collector unavailable) leaves each call to take its own reading.
+    """
+    try:
+        tools = str(_UTILITIES_DIR.parent / "tools")
+        if tools not in os.sys.path:
+            os.sys.path.insert(0, tools)
+        from fleet.collectors.steward import end_observation as fresh
+        return fresh()
+    except Exception:
+        return None
+
+
+def native_lifetime(harness, session_id, *, pid=None, pid_start=None, pid_namespace=None,
+                    observation=None):
+    """Return live/ended/unknown using exact process birth or complete native proof.
+
+    ``observation`` is one pass's shared ``end_observation()``; without it the call
+    takes its own reading.
+    """
     if pid is not None and pid_start and pid_namespace:
         try:
             if pid_namespace != os.readlink("/proc/self/ns/pid"):
@@ -106,7 +128,8 @@ def native_lifetime(harness, session_id, *, pid=None, pid_start=None, pid_namesp
         if tools not in os.sys.path:
             os.sys.path.insert(0, tools)
         from fleet.collectors.steward import session_liveness
-        state = session_liveness(harness, session_id, agents=())
+        options = {} if observation is None else {"observation": observation}
+        state = session_liveness(harness, session_id, agents=(), **options)
         return state if state in {"live", "ended", "unknown"} else "unknown"
     except Exception:
         return "unknown"

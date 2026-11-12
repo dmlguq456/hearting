@@ -2536,6 +2536,32 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self._fields(proc.stdout.splitlines()[0])["state"], "armed")
 
+    def test_watch_from_a_herdr_window_arms_and_settles_natively_when_herdr_is_unreachable(self):
+        """The caller's own seat proof asks Herdr (the shared seat resolver) only when the
+        caller itself sits in a Herdr window. With Herdr absent or failing the seat stays
+        unknown, the watch still arms with no refusal, and it settles from native state."""
+        failing = self.tmp_root / "failing-herdr-bin"
+        failing.mkdir()
+        (failing / "herdr").write_text("#!/bin/sh\nexit 1\n")
+        (failing / "herdr").chmod(0o755)
+        for label, path in (("absent", "/nonexistent"),
+                            ("failing", str(failing) + os.pathsep + "/usr/bin" + os.pathsep + "/bin")):
+            with self.subTest(herdr=label):
+                self.seat.set("working")
+                env = self._env("held", with_herdr=False)
+                env["PATH"] = path
+                env["HERDR_PANE_ID"] = "w1:p5"
+                env["CLAUDE_CODE_SESSION_ID"] = "steward-in-window-" + label
+                proc = self._run("watch", self.target, "--wake", "none", env=env)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                fields = self._fields(proc.stdout.splitlines()[0])
+                self.assertEqual(fields["state"], "armed")
+                self._release()
+                receipt = self._wait_for_receipt(fields["watch_id"])
+                self.assertEqual((receipt["state"], receipt["agent"]["session_id"]),
+                                 ("idle", "sid-peer"))
+                self._wait_for_watcher_exit(fields["watch_id"])
+
     def test_absent_target_is_exit_4_with_zero_watch_files(self):
         proc = self._run("watch", "ghost", env=self._env("held"))
         self.assertEqual(proc.returncode, 4)

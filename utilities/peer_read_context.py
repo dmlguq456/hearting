@@ -39,6 +39,16 @@ class PeerReadContext:
         self._recipient_censuses = {}
         self._transfer_roots = None
         self._peer_notice_records = None
+        self._end_observation = _UNOBSERVED
+
+    def end_observation(self, loader):
+        """Reuse one lazy session-holder reading for every lifetime question of this pass.
+
+        It is an observation of live processes, never delivery state, a claim or an
+        acknowledgement; a settlement that acts on it re-checks lifetime afresh."""
+        if self._end_observation is _UNOBSERVED:
+            self._end_observation = loader()
+        return self._end_observation
 
     def transfer_roots(self, loader):
         """Reuse candidate ledger roots for exact per-message transfer reads.
