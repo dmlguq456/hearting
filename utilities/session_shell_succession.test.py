@@ -622,6 +622,12 @@ class SessionShellSuccessionTest(unittest.TestCase):
         cache = Path(self.env['XDG_STATE_HOME'])/'hearting/human-waits/projection.json'
         value = json.loads(cache.read_text()); key = window.harness+'\0'+window.sid
         value['observed_at'] = time.time()
+        # The session's own route demand is fresh too, as the PTY tests seed it: a stale or missing
+        # one wakes the producer, whose next write (no such route) would take the seeded row away.
+        value['route_sessions'] = {**(value.get('route_sessions') if isinstance(value.get('route_sessions'), dict) else {}),
+                                   key: time.time()}
+        value['route_status'] = {**(value.get('route_status') if isinstance(value.get('route_status'), dict) else {}),
+                                 key: 'route 1 · ROUTE_PAGE'}
         value['route_panels'] = {key: [{'id': 'rt-detail', 'title': 'ROUTE_PAGE', 'state': 'working', 'worker_stage': 'inline',
             'stages': [{'name': 'inline', 'st': 'active'}], 'harness': 'codex', 'model': 'gpt-fixture', 'effort': 'high',
             'ctx_pct': 40, 'agents': 2, 'visibility': {'codes': {'schema': 'route_visibility_codes_v1', 'shape': 'direct',
