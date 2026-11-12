@@ -483,7 +483,6 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
             plan = slow_phase_plan(slow, reps, cadence)
             watch = PublishWatch(cache)
             watch.wait_publish(cadence + 30.0)
-            cycle = []
             for rep in range(reps):
                 anchor = watch.last_publish_ns or time.monotonic_ns()
                 batch = []
@@ -499,11 +498,10 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
                     injected.append(ev)
                     watch.add(ev)
                 watch.until_done(cadence + 30.0)
-                cycle.extend(batch)
+                for ev in batch:       # right after the publish: a later event may close or kill the route
+                    _ask(probe, fixture, ev)
                 if watch.pending or watch.last_publish_ns == anchor:
                     watch.wait_publish(cadence + 5.0)
-            for ev in cycle:
-                _ask(probe, fixture, ev)
         # The Fleet keeps going at its own cadence: give the last events time to show.
         tail_end = time.monotonic() + FLEET_TAIL_S
         while time.monotonic() < tail_end:

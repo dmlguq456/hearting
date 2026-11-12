@@ -454,9 +454,16 @@ def _history_row(index: int, row_bytes: int, now: float, total: int | None = Non
     status = ("open", "open", "done")[phase]
     if total is not None and attempt_index == (total - 1) // HISTORY_ROWS_PER_ATTEMPT:
         status = "done"
-    stamp = _iso(now - _history_age_s(index, total))
-    return _padded_row(stamp, status, f"hist-{attempt_index:06d}",
-                       _history_metadata(attempt, attempt_index), row_bytes)
+    age = _history_age_s(index, total)
+    metadata = _history_metadata(attempt, attempt_index)
+    if age < 86_400:
+        # A first-screen row bound to a route needs that route's record (``required-details``
+        # stays partial without it and Fleet never leaves loading), so the recently finished
+        # attempts are standalone dispatches here: they exercise the afterglow and stall
+        # windows, not the route-detail path (which the open routes cover).
+        for key in ("route_id", "route_hash", "route_node"):
+            metadata.pop(key, None)
+    return _padded_row(_iso(now - age), status, f"hist-{attempt_index:06d}", metadata, row_bytes)
 
 
 # Live 2026-11-12: of ~7,740 registry rows, ~61 are younger than 6 h and ~161 younger than 24 h
