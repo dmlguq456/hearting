@@ -8131,24 +8131,29 @@ def _read_screen(target):
     judged key into a shell seat's pane reads here first: while the host says a
     shell editor holds the outer keys, or gives no answer, there is no screen to
     type into (None), never the framed pane read again as an empty box."""
+    return _read_screen_reason(target)[0]
+
+
+def _read_screen_reason(target):
+    """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
     seat = _shell_seat(target)
     if seat is not None:
         import session_shell
-        lines = session_shell.native_screen(seat)
+        lines, why = session_shell.native_screen_reason(seat)
         if lines != session_shell.PASSTHROUGH:
-            return lines
+            return lines, why
     if terminal_surface.is_tmux_pane(target):
         tmux = _tmux_surface(target)
         text = tmux.read_visible(target, ansi=True) if tmux else None
-        return _screen_lines(text) if text and text.strip() else None
+        return (_screen_lines(text) if text and text.strip() else None), ""
     try:
         proc = subprocess.run(_herdr_argv("agent", "read", target, "--source", "visible", "--format", "ansi"),
                               capture_output=True, text=True, errors="replace", timeout=_herdr_get_timeout())
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, ""
     if proc.returncode != 0 or not (proc.stdout or "").strip():
-        return None
-    return _screen_lines(proc.stdout)
+        return None, ""
+    return _screen_lines(proc.stdout), ""
 
 
 _CODEX_UNMATERIALIZED = "not materialized yet"
@@ -8273,7 +8278,9 @@ def _clear_look(target, req):
         return refusal, agent, None
     lines = _read_screen(target)
     if lines is None:
-        return "screen-unknown", agent, None
+        # A shell seat says why (an older host, an open shell editor, no answer); the
+        # tidy notice names that cause instead of one undifferentiated line.
+        return _read_screen_reason(target)[1] or "screen-unknown", agent, None
     return _screen_ready(req.get("harness"), lines), agent, lines
 
 
@@ -8456,7 +8463,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     req, why = clear.validate_idle_request(path, args.nonce)
@@ -8466,7 +8473,7 @@ def cmd_idle_card_request(args):
     if not reason and not exact_session(agent):
         reason = "target-changed"
     if reason:
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     claim, why = clear.claim_idle_card_request(path, args.nonce)
@@ -8477,7 +8484,7 @@ def cmd_idle_card_request(args):
         reason = "target-changed"
     if reason:
         clear.release_unsent_idle_request(claim)
-        queued = reason in {"draft", "draft-unknown", "form-open", "screen-unknown", *_TMUX_INPUT_WAIT} \
+        queued = reason in {"draft", "draft-unknown", "form-open", *_SCREEN_WAIT, *_TMUX_INPUT_WAIT} \
             or reason.startswith("not-idle-")
         return finish("queued" if queued else _look_outcome(reason), reason)
     checked, why = clear.validate_idle_request(path, args.nonce, _sending_claim=claim.get("idle_request"))
@@ -8501,6 +8508,10 @@ def cmd_idle_card_request(args):
     if clear.finish_idle_card_request(claim, accepted=True):
         return finish("true")
     return finish("unverified", "arrival-not-observed")
+
+
+# Screen doubts that pass on their own; an older shell host does not, so it is not waited for.
+_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer"})
 
 
 def _look_outcome(reason):

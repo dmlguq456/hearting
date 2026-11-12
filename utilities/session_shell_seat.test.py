@@ -142,6 +142,49 @@ class ShellSeatTest(unittest.TestCase):
                 self.assertIsNone(fixture.peer._read_screen(self.pane))
                 pane.assert_not_called()
 
+    def test_an_unreadable_shell_screen_names_its_cause_for_the_tidy_notice(self):
+        # 2026-11-11: tidy's /compact was not typed twice with only "화면을 읽지 못했습니다".
+        # Hosts started before the `screen` request (v4.11.x, still running) answer it with
+        # the generic unsupported-operation refusal; the cause is now named, and the one
+        # notice line says it together with "run /compact yourself".
+        import session_tidy_clear
+        self.publish("claude")
+        empty = [[["› ", False]]]
+        cases = (({"ok": False, "reason": "unsupported-operation", "not_started": True}, "shell-host-outdated"),
+                 ({"ok": True, "screen": empty, "focused": True}, "shell-editor-open"),
+                 ({"ok": True, "screen": empty}, "shell-no-answer"),
+                 ({"ok": False, "reason": "attachment-changed"}, "shell-no-answer"),
+                 ({"ok": False}, "shell-no-answer"))
+        for answer, reason in cases:
+            with self.subTest(answer=answer), \
+                 mock.patch.object(session_shell, "control", return_value=answer), \
+                 mock.patch.object(fixture.peer, "_herdr_argv") as pane, \
+                 mock.patch.object(fixture.peer.terminal_surface, "is_tmux_pane", return_value=False):
+                self.assertEqual(fixture.peer._read_screen_reason(self.pane), (None, reason))
+                self.assertIsNone(fixture.peer._read_screen(self.pane))
+                pane.assert_not_called()
+                with mock.patch.object(fixture.peer, "_interpret_payload",
+                                       return_value=("idle", {"pane": self.pane, "harness": "claude",
+                                                              "session_id": "sid-1"}, 0, None)), \
+                     mock.patch.object(fixture.peer, "_run_herdr_get"), \
+                     mock.patch.object(fixture.peer, "_tmux_input_refusal", return_value=None):
+                    look = fixture.peer._clear_look(self.pane, {"harness": "claude", "sid": "sid-1",
+                                                                "seat": {"pane": self.pane}})
+                self.assertEqual(look[0], reason)
+        spec = importlib.util.spec_from_file_location(
+            "ui_text_ko", Path(__file__).resolve().parents[1] / "tools" / "i18n" / "ui_text.py")
+        ui_text = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ui_text)
+        with mock.patch.object(session_tidy_clear.st, "_ui_translator", return_value=ui_text.translator("ko")):
+            line = session_tidy_clear._notice_text("skipped", "shell-host-outdated")
+        self.assertIn("이전 판", line)
+        self.assertIn("/compact 하세요", line)
+        self.assertNotIn("화면을 읽지 못했습니다", line)
+        # An older host does not answer later either: it is not waited for like a passing doubt.
+        self.assertNotIn("shell-host-outdated", fixture.peer._SCREEN_WAIT)
+        self.assertLessEqual({"screen-unknown", "shell-editor-open", "shell-no-answer"},
+                             set(fixture.peer._SCREEN_WAIT))
+
     def test_herdr_unknown_turn_takes_the_shell_lifecycle_state_only_for_the_seat(self):
         self.publish("codex")
         payload = {"result": {"type": "agent_info", "agent": {"agent": "codex", "agent_status": "unknown"}}}
