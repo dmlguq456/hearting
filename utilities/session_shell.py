@@ -932,7 +932,19 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
+    turn = None
+    if state == "unknown" and native_pid:
+        # Spec rule 26, display only: before a lifecycle event names this session's
+        # state, the runtime's own turn record (Claude's session record, Codex's
+        # rollout; the files watched above) as the pane reader reads it. It never
+        # stands for input readiness.
+        try:
+            from terminal_surface import native_turn
+            turn = native_turn(harness, native_pid, sid)
+        except Exception:
+            turn = None
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
+            **({"native_turn": turn} if turn in ("idle", "working", "blocked") else {}),
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
@@ -1131,7 +1143,7 @@ def _backend_operation(request: dict) -> dict:
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                                for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r",
-                                           "g_spin", "g_work_off")}
+                                           "g_spin", "g_work_off", "g_blocked")}
             panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:

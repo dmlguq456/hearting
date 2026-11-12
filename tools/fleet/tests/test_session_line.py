@@ -118,11 +118,11 @@ class CommonSessionLineTest(unittest.TestCase):
                          ctx_pct=12, elapsed_min=54.0)],
         }
         jobs["rt-d"] = [job(attempt_id="o4", depth=1, worker_type="owner", liveness="dead", harness="codex",
-                            elapsed_min=30.0)]
+                            model="gpt-fixture", effort="high", ctx_pct=40, elapsed_min=30.0)]
         collected = {rid: {"jobs": rows} for rid, rows in jobs.items()}
         # Fleet's own route records (``_route_records``), as the producer observes them.
         closed = {"codes": {"schema": "route_visibility_codes_v1", "verification": {"closed_at": "2026-11-11T00:00:00Z"}}}
-        routes = {"rt-a": {"id": "rt-a", "state": "working", "activity": "running", "owner_waits": True, "current": True,
+        routes = {"rt-a": {"id": "rt-a", "state": "working", "activity": "running", "current": True,
                            "worker_stage": "execute"},
                   "rt-b": {"id": "rt-b", "state": "working", "activity": "running", "current": True, "worker_stage": "one-shot"},
                   "rt-c": {"id": "rt-c", "state": "dead", "activity": "ended", "current": True, "worker_stage": "execute"},
@@ -149,8 +149,12 @@ class CommonSessionLineTest(unittest.TestCase):
                          ("python3", "tools/run-tests.py", "Edit · utilities/x.py"))
         self.assertNotIn("after_tool", c); self.assertNotIn("idle_tool", c)
         self.assertNotIn("ctx_pct", c); self.assertNotIn("tool", c); self.assertEqual(c["elapsed_min"], 54.0)
-        self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
+        # Spec rule 27: an owner waiting on its running worker is a running route.
+        self.assertEqual([row["marker"] for row in (a, b, c, d)], ["working", "working", "dead", "dead"])
         self.assertTrue(d["closed"])
+        # With nothing running, the owner's recorded harness, model and effort stay; no context.
+        self.assertEqual((d["harness"], d.get("model"), d.get("effort")), ("codex", "gpt-fixture", "high"))
+        self.assertNotIn("ctx_pct", d)
         # The route page reads the owner Fleet's route row names: the single depth-1 owner.
         self.assertEqual([row.get("owner_attempt") for row in (a, b, c, d)], ["o", "o2", "o3", "o4"])
         # The record's owner_attempt_id picks the current owner over an earlier one;
@@ -162,8 +166,8 @@ class CommonSessionLineTest(unittest.TestCase):
             with mock.patch.object(live, "_collect_routes", return_value={"rt-e": {"jobs": two, "record": record}}):
                 session_line.route_details(object(), rows, {}, now=10_000.0)
             self.assertEqual(rows["claude\0s"][0].get("owner_attempt"), want)
-        # Fleet's judgment: an owner waiting on its worker is ●, a closed route is in no count.
-        self.assertEqual(session_line.route_badge("route 4 · execute", panels["claude\0s"]), "route 4 ⠏1 ●1 ✕1")
+        # Fleet's judgment: a closed route is in no count.
+        self.assertEqual(session_line.route_badge("route 4 · execute", panels["claude\0s"]), "route 4 ⠏2 ✕1")
         self.assertEqual(session_line.token_text(250_136), "250K")
         # Without its rows the count stays alone; a missing label stays empty.
         self.assertEqual(session_line.route_badge("route 3 · execute", None), "route 3")

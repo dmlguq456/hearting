@@ -74,6 +74,12 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
+// Spec rule 26: while no lifecycle event has named this session's state (start,
+// resume, /clear, a session switch), the panel shows the runtime's own turn record
+// the projection already reads (Claude's session record, Codex's rollout). Display
+// only: `state`, readiness and every input gate keep the host's own value.
+let nativeTurn = '';
+function shownState(){return state==='unknown'&&nativeTurn?nativeTurn:state;}
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
@@ -263,7 +269,7 @@ function readRouteRaw(){
 }
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
@@ -551,9 +557,10 @@ async function projection() {
   try{
     const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
+    nativeTurn=['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'';
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,nativeTurn]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
@@ -858,7 +865,7 @@ async function lifecycle(req) {
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
-    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
@@ -869,7 +876,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }

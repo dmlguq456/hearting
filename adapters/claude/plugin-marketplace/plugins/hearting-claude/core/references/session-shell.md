@@ -102,10 +102,18 @@ The panel follows the 2026-11-11 unified layout (the C3 draft the person
 chose), placed by the C6 rule: what is always there sits at the top, what
 comes and goes at the bottom. The top border carries this session's state on
 the left, as Fleet's session row judges and draws it, with an English
-lower-case word (a spinner and `running` while it works, `●` `idle`, `◑`
-`waiting`; an unknown state is left blank), and only the gear `⚙` on the right,
-whose press reaches the rule cell beside it and the corner. `HEARTING` names
-the settings screen alone. What runs shares Fleet's one beat (its 100 ms
+lower-case word (a spinner and `running` while it works or an answer is being
+typed in for the person, `●` `idle`, `◑` `waiting`), and only the gear `⚙` on
+the right, whose press reaches the rule cell beside it and the corner. Before a
+lifecycle event names the state (start, resume, `/clear`, a session switch), the
+runtime's own turn record that the projection already reads stands in (Claude's
+session record, Codex's rollout), for display only; with none the state is left
+blank. The whole outer frame takes that word's color in the same paint, on the
+lifecycle event itself: running and waiting Fleet's session keys, idle and an
+unknown state the neutral frame gray (the terminal's dim on an unknown face), no
+hue in `mono`. A route's state stays in the route box: a failed current route
+turns that box's line to the failure color and a running one pulses `route N`;
+the question box keeps its rose. `HEARTING` names the settings screen alone. What runs shares Fleet's one beat (its 100 ms
 spinner frame and one-second blink): this session's spinner, a working route's
 mark, the running stage and the open route count. The host keeps that beat only
 while the painted panel shows one of them; a spinner turn swaps only its own
@@ -139,11 +147,14 @@ page uses, and shows its last rows under the route.
 An opened route detail is indented inside its box, never a box in a box,
 and nothing is drawn for an empty route list or message list. Box rows are
 laid out at the box's inner width. Beside the native area a folded route takes
-two rows: the glyph and its whole title (cut with `…` only past the row), then,
-indented and dim, harness, model, context percent and elapsed time
-(`claude Opus 5.5 25% · 1h 27m`); short of cells the `route line` choice keeps
-its value (`time`: elapsed, `model`: model) and the other goes, and a value is
-shown whole or not at all. A press on either row opens it. The bottom layout
+two rows: the glyph with harness, model, effort, context percent, a one-step
+route's open tool (only where it fits) and elapsed time, in the colors of
+Fleet's ROUTES row (`⠏ claude Opus 5.5 high 25% · >_ Bash · 1h 27m`), then,
+two cells in, its whole title (cut with `…` only past the row); short of cells
+effort goes first, then the `route line` choice keeps its value (`time`:
+elapsed, `model`: model) and the other goes, and a value is shown whole or not
+at all. A route with no value at all takes one row, glyph and title. A press on
+either row opens it. The bottom layout
 keeps its one folded row. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
 `messages`, stage names, `5h`/`7d`); only real content and
@@ -189,8 +200,9 @@ process still clear them, and an unobserved value is never made up.
 The route box carries `route N` in its top border (the producer's own label
 alone, over a `Checking` row, while its rows are not read yet). Each current
 route (the ones the statusline counts) is one folded row: Fleet's route marker
-and judgment (`⠏` working, `●` waiting on a worker or a person, `✕` stopped,
-`✓` done, `◌` no response),
+and judgment (`⠏` while anything of it runs, its owner or a worker; `●`
+waiting, with nothing running or on a person; `✕` stopped; `✓` done; `◌` no
+response, nothing of it running),
 title, harness, context percent and elapsed time (`route line` = `time`, the
 default) or title, harness, model and context percent (`model`). The bottom
 layout fits model, effort, a five-cell gauge, the current tool or stage and the
@@ -209,7 +221,9 @@ rows shown plus the border counts always add up to N. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
 Fleet's own route records from that pass and adds each row's marker and the
 values of who does the work now (the working worker of the shown stage, else
-the owner: harness, display model, effort, context, tool, active sub-agents)
+the owner: harness, display model, effort, context, tool, active sub-agents;
+with nothing of the route running, the owner attempt's harness, model and
+effort as it recorded them, without context, tool or sub-agents)
 plus an absolute start time, and counts running, waiting and stopped routes
 into the statusline label (`route 3 ⠏2 ✕1`) by Fleet's own rule, over every
 current route of that pass rather than the kept rows; a route
@@ -280,7 +294,7 @@ light for the `light` theme, else the terminal's background where it is
 already known (`COLORFGBG`; nothing is asked); on an unknown background `terminal` and
 `mono` keep the terminal's own and paint no shade. On a shade nothing is dimmed
 on top: secondary text and messages take 248/241, body text 253/237, the panel
-frame 244/243, route box 245/243, messages rules 242/245; the question's border,
+frame 244/243 while idle or unknown, route box 245/243, messages rules 242/245; the question's border,
 `◑` and `›` are 174/131 on every colored theme.
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's notice row takes the theme, not the shade). An unknown position, theme or shade falls back to its own

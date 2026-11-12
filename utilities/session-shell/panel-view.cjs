@@ -31,12 +31,15 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
   const F=FACES[known||'dark'];
   return rows.map(row=>row.map(part=>{
     let foreground=Number.isInteger(part.foreground)&&part.foreground>=0?part.foreground:null,dim=part.dim===true,bold=part.bold===true;
-    const role=part.role||'';
+    // Spec rule 25: a frame or route box in a state color reads as the plain line where no hue is shown.
+    const role=theme==='mono'&&part.role==='frame-state'?'frame':theme==='mono'&&part.role==='route-dead'?'route':part.role||'';
+    // (Box lines never turn bold: weight changes a line's stroke and, in some terminals, its width.)
+    if(role==='route-dead')bold=false;
     if(!full){
       // Eight colors: the light theme leaves the pale default white to the terminal.
       if(theme==='mono')foreground=null;
       else if(theme==='light'&&foreground===7)foreground=null;
-      return {...part,foreground};
+      return {...part,foreground,bold};
     }
     if(theme==='mono')foreground=null;
     else if(foreground!==null&&(known==='light'||shade))foreground=HUES[known||'dark'][foreground]??foreground;
@@ -49,6 +52,11 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
     // g_work_off, waiting g_blocked) on every face; the state colors above are
     // the route and stage marks' (running 150 / idle 186).
     else if(role==='session'&&theme!=='mono'&&(shade||known==='light'))dim=false;
+    // Spec rule 25: a running or waiting session's frame keeps its state word's color
+    // (Fleet's session key, the light face's deep counterpart) at full strength.
+    else if(role==='frame-state')dim=false;
+    // A failed route's box line: its face's failure color, at full strength.
+    else if(role==='route-dead'){if(known)foreground=F.dead;dim=false;}
     // Spec rule 22: on a known face each line takes its role's color with or
     // without a shade (frame 244/243, route 245/243, messages 242/245); an
     // unknown face keeps the terminal's own, mono keeps no hue.
@@ -89,7 +97,8 @@ const APPEARANCE_KEYS=['position','theme','shade'];
 // The session's own state, as Fleet's session row judges and draws it
 // (render_cells `_LIVE_GLYPH`/`_state_key`): a working session spins.
 const SPIN='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
-const LIVE={working:['spin','running','g_spin'],idle:['●','idle','g_work_off'],blocked:['◑','waiting','g_blocked']};
+// Spec rule 26: an answer being typed in for the person reads as running.
+const LIVE={working:['spin','running','g_spin'],submitting:['spin','running','g_spin'],idle:['●','idle','g_work_off'],blocked:['◑','waiting','g_blocked']};
 function change(value,key,step){
   const options=OPTIONS;
   if(options[key]){const list=options[key];return {...value,[key]:list[(list.indexOf(value[key])+step+list.length)%list.length]};}
@@ -137,7 +146,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     }
     if(current.length)put(current);
   }
-  const routes=model.routes||[],first=routes[0];
+  const routes=model.routes||[];
   // Fleet's shared beat (render_cells `_blink_phase`): one second lit, one second
   // dark, from the same clock as the 100 ms spinner frame.
   const beat=Math.floor(Math.trunc(frame)/10)%2===0;
@@ -223,13 +232,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     return out;
   }
   const asking=!!model.answerable;
-  // UI attention is not native agent liveness. Only a confirmed route failure
-  // may make this frame red; an unknown source/permission popup cannot.
-  const failed=!stale&&first?.state==='dead',done=!stale&&first?.state==='done';
-  const working=!stale&&first?.state==='working';
-  const answer=!stale&&asking;
-  const color=failed?'g_dead':answer?'lvl_y':working?'g_work':done?'lvl_g':'dim';
-  const status=failed?(first.reason||t('unknown','Checking state')):answer?t('answer','Your answer needed'):working?t('working','Working'):done?t('ready','Result ready'):'';
   const cfg={...defaults,...configuration};
   let routePages=1,routeArea=null,routeOffset=0,routeMax=0,routeStep=1;
   // A message too long to open in place is read here, on the route detail's pages.
@@ -378,7 +380,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
         const end=r.elapsed?[text(' '),text(r.elapsed)]:[],left=cut(parts,inner-size(end));
         return [...left,pad(inner-size(left)-size(end)),...end];
       }
-      // As in second(): the title gives way first, and each fixed value
+      // As in leadRow(): the title gives way first, and each fixed value
       // (harness, model, context, time) shows whole or not at all.
       const H=p.harness?[p.harness]:[],M=p.model_text?[p.model_text]:[],C=p.ctx?[p.ctx]:[];
       const E=elapsedWidth?[text(' '.repeat(elapsedWidth-measure(r.elapsed||''))+(r.elapsed||''))]:[];
@@ -413,7 +415,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // messages dim, all from the panel's own styles.
     // Spec rule 22: each line keeps its own role, so a shade colors it without a dim on top;
     // the question's border is rose.
-    const tone={route:{key:'plain',role:'route'},messages:'dim',question:{key:asking?'lvl_y':'dim',role:'accent-line'}};
+    // Spec rule 25: a route's state stays inside the route box. A failed current route
+    // turns the box line to the failure color; a running one pulses `route N` (below).
+    const failedRoute=!stale&&shown.some(r=>r.kind==='dead');
+    const tone={route:failedRoute?{key:'g_dead',role:'route-dead'}:{key:'plain',role:'route'},messages:'dim',question:{key:asking?'lvl_y':'dim',role:'accent-line'}};
     const L=(v,k)=>typeof k==='object'?{...text(v,k.key),role:k.role}:text(v,k);
     const box=4;
     // Box content is laid out at the box's inner width, so nothing is cut by the frame.
@@ -445,26 +450,39 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const fit=clip(item.parts||[],Math.max(0,inner-box));
       return {...item,parts:[L('│ ',key),...fit.parts,pad(inner-box-fit.used),L(' │',key)]};
     };
-    // Spec rule 19: beside the native area a folded route takes two rows: the
-    // glyph and its whole title, then (indented, dim) harness, model, context and
-    // elapsed time. Short of cells the `route line` choice keeps its value (time:
-    // elapsed, model: model) and the other goes; a value shows whole or not at all.
-    function second(r){
-      const p=r.paint||{},value=x=>x?[{...x,dim:true}]:[];
-      const H=value(p.harness),M=value(p.model_text),C=value(p.ctx),E=r.elapsed?[text(r.elapsed)]:[];
-      const build=(h,m,c,e)=>{const left=[h,m,c].filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);return [text('  '),...left,...(e.length?[...(left.length?[text(' · ')]:[]),...e]:[])];};
-      const drops=routeLine==='model'?[[H,M,C,E],[H,M,C,[]],[H,M,[],[]],[H,[],[],[]],[[],[],[],[]]]:[[H,M,C,E],[H,[],C,E],[H,[],[],E],[[],[],[],E],[[],[],[],[]]];
+    // Spec rule 24 (rule 19's two rows, turned): beside the native area a folded
+    // route takes two rows. The first is its glyph with harness, model, effort,
+    // context percent, what a one-step route's doer is on now and the elapsed
+    // time, in the colors of Fleet's ROUTES row; the second, two cells in, its
+    // whole title. Short of cells effort goes first, then the `route line` choice
+    // keeps its value (time: elapsed, model: model) and the other goes; a value
+    // shows whole or not at all. No value at all: the glyph and title share one row.
+    function leadRow(r){
+      const p=r.paint||{},value=x=>x?[x]:[];
+      const H=value(p.harness),M=value(p.model_text),F=value(p.effort),C=value(p.ctx),E=r.elapsed?[text(r.elapsed)]:[];
+      const lead=[routeGlyph(r),text(' ')];
+      const build=(h,m,f,c,e,t=[])=>{const left=[h,m,f,c].filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+        const tail=[t,e].filter(x=>x.length).flatMap((x,i)=>i||left.length?[text(' · '),...x]:x);return [...lead,...left,...tail];};
+      const drops=routeLine==='model'?[[H,M,F,C,E],[H,M,[],C,E],[H,M,[],C,[]],[H,M,[],[],[]],[H,[],[],[],[]]]:
+        [[H,M,F,C,E],[H,M,[],C,E],[H,[],[],C,E],[H,[],[],[],E],[[],[],[],[],E]];
       // A one-step route (no stage flow) adds its open tool's name, Fleet's `>_ Bash`,
       // only where the row still has room for it; it never pushes a value out.
-      const tool=r.tool&&!r.flow&&!(Array.isArray(r.stages)&&r.stages.length>1)?[text(' · '),{...text('>_ ','lvl_g'),dim:true},{...text(r.tool,'loc_repo'),dim:true}]:[];
-      for(const pick of drops){const row=build(...pick);if(size(row)<=inner){if(size(row)<=2)return null;return tool.length&&size(row)+size(tool)<=inner?[...row,...tool]:row;}}
+      const tool=r.tool&&!r.flow&&!(Array.isArray(r.stages)&&r.stages.length>1)?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[];
+      for(const pick of drops){
+        const row=build(...pick);
+        if(size(row)>inner)continue;
+        if(size(row)<=size(lead))return null;
+        const more=tool.length?build(...pick,tool):[];
+        return more.length&&size(more)<=inner?more:row;
+      }
       return null;
     }
     const routeRows=[],detailRows=[];
     within(()=>{
       for(const r of listed){
         const key='route:'+r.id,p=r.paint||{};
-        const two=side?[[routeGlyph(r),text(' '),...cut(line(r.title||'·','loc_repo'),inner-2)],second(r)].filter(Boolean):null;
+        const first=side?leadRow(r):null,name=cut(line(r.title||'·','loc_repo'),inner-2);
+        const two=side?(first?[first,[text('  '),...name]]:[[routeGlyph(r),text(' '),...name]]):null;
         routeRows.push({parts:folded(r),two,action:key,kind:r.kind});
         if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
       }
@@ -610,7 +628,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // (Fleet's session glyph and color, an English word) and only the gear on the
   // right. `HEARTING` names the settings screen alone. An unknown state is left blank.
   const own=settings?null:LIVE[state];
-  const frameText=v=>({...text(v,color),role:'frame'});
+  // Spec rule 25: the outer frame takes the color of that state word: running and
+  // waiting their Fleet session key, idle and an unknown state the neutral frame
+  // gray (the terminal's dim on an unknown face). Route failures and results stay
+  // on their own rows' marks; the question box keeps its rose.
+  const color=own&&own[2]!=='g_work_off'?own[2]:'dim';
+  const frameText=v=>({...text(v,color),role:color==='dim'?'frame':'frame-state'});
   const leftParts=settings?[{...text(' HEARTING ','loc_repo'),bold:true}]:
     own?[frameText(' '),{...text(own[0]==='spin'?spinGlyph.text:own[0],own[2]),...(own[0]==='spin'?{spin:true}:{}),role:'session'},
       {...text(' '+own[1]+' ',own[2]),role:state==='idle'?'secondary':'session'}]:[];

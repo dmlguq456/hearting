@@ -37,15 +37,19 @@ for(const [width,height] of [[37,21],[80,14]]){
 
     def test_values_left_unrefreshed_claim_no_route_state(self):
         # Spec rule 12: the host marks values it could not refresh for a while;
-        # the route rows stay readable but nothing spins and the frame takes no
-        # route color, so an old state never reads as the current one.
+        # the route rows stay readable but nothing spins and the route box takes no
+        # failure color, so an old state never reads as the current one. The frame
+        # never takes a route's state at all (spec rule 25).
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const route=state=>({id:'r',title:'Exact route',state,kind:state,stages:[{name:'inline',st:'active'}],paint:{glyph:{text:'⠏'}}});
-for(const [state,color] of [['working','g_work'],['done','lvl_g'],['dead','g_dead']]){
- const args=extra=>({width:40,height:24,side:true,model:{routes:[route(state)],route_count:1,...extra},questions:()=>[],configuration:{},frame:3});
+const styles={dim:{dim:true},g_dead:{foreground:217,bold:true}};
+for(const state of ['working','done','dead']){
+ const args=extra=>({width:40,height:24,side:true,model:{routes:[route(state)],route_count:1,styles,...extra},questions:()=>[],configuration:{},frame:3});
  const fresh=view.render(args({})),old=view.render(args({stale:true}));
- assert.equal(fresh.color,color);assert.equal(old.color,'dim');
+ assert.equal(fresh.color,'dim');assert.equal(old.color,'dim');
+ const box=v=>v.rows.flat().find(p=>p.text==='╭');
+ assert.equal(box(fresh).foreground??undefined,state==='dead'?217:undefined,state);assert.equal(box(old).foreground??undefined,undefined,state);
  assert(old.rows.flat().some(p=>p.text.includes('Exact route')));
  assert(!old.rows.flat().some(p=>p.spin||p.beat&&String(p.text).startsWith('route')));
  if(state==='working')assert(fresh.animated);
@@ -71,14 +75,15 @@ for(const width of [37,40,80]){
  assert(!text.some(s=>s.includes('→')));
  assert(text[0].startsWith('┌'));assert(text.at(-1).endsWith('┘'));
  assert(v.rows.every(r=>r.every(s=>s.background===undefined&&s.reverse!==true)));
- assert.equal(v.color,'lvl_y');assert(v.hits.some(h=>h.action==='settings'));
+ // The frame follows the session's own state (none given here), never the question (spec rule 25).
+ assert.equal(v.color,'dim');assert(v.hits.some(h=>h.action==='settings'));
  assert(v.hits.some(h=>h.action==='route:r'));assert(v.hits.some(h=>h.action==='route'));
  assert(text.every(s=>s.length<=width));
 }
 const direct=view.render({width:40,height:24,side:true,model:{routes:[{title:'One step',state:'idle',stages:[{name:'inline'}]}]},questions:()=>[],configuration:{}});
 const text=direct.rows.flat().map(s=>s.text).join('');assert(!text.includes('→'));assert.equal(direct.color,'dim');
-const unknown=view.render({width:80,height:12,model:{},state:'blocked',questions:()=>[],configuration:{}});
-assert.equal(unknown.color,'dim'); // Native permission state is not route failure.
+const waiting=view.render({width:80,height:12,model:{},state:'blocked',questions:()=>[],configuration:{}});
+assert.equal(waiting.color,'g_blocked'); // The frame is the state word's color: waiting, not a route failure.
 '''
         self.node(script, "panel-view.cjs")
 
@@ -320,6 +325,32 @@ for(let height=10;height<=22;height++){
 '''
         self.node(script, "panel-view.cjs")
 
+    def test_an_unknown_state_carries_the_natives_own_turn_record_for_display(self):
+        # Spec rule 26: while the host has no lifecycle state (start, resume, /clear,
+        # a switch) the projection carries the runtime's own turn record, the one the
+        # pane reader uses; a known host state asks nothing.
+        from unittest import mock
+        import terminal_surface
+        shell.registry_root()
+        sid = "00000000-0000-4000-8000-000000001112"
+        calls = []
+        def turn(harness, pid, session):
+            calls.append((harness, pid, session))
+            return "idle"
+        with mock.patch.object(terminal_surface, "native_turn", side_effect=turn):
+            unknown = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
+                                             columns=40, rows=30, state="unknown")
+            known = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
+                                           columns=40, rows=30, state="working")
+            unbound = shell.panel_projection("claude", sid, columns=40, rows=30, state="unknown")
+        self.assertEqual(unknown.get("native_turn"), "idle")
+        self.assertNotIn("native_turn", known)
+        self.assertNotIn("native_turn", unbound)
+        self.assertEqual(calls, [("claude", os.getpid(), sid)])
+        with mock.patch.object(terminal_surface, "native_turn", return_value="unknown"):
+            self.assertNotIn("native_turn", shell.panel_projection("codex", sid, native_pid=os.getpid(),
+                                                                    native_start="0", columns=40, rows=30))
+
     def test_presentation_keeps_the_producers_whole_route_count_and_mcp(self):
         sys.path.insert(0, str(ROOT / "tools"))
         from fleet import session_panel
@@ -350,7 +381,7 @@ const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const p=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 const route=i=>({id:'r'+i,title:'ROUTE_'+i,state:'working',kind:'working',elapsed:'42m',paint:{glyph:p('⠏'),harness:p('codex'),ctx:p('72%')}});
 const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],selected:[p('fixture high')],context:[p('context 42%')],
- quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true}},
+ quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
  messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
 const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
 const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
@@ -365,13 +396,27 @@ const settings=paint({settings:{index:0,value:view.defaults}});assert(text(setti
 const gear=paint({state:'idle'}).hits.find(h=>h.action==='settings');assert(gear.row===0&&gear.left<=35&&gear.right>=39,JSON.stringify(gear));
 // The state word takes the same color as its glyph (Fleet's state key).
 const top=paint({state:'idle'}).rows[0];assert.equal(top[2].foreground,150);assert.equal(top[3].foreground,150);
+// Spec rule 25: the whole frame takes that word's color, running and waiting their
+// session keys, idle and an unknown state the neutral line, in the same paint.
+for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['idle',undefined],['unknown',undefined]]){
+ const v=paint({state}),frame=v.rows.flatMap(r=>[r[0],r.at(-1)]);
+ assert(frame.every(x=>(x.foreground??undefined)===want&&(want===undefined?x.dim===true:x.dim!==true)),state+' '+JSON.stringify(frame[0]));
+ assert(!v.rows.flat().some(x=>x.text==='╭'&&x.foreground===217),state+' no route failure here');
+}
+// A failed route turns only its own box line to the failure color; the frame stays the session's.
+const failed=paint({state:'idle',model:{routes:[route(0),{...route(1),state:'dead',kind:'dead'}]}});
+const box=failed.rows.flat().filter(x=>/^[╭╮╰╯]$/.test(x.text));
+assert(box.length===4&&box.every(x=>x.foreground===217&&x.bold===false),JSON.stringify(box));
+assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
 // Repo row, then Git on its own row; the route box high; messages (no box: two rules) fixed at the bottom.
 let rows=text(paint({state:'idle'}));
 assert(rows[1].includes('[e9] project')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
-// A folded route takes two rows beside the native area: glyph and title, then harness, context and time.
-const t0=rows.findIndex(s=>s.includes('ROUTE_0'));assert(rows[t0+1].includes('│   codex 72% · 42m'),rows.join('\n'));
+// Spec rule 24: a folded route takes two rows beside the native area: the glyph with
+// harness, context and time, then its title two cells in.
+const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
+assert(/│ │ \S codex 72% · 42m +│ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
 assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-7&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
@@ -385,7 +430,7 @@ for(const s of rows)assert.equal(cells(s),40,s);
 // before the route box scrolls in place; messages go last.
 const short=(h,q=question)=>text(view.render({width:40,height:h,side:true,sid:'s',configuration:{},model:{...model,answerable:true},state:'idle',questions:o=>q.slice(0,o.budget)}));
 for(const q of [[],question])for(let h=12;h<=30;h++){
- const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   codex'));
+ const rows=short(h,q),all=rows.join('\n'),two=rows.some(s=>s.includes('│   ROUTE_'));
  if(!all.includes('MESSAGE_2')&&all.includes('MESSAGE_1'))assert(!two&&/ \+2 ─ │/.test(all),h+'\n'+all);
  if(all.includes('MESSAGE_3')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
  if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2'),h+'\n'+all);
@@ -437,8 +482,9 @@ assert(idle.some(x=>x.includes('>_ no tool')),idle.join('\n'));
         self.node(script, "panel-view.cjs")
 
     def test_a_folded_one_step_route_adds_its_tool_only_where_the_row_has_room(self):
-        # Supervisor 2026-11-12: the second row of a folded route may add Fleet's `>_ tool`
-        # for a one-step route, never pushing out harness, model, context or time (rule 19).
+        # Supervisor 2026-11-12: the value row of a folded route may add Fleet's `>_ tool`
+        # for a one-step route, never pushing out harness, model, context or time (rules 19,
+        # 24: the values lead, the tool before the time).
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
 const P=(c)=>({glyph:{text:'⠋'},harness:{text:'claude'},model_text:{text:'Opus 5.5'},ctx:{text:c}});
@@ -449,7 +495,7 @@ const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,s
 const narrow=paint(40),wide=paint(52);
 assert(narrow.some(x=>x.includes('claude Opus 5.5 24% · 47m')),narrow.join('\n'));
 assert(!narrow.some(x=>x.includes('>_')),narrow.join('\n'));
-assert(wide.some(x=>x.includes('claude Opus 5.5 24% · 47m · >_ python3')),wide.join('\n'));
+assert(wide.some(x=>x.includes('⠋ claude Opus 5.5 24% · >_ python3 · 47m')),wide.join('\n'));
 assert.equal(wide.filter(x=>x.includes('>_')).length,1,wide.join('\n'));
 assert(!wide.some(x=>x.includes('tools/run-tests.py')),wide.join('\n'));
 '''
@@ -467,21 +513,24 @@ const model={route_count:2,routes:[
 const paint=(cfg,open=[],width=40)=>view.render({width,height:30,side:width<80,model,configuration:cfg,expandedKeys:open,questions:()=>[]}).rows.map(r=>r.map(s=>s.text).join(''));
 const time=paint({}),byModel=paint({route_line:'model'});
 const row=(rows,title)=>rows.find(s=>s.includes(title.slice(0,5)));
-// Spec rule 19: two rows beside the native area: glyph and title, then the values.
-const below=(rows,title)=>rows[rows.findIndex(s=>s.includes(title.slice(0,5)))+1];
-for(const rows of [time,byModel])assert(below(rows,'셸 표기').includes('codex gpt-6.1-sol 72% · 42m')&&!row(rows,'셸 표기').includes('codex'),rows.join('\n'));
+// Spec rule 24: two rows beside the native area: the glyph and the values, then the title.
+const above=(rows,title)=>rows[rows.findIndex(s=>s.includes(title.slice(0,5)))-1];
+for(const rows of [time,byModel])assert(above(rows,'셸 표기').includes('⠋ codex gpt-6.1-sol 72% · 42m')&&!row(rows,'셸 표기').includes('codex')
+ &&row(rows,'셸 표기').includes('│   셸 표기'),rows.join('\n'));
+// Effort goes first; with room it stays, in its place after the model.
+assert(paint({},[],48).some(s=>s.includes('⠋ codex gpt-6.1-sol high 72% · 42m')),paint({},[],48).join('\n'));
 // Short of cells the `route line` choice keeps its value and the other goes, whole.
 const narrowTime=paint({},[],32),narrowModel=paint({route_line:'model'},[],32);
-assert(below(narrowTime,'셸 표기').includes('codex 72% · 42m')&&!below(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
-assert(below(narrowModel,'셸 표기').includes('codex gpt-6.1-sol 72%')&&!below(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
+assert(above(narrowTime,'셸 표기').includes('codex 72% · 42m')&&!above(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
+assert(above(narrowModel,'셸 표기').includes('codex gpt-6.1-sol 72%')&&!above(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
 // A long title is cut on its own row; harness and elapsed time keep theirs.
-assert(row(time,'제목만').includes('…')&&below(time,'제목만').includes('claude')&&below(time,'제목만').includes('1h 27m'));
+assert(row(time,'제목만').includes('…')&&above(time,'제목만').includes('claude')&&above(time,'제목만').includes('1h 27m'));
 // Both rows open the route in place.
 const hitRows=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.filter(h=>h.action==='route:a').map(h=>h.row);
 assert.equal(hitRows.length,2);assert.equal(hitRows[1],hitRows[0]+1);
 // Unreported context is left out, never `?`.
 assert(!time.join('\n').includes('?'));
-const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+2,opened.findIndex(s=>s.includes('제목만')));
+const opened=paint({},['route:a']),detail=opened.slice(opened.findIndex(s=>s.includes('셸 표기'))+1,opened.findIndex(s=>s.includes('제목만')));
 assert(detail.some(s=>s.includes('gpt-6.1-sol high')&&s.includes('72%')),detail.join('\n'));
 assert(detail.some(s=>s.includes('plan ✓ › execute ● › review')));assert(detail.some(s=>s.includes('>_ apply_patch · +1 agent')));
 const openedModel=paint({route_line:'model'},['route:a']);

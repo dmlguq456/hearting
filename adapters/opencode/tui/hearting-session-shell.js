@@ -66,6 +66,9 @@ export default {id:'hearting.session-shell',setup(ctx) {
     if(event.type==='session.execution.started')send('submit');
     else if(event.type==='session.execution.succeeded')send('stop');
     else if(['form.created','permission.asked','session.execution.failed','session.execution.interrupted'].includes(event.type))send('blocked');
+    // An answered or approved wait resumes the turn (Claude and Codex: the PostToolUse
+    // that follows it): the border leaves `waiting` now, not at the turn's end.
+    else if(['permission.replied','form.replied','form.cancelled'].includes(event.type))send('working');
   });
   // The native app slot runs inside its reactive route tree, including home.
   // Reading the selected route here observes navigation with no polling loop.

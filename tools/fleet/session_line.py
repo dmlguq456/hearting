@@ -542,12 +542,12 @@ def route_marker(route):
     shared = getattr(live, "route_marker_state", None)
     if shared is not None:
         return shared(route)
-    if route.get("owner_waits"):
-        return "idle"
+    state = str(route.get("state") or "")
+    if state == "stale":
+        return "stale"
     if route.get("activity") == "running":
         return "working"
-    state = str(route.get("state") or "")
-    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+    return state if state in ("working", "blocked", "dead", "done") else "idle"
 
 
 def route_tally(markers):
@@ -657,9 +657,10 @@ def route_doer(route, jobs, get, live):
     if job is None:
         return None
     harness = get(job, "harness")
-    if (route or {}).get("state") in ("dead", "stale"):
-        return {"harness": harness}
     pair = live._model_pair(get(job, "resolved_model", "model"))
+    if (route or {}).get("state") in ("dead", "stale"):
+        # Spec rule 27: nothing runs; the attempt's recorded harness, model and effort stay.
+        return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort")}
     percent, tokens = job_context(job, get)
     tool = get(job, "exec_tool")
     name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
