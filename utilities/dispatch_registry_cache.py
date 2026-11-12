@@ -314,7 +314,7 @@ class _RegistrySegment:
                  "completion_errors", "completion_all", "completion_children",
                  "completion_by_parent_sid",
                  "completion_by_route_alias", "settlement_owners",
-                 "observation_owners",
+                 "observation_owners", "observation_owner_keys",
                  "handover_latest", "handover_by_parent", "handover_by_binding",
                  "headless_owner_rows", "selection_by_parent", "selection_by_slug",
                  "selection_by_attempt", "selection_by_parent_slug",
@@ -352,6 +352,7 @@ class _RegistrySegment:
         completion_by_route_alias = {}
         settlement_owners = []
         observation_owners = []
+        observation_owner_keys = []
         handover_latest = {}
         selection_by_parent = {}
         selection_by_slug = {}
@@ -421,6 +422,9 @@ class _RegistrySegment:
                 settlement_owners.append(record)
             if completion_meta.get("worker_type") == "owner":
                 observation_owners.append(record)
+                # What a consumer that keeps one row per attempt keys on, known here so it never
+                # parses a finished row's metadata again just to find it.
+                observation_owner_keys.append(attempt_id or record.order)
             handover_attempt = handover_meta.get("attempt_id")
             if handover_attempt:
                 handover_latest[handover_attempt] = (fields[1], record)
@@ -444,6 +448,7 @@ class _RegistrySegment:
         }
         self.settlement_owners = tuple(settlement_owners)
         self.observation_owners = tuple(observation_owners)
+        self.observation_owner_keys = tuple(observation_owner_keys)
         self.handover_latest = handover_latest
         self.selection_by_parent = {key: tuple(value) for key, value in selection_by_parent.items()}
         self.selection_by_slug = {key: tuple(value) for key, value in selection_by_slug.items()}
@@ -556,6 +561,8 @@ class _RegistrySegment:
                                         for record in segment.settlement_owners)
         result.observation_owners = tuple(record for segment in segments
                                           for record in segment.observation_owners)
+        result.observation_owner_keys = tuple(key for segment in segments
+                                              for key in segment.observation_owner_keys)
         result.selection_by_parent = {key: tuple(value) for key, value in selection_by_parent.items()}
         result.selection_by_slug = {key: tuple(value) for key, value in selection_by_slug.items()}
         result.selection_by_attempt = {key: tuple(value) for key, value in selection_by_attempt.items()}
@@ -1005,6 +1012,15 @@ class RegistryView:
     def answer_wait_owner_candidates(self):
         """All owner rows for observational wait projection (no lease filter)."""
         return tuple(record for segment in self._segments for record in segment.observation_owners)
+
+    def answer_wait_owner_keyed(self):
+        """``(attempt id or row order, record)`` of every owner row, in registry order.
+
+        The key is each row's ``attempt_id`` (its order when it has none); the segments computed
+        it once, so a pass that keeps the last row per attempt does not parse a finished row.
+        """
+        return tuple(pair for segment in self._segments
+                     for pair in zip(segment.observation_owner_keys, segment.observation_owners))
 
     def route_alias_candidates(self, *aliases):
         """Return every row matching aliases; callers must validate full route identity."""

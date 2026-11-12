@@ -161,6 +161,7 @@ CLAUDE_PID, CODEX_PID = 910_001, 910_002
 CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 CODEX_SID = "22222222-2222-4222-8222-222222222222"
 OTHER_SID = "33333333-3333-4333-8333-333333333333"
+SUCCESSOR_SID = "44444444-4444-4444-8444-444444444444"
 SECOND_CODEX_SID = "44444444-4444-4444-8444-444444444444"
 
 
@@ -221,6 +222,10 @@ class Fixture:
         self.work = self.root / "work"
         self.logs = self.jobs.parent / "logs"      # the registry's own log directory
         self.liveness = self.root / "liveness.json"
+        # The seat ledgers (lineage) of every computing process: warm and fresh must read the same
+        # ones, so each process's own ``session-tidy`` state is a link to this directory.
+        self.seat_state = self.root / "seat-state"
+        self.seat_tidy = self.seat_state / "hearting" / "session-tidy"
         self.revision = {0: 0, 1: 0, 2: 0}
 
     # -- paths ------------------------------------------------------------
@@ -421,7 +426,7 @@ class Fixture:
     # -- build ------------------------------------------------------------
     def build(self) -> "Fixture":
         for directory in (self.work, self.routes, self.claude / "sessions", self.jobs.parent,
-                          self.codex / "sessions", self.logs, self.root / "artifacts"):
+                          self.codex / "sessions", self.logs, self.root / "artifacts", self.seat_tidy):
             directory.mkdir(parents=True, exist_ok=True)
         for index in range(3):
             record = route_record(self.root, index, revision=self.revision[index])
@@ -514,6 +519,10 @@ def hermetic(fixture_root, scratch, clock: FixtureClock, cache_home=None):
     state_home = scratch / "state"
     for directory in ("home", "state", "data", "cache", "tmp"):
         (scratch / directory).mkdir(parents=True, exist_ok=True)
+    seat_link = state_home / "hearting" / "session-tidy"
+    seat_link.parent.mkdir(parents=True, exist_ok=True)
+    if not seat_link.is_symlink() and not seat_link.exists():
+        seat_link.symlink_to(fx.seat_tidy)
 
     def census():
         return _expand(json.loads(fx.liveness.read_text(encoding="utf-8")), str(fx.work))
@@ -683,6 +692,7 @@ REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuse
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
 OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
 FOLD_COUNTERS = ("segment_folds", "segment_fold_reuses")
+HOLDER_COUNTERS = ("holder_resolves", "holder_memo_hits")
 GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses",
                  "route_wait_recomputes", "route_wait_reuses")
 
@@ -713,6 +723,11 @@ def counters() -> dict:
         stats = module.registry_fold_metrics() if hasattr(module, "registry_fold_metrics") else {}
         for name in FOLD_COUNTERS:
             out[name] += int(stats.get(name, 0))
+    for name in HOLDER_COUNTERS:
+        out[name] = 0
+    handover = sys.modules.get("dispatch_seat_handover")
+    for name, value in (handover.holder_metrics() if hasattr(handover, "holder_metrics") else {}).items():
+        out[name] = int(value)
     for name in GATE_COUNTERS:
         out[name] = 0
     for module_name in ("human_gate_observation", "utilities.human_gate_observation"):
@@ -765,6 +780,7 @@ def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict 
                     "o2_streams": observe_streams(fx),
                     "o3_fleet": observe_fleet(Path(scratch)),
                     "o4_producer": observe_producer(),
+                    "o5_holders": observe_holders(fx),
                 }
             observed["_meta"] = {"lifecycle_disk_resumes": _codex_disk_resumes() - resumed_before}
             return observed
@@ -854,6 +870,12 @@ def observe_fleet(scratch: Path) -> dict:
     from fleet.collectors import collect_all
     isolated = scratch / "state-fleet"
     isolated.mkdir(exist_ok=True)
+    # The same seat ledgers as every other observation of this process (one lineage location, as
+    # in a real Fleet: two locations alternating would only show a cache built for one of them).
+    seat_link = isolated / "hearting" / "session-tidy"
+    seat_link.parent.mkdir(parents=True, exist_ok=True)
+    if not seat_link.is_symlink() and not seat_link.exists():
+        seat_link.symlink_to(os.readlink(scratch / "state" / "hearting" / "session-tidy"))
     out = {}
     with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(isolated)}):
         for label, fast in (("fast_first", True), ("full", False)):
@@ -866,6 +888,25 @@ def observe_fleet(scratch: Path) -> dict:
                 observations=snapshot.observations, show_all=True)
             out[label] = json.loads(text)
     return out
+
+
+def observe_holders(fx: Fixture) -> dict:
+    """Which owner rows the Fleet's route display selects for one session, by who holds their job.
+
+    Exactly the selection ``_prime_route_display_rows`` makes (the session holds a job when the
+    lineage says so), with no alias or family rule mixed in, so a change of holder shows here.
+    """
+    import dispatch_registry_cache as cache
+    import dispatch_supervision
+    from fleet.collectors import dispatch as fleet_dispatch
+    scope = {"aliases": set(), "routes": set(), "rows": {}, "sources": {},
+             "holders": {("claude", CLAUDE_SID)}}
+    with cache.registry_read_scope(), dispatch_supervision.route_attention_read_scope():
+        fleet_dispatch._prime_route_display_rows([str(fx.jobs)], scope)
+    view, chosen = scope["sources"][os.path.abspath(str(fx.jobs))]
+    return {"selected": [{"order": record.order, "attempt": record.completion_metadata().get("attempt_id")}
+                         for _order, record in sorted(chosen.items())],
+            "routes": sorted(scope["routes"])}
 
 
 def observe_producer() -> dict:
@@ -1066,7 +1107,7 @@ class Step:
 
 # An unchanged pass after any step: every reader answers from what it kept.
 UNCHANGED_PASS = {
-    "full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
+    "holder_resolves": "0", "full_metadata_parses": "0", "prefix_reuses": "0", "append_reuses": "0",
     "line_parse_reuses": "0", "invalidations": "0", "content_reads": "0",
     "codex_append_reads": "0", "codex_full_reads": "0", "codex_hits": "+",
 }
@@ -1634,6 +1675,57 @@ def e42c(run):  # an early row is deleted: every later row moves up, no old segm
     run.fx.replace_registry(rows)
 
 
+def e43_edit(run):  # an owner row of the claude session is edited in place (its own bytes change)
+    rows = run.fx.current_rows()
+    at = next(index for index, row in enumerate(rows) if "att-owner-1" in row)
+    rows[at] = rows[at].replace("launch_started=1", "launch_started=1,fixture_note=edited", 1)
+    assert rows[at] != run.fx.current_rows()[at]
+    run.fx.replace_registry(rows)
+
+
+def e43_handover(run):  # the claude session hands its unfinished jobs to a successor, by the real writer
+    import dispatch_seat_handover as handover
+    import session_tidy as tidy
+    seat = tidy.Seat("pane", "fixture-seat", "fixture:pane")
+    with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(run.fx.seat_state)}):
+        row = handover.record_retire_handover(CLAUDE_SID, "claude", SUCCESSOR_SID, "claude",
+                                              jobs=run.fx.jobs, now=run.clock.now - 5, successor_seat=seat)
+    assert row is not None and row["bindings"], "the writer bound nothing: the event tested nothing"
+
+
+def e38_lease(run):  # a BLOCKED owner's supervisor lease is taken and released (flock): no file content moves
+    import fcntl
+    from dispatch_contract import supervisor_lease_path
+    path = supervisor_lease_path(run.fx.jobs, "att-blocked-a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def e38_gone(run):  # the processes of the sessions end: liveness only, no registry or route file moves
+    value = run.fx.read_liveness()
+    value["alive"] = False
+    run.fx.write_liveness(value, run.clock.now - 1)
+
+
+def e39_other_session(run):  # the registry is replaced (new inode) with one more owner row, of another session
+    rows = run.fx.current_rows()
+    rows.append(attempt_row(CLOCK_BASE - 90, "open", "other-session-owner", {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "codex",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-owner-other",
+        "parent_sid": OTHER_SID, "parent_harness": "claude", "launch_claimed": "1",
+        "launch_started": "1"}, str(run.fx.work)))
+    run.fx.replace_registry(rows)
+
+
+def e39_same(run):  # the same rows, written again as another inode
+    run.fx.replace_registry(run.fx.current_rows())
+
+
 EVENTS = [
     ("E01", "registry append: a new attempt row",
      [Step("append", e01, expect={**REG_APPEND, **CODEX_STILL})]),
@@ -1773,6 +1865,33 @@ EVENTS = [
            expect={**REG_STILL, "owner_decisions": 1, **CODEX_STILL})]),
     # E42: a rewrite after the registry grew by appended batches (segments of unequal size). Only
     # the segments whose own bytes or first order changed are built again; the others keep their rows.
+    # E43: who holds an owner row's job is remembered per row object and lineage graph. Rows that
+    # did not change keep their answer, a changed row is asked again, a changed lineage asks every
+    # row again, and the answers are the ones a process starting from nothing gives.
+    ("E43", "owner holders: rows appended, a row edited in place, the lineage handed over",
+     [Step("two BLOCKED owners", blocked_setup,
+           expect={**REG_APPEND, "holder_resolves": 2, "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("owner row edited in place", e43_edit,
+           expect={"full_metadata_parses": "+", "holder_resolves": "+", "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("holder handed over by the writer", e43_handover,
+           expect={**REG_STILL, "holder_resolves": "+", "holder_memo_hits": "0", **CODEX_STILL})]),
+    # E38: nothing a wait or an owner state is judged from lives in a kept value that a lease flock
+    # or a session ending would leave stale: the lease change moves nothing, the ending moves the
+    # owner states (liveness), and neither re-judges a route (inputs of every route are unchanged).
+    ("E38", "a BLOCKED owner's supervisor lease is flocked and released, then the sessions end",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("lease flocked and released", e38_lease, unchanged=True,
+           expect={**REG_STILL, "route_wait_recomputes": "0", "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("sessions end", e38_gone,
+           expect={**REG_STILL, "route_wait_recomputes": "0", "route_wait_reuses": "+", **CODEX_STILL})]),
+    # E39: a registry replaced with one more owner row of another session reads the bytes as they are
+    # and asks only the new row who holds its job; writing the same rows again as another inode
+    # changes no answer and asks nobody.
+    ("E39", "registry replaced: another session's owner row appears, then the same rows again",
+     [Step("another session's owner row", e39_other_session,
+           expect={"holder_resolves": 1, "holder_memo_hits": "+", **CODEX_STILL}),
+      Step("same rows, another inode", e39_same, unchanged=True,
+           expect={"holder_resolves": "0", "holder_memo_hits": "+", **CODEX_STILL})]),
     ("E42a", "in-place replacement of a middle row with a longer one, after appended batches",
      [Step("append batches", e42_batches, expect={**REG_APPEND, **CODEX_STILL}),
       Step("replace middle row", e42a, expect={**REG_KEEP_PREFIX, "segment_rebuilds": 1,

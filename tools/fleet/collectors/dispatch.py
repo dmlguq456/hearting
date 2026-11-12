@@ -172,16 +172,13 @@ def _prime_route_display_rows(paths, scope):
         # interpreter Fleet's parent-edge join uses, never through pane/cwd.
         if scope["holders"]:
             from . import _parent_read_context
-            from dispatch_seat_handover import resolve_recipient
+            from dispatch_seat_handover import job_holders
             context = _parent_read_context()
             owners = {}
-            for record in view.answer_wait_owner_candidates():
-                owners[record.completion_metadata().get("attempt_id") or record.order] = record
-            for record in owners.values():
-                if record.order in chosen:
-                    continue
-                answer = resolve_recipient("job-holder", metadata=record.handover_metadata(),
-                                           jobs=path, read_context=context)
+            for attempt_key, record in view.answer_wait_owner_keyed():
+                owners[attempt_key] = record
+            asked = [record for record in owners.values() if record.order not in chosen]
+            for record, answer in zip(asked, job_holders(asked, path, read_context=context)):
                 if (answer.harness, answer.session_id) in scope["holders"]:
                     chosen[record.order] = record
         for record in chosen.values():
