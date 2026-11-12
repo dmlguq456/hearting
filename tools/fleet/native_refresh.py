@@ -259,7 +259,9 @@ class NativeDisplayReader:
                 observed = True
         elif harness == "opencode" and db and feed is None:
             from .session_view import observe
-            values, _paths = observe(harness, int(pid), start, sid)
+            # An unread database raises: the caller keeps this session's last display
+            # and the next pass reads it again, as for the other native sources.
+            values, _paths = observe(harness, int(pid), start, sid, raise_unread=True)
             if values:
                 row.model, row.effort = values.get("model"), values.get("effort")
                 if not isinstance(row.context_policy, Mapping) or row.context_policy.get("state") != "applied":
