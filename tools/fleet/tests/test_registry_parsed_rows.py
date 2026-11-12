@@ -877,6 +877,10 @@ class ParsedRegistryRowsTest(unittest.TestCase):
             self.assertEqual([row[1][4] for row in completed], ["first", "second"])
 
 
+def index_number(steps, lines):
+    return next(position for position, candidate in enumerate(steps) if candidate is lines)
+
+
 class SegmentedEvidenceTest(unittest.TestCase):
     """Folding only the segments a rewrite changed gives what folding every row gives."""
 
@@ -940,8 +944,20 @@ class SegmentedEvidenceTest(unittest.TestCase):
                     rows_now = dispatch.parsed_registry_rows(path)
                     got = self._plain(dispatch._registry_evidence_for_path(path, rows_now))
                 self.assertEqual(got, wanted, "step %d" % index)
+                # The derived lookup tables: per-segment parts merged against one pass over every row.
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    rows_now = dispatch.parsed_registry_rows(path)
+                    dispatch._PARSED_REGISTRY_INDEXES.clear()
+                    index = dispatch._registry_derived_index(path, rows_now)
+                    direct = dispatch._build_registry_derived_index(rows_now)
+                self.assertEqual(index["job_order"], direct["job_order"], "step %d job_order" % index_number(steps, lines))
+                for name in ("latest_jobs", "all_by_attempt", "attempt_positions",
+                             "children_by_parent", "latest_by_attempt"):
+                    self.assertEqual(list(index[name]), list(direct[name]), "step %d %s order" % (index_number(steps, lines), name))
+                    self.assertEqual(dict(index[name]), dict(direct[name]), "step %d %s" % (index_number(steps, lines), name))
             stats = dispatch.registry_fold_metrics()
             self.assertGreater(stats["segment_fold_reuses"], 0)
+            self.assertGreater(stats["index_segment_reuses"], 0)
 
 
 if __name__ == '__main__':

@@ -882,6 +882,92 @@ def _index_registry_rows_by_attempt(rows):
     return indexed
 
 
+def _registry_segments_of(path, rows):
+    """``(absolute path, segments)`` of the registry generation ``rows`` was parsed from, or None."""
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        rows_key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        if rows_key is None or _PARSED_REGISTRY_ROWS.get(rows_key) is not rows:
+            return None
+        segments = _PARSED_REGISTRY_SEGMENTS.get(rows_key)
+    if not segments or not all(hasattr(segment, "records") and hasattr(segment, "order_start")
+                               for segment in segments):
+        return None
+    return absolute, segments
+
+
+def _index_segment_part(segment_rows):
+    """What ``_build_registry_derived_index`` collects from one segment's rows (immutable values)."""
+    all_by_attempt, latest_by_attempt, children, latest_jobs = {}, {}, {}, {}
+    for registry_order, fields, metadata in segment_rows:
+        attempt_id = metadata.get("attempt_id")
+        if attempt_id:
+            all_by_attempt.setdefault(attempt_id, []).append((fields, metadata))
+            latest_by_attempt[attempt_id] = (registry_order, fields, metadata)
+            parent = metadata.get('parent_attempt_id')
+            if parent:
+                children.setdefault(parent, set()).add(attempt_id)
+        if not "\t".join(fields).strip():
+            continue
+        latest_jobs[attempt_id or fields[4]] = (registry_order, fields, metadata)
+    return ({attempt: tuple(items) for attempt, items in all_by_attempt.items()}, latest_by_attempt,
+            {parent: frozenset(attempts) for parent, attempts in children.items()}, latest_jobs)
+
+
+def _segmented_derived_index(path, rows):
+    """``_build_registry_derived_index(rows)`` from per-segment parts, or None when not usable.
+
+    The same keying as ``_segmented_evidence``: a segment's part is a pure function of its rows, which
+    are a pure function of its ``records`` tuple. Parts merge in file order: later rows win in
+    ``latest_*``, an attempt's rows concatenate, a parent's children union; first-seen order of
+    jobs and attempts is the dict insertion order."""
+    found = _registry_segments_of(path, rows)
+    if found is None:
+        return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        reusable = _REGISTRY_INDEX_PARTS.get(absolute) or {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _index_segment_part(rows[low:high]))
+            _REGISTRY_FOLD_STATS["index_segment_builds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["index_segment_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    all_by_attempt, latest_by_attempt, children_by_parent, latest_jobs = {}, {}, {}, {}
+    for part_all, part_latest, part_children, part_jobs in parts:
+        for attempt, items in part_all.items():
+            held = all_by_attempt.get(attempt)
+            all_by_attempt[attempt] = items if held is None else held + items
+        latest_by_attempt.update(part_latest)
+        for parent, attempts in part_children.items():
+            held = children_by_parent.get(parent)
+            children_by_parent[parent] = attempts if held is None else held | attempts
+        latest_jobs.update(part_jobs)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_INDEX_PARTS[absolute] = current
+        while len(_REGISTRY_INDEX_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_INDEX_PARTS.pop(next(iter(_REGISTRY_INDEX_PARTS)))
+    return MappingProxyType({
+        "token": object(),
+        "job_order": tuple(latest_jobs),
+        "latest_jobs": MappingProxyType(latest_jobs),
+        "all_by_attempt": MappingProxyType(all_by_attempt),
+        "attempt_positions": MappingProxyType({attempt: position for position, attempt in enumerate(all_by_attempt)}),
+        "children_by_parent": MappingProxyType(children_by_parent),
+        "latest_by_attempt": MappingProxyType(latest_by_attempt),
+    })
+
+
 def _registry_derived_index(path, rows):
     """Reuse immutable row indexes only while their parsed generation is retained."""
     absolute = os.path.abspath(os.fspath(path))
@@ -898,7 +984,7 @@ def _registry_derived_index(path, rows):
                 return cached
     if key is None:
         return _build_registry_derived_index(rows)
-    index = _build_registry_derived_index(rows)
+    index = _segmented_derived_index(path, rows) or _build_registry_derived_index(rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
         if (key in _PARSED_REGISTRY_ROWS
                 and _PARSED_REGISTRY_ROWS[key] is rows
@@ -4234,7 +4320,9 @@ class RegistryEvidence(dict):
 # recognised a segment keeps that tuple) and of the four classifying functions. One generation per
 # path is held (each entry keeps its ``records`` alive, so the id cannot name another tuple).
 _REGISTRY_FOLD_PARTS = {}
-_REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0}
+_REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
+                        "index_segment_builds": 0, "index_segment_reuses": 0}
+_REGISTRY_INDEX_PARTS = {}
 
 
 def registry_fold_metrics():
@@ -4337,16 +4425,12 @@ def _segmented_evidence(path, rows, functions):
     order with the rules of the row-by-row fold (later rows win per key, histories concatenate,
     an attempt's last row decides). The merge copies, so nothing a kept partial holds is mutated.
     """
-    absolute = os.path.abspath(os.fspath(path))
-    with _PARSED_REGISTRY_CACHE_LOCK:
-        rows_key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
-        if rows_key is None or _PARSED_REGISTRY_ROWS.get(rows_key) is not rows:
-            return None
-        segments = _PARSED_REGISTRY_SEGMENTS.get(rows_key)
-        held = _REGISTRY_FOLD_PARTS.get(absolute)
-    if not segments or not all(hasattr(segment, "records") and hasattr(segment, "order_start")
-                               for segment in segments):
+    found = _registry_segments_of(path, rows)
+    if found is None:
         return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _REGISTRY_FOLD_PARTS.get(absolute)
     reusable = held[1] if held is not None and all(a is b for a, b in zip(functions, held[0])) else {}
     current, parts, covered = {}, [], 0
     for segment in segments:
