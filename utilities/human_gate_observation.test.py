@@ -153,6 +153,38 @@ class PendingWaitTest(unittest.TestCase):
         successor = H.read_answer_waits(jobs_paths=[self.jobs], now=302)
         self.assertEqual(successor["total"], 0)
 
+    def test_one_selected_wait_reads_only_its_own_route(self):
+        """2026-11-11: opening one Fleet question re-observed every older wait.
+
+        With 13 older blocked owners each selected read verified every owner's
+        route on the shared artifact root (2,295 NAS reads per S3 row).
+        """
+        route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        rows = []
+        for index, name in enumerate(("att-owner", "att-other-a", "att-other-b")):
+            route_file = self.root / (name + ".route.json")
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            row = (metadata.replace("attempt_id=" + attempt, "attempt_id=" + name)
+                   .replace("route_file=" + str(self.root / "owner.route.json"),
+                            "route_file=" + str(route_file)))
+            rows.append("%d\tdone\t/repo\t/wt\towner\t%s,note=dead-worker-blocked,"
+                        "failure_class=blocked\n" % (300 + index, row))
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        full = H.read_answer_waits(jobs_paths=[self.jobs], now=400)
+        self.assertEqual(sorted(item["id"] for item in full["items"]),
+                         ["S3:att-other-a", "S3:att-other-b", "S3:att-owner"])
+        with mock.patch.object(H, "_route_outcome", wraps=H._route_outcome) as outcome, \
+             mock.patch.object(H, "_codex_rollout_waits") as rollouts:
+            one = H.read_answer_waits(jobs_paths=[self.jobs], now=400,
+                                      only_id="S3:att-other-a")
+        self.assertEqual([item["id"] for item in one["items"]], ["S3:att-other-a"])
+        self.assertEqual(outcome.call_count, 1)
+        rollouts.assert_not_called()
+        self.assertTrue(one["complete"])
+        selected = next(item for item in full["items"] if item["id"] == "S3:att-other-a")
+        self.assertEqual({key: one["items"][0][key] for key in ("route_id", "since", "owner")},
+                         {key: selected[key] for key in ("route_id", "since", "owner")})
+
     def test_later_owner_on_different_route_file_does_not_close_wait(self):
         route, _attempt, _lease, metadata = self._blocked_owner_fixture()
         route_file = self.root / "same-route-other-file.json"
