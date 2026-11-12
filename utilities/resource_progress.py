@@ -2148,6 +2148,18 @@ def _read_public_in_scan(artifact_root, run_id):
     if held is None:
         return None
     name = run_id + '.json'
+    signature = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                            st.st_mtime_ns, st.st_ctime_ns)
+    key = ('public', str(held.path / name))
+    try:
+        present = os.stat(name, dir_fd=held.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        present = None
+    if present is not None and stat.S_ISREG(present.st_mode):
+        raw = _generation_hit(key, signature(present))
+        if raw is not None:
+            value = passive_parse(key, raw, (_json,), lambda: _json(raw))
+            return value if value.get('run_id') == run_id else None
     fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                  dir_fd=held.fd)
     with os.fdopen(fd, 'rb') as source:
@@ -2157,12 +2169,11 @@ def _read_public_in_scan(artifact_root, run_id):
         raw = source.read(MAX_PUBLIC_RUN_RECORD_BYTES + 1)
         after = os.fstat(source.fileno())
     current = os.stat(name, dir_fd=held.fd, follow_symlinks=False)
-    signature = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_size,
-                            st.st_mtime_ns, st.st_ctime_ns)
     if (len(raw) > MAX_PUBLIC_RUN_RECORD_BYTES or signature(before) != signature(after)
             or signature(after) != signature(current)):
         return None
-    value = passive_parse(('public', str(held.path / name)), raw, (_json,), lambda: _json(raw))
+    _generation_store(key, signature(current), raw)
+    value = passive_parse(key, raw, (_json,), lambda: _json(raw))
     return value if value.get('run_id') == run_id else None
 
 
@@ -2301,6 +2312,25 @@ def _signature(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+# Settled resource files are re-read every Fleet pass although they rarely
+# change. A file whose full generation (device, inode, size, mtime, ctime) is
+# unchanged since a verified read yields that read's bytes again; any change,
+# link or failure takes the normal verified read.
+_GENERATION_LIMIT = 4096
+_GENERATION_READS = {}
+
+
+def _generation_hit(key, signature):
+    cached = _GENERATION_READS.get(key)
+    return cached[1] if cached is not None and cached[0] == signature else None
+
+
+def _generation_store(key, signature, value):
+    if len(_GENERATION_READS) >= _GENERATION_LIMIT and key not in _GENERATION_READS:
+        _GENERATION_READS.pop(next(iter(_GENERATION_READS)))
+    _GENERATION_READS[key] = (signature, value)
+
+
 def _read(path: Path, root: Path):
     """One regular, root-contained file; reject links, swaps and growing reads."""
     from resource_run_registry import passive_parent_identity
@@ -2321,6 +2351,16 @@ def _read(path: Path, root: Path):
         if stat.S_ISLNK(mode):
             raise ValueError("progress-link")
         parents.append((current, device, inode))
+    key = ("progress", str(path))
+    if stat.S_ISREG(info.st_mode) and info.st_size <= MAX_BYTES:
+        reused = _generation_hit(key, _signature(info))
+        if reused is not None:
+            # Same bytes; the closing parent check still observes this pass.
+            for parent, device, inode in parents:
+                current_info = parent.lstat()
+                if stat.S_ISLNK(current_info.st_mode) or (current_info.st_dev, current_info.st_ino) != (device, inode):
+                    raise ValueError("progress-path-changed")
+            return reused
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         first = os.fstat(stream.fileno())
@@ -2335,6 +2375,7 @@ def _read(path: Path, root: Path):
         info = parent.lstat()
         if stat.S_ISLNK(info.st_mode) or (info.st_dev, info.st_ino) != (device, inode):
             raise ValueError("progress-path-changed")
+    _generation_store(key, _signature(last), (data, last.st_mtime))
     return data, last.st_mtime
 
 

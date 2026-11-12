@@ -1233,6 +1233,36 @@ def _valid_cycle_state(value: Any) -> bool:
     return isinstance(value, str) and value in _SEALED_CYCLE_STATES
 
 
+# One read pass of a long-lived reader (a runner pass, one completed-publication
+# check) shares the immutable shared revisions it already proved unchanged.
+# Nested scopes reuse the outer one; nothing outlives it.
+_READ_PASS: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar(
+    "artifact_producer_read_pass", default=None)
+
+
+@contextlib.contextmanager
+def shared_revision_read_scope():
+    """Pin immutable-revision proofs for one read pass."""
+    if _READ_PASS.get() is not None:
+        yield
+        return
+    token = _READ_PASS.set({})
+    try:
+        yield
+    finally:
+        _READ_PASS.reset(token)
+
+
+def _read_pass_entry(name: str, factory):
+    """This read pass's value for ``name`` (created on first use), or ``None``."""
+    scope = _READ_PASS.get()
+    if scope is None:
+        return None
+    if name not in scope:
+        scope[name] = factory()
+    return scope[name]
+
+
 def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
     """Resolve this record's manifest without scanning other cycle bindings."""
     root = Path(root).resolve()

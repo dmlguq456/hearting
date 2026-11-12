@@ -1889,7 +1889,8 @@ def _attempt_stall_attention(job):
                 or job.attempt_id not in (receipt.get("monitored_attempt_ids") or [])):
             return None
         import dispatch_supervision
-        if not dispatch_supervision.notice_is_current(record):
+        if not _notice_current_in_pass(dispatch_supervision, record, delivery_id, digest,
+                                       recipient_digest):
             return None
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         return None
@@ -1899,6 +1900,28 @@ def _attempt_stall_attention(job):
         "observed_at", "episode_id", "delivery_id", "notice_digest")}
     result["observed_at"] = time.time()
     return result
+
+
+def _notice_current_in_pass(supervision, record, delivery_id, digest, recipient_digest):
+    """One currency verdict per exact delivery record in one collection pass.
+
+    Several monitored attempts point at the same stall delivery. Its receipt
+    (identified by delivery, receipt digest and recipient) is evaluated once
+    per pass; the next pass evaluates it again. A raised verdict is shared too.
+    """
+    from ..pass_scope import cached
+
+    def evaluate():
+        try:
+            return True, supervision.notice_is_current(record)
+        except Exception as exc:  # noqa: BLE001 -- re-raised to every reader below
+            return False, exc
+
+    ok, value = cached(("notice-current", delivery_id, digest, recipient_digest,
+                        record.get("receipt_digest")), evaluate)
+    if not ok:
+        raise value
+    return value
 
 
 def _parent_extinction_rows(paths, parent_ids=None):

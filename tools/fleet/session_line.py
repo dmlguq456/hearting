@@ -750,7 +750,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
         routes = {route.get("id"): route for route in (captured[-1] if captured else ()) if isinstance(route, dict)}
         route_details(snapshot, panels, routes, now)
         # The statusline reads only this label: count the states here, once, over
-        # every current route of the session (the panel keeps at most eight rows).
+        # every current route of the session.
         by_tag = {}
         for route in routes.values():
             if route.get("current") is True and route.get("session_tag"):
