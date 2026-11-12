@@ -394,7 +394,9 @@ tool-deferred	adaptation-exemptions.tsv
 tool-deferred	adaptation-guard.test.sh
 tool-deferred	answer-wait-audit.py
 tool-deferred	argparse_abbrev_guard.test.py
+tool-deferred	artifact-dedup-hardlink.py
 tool-deferred	artifact-w8-handoff.py
+tool-deferred	artifact_dedup_hardlink.test.py
 tool-deferred	artifact_w8_handoff.test.py
 tool-deferred	browser-acceptance
 tool-deferred	build-manifest.py
