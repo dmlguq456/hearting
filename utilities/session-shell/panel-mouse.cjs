@@ -20,5 +20,5 @@ module.exports=function({bytes,mouse,suppressed}){
       bytes(data.subarray(0,1));data=data.subarray(1);
     }
   }
-  return {feed,flush};
+  return {feed,flush,pending:()=>pending.length>0};
 };
