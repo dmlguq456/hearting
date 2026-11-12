@@ -453,7 +453,7 @@ class SubprocessTimeoutContractTest(unittest.TestCase):
         self.assertEqual(calls[0][0][0], "status")
         self.assertEqual(calls[0][1], short_cap)
         self.assertEqual(calls[1][0], [
-            "join", watch_id, "--timeout", str(remaining_seconds * 1000)
+            "join", watch_id, "--timeout", str(remaining_seconds * 1000), "--no-ack"
         ])
         self.assertEqual(calls[1][1], remaining_seconds + module.BUDGET_MARGIN_SECONDS)
         self.assertGreater(calls[1][1], short_cap)

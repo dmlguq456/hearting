@@ -119,7 +119,7 @@ from peer_steward_watch import (  # noqa: F401
     _watch_timeout_remaining_ms, _WATCH_TRANSITION_LOCK_BUDGET_SEC,
     _WatchCloseEvidence, _WatchDeadlineExpired, _watcher_present, _WatchPaths,
     _WatchTransitionLockBusy, _write_json_atomic, _write_watch_claim, _write_watch_observation,
-    cmd_join,
+    cmd_join as _watch_cmd_join,
 )
 from peer_steward_status import (  # noqa: F401
     _arm_steward_facts, _blocking_screen, _codex_location_menu, _CODEX_LOCATION_TOKENS,
@@ -4700,6 +4700,30 @@ def cmd_rearm(args):
     return 0
 
 
+def cmd_join(args):
+    """Print the watch's receipt; the steward that received it here has it delivered.
+
+    The undelivered sweep (`status --undelivered` and the Claude/Codex/OpenCode callers of
+    it) lists receipts nobody acknowledged. A receipt the steward read through its own
+    `join` is acknowledged by the same exact-recipient ACK, silently, so the next turn does
+    not hand the same change over again. A caller that is not the recipient changes nothing.
+    The rewake hook passes `--no-ack`: it joins on the steward's behalf and acks only after
+    its own display, so a receipt it could not show stays for the sweep.
+    """
+    args.joined_receipt = False
+    rc = _watch_cmd_join(args)
+    if getattr(args, "joined_receipt", False) and not getattr(args, "no_ack", False):
+        try:
+            session_id, harness = _current_session_identity()
+            import dispatch_seat_handover as handover
+            if handover.acknowledge_watch(args.watch_id, harness, session_id, "join") in {
+                    "created", "already"}:
+                peer_message.settle_watch_transfers(args.watch_id, harness, session_id)
+        except Exception:  # noqa: BLE001 - an unproven ACK leaves the receipt for the sweep
+            pass
+    return rc
+
+
 def cmd_ack(args):
     """Publish or validate the shared exact-recipient ACK before settling its ref."""
     session_id, harness = _current_session_identity()
@@ -8606,6 +8630,8 @@ def build_parser():
     p_join = sub.add_parser("join")
     p_join.add_argument("watch_id")
     p_join.add_argument("--timeout", type=int, default=None, help="milliseconds")
+    # The Claude asyncRewake hook joins for the steward and acks after it shows the receipt.
+    p_join.add_argument("--no-ack", action="store_true", help=argparse.SUPPRESS)
     p_join.set_defaults(func=cmd_join)
 
     p_status = sub.add_parser("status")

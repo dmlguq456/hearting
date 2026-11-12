@@ -451,6 +451,14 @@ def _steward_seat(harness, sid):
         window = bool((env.get("HERDR_PANE_ID") or "").strip()) or bool(
             session_tidy.terminal_tmux_pane(env))
         if harness == "codex":
+            # A Codex TUI behind the session shell is proven by its own attachment,
+            # whichever environment the tool command or the TUI inherited.
+            try:
+                attached = _codex_shell_seat(sid)
+            except Exception:  # noqa: BLE001 - an unproven attachment leaves the other proofs
+                attached = None
+            if attached is not None:
+                return attached
             _caller, service = pane_ownership._caller_runtime(os.getpid(), "codex")
             if service:
                 return _codex_service_seat(sid)
@@ -461,6 +469,58 @@ def _steward_seat(harness, sid):
         return seat.as_dict() if seat is not None and seat.kind in {"pane", "native"} else None
     except Exception:
         return None
+
+
+def _codex_shell_seat(sid):
+    """Seat of the Codex TUI behind the session shell whose attachment names thread `sid`.
+
+    The attachment record is birth-bound proof of the TUI (`session_shell.exact_binding`
+    re-reads births, parentage and descent). The pane is the tmux pane named by the
+    environment of the attachment's own processes (broker, host or TUI: any one of them
+    carries it), accepted only when `session_shell.pane_seat` joins that pane's
+    foreground to this very attachment. The caller must be this thread (its thread id,
+    or a descendant of the attachment's TUI). No Herdr call is made and no other pane is
+    read; anything unproven returns None so the other proofs still run.
+    """
+    import pane_ownership
+    import session_shell
+    import session_tidy
+    import terminal_surface
+    from fleet.collectors import codex as codex_collector, procscan
+    caller = os.getpid()
+    if pane_ownership._registered_worker(caller):
+        return None
+    binding, _why = session_shell.exact_binding("codex", sid)
+    if binding is None:
+        return None
+    native, birth = binding["native_pid"], binding["native_start"]
+    if not pane_ownership._native_user_tui(native, "codex"):
+        return None
+    if (os.environ.get("CODEX_THREAD_ID") or "") != sid and not session_shell._descends(caller, native):
+        return None
+    current = codex_collector.session_id_of_process(native, fresh=True)
+    if current and current != sid:
+        return None  # the TUI proves a different thread now
+    hint = ""
+    for pid in (binding.get("broker_pid"), binding.get("host_pid"), native):
+        if type(pid) is not int:
+            continue
+        hint, _socket = terminal_surface.caller_tmux_pane(procscan.read_environ(pid) or {})
+        if hint:
+            break
+    if not hint:
+        return None
+    info = pane_ownership._pane_process_info(hint, executable="tmux")
+    joined = session_shell.pane_seat(info, "codex")
+    if not joined or any(joined.get(key) != binding.get(key) for key in (
+            "host_pid", "host_start", "native_pid", "native_start", "sid")):
+        return None
+    if session_shell.process(native) is None or session_shell.process(native)["start"] != birth:
+        return None
+    seat = session_tidy.session_seat(session_tidy.pane_seat_from_binding(
+        {"pane": hint, "socket_path": "", "pid": native, "pid_start": birth,
+         "session_id": sid}), "codex", sid)
+    return seat.as_dict() if seat.kind in {"pane", "native"} else None
 
 
 def _codex_service_seat(sid):
@@ -1120,6 +1180,7 @@ def _acquire_bounded(lock_fd, timeout_ms):
 
 
 def cmd_join(args):
+    """Wait for the watch and print its receipt; sets ``args.joined_receipt`` when it did."""
     root = _watch_root()
     watch_id = args.watch_id
     paths = _watch_paths(watch_id, root)
@@ -1127,6 +1188,7 @@ def cmd_join(args):
     receipt = _read_json(paths.receipt)
     if receipt is not None:
         print(_receipt_line(receipt, watch_id, paths))
+        args.joined_receipt = True
         return _exit_for_state(receipt.get("state", "unknown"))
 
     try:
@@ -1148,6 +1210,7 @@ def cmd_join(args):
             receipt = _read_json(paths.receipt)
             if receipt is not None:
                 print(_receipt_line(receipt, watch_id, paths))
+                args.joined_receipt = True
                 return _exit_for_state(receipt.get("state", "unknown"))
 
             arm = _read_json(paths.arm)

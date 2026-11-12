@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "tools")]
 import pane_ownership  # noqa: E402
 import peer_steward_watch as watch  # noqa: E402
+import session_shell  # noqa: E402
 import session_tidy  # noqa: E402
 from fleet.collectors import procscan  # noqa: E402
 
@@ -184,6 +185,74 @@ class StewardSeatReachTest(unittest.TestCase):
         with mock.patch.object(pane_ownership, "codex_tui_processes_for_session") as lookup:
             self.assertIsNone(watch._steward_seat("codex", SID))
         lookup.assert_not_called()
+
+
+    # A Codex TUI behind the session shell is proven by its attachment, not by an environment.
+    BINDING = {"harness": "codex", "sid": SID, "host_pid": 500, "host_start": "5",
+               "broker_pid": 400, "broker_start": "4", "native_pid": 600, "native_start": "6"}
+
+    def attached(self, *, tui_env=None, broker_env=None, joined="same", thread=SID,
+                 current=SID, caller_descends=False, binding="one", user_tui=True):
+        """Run `_steward_seat` for a non-service caller with only the attachment to go on."""
+        socket = self.tmp / "tmux.sock"
+        socket.touch()
+        tmux = {"TMUX": f"{socket},1,0", "TMUX_PANE": "%7"}
+        environs = {400: tmux if broker_env is None else broker_env, 500: {},
+                    600: {} if tui_env is None else tui_env}
+        if thread:
+            os.environ["CODEX_THREAD_ID"] = thread
+        stack = [
+            mock.patch.object(session_shell, "exact_binding",
+                              return_value=(dict(self.BINDING), "") if binding == "one"
+                              else (None, "attachment-unavailable")),
+            mock.patch.object(session_shell, "process",
+                              side_effect=lambda pid: {"pid": pid, "start": "6", "parent": 1, "uid": 1}),
+            mock.patch.object(session_shell, "_descends", return_value=caller_descends),
+            mock.patch.object(session_shell, "pane_seat",
+                              return_value=(dict(self.BINDING) if joined == "same"
+                                            else dict(self.BINDING, native_pid=601) if joined == "other"
+                                            else None)),
+            mock.patch.object(pane_ownership, "_native_user_tui", return_value=user_tui),
+            mock.patch.object(pane_ownership, "_pane_process_info",
+                              return_value={"foreground_process_group_id": 400,
+                                            "foreground_processes": [{"pid": 400}]}),
+            mock.patch.object(pane_ownership, "_caller_runtime", return_value=(None, False)),
+            mock.patch.object(pane_ownership, "codex_tui_processes_for_session", return_value=[]),
+            mock.patch.object(pane_ownership, "codex_tui_process_bindings", return_value=[]),
+            mock.patch.object(procscan, "read_environ", side_effect=lambda pid: environs.get(pid, {})),
+            mock.patch("fleet.collectors.codex.session_id_of_process", return_value=current),
+        ]
+        for item in stack:
+            item.start()
+            self.addCleanup(item.stop)
+        return watch._steward_seat("codex", SID), os.path.realpath(socket)
+
+    def test_the_attachment_proves_the_seat_when_neither_caller_nor_tui_env_names_a_window(self):
+        seat, socket = self.attached()
+        self.assertEqual((seat or {}).get("kind"), "pane", seat)
+        self.assertEqual(seat["pane"], f"%7@{socket}")
+        self.assertEqual(self.calls(), [])
+
+    def test_the_attachment_proves_a_caller_that_descends_from_its_tui(self):
+        seat, socket = self.attached(thread="", caller_descends=True, tui_env={"TMUX_PANE": "%1"})
+        self.assertEqual((seat or {}).get("pane"), f"%7@{socket}", seat)
+
+    def test_an_unproven_attachment_gives_no_seat(self):
+        for label, case in {
+            "no attachment": dict(binding="none"),
+            "pane foreground is another attachment": dict(joined="other"),
+            "pane foreground is nobody's attachment": dict(joined="none"),
+            "no process of the attachment names a tmux pane": dict(broker_env={}),
+            "the TUI proves another thread now": dict(current="019a0000-0000-7000-8000-0000000000ee"),
+            "the caller is another thread outside the TUI": dict(
+                thread="019a0000-0000-7000-8000-0000000000ee"),
+            "the attachment's process is a service": dict(user_tui=False),
+        }.items():
+            with self.subTest(label):
+                with mock.patch.dict(os.environ, {}):
+                    seat, _socket = self.attached(**case)
+                self.assertIsNone(seat)
+        self.assertEqual(self.calls(), [])
 
 
 class SeatSharedWithTheGrantTest(unittest.TestCase):

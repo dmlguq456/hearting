@@ -3485,6 +3485,35 @@ class StatusRearmTest(_WatchMixin, unittest.TestCase):
         after = json.loads(self._run("status", "--undelivered", "--json").stdout)
         self.assertEqual(after["watches"], [])
 
+    def test_a_receipt_read_through_join_is_not_listed_as_undelivered_again(self):
+        mine = self._settled()
+        listed = lambda: [row["watch_id"] for row in json.loads(
+            self._run("status", "--undelivered", "--json").stdout)["watches"]]
+        self.assertEqual(listed(), [mine["watch_id"]])
+        joined = self._run("join", mine["watch_id"], "--timeout", "0")
+        self.assertEqual(joined.returncode, 0, joined.stdout + joined.stderr)
+        self.assertEqual(self._fields(joined.stdout)["watch_id"], mine["watch_id"])
+        self.assertEqual(joined.stdout.count("\n"), 1, joined.stdout)  # join prints the receipt only
+        self.assertEqual(listed(), [])
+        again = self._run("join", mine["watch_id"], "--timeout", "0")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(listed(), [])
+
+    def test_the_rewake_hooks_join_leaves_the_ack_to_its_own_display(self):
+        mine = self._settled()
+        joined = self._run("join", mine["watch_id"], "--timeout", "0", "--no-ack")
+        self.assertEqual(joined.returncode, 0, joined.stdout + joined.stderr)
+        self.assertFalse((self.watch_root / f"{mine['watch_id']}.ack.json").exists())
+        listed = json.loads(self._run("status", "--undelivered", "--json").stdout)["watches"]
+        self.assertEqual([row["watch_id"] for row in listed], [mine["watch_id"]])
+
+    def test_join_by_a_session_that_is_not_the_recipient_acknowledges_nothing(self):
+        seat_b = self.native_seat("sid-b", pane="w1:p8")
+        other = self._settled(target="claude:sid-b", session_id="steward-2", seat=seat_b)
+        joined = self._run("join", other["watch_id"], "--timeout", "0")
+        self.assertEqual(joined.returncode, 0, joined.stdout + joined.stderr)
+        self.assertFalse((self.watch_root / f"{other['watch_id']}.ack.json").exists())
+
     def test_ack_is_created_once_then_silently_skipped(self):
         fields = self._settled()
         with mock.patch.dict(os.environ, self._env("idle")):
