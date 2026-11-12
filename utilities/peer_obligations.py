@@ -1910,10 +1910,26 @@ def session_notice_submission_current(message):
                for _store, duty, record, root, storage, _delivery in matches)
 
 
+def _session_notice_delivery_terminal(message, roots=None):
+    """A carrier row of a retained session notice whose every exact dispatch record is
+    already terminal (ACKed by the hook's own receipt, rejected or expired) has nothing
+    left to deliver. Only exact, verified records count; an unreadable or mismatched
+    binding leaves the row as it is."""
+    members = (message.get("producer_binding") or {}).get("records")
+    if not isinstance(members, list) or not members:
+        return False
+    matches = list(_session_notice_delivery_bindings(message, roots))
+    return len(matches) == len(members) and all(
+        record.get("state") in {"acked", "rejected", "expired"}
+        for _store, _duty, record, _root, _storage, _delivery in matches)
+
+
 def registered_delivery_settled(message, *, roots=None, read_context=None):
     """Settle only when every exact binding in a retained delivery is terminal."""
     if ordinary_notice_delivery_settled(message, roots=roots):
         return True
+    if (message.get("producer_binding") or {}).get("schema") == "session-notice-runtime-v1":
+        return _session_notice_delivery_terminal(message, roots)
     bindings = list(_registered_delivery_bindings(
         message, roots, require_current_recipient=False, read_context=read_context))
     declared = message.get("dispatch_notices")

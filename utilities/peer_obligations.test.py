@@ -1170,6 +1170,49 @@ class ObligationStoreTest(unittest.TestCase):
             self.assertIsNotNone(peer._read_pending(ref).get("body_ref"))
         return ref, recipient, records, duties
 
+    def test_session_notice_row_is_settled_once_every_exact_dispatch_record_is_terminal(self):
+        """A runtime notice the hook delivered (its own transcript ACK), the steward check
+        retired (rejected) or that expired is no longer a pending peer message; one still
+        open or one whose binding does not match stays pending."""
+        import dispatch_pending_delivery as pending
+        peer = peer_steward.peer_message
+        for harness in ("claude", "codex", "opencode"):
+            for how in ("acked", "rejected", "expired", "open", "digest-mismatch"):
+                with self.subTest(harness=harness, how=how):
+                    ref, recipient, records, _duties = self.notice_transfer(
+                        harness, member_count=2, suffix=f"-settle-{how}")
+                    sid = recipient["session_id"]
+                    row = peer._read_pending(ref)
+                    self.assertEqual((row["state"], len(peer.pending_messages(recipient))), ("pending", 1))
+                    for record in records if how != "open" else ():
+                        did = record["delivery_id"]
+                        if how == "acked":
+                            pending.ack_received(
+                                self.root, sid, did, acked_by="hook-transcript",
+                                expected_identity=pending.received_ack_identity(record, sid, did))
+                        elif how == "rejected":
+                            pending.reject_claimed(self.root, sid, did, claim_owner=record["claim_owner"],
+                                                   reason="notice-obligation-resolved")
+                        elif how == "expired":
+                            path = pending.record_path(self.root, sid, did)
+                            raw = json.loads(path.read_text())
+                            raw["state"] = "expired"
+                            path.write_text(json.dumps(raw))
+                    if how == "digest-mismatch":
+                        pending.ack_received(
+                            self.root, sid, records[0]["delivery_id"], acked_by="hook-transcript",
+                            expected_identity=pending.received_ack_identity(
+                                records[0], sid, records[0]["delivery_id"]))
+                        path = pending.record_path(self.root, sid, records[1]["delivery_id"])
+                        raw = json.loads(path.read_text())
+                        raw["state"] = "acked"
+                        raw["receipt_digest"] = "0" * 64
+                        path.write_text(json.dumps(raw))
+                    settled = how in {"acked", "rejected", "expired"}
+                    self.assertEqual(peer._registered_delivery_settled(peer._read_pending(ref)), settled)
+                    self.assertEqual(len(peer.pending_messages(recipient)), 0 if settled else 1)
+                    self.assertEqual(peer._read_pending(ref)["state"], "pending")  # nothing rewritten
+
     def _native_first_write(self, ref, recipient, *, before=None):
         """Both actual transport boundaries; a native mock invokes before_add."""
         peer = peer_steward.peer_message

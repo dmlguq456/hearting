@@ -465,6 +465,103 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         self.assertEqual(seen["open_work"], ["w"])
 
 
+class StewardCheckPeerRequestCountTest(CheckBase):
+    """Only a request another session sent and the holder has not received is a
+    "peer request queued for you"; runtime notices (route completions, experiment
+    finals, this check's own notice) never are. Rows keep the real shape the
+    peer-message store gives them, per receiving harness."""
+
+    # The receipt a notice's carrier row keeps differs per adapter: Claude's hook
+    # releases its in-flight reservation, Codex and OpenCode leave the native queue's
+    # ``native-pending`` row.
+    RECEIPTS = {"claude": "delivery-reservation-released",
+                "codex": "native-pending", "opencode": "native-pending"}
+
+    def setUp(self):
+        super().setUp()
+        self.rows = []
+        module = SimpleNamespace(pending_messages=lambda who: [
+            row for row in self.rows
+            if (row["to"]["harness"], row["to"]["session_id"]) == (who["harness"], who["session_id"])])
+        self.collector = SimpleNamespace(role_targets=lambda h, s: [],
+                                         _peer_message_module=lambda: module)
+        for name, patch in (
+                ("_observe_role", mock.patch.object(SC, "_observe_role", REAL_OBSERVE)),
+                ("_collector", mock.patch.object(SC, "_collector", return_value=self.collector)),
+                ("_end_observation", mock.patch.object(SC, "_end_observation", return_value=None)),
+                ("_open_work", mock.patch.object(SC, "_open_work", return_value=([], [])))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def row(self, harness, sid, *, sender="runtime", state="pending", receipt=None, text="x"):
+        binding = ({"schema": "session-notice-runtime-v1"} if sender == "runtime" else None)
+        row = {"ref": f"{len(self.rows):032x}", "state": state, "text": text,
+               "from": {"harness": sender, "session_id": None if sender == "runtime" else "sid-other"},
+               "to": {"harness": harness, "session_id": sid},
+               "receipt": receipt or self.RECEIPTS[harness], "producer_binding": binding}
+        self.rows.append(row)
+        return row
+
+    def test_only_runtime_notices_pending_is_not_a_peer_request(self):
+        for harness, receipt in self.RECEIPTS.items():
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                for kind in ("route completion", "experiment final", "steward-check: 12 peer request(s)"):
+                    self.row(harness, SID, text=kind)
+                self.row(harness, SID, state="queued", receipt="claude-pty-continue-submitted")
+                seen = REAL_OBSERVE(harness, SID)
+                self.assertEqual(seen["pending_messages"], 0)
+                self.assertNotIn("queued for you", " ".join(SC.next_actions(seen, {}, T0)))
+                self.assertFalse(SC._remaining(seen))
+
+    def test_running_the_check_repeatedly_never_grows_the_count(self):
+        for harness in self.RECEIPTS:
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                for index in range(6):
+                    out = self.check_as(harness, T0 + index * 3600)
+                    self.assertNotIn("queued for you", out)
+                    self.assertNotIn("pending_messages=1", out)
+                    # the courier leaves this check's own notice pending, as observed
+                    self.row(harness, SID, text="steward-check: notice %d" % index)
+                self.assertEqual(len(self.rows), 6)
+                self.assertEqual(REAL_OBSERVE(harness, SID)["pending_messages"], 0)
+
+    def check_as(self, harness, now):
+        out = io.StringIO()
+        with mock.patch.object(SC, "_role_held", return_value={"held": True, "reason": None,
+                                                                "successor": None}):
+            SC.cmd_check(harness, SID, now=now, out=out)
+        return out.getvalue()
+
+    def test_one_undelivered_request_from_another_session_counts_once(self):
+        for harness in self.RECEIPTS:
+            with self.subTest(harness=harness):
+                self.rows.clear()
+                self.row(harness, SID, text="route completion")
+                self.row(harness, SID, sender="claude", text="please review")
+                self.row(harness, SID, sender="codex", state="received", text="old")
+                seen = REAL_OBSERVE(harness, SID)
+                self.assertEqual(seen["pending_messages"], 1)
+                self.assertIn("1 peer request(s) queued for you → handle them as they arrive",
+                              SC.next_actions(seen, {}, T0))
+                out = self.check_as(harness, T0)
+                self.assertIn("pending_messages=1", out)
+                self.assertIn("1 peer request(s) queued for you", out)
+
+    def test_runtime_notice_to_a_target_is_not_a_request_owed_by_it(self):
+        self.collector.role_targets = lambda h, s: [
+            {"name": "e7", "harness": "codex", "session_id": "sid-e7"}]
+        self.row("codex", "sid-e7", text="route completion")
+        with mock.patch.object(SC, "_session_liveness", return_value="live"):
+            seen = REAL_OBSERVE("claude", SID)
+        self.assertEqual(seen["targets"][0]["owed"], 0)
+        self.row("codex", "sid-e7", sender="claude", text="do this")
+        with mock.patch.object(SC, "_session_liveness", return_value="live"):
+            seen = REAL_OBSERVE("claude", SID)
+        self.assertEqual(seen["targets"][0]["owed"], 1)
+
+
 class StewardCheckOwnTargetsTest(CheckBase):
     """The real role_targets winner rule: each steward sees only the targets it wins."""
 

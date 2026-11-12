@@ -436,13 +436,21 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
 
 
 def _pending_count(module, harness: str, session_id) -> int:
+    """Peer requests another session sent to ``session_id`` that it has not received yet.
+
+    A runtime notice (``from.harness == "runtime"``: route completions, experiment
+    finals and this check's own notice) is not a peer request: its non-delivery is the
+    duty's own ``undelivered_notices``, and counting it would let the check's notice
+    become the next check's work."""
     if module is None or not session_id:
         return 0
     try:
         rows = module.pending_messages({"harness": harness, "session_id": session_id})
     except Exception:  # noqa: BLE001
         return 0
-    return len([row for row in rows or () if row.get("state") == "pending"])
+    return len([row for row in rows or ()
+                if row.get("state") == "pending"
+                and (row.get("from") or {}).get("harness") != "runtime"])
 
 
 def _observe_role(harness: str, session_id: str) -> dict:
