@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import json
 import math
@@ -441,7 +442,9 @@ def pending_human_waits(route, *, jobs, outcome=None):
 
     This reads only the exact route's registry-selected workflow journal and, for
     frame-review, answer files beside the artifact named by the latest raise.
-    It never repairs ledger state or changes gate state.
+    It never repairs ledger state or changes gate state. A caller that keeps the result can
+    name what it depends on: ``_WAIT_READS`` collects every file besides the journal this call
+    looked at (a frame-review artifact and its two answer files).
     """
     if not isinstance(route, dict) or not route.get("route_id") or not route.get("route_hash"):
         return []
@@ -490,6 +493,10 @@ def pending_human_waits(route, *, jobs, outcome=None):
             if artifact and artifact_root and _inside(artifact, artifact_root):
                 try:
                     question_path = Path(artifact).resolve(strict=True)
+                    sink = _WAIT_READS.get()
+                    if sink is not None:
+                        sink.extend((question_path, question_path.parent / "answers.native.json",
+                                     question_path.parent / "answers.json"))
                     digest = resolution.get("artifact_sha256")
                     current = not digest or hashlib.sha256(question_path.read_bytes()).hexdigest() == digest
                     if current and FI.is_interview(_json_file(question_path)):
@@ -502,6 +509,44 @@ def pending_human_waits(route, *, jobs, outcome=None):
         gates.append({"gate_id": gate, "kind": "decision", "source": "hearting-ledger",
                       "waiting_since": waiting_since, "route_id": route["route_id"]})
     return gates
+
+
+# The S2 judgment of one route (``pending_human_waits``) is a pure function of its sealed record, the
+# route's outcome sidecars, its workflow journal and, for a raised frame-review gate, the artifact and
+# the two answer files. Each of those is read through an exact file identity (``_stamp``), and the
+# record and outcome are the objects ``_route_outcome`` keeps while their stamps hold. So a result is
+# reused while the same objects and the same stamps are found, and computed again as soon as one differs.
+# Time, process liveness and lineage are not inputs; the caller still computes them every pass.
+# One entry per route triple; entries the latest full pass did not see are dropped.
+_WAIT_MEMO = {}
+_WAIT_READS = contextvars.ContextVar("human_gate_wait_reads", default=None)
+_METRICS["route_wait_recomputes"] = 0
+_METRICS["route_wait_reuses"] = 0
+
+
+def _waits_for(route_key, raw_record, route_record, outcome, path, ledger_root):
+    """``pending_human_waits`` for one route, reused while none of its inputs changed."""
+    jobs_key = str(path)
+    journal = (Path(ledger_root) / str(route_key[0]) / "journal.jsonl") if ledger_root is not None else None
+    entry = _WAIT_MEMO.get(route_key)
+    journal_stamp = _stamp(journal) if journal is not None else None
+    if (entry is not None and journal is not None and entry[0] is raw_record and entry[1] is outcome
+            and entry[2] == jobs_key and entry[3] == journal_stamp
+            and all(_stamp(read) == stamp for read, stamp in entry[4])):
+        _METRICS["route_wait_reuses"] += 1
+        return [dict(wait) for wait in entry[5]]
+    _METRICS["route_wait_recomputes"] += 1
+    reads = []
+    token = _WAIT_READS.set(reads)
+    try:
+        waits = pending_human_waits(route_record, jobs=path, outcome=outcome)
+    finally:
+        _WAIT_READS.reset(token)
+    if journal is not None:
+        _WAIT_MEMO[route_key] = (raw_record, outcome, jobs_key, journal_stamp,
+                                 tuple((read, _stamp(read)) for read in reads),
+                                 tuple(dict(wait) for wait in waits))
+    return waits
 
 
 def _session_liveness_probe():
@@ -856,6 +901,11 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 if project_root not in sys.path:
                     sys.path.insert(0, project_root)
                 from tools.fleet import route as route_module
+                try:
+                    ledger_root = WS.ledger_root_for(path)[0]
+                except (OSError, ValueError, TypeError, KeyError):
+                    ledger_root = None
+                seen_routes = set()
                 for (route_id, route_digest, route_file), (row, _candidate_meta, route_activity) in route_candidates.items():
                     if only_id is not None and not only_id.startswith("S2:" + str(route_id) + ":"):
                         continue
@@ -873,11 +923,14 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                                                                route_id, route_digest)
                         if route_record is None:
                             continue
+                        seen_routes.add((route_id, route_digest, route_file))
                         # The loader's private schema tag is not covered by the
                         # sealed route hash; pending_human_waits must see sealed bytes.
+                        raw_record = route_record
                         route_record = {name: value for name, value in route_record.items()
                                         if name != "_fleet_schema_status"}
-                        for wait in pending_human_waits(route_record, jobs=path, outcome=outcome):
+                        for wait in _waits_for((route_id, route_digest, route_file), raw_record,
+                                               route_record, outcome, path, ledger_root):
                             if meta is None:
                                 meta = row.completion_metadata()
                             parent_sid = meta.get("parent_sid")
@@ -911,6 +964,9 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
                         health.append({"source": "S2", "route_id": route_id,
                                        "state": "unknown", "reason": type(exc).__name__})
+                if only_id is None:
+                    for stale in [key for key in _WAIT_MEMO if key not in seen_routes]:
+                        del _WAIT_MEMO[stale]
         except (OSError, ValueError, UnicodeError) as exc:
             health.append({"source": "registry", "path": str(path),
                            "state": "unknown", "reason": type(exc).__name__})

@@ -80,6 +80,44 @@ class PendingWaitTest(unittest.TestCase):
         self.assertEqual((waits[0]["kind"], waits[0]["source"]), ("decision", "hearting-ledger"))
         self.assertEqual(set(waits[0]), {"gate_id", "kind", "source", "waiting_since", "route_id"})
 
+    def test_a_kept_wait_judgment_names_every_gate_file_it_read(self):
+        """The judgment of a route is reused only while the journal, the interview artifact and both
+        answer files are the same files: an answer that appears or changes next to the artifact is an input."""
+        key = (self.route["route_id"], self.route["route_hash"], str(self.root / "route.json"))
+        args = (key, self.route, dict(self.route), None, self.jobs, self.root / "workflow")
+        H._WAIT_MEMO.clear()
+        start = H.metrics_snapshot()
+
+        def moved():
+            now = H.metrics_snapshot()
+            return (now["route_wait_recomputes"] - start["route_wait_recomputes"],
+                    now["route_wait_reuses"] - start["route_wait_reuses"])
+
+        first = H._waits_for(*args)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(H._waits_for(*args), first)
+        self.assertEqual(moved(), (1, 1))
+        answers = self.artifacts / "answers.json"
+        answers.write_text("{}\n", encoding="utf-8")                       # an answer file appears
+        H._waits_for(*args)
+        self.assertEqual(moved(), (2, 1))
+        answers.write_text('{"answers": {}}\n', encoding="utf-8")          # and changes
+        H._waits_for(*args)
+        self.assertEqual(moved(), (3, 1))
+        H._waits_for(*args)
+        self.assertEqual(moved(), (3, 2))
+        journal = self.root / "workflow" / self.route["route_id"] / "journal.jsonl"
+        journal.write_text(journal.read_text(encoding="utf-8").replace("frame-review", "other-gate"),
+                           encoding="utf-8")                                  # the journal changes
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+        self.assertEqual(moved(), (4, 2))
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+        self.assertEqual(moved(), (4, 3))
+        # A caller that changes what it was given gets its own copy of a kept answer.
+        first = H._waits_for(*args)
+        first[0]["gate_id"] = "tampered"
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+
     def test_mismatched_route_identity_has_no_observation(self):
         route = dict(self.route, route_id="rt-unrelated")
         self.assertEqual(H.pending_human_waits(route, jobs=self.jobs), [])
@@ -490,12 +528,17 @@ class PendingWaitTest(unittest.TestCase):
                      "waiting_since": pending.since, "route_id": route["route_id"]}]
 
         with mock.patch.object(H, "pending_human_waits", side_effect=pending):
+            # The judgment is replaced by one that answers differently for the same inputs, so
+            # what the pass kept of its answer for those inputs is dropped between the passes.
+            H._WAIT_MEMO.clear()
             pending.since = instant - 72 * 3600 + 1
             current = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((current["total"], current["stale_total"]), (1, 0))
+            H._WAIT_MEMO.clear()
             pending.since = instant - 72 * 3600
             older = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((older["total"], older["stale_total"]), (0, 1))
+            H._WAIT_MEMO.clear()
             pending.since = instant - 7 * 86400 - 1
             older = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((older["total"], older["stale_total"],

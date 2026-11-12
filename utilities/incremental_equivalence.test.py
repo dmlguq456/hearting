@@ -682,7 +682,8 @@ REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuse
                      "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
 OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
-GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses")
+GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses",
+                 "route_wait_recomputes", "route_wait_reuses")
 
 
 def counters() -> dict:
@@ -1381,7 +1382,7 @@ def real_route_record(slug: str) -> dict:
     return record
 
 
-def blocked_owner(run, name: str) -> dict:
+def blocked_owner(run, name: str, ended: float | None = None) -> dict:
     """One owner that ended BLOCKED with no successor, on its own open route; returns its identity."""
     record = real_route_record("blocked-" + name)
     route_file = run.fx.routes / ("blocked-%s.json" % name)
@@ -1399,7 +1400,8 @@ def blocked_owner(run, name: str) -> dict:
         "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": str(route_file),
         "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
         "owner_route_file": str(route_file), "launch_claimed": "1", "launch_started": "1",
-        "note": "dead-worker-blocked", "ended_at": "%.3f" % (CLOCK_BASE - 2900)}, str(run.fx.work))
+        "note": "dead-worker-blocked",
+        "ended_at": "%.3f" % (CLOCK_BASE - 2900 if ended is None else ended)}, str(run.fx.work))
     return {"attempt": attempt, "row": row, "route_id": record["route_id"], "journal": journal,
             "route_file": route_file}
 
@@ -1416,6 +1418,12 @@ def keep_answer(run, attempt: str, state: str = "retained") -> Path:
 
 def blocked_setup(run):  # two BLOCKED owners, neither holds an answer
     owners = [blocked_owner(run, name) for name in ("a", "b")]
+    run.blocked = {owner["attempt"]: owner for owner in owners}
+    run.fx.append_rows([owner["row"] for owner in owners])
+
+
+def blocked_near_fold_setup(run):  # BLOCKED owners that end 100 s short of the 72 h fold window
+    owners = [blocked_owner(run, name, ended=CLOCK_BASE - 72 * 3600 + 100) for name in ("a", "b")]
     run.blocked = {owner["attempt"]: owner for owner in owners}
     run.fx.append_rows([owner["row"] for owner in owners])
 
@@ -1514,6 +1522,47 @@ def e34e2(run):  # a later row of the same route has one: the route's activity i
 
 def e34e3(run):  # an even later row has none again: it does not take the time away
     run.fx.append_rows([_alias_row(run, "x3", "still-not-a-time", _alias_route(run))])
+
+
+def raise_gate(run, index: int, gate: str = "approval", at: float | None = None) -> None:
+    """The route's workflow journal gains a raised human gate, as the supervisor writes it."""
+    record = route_record(run.fx.root, index, revision=run.fx.revision[index])
+    journal = run.fx.jobs.parent / "workflow" / record["route_id"] / "journal.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "route_id": record["route_id"], "route_hash": record["route_hash"],
+            "workflow_state": "BLOCKED_HUMAN_GATE", "at": iso(CLOCK_BASE - 900 if at is None else at),
+            "evidence": {"gate": gate}}, sort_keys=True) + "\n")
+
+
+def e32a(run):  # route 2's journal gains a raised gate: its wait appears
+    raise_gate(run, 2)
+
+
+def e33_gate(run):  # route 1 has a raised gate, so deleting its record visibly removes the wait
+    raise_gate(run, 1)
+
+
+def e33a(run):  # route 1's record file is replaced by identical content (a new inode)
+    path = run.fx.route_path(1)
+    body = path.read_bytes()
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_bytes(body)
+    os.replace(tmp, path)
+
+
+def e33b(run):  # route 1's record file is deleted
+    run.fx.route_path(1).unlink()
+
+
+def e33c(run):  # and written again with the same content
+    write_json(run.fx.route_path(1), route_record(run.fx.root, 1, revision=run.fx.revision[1]),
+               run.clock.now - 1)
+
+
+def e37a(run):  # the clock crosses the 72 h window a wait folds at; no input of any route changed
+    run.clock.advance(150)
 
 
 def e42_batches(run):
@@ -1638,6 +1687,22 @@ EVENTS = [
                                                    **CODEX_STILL}),
       Step("later row without a time", e34e3, expect={**REG_APPEND, "generation_segment_reuses": "+",
                                                       **CODEX_STILL})]),
+    # E32/E33/E35/E37: the S2 judgment of a route is computed again only when one of its inputs changed.
+    ("E32a", "a raised gate appears in one route's journal",
+     [Step("gate raised", e32a, expect={**REG_STILL, "route_wait_recomputes": 1,
+                                        "route_wait_reuses": 2, **CODEX_STILL})]),
+    ("E33", "one route's record file: replaced by the same bytes, deleted, written again",
+     [Step("gate raised", e33_gate, expect={**REG_STILL, "route_wait_recomputes": 1, **CODEX_STILL}),
+      Step("replaced by identical bytes", e33a, unchanged=True,
+           expect={**REG_STILL, "route_wait_recomputes": "+", "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("deleted", e33b, expect={**REG_STILL, "route_wait_reuses": "+", **CODEX_STILL}),
+      Step("written again", e33c, expect={**REG_STILL, "route_wait_recomputes": "+",
+                                          "route_wait_reuses": "+", **CODEX_STILL})]),
+    ("E37a", "the clock crosses the fold window, no route input changed",
+     [Step("two BLOCKED owners near the window", blocked_near_fold_setup,
+           expect={**REG_APPEND, **CODEX_STILL}),
+      Step("+150 s", e37a, clock_only=True, expect={**REG_STILL, "route_wait_recomputes": "0",
+                                                   "route_wait_reuses": "+", **CODEX_STILL})]),
     # E40: the owner-input decision (route verification) runs only for an owner that holds a kept
     # answer; with nothing kept the answer is [] whatever the decision says.
     ("E40", "a kept answer appears for a BLOCKED owner, then is consumed",
