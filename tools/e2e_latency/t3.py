@@ -350,7 +350,8 @@ def child_env(fixture, *, scratch, cache_dir, marker, tag, records, bindir, shim
 def write_sessions(fixture, scratch):
     """The fixture's sessions as the shim's process-discovery answer; None when it has none."""
     items = [{"harness": s.get("harness") or "claude", "pid": s["pid"], "cwd": s["cwd"],
-              "pid_start": s.get("pid_start")} for s in (fixture.get("sessions") or ())
+              "pid_start": s.get("pid_start")}
+             for s in list(fixture.get("sessions") or ()) + list(fixture.get("codex_sessions") or ())
              if s.get("pid")]
     if not items:
         return None

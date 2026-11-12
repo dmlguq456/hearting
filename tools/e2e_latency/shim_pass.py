@@ -98,6 +98,39 @@ if _OUT:
                 _active[_next[0]] = acc
         stack.append((name, t0, acc, depth == 0))
 
+    _last_model = [None]
+
+    def _get(obj, key):
+        try:
+            return obj.get(key)
+        except Exception:
+            return None
+
+    def _model_digest():
+        """What the Fleet explorer's screen model shows about routes and questions (compact, no text)."""
+        model = None
+        for mod_name, mod in list(sys.modules.items()):
+            if mod_name == "render" or mod_name.endswith(".render"):
+                model = getattr(mod, "_EXPLORER_MODEL", None)
+                if model is not None:
+                    break
+        if model is None:
+            return None
+        try:
+            routes = {}
+            for row in getattr(model, "routes", ()) or ():
+                doer = _get(row, "doer")
+                owner = _get(_get(_get(row, "visibility"), "codes"), "owner")
+                routes[str(_get(row, "id"))] = {
+                    "state": _get(row, "state"), "outcome": _get(row, "outcome"),
+                    "active": [_get(stage, "name") for stage in (_get(row, "stages") or ())
+                               if _get(stage, "st") == "active"],
+                    "tool": _get(doer, "tool"), "attempt": _get(owner, "attempt_id")}
+            return {"routes": routes,
+                    "questions": [str(_get(q, "id")) for q in (getattr(model, "questions", ()) or ())]}
+        except Exception as exc:
+            return {"error": repr(exc)}
+
     def _leave(name):
         t1 = time.monotonic_ns()
         tid = threading.get_ident()
@@ -128,6 +161,11 @@ if _OUT:
                        metrics={k: after[k] - before.get(k, 0) for k in after
                                 if isinstance(after[k], (int, float)) and after[k] != before.get(k, 0)},
                        pid=os.getpid())
+            if name == "render._explorer_compose":
+                # After t1 is taken, so it is not part of the pass: what the screen model now shows.
+                digest = _model_digest()
+                if digest is not None and digest != _last_model[0]:
+                    acc["model"] = _last_model[0] = digest
             _emit(acc)
 
     mode = "import-hook"
@@ -296,6 +334,21 @@ def read_passes(path) -> list[dict]:
         return []
     rows.sort(key=lambda r: r["t0"])
     return rows
+
+
+def with_models(passes: list[dict]) -> list[dict]:
+    """Every pass record carrying ``model_now``: the last screen-model digest seen at or before it.
+
+    The shim writes a digest only when it changed, so a pass without ``model`` still shows
+    the previous one. ``None`` until the first digest.
+    """
+    current = None
+    out = []
+    for rec in passes:
+        if rec.get("model") is not None:
+            current = rec["model"]
+        out.append({**rec, "model_now": current})
+    return out
 
 
 def self_check(passes: list[dict], role: str) -> dict:

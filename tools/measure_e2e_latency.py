@@ -34,12 +34,14 @@ failure and exit 1 instead of publishing numbers.
 """
 from __future__ import annotations
 
+import sys
+sys.dont_write_bytecode = True  # before any other import: `live` must not write .pyc into the code checkout
+
 import argparse
 import importlib
 import json
 import os
 from pathlib import Path
-import sys
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -97,7 +99,7 @@ def _t1_t2_rows(results: list[dict]) -> list[dict]:
             label = kind if not stats.get("no_observed_within_s") else (
                 f"{kind} (loading을 {stats['no_observed_within_s']:g}s 안에 벗어나지 못함)")
             rows.append({"metric": item["metric"], "kind": label, **{k: stats.get(k) for k in (
-                "n", "median_s", "p95_s", "max_s", "p95_basis")}})
+                "n", "n_total", "median_s", "p95_s", "max_s", "p95_basis")}})
     return rows
 
 
@@ -121,58 +123,113 @@ def replace_contrast(passes: list[dict]) -> dict | None:
     return out or None
 
 
+def _full_parses(entry: dict) -> int:
+    metrics = ((entry.get("after_row") or {}).get("metrics")) or {}
+    return int(metrics.get("full_metadata_parses", 0) or 0)
+
+
 def history_verdicts(scale: dict) -> list[str]:
-    """The two falsifier sentences, from the numbers (never from the expectation)."""
+    """The falsifier sentences, from the numbers (never from the expectation).
+
+    The history verdict is read from the pass the user waits for: the pass right after the
+    registry changed (one line's content differs), as the *extra* it costs over an unchanged
+    pass. A role counts only when both sizes re-parsed the registry in that pass
+    (``full_metadata_parses >= 1``); an unchanged pass reads nothing again, so its time says
+    nothing about history and is listed only as the fixed cost.
+    """
     lines = []
-    shares = []
+    changes = []
+    for pair in scale.get("pairs", ()):
+        for role in ("producer", "fleet"):
+            small = pair["small"]["roles"].get(role, {})
+            large = pair["large"]["roles"].get(role, {})
+            extra_small, extra_large = small.get("extra_s"), large.get("extra_s")
+            if extra_small is None or extra_large is None:
+                continue
+            parses = (_full_parses(small), _full_parses(large))
+            if min(parses) < 1 or extra_small <= 0:
+                lines.append(f"- {pair['label']} {role}: 교체 직후 추가분 판정 불가 (full parses {parses[0]}/{parses[1]}, "
+                             f"추가분 {extra_small:+.3f}s -> {extra_large:+.3f}s)")
+                continue
+            change = _contrast(extra_small, extra_large)
+            changes.append(change)
+            lines.append(f"- {pair['label']} {role}: 교체 직후 추가분 {extra_small:.3f}s -> {extra_large:.3f}s "
+                         f"({change:+.1%}, x{extra_large / extra_small:.2f}), full parses {parses[0]}/{parses[1]}")
+    if changes:
+        verdict = ("history 비례는 주원인 아님 (두 배에서 교체 직후 추가분 증가 < 20%)" if max(changes) < CONTRAST_LIMIT
+                   else "history 비례가 주원인 후보 (두 배에서 교체 직후 추가분 증가 ≥ 20%)")
+    else:
+        verdict = "history 비례 판정 불가 (양쪽이 registry를 다시 해석한 교체 직후 pass가 없음)"
+    lines.insert(0, f"**history 2배 대조 (바뀐 직후 pass의 추가분): {verdict}**")
+    fixed = []
     for pair in scale.get("pairs", ()):
         for role in ("producer", "fleet"):
             base = pair["small"]["roles"].get(role, {}).get("warm_median_s")
             big = pair["large"]["roles"].get(role, {}).get("warm_median_s")
             change = _contrast(base, big)
             if change is not None:
-                shares.append(change)
-                lines.append(f"- {pair['label']} {role}: warm {base:.3f}s -> {big:.3f}s ({change:+.1%})")
-    if shares:
-        verdict = ("history 비례는 주원인 아님 (두 배에서 pass 증가 < 20%)" if max(shares) < CONTRAST_LIMIT
-                   else "history 비례가 주원인 후보 (두 배에서 pass 증가 ≥ 20%)")
-        lines.insert(0, f"**history 2배 대조: {verdict}**")
+                fixed.append(f"- (참고, 판정 아님) {pair['label']} {role}: 무변화 pass {base:.3f}s -> {big:.3f}s "
+                             f"({change:+.1%}) — registry를 다시 읽지 않는 pass의 고정 비용")
     shares = []
+    detail = []
     for pair in scale.get("pairs", ()):
         for size in ("small", "large"):
             for role in ("producer", "fleet"):
                 entry = pair[size]["roles"].get(role, {})
                 if entry.get("after_replace_s"):
                     shares.append(entry["extra_s"] / entry["after_replace_s"])
-                    lines.append(f"- {pair['label']} {size} {role}: unchanged {_fmt(entry['warm_median_s'])}s, "
-                                 f"after replace {_fmt(entry['after_replace_s'])}s "
-                                 f"(extra {entry['extra_s']:+.3f}s)")
+                    detail.append(f"- {pair['label']} {size} {role}: unchanged {_fmt(entry['warm_median_s'])}s, "
+                                  f"after replace {_fmt(entry['after_replace_s'])}s "
+                                  f"(extra {entry['extra_s']:+.3f}s, full parses {_full_parses(entry)})")
     if shares:
         verdict = ("[다] 먼저 (교체 직후와 무변화의 차가 직후 pass의 20% 미만)" if max(shares) < CONTRAST_LIMIT
                    else "교체 직후 pass가 무변화보다 20% 이상 큼: '[다] 먼저' 조건 불충족")
-        lines.insert(1 if lines and lines[0].startswith("**history") else 0,
-                     f"**통째 교체 대조: {verdict}**")
-    return lines
+        lines.insert(1, f"**통째 교체 대조: {verdict}**")
+    return lines + detail + fixed
 
 
 def _md_baseline(report: dict) -> list[str]:
     rows = []
     for item in report.get("results", ()):
         rows.extend(_t1_t2_rows([item]))
-    out = ["## 기준 T1~T4", "", "| T | 사건 종류 | n | 중앙값 s | p95 s | 최대 s | 목표 중앙/p95 |",
+    out = ["## 기준 T1~T4", "", "| T | 사건 종류 | n (보임/전체) | 중앙값 s | p95 s | 최대 s | 목표 중앙/p95 |",
            "|---|---|---|---|---|---|---|"]
     seen = set()
     for row in rows:
         target = TARGETS.get(row["metric"], ("-", "-"))
-        out.append(f"| {row['metric']} | {row['kind']} | {row['n']} | {_fmt(row['median_s'])} | "
+        count = f"{row['n']}/{row['n_total']}" if row.get("n_total") is not None else f"{row['n']}"
+        out.append(f"| {row['metric']} | {row['kind']} | {count} | {_fmt(row['median_s'])} | "
                    f"{_fmt(row['p95_s'])}{'*' if row.get('p95_basis') else ''} | {_fmt(row['max_s'])} | "
                    f"{target[0]} / {target[1]} |")
         seen.add(row["metric"])
     for metric in ("T1", "T2", "T3", "T4"):
         if metric not in seen:
             out.append(f"| {metric} | (측정 안 됨) | 0 | - | - | - | {TARGETS[metric][0]} / {TARGETS[metric][1]} |")
-    out += ["", "`*` n < 20: p95는 nearest-rank로 n개 중 최대(`max-of-n`)다.", ""]
+    out += ["", "`*` n < 20: p95는 nearest-rank로 n개 중 최대(`max-of-n`)다. "
+            "n은 값이 실제로 보인 표본이고 전체는 넣은 사건 수다. 끝내 보이지 않은 표본(`not_visible`)은 시간을 적지 않는다.", ""]
     return out
+
+
+def _md_outside(report: dict) -> list[str]:
+    group = report.get("outside_registry")
+    if not group:
+        return []
+    total = group["total_s"]
+    out = ["## registry 밖 사건: producer 주기 대기 (한 기전)", "",
+           f"{group['mechanism']}. 사건은 producer 주기({group['cadence_s']:g}s) 전체에 층화·seed 고정 위상으로 넣었다.", "",
+           f"- 보임 {group['n']}/{group['n_total']}, 중앙 {_fmt(total['median_s'])}s, p95 {_fmt(total['p95_s'])}s"
+           f"{'*' if total.get('p95_basis') else ''}, 최대 {_fmt(total['max_s'])}s",
+           f"- 위상(마지막 게시 뒤 s) 분포(5초 칸): {json.dumps(group['phase_bins_5s'])}",
+           f"- 주기 대기를 뺀 나머지(합계 − (주기 − 위상)): 중앙 {_fmt(group['residual_after_cadence_wait_s']['median_s'])}s, "
+           f"최대 {_fmt(group['residual_after_cadence_wait_s']['max_s'])}s",
+           f"- 다른 registry 변화가 producer를 일찍 깨운 표본: {group['woken_early']}개",
+           f"- host panel 답이 값을 보인 표본(id·도구 이름이 있는 사건만): {json.dumps(group['host_shows'])}", "",
+           "| 사건 | rep | 위상 s (게시 뒤) | 위상 s (pass 시작 뒤) | 합계 s | 주기 대기 s | 일찍 깸 |",
+           "|---|---|---|---|---|---|---|"]
+    for r in sorted(group["samples"], key=lambda r: (r["kind"], r["phase_s"] if r["phase_s"] is not None else -1)):
+        out.append(f"| {r['kind']} | {r['rep']} | {_fmt(r['phase_s'])} | {_fmt(r['since_pass_start_s'])} | "
+                   f"{_fmt(r['total_s'])} | {_fmt(r['cadence_wait_s'])} | {'예' if r['woken_early'] else '-'} |")
+    return out + [""]
 
 
 def _md_contrast(report: dict) -> list[str]:
@@ -260,6 +317,7 @@ def _md_info(report: dict) -> list[str]:
            f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
            f"- fixture: registry {report.get('fixture', {}).get('bytes')} bytes, "
            f"rows {report.get('fixture', {}).get('rows')}, baseline {report.get('fixture', {}).get('baseline')}",
+           f"- fixture shape (넣은 것): {json.dumps(report.get('fixture', {}).get('shape'))}",
            f"- cleanup: {json.dumps(report.get('cleanup'))}"]
     failures = (report.get("self_check") or {}).get("failures") or []
     if failures:
@@ -293,7 +351,8 @@ def render_markdown(report: dict) -> str:
                 f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
                 f"- cleanup: {json.dumps(report.get('cleanup'))}"]
         return "\n".join(out) + "\n"
-    for name, build in (("기준 T1~T4", _md_baseline), ("무변화 대 교체", _md_contrast),
+    for name, build in (("기준 T1~T4", _md_baseline), ("registry 밖 사건", _md_outside),
+                        ("무변화 대 교체", _md_contrast),
                         ("pass 구간", _md_passes), ("T3 launch", _md_launches),
                         ("구간 중앙값", _md_segments), ("실행 정보", _md_info)):
         out += _guarded(name, build, report)
@@ -341,8 +400,10 @@ def cmd_run(args) -> int:
                         report.setdefault("self_check", {"failures": []})["failures"] += check["failures"]
     else:
         only = {item.strip().lower() for item in (args.only or "t1,t2,t3,t4").split(",") if item.strip()}
-        fixture = fixture_mod.build(probe=True)
+        fixture = fixture_mod.build(probe=True, min_open_routes=2 * args.reps + 4, shape=True)
         report["fixture"] = {k: fixture[k] for k in ("bytes", "rows", "open_routes", "baseline", "marker")}
+        shapes = _module("shapes")
+        report["fixture"]["shape"] = shapes.describe(fixture) if shapes is not None else None
         scratch = Path(fixture["root"]) / "scratch"
         scratch.mkdir(exist_ok=True)
         try:
@@ -360,6 +421,7 @@ def cmd_run(args) -> int:
                 report["notes"].extend(result["notes"])
                 report["not_measured"].extend(result["not_measured"])
                 report["shim_mode"] = result.get("shim_mode")
+                report["outside_registry"] = result.get("outside_registry")
                 report["events"] = result["events"]
             for name, key in (("t3", "T3"), ("t4", "T4")):
                 if name not in only:

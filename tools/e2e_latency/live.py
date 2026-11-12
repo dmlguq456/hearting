@@ -10,10 +10,15 @@ mtime/inode changed is one publication; the only value taken from it is
 the first publication whose ``observed_at`` is at or after the change, minus the
 change time. Output carries counts and times only: no path, no row, no cache content.
 
-Read-only is enforced, not promised: an audit hook refuses (and records as
-``violations``) any write-mode open outside ``--out``/``--markdown``, ``os.kill`` and
-signal calls, rename/remove/mkdir/utime/chmod and the like, sockets and process
-spawns. One violation fails the run (exit 1). The hook is armed only inside ``run``.
+Read-only is enforced for the sampling loop and for the output write, not for the whole
+process: an audit hook armed around those two refuses (and records as ``violations``)
+any write-mode open outside ``--out``/``--markdown``, ``os.kill`` and signal calls,
+rename/remove/mkdir/utime/chmod and the like, sockets and process spawns; one violation
+fails the run (exit 1). What runs before it (argument parsing, ``default_registries()``
+importing the Fleet resolver that names the registry paths) is outside the hook; that
+part only reads, which is checked by reading it and by an isolated run, not by the hook.
+No bytecode is written either: ``measure_e2e_latency.py`` turns ``dont_write_bytecode`` on
+before any import.
 
     python3 tools/measure_e2e_latency.py live --duration 600 --period 0.1 --out live.json
 
@@ -28,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.dont_write_bytecode = True      # importing the Fleet resolver must not write .pyc
+sys.dont_write_bytecode = True      # also set by measure_e2e_latency.py before any import (this module's own .pyc)
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parents[1]
 CACHE_NAMES = ("projection", "fleet")
@@ -61,7 +66,11 @@ def summarize(samples):
 # --- read-only enforcement ------------------------------------------------------------
 
 class ReadOnlyGuard:
-    """One process-wide audit hook; ``arm``/``disarm`` scope it so tests can reuse it."""
+    """One process-wide audit hook, active only while a ``with ReadOnlyGuard(...)`` block runs.
+
+    It guards what runs inside that block (``run``'s sampling loop and ``main``'s output
+    write), nothing before or after it.
+    """
     _installed = False
     _guards = []
 

@@ -4,13 +4,22 @@ One producer child (``utilities/human_wait_state.py --refresh-cache``, the real
 loop) and one Fleet child (``tools/fleet/fleet.py --explorer --no-tmux`` on a PTY)
 run against the same fixture with the pass shim. After one cold pass and two
 unchanged warm passes, events are injected through the real writers
-(``events.py``), at phases spread over the producer's cadence (the #1548 method,
-widened), and each event is followed to its end:
+(``events.py``) and each is followed to the moment *its value is shown*:
 
-T1  event -> (producer wake -> pass -> publish) -> ``projection.json`` carries it
-    -> host debounce -> ``session_shell.panel_projection`` answers.
-T2  event -> first ``collect_all`` that starts after it -> the Fleet explorer
-    ``_explorer_compose`` that consumes it ends (the screen model).
+T1  event -> (producer wake -> pass -> publish) -> the first ``projection.json`` that
+    carries the value (``visible.t1``) -> host debounce -> ``session_shell.panel_projection``.
+T2  event -> the first Fleet ``_explorer_compose`` whose screen model carries the value
+    (``visible.t2``, from the digest the shim takes after each compose).
+
+A value that never shows within the wait is ``not_visible``: it gets no time, and every
+table says how many of the injected events were seen (``n_visible / n``).
+
+Phases. Events that change the registry (route-start, stage-transition, route-end) wake
+the producer, so they are injected 0.3-4.2 s after the last publish (around its 2 s
+registry min gap). Events outside the registry (worker-tool, answer-wait, owner-dead) wake
+nothing; they wait for the producer's own cadence, so their phase is the variable: one
+producer cycle per rep carries one event of each kind at seeded, stratified phases over
+the whole cadence (``slow_phase_plan``), and every sample records its phase.
 
 Latency is measured from the *completed write*. Nothing is mocked in the timed
 path; the only substitution is session discovery (fixture sleepers, see shim).
@@ -21,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import random
 import re
 import signal
 import subprocess
@@ -28,10 +38,11 @@ import sys
 import threading
 import time
 
-from . import events, fixture as fx, shim_pass
+from . import events, fixture as fx, shim_pass, visible
 
 REPO = fx.REPO
-PHASES_S = (0.3, 1.7, 3.1, 0.9, 2.4, 4.2, 1.2, 2.8)
+PHASES_S = (0.3, 1.7, 3.1, 0.9, 2.4, 4.2, 1.2, 2.8)  # registry-change events: after the last publish, around the 2 s min gap
+PHASE_SEED = 20261113  # fixed: the registry-outside phase plan reproduces
 HOST_DEBOUNCE_S = 0.025  # host.cjs queueProjection setTimeout
 WARM_PASSES = 2
 EVENT_TIMEOUT_S = 45.0
@@ -47,10 +58,13 @@ def percentile(values, q: float) -> float | None:
     return data[rank - 1]
 
 
-def summarize(samples) -> dict:
+def summarize(samples, total: int | None = None) -> dict:
+    """``n`` is the samples that arrived; ``n_total`` (when given) is how many events were injected."""
     values = [v for v in samples if v is not None]
     out = {"n": len(values), "median_s": None, "p95_s": None, "max_s": None,
            "samples_s": [round(v, 4) for v in values]}
+    if total is not None:
+        out.update(n_total=total, n_not_visible=max(0, total - len(values)))
     if values:
         data = sorted(values)
         mid = len(data) // 2
@@ -91,8 +105,8 @@ class Children:
         self.shim_dir = shim_pass.install(scratch / "shim")
         sessions = scratch / "sessions.json"
         sessions.write_text(json.dumps([
-            {"harness": "claude", "pid": s["pid"], "pid_start": s["pid_start"], "cwd": s["cwd"]}
-            for s in fixture["sessions"]]), encoding="utf-8")
+            {"harness": s.get("harness", "claude"), "pid": s["pid"], "pid_start": s["pid_start"], "cwd": s["cwd"]}
+            for s in list(fixture["sessions"]) + list(fixture.get("codex_sessions") or ())]), encoding="utf-8")
         self.sessions_file = str(sessions)
         self.producer_log = scratch / "producer.jsonl"
         self.fleet_log = scratch / "fleet.jsonl"
@@ -178,7 +192,7 @@ class Probe:
         "sys.path[:0] = [%r, %r]\n"
         "import session_shell\n"
         "for line in sys.stdin:\n"
-        "    sid, pid, start = line.split()\n"
+        "    sid, pid, start, needle = line.split()\n"
         "    t0 = time.monotonic_ns()\n"
         "    try:\n"
         "        out = session_shell.panel_projection('claude', sid, native_pid=int(pid), native_start=start,\n"
@@ -187,8 +201,8 @@ class Probe:
         "    except Exception as exc:\n"
         "        out, err = {}, repr(exc)\n"
         "    t1 = time.monotonic_ns()\n"
-        "    print(json.dumps({'dur_s': (t1 - t0) / 1e9, 'error': err, 't1': t1,\n"
-        "                      'label': str(out.get('route_label') if isinstance(out, dict) else '')[:80]}), flush=True)\n"
+        "    contains = None if needle == '-' else needle in json.dumps(out, default=str)\n"
+        "    print(json.dumps({'dur_s': (t1 - t0) / 1e9, 'error': err, 't1': t1, 'contains': contains}), flush=True)\n"
     ) % (str(REPO / "utilities"), str(REPO / "tools"))
 
     def __init__(self, fixture: dict, shim_dir: str):
@@ -197,8 +211,8 @@ class Probe:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True, start_new_session=True)
 
-    def ask(self, session: dict) -> dict:
-        self.proc.stdin.write(f"{session['session_id']} {session['pid']} {session['pid_start']}\n")
+    def ask(self, session: dict, needle: str | None = None) -> dict:
+        self.proc.stdin.write(f"{session['session_id']} {session['pid']} {session['pid_start']} {needle or '-'}\n")
         self.proc.stdin.flush()
         return json.loads(self.proc.stdout.readline())
 
@@ -220,16 +234,43 @@ def _stat_ns(path: Path):
         return None
 
 
-def _read_cache(path: Path) -> tuple[float | None, str]:
+def _read_cache(path: Path) -> dict | None:
     try:
-        text = path.read_text(encoding="utf-8")
-        return float(json.loads(text).get("observed_at") or 0), text
-    except (OSError, ValueError, AttributeError):
-        return None, ""
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
+def producer_cadence_s() -> float:
+    """The producer's idle sleep (``delay = min(30.0, ...)``) read from its own source."""
+    try:
+        text = (REPO / "utilities" / "human_wait_state.py").read_text(encoding="utf-8")
+        return float(re.search(r"delay = min\(\s*([0-9.]+)\s*,\s*max\(1\.0,\s*600\.0 - idle\)\)", text).group(1))
+    except (OSError, AttributeError, ValueError):
+        return 30.0
+
+
+# Events outside the registry: a worker stream line, an answer-wait signal and an owner process
+# ending change nothing the producer's registry-generation wake watches, so they wait for its cadence.
 SLOW_KINDS = ("worker-tool", "answer-wait", "owner-dead")
-SLOW_STAGGER_S = 7.0
+
+
+def slow_phase_plan(kinds, reps: int, period_s: float, seed: int = PHASE_SEED) -> dict:
+    """Phase (seconds after a publish) of every ``(rep, kind)`` of the registry-outside events.
+
+    Stratified per kind: its ``reps`` samples take ``reps`` equal slices of ``[0, period)`` in a
+    seeded random order, one random point inside each slice, so the phases cover the whole
+    cadence evenly and the same seed gives the same plan.
+    """
+    rng = random.Random(seed)
+    plan = {}
+    for kind in kinds:
+        order = list(range(reps))
+        rng.shuffle(order)
+        for rep in range(reps):
+            plan[(rep, kind)] = round((order[rep] + rng.random()) / reps * period_s, 3)
+    return plan
 
 
 def _sleep_for(seconds: float) -> None:
@@ -238,47 +279,69 @@ def _sleep_for(seconds: float) -> None:
         time.sleep(min(0.05, max(0.0, end - time.monotonic())))
 
 
-def _inject(fixture, kind, seq, rep, phase, not_measured):
+def _inject(fixture, kind, seq, rep, not_measured, cache: Path):
+    """Write one event. The readers' current rows are taken first, so an "is gone" event can
+    tell a route it never showed from one that went away."""
+    projection = _read_cache(cache) or {}
     try:
         ev = events.inject(fixture, kind, seq)
     except Exception as exc:  # a writer that cannot run is reported, not hidden
         not_measured.append({"what": f"{kind}#{seq}", "reason": f"{type(exc).__name__}: {exc}"})
         return None
-    ev.update(phase_s=phase, seq=seq, rep=rep)
+    expect = ev.setdefault("expect", {})
+    # The baseline is the projection read just before the write; the Fleet side is filled by the
+    # caller from the last digest it has (see ``_stamp_fleet_baseline``).
+    expect["was_present"] = visible.route_shown(projection, expect) if "route_id" in expect else None
+    ev.update(seq=seq, rep=rep)
     return ev
 
 
 class PublishWatch:
-    """Marks each pending event with the first ``projection.json`` publish that carries it.
+    """Marks each pending event when a ``projection.json`` publish carries its value.
 
     Polled on every wait, so an event is stamped when its publish happens, not when the
-    caller next looks (a staggered batch keeps polling between its injections).
+    caller next looks. A publish counts only if ``visible.t1`` finds the event's value in it
+    (route row, stage, tool, item id, owner state): a write the reader does not recognise is
+    never "seen", however many publishes follow it.
     """
 
     def __init__(self, cache: Path):
         self.cache, self.last, self.pending = cache, _stat_ns(cache), []
+        self.last_publish_ns: int | None = None
 
     def add(self, ev: dict) -> None:
         self.pending.append(ev)
+        self._check(time.monotonic_ns())  # a publish may already hold it
+
+    def _check(self, now: int) -> None:
+        if not self.pending:
+            return
+        value = _read_cache(self.cache)
+        if value is None:
+            return
+        for ev in list(self.pending):
+            if visible.t1(ev, value):
+                ev["detect_ns"] = now
+                ev["detect_observed_at"] = value.get("observed_at")
+                self.pending.remove(ev)
 
     def poll(self) -> None:
         stamp = _stat_ns(self.cache)
-        if stamp is None or stamp == self.last or not self.pending:
-            self.last = stamp if stamp is not None else self.last
+        if stamp is None or stamp == self.last:
             return
         self.last = stamp
-        observed, text = _read_cache(self.cache)
         now = time.monotonic_ns()
-        if observed is None:
-            return
-        for ev in list(self.pending):
-            if observed >= ev["wall"] and (ev["kind"] != "answer-wait" or ev["marker"] in text):
-                ev["detect_ns"] = now
-                self.pending.remove(ev)
+        self.last_publish_ns = now
+        self._check(now)
 
     def run(self, seconds: float) -> None:
         end = time.monotonic() + seconds
         while time.monotonic() < end:
+            self.poll()
+            time.sleep(0.002)
+
+    def run_until_ns(self, target_ns: int) -> None:
+        while time.monotonic_ns() < target_ns:
             self.poll()
             time.sleep(0.002)
 
@@ -288,14 +351,34 @@ class PublishWatch:
             self.poll()
             time.sleep(0.002)
 
+    def wait_publish(self, timeout: float) -> bool:
+        """Block until a publish newer than this call is seen."""
+        before, end = self.last_publish_ns, time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.poll()
+            if self.last_publish_ns != before:
+                return True
+            time.sleep(0.002)
+        return False
 
-def _ask(probe, fixture, ev, seq, probe_rows) -> None:
+
+def _ask(probe, fixture, ev) -> None:
+    """The host's side: one ``panel_projection`` answer for the event's session.
+
+    Its duration is the host's cost; its content is checked for the event's own id/tool name
+    where it has one (``host_shows``), so a panel that never shows the value is visible here.
+    """
     if "detect_ns" not in ev:
         return
-    answer = probe.ask(fixture["sessions"][seq % len(fixture["sessions"])])
+    expect = ev.get("expect") or {}
+    session = next((s for s in fixture["sessions"] if s["session_id"] == expect.get("session_id")),
+                   fixture["sessions"][ev["seq"] % len(fixture["sessions"])])
+    needle = {"route-start": expect.get("route_id"), "worker-tool": expect.get("tool"),
+              "answer-wait": expect.get("item_id")}.get(ev["kind"])
+    answer = probe.ask(session, needle)
     ev["projection_s"] = answer["dur_s"]
     ev["projection_error"] = answer.get("error")
-    probe_rows[seq] = answer.get("label")
+    ev["host_shows"] = answer.get("contains")
 
 
 def wait_warm(children: Children, *, timeout: float) -> dict:
@@ -332,11 +415,31 @@ def _pass_row(index: int, kind: str, rec: dict, role: str) -> dict:
             "metrics": rec.get("metrics", {})}
 
 
+def _fleet_arrival(composes: list[dict], ev: dict):
+    """The first ``_explorer_compose`` that ends after the event with the event's value in its model."""
+    for rec in composes:
+        if rec["t1"] >= ev["t_ns"] and visible.t2(ev, rec.get("model_now")):
+            return rec
+    return None
+
+
+def _fleet_baseline(fleet: list[dict], ev: dict) -> bool | None:
+    """Was the route shown in the Fleet model just before the write (for "is gone" events)?"""
+    expect = ev.get("expect") or {}
+    if "route_id" not in expect:
+        return None
+    before = [r for r in shim_pass.with_models(fleet)
+              if r["root"] == "render._explorer_compose" and r["t1"] <= ev["t_start_ns"]]
+    digest = before[-1].get("model_now") if before else None
+    return bool(digest and expect["route_id"] in (digest.get("routes") or {}))
+
+
 def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout: float = 300.0,
             event_timeout: float = EVENT_TIMEOUT_S) -> dict:
     """Run T1 and T2 against ``fixture``; the result follows the orchestrator contract."""
     kinds = list(kinds or events.KINDS)
     min_gap = registry_min_gap()
+    cadence = producer_cadence_s()
     debounce = host_debounce_s()
     children = Children(fixture, scratch)
     probe = None
@@ -351,7 +454,6 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
         warm = wait_warm(children, timeout=warm_timeout)
         if not warm["warm_ready"]:
             notes.append(f"warm-up incomplete after {warm_timeout:.0f}s: {warm}")
-        probe_rows = {}
         # The host process is long-lived: its first answer pays imports, so it is asked once
         # before any event and that cold answer is reported on its own.
         cold_probe = probe.ask(fixture["sessions"][0])
@@ -364,42 +466,50 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
             for kind in fast:
                 seq += 1
                 watch = PublishWatch(cache)
-                _sleep_for(PHASES_S[seq % len(PHASES_S)])  # phase after the last publish
-                ev = _inject(fixture, kind, seq, rep, PHASES_S[seq % len(PHASES_S)], not_measured)
+                phase = PHASES_S[seq % len(PHASES_S)]
+                watch.run(phase)  # phase after the last publish
+                ev = _inject(fixture, kind, seq, rep, not_measured, cache)
                 if ev is None:
                     continue
+                ev["phase_s"] = phase
                 injected.append(ev)
                 watch.add(ev)
                 watch.until_done(event_timeout)
-                _ask(probe, fixture, ev, seq, probe_rows)
-            if slow:
-                # These writes are not registry changes, so the producer only sees them at its own
-                # cadence. One batch per rep, staggered, so the events land at different phases of
-                # that cadence and share the wait instead of serialising it.
+                _ask(probe, fixture, ev)
+        if slow:
+            # Registry-outside events wait for the producer's own cadence, so their phase is the
+            # variable: one producer cycle per rep carries one event of each kind, at seeded,
+            # stratified phases over the whole cadence (see ``slow_phase_plan``).
+            plan = slow_phase_plan(slow, reps, cadence)
+            watch = PublishWatch(cache)
+            watch.wait_publish(cadence + 30.0)
+            cycle = []
+            for rep in range(reps):
+                anchor = watch.last_publish_ns or time.monotonic_ns()
                 batch = []
-                watch = PublishWatch(cache)
-                _sleep_for(PHASES_S[(seq + 1) % len(PHASES_S)])
-                for position, kind in enumerate(slow):
+                for kind in sorted(slow, key=lambda k: plan[(rep, k)]):
+                    watch.run_until_ns(anchor + int(plan[(rep, kind)] * 1e9))
                     seq += 1
-                    if position:
-                        watch.run(SLOW_STAGGER_S)
-                    ev = _inject(fixture, kind, seq, rep, PHASES_S[seq % len(PHASES_S)], not_measured)
-                    if ev is not None:
-                        batch.append(ev)
-                        injected.append(ev)
-                        watch.add(ev)
-                watch.until_done(event_timeout)
-                for ev in batch:
-                    _ask(probe, fixture, ev, ev["seq"], probe_rows)
-        # Fleet answers keep arriving at its own cadence: give the last events time to resolve.
+                    ev = _inject(fixture, kind, seq, rep, not_measured, cache)
+                    if ev is None:
+                        continue
+                    ev.update(phase_target_s=plan[(rep, kind)],
+                              phase_s=round((ev["t_ns"] - anchor) / 1e9, 3), anchor_ns=anchor)
+                    batch.append(ev)
+                    injected.append(ev)
+                    watch.add(ev)
+                watch.until_done(cadence + 30.0)
+                cycle.extend(batch)
+                if watch.pending or watch.last_publish_ns == anchor:
+                    watch.wait_publish(cadence + 5.0)
+            for ev in cycle:
+                _ask(probe, fixture, ev)
+        # The Fleet keeps going at its own cadence: give the last events time to show.
         tail_end = time.monotonic() + FLEET_TAIL_S
         while time.monotonic() < tail_end:
-            fleet = shim_pass.read_passes(children.fleet_log)
-            last_event = max((e["t_ns"] for e in injected), default=0)
-            collects = [r for r in fleet if r["root"] == "__init__.collect_all" and r["t0"] > last_event]
-            composes = [r for r in fleet if r["root"] == "render._explorer_compose"
-                        and collects and r["t0"] >= collects[0]["t1"]]
-            if collects and composes:
+            fleet = shim_pass.with_models(shim_pass.read_passes(children.fleet_log))
+            composes = [r for r in fleet if r["root"] == "render._explorer_compose"]
+            if injected and all(_fleet_arrival(composes, e) is not None for e in injected):
                 break
             time.sleep(0.5)
         producer = shim_pass.read_passes(children.producer_log)
@@ -408,25 +518,43 @@ def measure(fixture: dict, *, reps: int, scratch: Path, kinds=None, warm_timeout
         if probe is not None:
             probe.close()
         children.close()
+    for ev in injected:
+        ev["expect"]["was_present_fleet"] = _fleet_baseline(fleet, ev)
     return _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, notes,
-                     not_measured, warm, children.producer_log)
+                     not_measured, warm, children.producer_log, cadence=cadence, event_timeout=event_timeout)
+
+
+def _bin_counts(phases: list[float], period: float, width: float = 5.0) -> dict:
+    out: dict[str, int] = {}
+    edge = 0.0
+    while edge < period:
+        out[f"{edge:g}-{min(edge + width, period):g}"] = 0
+        edge += width
+    for value in phases:
+        key = f"{(min(value, period - 1e-9) // width) * width:g}-{min(((value // width) + 1) * width, period):g}"
+        if key in out:
+            out[key] += 1
+    return out
 
 
 def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, notes, not_measured, warm,
-              producer_log=None) -> dict:
+              producer_log=None, cadence: float = 30.0, event_timeout: float = EVENT_TIMEOUT_S) -> dict:
     t1_total: dict[str, list] = {k: [] for k in kinds}
     t2_total: dict[str, list] = {k: [] for k in kinds}
     seg_samples: dict[str, dict[str, list]] = {k: {} for k in kinds}
     t2_seg: dict[str, dict[str, list]] = {k: {} for k in kinds}
+    totals = {k: sum(1 for e in injected if e["kind"] == k) for k in kinds}
     publisher_passes: dict[int, str] = {}
     fleet_collects = [r for r in fleet if r["root"] == "__init__.collect_all"]
-    fleet_composes = [r for r in fleet if r["root"] == "render._explorer_compose"]
+    fleet_composes = [r for r in shim_pass.with_models(fleet) if r["root"] == "render._explorer_compose"]
+    outside = []
+    unresolved = []
     for ev in injected:
         kind = ev["kind"]
+        record = None
         if "detect_ns" in ev:
             publish = _publisher_pass(producer, ev["detect_ns"])
             if publish is not None:
-                pass_start = max(publish["t0"], ev["t_ns"])
                 previous = [p for p in producer if p["t1"] <= publish["t0"]]
                 wake = max(0.0, (publish["t0"] - ev["t_ns"]) / 1e9)
                 ready_gap = 0.0
@@ -452,15 +580,36 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
                         continue
                     seg_samples[kind].setdefault(key, []).append(value)
                 publisher_passes[publish["index"]] = f"after-{kind}"
-        collect = next((r for r in fleet_collects if r["t0"] >= ev["t_ns"]), None)
-        if collect is not None:
-            compose = next((r for r in fleet_composes if r["t0"] >= collect["t1"]), None)
-            if compose is not None:
-                t2_total[kind].append((compose["t1"] - ev["t_ns"]) / 1e9)
-                t2_seg[kind].setdefault("wait_for_collect_s", []).append((collect["t0"] - ev["t_ns"]) / 1e9)
+                if kind in SLOW_KINDS:
+                    last_pass = [p for p in producer if p["t0"] <= ev["t_ns"]]
+                    gap = (publish["t0"] - previous[-1]["t1"]) / 1e9 if previous else None
+                    record = {"kind": kind, "rep": ev.get("rep"), "phase_s": ev.get("phase_s"),
+                              "phase_target_s": ev.get("phase_target_s"),
+                              "since_pass_start_s": round((ev["t_ns"] - last_pass[-1]["t0"]) / 1e9, 3) if last_pass else None,
+                              "total_s": round(total, 4),
+                              "cadence_wait_s": round(max(0.0, cadence - (ev.get("phase_s") or 0.0)), 3),
+                              # the publish came sooner than the idle sleep: another registry change woke the producer
+                              "woken_early": bool(gap is not None and gap < cadence - 1.0),
+                              "host_shows": ev.get("host_shows")}
+                    outside.append(record)
+        else:
+            unresolved.append({"what": f"{kind}#{ev['seq']} T1",
+                               "reason": f"not_visible: its value was not in projection.json within the wait "
+                                         f"({(event_timeout if kind not in SLOW_KINDS else cadence + 30.0):g}s)"})
+        arrival = _fleet_arrival(fleet_composes, ev)
+        if arrival is not None:
+            ev["t2_arrival_t1"] = arrival["t1"]
+            collect = [r for r in fleet_collects if r["t1"] <= arrival["t0"]]
+            collect = collect[-1] if collect else None
+            t2_total[kind].append((arrival["t1"] - ev["t_ns"]) / 1e9)
+            t2_seg[kind].setdefault("compose_s", []).append((arrival["t1"] - arrival["t0"]) / 1e9)
+            if collect is not None:
+                t2_seg[kind].setdefault("wait_for_collect_s", []).append(max(0.0, (collect["t0"] - ev["t_ns"]) / 1e9))
                 t2_seg[kind].setdefault("collect_s", []).append((collect["t1"] - collect["t0"]) / 1e9)
-                t2_seg[kind].setdefault("compose_s", []).append((compose["t1"] - compose["t0"]) / 1e9)
-                t2_seg[kind].setdefault("compose_wait_s", []).append((compose["t0"] - collect["t1"]) / 1e9)
+                t2_seg[kind].setdefault("compose_wait_s", []).append((arrival["t0"] - collect["t1"]) / 1e9)
+        else:
+            unresolved.append({"what": f"{kind}#{ev['seq']} T2",
+                               "reason": "not_visible: its value was not in the Fleet screen model within the wait"})
     passes = []
     for index, rec in enumerate(producer, 1):
         label = "cold-1" if index == 1 else publisher_passes.get(rec["index"], "warm-unchanged")
@@ -477,30 +626,45 @@ def _assemble(fixture, kinds, injected, producer, fleet, min_gap, debounce, note
               "fleet": shim_pass.self_check(fleet, "fleet")}
     failures = checks["producer"]["failures"] + checks["fleet"]["failures"]
     out = []
-    for metric, totals, segs in (("T1", t1_total, {k: {n: summarize(v) for n, v in s.items()}
-                                                   for k, s in seg_samples.items()}),
-                                 ("T2", t2_total, {k: {n: summarize(v) for n, v in s.items()}
-                                                   for k, s in t2_seg.items()})):
-        out.append({"metric": metric, "events": {k: summarize(v) for k, v in totals.items()},
+    for metric, samples, segs in (("T1", t1_total, {k: {n: summarize(v) for n, v in s.items()}
+                                                    for k, s in seg_samples.items()}),
+                                  ("T2", t2_total, {k: {n: summarize(v) for n, v in s.items()}
+                                                    for k, s in t2_seg.items()})):
+        out.append({"metric": metric, "events": {k: summarize(v, total=totals.get(k)) for k, v in samples.items()},
                     "segments": segs})
-    unresolved = [{"what": f"{e['kind']}#{e['seq']} T1", "reason": "no publish seen in time"}
-                  for e in injected if "detect_ns" not in e]
-    for ev in injected:
-        if not any(ev["t_ns"] <= r["t0"] for r in fleet_collects):
-            unresolved.append({"what": f"{ev['kind']}#{ev['seq']} T2", "reason": "no collect_all started after it"})
+    outside_group = None
+    if outside:
+        phases = [r["phase_s"] for r in outside if r["phase_s"] is not None]
+        residual = [r["total_s"] - r["cadence_wait_s"] for r in outside]
+        outside_group = {
+            "mechanism": "registry 밖 사건 (worker stream 줄, 답 대기 signal, owner 종료): producer 주기 대기",
+            "cadence_s": cadence, "n": len(outside),
+            "n_total": sum(totals.get(k, 0) for k in SLOW_KINDS),
+            "total_s": summarize([r["total_s"] for r in outside]),
+            "phase_s": summarize(phases),
+            "phase_bins_5s": _bin_counts(phases, cadence),
+            "residual_after_cadence_wait_s": summarize(residual),
+            "woken_early": sum(1 for r in outside if r["woken_early"]),
+            "host_shows": {"true": sum(1 for r in outside if r["host_shows"] is True),
+                           "false": sum(1 for r in outside if r["host_shows"] is False),
+                           "unchecked": sum(1 for r in outside if r["host_shows"] is None)},
+            "samples": outside}
     notes.append("latency starts at the completed write; T1 includes the 25 ms host debounce constant "
                  "read from host.cjs and the panel_projection call; the host's own paint is not measured.")
-    notes.append("T1 publish is the first projection.json whose observed_at is at or after the event "
-                 "(answer-wait also requires its item id in the file).")
-    notes.append("T2 ends at the _explorer_compose that starts after the first collect_all that started "
-                 "after the event; the content of that snapshot is not re-read.")
+    notes.append("T1 arrival is the first projection.json that carries the event's value (route row with its "
+                 "owner attempt, new stage, tool name, closed outcome, item id, owner no longer working); "
+                 "a write the reader does not show is `not_visible`, never given a time.")
+    notes.append("T2 arrival is the first _explorer_compose whose screen model (digest taken by the shim "
+                 "after the compose) carries the same value.")
+    notes.append(f"registry-outside events are placed at seeded, stratified phases over the producer's "
+                 f"{cadence:g}s cadence (phase = seconds after the last publish).")
     return {
-        "metric": "T12", "results": out, "passes": passes,
-        "events": [dict(e) for e in injected],
+        "metric": "T12", "results": out, "passes": passes, "outside_registry": outside_group,
+        "events": [{k: v for k, v in e.items() if k != "anchor_ns"} for e in injected],
         "warm": warm, "self_check": {"checks": checks, "failures": failures},
         "shim_mode": shim_pass.shim_mode(producer_log),
         "notes": notes, "not_measured": not_measured + unresolved,
-        "min_gap_s": min_gap, "debounce_s": debounce,
+        "min_gap_s": min_gap, "debounce_s": debounce, "cadence_s": cadence,
     }
 
 
