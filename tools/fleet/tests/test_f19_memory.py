@@ -452,6 +452,50 @@ class ProjectMemoryReadTest(_TmpStoreCase):
         with mock.patch.object(memcol.sqlite3, "connect", side_effect=AssertionError("unchanged scope must reuse")):
             self.assertEqual(memcol._read_project_memory("2026-11-02", repo="repo"), selected)
 
+    def test_latest_saved_memory_reads_the_journal_once_and_rides_the_open_work_query(self):
+        # Spec E9 rule 37 (b): the panel's MEM row is this repo's newest add/supersede journal
+        # row; its stored headline comes from the open-work query the panel already runs (one
+        # connection, as before), and an unchanged journal is not read again.
+        self._make_db([{"id": "rec-new", "cwd_origin": "git:github.com/team/repo", "type": "decision",
+                        "headline": "the newest decision", "updated": "2026-11-12"},
+                       {"id": "rec-next", "cwd_origin": "git:github.com/team/repo", "type": "decision",
+                        "headline": "the replacement", "updated": "2026-11-12"}])
+        _write_lines(self.journal, [
+            _event("2026-11-12T09:00:00", "add", snippet="older", cwd="/home/demo/repo", id="rec-old"),
+            _event("2026-11-12T10:00:00", "add", rtype="decision", snippet="first line", cwd="/home/demo/repo", id="rec-new"),
+            _event("2026-11-12T11:00:00", "lifecycle-expire", snippet="expired", cwd="/home/demo/repo", id="rec-x"),
+            _event("2026-11-12T12:00:00", "add", snippet="other repo", cwd="/home/demo/other", id="rec-o"),
+        ])
+        from fleet import session_work
+        memcol._latest_cache.clear()
+        reads = mock.Mock(wraps=memcol._read_jsonl_tail)
+        with mock.patch.object(memcol, "_read_jsonl_tail", reads):
+            row, paths = session_work.latest_memory("/home/demo/repo")
+            again, _paths = session_work.latest_memory("/home/demo/repo")
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual((row["id"], row["type"], row["action"], row["headline_id"]),
+                         ("rec-new", "decision", "add", "rec-new"))
+        self.assertEqual(again, row)
+        self.assertEqual(paths, [str(self.journal)])
+        connects = mock.Mock(wraps=memcol.sqlite3.connect)
+        with mock.patch.object(session_work, "project_of", return_value="repo"), \
+                mock.patch.object(memcol.sqlite3, "connect", connects):
+            work, _paths = session_work.observe("/home/demo/repo", (row["headline_id"],))
+        self.assertEqual(connects.call_count, 1)
+        self.assertEqual(work.headlines.get("rec-new"), "the newest decision")
+        self.assertNotIn("PRIVATE-BODY-SENTINEL", repr(work.headlines))
+        # A changed journal is read again; a supersede asks for its replacement's headline.
+        with self.journal.open("a", encoding="utf-8") as handle:
+            handle.write(_event("2026-11-12T13:00:00", "supersede", snippet="superseded_by=rec-next",
+                                cwd="/home/demo/repo", id="rec-new") + "\n")
+        row, _paths = session_work.latest_memory("/home/demo/repo")
+        self.assertEqual((row["action"], row["headline_id"]), ("supersede", "rec-next"))
+        # Another repo's newest row, none for a repo without one, none without a journal.
+        self.assertEqual(memcol.latest_saved("other")[0]["id"], "rec-o")
+        self.assertIsNone(memcol.latest_saved("nothing-here")[0])
+        self.journal.unlink()
+        self.assertIsNone(session_work.latest_memory("/home/demo/repo")[0])
+
     def test_unchanged_database_is_not_queried_again(self):
         self._make_db([{"id": "d", "cwd_origin": "git:github.com/team/repo", "type": "decision",
                         "headline": "kept", "updated": "2026-11-02"}])

@@ -48,8 +48,11 @@ def _remaining(reset):
     return elapsed_text(seconds // 60)
 
 
-def _git_text(values):
-    """``main 🚧 3`` and its existing Git warnings, for the dim parentheses."""
+def _git_text(values, *, worktrees=True):
+    """``main 🚧 3`` and its existing Git warnings, for the dim parentheses.
+
+    ``worktrees=False`` leaves the worktree count out (the side panel draws it beside the
+    repository name, spec E9 rule 37 (a)); every other surface keeps it here."""
     git = values.get("git") or {}
     branch = _text(values.get("branch"), "")
     parts = [clip_cells(branch, 32)] if branch else []
@@ -65,7 +68,9 @@ def _git_text(values):
             if type(git.get(key)) is int and git[key] > 0:
                 parts.append(glyph + str(git[key]))
         wt = git.get("extra_worktrees")
-        if wt is None:
+        if not worktrees:
+            pass
+        elif wt is None:
             parts.append("🚧 ?")
         elif type(wt) is int and wt > 0:
             parts.append("🚧 " + str(wt))
@@ -647,6 +652,7 @@ def route_doer(route, jobs, get, live):
         return {"harness": shared.get("harness"), "model": pair[0] if isinstance(pair, (list, tuple)) and pair else None,
                 "effort": shared.get("effort"), "percent": _number(shared.get("context")),
                 "worker": shared.get("worker") is True,
+                "role": ((_worker_role(route) if shared.get("worker") is True else "owner")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
                 **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
@@ -661,21 +667,35 @@ def route_doer(route, jobs, get, live):
         return None
     harness = get(job, "harness")
     pair = live._model_pair(get(job, "resolved_model", "model"))
+    # Spec E9 rule 36 (a): the attempt's recorded role (a frame leg names itself by its node
+    # or worker type, as Fleet's ``_is_frame_leg`` reads it).
+    role = "owner" if job is owner else (
+        "frame" if get(job, "worker_type") == "frame" or get(job, "route_node") in live.FRAME_NODES else "worker")
     if (route or {}).get("state") in ("dead", "stale"):
         # Spec rule 27: nothing runs; the attempt's recorded harness, model and effort stay.
-        return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort")}
+        return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"), "role": role}
     percent, tokens = job_context(job, get)
     tool = get(job, "exec_tool")
     name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
     working = get(job, "liveness") == "working"
     agents = get(job, "subagents") or ()
     activity = live._doer_activity(job, tool if working and name else None, working)
-    return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"),
+    return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"), "role": role,
             "percent": percent, "tokens": tokens, "tool": name if working else None,
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
                       if working and isinstance(agents, (list, tuple)) else 0,
             **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
                if key in activity}}
+
+
+def _worker_role(route):
+    """``frame`` or ``worker``: the role word of Fleet's route body line for its live stage worker
+    (``_worker_segments``: a frame/frame-alternative leg reads ``frame``)."""
+    worker = route.get("worker") if isinstance(route, dict) else None
+    label = worker[0] if isinstance(worker, (list, tuple)) and worker else None
+    if isinstance(label, (list, tuple)):
+        label = label[0] if label else None
+    return "frame" if label == "frame" else "worker"
 
 
 def route_details(snapshot, panels, routes=None, now=None):
@@ -729,6 +749,8 @@ def route_details(snapshot, panels, routes=None, now=None):
                 row["idle_tool"] = True
             if doer.get("worker") is True:
                 row["doer_worker"] = True
+            if doer.get("role") in ("owner", "frame", "worker"):
+                row["role"] = doer["role"]
             if doer.get("percent") is not None:
                 row["ctx_pct"] = round(doer["percent"], 1)
             elif type(doer.get("tokens")) is int:

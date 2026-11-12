@@ -491,6 +491,35 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
     return dict(result)
 
 
+_latest_cache = {}
+SAVED_ACTIONS = ("add", "supersede")
+
+
+def latest_saved(repo):
+    """The newest ``add``/``supersede`` journal row of one project (``by_repo``'s grouping key),
+    or None, with the journal path. Read-only; the journal is read again only when its size or
+    modification time changed, so a panel projection with an unchanged journal reads nothing
+    but its stat. Bodies are never carried: the row's id, time, type and its bounded snippet."""
+    path = _write_events_path()
+    try:
+        stat = path.stat()
+        stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None, str(path)
+    if _latest_cache.get("stamp") != stamp:
+        events, _ok = _read_jsonl_tail(path)
+        newest = {}
+        for event in events:
+            if event.get("action") not in SAVED_ACTIONS:
+                continue
+            key = _repo_key(event)
+            if key and (key not in newest or str(event.get("ts") or "") >= str(newest[key].get("ts") or "")):
+                newest[key] = {name: event.get(name) for name in ("ts", "action", "type", "snippet", "id")}
+        _latest_cache.update(stamp=stamp, rows=newest)
+    row = (_latest_cache.get("rows") or {}).get(repo)
+    return (dict(row) if row else None), str(path)
+
+
 def collect(now=None, *, include_summary=True, include_backlog=False):
     """Return an additive `memory` dict (fleet.py --json / render.py consume it), or None
     when neither the journal nor the graveyard exists (F-19 not wired up yet — panel omitted).

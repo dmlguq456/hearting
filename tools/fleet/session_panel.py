@@ -276,11 +276,21 @@ def notice_line(values, routes, questions, display, now):
     return max(news, key=lambda item: item[0])[1] if news else []
 
 
-def route_row(row, now=None):
+ROLES = ("owner", "frame", "worker")
+
+
+def route_gauge_cells(columns):
+    """The folded route's context gauge width beside the native area (spec E9 rule 38):
+    about eight cells in a 40-cell panel, five to ten as the panel narrows or widens."""
+    return max(5, min(10, (int(columns or 40) - 8) // 4))
+
+
+def route_row(row, now=None, *, cells=None):
     """A route row's painted values (spec rules 5-7); an unreported value is left out."""
     import time
     from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
                                stage_glyph, token_text, _number)
+    from .explorer.live import _short_capability
     now = time.time() if now is None else now
     # The producer's Fleet marker; an older cache row has only its state.
     marker = row.get("marker")
@@ -290,6 +300,13 @@ def route_row(row, now=None):
         marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
     glyph, key = route_glyph(marker)
     shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
+    # Spec E9 rule 36: the doer's recorded role (owner, frame or worker; none unrecorded) and
+    # the route's kind in Fleet's own word (``code``, ``lab``, ``frame``: Fleet's KIND).
+    if row.get("role") in ROLES:
+        shown["role"] = row["role"]
+    kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
+    if kind_word:
+        shown["kind_word"] = kind_word
     harness = sanitize_title(str(row.get("harness") or ""))[:32]
     if harness:
         shown.update(harness=harness, harness_key="hb_" + harness)
@@ -303,10 +320,15 @@ def route_row(row, now=None):
     if _percent(percent) != "?":
         shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
                      gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+        if cells:
+            # Spec E9 rule 38: the folded route's own context row, the same gauge at the panel's width.
+            shown["gauge_row"] = [list(part) for part in gauge_parts(percent, cells=cells)]
     elif token_text(row.get("ctx_tokens")):
         # No window known: the exact token count, as Fleet writes it, never a made-up percent.
         tokens = token_text(row["ctx_tokens"])
         shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
+        if cells:
+            shown["gauge_row"] = [[tokens, "dim"]]
     minutes = None
     if _number(row.get("since")) is not None:
         minutes = max(0.0, (now - row["since"]) / 60)
@@ -359,6 +381,55 @@ def session_git(values):
             if _git_part((text, key))]
 
 
+def session_git_side(values):
+    """``(main ↑2)``: the Git row beside the native area, its worktree count moved to the
+    repository row (spec E9 rule 37 (a)); empty when nothing else is left in the parentheses."""
+    from .session_line import _git_text
+    if not session_git(values):
+        return []
+    git = "no-git" if (values.get("git") or {}).get("repo") == 0 else _git_text(values, worktrees=False)
+    return [("(" + git + ")", "dim")] if git else []
+
+
+def session_worktrees(values):
+    """``🚧 12`` beside the repository name (spec E9 rule 37 (a)): the Git row's own
+    ``extra_worktrees``; nothing for none or an unknown count."""
+    git = values.get("git") or {}
+    count = git.get("extra_worktrees")
+    return [("🚧 " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
+
+
+def session_memory(values, now=None):
+    """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
+    its age and type dim and its headline (else the start of its snippet) in the body color.
+    Nothing for no row; a body is never carried."""
+    import datetime
+    from .session_line import elapsed_text
+    row = values.get("memory_latest")
+    if not isinstance(row, dict):
+        return []
+    headline = sanitize_title(str(row.get("headline") or "")).strip()
+    snippet = sanitize_title(str(row.get("snippet") or "")).strip()
+    if not headline and snippet.startswith("superseded_by="):
+        snippet = ""
+    text = (headline or snippet)[:160]
+    if not text:
+        return []
+    parts = []
+    try:
+        saved = datetime.datetime.fromisoformat(str(row.get("ts") or ""))
+        clock = now or (datetime.datetime.now(saved.tzinfo) if saved.tzinfo else datetime.datetime.now())
+        age = elapsed_text(max(0.0, (clock - saved).total_seconds() / 60))
+    except (TypeError, ValueError):
+        age = ""
+    if age:
+        parts.append((age + " ", "dim"))
+    kind = sanitize_title(str(row.get("type") or "")).strip()[:32]
+    if kind:
+        parts.append((kind + " ", "dim"))
+    return parts + [(text, "loc_repo")]
+
+
 def quota_row(values):
     """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
     from .session_line import _remaining, _text
@@ -405,7 +476,7 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         owner_text = "owner · " + owner if owner else ""
         runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
-        routes.append({**route_row(row), "id": clean(row.get("id")), "title": clean(row.get("title")),
+        routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
                        "visibility": route_evidence(visibility),
@@ -457,7 +528,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
             "steward": values.get("steward") is True,
             "now": sanitize_title(str(values.get("now") or ""))[:320],
-            "git": session_git(values), "selected": selected,
+            "git": session_git(values), "git_side": session_git_side(values), "worktrees": session_worktrees(values),
+            "memory": session_memory(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",

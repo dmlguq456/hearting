@@ -148,8 +148,13 @@ Then the metadata, one block: the repository name ending in `/` (`hearting/`,
 the mark only on a whole name), with Git (branch and dirty mark, `🚧 N`,
 ahead/behind and the existing merge warnings) dim in parentheses on its own
 row below, cut with `…` within that row and absent without a Git reading; no
-folder or branch glyph; beside the native area one empty row then parts the
-repository and Git from the model (without Git, the repository from the model);
+folder or branch glyph. Beside the native area the worktree count stands dim
+one cell after the repository name instead (`hearting/ 🚧 12`, none for zero
+or an unknown count) and the Git row keeps the branch, ahead/behind and the
+warnings (`(main ↑2)`; no row when nothing else is left); the bottom layout,
+Claude's statusline and Fleet keep the count in the parentheses. Beside the
+native area one empty row then parts the repository and Git from the model
+(without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside
 the native area, one `│`-separated row with the repo row at the bottom);
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
@@ -158,7 +163,12 @@ then parts it from this session's content: `TITLE` and `NOW` (Fleet's words, dim
 in one label column; the values start in one column and their next rows start
 there too; narrower than 30 cells the labels go first), Fleet's title and NOW
 (bright while the session works or waits), each on as many rows as it needs,
-then `◑답 대기 N` and a tidy notice; one empty row then parts the head from the
+then `MEM`: this repository's newest saved memory record from the journal
+Fleet reads (the newest `add`/`supersede` row of its project: age and type dim,
+the stored headline, else the start of its snippet, in the body color; no
+body), on at most two rows ending in `…`, absent without a journal row; the
+journal is read again only when it changed and the headline comes with the open
+work's query; then `◑답 대기 N` and a tidy notice; one empty row then parts the head from the
 route box. The bottom layout keeps the metadata row (or rows) first and one
 content row (`◑답 대기 N │ title │ NOW …`, title and NOW each keeping at least
 half of what is left); the row break parts them. Then the route box, high; free
@@ -189,23 +199,31 @@ the route page reads the owner's raw output once, with the reader Fleet's route
 page uses, and shows its last rows under the route.
 An opened route detail is indented inside its box, never a box in a box,
 and nothing is drawn for an empty route list or message list. Box rows are
-laid out at the box's inner width. Beside the native area a folded route takes
-two rows: the glyph with harness, model, effort and a one-step route's open
-tool (only where it fits), then its context percent and elapsed time each
-right-aligned in its own column so they stand one above the other, in the
-colors of Fleet's ROUTES row (`⠏ claude Opus 5.5 high · >_ Bash   25% 1h 27m`),
-then, two cells in, its whole title on as many rows as it needs; short of cells
-effort goes first, then the `route line` choice keeps its value (`time`:
-elapsed, `model`: model) and the other goes, and a value is shown whole or not
-at all. A route with no value at all takes one row, glyph and title. A third
-row says which kind of route it is and where it stands, its kind word first
-and dim: `one-shot` (the owner works itself) and what it is on now (`Edit
-host.cjs 3m`, else the call it just finished); `staged 3/7` (a worker per
-stage) with the current stage and its mark, then `owner <model>` when a stage
-worker leads the first row, or with no stage running the next stage and what
-it waits for; a kind the record does not name draws no third row. Fleet's
+laid out at the box's inner width. Beside the native area a folded route reads
+who / context and time / what / which kind. Who: the glyph, the doer's recorded
+role as a dim label in one column (`owner`, `frame` for a frame or
+frame-alternative leg, `worker` for a stage worker; empty when the record names
+none), then harness, model, effort and a one-step route's open tool (only where
+it fits), in the colors of Fleet's ROUTES row (`⠏ owner  claude Opus 5.5 xhigh`).
+Context and time, two cells in: the context gauge (Fleet's CONTEXT gauge at the
+panel's width, about eight cells in 40) and percent, and the elapsed time at
+the right edge, each in its own column so they stand one above the other; an
+unknown context leaves its cells empty, and with neither value the row is left
+out. What: two cells in, its title on at most two rows, the second ending in
+`…`. Short of cells effort goes first, then the tool, then the harness; the
+role and the model stay, and a value is shown whole or not at all. A route
+with no value at all takes one row, glyph and title. A fourth row says which
+kind of route it is and where it stands, dim: Fleet's kind word (`code`, `lab`,
+`frame`: the capability without `autopilot-`, Fleet's own function; mode and
+intensity only in the opened `KIND`), then `one-shot` (the owner works itself)
+and what it is on now (`Edit host.cjs 3m`, else the call it just finished), or
+`staged 3/7` (a worker per stage) with the current stage and its mark, then
+`owner <model>` when a stage worker leads the first row, or with no stage
+running the next stage and what it waits for (`code · staged 3/7 · execute ●`);
+short of cells the tool's target, the tool and `owner <model>` go, the kind and
+shape stay; a route with neither kind nor shape draws no such row. Fleet's
 ROUTES progress cell reads the same words (`staged 3/7 execute ●`, short of
-cells `3/7 execute ●`; a one-shot route on a tool `one-shot ● Edit host.cjs 3m`). Short of rows a route keeps two rows, then one; every
+cells `3/7 execute ●`; a one-shot route on a tool `one-shot ● Edit host.cjs 3m`). Short of rows a route's title keeps one row, its context row folds into its first row (percent and time at the right, no gauge; short of cells there the `route line` choice keeps its value, `time`: elapsed, `model`: context), its kind row goes, then it takes one row (glyph, title, harness, percent and time; no role, no kind); every
 route in the box takes the same form, and no empty row parts two folded routes.
 A press on any of its rows opens it. An opened route reads like a table behind a
 thin dim guide two cells in: `OWNER` (and `DOER` when a stage worker leads, or
@@ -221,7 +239,8 @@ next; a cut keeps whole items. The bottom layout
 keeps its one folded row: title, harness·model·effort, context, then the kind in
 the third row's and Fleet's words (`one-shot`, `staged 3/7 execute ●`, a failed
 one `staged 2/3 execute ✕`), then the open tool, and the elapsed time at the
-right edge. Short of cells the tool goes first, then the word `staged`
+right edge; Fleet's kind word leads the kind (`code · staged 3/7 execute ●`).
+Short of cells the kind word goes first, then the tool, then the word `staged`
 (`3/7 execute ●`), the title keeping ten cells through both; narrower still the
 kind column goes whole, and the tool shows whole or not at all. Groups are divided by
 `│`, stages joined by `›`. Fixed words are English (`context`, `route`,
@@ -236,11 +255,13 @@ short, the question (its body and choices) and the top groups stay, and the
 others give way first, in this order: empty rows; the messages' extra rows
 (past three, and a body's rows after its first); an opened route detail (and an
 opened message) shortens and closes; a value on several rows (title, NOW, a
-route title) keeps one row ending in `…`; the empty row under the route box,
+route title) keeps one row ending in `…` (and `MEM` one row); the `MEM` row; the
+empty row under the route box,
 then the one inside the metadata (structural rows, not spare ones: the messages'
 extra rows leave them); then the head's rule (it is not an empty row: it goes
 only once TITLE and NOW are one row each); the messages fold
-to one row each (three of them); the routes' third row goes, then their second;
+to one row each (three of them); the routes' context row folds into their first
+row; their kind row goes, then their title row (one-row form);
 fewer messages show (three down to one, `+N` at the end of the lower rule); only
 then does the route box scroll in place, showing fewer
 routes (down to one) without dropping any; then the Git row, the route box and
