@@ -35,7 +35,10 @@ def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=No
         return None, selection
     if profile != PROFILE.TOP_PROFILE and registry["model_profiles"].get(
             profile, {}).get("registered_topology") is not True:
-        raise ValueError("owner-profile-ineligible-for-registered-dispatch")
+        eligible = "|".join(name for name, row in registry["model_profiles"].items()
+                            if row.get("registered_topology") is True)
+        raise ValueError(f"owner-profile-ineligible-for-registered-dispatch: {profile} cannot run a registered "
+                         f"owner; use --profile {eligible}, or --shape direct to work in this session")
     return profile, selection
 
 

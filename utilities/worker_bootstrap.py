@@ -2105,7 +2105,8 @@ def _contract_read_prompt(args, harness: str) -> str:
         return ("- Your frame unit contract is already included above. Read its named inputs within "
                 "the requested scope; no owner capability Skill or full harness bootstrap is needed.\n")
     if args.worker_type == "owner":
-        return (f"- Read only `capabilities/{args.assigned_contract}/references/owner-execution.md`. "
+        # Absolute: an owner usually runs in another project, where a relative path misses.
+        return (f"- Read only `{_REPO_ROOT}/capabilities/{args.assigned_contract}/references/owner-execution.md`. "
                 "Run only the commands your Route steps and the latest receipt print; "
                 "never assemble a runtime command yourself. Read another reference or `core/` "
                 "only when a receipt names that section.\n")

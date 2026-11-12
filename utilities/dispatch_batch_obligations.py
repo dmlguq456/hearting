@@ -794,10 +794,21 @@ _PASS_CLOCK = time.perf_counter  # bound at import: fixtures replace ``time`` it
 _UNOBSERVED = object()
 
 
+# A runner pass proves at most this much historical owner completion before it
+# returns to its delivery work; the next pass resumes after the last proven row.
+# A runner that has just started (after every install) has nothing cached and
+# would otherwise re-prove every finished owner on the shared artifact roots in
+# one pass while accepted notices wait (2026-11-11: 882 s, 816,956 NAS reads).
+RUNNER_OWNER_SCAN_BUDGET_S = 5.0
+
+
 class OwnerSettlementReadContext:
     """Reuse exact settled-owner observations while rechecking their dependencies."""
 
     def __init__(self):
+        self._owner_scan_budget_s = None
+        # jobs key -> (view path identity, resolved path, last proven order)
+        self._owner_scan_resume = {}
         self._seen = {}
         self._settled = {}
         self._active_owners = {}
@@ -1492,6 +1503,35 @@ class OwnerSettlementReadContext:
                               tuple(view.signature[:2]), view.last_complete_order,
                               tuple(view.signature))
 
+    def limit_owner_scan(self, seconds):
+        """Bound each pass's historical owner proof; the next pass resumes."""
+        self._owner_scan_budget_s = seconds
+
+    def owner_scan_deadline(self):
+        if self._owner_scan_budget_s is None:
+            return None
+        return self._clock() + max(0.0, float(self._owner_scan_budget_s))
+
+    def owner_scan_resume_order(self, jobs: Path, view):
+        """The last owner row an unfinished historical scan already proved."""
+        prior = self._owner_scan_resume.get(str(jobs.resolve(strict=False)))
+        if prior is None or prior[:2] != (view.path_identity, view.resolved_path):
+            return None
+        return prior[2]
+
+    def continue_owner_scan(self, jobs: Path, view, order):
+        self._owner_scan_resume[str(jobs.resolve(strict=False))] = (
+            view.path_identity, view.resolved_path, order)
+
+    def finish_owner_scan(self, jobs: Path):
+        self._owner_scan_resume.pop(str(jobs.resolve(strict=False)), None)
+
+    def owner_scan_unfinished(self, jobs: Path | None = None):
+        """Rows proved so far by unfinished scans; empty once every scan finished."""
+        if jobs is not None:
+            return str(jobs.resolve(strict=False)) in self._owner_scan_resume
+        return tuple(sorted((key, value[2]) for key, value in self._owner_scan_resume.items()))
+
     def metrics(self):
         return dict(self._metrics)
 
@@ -1742,8 +1782,11 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
             candidates = tuple(selected.values())
     except FileNotFoundError:
         return ()
+    resume_after = None
     if context is not None:
         context.begin_dependency_pass()
+        resume_after = context.owner_scan_resume_order(jobs, view)
+        candidates = tuple(sorted(candidates, key=lambda record: record.order))
     # One read-only classification section observes the generation that
     # selected its candidates; settlement writes run after this returns.
     with registry_read_scope(pinned=view):
@@ -1751,13 +1794,20 @@ def _pending_owner_settlements(jobs: Path, *, context=None):
         # candidate of this pass instead of one walk per owner proof.
         from dispatch_contract import process_table_scan_scope
         with process_table_scan_scope():
-            pending = _classify_owner_candidates(jobs, view, candidates, context)
+            pending, proven_through = _classify_owner_candidates(
+                jobs, view, candidates, context, resume_after=resume_after)
     if context is not None:
-        context.remember_owner_cursor(jobs, view)
+        if proven_through is None:
+            context.finish_owner_scan(jobs)
+            context.remember_owner_cursor(jobs, view)
+        else:
+            # Unproven finished owners stay owed: the next pass resumes after
+            # the last proven row and keeps the old candidate floor.
+            context.continue_owner_scan(jobs, view, proven_through)
     return pending
 
 
-def _classify_owner_candidates(jobs: Path, view, candidates, context):
+def _classify_owner_candidates(jobs: Path, view, candidates, context, *, resume_after=None):
     from dispatch_contract import (
         SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
     )
@@ -1766,6 +1816,9 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
     import peer_obligations
 
     pending = []
+    deadline = None if context is None else context.owner_scan_deadline()
+    proven_through = None
+    last_proven = resume_after
     for candidate in candidates:
         # Each historical proof reads and drops large inputs; return the freed
         # heap while the long candidate walk continues (rate limited).
@@ -1817,7 +1870,16 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
                 # Unchanged inputs before the retry time: keep the unfinished
                 # owner visible without observing it again.
                 context.remember_active_owner(jobs, candidate)
+            elif resume_after is not None and order <= resume_after:
+                # An earlier pass of this unfinished scan already proved it.
+                continue
+            elif (deadline is not None and last_proven != resume_after
+                    and context._clock() >= deadline):
+                # This pass spent its proof budget; prove the rest next pass.
+                proven_through = last_proven
+                continue
             else:
+                last_proven = order
                 try:
                     observed = dependencies = None
                     if context is not None:
@@ -1873,7 +1935,7 @@ def _classify_owner_candidates(jobs: Path, view, candidates, context):
         except (OSError, ValueError):
             lease_held = True
         pending.append((order, fields[1], raw, meta, lease_held))
-    return tuple(pending)
+    return tuple(pending), proven_through
 
 
 def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
@@ -1898,7 +1960,7 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
             context.remember(jobs, before_stamp, (), retry_required=True)
         return ((str(jobs), "owner-settlement-unavailable"),)
     live_leases = []
-    retry_required = False
+    retry_required = context is not None and context.owner_scan_unfinished(jobs)
     signatures = []
     for order, status, raw, meta, lease_held in pending:
         attempt_id = meta.get("attempt_id", "")

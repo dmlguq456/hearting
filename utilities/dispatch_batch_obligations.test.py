@@ -622,6 +622,52 @@ class BatchObligationTest(unittest.TestCase):
             self.assertEqual(registry_cache.metrics_snapshot()["content_reads"], 2,
                              "retryable settlement reuses unchanged registry content")
 
+    def test_runner_owner_proof_budget_resumes_across_passes(self):
+        """A just-started runner proves cold owner history a slice per pass.
+
+        2026-11-11: after each install the runner re-proved every finished
+        owner on the shared artifact roots in its first pass (882 s, 816,956
+        NAS reads) while accepted notices waited for the pass to end.
+        """
+        rows = [self._runtime_owner_row(f"att-cold-{index}") for index in range(5)]
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        dependency = self.base / "terminal-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        registry_cache.clear_cache()
+        now = [0.0]
+        proven = []
+
+        def prove(_jobs, _status, metadata):
+            proven.append(metadata["attempt_id"])
+            now[0] += 10.0  # each proof costs more than the pass budget
+            return COMPLETE
+
+        unbudgeted = obligations.OwnerSettlementReadContext()
+        unbudgeted._dependency_watcher_fallback = True
+        budgeted = obligations.OwnerSettlementReadContext()
+        budgeted._dependency_watcher_fallback = True
+        budgeted._clock = lambda: now[0]
+        budgeted.limit_owner_scan(5.0)
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=prove), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            obligations._resume_owner_settlements(self.jobs, context=unbudgeted)
+            self.assertEqual(len(proven), 5, "a context without a budget keeps one full pass")
+            proven.clear()
+            per_pass = []
+            for _pass in range(5):
+                before = len(proven)
+                obligations._resume_owner_settlements(self.jobs, context=budgeted)
+                per_pass.append((len(proven) - before,
+                                 bool(budgeted.owner_scan_unfinished(self.jobs))))
+            obligations._resume_owner_settlements(self.jobs, context=budgeted)
+        self.assertEqual(per_pass, [(1, True), (1, True), (1, True), (1, True), (1, False)])
+        self.assertEqual(proven, [f"att-cold-{index}" for index in range(5)],
+                         "each pass resumes after the last proven owner, never from the start")
+        self.assertEqual(budgeted.owner_scan_unfinished(), ())
+
     def test_settled_owner_cache_survives_unrelated_append_and_invalidates_dependencies(self):
         self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
         dependency = self.base / "terminal-evidence.json"

@@ -3493,7 +3493,9 @@ one carrier.
 
 `peer-steward.py prompt` prints `prompted=queued` while the ref is pending or
 accepted by a native queue, and `prompted=true` only with the exact native
-receipt. `hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
+receipt. Both exit 0: queued is normal acceptance, not a failure to resend;
+a refusal, unresolved address or identity mismatch exits non-zero.
+`hearting run peer-steward prompt <name-or-pane> --body-file <file>` is
 the send path; reply text addressed to another session reaches nobody.
 
 A lost native response is reconciled from exact persisted history before continuing
