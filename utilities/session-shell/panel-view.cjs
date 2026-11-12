@@ -147,7 +147,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   // read from the rows this paint finally shows, so a route the height dropped
   // keeps nothing turning.
   const pulse=(value)=>({...text(value,beat?'g_work':'g_work_off'),beat:true});
-  const live=r=>r?.kind==='working';
+  // Values the host could not refresh for a while are shown, not claimed:
+  // nothing spins and the frame takes no route state (spec rule 12).
+  const stale=model.stale===true;
+  const live=r=>!stale&&r?.kind==='working';
   // A route's glyph: a working route spins on the frame like Fleet's route mark.
   const routeGlyph=r=>{const g=r.paint?.glyph||text('·');if(live(r))return {...g,...spinGlyph,role:'state:working'};return {...g,role:'state:'+(r.kind||'idle')};};
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -214,9 +217,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const asking=!!model.answerable;
   // UI attention is not native agent liveness. Only a confirmed route failure
   // may make this frame red; an unknown source/permission popup cannot.
-  const failed=first?.state==='dead',done=first?.state==='done';
-  const color=failed?'g_dead':asking?'lvl_y':first?.state==='working'?'g_work':done?'lvl_g':'dim';
-  const status=failed?(first.reason||t('unknown','Checking state')):asking?t('answer','Your answer needed'):first?.state==='working'?t('working','Working'):done?t('ready','Result ready'):'';
+  const failed=!stale&&first?.state==='dead',done=!stale&&first?.state==='done';
+  const working=!stale&&first?.state==='working';
+  const answer=!stale&&asking;
+  const color=failed?'g_dead':answer?'lvl_y':working?'g_work':done?'lvl_g':'dim';
+  const status=failed?(first.reason||t('unknown','Checking state')):answer?t('answer','Your answer needed'):working?t('working','Working'):done?t('ready','Result ready'):'';
   const cfg={...defaults,...configuration};
   let routePages=1;
   // A message too long to open in place is read here, on the route detail's pages.
