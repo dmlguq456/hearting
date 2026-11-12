@@ -293,6 +293,82 @@ const start=(sid,how,harness='claude',event='start')=>{c.harness=harness;return 
                                 text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+class ShownStateOrderTests(unittest.TestCase):
+    def test_event_orders_draw_the_natives_own_state(self):
+        # Review RV-PR1560 R1-R3, R5: host.cjs's own shownState/noteTurn/readTurnRecord/
+        # observeForm text, fed scripted event orders (the review's probe); lifecycle's
+        # `state`/`eventMark` changes replayed as lifecycle() applies them.
+        script = r"""
+const fs=require('node:fs'),a=require('node:assert/strict');
+const src=fs.readFileSync(process.argv[1],'utf8');
+const block=src.slice(src.indexOf("let nativeTurn = ''"),src.indexOf('let nativeEpoch = 0'));
+function world(h){
+  return new Function('uid',`
+  let harness=${JSON.stringify(h)},state='unknown',sid='s1',relay=false,ended=false,selection=0,screenRevision=0;
+  function queueDisplay(){}function schedule(){}function screenSnapshot(){return 'snap'+screenRevision;}
+  let reply=null;async function source(op,x){return reply(op,x);}
+  const native={pid:1,start:'7'};let current={};
+  const fs={lstatSync:()=>({isFile:()=>true,uid,size:64}),readFileSync:()=>JSON.stringify(current)};
+  ${block}
+  turnRecord='/record';
+  function hook(ev){const was=state;
+    if(ev==='select'){state='unknown';nativeTurn='';turnMark=0;seenTurn=null;formSeen=false;eventMark=++clock;return;}
+    if(ev==='prompt')state='working';else if(ev==='stop'||ev==='idle')state='idle';else if(ev==='working')state='working';else state='blocked';
+    eventMark=++clock;if(state==='blocked'&&was!=='blocked')formSeen=false;}
+  const record=fields=>{current={pid:1,procStart:'7',sessionId:'s1',...fields};readTurnRecord();};
+  return {hook,record,reading:turn=>noteTurn(turn,++clock),shown:()=>shownState(),observeForm,setReply:f=>{reply=f;},
+    bump:()=>{screenRevision++;},get state(){return state;}};`)(process.getuid());
+}
+const tick=()=>new Promise(r=>setTimeout(r,5));
+(async()=>{
+ // Claude: the record wins over late hooks (C1, C2); an unmapped status leaves the hooks (C4).
+ {const w=world('claude');w.hook('select');w.record({status:'idle'});w.hook('prompt');w.record({status:'busy'});w.record({status:'idle'});
+  w.record({status:'busy'});w.hook('stop');a.equal(w.shown(),'working','C1');}
+ {const w=world('claude');w.hook('select');w.record({status:'idle'});w.record({status:'busy'});w.record({status:'idle'});w.hook('prompt');
+  a.equal(w.shown(),'idle','C2');a.equal(w.state,'working');}
+ {const w=world('claude');w.hook('select');w.record({status:'busy'});w.hook('stop');w.record({status:'shell'});a.equal(w.shown(),'idle','C4');}
+ // R1: a menu or settings dialog is not an answer wait; the person's own reasons are; an unlisted one is the hooks'.
+ for(const [why,want] of [['dialog open','idle'],['permission prompt','blocked'],['input needed','blocked'],['worker request','blocked'],
+   ['sandbox request','blocked'],['goal proposal','blocked'],['a reason not listed','idle'],[undefined,'idle']]){
+  const w=world('claude');w.hook('select');w.record({status:'idle'});w.hook('stop');w.record({status:'waiting',waitingFor:why});
+  a.equal(w.shown(),want,'C3 '+why);a.equal(w.state,'idle');
+ }
+ // A dialog says nothing about the turn: the previous reading stands (a running turn beside
+ // `/btw`; an idle one under a late `prompt` hook); after an answer wait the hooks say.
+ {const w=world('claude');w.hook('select');w.record({status:'busy'});w.hook('prompt');w.record({status:'waiting',waitingFor:'dialog open'});
+  a.equal(w.shown(),'working','dialog beside a running turn');}
+ {const w=world('claude');w.hook('select');w.record({status:'busy'});w.record({status:'idle'});w.hook('prompt');
+  w.record({status:'waiting',waitingFor:'dialog open'});a.equal(w.shown(),'idle','dialog after the turn, its prompt hook late');}
+ {const w=world('claude');w.hook('select');w.record({status:'waiting',waitingFor:'permission prompt'});a.equal(w.shown(),'blocked');
+  w.hook('working');w.record({status:'waiting',waitingFor:'dialog open'});a.equal(w.shown(),'working','after an answer wait the hooks say');}
+ // R5: a record written for another session or another process changes nothing.
+ for(const other of [{sessionId:'another'},{procStart:'8'},{pid:2}]){
+  const w=world('claude');w.hook('select');w.record({status:'idle'});w.hook('stop');w.record({status:'busy',...other});
+  a.equal(w.shown(),'idle',JSON.stringify(other));
+ }
+ // R3: right after a resume a rollout ending in `task_started` is not a running turn (X1);
+ // its idle is taken; a turn seen starting after that reads as running.
+ {const w=world('codex');w.hook('select');w.reading('working');a.equal(w.shown(),'unknown','X1');a.equal(w.state,'unknown');}
+ {const w=world('codex');w.hook('select');w.reading('idle');a.equal(w.shown(),'idle');w.reading('working');a.equal(w.shown(),'working');}
+ {const w=world('claude');w.hook('select');w.record({status:'busy'});a.equal(w.shown(),'working','a live Claude record is not held back');}
+ // R2: one screen the judgment misses does not hold the panel at running (X3);
+ // a question seen again turns it back to waiting while the hooks wait.
+ {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
+  const seq=['form-open',null,'form-open','form-open'];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));
+  const states=[];for(let k=0;k<4;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
+  a.deepEqual(states,['blocked','working','blocked','blocked'],'X3');a.equal(w.state,'blocked');}
+ // An approval: the question gone, the turn runs on, and the next hook takes over.
+ {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
+  const seq=['form-open',null,null];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));
+  const states=[];for(let k=0;k<3;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
+  a.deepEqual(states,['blocked','working','working'],'approved');w.hook('working');a.equal(w.shown(),'working');w.hook('stop');a.equal(w.shown(),'idle');}
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/host.cjs')],
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class FooterReaderParityTests(unittest.TestCase):
     """The host frame and the Python footer reader name the same current thread."""
     FIXTURES = ROOT / 'utilities/fixtures/codex-0.163-shared-footer'

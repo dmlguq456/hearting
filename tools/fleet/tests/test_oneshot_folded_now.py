@@ -54,18 +54,20 @@ class OneStepFoldedNowTest(unittest.TestCase):
         ]
 
     def test_the_progress_cell_carries_the_open_tool_summary_once(self):
+        # Review RV-PR1560 follow-up 10 (spec E9 rule 24): the kind word leads the cell
+        # while the tool shows, as on the shell panel's third row.
         wide = _rows(self.jobs(), 150)
-        self.assertIn("● python3 tools/run-tests.py  3m", wide["t-run"])
-        self.assertIn("● Edit utilities/session-shell/host.cjs", wide["t-edit"])
+        self.assertIn("one-shot ● python3 tools/run-tests.py  3m", wide["t-run"])
+        self.assertIn("one-shot ● Edit host.cjs", wide["t-edit"])
         for title in ("t-run", "t-edit"):
             self.assertNotIn(">_", wide[title])          # not again in the tool cell
-            self.assertNotIn("one-shot", wide[title])    # the unfolded rows keep the word
+            self.assertEqual(wide[title].count("one-shot"), 1)
             self.assertIn("47m", wide[title])
 
     def test_a_narrow_row_cuts_whole_values(self):
         narrow = _rows(self.jobs(), 120)
-        self.assertIn("● Edit host.cjs", narrow["t-edit"])
-        self.assertIn("● python3", narrow["t-run"])
+        self.assertIn("one-shot ● Edit", narrow["t-edit"])
+        self.assertIn("one-shot ● python3", narrow["t-run"])
         for title in ("t-run", "t-edit"):
             self.assertNotIn("…", narrow[title].split("●", 1)[1])
             self.assertIn("47m", narrow[title])

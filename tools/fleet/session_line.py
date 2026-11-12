@@ -838,10 +838,9 @@ def _message_when(at, now):
 
 
 # The sender's ledger status (peer-message `record --status`): the receiver's own
-# acknowledgement, the transport's acceptance, an unconfirmed delivery, a failure.
-_MESSAGE_PENDING_WARN_SECONDS = 1800
-
-
+# acknowledgement, the transport's acceptance, a failure, and `unknown`, written only
+# when the recipient could not be resolved (peer-steward), so it never arrives: `not
+# delivered`, with no age, in the caution color (it is not on its way).
 def _message_delivery(status, at, now):
     from .config import ui_text
     if status == "received":
@@ -850,10 +849,8 @@ def _message_delivery(status, at, now):
         return [ui_text("fleet.session_panel.message_sent"), "dim"]
     if status == "failed":
         return [ui_text("fleet.session_panel.message_failed"), "lvl_r"]
-    if status == "unknown" and isinstance(at, (int, float)) and at > 0:
-        age = max(0.0, now - at)
-        return [ui_text("fleet.session_panel.message_pending").format(age=elapsed_text(age / 60)),
-                "lvl_y" if age >= _MESSAGE_PENDING_WARN_SECONDS else "dim"]
+    if status == "unknown":
+        return [ui_text("fleet.session_panel.message_undelivered"), "lvl_y"]
     return None
 
 

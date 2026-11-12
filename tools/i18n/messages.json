@@ -906,13 +906,13 @@
    "en": "failed",
    "ko": "실패"
   },
-  "fleet.session_panel.message_pending": {
-   "en": "not delivered {age}",
-   "ko": "미전달 {age}"
-  },
   "fleet.session_panel.message_sent": {
    "en": "sent",
    "ko": "보냄"
+  },
+  "fleet.session_panel.message_undelivered": {
+   "en": "not delivered",
+   "ko": "전달 안 됨"
   },
   "fleet.session_panel.narrow": {
    "en": "Narrow window",

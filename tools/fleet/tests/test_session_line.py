@@ -213,8 +213,11 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(first["when"], "14:50")
         self.assertEqual(failed["when"], "11-09")
         self.assertEqual(failed["delivery"][1], "lvl_r")
+        # Review RV-PR1560 follow-up 6: `unknown` (recipient not resolved) never arrives:
+        # `not delivered`, no age, the caution color however recent.
+        self.assertEqual(old["delivery"], quick["delivery"])
         self.assertEqual(old["delivery"][1], "lvl_y")
-        self.assertEqual(quick["delivery"][1], "dim")
+        self.assertNotRegex(old["delivery"][0], r"\d")
         self.assertEqual(delivered["delivery"][1], "dim")
         self.assertEqual((sent_row["kind"], sent_row["delivery"][1]), ("steer", "dim"))
 

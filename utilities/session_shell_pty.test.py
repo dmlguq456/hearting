@@ -41,8 +41,11 @@ pending=''
 # session record as it paints (busy, waiting with a dialog, idle), while each hook is
 # its own process (a new python that imports what the real hook imports) reporting
 # over the socket some time later.
+# Each hook lands 1.5 s late (review R5): a state the hooks drew would cross the test's
+# 400 ms bound, so the bound holds only while the record itself is read.
 HOOK=(
  "import json,os,socket,sys,time\n"
+ "time.sleep(1.5)\n"
  "began=time.monotonic()\n"
  "kind,sid,pid,start,log=sys.argv[1:6]\n"
  "utilities=os.environ['LOOP_UTILITIES'];sys.path[:0]=[utilities,os.path.join(utilities,'..','tools')]\n"
@@ -58,11 +61,11 @@ def hook(kind):
     raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
     subprocess.Popen([sys.executable,'-c',HOOK,kind,sid,str(os.getpid()),start,os.environ.get('LOOP_HOOK_LOG','/dev/null')],
         stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-def record(status):
+def record(status,waiting=None,**identity):
     raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
     path=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/(str(os.getpid())+'.json');path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps({'pid':os.getpid(),'procStart':start,'sessionId':sid,'status':status,
-        'statusUpdatedAt':int(time.time()*1000)}))
+        **({'waitingFor':waiting} if waiting else {}),**identity,'statusUpdatedAt':int(time.time()*1000)}))
 later=[]
 def after(seconds,action):later.append((time.monotonic()+seconds,action))
 def screen(text):print('\x1b[2J\x1b[H'+text+'\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
@@ -73,7 +76,7 @@ def live(line):
         after(0.7,end)
     elif line.startswith('live-perm-'):
         n=line[10:];record('busy');screen('✻ Working… LIVE_BUSY_'+n);hook('prompt')
-        def form():record('waiting');print('\x1b[2J\x1b[HDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\nLIVE_FORM_'+n+'\r\n',end='',flush=True);hook('blocked')
+        def form():record('waiting','permission prompt');print('\x1b[2J\x1b[HDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\nLIVE_FORM_'+n+'\r\n',end='',flush=True);hook('blocked')
         after(0.3,form)
     elif line.startswith('live-yes-'):
         n=line[9:];record('busy');screen('✻ Running the tool… LIVE_APPROVED_'+n)
@@ -81,7 +84,15 @@ def live(line):
         def end():record('idle');screen('LIVE_IDLE_'+n);hook('stop')
         after(1.0,done);after(1.3,end)
     elif line.startswith('live-menu-'):
-        screen('LIVE_MENU_'+line[10:])   # an Enter the native does not take as a prompt
+        # An Enter the native does not take as a prompt, opening a menu dialog (Claude
+        # writes `waiting` with `dialog open`): no turn and no answer wait.
+        record('waiting','dialog open');screen('LIVE_MENU_'+line[10:])
+        after(0.6,lambda:record('idle'))
+    elif line.startswith('live-foreign-'):
+        # A record written for another session, then for another process: nothing changes.
+        n=line[13:];record('busy',sessionId=sid+'-other')
+        def second():record('busy',procStart='1');screen('LIVE_FOREIGN_'+n)
+        after(0.05,second);after(0.6,lambda:record('idle'))
 while True:
     wait=max(0,min(due for due,_ in later)-time.monotonic()) if later else None
     readable,_,_=select.select([0,exit_fd],[],[],wait)
@@ -203,7 +214,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    const send=text=>rpc(cfg.inlet,{batch:Buffer.from(text+'\r').toString('base64')});
    const since=(a,b)=>a===null?null:Math.round((a-b)*10)/10;
    for(const key of ['submit','busy','idle','waiting','approve','approveIdle'])liveState[key]=[];
-   liveState.false_running=0;liveState.false_back=[];
+   liveState.false_running=0;liveState.false_back=[];liveState.false_waiting=0;liveState.foreign_changed=0;
    // One ordinary turn first (in-process events), so every version starts from idle.
    await send('warm');await waitFor(/DONE_warm/);
    if(await until('idle')===null)throw Error('never idle before the turns: '+word());
@@ -221,11 +232,18 @@ function existing(file){return new Promise((resolve,reject)=>{
      // An Enter the native does not take as a prompt: the panel must not claim a turn.
      for(const key of Object.keys(seen))delete seen[key];
      began=now();await send('live-menu-'+n);await shown('LIVE_MENU_'+n);
-     let wrong=null;while(now()-began<400){await flush();if(word()==='running'&&wrong===null){wrong=now();liveState.false_running++;}if(wrong!==null&&word()==='idle'){liveState.false_back.push(Math.round(now()-wrong));break;}await sleep(2);}
+     let wrong=null,waited=false;while(now()-began<400){await flush();if(word()==='waiting'&&!waited){waited=true;liveState.false_waiting++;}
+       if(word()==='running'&&wrong===null){wrong=now();liveState.false_running++;}if(wrong!==null&&word()==='idle'){liveState.false_back.push(Math.round(now()-wrong));break;}await sleep(2);}
      for(const key of Object.keys(seen))delete seen[key];
-     await sleep(250);
+     await sleep(400);
+     // A record of another session or process (review R5): the panel keeps its state.
+     await send('live-foreign-'+n);await shown('LIVE_FOREIGN_'+n);began=now();
+     let moved=false;while(now()-began<400){await flush();if(word()!=='idle')moved=true;await sleep(2);}
+     if(moved)liveState.foreign_changed++;
+     for(const key of Object.keys(seen))delete seen[key];
+     await sleep(350);
    }
-   await sleep(600);
+   await sleep(2000);   // the last hooks land 1.5 s late
    liveState.hooks=fs.existsSync(path.join(cfg.directory,'hooks.log'))?fs.readFileSync(path.join(cfg.directory,'hooks.log'),'utf8').trim().split('\n').map(line=>JSON.parse(line)):[];
  }
  if(!['initial','startup-state','live-state'].includes(cfg.scenario)){
@@ -712,6 +730,8 @@ class SessionShellPTYTest(unittest.TestCase):
             self.assertEqual(len(result[key]),10,key);self.assertNotIn(None,result[key],key)
             self.assertLess(max(result[key]),400,key)
         self.assertEqual(result['false_running'],0)
+        self.assertEqual(result['false_waiting'],0)      # a menu dialog is not an answer wait (R1)
+        self.assertEqual(result['foreign_changed'],0)    # another session's or process's record (R5)
 
     def test_a_late_projection_is_applied_and_never_replaces_a_newer_one(self):
         # A projection held past the host's limit is still painted when it comes,

@@ -64,11 +64,14 @@ export default {id:'hearting.session-shell',setup(ctx) {
     select();const data=event.data||{},owner=data.sessionID||data.form?.sessionID||event.sessionID;
     if(!sid||owner!==sid)return;
     if(event.type==='session.execution.started')send('submit');
-    else if(event.type==='session.execution.succeeded')send('stop');
-    else if(['form.created','permission.asked','session.execution.failed','session.execution.interrupted'].includes(event.type))send('blocked');
+    // A turn stopped by the person (Esc) or by OpenCode ends like a finished one: idle,
+    // not a wait that stays until the next prompt. A failed turn keeps its wait.
+    else if(['session.execution.succeeded','session.execution.interrupted'].includes(event.type))send('stop');
+    else if(['form.created','permission.asked','session.execution.failed'].includes(event.type))send('blocked');
     // An answered or approved wait resumes the turn (Claude and Codex: the PostToolUse
-    // that follows it): the border leaves `waiting` now, not at the turn's end.
-    else if(['permission.replied','form.replied','form.cancelled'].includes(event.type))send('working');
+    // that follows it): the border leaves `waiting` now, not at the turn's end. A rejected
+    // permission resumes nothing; the turn's own end says what follows.
+    else if(event.type==='permission.replied'&&data.reply!=='reject'||['form.replied','form.cancelled'].includes(event.type))send('working');
   });
   // The native app slot runs inside its reactive route tree, including home.
   // Reading the selected route here observes navigation with no polling loop.

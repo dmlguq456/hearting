@@ -873,20 +873,23 @@ def route_now_texts(route):
 
 
 def _draw_route_now(grid, x, end, y, route, texts):
-    """``● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress cell.
-    The widest summary that fits wins, with the tool's time and agent count when they fit
-    too (the agent count goes first). False when not even the tool name fits (the caller
-    keeps the stage rail)."""
+    """``one-shot ● python3 tools/run-tests.py  3m · +1 agent`` in a one-step route's progress
+    cell: its stage word and mark first (spec E9 rule 24: the kind word stays, as on the
+    shell panel's third row), then the widest summary that fits, with the tool's time and
+    agent count when they fit too (the agent count goes first). False when not even the
+    tool name fits beside the word (the caller keeps the stage rail, ``one-shot ●``)."""
     doer = route["doer"]
     age = ("  " + str(doer["tool_age"])) if doer.get("tool_age") else ""
     agents = int(doer.get("agents") or 0)
     agent_text = f" · +{agents} agent" if agents else ""
-    room = end - x - 2
+    lit = bool(getattr(grid, "beat", 1))
+    stages = route.get("stages") or ()
+    lead = _stage_items(stages[:1], lit=lit)[0][0] if stages else [("●", "work" if lit else "g_work_off")]
+    room = end - x - sum(_seg_width(text) for text, _key in lead) - 1
     for text in texts:
         for extras in ((age, agent_text), (age, ""), ("", "")):
             if _seg_width(text) + sum(_seg_width(part) for part in extras) <= room:
-                lit = bool(getattr(grid, "beat", 1))
-                cursor = grid.put(x, y, "●", "work" if lit else "g_work_off", limit=end)
+                cursor = _put_segments(grid, x, y, lead, end)
                 cursor = grid.put(cursor, y, " " + text, "soft", limit=end)
                 if extras[0]:
                     cursor = grid.put(cursor, y, extras[0], "dim", limit=end)

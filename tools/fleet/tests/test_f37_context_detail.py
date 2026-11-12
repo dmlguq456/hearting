@@ -637,13 +637,18 @@ class ClaudeStreamSessionTest(unittest.TestCase):
             self.assertEqual(render._native_context_gauge(job), (None, None))
 
     def test_a_configured_window_stands_from_the_first_observation(self):
-        # Spec E9 rule 33: the window the launch recorded as configured (launch env and
-        # settings env agreeing) is the gauge's before the first result; disagreeing ones
-        # leave it unknown.
+        # Spec E9 rule 33 (a), narrowed (review R4): the window this launch requested for the
+        # model it chose (its settings env setting none other) is the gauge's before the first
+        # result. No request (a settings value alone), a disagreeing setting, or a run of
+        # another model than the launch chose leaves it unknown (#1558's rule).
+        window = {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}
         for index, (case, want) in enumerate(((
-                {"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}}, 1000000),
-                ({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"},
-                  "settings_env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}}, None))):
+                {"env": window, "model": "fable"}, 1000000),
+                ({"env": window, "settings_env": window, "resolved_model": "claude-fable-5"}, 1000000),
+                ({"env": window, "settings_env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}, "model": "fable"}, None),
+                ({"settings_env": window, "model": "fable"}, None),
+                ({"env": window, "settings_env": window, "model": "sonnet"}, None),
+                ({"env": window, "settings_env": window}, None))):
             job = self._job("att-configured-%d" % index)
             job._registry_metadata = self._launch_metadata(**case)
             self._write_log(job, [self._init("sid-c%d" % index, version="9.9.9"),

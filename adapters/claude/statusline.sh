@@ -461,7 +461,8 @@ else
 fi
 # The repository name ends in `/` (a folder), as the shared line writes it (spec E9 rule 29).
 project_name="${S_SESSION_PROJECT:-$dir}"
-hseg="${CYAN}${project_name}${project_name:+/}${RST}"
+# (The root folder `/` is its own name: no second `/`.)
+hseg="${CYAN}${project_name:+${project_name%/}/}${RST}"
 [ -n "$S_SESSION_TAG" ] && hseg="[${S_SESSION_TAG}] ${hseg}"
 git_text="${git_text# }"
 [ -n "$git_text" ] && hseg="${hseg} ${DIM}(${git_text})${RST}"

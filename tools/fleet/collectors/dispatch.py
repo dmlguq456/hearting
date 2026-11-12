@@ -2766,19 +2766,23 @@ def _claude_own_window(metadata, model_id, active_tokens=None):
                                             "claude_settings_disable_1m")} - {None, "", "absent"}
     if len(values) == 1 and _truthy(next(iter(values))):
         return _CLAUDE_STANDARD_WINDOW, "claude-launch-disable-1m"
-    # Spec E9 rule 33 (a): the window this attempt's launch recorded as configured
-    # (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env and its settings `env`), read
-    # as Claude reads it (100K..1M), is a recorded fact from the first observation.
     # Its own usage above 200K is its own evidence and wins over a configured value.
     if type(active_tokens) is int and active_tokens > _CLAUDE_STANDARD_WINDOW:
         return _CLAUDE_EXTENDED_WINDOW, "claude-own-usage-over-standard"
-    configured = set()
-    for key in ("claude_context_window_request", "claude_settings_window"):
-        value = metadata.get(key)
-        if value not in (None, "", "absent"):
-            configured.add(str(value).strip())
-    if len(configured) == 1 and next(iter(configured)).isdigit():
-        return (max(_CLAUDE_MIN_CONFIGURED_WINDOW, min(int(next(iter(configured))), _CLAUDE_EXTENDED_WINDOW)),
+    # Spec E9 rule 33 (a), narrowed: the window this attempt's launch requested
+    # (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env), when its settings `env` does
+    # not set another one (Claude assigns that over the launch env), for the model the
+    # launch chose. That variable is the compaction threshold, the smaller of it and the
+    # model's own window; this assumes a model the launch requested a window for runs with
+    # that window (Claude 4+ models here run with 1M). No request, a disagreeing setting or
+    # another model than the launch chose (one that may hold only 200K) stays unknown.
+    request = str(metadata.get("claude_context_window_request") or "").strip()
+    setting = str(metadata.get("claude_settings_window") or "").strip()
+    family = lambda value: (re.match(r"(?:claude-)?([a-z]+)", str(value or "").strip().lower()) or [None, None])[1]
+    launched = family(metadata.get("resolved_model") or metadata.get("model"))
+    if (request.isdigit() and setting in ("", "absent", request)
+            and launched is not None and launched == family(model_id)):
+        return (max(_CLAUDE_MIN_CONFIGURED_WINDOW, min(int(request), _CLAUDE_EXTENDED_WINDOW)),
                 "claude-launch-configured-window")
     return None, None
 

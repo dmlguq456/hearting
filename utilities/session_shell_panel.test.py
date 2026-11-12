@@ -347,10 +347,16 @@ for(let height=10;height<=22;height++){
             record = Path(home) / "sessions" / f"{me}.json"
             record.parent.mkdir()
             project = lambda: shell.panel_projection("claude", sid, native_pid=me, native_start=start, columns=40, rows=30)
-            for status, turn in (("busy", "working"), ("waiting", "blocked"), ("idle", "idle"), ("shell", None)):
-                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": status}))
+            # Review R1: `waiting` is an answer wait only for the person's own reasons; a menu
+            # or settings dialog (`dialog open`) and an unlisted or missing reason say nothing.
+            for status, why, turn in (("busy", None, "working"), ("waiting", "permission prompt", "blocked"),
+                                      ("waiting", "input needed", "blocked"), ("waiting", "dialog open", None),
+                                      ("waiting", "a reason not listed", None), ("waiting", None, None),
+                                      ("idle", None, "idle"), ("shell", None, None)):
+                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": status,
+                                              **({"waitingFor": why} if why else {})}))
                 result = project()
-                self.assertEqual(result.get("native_turn"), turn, status)
+                self.assertEqual(result.get("native_turn"), turn, (status, why))
                 self.assertEqual(result.get("turn_record"), str(record))
                 self.assertIn(str(record), result["watch"])
             for other in ({"sessionId": "another"}, {"procStart": "1"}):
@@ -892,7 +898,7 @@ const failed={id:'e',title:'PG-50 휠 입력',kind:'dead',state:'dead',elapsed:'
  paint:{glyph:P('✕'),harness:P('claude'),model_text:P('Sonnet 5.5'),effort:P('high')}};
 const TITLE='하팅 v4-open 감독 — 셸 상태·표시 고치기와 Fleet 세션 줄 다듬기',NOW='검토 결과 3건을 기다리는 중이며 CI 결과를 확인하고 있음';
 const message=(way,who,when,body,at,delivery)=>({way,who,harness:'claude',when,body,text:body,at,...(delivery?{delivery:[delivery,'dim']}:{})});
-const messages=[message('→','[e8]','02:59','fact-verify 설치됨, 재개 명령 안내',1,'미전달 5h'),message('→','[73]','04:00','#1549·#1505 한 묶음으로 출판 요청',2,'전달됨'),
+const messages=[message('→','[e8]','02:59','fact-verify 설치됨, 재개 명령 안내',1,'전달 안 됨'),message('→','[73]','04:00','#1549·#1505 한 묶음으로 출판 요청',2,'전달됨'),
  message('←','[52]','05:00','#1556 수정 후 병합, P2 한 건: 세션이 바뀐 뒤 DB 오류면 앞 값이 남음',3),message('←','[e7]','07:50','v4.23.0 설치 완료, 다음 판 준비',4),
  message('→','[e9]','07:58','검토 요청 — 셸 패널 시안 C7',5,'보냄')];
 const head={repo:[P('hearting/')],git:[P('(fix/fleet-opencode-dup-sid 🚧 3)')],selected:[P('claude-fable-5-2 high')],context:[P('context ━━━━────── 41%')],

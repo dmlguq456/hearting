@@ -113,11 +113,20 @@ own observation; hook events confirm and correct it, and input readiness and
 every gate keep the hooks' lifecycle state. Claude's REPL writes its UI state
 into its session record as it paints (`busy` while it shows progress, `waiting`
 with a dialog or question open, `idle`); the host reads that record the moment
-its watched file changes. Codex appends each turn's start and end to its
-rollout, read with the projection; after an approval, the question screen
-leaving (the readiness judgment's own form test) means the turn goes on.
+its watched file changes, only for this exact process and session. A `waiting`
+is an answer wait only for the person's own reasons (`waitingFor`: `permission
+prompt`, `input needed`, `worker request`, `sandbox request`, `goal proposal`);
+a menu, settings or side dialog (`dialog open`) says nothing about the turn and
+the previous reading stands, and an unlisted reason is left to the hooks. Codex
+appends each turn's start and end to its rollout, read with the projection;
+before any hook after a start or resume only its idle is taken (a last turn
+start may be a turn cut off mid-way), and a turn seen starting after that reads
+as running. After an approval the question screen leaving (the readiness
+judgment's own form test) means the turn goes on; it is asked about for as long
+as the hooks wait, and a question seen again turns the panel back to waiting.
 OpenCode's plugin reports its native events, an answered or approved request
-included. An Enter alone never claims a turn. Before any reading or event after
+included (a rejected one resumes nothing); a turn stopped by the person (Esc) is
+idle, a failed one keeps its wait. An Enter alone never claims a turn. Before any reading or event after
 start, resume, `/clear` or a session switch the state is left blank. The whole
 outer frame takes the state's color in the same paint: running and waiting
 Fleet's session keys, idle and an unknown state the neutral frame gray (the
@@ -192,7 +201,7 @@ stage) with the current stage and its mark, then `owner <model>` when a stage
 worker leads the first row, or with no stage running the next stage and what
 it waits for; a kind the record does not name draws no third row. Fleet's
 ROUTES progress cell reads the same words (`staged 3/7 execute ●`, short of
-cells `3/7 execute ●`). Short of rows a route keeps two rows, then one; every
+cells `3/7 execute ●`; a one-shot route on a tool `one-shot ● Edit host.cjs 3m`). Short of rows a route keeps two rows, then one; every
 route in the box takes the same form, and no empty row parts two folded routes.
 A press on any of its rows opens it. An opened route reads like a table behind a
 thin dim guide two cells in: `OWNER` (and `DOER` when a stage worker leads, or
@@ -293,8 +302,12 @@ its supervisor closed is in neither count. Context is Fleet's own gauge
 percent, else tokens over a known window, else the exact token count
 (`250K`); a stopped job shows none. Before an attempt's own result the window
 is its own evidence (usage above 200K is the 1M window), else the window its
-launch recorded as configured (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in launch and
-settings env, 100K..1M; `CLAUDE_CODE_DISABLE_1M_CONTEXT` holds 200K). A start,
+launch requested (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env, 100K..1M)
+when its settings env sets no other one and the model running is the one the
+launch chose (this path is a dispatch worker's, the route rows'; a seat keeps the
+native statusline's own value); `CLAUDE_CODE_DISABLE_1M_CONTEXT` holds 200K. That
+variable is Claude's compaction threshold (the smaller of it and the model's own
+window): a model the launch requested a window for is assumed to run with it. A start,
 resume, `/clear` or switch keeps this seat's own values drawn (the folder, Git
 and usage); session values clear until read again. A `/clear` (the native start
 hook's own `source`) keeps the same process and model, so the model and effort
@@ -310,7 +323,7 @@ from the exact session's retained received inputs, `→` sent from this session'
 own ledger shard and its 200-character summary), each on two rows: a head (the
 arrow in its direction's color, the other session's number, then dim harness,
 `HH:MM` today or `MM-DD`, the record's kind and a sent one's delivery state:
-`delivered`/`sent` dim, `not delivered 5h` in the caution color after 30 minutes,
+`delivered`/`sent` dim, `not delivered` (the recipient was never resolved; no age) in the caution color,
 `failed` red) and, two cells in, the text in the body color from its first
 meaningful words (leading bracket frames and heading marks left out, nothing
 else changed). Three show; rows to spare once every route stands in its three-row

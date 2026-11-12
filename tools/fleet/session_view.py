@@ -38,6 +38,8 @@ def weekly_quota(payload):
 _TAP_CELLS = ("model", "effort", "ctx_pct", "active_context_tokens", "context_window_tokens")
 _TAP_QUOTA = ("weekly_pct", "quota_windows", "model_quotas")
 _MODEL_CELLS = ("model", "effort")
+# Claude session record `waitingFor` reasons that wait for the person (its own words).
+_ANSWER_WAITS = frozenset(("permission prompt", "input needed", "worker request", "sandbox request", "goal proposal"))
 _TOKEN_CELLS = ("ctx_pct", "active_context_tokens", "context_window_tokens", "compaction_pressure")
 
 
@@ -77,11 +79,16 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False)
     if harness == "claude":
         home = claude._home()
         paths.append(Path(home) / "sessions" / f"{pid}.json")
-        record = claude.read_registry(pid, home)
+        record = claude.read_registry(pid, home, extra=("waitingFor",))
         if record and record.get("sessionId") == sid:
             claude._apply_registry(sess, record)
             if str(record.get("procStart") or "") == str(proc_start):
-                turn = {"busy": "working", "idle": "idle", "waiting": "blocked"}.get(record.get("status"))
+                # `waiting` is an answer wait only for these `waitingFor` reasons; a menu or
+                # settings dialog (`dialog open`) and an unlisted reason are left to the hooks.
+                if record.get("status") == "waiting":
+                    turn = "blocked" if record.get("waitingFor") in _ANSWER_WAITS else None
+                else:
+                    turn = {"busy": "working", "idle": "idle"}.get(record.get("status"))
         transcript = claude._newest_transcript_path(home, cwd, sid)
         if transcript:
             sess.model, sess.effort, _at = claude._subagent_budget(transcript)

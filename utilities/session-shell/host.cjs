@@ -88,12 +88,21 @@ let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown'
 // Nothing here polls: readings come from file events and native output the host
 // already receives.
 let nativeTurn = '', turnMark = 0, eventMark = 0, seenTurn = null, clock = 0, turnRecord = '';
-const TURN={busy:'working',idle:'idle',waiting:'blocked'};
+const TURN={busy:'working',idle:'idle'};
+// A record's `waiting` is an answer wait only for these reasons (Claude's own `waitingFor`).
+// A menu, settings or side dialog (`dialog open`, also `/btw` beside a running turn) is not
+// one, as Fleet's row reads it, and says nothing about the turn: the previous reading
+// stands (after an answer wait, or with none, the hooks say). An unlisted reason is the hooks'.
+const ANSWER_WAITS=new Set(['permission prompt','input needed','worker request','sandbox request','goal proposal']);
+const recordTurn=value=>value.status!=='waiting'?TURN[value.status]||'':ANSWER_WAITS.has(value.waitingFor)?'blocked'
+  :value.waitingFor==='dialog open'&&nativeTurn!=='blocked'?nativeTurn:'';
 function shownState(){
   if(state==='submitting')return state;
   if(harness==='claude'&&nativeTurn)return nativeTurn;
   if(seenTurn&&seenTurn.mark>eventMark)return seenTurn.value;
-  return state==='unknown'&&nativeTurn?nativeTurn:state;
+  // Before any hook (a start or resume) a rollout's last turn start may be a turn cut off
+  // mid-way: only its idle is taken; a turn seen starting after that reads as `seenTurn`.
+  return state==='unknown'&&nativeTurn&&nativeTurn!=='working'?nativeTurn:state;
 }
 // One reading of the native's own turn record, ordered by when it was asked for.
 function noteTurn(turn,mark){
@@ -112,16 +121,18 @@ function readTurnRecord(){
   }catch{return;}
   // The same identity the pane reader requires: this exact process and session.
   if(!value||value.pid!==native.pid||String(value.procStart??'')!==String(native.start)||value.sessionId!==sid)return;
-  noteTurn(TURN[value.status]||'',mark);
+  noteTurn(recordTurn(value),mark);
 }
 // Codex after an approval: the question screen shown, then gone, while no newer event came.
+// It is asked for as long as the hooks say the turn waits (a screen the judgment missed
+// once is asked about again), and a question seen again turns the panel back to waiting.
 let formSeen=false,formRevision=-1,formAsking=false;
 function observeForm(){
-  if(harness!=='codex'||!sid||relay||ended||formAsking||formRevision===screenRevision||shownState()!=='blocked')return;
+  if(harness!=='codex'||!sid||relay||ended||formAsking||formRevision===screenRevision||state!=='blocked')return;
   formAsking=true;formRevision=screenRevision;const mark=++clock,events=eventMark,selected=selection;
   source('readiness',{screen:screenSnapshot(),state}).then(result=>{
     if(selected!==selection||events!==eventMark||!result?.ok)return;
-    if(result.reason==='form-open'){formSeen=true;return;}
+    if(result.reason==='form-open'){formSeen=true;if(seenTurn){seenTurn=null;queueDisplay();}return;}
     if(formSeen&&shownState()==='blocked'){formSeen=false;seenTurn={value:'working',mark};queueDisplay();}
   }).finally(()=>{formAsking=false;if(formRevision!==screenRevision)schedule();});
 }
@@ -610,7 +621,10 @@ async function projection() {
     const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
-    noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
+    // Claude's record is read here as well, by the host itself: one reading rule (a dialog
+    // keeps the previous reading), and the file as it is now.
+    if(turnRecord)readTurnRecord();
+    else noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
     const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState()]);

@@ -188,8 +188,8 @@ class ClaudeRegisteredTest(unittest.TestCase):
         job = DispatchJob(key="code", slug="worker", pid=91, proc_start="w", harness="claude",
                           attempt_id="att-claude-reg", is_child=True, liveness="working")
         job._log_file = os.path.join(self.logs, "worker.att-claude-reg.claude.jsonl")
-        job._registry_metadata = _wrapper_module().claude_compaction_inputs(
-            {"CLAUDE_CONFIG_DIR": home, **env})
+        job._registry_metadata = {**_wrapper_module().claude_compaction_inputs(
+            {"CLAUDE_CONFIG_DIR": home, **env}), "model": "opus"}
         Path(job._log_file).write_text("".join(json.dumps(row) + "\n" for row in rows))
         return job
 

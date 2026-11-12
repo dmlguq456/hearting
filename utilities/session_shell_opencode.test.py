@@ -32,9 +32,10 @@ const fsModule=new vm.SyntheticModule(['readFileSync'],function(){this.setExport
    listener({details:{type:'fixture-native-update',data:{}}});await drain();
  }else if(process.argv[3]==='events'){
    for(const slot of slots)slot.render({});await drain();
-   for(const type of ['session.execution.started','permission.asked','permission.replied','form.created','form.replied',
-                      'form.created','form.cancelled','session.execution.succeeded'])
-     listener({details:{type,data:{sessionID:'ses_first'}}});
+   for(const [type,reply] of [['session.execution.started'],['permission.asked'],['permission.replied','once'],['form.created'],['form.replied'],
+                      ['form.created'],['form.cancelled'],['permission.asked'],['permission.replied','reject'],['session.execution.succeeded'],
+                      ['session.execution.started'],['session.execution.interrupted'],['session.execution.started'],['session.execution.failed']])
+     listener({details:{type,data:{sessionID:'ses_first',...(reply?{reply}:{})}}});
    await drain();
  }else{
    for(const slot of slots)slot.render({});await drain();
@@ -75,10 +76,13 @@ class OpenCodeShellSelectionTest(unittest.TestCase):
 
     def test_an_answered_or_approved_wait_resumes_the_turn_at_once(self):
         # Spec rule 26 table: as Claude's and Codex's PostToolUse after a wait, the
-        # native reply leaves `waiting` now, not at the turn's end.
+        # native reply leaves `waiting` now, not at the turn's end. Review RV-PR1560
+        # follow-up 4: a rejected permission resumes nothing, and a turn the person
+        # stopped (Esc) is idle, not a wait; a failed turn keeps its wait.
         data=self.probe('events')
         events=[row['event'] for row in data['events'] if row.get('op')=='event' and row.get('event') not in ('select','idle','deselect')]
-        self.assertEqual(events,['submit','blocked','working','blocked','working','blocked','working','stop'])
+        self.assertEqual(events,['submit','blocked','working','blocked','working','blocked','working','blocked','stop',
+                                 'submit','stop','submit','blocked'])
 
     def test_a_queued_old_selection_cannot_be_reported_after_the_native_route_moves(self):
         data=self.probe('rapid')

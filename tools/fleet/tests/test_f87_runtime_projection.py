@@ -686,6 +686,17 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.assertEqual(rows[-1][4:], ["herdr:opencode", "--display-agent", oc_agent,
                                             "--title", oc_agent + " OC task"])
 
+    def test_the_root_folder_reads_one_slash(self):
+        """Review RV-PR1560 follow-up 9: the root folder `/` is its own name, never `//`."""
+        import re
+        with tempfile.TemporaryDirectory() as td:
+            root, sid = Path(td), "abcdefgh-claude"
+            self.statusline(root, sid, "x")
+            out = subprocess.run([str(STATUSLINE)], input=json.dumps({"cwd": "/", "session_id": sid}),
+                                 text=True, capture_output=True, env=self.env(root)).stdout
+            head = re.sub(r"\x1b\[[0-9;]*m", "", out).split("│")[0].strip()
+            self.assertTrue(head.split(" (")[0].endswith("/") and "//" not in head, out)
+
     def test_statusline_leads_with_the_project_and_carries_no_title(self):
         """2026-11-11 (spec rule 10): `[number] project/ (git) │ model …`, no folder glyph
         and no session title; a title equal to the folder is not repeated either."""
