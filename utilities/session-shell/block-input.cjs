@@ -1,7 +1,7 @@
 'use strict';
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
-module.exports=function({changed,answer,action}) {
+module.exports=function({changed,answer,action,page}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer;
   let labels={},styles={},help='';
@@ -198,6 +198,9 @@ module.exports=function({changed,answer,action}) {
             const up=escape==='\x1b[A'||escape==='\x1bOA',down=escape==='\x1b[B'||escape==='\x1bOB',row=current();
             if(escape==='\x1b[Z')move(-1);
             else if((up||down)&&choosing(row)){const local=state(row.item),n=choices(row).length;const at=cursorOf(row);local.cursor[row.question.id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));scroll=0;follow=true;}
+            // With no question to read, PgUp/PgDn page the route box: the same
+            // parse, so a key split across reads pages it as a whole one does.
+            else if(!row&&page&&(escape==='\x1b[5~'||escape==='\x1b[6~'))page(escape==='\x1b[5~'?-1:1);
             else if(up||escape==='\x1b[5~'){scroll-=escape.includes('5')?4:1;follow=false;}else if(down||escape==='\x1b[6~'){scroll+=escape.includes('6')?4:1;follow=false;}
           }
           escape='';
@@ -208,5 +211,5 @@ module.exports=function({changed,answer,action}) {
     }
     changed();return Buffer.alloc(0);
   }
-  return {get focused(){return focused;},get asking(){return !!current();},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
+  return {get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},get pasting(){return pasting;},enter,leave,update,input,detail:preview,references};
 };

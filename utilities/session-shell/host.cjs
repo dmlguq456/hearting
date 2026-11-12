@@ -444,7 +444,10 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key)});
+  action:key=>blockAction(key),
+  // Focused on the panel with no question to read, PgUp/PgDn scroll the route
+  // box; with a question they stay the question's (its body reads on).
+  page:dir=>{if(!paste&&routeArea)scrollRoutes(dir*Math.max(1,routeArea.step||1));}});
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
@@ -818,12 +821,6 @@ function inputBytes(data) {
       // native PTY, so a display-host failure cannot lose another held draft.
       view.child.write('\x1b\x1bq');
       const rest=data.subarray(exit+1);if(rest.length){observeInput(rest);child.write(rest);}return;
-    }
-    // Focused on the panel with no question to read, PgUp/PgDn scroll the route
-    // box; with a question they stay the question's (its body reads on).
-    if(block.focused&&!block.asking&&!paste&&!block.pasting&&routeArea?.max){
-      const pageKey=/^\x1b\[([56])~/.exec(data.toString('latin1'));
-      if(pageKey){scrollRoutes((pageKey[1]==='5'?-1:1)*Math.max(1,routeArea.step||1));epoch+=pageKey[0].length;data=data.subarray(pageKey[0].length);continue;}
     }
     if(block.focused){
       actionLines=[];const rest=block.input(data);epoch+=data.length-rest.length;
