@@ -144,15 +144,21 @@ only while the painted panel shows one of them; a spinner turn swaps only its ow
 cells, the blink repaints the panel once a second (a panel with only a blink
 wakes once a second and changes only the blinking row), and an idle panel with
 nothing to blink paints nothing between native frames.
-Then the metadata, one block: the repository name ending in `/` (`hearting/`,
-the mark only on a whole name), with Git (branch and dirty mark, `🚧 N`,
-ahead/behind and the existing merge warnings) dim in parentheses on its own
-row below, cut with `…` within that row and absent without a Git reading; no
-folder or branch glyph. Beside the native area the worktree count stands dim
-one cell after the repository name instead (`hearting/ 🚧 12`, none for zero
-or an unknown count) and the Git row keeps the branch, ahead/behind and the
-warnings (`(main ↑2)`; no row when nothing else is left); the bottom layout,
-Claude's statusline and Fleet keep the count in the parentheses. Beside the
+Then the metadata, one block. Beside the native area the repository and Git rows
+start with dim labels in the label column of `TITLE` and `NOW` (`REPO`, `GIT`;
+narrower than 30 cells inside the labels go first): `REPO   hearting · wt 12`,
+the repository name in its color with no trailing `/` and the worktree count
+dim (none for zero or an unknown count), and `GIT    main ✓`, all dim with no
+parentheses: the branch and dirty mark cut at 20 cells (32 with 60 cells
+inside), then `✓` when ahead and behind are both known to be 0, else `↑N`/`↓N`
+(nothing when unknown: no upstream to compare with), then the existing merge
+warnings and `💀merged`; no Git row when nothing is left; no folder or branch
+glyph. The bottom layout and Claude's statusline keep the repository name
+ending in `/` (`hearting/`, the mark only on a whole name) with Git dim in
+parentheses (`(main ✓ 🚧 3)`, the same branch cut and `✓`; Claude's statusline
+cuts at the width its lines are shown at, its bash fallback by `COLUMNS`),
+cut with `…` within that row and absent without a Git reading; Fleet's own Git
+words are unchanged. Beside the
 native area one empty row then parts the repository and Git from the model
 (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (two rows beside

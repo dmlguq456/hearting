@@ -48,33 +48,44 @@ def _remaining(reset):
     return elapsed_text(seconds // 60)
 
 
-def _git_text(values, *, worktrees=True):
-    """``main 🚧 3`` and its existing Git warnings, for the dim parentheses.
+def git_branch_cells(width):
+    """The branch name's cells (spec E9 rule 40 (b)): 20, or 32 with 60 cells inside."""
+    return 32 if int(width) >= 60 else 20
 
-    ``worktrees=False`` leaves the worktree count out (the side panel draws it beside the
-    repository name, spec E9 rule 37 (a)); every other surface keeps it here."""
+
+def _git_words(values, *, branch_cells=32):
+    """The Git observation's words: the branch (cut to ``branch_cells``), its warning, whether it
+    is up to date (spec E9 rule 40 (c): ``✓`` when ahead and behind are both known to be 0, else
+    ``↑N``/``↓N``, nothing when unknown) and the worktree count."""
     git = values.get("git") or {}
     branch = _text(values.get("branch"), "")
-    parts = [clip_cells(branch, 32)] if branch else []
+    words = {"branch": clip_cells(branch, branch_cells) if branch else "", "flag": "", "fresh": [], "worktrees": ""}
     if git and git.get("repo") != 0:
         operation = git.get("operation")
         flag = "⚠️" + operation if operation in {"merge", "rebase", "cherry-pick"} else (
             "💀merged" if operation == "none" and (git.get("merged") == 1 or git.get("branch_done") == 1) else "")
         if operation is None or operation == "unknown":
             flag = "⚠️?"
-        if flag:
-            parts.append(flag)
-        for key, glyph in (("ahead", "↑"), ("behind", "↓")):
-            if type(git.get(key)) is int and git[key] > 0:
-                parts.append(glyph + str(git[key]))
+        words["flag"] = flag
+        ahead, behind = git.get("ahead"), git.get("behind")
+        if type(ahead) is int and type(behind) is int and ahead == 0 and behind == 0:
+            words["fresh"] = ["✓"]
+        else:
+            words["fresh"] = [glyph + str(count) for count, glyph in ((ahead, "↑"), (behind, "↓"))
+                              if type(count) is int and count > 0]
         wt = git.get("extra_worktrees")
-        if not worktrees:
-            pass
-        elif wt is None:
-            parts.append("🚧 ?")
-        elif type(wt) is int and wt > 0:
-            parts.append("🚧 " + str(wt))
-    return " ".join(parts)
+        words["worktrees"] = "🚧 ?" if wt is None else "🚧 " + str(wt) if type(wt) is int and wt > 0 else ""
+    return words
+
+
+def _git_text(values, *, worktrees=True, branch_cells=32):
+    """``main ✓ 🚧 3`` and its existing Git warnings, for the dim parentheses.
+
+    ``worktrees=False`` leaves the worktree count out (the side panel draws it beside the
+    repository name, spec E9 rule 37 (a)); every other surface keeps it here."""
+    words = _git_words(values, branch_cells=branch_cells)
+    parts = [words["branch"], words["flag"], *words["fresh"], words["worktrees"] if worktrees else ""]
+    return " ".join(part for part in parts if part)
 
 
 def gauge_parts(percent, *, cells=10):
@@ -91,7 +102,7 @@ def effort_label(effort):
     return "med" if text == "medium" else text
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False, fields=None):
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None):
     """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ route N │ 5h … 7d …``.
 
     Shorten words before losing a known count; never invent an unknown value.
@@ -123,7 +134,9 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
 
     tag = _text(values.get("tag"), "").strip("[]")
     project = project_of(values.get("cwd")) if values.get("cwd") else None
-    git = _git_text(values)
+    # Spec E9 rule 40 (b): the branch keeps 20 cells, 32 on a line of 60 cells or more
+    # (``branch_room``: the width a wrapped, complete line is shown at).
+    git = _git_text(values, branch_cells=git_branch_cells(columns if branch_room is None else branch_room))
     if values.get("git") and (values["git"] or {}).get("repo") == 0:
         git = "no-git"
     after = [(" (" + git + ")", "dim")] if git else []
@@ -233,7 +246,7 @@ def wrap_segments(parts, columns):
 
 def status_lines(values, columns, *, wrap_long=False, reported_only=False, fields=None):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
-    parts = line_segments(values, 10000, complete=True, reported_only=reported_only, fields=fields)
+    parts = line_segments(values, 10000, complete=True, reported_only=reported_only, fields=fields, branch_room=columns)
     groups = [[]]
     for part in parts:
         if part == (SEPARATOR, "dim"):

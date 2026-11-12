@@ -377,9 +377,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       rows.forEach((row,i)=>{top.push([...(lead?[i?rest:lead]:[]),...row]);if(into)into.add(top.length-1);else if(i)extra.add(top.length-1);});
       if(rows.length>1)oneRow.set(from,[...(lead?[lead]:[]),...cut(parts,inner-labelWidth)]);
     };
-    // Spec rule 37 (a): beside the native area the worktree count stands beside the repository
-    // name (`hearting/ 🚧 12`) and the Git row keeps the branch, ahead/behind and warnings.
+    // Spec rules 37 (a), 41: beside the native area the worktree count stands beside the
+    // repository name (`REPO   hearting · wt 12`) and the Git row keeps the branch, whether it
+    // is up to date and the warnings (`GIT    main ✓`), the labels as TITLE's and NOW's.
     const worktrees=painted(model.worktrees),sideGit=Array.isArray(model.git_side)?painted(model.git_side):git;
+    const sideRepo=Array.isArray(model.repo_side)?painted(model.repo_side):repo;
+    const labelled=(label,parts)=>labelWidth?[text(label.padEnd(labelWidth),'dim'),...parts]:parts;
     const memory=painted(model.memory);
     if(side){
       // Spec rule 29 (b), 30 (a): the metadata first, one block (the repository, Git,
@@ -387,11 +390,19 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       // this session's content (title, NOW, MEM, the answer wait and a tidy notice). Spec rule
       // 35 (b): inside the metadata one empty row parts [repository, Git] from [model and
       // effort, context]; without Git it parts the repository from the model.
-      if(repo.length){
-        const withCount=worktrees.length&&size(repo)+1+size(worktrees)<=inner;
-        top.push(withCount?[...repo,text(' '),...worktrees]:cut(repo,inner));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
+      if(sideRepo.length){
+        // The name keeps its color; the count (dim) shows whole or not at all.
+        const room=inner-labelWidth,count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
+        const withCount=count.length>0&&size(sideRepo)+size(count)<=room;
+        top.push(labelled('REPO',withCount?[...sideRepo,...count]:cut(sideRepo,room)));mark(0,'head',...(withCount&&!sideGit.length?['git']:[]));
       }
-      putGit(sideGit);
+      // Short of cells the branch (the first part) gives way so the status and a warning stay whole.
+      const gitValue=(parts,room)=>{
+        if(size(parts)<=room||parts.length<2)return cut(parts,room);
+        const rest=parts.slice(1),left=room-size(rest);
+        return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
+      };
+      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',gitValue(sideGit,inner-labelWidth)));mark(top.length-1,'git');}
       if(top.length){metaGaps.add(top.length);top.push([]);}
       top.push(selected);
       if(contextParts.length){top.push(contextParts);mark(top.length-1,'context');}

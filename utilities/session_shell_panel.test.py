@@ -1122,24 +1122,32 @@ for(let h=16;h<=80;h++){
         self.node(script, "panel-view.cjs")
 
     def test_the_repository_row_counts_worktrees_and_mem_reads_the_latest_saved_memory(self):
-        # Spec E9 rule 37: beside the native area `hearting/ 🚧 12` and a Git row without the
+        # Spec E9 rules 37, 41: beside the native area `REPO   hearting · wt 12` and `GIT` without the
         # count; under NOW the newest saved memory (`MEM`, two rows at most), which goes to one
         # row with TITLE and NOW and goes whole before the structural empty rows. The bottom
         # layout keeps its rows as they were.
         script = self.FIXTURE + r'''
 const D=t=>({text:t,dim:true}),MEM=[D('3m '),D('decision '),P('셸 패널 route 줄 순서는 누가 / context·시간 / 무엇 / 종류로 정함, 지어낸 기억')];
-const side={...head,worktrees:[D('🚧 12')],git_side:[P('(fix/fleet-opencode-dup-sid)')],memory:MEM};
+const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-… ✓')],memory:MEM};
 const paint=(routes,width,height,o={})=>view.render({width,height,side:o.side!==false,fill:o.side!==false,model:{...side,...(o.model||{}),routes,route_count:routes.length},
  state:'working',configuration:{},questions:()=>[]});
 const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const v50=paint([oneShot,staged],40,50),r50=text(v50);
-assert(r50[1].startsWith('│ hearting/ 🚧 12 ')&&r50[2].startsWith('│ (fix/fleet-opencode-dup-sid) ')&&!r50[2].includes('🚧'),r50.join('\n'));
+assert(r50[1].startsWith('│ REPO   hearting · wt 12 ')&&r50[2].startsWith('│ GIT    fix/fleet-opencode-… ✓ ')&&!r50.slice(1,3).join('').includes('🚧'),r50.join('\n'));
+// The labels are TITLE's and NOW's: dim, seven cells; the name keeps its color, the rest is dim.
+const labels=v50.rows.slice(1,3).map(r=>r.find(p=>/^(REPO|GIT) +$/.test(p.text)));
+assert(labels.every(p=>p&&p.dim===true&&p.text.length===7),JSON.stringify(labels));
+assert(v50.rows[1].find(p=>p.text==='hearting').dim!==true&&v50.rows[1].filter(p=>p.text===' · '||p.text==='wt 12').every(p=>p.dim===true),JSON.stringify(v50.rows[1]));
+// Short of cells the branch gives way; the status and a warning stay whole (spec rule 30 (d)).
+const tight=text(paint([oneShot],40,50,{model:{git_side:[D('fix/fleet-opencode-…'),D(' ↓3'),D(' ⚠️rebase')]}}));
+assert(/^│ GIT    fix\/fleet-.*… ↓3 ⚠️rebase +│$/.test(tight[2]),tight.join('\n'));
+// Narrower than 30 cells inside, the labels go first (as TITLE's and NOW's).
+const narrow=text(paint([oneShot],32,50));
+assert(narrow[1].startsWith('│ hearting · wt 12')&&narrow[2].startsWith('│ fix/fleet-opencode-… ✓')&&!narrow.join('').includes('REPO'),narrow.join('\n'));
 assert(v50.groups.includes('head')&&v50.groups.includes('git'),v50.groups);
-// The count is dim, one cell after the name.
-const count=v50.rows[1].find(p=>p.text==='🚧 12');assert(count&&count.dim===true,JSON.stringify(v50.rows[1]));
 // Only the count was left in the parentheses: the repository row carries the Git group.
 const bare=paint([oneShot],40,50,{model:{git_side:[]}});
-assert(text(bare)[1].includes('🚧 12')&&!text(bare)[2].includes('(')&&bare.groups.includes('git'),text(bare).join('\n'));
+assert(text(bare)[1].includes('wt 12')&&!text(bare).join('').includes('GIT')&&bare.groups.includes('git'),text(bare).join('\n'));
 // MEM: under NOW, the value column of TITLE and NOW, two rows, the second ending in `…`.
 const m=r50.findIndex(s=>s.startsWith('│ MEM    3m decision 셸'));
 assert(m>0&&r50[m-1].startsWith('│        ')&&r50[m+1].startsWith('│        ')&&r50[m+1].includes('…')&&!r50.join('').includes('지어낸 기억'),r50.join('\n'));
@@ -1148,7 +1156,8 @@ const ages=v50.rows[m].filter(p=>p.text==='3m'||p.text==='decision');assert(ages
 assert(!text(paint([oneShot],40,50,{model:{memory:[]}})).join('').includes('MEM'));
 // The bottom layout: its rows as before (the count stays in the Git parentheses, no MEM).
 const bottom=text(paint([oneShot,staged],140,16,{side:false}));
-assert(bottom.some(s=>s.includes('(fix/fleet-opencode-dup-sid 🚧 3)'))&&!bottom.join('').includes('🚧 12')&&!bottom.join('').includes('MEM'),bottom.join('\n'));
+assert(bottom.some(s=>s.includes('hearting/ │'))&&bottom.some(s=>s.includes('(fix/fleet-opencode-dup-sid 🚧 3)'))&&!bottom.join('').includes('wt 12')
+ &&!/REPO|GIT |MEM/.test(bottom.join('')),bottom.join('\n'));
 // Short of rows: MEM keeps two rows only with TITLE's and NOW's, and goes whole before the
 // empty row under the route box.
 const six=[...Array(6)].map((_,i)=>({...[oneShot,staged,waiting][i%3],id:'s'+i}));

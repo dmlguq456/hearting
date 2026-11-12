@@ -382,22 +382,38 @@ def session_git(values):
             if _git_part((text, key))]
 
 
-def session_git_side(values):
-    """``(main ↑2)``: the Git row beside the native area, its worktree count moved to the
-    repository row (spec E9 rule 37 (a)); empty when nothing else is left in the parentheses."""
-    from .session_line import _git_text
+def session_git_side(values, columns=40):
+    """``fix/fleet-opencode-d… ✓``: the ``GIT`` row's value beside the native area (spec E9
+    rules 40 (b)-(e), 41 (b)): the branch cut at 20 cells (32 with 60 cells inside), then
+    ``✓`` or ``↑N``/``↓N``, then the existing warning; all dim, no parentheses, and the
+    worktree count on the ``REPO`` row. Empty when Git has nothing else to say."""
+    from .session_line import _git_words, git_branch_cells
     if not session_git(values):
         return []
-    git = "no-git" if (values.get("git") or {}).get("repo") == 0 else _git_text(values, worktrees=False)
-    return [("(" + git + ")", "dim")] if git else []
+    if (values.get("git") or {}).get("repo") == 0:
+        return [("no-git", "dim")]
+    words = _git_words(values, branch_cells=git_branch_cells(int(columns) - 4))
+    # One part per word, so the panel can shorten the branch and keep the status and warning whole.
+    shown = [part for part in (words["branch"], *words["fresh"], words["flag"]) if part]
+    return [((" " if index else "") + part, "dim") for index, part in enumerate(shown)]
+
+
+def session_repo_side(values):
+    """``hearting``: the ``REPO`` row's name beside the native area (spec E9 rule 41 (a)), the
+    repository row's own name and color without the trailing ``/``."""
+    repo = [part for part in session_head(values) if part[1] != "tag"]
+    if not repo:
+        return []
+    *head, (name, key) = repo
+    return [*head, (name[:-1] if name.endswith("/") and len(name) > 1 else name, key)]
 
 
 def session_worktrees(values):
-    """``🚧 12`` beside the repository name (spec E9 rule 37 (a)): the Git row's own
+    """``wt 12`` beside the repository name (spec E9 rules 37 (a), 41 (a)), dim: the Git row's own
     ``extra_worktrees``; nothing for none or an unknown count."""
     git = values.get("git") or {}
     count = git.get("extra_worktrees")
-    return [("🚧 " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
+    return [("wt " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
 
 
 def session_memory(values, now=None):
@@ -529,7 +545,8 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
             "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
             "steward": values.get("steward") is True,
             "now": sanitize_title(str(values.get("now") or ""))[:320],
-            "git": session_git(values), "git_side": session_git_side(values), "worktrees": session_worktrees(values),
+            "git": session_git(values), "git_side": session_git_side(values, columns), "worktrees": session_worktrees(values),
+            "repo_side": session_repo_side(values),
             "memory": session_memory(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
