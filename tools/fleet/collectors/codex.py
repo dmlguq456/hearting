@@ -1732,13 +1732,20 @@ def process_for_thread(thread_id, environ=None, *, expected_service=None, fresh=
     if not row:
         return None
     port, source = row
-    if not port or not source or source == "subagent":
+    if not source or source == "subagent":
         return None
-    observed = _tcp_listener_snapshot(port)
+    observed = _tcp_listener_snapshot(port) if port else (frozenset(), frozenset())
     if observed is None:
         _invalidate_origins(origins)
         return None
     inodes, owners = observed
+    if not inodes and not fresh:
+        # A loaded thread can move to another TUI (a window reopened with the same session id)
+        # without leaving the loaded list, so the cached origin names a listener that is gone, or
+        # was read before the TUI connected. A long-lived reader (the notice runner) would call
+        # the thread unowned for as long as it stays loaded: read the daemon once more first.
+        _invalidate_origins(origins)
+        return process_for_thread(thread_id, environ, expected_service=expected_service, fresh=True)
     if not inodes or len(owners) != 1:
         return None
     pid = next(iter(owners))

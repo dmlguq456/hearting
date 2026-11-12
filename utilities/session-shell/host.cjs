@@ -12,7 +12,7 @@ function startupResult(value) {
   const fd = Number(process.env.HEARTING_SHELL_START_FD);
   fs.writeSync(fd, value + '\n'); fs.closeSync(fd);
 }
-function bypass() { startupResult('BYPASS'); process.exit(0); }
+function bypass() { try{startupResult('BYPASS');}catch{} process.exit(0); }
 let pty, Terminal, Unicode11Addon;
 try {
   if (!['claude','codex','opencode'].includes(harness) || !command.length || !process.stdin.isTTY || !process.stdout.isTTY) throw Error();
@@ -37,6 +37,12 @@ const socketPath = path.join(dir, 'control.sock');
 let cols = process.stdout.columns, rows = process.stdout.rows;
 if (cols < 20 || rows < 8) bypass();
 const nativeDisplay=require('./native-display.cjs');
+const succession=require('./succession.cjs');
+const {serialize}=succession;
+// A broker that offers hand-over names its channel; without it this host never asks for or takes one.
+const SUCCESSION=process.env.HEARTING_SHELL_SUCCESSION==='1'&&Number(process.env.HEARTING_SHELL_SUCCESSION_FD)>=3;
+const SUCCESSOR=SUCCESSION&&process.env.HEARTING_SHELL_SUCCESSOR==='1';
+const GENERATION=Number(process.env.HEARTING_SHELL_GENERATION)||0;
 const panelView=require('./panel-view.cjs');
 let displayConfiguration={...panelView.defaults};
 try{displayConfiguration=JSON.parse(process.env.HEARTING_SHELL_LAYOUT||'{}');}catch{}
@@ -136,7 +142,10 @@ function observeForm(){
     if(formSeen&&shownState()==='blocked'){formSeen=false;seenTurn={value:'working',mark};queueDisplay();}
   }).finally(()=>{formAsking=false;if(formRevision!==screenRevision)schedule();});
 }
-let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
+// `unselected`: the input frontier of the session the native just deselected. OpenCode reloads its
+// plugins when an install rewrites its config, which reports deselect then select of the same session;
+// that is no new input, so the frontier and an open read page survive it (keys typed in between end it).
+let nativeEpoch = 0, lastEnter = -1, submitted = -1, unselected = null, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
 let last = [], nativeLast = [], footer = '', footerSegments = [], footerLast = '\0', panelRows = [], panelLines = [], projectionKey = '';
@@ -156,6 +165,12 @@ let routeScroll=0,routeArea=null;
 // here is not typing, so it moves neither the input epoch nor `empty`.
 const panelOpen=new Set();
 let displaySequence=0,nativeMcp;
+// Hand-over between host generations (plan §3.0): `succeeding` is the frozen window of the old
+// display, `upgrade` a newer installed release waiting for a safe moment.
+let succeeding=false,switched=!SUCCESSOR,running=!SUCCESSOR,upgrade=null,upgradeNote='',checkingRelease=false,checkedKey='';
+let successionChannel,socketIno=-1,seedFile='',layoutDeferred=false;
+const bound=[],releaseWatchers=[],staleServers=[],nextPath=socketPath+'.next';
+const myRelease=(()=>{try{return fs.realpathSync(__filename);}catch{return null;}})();
 function binding() {
   // An unselected seat (OpenCode home after /new) keeps its pane as '-': no
   // session lookup can match it, so nothing is ever delivered to an old session.
@@ -283,7 +298,7 @@ function readAction(extra,operation='action',own=false) {
     const timer=setTimeout(()=>finish({ok:false,reason:'action-unavailable'}),12000);
     worker.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
     worker.stdin.on('error',()=>finish({ok:false,reason:'action-unavailable'}));
-    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();}finish({ok:false,reason:'action-unavailable'});});
+    worker.on('close',()=>{if(actionWorker===worker){actionWorker=undefined;queueProjection();checkRelease();}finish({ok:false,reason:'action-unavailable'});});
     worker.stdout.setEncoding('utf8');
     worker.stdout.on('data',bytes=>{
       if(settled)return;
@@ -294,23 +309,6 @@ function readAction(extra,operation='action',own=false) {
   });
 }
 function emit(value) { process.stdout.write(value); }
-function color(c,bg) {
-  const v=bg?c.getBgColor():c.getFgColor();
-  if(bg?c.isBgRGB():c.isFgRGB())return `${bg?48:38};2;${v>>16};${v>>8&255};${v&255}`;
-  if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
-  return bg?'49':'39';
-}
-function serialize(line,width,from=0) {
-  let s='',previous='';
-  for(let x=from;x<width;x++) {
-    const c=line?.getCell(x); if(!c||!c.getWidth())continue;
-    const a=[0,color(c,false),color(c,true)];
-    for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
-    const attr=a.join(';');if(attr!==previous)s+=`\x1b[${attr}m`;
-    s+=c.getChars()||' ';previous=attr;
-  }
-  return s+'\x1b[0m';
-}
 function geometry(){return nativeDisplay.layout({cols,rows,expanded,configuration:displayConfiguration});}
 function panelColumns(){return geometry().panelCols;}
 function nativeColumns(){return geometry().nativeCols;}
@@ -346,7 +344,7 @@ function spun(y,row){
   const spin=panelView.SPIN;return row.replace(new RegExp('['+spin+']','g'),spin[spinFrame()%spin.length]);
 }
 let beatTimer,beatPhase=-1;
-function beating(){return panelAnimated&&activated&&!ended&&!relay&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
+function beating(){return panelAnimated&&activated&&!ended&&!relay&&!succeeding&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
 // With no spinner painted (only a blink, such as an idle steward's mark) the beat wakes
 // once a second, at the blink's own phase change, not every spinner frame.
 function armBeat(){if(!beatTimer&&beating()){const step=paintedSpins.size?100:1000;beatTimer=setTimeout(beatTick,step-Date.now()%step);}}
@@ -360,7 +358,7 @@ function beatTick(){
 // Only the spinner cells of the panel rows, with the cursor kept where the native left it.
 // A native frame already on its way paints them itself.
 function spinPaint(){
-  if(frameTimer||!paintedSpins.size)return;
+  if(frameTimer||!paintedSpins.size||succeeding)return;
   let text='';const side=geometry().side;
   for(const y of paintedSpins){
     if(y>=panelRows.length)continue;
@@ -399,7 +397,7 @@ function height(){
   return Math.min(maxHeight(),Math.max(content.length,currentDelivery?1:0));
 
 }
-function schedule() { if(!frameTimer)frameTimer=setTimeout(render,8); }
+function schedule() { if(!frameTimer&&!succeeding)frameTimer=setTimeout(render,8); }
 function displayModelKey(lines){return lines.slice(-4).join('\n');}
 function observeSelectedModel(lines){
   if(harness!=='codex'||modelReading||!native||nativeSelected.model)return;
@@ -414,7 +412,7 @@ function observeSelectedModel(lines){
   }).finally(()=>{modelReading=false;});
 }
 function render() {
-  frameTimer=undefined;if(ended||!activated||relay)return;
+  frameTimer=undefined;if(ended||!activated||relay||succeeding)return;
   try {
     observeNativeSelection();observeForm();
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
@@ -469,7 +467,7 @@ function render() {
     if(expanded&&!fleetView&&height()>0)text+='\x1b[?1002h\x1b[?1006h';
     else if(m.mouseTrackingMode!=='none')text+=`\x1b[?${({x10:9,vt200:1000,drag:1002,any:1003})[m.mouseTrackingMode]}h\x1b[?1006h`;
     text+=`\x1b[?1004${m.sendFocusMode?'h':'l'}\x1b[?7h${(block.focused&&!fleetView?!!blockCursor:cursorVisible)?'\x1b[?25h':''}\x1b[?2026l`;
-    emit(text);armBeat();
+    emit(text);armBeat();checkRelease();
   } catch { rawRelay(); }
 }
 function lineLength(line){
@@ -575,12 +573,13 @@ function openFleet() {
 let displayFooter='';
 function applyLayout() {
   if(relay)return;
+  if(succeeding){layoutDeferred=true;return;}
   if(fleetView){fleetView.child.resize(cols,rows);fleetView.terminal.resize(cols,rows);last=[];schedule();return;}
   child.resize(nativeColumns(),nativeRows());terminal.resize(nativeColumns(),nativeRows());last=[];footerLast='\0';
   emit('\x1b[0m\x1b[2J');rebuildDisplay();schedule();queueProjection();
 }
 function queueProjection() {
-  if(ended||relay||projectionTimer)return;
+  if(ended||relay||projectionTimer||succeeding)return;
   nativeSelectionRevision=-1; // Existing lifecycle/file events may settle a prior observation.
   projectionTimer=setTimeout(()=>{projectionTimer=undefined;projection();},25);
 }
@@ -614,11 +613,11 @@ function observeFiles(paths) {
   return changed;
 }
 async function projection() {
-  if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
+  if(!sid||ended||relay||succeeding)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
     const asked=++clock;
-    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
+    const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery,upgrade_note:upgradeNoteNow()});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
     turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
     // Claude's record is read here as well, by the host itself: one reading rule (a dialog
@@ -627,7 +626,7 @@ async function projection() {
     else noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState()]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState(),upgradeNoteNow()]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
@@ -677,6 +676,10 @@ function claudeStatusRecord(){
 function rawRelay() {
   if(relay||ended)return;
   if(!activated){bypass();return;}relay=true;state='unknown';empty=false;
+  // A display lost while frozen for hand-over reads again: the relay needs the PTY and the keyboard.
+  // Ending this side of the hand-over channel first tells the owner (`eof`), so it drops the successor
+  // before that one is told to read; a `retire` already sent still arrives and ends this host.
+  if(succeeding){succeeding=false;try{successionChannel?.end();}catch{}try{child.resume();process.stdin.resume();}catch{}}
   if(fleetView){try{fleetView.child.write('q');}catch{}fleetView=undefined;}
   clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
   mouseInput?.flush();
@@ -817,7 +820,7 @@ function panelMouse(code,x,y,release){
   const g=geometry(),local=x-1-g.panelColumn,row=y-1-panelRow();
   if(dragging){
     if(!release){displayConfiguration={...displayConfiguration,side_width:Math.max(32,Math.min(80,g.left?x:cols-x+1))};if(settings)settings.value={...displayConfiguration};queueLayout();}
-    else{dragging=false;source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
+    else{dragging=false;schedule();source('display-settings',{settings:{...panelView.defaults,...displayConfiguration}}).then(r=>{if(!r.ok)openSettings();});}
     return true;
   }
   // The boundary beside the native area resizes: the left edge of a right
@@ -939,8 +942,11 @@ async function lifecycle(req) {
     panelModel={labels:panelModel.labels,styles:panelModel.styles,repo:panelModel.repo,git:panelModel.git,quota:panelModel.quota,
       head:Array.isArray(panelModel.head)?panelModel.head.filter(part=>!/^\[/.test(String(part?.text))):undefined,
       ...(cleared?{selected:panelModel.selected,model_value:panelModel.model_value,effort_value:panelModel.effort_value}:{})};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
-    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;submitted=-1;block.leave();block.update([]);
+    projectionKey='';footer='';footerSegments=[];
+    const again=unselected&&unselected.sid===req.sid&&unselected.nativeEpoch===nativeEpoch;
+    // The same session selected again with no key between keeps its open read page as well.
+    routeDetail=again?unselected.routeDetail:false;routePage=again?unselected.routePage:0;routeScroll=again?unselected.routeScroll:0;unselected=null;
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     // A start or selection follows the keys that chose it (a resume picker's Enter, /clear):
@@ -955,14 +961,16 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
+    unselected={sid:req.sid,nativeEpoch,routeDetail,routePage,routeScroll};
     selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
   if(req.event==='prompt'||req.event==='submit') {
     submitted=lastEnter;state='working';empty=false;
+    if(upgradeNote==='scrollback'){upgradeNote='';queueProjection();}
     if(currentDelivery){deliveries.set(currentDelivery,'submitted');releaseHeld(currentDelivery,true);rebuildDisplay();}
-  } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
+  } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false;setImmediate(()=>{detectRelease();checkRelease();}); }
   else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
   // A hook event is newer than every reading asked for before it.
@@ -989,15 +997,16 @@ async function request(req) {
   if(req.op==='event')return lifecycle(req);
   if(!exact(req))return {ok:false,reason:'attachment-changed',not_started:true};
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
-  if(req.op==='status'){await refreshReadiness();return {ok:true,...status()};}
+  if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
   if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){expanded=req.expanded===true;if(!expanded)block.leave();applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
+  if(!running||succeeding)return {ok:false,reason:'not-idle-empty',not_started:true};
   if(typeof req.ref!=='string'||req.ref.length>128)return {ok:false,reason:'peer-ref-unavailable',not_started:true};
   if(deliveries.has(req.ref))return {ok:true,duplicate:true,state:deliveries.get(req.ref)};
-  const safe=()=>!relay&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
+  const safe=()=>!relay&&!succeeding&&exact(req)&&req.epoch===epoch&&state==='idle'&&empty&&!paste&&!keyTail&&(!block.focused||block.waitingForReceipt)&&!settings&&!fleetView&&!currentDelivery&&terminal.modes.bracketedPasteMode;
   if(!safe())return {ok:false,reason:'not-idle-empty',not_started:true};
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
@@ -1015,48 +1024,64 @@ terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))
 for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
   if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
-server=net.createServer(conn=>{
+// A connection's one request line, answered by this host's own state.
+function serve(conn,line) {
+  setImmediate(async()=>{
+    let result;try{
+      const req=JSON.parse(line.toString());
+      result=await request(req);}
+    catch{result={ok:false,reason:'control-unavailable',not_started:false};}
+    conn.end(JSON.stringify({...result,...identity()})+'\n');
+  });
+}
+function onConnection(conn) {
   let raw=Buffer.alloc(0),consumed=false;conn.setTimeout(2000,()=>conn.destroy());
   conn.on('error',()=>{});
   conn.on('data',chunk=>{
     if(consumed)return;raw=Buffer.concat([raw,chunk]);if(raw.length>65536)return conn.destroy();
     const newline=raw.indexOf(10);if(newline<0)return;consumed=true;conn.pause();
-    setImmediate(async()=>{
-      let result;try{
-        const req=JSON.parse(raw.subarray(0,newline).toString());
-        result=await request(req);}
-      catch{result={ok:false,reason:'control-unavailable',not_started:false};}
-      conn.end(JSON.stringify({...result,...identity()})+'\n');
-    });
+    // While the display is frozen for hand-over no request is answered: it waits here for the
+    // successor (retire) or for this host again (resume).
+    if(succeeding){bound.push({conn,line:raw.subarray(0,newline+1)});return;}
+    serve(conn,raw.subarray(0,newline));
   });
+}
+function serverFailure() {if(!activated)bypass();else{state='unknown';empty=false;}}
+function listenControl(target,done) {
+  const listener=net.createServer(onConnection);
+  listener.on('error',serverFailure);
+  listener.listen(target,()=>{fs.chmodSync(target,0o600);done(listener);});
+  return listener;
+}
+terminal.parser.registerCsiHandler({prefix:'?',final:'h'},p=>{if(p.includes(25))cursorVisible=true;return false;});
+terminal.parser.registerCsiHandler({prefix:'?',final:'l'},p=>{if(p.includes(25))cursorVisible=false;return false;});
+for(const [code,rgb] of [[10,'dddd/dddd/dddd'],[11,'1111/1111/1111']])terminal.parser.registerOscHandler(code,text=>{
+  if(text==='?'){child.write(`\x1b]${code};rgb:${rgb}\x1b\\`);return true;}return false;
 });
-server.on('error',()=>{if(!activated)bypass();else{state='unknown';empty=false;}});
-server.listen(socketPath,()=>{
-  fs.chmodSync(socketPath,0o600);
-  try {
-    const broker=processRow(Number(process.env.HEARTING_SHELL_BROKER_PID));
-    if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
-    child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
-      Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD));
-    inputOwner=require('./input-owner.cjs')(Number(process.env.HEARTING_SHELL_INPUT_FD),
-      Number(process.env.HEARTING_SHELL_HELD_FD),ref=>{
-        if(deliveries.get(ref)!=='submitted')deliveries.set(ref,'transport-submitted');
-        releaseHeld(ref);
-      });
-    native=processRow(child.pid);rootNative=native;
-  } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
-  // The parent may only fall back before this boundary. A failed display keeps
-  // this same native child; no second CLI is ever started.
-  startupResult('STARTED');activated=true;process.stdin.resume();
+
+// ---- the native, the input owner and the backend: the same for a first host and a successor ----
+function adoptNative(paused) {
+  const broker=processRow(Number(process.env.HEARTING_SHELL_BROKER_PID));
+  if(!broker||broker.pid!==host.parent||broker.start!==process.env.HEARTING_SHELL_BROKER_START)throw Error('PTY owner changed');
+  child=require('./adopted-pty.cjs')(pty,Number(process.env.HEARTING_SHELL_PTY_FD),
+    Number(process.env.HEARTING_SHELL_NATIVE_PID),Number(process.env.HEARTING_SHELL_PTY_EXIT_FD),paused);
+  native=processRow(child.pid);rootNative=native;
+}
+function createInputOwner() {
+  inputOwner=require('./input-owner.cjs')(Number(process.env.HEARTING_SHELL_INPUT_FD),
+    Number(process.env.HEARTING_SHELL_HELD_FD),ref=>{
+      if(deliveries.get(ref)!=='submitted')deliveries.set(ref,'transport-submitted');
+      releaseHeld(ref);
+    });
+}
+function startBackend() {
   backend=cp.spawn(process.env.HEARTING_SHELL_PYTHON,[path.join(__dirname,'..','session_shell.py'),'backend'],{stdio:['pipe','pipe','ignore']});
   backend.on('error',rawRelay);backend.on('exit',rawRelay);backend.stdin.on('error',()=>{});
-  // OpenCode starts on its home route with no session: publish the seat now.
-  if(harness==='opencode'&&!sid){state='idle';source('register');}
   readline.createInterface({input:backend.stdout}).on('line',line=>{
     try {const data=JSON.parse(line),call=calls.get(data.id);if(call){calls.delete(data.id);clearTimeout(call.timer);call.resolve(data);}}catch{}
   });
-  source('display-bootstrap').then(data=>{if(data.ok&&!projectionKey){panelModel=data.panel;queueDisplay();}});
-  emit('\x1b[?1049h\x1b[2J');
+}
+function wireDisplay() {
   terminal.onData(data=>child.write(data));terminal.onWriteParsed(()=>{screenRevision++;schedule();});
   terminal.onTitleChange(title=>{
     try{if(!ended&&!relay)emit(nativeDisplay.titleSequence(title));}catch{rawRelay();}
@@ -1068,11 +1093,288 @@ server.listen(socketPath,()=>{
     try{if(relay)child.resize(cols,rows);else applyLayout();}catch{rawRelay();}
   });
   child.onExit(async event=>{
+    // A successor that has not taken over owns nothing outside itself.
+    if(!switched)process.exit(0);
     ended=true;clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);
     for(const row of watchers.values())row.watch.close();watchers.clear();
+    for(const watch of releaseWatchers)try{watch.close();}catch{}
     server.close();await source('unregister');backend?.stdin.end();
     emit('\x1b[0m\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?25h\x1b[?1049l');
-    fs.rmSync(socketPath,{force:true});process.exit(event.exitCode);
+    fs.rmSync(socketPath,{force:true});fs.rmSync(nextPath,{force:true});if(seedFile)fs.rmSync(seedFile,{force:true});process.exit(event.exitCode);
   });
+}
+
+// ---- release detection (H1) and the safe moment (H2) ----
+function installedRelease() {try{return fs.realpathSync(process.env.HEARTING_SHELL_HOST_PATH);}catch{return null;}}
+function upgradeNoteNow() {return upgradeNote||(upgrade?'pending':'');}
+// A newer installed release is noticed when its link moves (an event, not a poll) and when
+// the session goes idle. A link that cannot be watched leaves only the idle check.
+function detectRelease() {
+  if(!SUCCESSION||!activated||ended||relay||succeeding||!running)return;
+  const target=installedRelease();
+  if(!target||target===myRelease){
+    if(upgrade&&!upgrade.requested){upgrade=null;queueProjection();}
+    return;
+  }
+  if(upgrade&&upgrade.target===target)return;
+  upgrade={target,requested:false,blocked:''};queueProjection();checkRelease();
+}
+function watchRelease() {
+  const hostPath=process.env.HEARTING_SHELL_HOST_PATH;
+  if(!SUCCESSION||!hostPath||!path.isAbsolute(hostPath))return;
+  let probe=path.sep;const links=[];
+  for(const part of hostPath.split(path.sep).filter(Boolean)){
+    const next=path.join(probe,part);
+    try{if(fs.lstatSync(next).isSymbolicLink())links.push([probe,part]);}catch{break;}
+    probe=next;
+  }
+  for(const [directory,name] of links.slice(0,4)){
+    try{
+      const watch=fs.watch(directory,(_event,changed)=>{if(!changed||String(changed)===name)detectRelease();});
+      watch.on('error',()=>{try{watch.close();}catch{}});releaseWatchers.push(watch);
+    }catch{}
+  }
+}
+// The old host's conditions for starting the hand-over. `empty` is not assumed: it is proven
+// by one readiness read of this exact screen. Anything a person or a delivery is in the middle of keeps this false.
+function successionSafe(skipEmpty=false) {
+  const quiet=!relay&&activated&&!ended&&running&&!succeeding&&state==='idle'&&!paste&&!keyTail&&!block.focused&&!settings&&!fleetView
+    &&!currentDelivery&&!releasing&&heldBytes===0&&!routeDetail&&!actionWorker&&!panelModel.answerable&&!dragging&&!settingsPaste
+    &&displayVTs.size===0&&!rebuilding&&!checkingNativeSelection&&!modelReading&&!mouseInput.pending()&&terminal.modes.bracketedPasteMode;
+  return quiet&&(skipEmpty||empty);
+}
+function checkRelease() {
+  if(!upgrade||upgrade.requested||upgrade.blocked||Date.now()<(upgrade.retryAfter||0)||succeeding||checkingRelease||!successionChannel||!successionSafe(true))return;
+  checkingRelease=true;
+  (async()=>{
+    const key=[screenRevision,epoch,selection,state].join(':');
+    if(!successionSafe()&&checkedKey!==key){checkedKey=key;await refreshReadiness();}
+    if(upgrade&&!upgrade.requested&&successionSafe()){upgrade.requested=true;succSend({op:'request',release:myRelease});}
+  })().catch(()=>{}).finally(()=>{checkingRelease=false;});
+}
+
+// ---- the succession channel: the old host answers freeze/resume/retire, the new one commit/switch/run ----
+function succSend(value) {try{successionChannel.write(JSON.stringify(value)+'\n');}catch{}}
+function startSuccessionChannel() {
+  if(!SUCCESSION||successionChannel)return;
+  successionChannel=new net.Socket({fd:Number(process.env.HEARTING_SHELL_SUCCESSION_FD),readable:true,writable:true});
+  successionChannel.on('error',()=>{});
+  let queue=Promise.resolve();
+  readline.createInterface({input:successionChannel}).on('line',line=>{
+    let message;try{message=JSON.parse(line);}catch{return;}
+    // One message at a time: a resume that arrives during a freeze waits for it to finish.
+    queue=queue.then(()=>onSuccession(message)).catch(()=>{});
+  });
+}
+async function onSuccession(message) {
+  if(message.op==='declined'){
+    if(upgrade){upgrade.requested=false;if(message.reason!=='busy'&&message.reason!=='not-running')upgrade.blocked=String(message.reason||'declined');}
+    return;
+  }
+  if(message.op==='freeze')return succSend(await freeze());
+  if(message.op==='resume')return resumeHost(message.failed===true);
+  if(message.op==='retire')return retireHost();
+  if(!SUCCESSOR)return;
+  if(message.op==='commit')return succSend(await commitSuccessor(message.seed));
+  if(message.op==='switch')return succSend(await switchSuccessor());
+  if(message.op==='run')return runSuccessor();
+}
+
+// H3/H4: stop reading both sides, let the VT parse what it already has, give up the binding and write the screen out.
+function buildSeed() {
+  // The seed is capped at 8 MiB; HEARTING_SHELL_SEED_LIMIT can only lower it (a test hook).
+  const limit=Math.min(8*1024*1024,Number(process.env.HEARTING_SHELL_SEED_LIMIT)||8*1024*1024);
+  const captured=succession.capture(terminal,{scrollback:true});
+  const seed={schema:succession.SCHEMA,harness,sid,native:{pid:native.pid,start:native.start},rootNative:{pid:rootNative.pid,start:rootNative.start},
+    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,cursorVisible,expanded,displayConfiguration,displaySequence,
+    panelOpen:[...panelOpen],deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
+    displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
+    // The host's own turn observation (what the panel shows as the state), so the successor shows the same
+    // state at its first paint and goes on reading the native's turn record; its marks keep their order.
+    turn:{nativeTurn,turnMark,eventMark,clock,seenTurn,turnRecord,formSeen},
+    panel:{model:{...panelModel,...(panelModel.tidy_upgrade?{tidy_notice:''}:{}),...(panelModel.notice_upgrade?{notice:[]}:{}),upgrade_waiting:''},lines:panelLines,sections:panelSections??null,footer,segments:footerSegments,nativeFooter},
+    terminal:captured.terminal,scrollback:captured.scrollback,
+    outer:{cols,rows,last:Array.from(last,value=>value??null),nativeLast:Array.from(nativeLast,value=>value??null),footerLast}};
+  let json=JSON.stringify(seed);
+  if(Buffer.byteLength(json)>limit&&seed.scrollback.carried){
+    // Too large: carry the viewport only and say so, never cut the scrollback silently.
+    seed.terminal=succession.capture(terminal,{scrollback:false}).terminal;seed.scrollback={carried:false,reason:'seed-too-large',lines:0};
+    json=JSON.stringify(seed);
+  }
+  return json;
+}
+async function freeze() {
+  if(!successionSafe())return {ok:false,reason:'unsafe'};
+  succeeding=true;
+  try{
+    process.stdin.pause();child.pause();
+    clearTimeout(frameTimer);clearTimeout(projectionTimer);clearTimeout(beatTimer);frameTimer=projectionTimer=beatTimer=undefined;
+    await new Promise(resolve=>terminal.write('',resolve));
+    await new Promise(resolve=>process.stdout.write('',resolve));
+    if(currentDelivery||releasing||heldBytes||paste||keyTail||settings||fleetView||mouseInput.pending()){await resumeHost(false);return {ok:false,reason:'unsafe'};}
+    await source('unregister');
+    const json=buildSeed();
+    seedFile=path.join(dir,`succession-${GENERATION+1}.json`);
+    fs.writeFileSync(seedFile+'.tmp',json,{mode:0o600});fs.renameSync(seedFile+'.tmp',seedFile);
+    return {ok:true,seed:seedFile};
+  }catch(error){
+    await resumeHost();
+    if(upgrade)upgrade.blocked='capture';
+    return {ok:false,reason:'capture'};
+  }
+}
+// H7: the successor did not take over. Take the socket path back if it is no longer this host's,
+// publish the binding again and paint the whole screen.
+async function resumeHost(failed=true) {
+  // A host that only asked (nothing frozen) learns the attempt is over. A counted failure may retry at once,
+  // another end (not safe after all) waits a second so a persistent condition cannot spin.
+  if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
+  // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
+  if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
+  let listenFailed=false;
+  try{
+    let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
+    if(ino!==socketIno){
+      fs.rmSync(nextPath,{force:true});
+      staleServers.push(server);
+      // A listen that fails settles too: a rollback never leaves the host frozen with the queue blocked.
+      await new Promise(resolve=>{
+        server=listenControl(nextPath,()=>{try{fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;}catch{listenFailed=true;}resolve();});
+        server.once('error',()=>{listenFailed=true;resolve();});
+      });
+    }
+    if(seedFile){fs.rmSync(seedFile,{force:true});fs.rmSync(seedFile+'.tmp',{force:true});}
+  }catch{}
+  // No control socket to serve: the display keeps nothing frozen and falls back to the plain relay.
+  if(listenFailed){for(const entry of bound.splice(0))entry.conn.destroy();rawRelay();return;}
+  succeeding=false;
+  if(upgrade)upgrade.requested=false;
+  await source('register');
+  child.resume();process.stdin.resume();
+  last=[];footerLast='\0';
+  if(layoutDeferred){layoutDeferred=false;applyLayout();}
+  schedule();queueProjection();
+  for(const entry of bound.splice(0))if(!entry.conn.destroyed)serve(entry.conn,entry.line.subarray(0,entry.line.length-1));
+}
+// H9: hand each waiting connection to the successor's socket (same path) and leave without
+// closing this host's listener: closing it would unlink the path the successor now owns.
+function forward(entry) {
+  return new Promise(resolve=>{
+    if(entry.conn.destroyed)return resolve();
+    const up=net.connect(socketPath);let finished=false;
+    const finish=()=>{if(!finished){finished=true;resolve();}};
+    up.setTimeout(1500,()=>{up.destroy();entry.conn.destroy();finish();});
+    up.on('connect',()=>up.write(entry.line));
+    up.on('data',data=>entry.conn.write(data));
+    up.on('end',()=>{entry.conn.end();finish();});
+    up.on('error',()=>{entry.conn.destroy();finish();});
+  });
+}
+async function retireHost() {
+  // The owner retires only a host it froze; one that fell to the relay meanwhile leaves as well.
+  if(!succeeding&&!relay)return;
+  await new Promise(resolve=>setImmediate(resolve));
+  await Promise.all(bound.splice(0).map(forward));
+  try{backend?.stdin.end();}catch{}
+  if(seedFile){try{fs.rmSync(seedFile,{force:true});}catch{}}
+  process.exit(0);
+}
+
+// H8: the successor. It prepares (assets, Terminal), commits (reads the seed, rebuilds the screen
+// and state, listens on a side path, warms its backend), switches (takes the control path) and
+// runs (reads the PTY and the keyboard) only on the owner's word.
+async function commitSuccessor(file) {
+  try{
+    const info=fs.lstatSync(file);
+    if(typeof file!=='string'||path.dirname(file)!==dir||!info.isFile()||info.uid!==process.getuid()||info.mode&0o077||info.size>9*1024*1024)throw Error('seed file');
+    const seed=JSON.parse(fs.readFileSync(file,'utf8'));
+    const bad=succession.validate(seed);if(bad)throw Error('seed '+bad);
+    if(seed.harness!==harness)throw Error('seed harness');
+    seedFile=file;
+    adoptNative(true);
+    const root=processRow(seed.rootNative.pid),row=processRow(seed.native.pid);
+    if(!root||root.start!==seed.rootNative.start||child.pid!==root.pid||!row||row.start!==seed.native.start)throw Error('native changed');
+    rootNative=root;native=row;
+    sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
+    submitted=seed.submitted;lastEnter=seed.lastEnter;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
+    displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;
+    for(const key of seed.panelOpen.slice(0,16))if(typeof key==='string')panelOpen.add(key);
+    for(const [ref,value] of seed.deliveries)deliveries.set(ref,value);
+    const object=value=>value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    displayValues=object(seed.displayValues);nativeSelected=object(seed.nativeSelected);
+    nativeContext=seed.nativeContext&&typeof seed.nativeContext==='object'?seed.nativeContext:undefined;
+    nativeMcp=seed.nativeMcp&&typeof seed.nativeMcp==='object'?seed.nativeMcp:undefined;
+    {
+      // Absent or malformed (an older seed): the first projection reads the native's record again.
+      const turn=object(seed.turn),count=value=>Number.isSafeInteger(value)&&value>=0?value:0,word=value=>['idle','working','blocked'].includes(value)?value:'';
+      nativeTurn=word(turn.nativeTurn);clock=count(turn.clock);turnMark=Math.min(count(turn.turnMark),clock);eventMark=Math.min(count(turn.eventMark),clock);
+      seenTurn=word(turn.seenTurn?.value)?{value:turn.seenTurn.value,mark:Math.min(count(turn.seenTurn.mark),clock)}:null;
+      turnRecord=typeof turn.turnRecord==='string'&&path.isAbsolute(turn.turnRecord)?turn.turnRecord:'';formSeen=turn.formSeen===true;
+    }
+    const panel=object(seed.panel);
+    panelModel=object(panel.model);panelLines=Array.isArray(panel.lines)?panel.lines:[];panelSections=panel.sections??undefined;
+    footer=typeof panel.footer==='string'?panel.footer:'';footerSegments=Array.isArray(panel.segments)?panel.segments:[];
+    nativeFooter=panel.nativeFooter&&typeof panel.nativeFooter==='object'?panel.nativeFooter:null;
+    await succession.restore(terminal,seed.terminal);
+    last=seed.outer.last.map(value=>value===null?undefined:value);nativeLast=seed.outer.nativeLast.map(value=>value===null?undefined:value);
+    footerLast=seed.outer.footerLast;seedOuter={cols:seed.outer.cols,rows:seed.outer.rows};
+    if(seed.scrollback.carried===false)upgradeNote='scrollback';
+    fs.rmSync(nextPath,{force:true});
+    await new Promise(resolve=>{server=listenControl(nextPath,()=>resolve());});
+    startBackend();
+    // The panel rows are rebuilt from the seeded values before the first paint, so that paint is a difference.
+    rebuildDisplay();
+    for(let waited=0;(rebuilding||rebuildPending)&&waited<400;waited++)await new Promise(resolve=>setTimeout(resolve,5));
+    return {ok:true};
+  }catch(error){return {ok:false,reason:String(error&&error.message||error).slice(0,80)};}
+}
+let seedOuter={cols:0,rows:0};
+async function switchSuccessor() {
+  try{
+    fs.renameSync(nextPath,socketPath);socketIno=fs.statSync(socketPath).ino;
+    switched=true;activated=true;
+    try{fs.rmSync(seedFile,{force:true});}catch{}
+    // Stay paused (no PTY, no keys) until the owner says run: a successor lost now loses nothing.
+    process.stdin.pause();
+    wireDisplay();
+    // Normally nothing differs and nothing is cleared: the old host left the screen painted.
+    cols=process.stdout.columns;rows=process.stdout.rows;
+    if(cols!==seedOuter.cols||rows!==seedOuter.rows||terminal.cols!==nativeColumns()||terminal.rows!==nativeRows())applyLayout();
+    await source('register');
+    clearTimeout(frameTimer);frameTimer=undefined;render();
+    queueProjection();
+    return {ok:true,settled:true};
+  }catch(error){return {ok:false,reason:String(error&&error.message||error).slice(0,80)};}
+}
+function runSuccessor() {
+  if(running||!switched)return;
+  running=true;
+  child.resume();createInputOwner();process.stdin.resume();
+  refreshReadiness().finally(()=>{detectRelease();checkRelease();});
+}
+
+// ---- start ----
+server=net.createServer(onConnection);
+server.on('error',serverFailure);
+if(SUCCESSOR){
+  // Nothing is read, listened or spawned until the owner commits: a failure here is a quiet exit.
+  startupResult('PREPARED');
+  startSuccessionChannel();
+}else server.listen(socketPath,()=>{
+  fs.chmodSync(socketPath,0o600);
+  try {
+    socketIno=fs.statSync(socketPath).ino;
+    adoptNative(false);createInputOwner();
+  } catch {server.close();fs.rmSync(socketPath,{force:true});bypass();return;}
+  // The parent may only fall back before this boundary. A failed display keeps
+  // this same native child; no second CLI is ever started.
+  startupResult('STARTED');activated=true;process.stdin.resume();
+  startBackend();
+  // OpenCode starts on its home route with no session: publish the seat now.
+  if(harness==='opencode'&&!sid){state='idle';source('register');}
+  source('display-bootstrap').then(data=>{if(data.ok&&!projectionKey){panelModel=data.panel;queueDisplay();}});
+  emit('\x1b[?1049h\x1b[2J');
+  wireDisplay();
   applyLayout();
+  startSuccessionChannel();watchRelease();detectRelease();
 });

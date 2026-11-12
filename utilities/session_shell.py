@@ -847,7 +847,8 @@ PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked"
 
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
-                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
+                     native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False,
+                     upgrade_note="") -> dict:
     """No collection pass: read the same exact native display and question APIs."""
     import time
     registry_root()
@@ -948,6 +949,14 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # field: Claude's `notice` below is the native status row's segments.
     notice, notice_paths = session_tidy.waiting_notice_display(seat, harness, sid)
     panel["tidy_notice"] = _plain(notice, 400)
+    # A newer installed release this window has not switched to yet, or a switch that could
+    # not carry the scrollback: the lowest-priority line, never over another notice.
+    panel["tidy_upgrade"] = False
+    if upgrade_note in ("pending", "scrollback") and not panel["tidy_notice"]:
+        panel["tidy_notice"] = ui_text("session_shell.upgrade_" + upgrade_note)
+        panel["tidy_upgrade"] = upgrade_note == "pending"
+    # An open route page has no notice slot: it shows the same words on its own page row.
+    panel["upgrade_waiting"] = ui_text("session_shell.upgrade_pending") if upgrade_note == "pending" else ""
     watched.extend(notice_paths)
     panel["model"] = styled(panel["model"])
     panel["status"] = [styled(line) for line in panel["status"]]
@@ -973,7 +982,10 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["messages"] = peer_message_rows(received, sent, assigned_tag, limit=8)
     if harness == "claude":
         from fleet.session_panel import notice_line
-        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
+        panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time(), upgrade_note=upgrade_note))
+        # A waiting-release line stands only for this host: the next one starts without it.
+        panel["notice_upgrade"] = upgrade_note == "pending" and not notice_line(
+            values, panel["routes"], board, display, time.time())
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
                        for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
@@ -1234,7 +1246,8 @@ def _backend_operation(request: dict) -> dict:
             columns=columns, rows=rows, state=request.get("state", "unknown"), expanded=request.get("expanded") is True,
             native_context=request.get("native_context"),native_badges=request.get("native_badges"),
             retained_questions=request.get("retained_questions", ()), pane_binding=binding,
-            answer_busy=request.get("answer_busy") is True)}
+            answer_busy=request.get("answer_busy") is True,
+            upgrade_note=request.get("upgrade_note") if request.get("upgrade_note") in ("pending", "scrollback") else "")}
     if op == "answer":
         return _block_answer(binding, request)
     if op == "action":
