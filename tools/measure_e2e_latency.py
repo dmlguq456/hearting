@@ -423,6 +423,16 @@ def cmd_run(args) -> int:
                 report["shim_mode"] = result.get("shim_mode")
                 report["outside_registry"] = result.get("outside_registry")
                 report["events"] = result["events"]
+            if only & {"t1", "t2"} and only & {"t3", "t4"}:
+                # T1/T2 leave the fixture changed (closed and killed routes, new launches, a replaced
+                # registry); T3/T4 measure a fresh start, so they get an untouched fixture.
+                cleanups.append({**fixture_mod.cleanup(fixture, keep_files=args.keep_scratch),
+                                 "marker": fixture["marker"]})
+                fixture = fixture_mod.build(probe=True, min_open_routes=2 * args.reps + 4, shape=True)
+                scratch = Path(fixture["root"]) / "scratch"
+                scratch.mkdir(exist_ok=True)
+                report["notes"].append("T3/T4 ran on a second, untouched fixture of the same shape "
+                                       "(T1/T2 change the first one).")
             for name, key in (("t3", "T3"), ("t4", "T4")):
                 if name not in only:
                     continue
@@ -444,7 +454,8 @@ def cmd_run(args) -> int:
                     code = 1
                     report.setdefault("violations", []).extend(sub["violations"])
         finally:
-            cleanups.append(fixture_mod.cleanup(fixture, keep_files=args.keep_scratch))
+            if not any(c.get("marker") == fixture["marker"] for c in cleanups):
+                cleanups.append(fixture_mod.cleanup(fixture, keep_files=args.keep_scratch))
     report["cleanup"] = {"scratch_removed": all(c["scratch_removed"] for c in cleanups) or args.keep_scratch,
                          "leftover_processes": sum(c["leftover_processes"] for c in cleanups),
                          "runs": cleanups}
