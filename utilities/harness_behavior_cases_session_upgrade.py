@@ -1053,6 +1053,10 @@ class RouteResumeScenario(Scenario):
         ev["notice"] = "arrived without a prompt" if arrived else "not-delivered"
         ok = (ev["open_in_order"] and ev["closed_route_absent"]
               and all(rcs.get(r) == 0 for r in wanted) and ev["receipt_last"] and arrived)
+        if not ok:
+            # The base run reads the screen of the first window; this is the reopened one.
+            with contextlib.suppress(Exception):
+                ev["reopened_screen_tail"] = "\n".join(run.tui.screen().rstrip().splitlines()[-12:])
         return "pass" if ok else "fail"
 
 
