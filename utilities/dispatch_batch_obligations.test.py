@@ -2395,6 +2395,11 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
         return floor, None
 
     @staticmethod
+    def _proves_rows(view):
+        """Whether ``view`` has complete rows its LF segment digests describe."""
+        return view.last_complete_order >= 0 and view._prefix_reuse_eligible
+
+    @staticmethod
     def _truth_lines(raw):
         view = registry_cache.RegistryView("truth", "truth", (0, 0, len(raw), 0, 0), raw)
         return view.lines
@@ -2497,7 +2502,7 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
             self._rename(self._data(lines))
             view = self._read("window")
             cursor = self._remember(context, view)
-            whole, appends_only = view.last_complete_order, bool(view.prefix_proofs())
+            whole, appends_only = view.last_complete_order, self._proves_rows(view)
             held = None
             for step in range(150):
                 op = rng.choices(
@@ -2580,7 +2585,7 @@ class OwnerCandidateFloorProofTest(unittest.TestCase):
                         narrowed.append((seed, step, op, how, floor, whole))
                 if rng.random() < 0.4:
                     cursor = self._remember(context, view)
-                    whole, appends_only = view.last_complete_order, bool(view.prefix_proofs())
+                    whole, appends_only = view.last_complete_order, self._proves_rows(view)
                     if held is not None and rng.random() < 0.5:
                         os.unlink(held)
                         held = None
