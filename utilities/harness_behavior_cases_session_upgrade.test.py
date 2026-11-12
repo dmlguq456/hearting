@@ -320,17 +320,24 @@ class VerdictTest(unittest.TestCase):
         def wait_requests(self, count, timeout): return True
         def wait_idle(self, quiet, timeout): return True
         def main_requests(self): return []
-        def screen(self): return self.text
-        text = "native screen\nDRAFT-KEPT-HERE"
+        def screen(self):
+            # the first read is before the install, the second is the held screen
+            self.reads += 1
+            return self.held_text if self.reads == 2 and self.held_text is not None else self.text
+        reads = 0
+        held_text = None
+        text = "native screen\nDRAFT-KEPT-HERE\nNew release waiting"
 
-    def drive(self, scenario, *, changes, draft_on_screen=True, same_pids=True):
+    def drive(self, scenario, *, changes, draft_on_screen=True, same_pids=True,
+              held_text=None, held_host_pid=10):
         """``changes``: one answer per ``wait_host_change`` call (after release, then after the next prompt)."""
         answers = iter(changes)
         run = self.Run()
-        run.text = "native screen" + ("\nDRAFT-KEPT-HERE" if draft_on_screen else "")
+        run.text = "native screen" + ("\nDRAFT-KEPT-HERE" if draft_on_screen else "") + "\nNew release waiting"
+        run.held_text = held_text
         snap = {"host_pid": 10, "native_pid": 20, "digest": "d", "cursor": (1, 1), "history": "h", "history_size": 0}
         after = dict(snap, host_pid=11 if any(changes) else 10)
-        shots = iter([snap, snap, after])
+        shots = iter([snap, dict(snap, host_pid=held_host_pid), after])
         patches = {
             "snapshot": lambda *a, **k: next(shots),
             "session_id": lambda run: "sid",
@@ -374,6 +381,27 @@ class VerdictTest(unittest.TestCase):
         verdict, ev = self.drive(scenario, changes=[None, None])
         self.assertEqual(verdict, "fail", ev)
         self.assertIs(ev["switched_after_next_prompt"], False)
+
+    def test_a_native_repaint_while_held_with_the_same_host_is_still_deferred(self):
+        scenario = su.QuestionScenario()
+        verdict, ev = self.drive(scenario, changes=[True],
+                                 held_text="native form re-laid out\nNew release waiting")
+        self.assertEqual(verdict, "pass", ev)
+        self.assertEqual(ev["deferred"], "yes")
+        self.assertEqual(ev["held_screen_same"], "no")
+        self.assertTrue(ev["held_row_diff"])
+
+    def test_a_host_change_while_held_is_not_deferred(self):
+        scenario = su.QuestionScenario()
+        verdict, ev = self.drive(scenario, changes=[True], held_host_pid=11)
+        self.assertEqual(verdict, "fail", ev)
+        self.assertEqual(ev["deferred"], "NO")
+
+    def test_a_held_state_without_the_waiting_line_is_not_deferred(self):
+        scenario = su.QuestionScenario()
+        verdict, ev = self.drive(scenario, changes=[True], held_text="native screen\nDRAFT-KEPT-HERE")
+        self.assertEqual(verdict, "fail", ev)
+        self.assertEqual(ev["waiting_note"], "no")
 
     def test_a_lost_draft_byte_fails(self):
         scenario = su.DraftScenario()

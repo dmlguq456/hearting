@@ -253,7 +253,7 @@ def tmux_numbers(text: str) -> tuple[int | None, int | None]:
 
 
 COLUMNS = ("native_before", "native_after", "host_before", "host_after", "deferred",
-           "waiting_note", "switched", "switched_after_release", "switched_after_next_prompt",
+           "waiting_note", "held_screen_same", "switched", "switched_after_release", "switched_after_next_prompt",
            "screen_same", "cursor_same", "key_reached",
            "l1_before", "l1_after", "l3_before", "l3_after", "scrollback_line", "fail_injection",
            "routes", "notice", "delivery_arrivals")
@@ -551,22 +551,28 @@ class SessionUpgradeScenario(Scenario):
             quiet = screen_digest(shown, blank=WAIT_NOTE, native=True, running=True)
             ev["waiting_note"] = "yes" if any(rule.search(row) for rule in WAIT_NOTE
                                               for row in screen_rows(shown)) else "no"
+            # Deferred = the switch did not happen while held: the host and the native process
+            # are the same and the waiting line is shown.  The native's own repaint during the
+            # hold (Codex re-lays out its form) is the native's business, not a switch: its
+            # row diff is evidence in `held_screen_same`, not part of the verdict.
             same = (held["host_pid"] == before["host_pid"]
                     and held["native_pid"] == before["native_pid"]
-                    and quiet["sha"] == before_quiet["sha"])
+                    and ev["waiting_note"] == "yes")
+            ev["held_screen_same"] = "yes" if quiet["sha"] == before_quiet["sha"] else "no"
             ev["deferred"] = "yes" if same else "NO"
             if self.DRAFT:
                 ev["draft_kept"] = self.DRAFT[:20] in shown
                 if not ev["draft_kept"]:
                     verdict = "fail"
                     run.note("a draft byte was lost while the switch was held")
-            if not same:
+            if not same or ev["held_screen_same"] == "no":
                 ev["held_before"] = before
                 ev["held_after"] = held
                 ev["held_row_diff"] = row_diff(kept_rows(screen_rows(before_text, WAIT_NOTE, True)),
                                                kept_rows(screen_rows(shown, WAIT_NOTE, True)))
-                verdict = "fail"
-                run.note("the switch was not deferred while the state was held")
+                if not same:
+                    verdict = "fail"
+                    run.note("the switch was not deferred while the state was held")
             self.release_state(run)
         moved = wait_host_change(run, before["host_pid"])
         released = bool(moved)

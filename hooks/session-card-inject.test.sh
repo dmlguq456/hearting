@@ -18,17 +18,23 @@ FIXTURE_MARKER=
 cleanup_fixture() {
   local fixture_status=$? cleanup_status=0
   trap - EXIT INT TERM
-  if [ -n "$FIXTURE_MARKER" ]; then
-    if python3 - "$ROOT" "$FIXTURE_MARKER" <<'PY'
+  # The fixture owns every detached helper it caused: the obligation runner (marker) and
+  # whatever the hooks/plugin spawned with this private root in their environment (the
+  # OpenCode plugin starts session_summary_trigger.py detached, and its --wait outlives
+  # the case). Reap both by marker or by the fixture root before the root is removed.
+  if [ -n "$FIXTURE_MARKER" ] || [ -n "$TMP" ]; then
+    if python3 - "$ROOT" "$FIXTURE_MARKER" "$TMP" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
 import fixture_processes
-marker = sys.argv[2]
-fixture_processes.reap(marker, timeout=10)
-left = fixture_processes.marked_processes(marker)
+markers = [m for m in sys.argv[2:4] if m]
+left = {}
+for marker in markers:
+    fixture_processes.reap(marker, timeout=10)
+    left.update(fixture_processes.marked_processes(marker))
 if left:
-    raise SystemExit("fixture runner survived cleanup: %s" % sorted(left))
+    raise SystemExit("fixture helper survived cleanup: %s" % sorted(left))
 PY
     then
       :
