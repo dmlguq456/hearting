@@ -1161,12 +1161,16 @@ class RouteResumeScenario(Scenario):
         base = _base(run)
         ev = run.evidence.setdefault("upgrade", {})
         for k in range(1, len(self.ROUTES) + 1):
-            before = len(run.main_requests())
-            run.tui.type_text(f"SCENARIO-RR {k} compose a solo route for project {k}")
-            if not run.wait_requests(before + 1, 60):
-                run.note(f"no model request for project {k}")
-                return "inconclusive"
-            run.wait_idle(8, 200)
+            # A turn the harness lost (OpenCode's "server restarted" before the tool ran) is asked once more.
+            for _attempt in range(2):
+                before = len(run.main_requests())
+                run.tui.type_text(f"SCENARIO-RR {k} compose a solo route for project {k}")
+                if not run.wait_requests(before + 1, 60):
+                    run.note(f"no model request for project {k}")
+                    return "inconclusive"
+                run.wait_idle(8, 200)
+                if self.state["routes"].get(k):
+                    break
         sid = session_id(run)
         if not sid:
             run.note("session id not found")
