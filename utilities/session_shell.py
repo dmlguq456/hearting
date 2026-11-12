@@ -960,18 +960,24 @@ def _block_action(binding, request):
     if key == "raw":
         # The route page's owner output, read once when the person opens the page,
         # through the same reader Fleet uses when its route page is opened.
-        from fleet.explorer.focus import read_attempts, read_owner_raw, session_entries
+        # Only the routes the page shows (the panel's own rows), each through the
+        # current owner Fleet's route row names; a row without one is not guessed.
+        import human_wait_state
+        from fleet.explorer.focus import read_attempts, read_owner_raw
         from fleet.explorer.output import OutputReader
-        entries = session_entries(None, binding["sid"])
-        rows = read_attempts(None, binding["sid"], entries=entries)
+        view = human_wait_state.cached_view(request=False) or {}
+        shown = (view.get("route_panels") or {}).get(binding["harness"] + "\0" + binding["sid"])
         routes = []
-        for _line, _fields, meta in reversed(entries):
-            route = meta.get("owner_route_id") or meta.get("route_id")
-            if route and route not in routes and re.fullmatch(r"rt-[0-9a-f]{16}", route):
-                routes.append(route)
+        for row in shown[:8] if isinstance(shown, list) else ():
+            route = row.get("id") if isinstance(row, dict) else None
+            owner = row.get("owner_attempt") if isinstance(row, dict) else None
+            if (isinstance(route, str) and re.fullmatch(r"rt-[0-9a-f]{16}", route)
+                    and isinstance(owner, str) and owner):
+                routes.append((route, owner))
+        rows = read_attempts(None, binding["sid"]) if routes else []
         reader, attempts, budget = OutputReader(), [], 40000
-        for route in routes[:4]:
-            raw = read_owner_raw(route, "", rows, {}, reader)
+        for route, owner in routes[:4]:
+            raw = read_owner_raw(route, owner, rows, {}, reader)
             lines = []
             for text in reversed((raw or {}).get("lines") or ()):
                 text = _plain(text, 240)

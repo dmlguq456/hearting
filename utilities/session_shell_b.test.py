@@ -206,25 +206,70 @@ for(const selected of [false,true]){
 
 
     def test_the_route_page_reads_its_owner_output_with_fleets_reader(self):
-        # Fleet's `attempts`: the same read_owner_raw, once per opened page, for this
-        # session's own routes; bounded so the read reply stays inside its frame.
+        # Fleet's `attempts`: the same read_owner_raw, once per opened page, for the
+        # routes the page shows, each through its current owner; bounded so the read
+        # reply stays inside its frame. A row without an owner is not guessed.
         from fleet.explorer import focus
-        entries=[(1,[],{'route_id':'rt-0123456789abcdef'}),(2,[],{'owner_route_id':'rt-0123456789abcdef'}),
-                 (3,[],{'route_id':'not-a-route'}),(4,[],{'route_id':'rt-fedcba9876543210'})]
+        import human_wait_state
+        shown=[{'id':'rt-0123456789abcdef','owner_attempt':'att-new'},{'id':'rt-fedcba9876543210','owner_attempt':'att-b'},
+               {'id':'not-a-route','owner_attempt':'att-c'},{'id':'rt-1111111111111111'}]
+        view={'route_panels':{'claude\0exact':shown,'claude\0other':[{'id':'rt-2222222222222222','owner_attempt':'att-x'}]}}
         calls=[]
         def raw(route,attempt,rows,live,reader):
             calls.append((route,attempt,rows,live))
-            return {'att':'att-'+route[-4:],'route':route,'lines':['x'*500]+['line %d'%n for n in range(60)]} if route.endswith('cdef') else None
-        with mock.patch.object(focus,'session_entries',return_value=entries) as listed, \
+            return {'att':attempt,'route':route,'lines':['x'*500]+['line %d'%n for n in range(60)]} if route.endswith('cdef') else None
+        with mock.patch.object(human_wait_state,'cached_view',return_value=view), \
              mock.patch.object(focus,'read_attempts',return_value=['ROWS']) as attempts, \
              mock.patch.object(focus,'read_owner_raw',side_effect=raw):
             result=session_shell._block_action({'sid':'exact','harness':'claude'},{'action':'raw'})
-        listed.assert_called_once_with(None,'exact');self.assertIs(attempts.call_args.kwargs['entries'],entries)
-        self.assertEqual([c[0] for c in calls],['rt-fedcba9876543210','rt-0123456789abcdef'])
-        self.assertTrue(all(c[1]==''and c[2]==['ROWS'] and c[3]=={} for c in calls))
+        attempts.assert_called_once_with(None,'exact')
+        self.assertEqual([c[:2] for c in calls],[('rt-0123456789abcdef','att-new'),('rt-fedcba9876543210','att-b')])
+        self.assertTrue(all(c[2]==['ROWS'] and c[3]=={} for c in calls))
         self.assertEqual(result['ok'],True);self.assertEqual(len(result['attempts']),1)
-        row=result['attempts'][0];self.assertEqual((row['route'],row['att']),('rt-0123456789abcdef','att-cdef'))
+        row=result['attempts'][0];self.assertEqual((row['route'],row['att']),('rt-0123456789abcdef','att-new'))
         self.assertEqual(row['lines'][-1],'line 59');self.assertEqual(len(row['lines']),30)
         self.assertLess(len(json.dumps(result,ensure_ascii=False).encode()),65536)
+        with mock.patch.object(human_wait_state,'cached_view',return_value=None), \
+             mock.patch.object(focus,'read_attempts') as attempts:
+            self.assertEqual(session_shell._block_action({'sid':'exact','harness':'claude'},{'action':'raw'}),{'ok':True,'attempts':[]})
+        attempts.assert_not_called()
+
+    def test_the_route_page_reads_the_current_owner_through_the_real_registry(self):
+        # Review [52]: an earlier owner of the same route, and finished routes recorded
+        # after the current one, must not replace the current route's owner output.
+        import tempfile
+        from fleet.explorer import focus, output
+        import human_wait_state
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs=Path(tmp)/'jobs.log';logs=Path(tmp)/'logs';logs.mkdir()
+            rid='rt-0123456789abcdef';sid='sid-rv1537-current'
+            def make(aid,who,route,body,status='open',owner=True):
+                log=logs/('fixture.'+aid+'.claude.jsonl')
+                log.write_text(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':body}]}})+'\n')
+                meta={'attempt_schema_version':'2','dispatch_depth':'1','transport':'headless','execution_surface':'registered-headless',
+                      'registered_worker':'1','attempt_id':aid,'parent_sid':who,'worker_type':'owner' if owner else 'stage','harness':'claude',
+                      'route_id':route,'owner_route_id':route,'log_file':str(log),'launch_outcome':'never-launched','note':'fixture'}
+                return '2026-11-12T00:00:00Z\t'+status+'\t/synthetic\t/synthetic\tfixture\t'+','.join(k+'='+v for k,v in meta.items())+'\n'
+            old=make('att-rv1537-old',sid,rid,'OLD_OWNER_OUTPUT','done');new=make('att-rv1537-new',sid,rid,'CURRENT_OWNER_OUTPUT')
+            alien=make('att-rv1537-alien','sid-other','rt-fedcba9876543210','OTHER_SESSION_OUTPUT')
+            stage=make('att-rv1537-stage',sid,rid,'STAGE_OUTPUT',owner=False)
+            history=''.join(make('att-rv1537-history-'+str(i),sid,'rt-'+format(i+16,'016x'),'HISTORY_'+str(i),'done') for i in range(4))
+            view={'route_panels':{'claude\0'+sid:[{'id':rid,'owner_attempt':'att-rv1537-new'}]}}
+            def read(text):
+                jobs.write_text(text);output.attempt_view()._REGISTRY_READERS.clear()
+                with mock.patch.dict(os.environ,{'AGENT_DISPATCH_JOBS':str(jobs)}), \
+                     mock.patch.object(human_wait_state,'cached_view',return_value=view):
+                    return session_shell._block_action({'sid':sid,'harness':'claude'},{'action':'raw'})['attempts']
+            for label,text in (('single',new+alien+stage),('old-before-new',old+new+alien+stage),('four-later-routes',new+history)):
+                with self.subTest(label):
+                    got=read(text)
+                    self.assertEqual([(a['route'],a['att']) for a in got],[(rid,'att-rv1537-new')])
+                    body=' '.join(got[0]['lines'])
+                    self.assertIn('CURRENT_OWNER_OUTPUT',body)
+                    for other in ('OLD_OWNER','OTHER_SESSION','STAGE_OUTPUT','HISTORY_'):
+                        self.assertNotIn(other,body)
+            # An owner of another session is not read even when a row names it.
+            view={'route_panels':{'claude\0'+sid:[{'id':'rt-fedcba9876543210','owner_attempt':'att-rv1537-alien'}]}}
+            self.assertEqual(read(new+alien),[])
 
 if __name__=='__main__':unittest.main()
