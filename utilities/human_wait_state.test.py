@@ -3402,7 +3402,7 @@ class MessageCompletionTests(unittest.TestCase):
             self.assertEqual(self.source(signal)["completion"], completion)
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
 
-    def test_queued_does_not_answer_direct_wins_and_late_receipt_only_records_delivery(self):
+    def test_queued_fleet_answer_is_not_replaced_by_a_later_prompt(self):
         import tidy_decisions
         import session_notice
         signal, envelope = self.f.ask()
@@ -3410,18 +3410,22 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.submit(envelope, "queued Fleet answer")
         wire, ref, recipient = self.f.prepare(signal)
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        self.f.direct(signal, "physical wins")
-        completion = self.source(signal)["completion"]
-        self.assertFalse(session_notice.notice_is_current(self.f.record(signal)))
+        self.f.direct(signal, "unrelated prompt while delivery waits")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertTrue(session_notice.notice_is_current(self.f.record(signal)))
         self.f.peer.receive_peer_message(wire, recipient)
+        completion = self.source(signal)["completion"]
+        self.assertEqual((completion["actor"], completion["answer"], completion["action_id"]),
+                         ("fleet", "queued Fleet answer", "fixture-action"))
+        self.f.direct(signal, "later prompt")
         self.assertEqual(self.source(signal)["completion"], completion)
         entry = state._selected_entry(envelope)
-        self.assertEqual((entry["state"], entry["result"]["status"]), ("received", "answered-elsewhere"))
-        self.assertEqual(entry["action_id"], "fixture-action")
+        self.assertEqual((entry["state"], entry["result"]["status"]), ("applied", "applied"))
         self.assertEqual(self.f.record(signal)["state"], "acked")
+        state.flush_message_decisions()
         decisions = tidy_decisions.list_pending()
         self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0][1]["answers"], ["physical wins"])
+        self.assertEqual(decisions[0][1]["answers"], ["queued Fleet answer"])
         # A new module instance reads the persisted claim; it never resends it.
         spec = importlib.util.spec_from_file_location("question_restart", state.__file__)
         restarted = importlib.util.module_from_spec(spec)
@@ -3429,7 +3433,73 @@ class MessageCompletionTests(unittest.TestCase):
         with mock.patch("session_notice.notify", side_effect=AssertionError("must not resend")):
             result = restarted.submit_selected_response(envelope, {"answers": {"message-response": ["retry"]}})
         self.assertFalse(result["support"]["supported"])
-        self.assertEqual(result["state"], "received")
+        self.assertEqual(result["state"], "applied")
+
+    def prompt(self, signal, text):
+        """The real prompt hook with context rendered, as each harness adapter calls it."""
+        import session_tidy as tidy
+        seat = self.f.seat(signal["harness"], signal["session_id"])
+        lines = []
+        with mock.patch.object(tidy, "resolve_seat", return_value=seat):
+            tidy.run_hook(signal["harness"], "prompt", signal["session_id"], cwd=str(self.f.root),
+                          prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
+        return "\n".join(lines)
+
+    def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
+        choices = ["Alpha plan", "Beta plan", "Gamma plan"]
+        kept = ("질문 전송 중이라고 뜨고 바로 안가네..", "0", "4", "12", "1 2", "1, 2",
+                "2번으로 하자 근데 왜 안 가지", "Beta plan 말고 Alpha plan", "Beta", "-2", "2-")
+        closed = {"2": "Beta plan", "2번": "Beta plan", "2.": "Beta plan", " 2 번 ": "Beta plan",
+                  "1": "Alpha plan", "3.": "Gamma plan", "Beta plan": "Beta plan",
+                  "  beta PLAN.  ": "Beta plan", "gamma plan。": "Gamma plan"}
+        for harness in ("claude", "codex", "opencode"):
+            for index, text in enumerate(kept):
+                with self.subTest(harness=harness, kept=text):
+                    signal, envelope = self.f.ask(harness, text="kept %d" % index, choices=choices)
+                    context = self.prompt(signal, text)
+                    self.assertEqual(self.source(signal)["lifecycle"], "open")
+                    self.assertIn("[답변 필요] 질문 %s이 아직 열려 있습니다" % signal["id"], context)
+                    self.assertIn("questions answer %s" % signal["id"], context)
+                    self.assertEqual(state.read_selected_request(envelope)["state"], "open")
+            for index, (text, answer) in enumerate(closed.items()):
+                with self.subTest(harness=harness, closed=text):
+                    signal, envelope = self.f.ask(harness, text="closed %d" % index, choices=choices)
+                    context = self.prompt(signal, text)
+                    completion = self.source(signal)["completion"]
+                    self.assertEqual((completion["actor"], completion["answer"]), ("direct", answer))
+                    self.assertNotIn(signal["id"], context)
+
+    def test_ambiguous_choice_wording_or_number_leaves_the_question_open(self):
+        signal, _ = self.f.ask(text="same key", choices=["Ship", "ship."])
+        self.prompt(signal, "ship")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        signal, _ = self.f.ask(text="number wording", choices=["2", "two"])
+        self.prompt(signal, "1")   # number 1 is "2"; wording "1" matches none
+        self.assertEqual(self.source(signal)["completion"]["answer"], "2")
+        signal, _ = self.f.ask(text="number clash", choices=["2", "two"])
+        self.prompt(signal, "2")   # number 2 is "two" but wording "2" is choice 1
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+
+    def test_claimed_panel_choice_is_kept_against_later_prompts(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, text="panel " + harness, choices=["A", "B", "C"])
+            self.f.submit(envelope, "B")
+            wire, _ref, recipient = self.f.prepare(signal)
+            for text in ("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C"):
+                context = self.prompt(signal, text)
+                self.assertEqual(self.source(signal)["lifecycle"], "open")
+                self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
+            self.f.peer.receive_peer_message(wire, recipient)
+            completion = self.source(signal)["completion"]
+            self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+
+    def test_question_without_choices_still_takes_the_next_prompt(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness, text="free " + harness)
+            context = self.prompt(signal, "아무 말이나 답")
+            completion = self.source(signal)["completion"]
+            self.assertEqual((completion["actor"], completion["answer"]), ("direct", "아무 말이나 답"))
+            self.assertNotIn(signal["id"], context)
 
     def test_verified_answer_provenance_is_body_free_and_does_not_become_physical_input(self):
         import session_tidy as tidy
@@ -3449,26 +3519,20 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.peer.receive_peer_message(wire, recipient)
         self.assertEqual(self.source(signal)["completion"]["actor"], "fleet")
 
-    def test_direct_answer_between_claim_and_notice_write_settles_unsent_transport(self):
+    def test_prompt_between_claim_and_notice_write_keeps_the_claimed_answer(self):
         import session_notice
-        import tidy_decisions
         signal, envelope = self.f.ask()
-        state.write_selected_draft(envelope, "unsent draft")
+        state.write_selected_draft(envelope, "claimed draft")
         notify = session_notice.notify
-        def direct_wins(*args, **kwargs):
-            self.f.direct(signal, "physical answer before carrier")
+        def prompt_first(*args, **kwargs):
+            self.f.direct(signal, "physical prompt before carrier")
             return notify(*args, **kwargs)
-        with mock.patch.object(session_notice, "notify", side_effect=direct_wins):
+        with mock.patch.object(session_notice, "notify", side_effect=prompt_first):
             result = self.f.submit(envelope)
-        self.assertIsNone(self.f.record(signal))
-        self.assertEqual(result["state"], "cancelled")
-        self.assertEqual(result["result"]["transport"], "not-sent")
-        from tools.fleet.render_explorer import _explorer_question_status
-        self.assertIn("not sent", _explorer_question_status(result, "unknown"))
-        entry = state._selected_entry(envelope)
-        self.assertEqual((entry["action_id"], entry["source_terminal"], entry["transport_settled"]),
-                         ("fixture-action", True, True))
-        self.assertEqual(len(tidy_decisions.list_pending()), 1)
+        self.assertEqual(result["state"], "submitted")
+        self.assertIsNotNone(self.f.record(signal))
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertEqual(state._selected_entry(envelope)["action_id"], "fixture-action")
 
     def test_decision_queue_failure_does_not_reverse_answer_and_normal_flush_retries(self):
         import tidy_decisions
@@ -3511,7 +3575,7 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
         self.assertEqual(state._selected_entry(envelope)["state"], "applied")
 
-    def test_real_direct_and_exact_receiver_race_apply_one_completion_and_decision(self):
+    def test_real_prompt_and_exact_receiver_race_apply_the_claimed_answer_once(self):
         from concurrent.futures import ThreadPoolExecutor
         import tidy_decisions
         for harness in ("claude", "codex", "opencode"):
@@ -3537,7 +3601,8 @@ class MessageCompletionTests(unittest.TestCase):
                 for future in futures:
                     future.result(timeout=10)
             self.assertEqual(len(applied), 1)
-            self.assertIn(self.source(signal)["completion"]["actor"], {"direct", "fleet"})
+            # The claimed Fleet answer is the answer; the racing prompt never replaces it.
+            self.assertEqual(self.source(signal)["completion"]["actor"], "fleet")
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
 
     def test_consumed_ack_source_and_overlay_write_failures_recover_on_normal_runner(self):

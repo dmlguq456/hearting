@@ -793,6 +793,39 @@ def open_signal(harness: str, session_id: str, seat_key: str, text: str, *,
     return True
 
 
+_PROMPT_CHOICE_NUMBER = re.compile(r"([0-9]{1,2})\s*번?")
+
+
+def _prompt_choice_key(text):
+    return re.sub(r"[\s.。]+$", "", text.strip()).casefold()
+
+
+def message_prompt_answer(signal, text):
+    """The answer a physical prompt gives this message question, or None.
+
+    Deterministic and closed when unsure: a question without choices takes the
+    whole input; one with choices takes only one in-range choice number ("2",
+    "2번", "2.") or a choice's own wording (edge spaces, case, final period).
+    Anything else is an ordinary prompt and leaves the question open."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    choices = signal["detail"]["questions"][0].get("choices") or []
+    if not choices:
+        return text
+    key = _prompt_choice_key(text)
+    picked = {index for index, choice in enumerate(choices) if _prompt_choice_key(choice) == key}
+    number = _PROMPT_CHOICE_NUMBER.fullmatch(key)
+    if number and 1 <= int(number.group(1)) <= len(choices):
+        picked.add(int(number.group(1)) - 1)
+    return choices[picked.pop()] if len(picked) == 1 else None
+
+
+def message_answer_pending(signal):
+    """A Fleet/CLI answer is claimed and not yet settled; it, not a later prompt, is the answer."""
+    entry = _selected_entry(_message_envelope(signal)) or {}
+    return bool(entry.get("action_id")) and not entry.get("source_terminal")
+
+
 def close_signal(seat_key: str, *, sequence: int | None = None,
                  harness: str | None = None, session_id: str | None = None,
                  answer: str | None = None) -> bool:
@@ -814,6 +847,9 @@ def close_signal(seat_key: str, *, sequence: int | None = None,
             # The prompt hook already owns the source seat lock. Receipt callers
             # acquire it in complete_message_answer instead.
             if harness is None or session_id is None or sequence is None:
+                return False
+            answer = message_prompt_answer(current, answer)
+            if answer is None or message_answer_pending(current):
                 return False
             return _complete_message_locked(current, answer, "direct", sequence=sequence)
         _remove_signal_source(current, path)
