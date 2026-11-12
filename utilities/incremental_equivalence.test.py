@@ -1278,13 +1278,29 @@ def e24(run):  # codex lifecycle log appended after the cursor was left on disk
     _append_rollout(run, run.fx.codex_rows(turns=3, complete_last=False)[2:])
 
 
-def e25(run):  # bytes just before the saved offset change in place, then the log grows
+def _codex_filler(when: float) -> dict:
+    return {"type": "response_item", "timestamp": iso(when), "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "filler " * 20}]}}
+
+
+def e25a(run):  # rotated to a log longer than the head digest (4 KiB) plus the boundary window
+    path = run.fx.codex_rollout()
+    os.rename(path, path.with_name(path.name + ".old"))
+    rows = run.fx.codex_rows(turns=2)
+    rows[1:1] = [_codex_filler(CLOCK_BASE - 950)] * 30
+    run.fx.write_stream(path, rows, run.clock.now - 1)
+
+
+def e25(run):  # bytes just before the saved offset change in place, past the head; the log grows
     path = run.fx.codex_rollout()
     raw = path.read_bytes()
-    assert b"turn-0" in raw
-    path.write_bytes(raw.replace(b"turn-0", b"turn-X"))
-    _append_rollout(run, [{"type": "event_msg", "timestamp": iso(run.clock.now - 5),
-                           "payload": {"type": "task_complete", "turn_id": "turn-X"}}])
+    at = raw.rindex(b"turn-1")
+    # Only the boundary digest can see this change; the head digest covers the first 4 KiB.
+    assert len(raw) - at <= 256 and at >= 4096, (at, len(raw))
+    path.write_bytes(raw[:at] + b"turn-X" + raw[at + len(b"turn-1"):])
+    # A row that carries no lifecycle: a process that kept the stale cursor still says turn-1.
+    _append_rollout(run, [_codex_filler(run.clock.now - 5)])
 
 
 def e26(run):  # rotated: another file (new inode) under the same name, longer than the saved offset
@@ -1397,7 +1413,9 @@ EVENTS = [
      [Step("append after saved cursor", e24, resume="used",
            expect={**REG_STILL, **CODEX_APPEND})]),
     ("E25", "a new process finds the bytes before the saved offset changed",
-     [Step("boundary rewritten, then appended", e25, resume="rejected",
+     [Step("rotate to a log longer than the head digest", e25a,
+           expect={**REG_STILL, **CODEX_REREAD}),
+      Step("boundary rewritten, then appended", e25, resume="rejected",
            expect={**REG_STILL, **CODEX_REREAD})]),
     ("E26", "a new process finds the log rotated (new inode)",
      [Step("rotate", e26, resume="rejected", expect={**REG_STILL, **CODEX_REREAD})]),
