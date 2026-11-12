@@ -88,6 +88,8 @@ let nativeSelected={};
 let modelReadKey='',modelReading=false,bootstrapModel=false;
 let nativeFooter=null,paintedCommon=[],panelSections;
 let panelModel={},panelHits=[],settings,routeDetail=false,routePage=0,routePageCount=1,dragging=false;
+// Spec rule 23: the route box's own scroll (routes hidden above), and the rows it took in the last paint.
+let routeScroll=0,routeArea=null;
 // Route and message rows opened in place by a press. Display only: a press
 // here is not typing, so it moves neither the input epoch nor `empty`.
 const panelOpen=new Set();
@@ -264,7 +266,7 @@ function panelViewNow(){
     model:stale?{...panelModel,stale}:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
     settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
-    questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+    routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
@@ -316,7 +318,7 @@ function spinPaint(){
 // unknown background keeps the terminal's own and paints no shade.
 const terminalBackground=(()=>{const value=String(process.env.COLORFGBG||''),bg=Number(value.split(';').pop());
   return value.includes(';')&&Number.isInteger(bg)?([7,15].includes(bg)?'light':bg>=0&&bg<16?'dark':''):'';})();
-function panelContent(){const view=panelViewNow();panelHits=view.hits;viewGroups=view.groups||[];viewSpins=view.spins||[];viewAnimated=!!view.animated;return view.rows;}
+function panelContent(){const view=panelViewNow();panelHits=view.hits;routeArea=view.routeArea||null;if(routeArea)routeScroll=routeArea.offset;viewGroups=view.groups||[];viewSpins=view.spins||[];viewAnimated=!!view.animated;return view.rows;}
 // A read page (a kept message or the route evidence) owns PgUp/PgDn and Esc
 // only while it is on screen. Collapsed, under Fleet or the settings editor,
 // relayed, or no longer kept, it leaves them to the native like any other key;
@@ -442,7 +444,10 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key)});
+  action:key=>blockAction(key),
+  // Focused on the panel with no question to read, PgUp/PgDn scroll the route
+  // box; with a question they stay the question's (its body reads on).
+  page:dir=>{if(!paste&&routeArea)scrollRoutes(dir*Math.max(1,routeArea.step||1));}});
 let actionLines=[];
 function rebuildDisplay() {
   if(relay||ended||fleetView)return;
@@ -689,7 +694,6 @@ function panelAction(action){
   epoch++;empty=false;
   if(settings?.saving)return;
   if(action==='settings'){openSettings();return;}
-  if(action==='fleet'){openFleet();return;}
   if(action==='apply'){applySettings();return;}
   if(action==='cancel'){cancelSettings();return;}
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
@@ -703,6 +707,13 @@ function panelAction(action){
     settings.index=index;if(operation!=='select')settings.value=panelView.change(settings.value,panelView.fields[index],operation==='down'?-1:1);previewSettings();return;
   }
   queueDisplay();
+}
+// Scroll the route box by `delta` routes; a box that shows every route keeps still.
+function scrollRoutes(delta){
+  if(!routeArea||!routeArea.max)return false;
+  const next=Math.max(0,Math.min(routeArea.max,routeScroll+delta));
+  if(next!==routeScroll){routeScroll=next;queueDisplay();}
+  return true;
 }
 let settingsTail='',settingsEscapeTimer,settingsPaste=false;
 function settingsInput(data){
@@ -739,6 +750,8 @@ function panelMouse(code,x,y,release){
   // panel, the right edge of a left one.
   if(g.side&&local===(g.left?panelColumns()-1:0)&&(code&3)===0&&!release){dragging=true;return true;}
   if(row<0||row>=height()||local<0||local>=panelColumns())return terminal.modes.mouseTrackingMode==='none';
+  // The wheel over the route box scrolls it in place (spec rule 23); elsewhere in the panel it does nothing.
+  if((code&0xc3)===64||(code&0xc3)===65){if(!release&&!routeDetail&&!settings&&routeArea&&row>=routeArea.top&&row<=routeArea.bottom)scrollRoutes((code&1)?1:-1);return true;}
   if(release||code>=32||(code&3)!==0)return true;
   const hit=panelHits.find(h=>h.row===row&&local>=h.left&&local<=h.right);
   if(hit){
@@ -844,7 +857,7 @@ async function lifecycle(req) {
     }
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
-    projectionKey='';footer='';footerSegments=[];routeDetail=false;
+    projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
@@ -856,7 +869,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;panelOpen.clear();block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }

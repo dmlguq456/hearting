@@ -7,7 +7,7 @@ function fixture(delivery){
  let held=[],saved=[],native=[],edited=[],focused=false;
  const context={Buffer,console,currentDelivery:delivery,settings:undefined,displayConfiguration:{layout:'side',side_width:40},
   panelView:require(path.join(root,'utilities/session-shell/panel-view.cjs')),cols:133,harness:'claude',epoch:0,empty:true,
-  fleetView:undefined,paste:false,relay:false,dragging:false,heldBytes:0,routeDetail:false,sessionDetails:false,keyTail:'',actionLines:[],
+  fleetView:undefined,paste:false,relay:false,dragging:false,heldBytes:0,routeDetail:false,routeArea:null,routeScroll:0,sessionDetails:false,keyTail:'',actionLines:[],
   panelHits:[{row:0,left:30,right:38,action:'settings'}],geometry:()=>({side:true,panelColumn:93}),panelRow:()=>0,height:()=>30,panelColumns:()=>40,
   terminal:{modes:{mouseTrackingMode:'none'}},queueLayout(){},queueDisplay(){},rebuildDisplay(){},observeInput(){},openFleet(){},
   source:(op,value)=>{saved.push({op,value});return Promise.resolve({ok:true,settings:value.settings});},
