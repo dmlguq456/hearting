@@ -823,7 +823,13 @@ class DispatchJob:
     session_reasoning_output_tokens: Optional[int] = None
     session_total_tokens: Optional[int] = None
     exec_child: Optional[dict] = None
+    # `exec_tool` may also carry `target` (an allow-listed summary of what the call acts
+    # on: a worktree-relative file, or an executable with one subcommand word or worktree
+    # file; never a raw command or text) and `since` (its native start time). `last_tool`
+    # is the last finished call in the same form {'name', 'target'?}. None = not in the
+    # stream read.
     exec_tool: Optional[dict] = None
+    last_tool: Optional[dict] = None
     shell_jobs: list[ShellJob] = field(default_factory=list)
     shell_job_observation: Optional[dict] = None
     context: Optional[ContextProjection] = None
@@ -836,6 +842,9 @@ class DispatchJob:
     resource_wait: Optional[dict] = None  # display-only current parked activity; summary is preserved
     _context_evidence: Optional[ContextEvidence] = field(default=None, repr=False, compare=False)
     _dispatch_context_owned: bool = field(default=False, repr=False, compare=False)
+    _context_window_source: Optional[str] = field(default=None, repr=False, compare=False)
+    # True only once this job's own native activity was read: the sole ground for "no tool".
+    _tool_observed: bool = field(default=False, repr=False, compare=False)
     _refresh_source: Optional[dict] = field(default=None, repr=False, compare=False)
     # The runtime's row_is_registered_only verdict for this registry row: a pre-registered
     # serial successor that has not launched yet (no process, no log).

@@ -205,11 +205,12 @@ time and quota resets alike.
 The panel paints no clock and no last-input row. A value that was not
 observed is left out, never painted as `?` or an estimate. When rows run
 short, the question (its body and choices) and the top groups stay, and the
-route side gives way first: spacer rows, then two-row routes fold to one row,
-an opened route detail closes, route rows give way to one row and `+N more`;
-then messages fold to one row (`+N` at the end of the lower rule), the last
-route row goes, then the Git row, the route box and running jobs; the messages
-section goes only last, then 5h/7d. A section is placed whole or not at all.
+others give way first: spacer rows, then two-row routes fold to one row, an
+opened route detail closes, then messages fold to one row (`+N` at the end of
+the lower rule); only then does the route box scroll in place, showing fewer
+routes (down to one) without dropping any; then the Git row, the route box and
+running jobs go; the messages section goes only last, then 5h/7d. A section is
+placed whole or not at all.
 Inside the box, an opened route's gauge bar gives way before its percent.
 Variable-width text (titles, message
 bodies) is cut with `…` before fixed-shape values (percent, glyphs, elapsed
@@ -231,8 +232,8 @@ or route binding; configured defaults never masquerade as observed selection.
 An official startup callback's active-model field may travel with its existing
 birth-checked lifecycle event, without another observation pass or event. This
 display field never selects a session or authorizes input.
-A native source that exists but was not read (an I/O error, or a replacement
-during the read) keeps the panel's last model and context for the same live
+A native source that exists but was not read (an I/O error, a replacement
+during the read, or a failed read of a readable OpenCode database) keeps the panel's last model and context for the same live
 session, as Fleet's native reader does; the next projection reads it again.
 Another session, a new process, an absent or refused source and an ended
 process still clear them, and an unobserved value is never made up.
@@ -247,11 +248,15 @@ layout fits model, effort, a five-cell gauge, the current tool or stage and the
 elapsed time on the row whatever the setting. Pressing a row opens it in place
 (model, effort and gauge, `plan ✓ › execute ● › review` when there are several
 stages, `>_ tool` while working, `+N agent`) and pressing it again folds it.
-More than five routes end in `+N more`, which opens Fleet. The count is the
-producer's whole current-route count, not the rows the cache keeps (at most
-eight) or the rows shown: the heading says `route N` for all N, and the rows
-shown plus `+N more` always add up to N, also when rows run short and the last
-kept row turns into `+N more`. These values come
+Every current route has a row; there is no count limit and no `+N more` row.
+When the box cannot show them all, it scrolls in place: the wheel over the box,
+or PgUp/PgDn while the panel has focus and no question is shown (a question's
+PgUp/PgDn stays its own), moves the list; the routes hidden above and below are
+counted only in the box's top and bottom borders (`↑2`, `↓3`). While it scrolls,
+working routes come first, then answer waits, stopped and finished ones. No
+press in the panel opens Fleet; Fleet opens only from its own shortcut. The
+heading says `route N` for the producer's whole current-route count, and the
+rows shown plus the border counts always add up to N. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
 Fleet's own route records from that pass and adds each row's marker and the
 values of who does the work now (the working worker of the shown stage, else

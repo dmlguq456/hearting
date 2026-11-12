@@ -5180,6 +5180,81 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
         ]))
         return f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}"
 
+    def _live_parent_notice(self, td):
+        """A closed row's notice whose exact parent (this process, same birth)
+        is alive, made by the normal close/materialize API, 8 days old."""
+        jobs = Path(td) / "jobs.log"
+        attempt = "att-reconcile-live-ttl"
+        birth = D.process_start_ticks(os.getpid())
+        row = self._row(attempt, ancestry=(os.getpid(), birth)).replace(
+            "route_node=execute", "route_node=notice")
+        jobs.write_text(row + "\n", encoding="utf-8")
+        self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+        self.assertTrue(JOIN.materialize_after_terminal_close(jobs, attempt))
+        pd = JOIN.pending_delivery
+        owner = JOIN.current_attempt_row(jobs, attempt)
+        sid, delivery = owner.metadata["parent_sid"], owner.metadata["delivery_id"]
+        record = pd.read(jobs.parent, sid, delivery)
+        self.assertEqual(record["route_node"], "notice")
+        old = time.time() - 8 * 86400
+        os.utime(pd.record_path(jobs.parent, sid, delivery), (old, old))
+        self.assertEqual(JOIN.expire_pending_for_dead_recipient(
+            jobs, owner.metadata, record, attempt_id=attempt), "pending")
+        # A readable, empty archive as in a live state root: only the registry
+        # observation itself stands between this notice and the TTL.
+        (jobs.parent / "archive" / "registry-2026-08").mkdir(parents=True)
+        (jobs.parent / "archive" / "registry-2026-08" / "rows.jsonl").write_text("")
+        return jobs, sid, delivery
+
+    def test_notice_ttl_never_ages_out_a_notice_its_row_still_protects(self):
+        # Review R1 (PR #1529): the dead-recipient rule keeps a live parent's
+        # notice pending; an 8-day mtime alone must not expire it.
+        with tempfile.TemporaryDirectory() as td:
+            jobs, sid, delivery = self._live_parent_notice(td)
+            result = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(result["expired"], 0)
+            self.assertEqual(JOIN.pending_delivery.read(
+                jobs.parent, sid, delivery)["state"], "pending")
+
+    def test_notice_ttl_keeps_every_notice_when_the_registry_was_not_observed(self):
+        # Reviews R2 and R3 (PR #1529): a registry that could not be read
+        # (OSError, a directory), is missing, is a broken symlink, or has an
+        # owner row that does not parse (7 fields) was not observed, so the
+        # live parent's 8-day notice is kept, never read as "no owner".
+        def oserror(jobs):
+            def unreadable(*_args, **_kwargs):
+                raise OSError("fixture registry read unavailable")
+            return mock.patch.dict(JOIN.reconcile_pending_delivery.__globals__,
+                                   {"registry_lines": unreadable})
+
+        def directory(jobs):
+            jobs.unlink()
+            jobs.mkdir()
+            return contextlib.nullcontext()
+
+        def missing(jobs):
+            jobs.rename(jobs.with_name("jobs.log.fixture-backup"))
+            return contextlib.nullcontext()
+
+        def broken_link(jobs):
+            jobs.rename(jobs.with_name("jobs.log.fixture-backup"))
+            jobs.symlink_to(jobs.with_name("jobs.log.nowhere"))
+            return contextlib.nullcontext()
+
+        def seven_fields(jobs):
+            lines = jobs.read_text(encoding="utf-8").splitlines()
+            jobs.write_text("".join(line + "\textra\n" for line in lines), encoding="utf-8")
+            return contextlib.nullcontext()
+
+        for failure in (oserror, directory, missing, broken_link, seven_fields):
+            with self.subTest(failure=failure.__name__), tempfile.TemporaryDirectory() as td:
+                jobs, sid, delivery = self._live_parent_notice(td)
+                with failure(jobs):
+                    result = JOIN.reconcile_pending_delivery(jobs)
+                self.assertEqual(result["expired"], 0)
+                self.assertEqual(JOIN.pending_delivery.read(
+                    jobs.parent, sid, delivery)["state"], "pending")
+
     def test_materializes_a_row_intent_stamped_but_not_yet_materialized(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"

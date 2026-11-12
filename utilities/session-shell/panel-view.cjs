@@ -96,7 +96,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
+function render({frame=0,width,height,side,fill=side,model={},native={},state,sid,questions,sections,configuration,settings,routeDetail=false,routePage=0,routeScroll=0,attempts=[],expandedKeys=[],focused=false,cwd='',harness='',cellWidth,background=''}){
   width=Math.max(12,width);height=Math.max(4,height);
   const labels=model.labels||{},styles=model.styles||{},t=(k,f)=>labels[k]||f;
   const text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
@@ -168,8 +168,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // The feed carries one open tool and sub-agent count for the route (its
     // doer), not one per stage: like Fleet's ROUTES row (`└ >_ tool · +n agent`)
     // it stands once on its own row and never on a stage it may not belong to.
-    const doing=join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]);
+    // With it, what the tool acts on and for how long, or that none is open; then the
+    // call it just finished (Fleet's unfolded `>_ tool · target  3m` and `after …` rows).
+    const doing=join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo'),...(r.target?[text(' · '+r.target)]:[]),...(r.tool_age?[text('  '+r.tool_age,'dim')]:[])]:
+      r.idle_tool?[text('>_ ','dim'),text('no tool','dim')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]);
     if(doing.length&&(stages.length||live(r)))items.push(doing);
+    if(r.after_tool)items.push({one:true,parts:[text('after '+r.after_tool,'dim')]});
     const used=new Set();
     stages.forEach((stage,i)=>{
       const mark=stage.mark||'';
@@ -209,7 +213,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     for(const item of items){
       // A stage's own notes sit two cells further in, under the stage they belong to.
       const parts=Array.isArray(item)?item:item.parts,first=item.sub?lead+'  ':lead,rest=first+'  ';
-      const rows=[];inner-=rest.length;try{wrap(parts,Infinity,undefined,rows);}finally{inner+=rest.length;}
+      const rows=[];
+      // The finished call (`one`) keeps one row, cut with `…`, as Fleet draws it.
+      if(item.one){const room=inner-first.length,all=parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+        rows.push(all<=room?parts:[...clip(parts,Math.max(0,room-1)).parts,text('…','dim')]);}
+      else{inner-=rest.length;try{wrap(parts,Infinity,undefined,rows);}finally{inner+=rest.length;}}
       rows.forEach((row,i)=>out.push([text(i?rest:first),...row]));
     }
     return out;
@@ -223,7 +231,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const color=failed?'g_dead':answer?'lvl_y':working?'g_work':done?'lvl_g':'dim';
   const status=failed?(first.reason||t('unknown','Checking state')):answer?t('answer','Your answer needed'):working?t('working','Working'):done?t('ready','Result ready'):'';
   const cfg={...defaults,...configuration};
-  let routePages=1;
+  let routePages=1,routeArea=null,routeOffset=0,routeMax=0,routeStep=1;
   // A message too long to open in place is read here, on the route detail's pages.
   const kept=Array.isArray(model.messages)?model.messages:[],keys=messageKeys(kept);
   const messageKey=m=>keys[kept.indexOf(m)],messageParts=m=>[text(m.way+' '),text(m.who+' ','loc_repo'),text(m.text)];
@@ -349,9 +357,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     const rows=height-2;
     // Routes: the current ones the statusline counts, one row each.
     const shown=routes.slice(0,Math.max(0,model.route_count??routes.length));
-    // The whole count is the producer's; the panel keeps only some rows of it.
+    // The whole count is the producer's. Spec rule 23: every current route gets a
+    // row; a count the producer did not send rows for shows only in the box's lower border.
     const total=Number.isInteger(model.route_total)&&model.route_total>=shown.length?model.route_total:shown.length;
-    const listed=shown.slice(0,5),more=shown.length?total-listed.length:0;
+    const listed=shown,unsent=shown.length?total-listed.length:0;
     const elapsedWidth=Math.max(0,...listed.map(r=>measure(r.elapsed||'')));
     const columnWidth=(pick)=>Math.max(0,...listed.map(r=>size(pick(r))));
     const owner=r=>{const p=r.paint||{};return [p.harness,p.model_text&&text(' '),p.model_text,p.effort&&text(' '),p.effort].filter(Boolean);};
@@ -421,10 +430,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const p of label){const s=clean(p.text).slice(0,left);if(s)out.push({...p,text:s});left-=s.length;}
       return out;
     };
-    const boxTop=(label,key,{action,ellipsis=false}={})=>{
-      const room=Math.max(0,inner-2),name=label.length&&room>=4?titled(label,room-3,ellipsis):[];
+    // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
+    const boxTop=(label,key,{action,ellipsis=false,note=[]}={})=>{
+      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+      const name=label.length&&room-size(tail)>=4?titled(label,room-size(tail)-3,ellipsis):[];
       const head=name.length?[L('─ ',key),...name,L(' ',key)]:[];
-      return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head))),key),L('╮',key)],action};
+      return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head)-size(tail))),key),...tail,L('╮',key)],action};
     };
     const boxBottom=(key,note=[],action)=>{
       const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
@@ -451,11 +462,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const r of listed){
         const key='route:'+r.id,p=r.paint||{};
         const two=side?[[routeGlyph(r),text(' '),...cut(line(r.title||'·','loc_repo'),inner-2)],second(r)].filter(Boolean):null;
-        routeRows.push({parts:folded(r),two,action:key});
+        routeRows.push({parts:folded(r),two,action:key,kind:r.kind});
         if(open.has(key))for(const d of details(r))detailRows.push({parts:d,action:key,after:r.id});
       }
     });
-    if(more>0)routeRows.push({parts:line('+'+more+' more'),action:'fleet'});
     const messages=painted(model.messages).slice(-3),messageRows=[];
     for(const m of messages){
       const key=messageKey(m),parts=messageParts(m);
@@ -507,11 +517,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       for(const row of q.slice(1))ask.push(boxRow({parts:accent(row),action:'question'},key));
       ask.push(boxBottom(key,[],'question'));
     }
-    // Short of rows (spec rules 14 and 19, the 11-11 night final layout): spacers;
-    // then the route side first — two-row routes fold to one row, opened details
-    // close, route rows give way to one row and `+N more`; then messages fold to
-    // one row and the last route row goes; the Git row; the route box; running
-    // jobs; the messages section only last; 5h/7d.
+    // Short of rows (spec rules 14, 19 and 23): spacers; two-row routes fold to
+    // one row; opened details close; messages fold to one row; only then the
+    // route box scrolls in place (fewer rows shown, down to one, none dropped);
+    // the Git row; the route box; running jobs; the messages section only last; 5h/7d.
     let keepGit=true,keepSpacers=true,keepMessages=true,keepDetails=true,routeLimit=routeRows.length,keepRoutes=!!routeTitle,keepOptional=true,keepQuota=quota.length>0;
     let twoRows=side&&routeRows.some(x=>x.two);
     const routeSize=x=>twoRows&&x.two?x.two.length:1;
@@ -524,8 +533,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
       const keep=Math.max(1,detailCap-1);
       return [...rows.slice(0,keep),{parts:[text('  '),text('+'+(rows.length-keep)+' lines ›','loc_repo')],action:'route',after:id}];
     };
-    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,Math.min(routeLimit,routeRows.length)).reduce((n,x,i,list)=>n+(i===list.length-1&&list.length<routeRows.length?1:routeSize(x)),0)
-      +(keepDetails?routeRows.slice(0,routeLimit).reduce((n,x)=>n+(x.action.startsWith('route:')?detailsOf(x.action.slice(6)).length:0),0):0):routeChecking.length):0;
+    // Whole rows are counted from the top while the box shows every route; once it
+    // scrolls, twoRows and details are already gone and every route takes one row.
+    const routeBox=()=>keepRoutes?2+(shown.length?routeRows.slice(0,routeLimit).reduce((n,x)=>n+routeSize(x),0)
+      +(keepDetails?routeRows.slice(0,routeLimit).reduce((n,x)=>n+detailsOf(x.action.slice(6)).length,0):0):routeChecking.length):0;
     const messageSection=()=>keepMessages&&messageRows.length?2+visibleMessages().length:0;
     const need=()=>core+(keepGit?gitRows.size:0)+(keepSpacers?spacers.size:0)+(keepOptional?optional.size:0)+ask.length+routeBox()+messageSection()+(keepQuota?1:0);
     const budget=rows;
@@ -533,8 +544,6 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     if(need()>budget)twoRows=false;
     while(need()>budget&&detailCap>2)detailCap--;
     if(need()>budget)keepDetails=false;
-    // One route row stays beside `+N more` until the messages have folded too.
-    while(need()>budget&&routeLimit>2)routeLimit--;
     while(need()>budget&&messageLimit>2)messageLimit--;
     if(need()>budget&&visibleMessages().length>1)messageOne=true;
     while(need()>budget&&routeLimit>1)routeLimit--;
@@ -547,15 +556,25 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     top.forEach((row,i)=>{if((keepSpacers||!spacers.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i)))order.push({parts:row,groups:topGroups.get(i)});});
     let routeBlock=[],messageBlock=[];
     if(keepRoutes){
-      const key=tone.route;routeBlock=[{...boxTop(routeTitle,key,{action:'route'}),groups:['route']}];
-      const kept=routeRows.slice(0,routeLimit);
-      if(kept.length<routeRows.length){const hidden=total-kept.slice(0,-1).filter(x=>x.action!=='fleet').length;kept[kept.length-1]={parts:line('+'+hidden+' more'),action:'fleet'};}
+      const key=tone.route;
+      // Spec rule 23: rows short, the box shows a window of the routes and scrolls
+      // in place (wheel, PgUp/PgDn). A working route comes first, then an answer
+      // wait, a stopped one, a finished one; the borders count what is hidden.
+      const scrolling=routeLimit<routeRows.length;
+      const rank={working:0,blocked:1,idle:2,dead:3,done:4,stale:4};
+      const sorted=scrolling?routeRows.map((x,i)=>[x,i]).sort((a,b)=>((rank[a[0].kind]??2)-(rank[b[0].kind]??2))||a[1]-b[1]).map(([x])=>x):routeRows;
+      routeOffset=scrolling?Math.max(0,Math.min(routeRows.length-routeLimit,Math.trunc(Number(routeScroll)||0))):0;
+      routeStep=routeLimit;routeMax=scrolling?routeRows.length-routeLimit:0;
+      const kept=sorted.slice(routeOffset,routeOffset+routeLimit);
+      const above=routeOffset,below=routeRows.length-routeOffset-kept.length+unsent;
+      const hiddenNote=n=>[text(n,'loc_repo')];
+      routeBlock=[{...boxTop(routeTitle,key,{action:'route',note:above?hiddenNote('↑'+above):[]}),groups:['route']}];
       for(const item of shown.length?kept:routeChecking){
         // A press on either row of a two-row route opens it.
         for(const parts of twoRows&&item.two?item.two:[item.parts])routeBlock.push(boxRow({parts,action:item.action},key));
         if(keepDetails&&item.action.startsWith('route:'))for(const d of detailsOf(item.action.slice(6)))routeBlock.push(boxRow(d,key));
       }
-      routeBlock.push(boxBottom(key));
+      routeBlock.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
     }
     // Messages have no box: a titled upper rule and a lower rule, fixed at the
     // bottom right above 5h/7d (spec rule 14, 11-11 night final layout).
@@ -569,7 +588,10 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // Each section is placed whole or not at all.
     const tail=ask.length+messageBlock.length+(keepQuota?1:0);
     if(order.length+routeBlock.length+tail>budget)routeBlock=[];
-    for(const item of [...order,...routeBlock])add(item.parts,item.action,item.groups);
+    for(const item of order)add(item.parts,item.action,item.groups);
+    // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
+    if(routeBlock.length)routeArea={top:content.length+1,bottom:content.length+routeBlock.length,offset:routeOffset,max:routeMax,step:routeStep};
+    for(const item of routeBlock)add(item.parts,item.action,item.groups);
     // What comes and goes sits low: the question right above the messages, which keep the bottom.
     if(fill)while(content.length<rows-tail)add([]);
     if(content.length+tail<=budget){
@@ -605,6 +627,7 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
   const animated=rows.slice(0,count).some(row=>row.some(part=>part.spin||part.beat));
   // The statusline groups this paint actually shows (cut rows count; dropped ones do not).
   const groups=[...new Set(contentGroups.slice(0,Math.max(0,count-2)).flat())];
-  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,groups,animated:animated&&!settings,spins};
+  if(routeArea&&routeArea.bottom>count-2)routeArea=null;
+  return {rows:painted,hits:hits.filter(h=>h.row<count),color,routePages,routeDetail,routeArea,groups,animated:animated&&!settings,spins};
 }
 module.exports={render,defaults,fields,change,appearance,options:OPTIONS,SPIN,FACES};

@@ -1149,6 +1149,9 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_fi
             stack.enter_context(collection_read_scope())
         stack.enter_context(artifact_producer.artifact_index_observation_scope())
         stack.enter_context(dispatch_registry_cache.registry_read_scope())
+        from ..pass_scope import collection_pass, install
+        install()
+        stack.enter_context(collection_pass())
         return _collect_all(
             harness_filter, jobs_path, usage, fast_first,
             include_report_verification=include_report_verification,

@@ -182,6 +182,17 @@ class PeerReadContext:
             self._lineage_summary = (graph, loader())
         return self._lineage_summary[1]
 
+    def replace_lineage_graph(self, signature, graph):
+        """A fresh normal observation replaces this pass's graph.
+
+        Inside ``pinned_lineage`` the pin moves to that same observation, so
+        the rest of the loop reuses it instead of re-stating every ledger.
+        """
+        self.invalidate_lineage_graph()
+        self.lineage_graph(signature, lambda: graph)
+        if self._lineage_pin is not None:
+            self._lineage_pin = tuple(signature)
+
     def invalidate_lineage_graph(self):
         """An unavailable current dependency cannot leave authority cached."""
         self._lineage_graphs.clear()

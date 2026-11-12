@@ -141,14 +141,12 @@ def _route_outcome(route_module, route_file, route_id, route_digest):
     return route_record, outcome
 
 
-def _stable_read(path, cache):
+def _stable_read(path, cache=None):
+    """One stable read. Callers cache the parsed value under the same stamp, so the
+    raw text is not retained a second time (``cache`` is accepted for old callers)."""
     before = _stamp(path)
     if before is None:
         return None
-    key = (str(path), before)
-    if key in cache:
-        cache.move_to_end(key)
-        return cache[key]
     try:
         value = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -156,7 +154,7 @@ def _stable_read(path, cache):
     after = _stamp(path)
     if before != after:
         return None
-    return _cached(cache, key, lambda: value)
+    return value
 
 
 def _journal(ledger):
