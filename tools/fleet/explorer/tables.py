@@ -832,6 +832,44 @@ def route_doer_cells(route):
     return parts, route_owner_context(route), None, 0
 
 
+TOOL_TARGET_W = 40          # ``>_ python3 · tools/run-tests.py --sel…`` on a folded route row
+
+
+def _route_rail_text(route):
+    """The stage rail's plain words, to size it before drawing (``one-shot ●``)."""
+    stages = route.get("stages") or ()
+    current = next((stage for stage in stages if stage.get("st") in ("active", "failed")), None)
+    if len(stages) <= 1:
+        return (str((current or (stages[0] if stages else {})).get("name") or "·") + " ●")
+    return " › ".join(str(stage.get("name") or "·") for stage in stages)
+
+
+def route_activity_rows(route):
+    """What the route's doer is on now and just finished, one row each, from its own stream:
+
+    ``>_ python3 · tools/run-tests.py  3m · +1 agent`` (or ``>_ no tool`` when its read
+    stream shows none open) and ``after Edit · utilities/x.py``. Unreported values are left
+    out; both are allow-listed summaries, never the worker's raw command or words."""
+    doer = route.get("doer")
+    if not isinstance(doer, Mapping):
+        return []
+    rows = []
+    if doer.get("tool"):
+        row = [(">_ ", "soft"), (str(doer["tool"]), "soft")]
+        if doer.get("target"):
+            row.append((" · " + str(doer["target"]), "soft"))
+        if doer.get("tool_age"):
+            row.append(("  " + str(doer["tool_age"]), "dim"))
+        if int(doer.get("agents") or 0):
+            row.append((f" · +{int(doer['agents'])} agent", "dim"))
+        rows.append(row)
+    elif doer.get("idle_tool"):
+        rows.append([(">_ ", "dim"), ("no tool", "dim")])
+    if doer.get("after_tool"):
+        rows.append([("after ", "dim"), (str(doer["after_tool"]), "dim")])
+    return rows
+
+
 def route_row_columns(use, routes, session_need=0):
     """The session row's columns for route rows: the MODEL cell fits the widest doer of either."""
     need = max([session_need] + [_seg_width("".join(text for text, _key in route_doer_cells(route)[0]))
@@ -934,6 +972,19 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
     agent_text = f" · +{agents} agent" if tool_text and agents else ""
     progress_end = age_x - GAP
     full_tool = [(tool_text, "soft")] + ([(agent_text, "dim")] if agent_text else [])
+    # What the tool acts on rides with it while the row has room for it and a stage rail;
+    # the unfolded activity row below gives it whole (with its time) either way.
+    activity = route_activity_rows(route)
+    target = (route.get("doer") or {}).get("target") if tool_text else None
+    if target:
+        # Only where the cut target fits beside a whole stage rail (a wide row); otherwise the
+        # folded row keeps the tool name and the unfolded activity row gives the target.
+        wide = _clip(tool_text + " · " + str(target), TOOL_TARGET_W)
+        rail = max(12, _seg_width(_route_rail_text(route)))
+        if age_x - GAP - _seg_width(wide + agent_text) - cursor >= rail + GAP:
+            tool_text = wide
+    if activity:
+        full_tool = []          # the activity row carries the tool, its target and agents
     if tool_text:
         width = max(TOOL_W, _seg_width(tool_text + agent_text))
         if age_x - GAP - width - cursor < 12:
@@ -944,9 +995,9 @@ def draw_route_row(grid, x, use, y, route, c, steward=False, show_repo=False, ti
             if agent_text:
                 grid.put(end, y, agent_text, "dim", limit=tool_x + width)
             progress_end = tool_x - GAP
-            if _seg_width(tool_text) > width or len(full_tool) > 1 and not agent_text:
+            if full_tool and (_seg_width(tool_text) > width or len(full_tool) > 1 and not agent_text):
                 dropped.append(full_tool)
-        else:
+        elif full_tool:
             dropped.append(full_tool)
     if progress_end > cursor:
         _draw_route_progress(grid, cursor, progress_end, y, route, card=False)
@@ -1432,6 +1483,20 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 # A value longer than the row goes on under it, whole.
                 line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2, next_row)
             if line_x is not None:
+                _tint_row(grid, y, x - 1, right, 236)
+                y += 1
+            # The doer's own now (whole, wrapped like the values above) and the call it
+            # just finished (one row, cut with `…`), each on its own row.
+            for item in route_activity_rows(route):
+                grid.fill(x - 1, right, y, " ", tint=236)
+                grid.add_hit(y, x, right, action)
+                line_x = grid.put(x + cols["title"], y, "└ ", "dim", limit=right)
+                if item[0][0] == "after ":
+                    grid.put(line_x, y, _clip("".join(text for text, _key in item),
+                                              max(0, right - line_x)), "dim", limit=right)
+                else:
+                    line_x, y = _put_wrapped(grid, line_x, y, item, right, x + cols["title"] + 2,
+                                             next_row)
                 _tint_row(grid, y, x - 1, right, 236)
                 y += 1
             if link:

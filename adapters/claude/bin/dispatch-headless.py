@@ -889,6 +889,9 @@ _COMPACTION_ENV_KEYS = {
     "disable_auto_compact_env": "DISABLE_AUTO_COMPACT",
     "disable_compact_env": "DISABLE_COMPACT",
     "max_output_env": "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    # Not a compaction input: it fixes this attempt's own model window at 200K (Fleet's
+    # context gauge before the first turn result).
+    "disable_1m": "CLAUDE_CODE_DISABLE_1M_CONTEXT",
 }
 
 

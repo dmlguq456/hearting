@@ -645,7 +645,9 @@ def route_doer(route, jobs, get, live):
         return {"harness": shared.get("harness"), "model": pair[0] if isinstance(pair, (list, tuple)) and pair else None,
                 "effort": shared.get("effort"), "percent": _number(shared.get("context")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
-                "tool": shared.get("tool"), "agents": shared.get("agents") or 0}
+                "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
+                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
+                   if shared.get(key)}}
     stage = (route or {}).get("worker_stage")
     owners = live._owner_jobs(jobs)
     workers = [job for job in jobs if job not in owners and stage and get(job, "route_node") == stage
@@ -663,10 +665,13 @@ def route_doer(route, jobs, get, live):
     name = tool.get("name") if isinstance(tool, dict) else get(tool, "name") if tool is not None else None
     working = get(job, "liveness") == "working"
     agents = get(job, "subagents") or ()
+    activity = live._doer_activity(job, tool if working and name else None, working)
     return {"harness": harness, "model": pair[0] if pair else None, "effort": get(job, "effort"),
             "percent": percent, "tokens": tokens, "tool": name if working else None,
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
-                      if working and isinstance(agents, (list, tuple)) else 0}
+                      if working and isinstance(agents, (list, tuple)) else 0,
+            **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
+               if key in activity}}
 
 
 def route_details(snapshot, panels, routes=None, now=None):
@@ -712,9 +717,12 @@ def route_details(snapshot, panels, routes=None, now=None):
             doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
             if not doer:
                 continue
-            for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64)):
+            for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
+                               ("target", 120), ("tool_age", 16), ("after_tool", 160)):
                 if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit:
                     row[key] = doer[key]
+            if doer.get("idle_tool") is True:
+                row["idle_tool"] = True
             if doer.get("percent") is not None:
                 row["ctx_pct"] = round(doer["percent"], 1)
             elif type(doer.get("tokens")) is int:
