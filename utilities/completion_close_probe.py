@@ -227,8 +227,7 @@ def _render_tree(tree: Path, work: Path) -> dict:
                  "reason": "registry-closed", "required_action": "advance-completed", "status": "done"}
         receipt = {"children": [child], "delivery_classification": "success", "state": "ready",
                    "job_registry": str(jobs)}
-        followup = join.completion_followup_text(
-            receipt, jobs=str(jobs), surface=str(tree / "adapters" / "codex" / "bin" / "preflight.sh"))
+        followup = join.completion_followup_text(receipt, jobs=str(jobs))
         codex = codex_queue_delivery.native_completion_body("probe", [], receipt, followup)
         opencode = sweep.delivery_context([(base.resolve(), [
             {"delivery_id": f"delivery-probe-{event}", "route_id": route["route_id"], "receipt": receipt}])])

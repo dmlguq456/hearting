@@ -155,6 +155,8 @@ class CommonSessionLineTest(unittest.TestCase):
         # With nothing running, the owner's recorded harness, model and effort stay; no context.
         self.assertEqual((d["harness"], d.get("model"), d.get("effort")), ("codex", "gpt-fixture", "high"))
         self.assertNotIn("ctx_pct", d)
+        # Spec E9 rule 36 (a): the doer's recorded role (the live stage worker, else the owner).
+        self.assertEqual([row.get("role") for row in (a, b, c, d)], ["worker", "owner", "owner", "owner"])
         # The route page reads the owner Fleet's route row names: the single depth-1 owner.
         self.assertEqual([row.get("owner_attempt") for row in (a, b, c, d)], ["o", "o2", "o3", "o4"])
         # The record's owner_attempt_id picks the current owner over an earlier one;
@@ -177,6 +179,129 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"][:2], markers),
                          "route 12 ⠏7 ●3 ✕1")
         self.assertEqual(session_line.route_badge("route 12", panels["claude\0s"]), "route 12")
+
+    def test_a_doer_reads_its_recorded_role_word(self):
+        # Spec E9 rule 36 (a): Fleet's own words. Fleet's shared doer names a stage worker;
+        # its route body line says whether that worker is a frame leg. Without a shared doer
+        # the job's own node or worker type says it.
+        from types import SimpleNamespace
+        from tools.fleet import session_line
+        from tools.fleet.explorer import live
+        get = live._get
+        shared = lambda worker, label: {"doer": {"harness": "claude", "worker": worker}, "worker": [label, [], []]}
+        self.assertEqual(session_line.route_doer(shared(True, "frame"), [], get, live)["role"], "frame")
+        self.assertEqual(session_line.route_doer(shared(True, "worker"), [], get, live)["role"], "worker")
+        self.assertEqual(session_line.route_doer(shared(False, "owner"), [], get, live)["role"], "owner")
+        # The panel row's flattened body line (``_worker_pieces``) reads the same.
+        self.assertEqual(session_line._worker_role({"worker": [["frame", "dim"], [" claude", "dim"]]}), "frame")
+        job = lambda **kw: SimpleNamespace(key=kw.get("attempt_id"), **kw)
+        leg = [job(attempt_id="f", depth=1, worker_type="frame", route_node="frame", liveness="working", harness="claude")]
+        self.assertEqual(session_line.route_doer({"worker_stage": "frame"}, leg, get, live)["role"], "frame")
+
+    def test_side_panel_values_for_worktrees_memory_kind_role_and_gauge(self):
+        # Spec E9 rules 36-38: the values the side panel paints; the statusline keeps its words.
+        import datetime
+        from tools.fleet import session_panel
+        values = {**self.sample(), "branch": "main",
+                  "git": {"repo": 1, "operation": "none", "extra_worktrees": 12, "ahead": 2}}
+        # 37 (a), 41 (e): the common line (Claude's statusline, the bottom layout) keeps the
+        # repository name's `/` and `🚧 12` in the parentheses.
+        line = "".join(part for part, _key in line_segments(values, 240))
+        self.assertIn("hearting/ (main ↑2 🚧 12)", line)
+        presented = session_panel.presentation(values, {}, "claude", "s", 40)
+        self.assertEqual(presented["git"], [("(main ↑2 🚧 12)", "dim")])
+        # 41 (a), (b): beside the native area the REPO name without `/`, `wt 12` and the GIT value, all dim.
+        side = lambda parts: ("".join(text for text, _key in parts), {key for _text, key in parts})
+        self.assertEqual((presented["repo_side"], presented["worktrees"], side(presented["git_side"])),
+                         ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim"})))
+        for count in (0, None):
+            other = {**values, "git": {**values["git"], "extra_worktrees": count}}
+            self.assertEqual(session_panel.session_worktrees(other), [])
+            self.assertEqual(side(session_panel.session_git_side(other)), ("main ↑2", {"dim"}))
+        # Nothing but the count in the parentheses: no Git row beside the native area.
+        bare = {**values, "branch": "", "git": {"repo": 1, "operation": "none", "extra_worktrees": 3}}
+        self.assertEqual((session_panel.session_git(bare), session_panel.session_git_side(bare)), ([("(🚧 3)", "dim")], []))
+        # 40 (c): `✓` only when ahead and behind are both known to be 0; unknown draws nothing.
+        for git, want, shared in (({"ahead": 0, "behind": 0}, "main ✓", "(main ✓ 🚧 12)"),
+                                  ({"ahead": 0, "behind": 5}, "main ↓5", "(main ↓5 🚧 12)"),
+                                  ({"ahead": 2, "behind": 5}, "main ↑2 ↓5", "(main ↑2 ↓5 🚧 12)"),
+                                  ({"ahead": None, "behind": None}, "main", "(main 🚧 12)"),
+                                  ({"ahead": 0, "behind": None}, "main", "(main 🚧 12)")):
+            other = {**values, "git": {**values["git"], **git}}
+            self.assertEqual(side(session_panel.session_git_side(other)), (want, {"dim"}))
+            self.assertEqual(session_panel.session_git(other), [(shared, "dim")])
+        # 40 (b): the branch keeps 20 cells, 32 with 60 cells inside; the status comes before a
+        # warning beside the native area, the shared parentheses keep their order.
+        long = {**values, "branch": "fix/fleet-opencode-dup-sid-and-more-words",
+                "git": {"repo": 1, "operation": "rebase", "ahead": 0, "behind": 3, "extra_worktrees": 2}}
+        self.assertEqual(session_panel.session_git_side(long, 40),
+                         [("fix/fleet-opencode-…", "dim"), (" ↓3", "dim"), (" ⚠️rebase", "dim")])
+        self.assertEqual(side(session_panel.session_git_side(long, 80)), ("fix/fleet-opencode-dup-sid-and-… ↓3 ⚠️rebase", {"dim"}))
+        self.assertIn("(fix/fleet-opencode-… ⚠️rebase ↓3 🚧 2)", "".join(p for p, _k in line_segments(long, 10000, complete=True, branch_room=50)))
+        self.assertIn("(fix/fleet-opencode-dup-sid-and-… ⚠️rebase ↓3 🚧 2)", "".join(p for p, _k in line_segments(long, 240)))
+        # The statusline's wrapped lines take the room they are shown at.
+        from tools.fleet.session_line import status_lines
+        narrow = "".join(p for row in status_lines(long, 40) for p, _k in row)
+        self.assertIn("(fix/fleet-opencode-… ", narrow); self.assertNotIn("dup-sid-and", narrow)
+        self.assertIn("fix/fleet-opencode-dup-sid-and-…", "".join(p for row in status_lines(long, 100) for p, _k in row))
+        # 37 (b): the newest saved memory row: age and type dim, the headline (else the
+        # snippet's start) in the body color; nothing without a row or a text.
+        now = datetime.datetime(2026, 11, 12, 10, 3, 0)
+        row = {"ts": "2026-11-12T10:00:00", "type": "decision", "headline": "route rows read who first", "snippet": "body line"}
+        self.assertEqual(session_panel.session_memory({"memory_latest": row}, now),
+                         [("3m ", "dim"), ("decision ", "dim"), ("route rows read who first", "loc_repo")])
+        self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": ""}}, now)[-1], ("body line", "loc_repo"))
+        self.assertEqual(session_panel.session_memory({"memory_latest": {**row, "headline": "", "snippet": "superseded_by=x"}}, now), [])
+        self.assertEqual(session_panel.session_memory({}, now), [])
+        # 36 (a), (b), 38: a route row's recorded role only, Fleet's kind word, the gauge at the panel's width.
+        painted = session_panel.route_row({"role": "owner", "capability": "autopilot-code", "ctx_pct": 38}, cells=8)
+        self.assertEqual((painted["role"], painted["kind_word"]), ("owner", "code"))
+        self.assertEqual(session_panel.route_gauge_cells(40), 8)
+        self.assertEqual("".join(part[0] for part in painted["gauge_row"][:2]), "━━━─────")
+        self.assertEqual(painted["gauge_row"][-1][0], "38%")
+        for capability, word in (("code", "code"), ("frame", "frame"), ("autopilot-lab", "lab")):
+            self.assertEqual(session_panel.route_row({"capability": capability})["kind_word"], word)
+        unknown = session_panel.route_row({"role": "boss", "ctx_tokens": 250_136}, cells=8)
+        self.assertNotIn("role", unknown); self.assertNotIn("kind_word", unknown)
+        self.assertEqual(unknown["gauge_row"], [["250K", "dim"]])
+
+    def test_the_bash_statusline_writes_the_shared_git_words(self):
+        # Spec E9 rule 41 (e): Claude's statusline keeps `name/` and the parentheses; its git
+        # value takes `✓` (ahead and behind known to be 0, nothing when unknown) and the branch
+        # cut (20 cells, 32 on a line of 60 or more), as the shared line writes it.
+        import os, re, subprocess, tempfile
+        from pathlib import Path
+        script = Path(__file__).resolve().parents[3] / "adapters/claude/statusline.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".claude").mkdir()
+            (home / "tools/fleet").mkdir(parents=True)
+            (home / "demo").mkdir()
+            # A fixture observation: the shell assignments gitinfo's display prints, nothing read.
+            (home / "tools/fleet/gitinfo.py").write_text(
+                "import os\nfor key in ('repo','branch','operation','merged','branch_done','extra_worktrees','ahead','behind','dirty'):\n"
+                "    print('git_'+key+'='+os.environ.get('FIXTURE_GIT_'+key.upper(),'unknown'))\n")
+            def line(columns=None, **git):
+                env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "AGENT_HOME": str(home), "XDG_STATE_HOME": str(home / "state"),
+                       "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+                       **({"COLUMNS": str(columns)} if columns else {}),
+                       **{"FIXTURE_GIT_" + key.upper(): str(value) for key, value in git.items()}}
+                done = subprocess.run(["bash", str(script)], input='{"cwd":"%s","model":{"id":"fixture"}}' % (home / "demo"),
+                                      text=True, capture_output=True, env=env, timeout=20)
+                return re.sub(r"\x1b\[[0-9;]*m", "", done.stdout.splitlines()[0])
+            base = {"repo": 1, "operation": "none", "extra_worktrees": 3}
+            self.assertIn("demo/ (main ✓ 🚧 3)", line(branch="main", ahead=0, behind=0, **base))
+            self.assertIn("demo/ (main ↑2 ↓1 🚧 3)", line(branch="main", ahead=2, behind=1, **base))
+            self.assertIn("demo/ (main 🚧 3)", line(branch="main", **base))
+            long = "fix/fleet-opencode-dup-sid-and-more-words"
+            self.assertIn("(fix/fleet-opencode-dup-sid-and-… 🚧 3)", line(branch=long, **base))
+            self.assertIn("(fix/fleet-opencode-… ⚠️rebase ↓3)",
+                          line(50, branch=long, ahead=0, behind=3, repo=1, operation="rebase", extra_worktrees=0))
+            # The shared line writes the same words.
+            values = {"cwd": "/synthetic/demo", "branch": long, "git": {"repo": 1, "operation": "rebase", "ahead": 0, "behind": 3,
+                                                                          "extra_worktrees": 0}}
+            self.assertIn("(fix/fleet-opencode-… ⚠️rebase ↓3)",
+                          "".join(p for p, _k in line_segments(values, 10000, complete=True, branch_room=50)))
 
     def test_messages_are_the_latest_three_peer_rows_either_way(self):
         from tools.fleet.session_line import peer_message_rows

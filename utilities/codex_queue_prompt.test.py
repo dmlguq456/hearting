@@ -70,8 +70,7 @@ class PromptReceiptTest(unittest.TestCase):
             pending.claim(root, session_id, did, claim_owner="fixture", lease_seconds=60)
             seed = pending.read(root, session_id, did)
             followup = completion_followup_text(
-                receipt, jobs=str(jobs),
-                surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"))
+                receipt, jobs=str(jobs))
             body = queue.native_completion_body(session_id, [seed], receipt, followup)
             client_id = queue.native_client_message_id(session_id, [did])
             item = {"id": "queued-exact", "clientUserMessageId": client_id,

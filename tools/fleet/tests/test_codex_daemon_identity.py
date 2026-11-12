@@ -174,6 +174,30 @@ class CodexDaemonIdentityTest(unittest.TestCase):
             self.threads[ROOT] = (41302, "user")
             self.assertIsNone(codex.process_for_thread(ROOT, env, fresh=True))
 
+    def test_thread_to_process_reads_again_when_a_loaded_thread_moved_to_another_tui(self):
+        # A window reopened with the same session id: the thread never leaves the loaded list, so a
+        # long-lived reader's cached origin names a listener that is gone (or none, read before the
+        # TUI connected). The thread must be found through the new origin, not called unowned.
+        env = {"CODEX_HOME": "/fake"}
+        empty = (frozenset(), frozenset())
+        with mock.patch.object(codex, '_tcp_listener_snapshot',
+                side_effect=lambda port, *args: self.listener if port == 41301 else empty):
+            self.threads[ROOT] = (41302, "user")
+            self.assertIsNone(codex.process_for_thread(ROOT, env))          # primes the cache: no owner
+            self.threads[ROOT] = (41301, "user")                            # the reopened TUI
+            self.assertEqual(codex.process_for_thread(ROOT, env), (PID, "778899"))
+            self.threads[ROOT] = (None, "user")                             # origin not connected yet
+            codex._DAEMON_ORIGINS.clear()
+            self.assertIsNone(codex.process_for_thread(ROOT, env))
+            self.threads[ROOT] = (41301, "user")
+            self.assertEqual(codex.process_for_thread(ROOT, env), (PID, "778899"))
+
+    def test_thread_to_process_does_not_read_again_for_an_unloaded_thread(self):
+        env = {"CODEX_HOME": "/fake"}
+        self.assertIsNone(codex.process_for_thread(SECOND, env))
+        reads = [m for m, _p in self.client.calls if m == "thread/loaded/list"]
+        self.assertEqual(len(reads), 1)
+
     def test_loaded_list_pages_are_followed_with_schema_cursor(self):
         self.threads[SECOND] = (41301, "user")
         self.client.loaded_pages = [

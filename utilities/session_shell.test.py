@@ -241,6 +241,39 @@ class SessionShellTest(unittest.TestCase):
         self.assertNotIn("private draft", text)
         self.assertTrue(any("private draft" in "".join(part["text"] for part in line) for line in result["lines"]))
 
+    def test_a_broken_byte_in_the_memory_journal_does_not_stop_the_panel(self):
+        # Every panel reads the one shared memory journal; a half-written line there costs
+        # only that line: the projection answers and MEM shows the newest whole row.
+        shell.registry_root()   # puts `tools` on the path
+        import human_wait_state, session_tidy
+        from fleet import session_tags, session_view
+        from fleet.collectors import memory
+        row = self.binding()
+        observed = {"harness": "claude", "cwd": "/synthetic/hearting", "title": "Common title"}
+        line = lambda ts, text, rid: json.dumps({"ts": ts, "action": "add", "id": rid, "type": "decision",
+                                                 "snippet": text, "cwd": "/synthetic/hearting"}, ensure_ascii=False).encode()
+        older, newer = line("2026-11-12T09:00:00", "앞 기록", "a"), line("2026-11-12T10:00:00", "뒤 기록", "b")
+        cut = newer[:newer.index("뒤".encode()) + 1]
+        journal = self.root / "memory" / "write-events.jsonl"
+        journal.parent.mkdir()
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.dict(os.environ, {"MEM_STORE": str(journal.parent), "MEM_WRITE_EVENTS": str(journal)}))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")))
+            patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value=None))
+            patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "none"}))
+            patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
+            patches.enter_context(mock.patch.object(session_view, "observe", return_value=(observed, [])))
+            patches.enter_context(mock.patch.object(shell.os, "getppid", return_value=os.getpid()))
+            for name, data, shown in (("the last line cut inside a character", older + b"\n" + cut, "앞 기록"),
+                                      ("a broken byte mid-journal", older + b"\n\xff" + cut + b"\n" + newer + b"\n", "뒤 기록")):
+                with self.subTest(name):
+                    journal.write_bytes(data)
+                    memory._latest_cache.clear()
+                    result = shell._backend_operation({"op": "projection", "binding": row, "columns": 100, "state": "idle"})
+                    self.assertTrue(result.get("ok"), result)
+                    self.assertIn(str(journal), result["watch"])
+                    self.assertIn(shown, "".join(part["text"] for part in result["panel"]["memory"]))
+
     def test_an_unobserved_question_projection_does_not_become_zero_waits(self):
         import human_wait_state, session_tidy
         with mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \

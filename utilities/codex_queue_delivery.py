@@ -513,11 +513,14 @@ def native_batch_unit_body(root: Path, storage_key: str, records: list[dict]) ->
 
 
 def prior_followup_text(current: str) -> str | None:
-    """The one exact historical completion wording retained for recovery."""
+    """The one exact historical completion wording retained for recovery: the
+    previous success first line, or the previous open-row harvest line."""
     head, newline, rest = current.partition("\n")
-    if not head.startswith(_CURRENT_SUCCESS_FOLLOWUP_START):
-        return None
-    return _PRIOR_SUCCESS_FOLLOWUP + newline + rest
+    if head.startswith(_CURRENT_SUCCESS_FOLLOWUP_START):
+        return _PRIOR_SUCCESS_FOLLOWUP + newline + rest
+    from dispatch_completion_join import previous_harvest_wording
+    previous = previous_harvest_wording(current)
+    return previous if previous != current else None
 
 
 def retire_acked_completion(root: Path, path: Path, thread_id: str, seed: dict | list[dict],
@@ -567,10 +570,7 @@ def retire_acked_completion(root: Path, path: Path, thread_id: str, seed: dict |
                 jobs = receipt.get("job_registry") if isinstance(receipt, dict) else None
                 if not isinstance(jobs, str) or not jobs:
                     continue
-                followup = completion_followup_text(
-                    receipt, jobs=jobs,
-                    surface=str(Path(__file__).resolve().parents[1] / "adapters" / "codex" / "bin" / "preflight.sh"),
-                )
+                followup = completion_followup_text(receipt, jobs=jobs)
                 bodies = [native_completion_body(storage_key, [fresh], receipt, followup)]
                 prior_followup = prior_followup_text(followup)
                 if prior_followup is not None:

@@ -65,6 +65,7 @@ shared-utility-deferred	harness_behavior_cases_e.py
 shared-utility-deferred	harness_behavior_cases_followthrough.py
 shared-utility-deferred	harness_behavior_cases_idle_wake.py
 shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
+shared-utility-deferred	harness_behavior_cases_session_upgrade.py
 shared-utility-deferred	harness_behavior_cases_status_footer.py
 shared-utility-deferred	harness_behavior_cases_subagent_model.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
@@ -98,6 +99,7 @@ shared-utility-deferred	review_input.py
 shared-utility-deferred	retained_review_completion.py
 shared-utility-deferred	review_watchdog.py
 shared-utility-deferred	session_resume.py
+shared-utility-deferred	session_route_resume.py
 shared-utility-deferred	session_shell.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
@@ -211,6 +213,7 @@ utility-deferred	dispatch-artifact-root.test.py
 utility-deferred	dispatch-attempt-ready.py
 utility-deferred	dispatch-batch.py
 utility-deferred	dispatch-concurrency.test.sh
+utility-deferred	dispatch-harvest.py
 utility-deferred	dispatch-liveness.sh
 utility-deferred	dispatch-liveness.test.sh
 utility-deferred	dispatch-node.py
