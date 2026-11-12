@@ -50,7 +50,7 @@ for(const state of ['working','done','dead']){
  assert.equal(fresh.color,'dim');assert.equal(old.color,'dim');
  const box=v=>v.rows.flat().find(p=>p.text==='╭');
  assert.equal(box(fresh).foreground??undefined,state==='dead'?217:undefined,state);assert.equal(box(old).foreground??undefined,undefined,state);
- assert(old.rows.flat().some(p=>p.text.includes('Exact route')));
+ assert(old.rows.some(r=>r.map(p=>p.text).join('').includes('Exact route')));
  assert(!old.rows.flat().some(p=>p.spin||p.beat&&String(p.text).startsWith('route')));
  if(state==='working')assert(fresh.animated);
 }
@@ -160,7 +160,7 @@ const paint=(width,height,side,q,open=[])=>view.render({width,height,side,model,
  questions:o=>q.slice(0,o.budget)}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,[]);
- for(const want of ['[e9] project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
+ for(const want of ['project','(topic 🚧 3)','fixture high','context ','42%','running: pytest','◑답 대기 1','SESSION_TITLE','╭─ route 6','ROUTE_0','── messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
@@ -171,7 +171,7 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
  const rows=paint(width,height,side,question,['route:r0']),text=rows.join('\n');
  assert(rows.length<=height,width+'x'+height);
  for(const row of question)assert(text.includes(row[0].text),'question row lost at '+width+'x'+height+'\n'+text);
- for(const want of ['[e9] project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
+ for(const want of ['project','fixture high','42%','◑답 대기 1','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // 11-11 night final layout: the route side gives way first (its opened detail
  // before its rows), and the messages fixed at the bottom go only last.
  if(text.includes('plan ✓ › execute ●'))assert(text.includes('MESSAGE_TWO'),text);
@@ -325,36 +325,41 @@ for(let height=10;height<=22;height++){
 '''
         self.node(script, "panel-view.cjs")
 
-    def test_an_unknown_state_carries_the_natives_own_turn_record_for_display(self):
-        # Spec rule 26: while the host has no lifecycle state (start, resume, /clear,
-        # a switch) the projection carries the runtime's own turn record, the one the
-        # pane reader uses; a known host state asks nothing.
+    def test_the_projection_carries_the_natives_own_turn_record_and_its_path(self):
+        # Spec rule 26 and the 11-12 rule 6: Claude's REPL writes its own UI state into its
+        # session record (busy / waiting / idle); the projection reads it with the session
+        # (same exact process and session as the pane reader) and names the record, which
+        # the host reads itself the moment its watched file changes. Codex: its rollout's
+        # latest turn event. Display only.
         from unittest import mock
         import human_wait_state
-        import terminal_surface
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import codex
         shell.registry_root()
         sid = "00000000-0000-4000-8000-000000001112"
-        calls = []
-        def turn(harness, pid, session):
-            calls.append((harness, pid, session))
-            return "idle"
-        # No answer-wait producer is asked for these reads (it would publish a cache
-        # the other projection tests read).
+        me = os.getpid()
+        start = open("/proc/self/stat").read().rsplit(") ", 1)[1].split()[19]
         quiet = mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, ""))
-        with quiet, mock.patch.object(terminal_surface, "native_turn", side_effect=turn):
-            unknown = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
-                                             columns=40, rows=30, state="unknown")
-            known = shell.panel_projection("claude", sid, native_pid=os.getpid(), native_start="0",
-                                           columns=40, rows=30, state="working")
-            unbound = shell.panel_projection("claude", sid, columns=40, rows=30, state="unknown")
-        self.assertEqual(unknown.get("native_turn"), "idle")
-        self.assertNotIn("native_turn", known)
-        self.assertNotIn("native_turn", unbound)
-        self.assertEqual(calls, [("claude", os.getpid(), sid)])
-        with mock.patch.object(human_wait_state, "cached_statusline", return_value=(None, "")), \
-                mock.patch.object(terminal_surface, "native_turn", return_value="unknown"):
-            self.assertNotIn("native_turn", shell.panel_projection("codex", sid, native_pid=os.getpid(),
-                                                                    native_start="0", columns=40, rows=30))
+        with tempfile.TemporaryDirectory() as home, quiet, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}):
+            record = Path(home) / "sessions" / f"{me}.json"
+            record.parent.mkdir()
+            project = lambda: shell.panel_projection("claude", sid, native_pid=me, native_start=start, columns=40, rows=30)
+            for status, turn in (("busy", "working"), ("waiting", "blocked"), ("idle", "idle"), ("shell", None)):
+                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": status}))
+                result = project()
+                self.assertEqual(result.get("native_turn"), turn, status)
+                self.assertEqual(result.get("turn_record"), str(record))
+                self.assertIn(str(record), result["watch"])
+            for other in ({"sessionId": "another"}, {"procStart": "1"}):
+                record.write_text(json.dumps({"pid": me, "procStart": start, "sessionId": sid, "status": "busy", **other}))
+                self.assertNotIn("native_turn", project(), other)
+        with quiet, mock.patch.object(codex, "exact_rollout_for_session_id", return_value=__file__), \
+                mock.patch.object(codex, "_tail_token_count", return_value=None):
+            for event, turn in (("task_started", "working"), ("task_complete", "idle"), ("turn_aborted", "idle")):
+                with mock.patch.object(codex, "_latest_task_lifecycle", return_value=(event, "turn")):
+                    result = shell.panel_projection("codex", sid, native_pid=me, native_start=start, columns=40, rows=30)
+                self.assertEqual(result.get("native_turn"), turn, event)
+                self.assertNotIn("turn_record", result)
 
     def test_presentation_keeps_the_producers_whole_route_count_and_mcp(self):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -387,20 +392,37 @@ const p=t=>({text:t}),cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2
 const route=i=>({id:'r'+i,title:'ROUTE_'+i,state:'working',kind:'working',elapsed:'42m',paint:{glyph:p('⠏'),harness:p('codex'),ctx:p('72%')}});
 const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],selected:[p('fixture high')],context:[p('context 42%')],
  quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
- messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
+ session_title:'SESSION_TITLE',now:'NOW_LINE',messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
 const question=[[p('◑ Q_HEAD')],[p('Q_BODY')],[p('› A')],[p('2 B')],[p('↑↓ choose · Enter send · t text')]];
-const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
+const paint=(o={})=>view.render({width:40,height:30,side:true,sid:'s',harness:'claude',configuration:{},model:{...model,...o.model},state:o.state,frame:o.frame,
  settings:o.settings,questions:q=>(o.q||[]).slice(0,q.budget)});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
-// State on the left of the top border, the gear alone on the right; HEARTING only in settings.
-for(const [state,want] of [['idle','┌ ● idle ─'],['working','┌ ⠙ running ─'],['blocked','┌ ◑ waiting ─'],['unknown','┌──'],[undefined,'┌──']]){
- const rows=text(paint({state,frame:1}));assert(rows[0].startsWith(want),state+' '+rows[0]);
+// Spec rule 29 (a): Fleet's session-row head on the left of the top border (glyph,
+// number, harness), the gear alone on the right; no state word; HEARTING only in settings.
+for(const [state,want] of [['idle','┌ ● [e9] claude ─'],['working','┌ ⠙ [e9] claude ─'],['blocked','┌ ◑ [e9] claude ─'],['unknown','┌ [e9] claude ─'],[undefined,'┌ [e9] claude ─']]){
+ const rows=text(paint({state,frame:1,model:{tag:'[e9]'}}));assert(rows[0].startsWith(want),state+' '+rows[0]);
+ assert(!/running|idle|waiting/.test(rows[0]),rows[0]);
  assert(rows[0].endsWith(' ⚙ ┐')&&!rows.join('').includes('Settings')&&!rows.join('').includes('HEARTING'),rows[0]);
 }
-const settings=paint({settings:{index:0,value:view.defaults}});assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
+// A steward's number and `⚑` blink in Fleet's steward pink, lit and dark on the shared beat.
+for(const [frame,key] of [[0,'tag_steward'],[10,'tag_steward_dim']]){
+ const v=paint({state:'idle',frame,model:{tag:'[e9]',steward:true,styles:{...model.styles,tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true}}}});
+ const marks=v.rows[0].filter(x=>x.text==='⚑'||x.text==='e9');
+ assert(marks.length===2&&marks.every(x=>x.beat&&x.foreground===219&&(key==='tag_steward'?x.bold:x.dim)),frame+' '+JSON.stringify(marks));
+ assert(v.animated,'an idle steward still keeps the beat');
+}
+// Narrow: the steward mark goes first, then the harness, then the number; the glyph stays.
+for(const [width,want] of [[24,'┌ ● [e9] claude ⚑ ─'],[23,'┌ ● [e9] claude ─'],[21,'┌ ● [e9] ─'],[14,'┌ ● ─']]){
+ const row=text(view.render({width,height:12,side:true,sid:'s',harness:'claude',configuration:{},model:{tag:'[e9]',steward:true},state:'idle',questions:()=>[]}))[0];
+ assert(row.startsWith(want),width+' '+row);
+}
+const settings=paint({settings:{index:0,value:view.defaults}});
+assert(!paint({state:'idle',model:{routes:[],route_count:0}}).animated,'an idle panel with nothing to blink keeps no beat');assert(text(settings)[0].startsWith('┌ HEARTING ─'),text(settings)[0]);
 const gear=paint({state:'idle'}).hits.find(h=>h.action==='settings');assert(gear.row===0&&gear.left<=35&&gear.right>=39,JSON.stringify(gear));
-// The state word takes the same color as its glyph (Fleet's state key).
-const top=paint({state:'idle'}).rows[0];assert.equal(top[2].foreground,150);assert.equal(top[3].foreground,150);
+// The number takes the same color as its glyph (Fleet's state key); the harness its Fleet hue.
+const top=paint({state:'idle',model:{tag:'[e9]',styles:{...model.styles,hb_claude:{foreground:116}}}}).rows[0];
+assert.equal(top.find(x=>x.text==='●').foreground,150);
+assert.equal(top.find(x=>x.text==='e9').foreground,150);assert.equal(top.find(x=>x.text==='claude').foreground,116);
 // Spec rule 25: the whole frame takes that word's color, running and waiting their
 // session keys, idle and an unknown state the neutral line, in the same paint.
 for(const [state,want] of [['working',230],['submitting',230],['blocked',217],['idle',undefined],['unknown',undefined]]){
@@ -415,13 +437,17 @@ assert(box.length===4&&box.every(x=>x.foreground===217&&x.bold===false),JSON.str
 assert(failed.rows[0][0].foreground==null&&failed.rows[0][0].dim===true);
 // Repo row, then Git on its own row; the route box high; messages (no box: two rules) fixed at the bottom.
 let rows=text(paint({state:'idle'}));
-assert(rows[1].includes('[e9] project')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
+assert(rows[1].includes('project')&&!rows[1].includes('[e9]')&&!rows[1].includes('topic')&&rows[2].includes('(topic 🚧 3)'),rows.join('\n'));
+// Spec rule 29 (b), 30 (a): the metadata block is one block (no empty row inside), then a
+// thin rule, then the session's content with its labels; an empty row parts the head from the route box.
+assert(rows[3].includes('fixture high')&&rows[4].includes('context')&&/^│ ─+ │$/.test(rows[5]),rows.join('\n'));
+assert(rows[6].startsWith('│ TITLE  SESSION_TITLE')&&rows[7].startsWith('│ NOW    NOW_LINE')&&/^│ +│$/.test(rows[8])&&rows[9].includes('╭─ route'),rows.join('\n'));
 const r=rows.findIndex(s=>s.includes('╭─ route 3 ')),m=rows.findIndex(s=>s.includes('── messages '));
 assert(r>0&&m>r&&rows.slice(r,m).filter(s=>s.includes('ROUTE_')).length===3,rows.join('\n'));
 // Spec rule 24: a folded route takes two rows beside the native area: the glyph with
 // harness, context and time, then its title two cells in.
 const t0=rows.findIndex(s=>s.includes('ROUTE_0'));
-assert(/│ │ \S codex 72% · 42m +│ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
+assert(/│ │ \S codex +72% 42m │ │/.test(rows[t0-1])&&rows[t0].includes('│ │   ROUTE_0'),rows.join('\n'));
 assert(rows.at(-2).includes('7d 60%')&&/^│ ─+ │$/.test(rows.at(-3))&&m===rows.length-7&&!rows.join('').includes('╭─ messages'),rows.join('\n'));
 for(const s of rows)assert.equal(cells(s),40,s);
 // A question box sits right above the messages in the answer-needed color; messages are dim, route plain.
@@ -498,9 +524,9 @@ const staged={...one,id:'b',title:'staged',flow:'plan ✓ › execute ● › re
 const paint=(width)=>view.render({width,height:30,side:true,model:{routes:[one,staged],route_count:2,messages:[]},sid:'s',
  configuration:{},expandedKeys:[],questions:()=>[]}).rows.map(x=>x.map(p=>p.text).join(''));
 const narrow=paint(40),wide=paint(52);
-assert(narrow.some(x=>x.includes('claude Opus 5.5 24% · 47m')),narrow.join('\n'));
+assert(narrow.some(x=>/⠋ claude Opus 5\.5 +24% 47m/.test(x)),narrow.join('\n'));
 assert(!narrow.some(x=>x.includes('>_')),narrow.join('\n'));
-assert(wide.some(x=>x.includes('⠋ claude Opus 5.5 24% · >_ python3 · 47m')),wide.join('\n'));
+assert(wide.some(x=>/⠋ claude Opus 5\.5 · >_ python3 +24% 47m/.test(x)),wide.join('\n'));
 assert.equal(wide.filter(x=>x.includes('>_')).length,1,wide.join('\n'));
 assert(!wide.some(x=>x.includes('tools/run-tests.py')),wide.join('\n'));
 '''
@@ -520,16 +546,21 @@ const time=paint({}),byModel=paint({route_line:'model'});
 const row=(rows,title)=>rows.find(s=>s.includes(title.slice(0,5)));
 // Spec rule 24: two rows beside the native area: the glyph and the values, then the title.
 const above=(rows,title)=>rows[rows.findIndex(s=>s.includes(title.slice(0,5)))-1];
-for(const rows of [time,byModel])assert(above(rows,'셸 표기').includes('⠋ codex gpt-6.1-sol 72% · 42m')&&!row(rows,'셸 표기').includes('codex')
+// Spec rule 30 (b): context percent and elapsed time are right-aligned in their own columns.
+for(const rows of [time,byModel])assert(/⠋ codex gpt-6\.1-sol +72% +42m │/.test(above(rows,'셸 표기'))&&!row(rows,'셸 표기').includes('codex')
  &&row(rows,'셸 표기').includes('│   셸 표기'),rows.join('\n'));
 // Effort goes first; with room it stays, in its place after the model.
-assert(paint({},[],48).some(s=>s.includes('⠋ codex gpt-6.1-sol high 72% · 42m')),paint({},[],48).join('\n'));
+assert(paint({},[],48).some(s=>/⠋ codex gpt-6\.1-sol high +72% +42m │/.test(s)),paint({},[],48).join('\n'));
+const columns=time.filter(s=>/[⠋✕] /.test(s)).map(s=>s.indexOf(' │ │')),ends=time.filter(s=>/[⠋✕] /.test(s));
+assert(columns.length===2&&columns[0]===columns[1]&&ends[0].indexOf('72%')+3===ends[0].indexOf('    42m'),ends.join('\n'));
 // Short of cells the `route line` choice keeps its value and the other goes, whole.
 const narrowTime=paint({},[],32),narrowModel=paint({route_line:'model'},[],32);
-assert(above(narrowTime,'셸 표기').includes('codex 72% · 42m')&&!above(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
-assert(above(narrowModel,'셸 표기').includes('codex gpt-6.1-sol 72%')&&!above(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
-// A long title is cut on its own row; harness and elapsed time keep theirs.
-assert(row(time,'제목만').includes('…')&&above(time,'제목만').includes('claude')&&above(time,'제목만').includes('1h 27m'));
+assert(/⠋ codex +72% +42m/.test(above(narrowTime,'셸 표기'))&&!above(narrowTime,'셸 표기').includes('gpt'),narrowTime.join('\n'));
+assert(/⠋ codex gpt-6\.1-sol +72% │/.test(above(narrowModel,'셸 표기'))&&!above(narrowModel,'셸 표기').includes('42m'),narrowModel.join('\n'));
+// Spec rule 29 (c): a long title goes on to the next rows (two cells in) instead of `…`;
+// harness and elapsed time keep their row.
+const long=time.findIndex(s=>s.includes('제목만'));
+assert(!time[long].includes('…')&&time[long+1].includes('│ │   ')&&time.slice(long,long+2).join('').includes('잘림')&&above(time,'제목만').includes('claude')&&above(time,'제목만').includes('1h 27m'),time.join('\n'));
 // Both rows open the route in place.
 const hitRows=view.render({width:40,height:30,side:true,model,configuration:{},questions:()=>[]}).hits.filter(h=>h.action==='route:a').map(h=>h.row);
 assert.equal(hitRows.length,2);assert.equal(hitRows[1],hitRows[0]+1);
@@ -682,7 +713,8 @@ for(const [width,height,side,focused,n] of [[80,14,false,false],[80,14,false,tru
  const branch=rows.findIndex(s=>s.includes('(values-fixture*'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git row\n'+rows.join('\n'));
  // The Git row sits right below the repo row and never shares it.
- if(branch>=0)assert(rows[branch-1].includes('[cb] project')&&!rows[branch].includes('[cb]'),rows.join('\n'));
+ // Spec rule 29: the number moves to the top border; the repo row keeps `project/`.
+ if(branch>=0)assert(rows[branch-1].includes('project/')&&!rows.slice(1).some(s=>s.includes('[cb]')),rows.join('\n'));
  assert(rows.length<=height);
 }
 // A long title is shortened with an ellipsis; the answer wait keeps its place.

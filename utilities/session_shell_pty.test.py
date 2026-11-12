@@ -37,8 +37,56 @@ exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
 began=time.monotonic();event('start');delay=(time.monotonic()-began)*1000
 print('\x1b]2;OWN_NATIVE_TITLE\x07\x1b[?2004hACK_MS='+str(delay)+'\r\nREADY\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
 pending=''
+# `live-*` lines act like Claude itself: the REPL writes its own UI state into its
+# session record as it paints (busy, waiting with a dialog, idle), while each hook is
+# its own process (a new python that imports what the real hook imports) reporting
+# over the socket some time later.
+HOOK=(
+ "import json,os,socket,sys,time\n"
+ "began=time.monotonic()\n"
+ "kind,sid,pid,start,log=sys.argv[1:6]\n"
+ "utilities=os.environ['LOOP_UTILITIES'];sys.path[:0]=[utilities,os.path.join(utilities,'..','tools')]\n"
+ "import session_shell\n"
+ "if kind=='prompt':import session_tidy\n"
+ "if kind in('blocked','working'):import fleet.interaction\n"
+ "req={'op':'event','event':kind,'harness':'claude','sid':sid,'pid':int(pid),'start':start,"
+ "'token':os.environ['HEARTING_SHELL_TOKEN'],'seq':time.monotonic_ns()//1000}\n"
+ "c=socket.socket(socket.AF_UNIX);c.settimeout(5);c.connect(os.environ['HEARTING_SHELL_SOCKET'])\n"
+ "c.sendall((json.dumps(req)+'\\n').encode());c.recv(8192);c.close()\n"
+ "open(log,'a').write(json.dumps([kind,round((time.monotonic()-began)*1000,1)])+'\\n')\n")
+def hook(kind):
+    raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
+    subprocess.Popen([sys.executable,'-c',HOOK,kind,sid,str(os.getpid()),start,os.environ.get('LOOP_HOOK_LOG','/dev/null')],
+        stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+def record(status):
+    raw=open('/proc/self/stat').read(); start=raw.rsplit(') ',1)[1].split()[19]
+    path=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/(str(os.getpid())+'.json');path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps({'pid':os.getpid(),'procStart':start,'sessionId':sid,'status':status,
+        'statusUpdatedAt':int(time.time()*1000)}))
+later=[]
+def after(seconds,action):later.append((time.monotonic()+seconds,action))
+def screen(text):print('\x1b[2J\x1b[H'+text+'\r\n❯ \r\n──────────────────\r\n',end='',flush=True)
+def live(line):
+    if line.startswith('live-turn-'):
+        n=line[10:];record('busy');screen('✻ Working… (esc to interrupt) LIVE_BUSY_'+n);hook('prompt')
+        def end():record('idle');screen('LIVE_IDLE_'+n);hook('stop')
+        after(0.7,end)
+    elif line.startswith('live-perm-'):
+        n=line[10:];record('busy');screen('✻ Working… LIVE_BUSY_'+n);hook('prompt')
+        def form():record('waiting');print('\x1b[2J\x1b[HDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\nLIVE_FORM_'+n+'\r\n',end='',flush=True);hook('blocked')
+        after(0.3,form)
+    elif line.startswith('live-yes-'):
+        n=line[9:];record('busy');screen('✻ Running the tool… LIVE_APPROVED_'+n)
+        def done():hook('working')
+        def end():record('idle');screen('LIVE_IDLE_'+n);hook('stop')
+        after(1.0,done);after(1.3,end)
+    elif line.startswith('live-menu-'):
+        screen('LIVE_MENU_'+line[10:])   # an Enter the native does not take as a prompt
 while True:
-    readable,_,_=select.select([0,exit_fd],[],[])
+    wait=max(0,min(due for due,_ in later)-time.monotonic()) if later else None
+    readable,_,_=select.select([0,exit_fd],[],[],wait)
+    for item in [item for item in later if item[0]<=time.monotonic()]:later.remove(item);item[1]()
+    if not readable:continue
     if exit_fd in readable:break
     data=os.read(0,65536)
     if not data or data==b'\x03':break
@@ -46,6 +94,7 @@ while True:
     while '\r' in pending:
         line,pending=pending.split('\r',1)
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
+        if line.startswith('live-'):live(line);continue
         callback_missing='PEER_NO_CALLBACK' in line
         if not callback_missing and line!='turn-close':event('prompt')
         if line=='spawn-child':
@@ -88,7 +137,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -113,7 +162,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.barrier)barrier=fs.openSync(cfg.barrier,fs.constants.O_RDWR|fs.constants.O_NONBLOCK);
  child=pty.spawn(cfg.python,[cfg.entry,'claude',cfg.python,cfg.fake,cfg.sid],
     {cols:cfg.columns||100,rows:cfg.rows||30,cwd:cfg.project,env:{...process.env,TERM:'xterm-256color',HEARTING_SHELL_DIRECTORY:cfg.directory,
-        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,NODE_OPTIONS:'--require '+cfg.launcher,
+        HEARTING_SHELL_PYTHON:cfg.backend,NODE_PATH:process.env.NODE_PATH,LOOP_NATIVE_EXIT:cfg.exit_fifo,LOOP_UTILITIES:cfg.utilities,LOOP_HOOK_LOG:path.join(cfg.directory,'hooks.log'),NODE_OPTIONS:'--require '+cfg.launcher,
         ...(cfg.scenario==='herdr'||cfg.peer?{HERDR_ENV:'1',HERDR_PANE_ID:'private:p1',HERDR_BIN_PATH:'/private/herdr',HERDR_SOCKET_PATH:path.join(process.env.XDG_CONFIG_HOME||path.join(process.env.HOME,'.config'),'herdr','herdr.sock')}:{})}});
  child.onData(text=>{if(sideTerm)sideTerm.write(text);raw+=text;if(raw.length>1024*1024)raw=raw.slice(-512*1024);
     for(let n=listeners.length-1;n>=0;n--)if(listeners[n].pattern.test(raw))listeners.splice(n,1)[0].resolve();});
@@ -130,17 +179,56 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/\] (?:\x1b\[[0-9;]*m)*project/);
+ await waitFor(/project\/|\] (?:\x1b\[[0-9;]*m)*project/);
  const startup={};
  if(cfg.scenario==='startup-state'){
    // No key, no status request (which would run the readiness observation): the
    // border's word right after start comes from the native's own session record.
-   const word=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ \S+ (running|idle|waiting) /);if(m)return m[1];}return '';};
+   const word=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);if(m)return m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running';}return '';};
    const began=Date.now();
    while(Date.now()-began<8000&&!startup.word){await new Promise(resolve=>sideTerm.write('',resolve));startup.word=word();if(!startup.word)await new Promise(resolve=>setTimeout(resolve,20));}
    startup.ms=Date.now()-began;
  }
- if(!['initial','startup-state'].includes(cfg.scenario)){
+ const liveState={};
+ if(cfg.scenario==='live-state'){
+   // Spec 11-12 rule 6: how soon the panel's own state follows the native screen.
+   // Times are taken where they happen: a native marker when its bytes reach this
+   // terminal, the panel's state when the painted border first shows it.
+   const word=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);if(m)return m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running';}return '';};
+   const now=()=>Number(process.hrtime.bigint())/1e6,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+   const seen={};child.onData(text=>{for(const m of String(text).matchAll(/LIVE_[A-Z]+_\d+/g))if(!(m[0] in seen))seen[m[0]]=now();});
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
+   const until=async want=>{const began=now();while(now()-began<6000){await flush();if(word()===want)return now();await sleep(1);}return null;};
+   const shown=async name=>{const began=now();while(!(name in seen)){if(now()-began>6000)throw Error('never shown '+name);await sleep(1);}return seen[name];};
+   const send=text=>rpc(cfg.inlet,{batch:Buffer.from(text+'\r').toString('base64')});
+   const since=(a,b)=>a===null?null:Math.round((a-b)*10)/10;
+   for(const key of ['submit','busy','idle','waiting','approve','approveIdle'])liveState[key]=[];
+   liveState.false_running=0;liveState.false_back=[];
+   // One ordinary turn first (in-process events), so every version starts from idle.
+   await send('warm');await waitFor(/DONE_warm/);
+   if(await until('idle')===null)throw Error('never idle before the turns: '+word());
+   for(let n=0;n<10;n++){
+     let began=now();await send('live-turn-'+n);
+     const running=await until('running');
+     liveState.submit.push(since(running,began));liveState.busy.push(since(running,await shown('LIVE_BUSY_'+n)));
+     liveState.idle.push(since(await until('idle'),await shown('LIVE_IDLE_'+n)));
+     for(const key of Object.keys(seen))delete seen[key];
+     await send('live-perm-'+n);await shown('LIVE_BUSY_'+n);
+     liveState.waiting.push(since(await until('waiting'),await shown('LIVE_FORM_'+n)));
+     began=now();await send('live-yes-'+n);
+     liveState.approve.push(since(await until('running'),began));
+     liveState.approveIdle.push(since(await until('idle'),await shown('LIVE_IDLE_'+n)));
+     // An Enter the native does not take as a prompt: the panel must not claim a turn.
+     for(const key of Object.keys(seen))delete seen[key];
+     began=now();await send('live-menu-'+n);await shown('LIVE_MENU_'+n);
+     let wrong=null;while(now()-began<400){await flush();if(word()==='running'&&wrong===null){wrong=now();liveState.false_running++;}if(wrong!==null&&word()==='idle'){liveState.false_back.push(Math.round(now()-wrong));break;}await sleep(2);}
+     for(const key of Object.keys(seen))delete seen[key];
+     await sleep(250);
+   }
+   await sleep(600);
+   liveState.hooks=fs.existsSync(path.join(cfg.directory,'hooks.log'))?fs.readFileSync(path.join(cfg.directory,'hooks.log'),'utf8').trim().split('\n').map(line=>JSON.parse(line)):[];
+ }
+ if(!['initial','startup-state','live-state'].includes(cfg.scenario)){
    await rpc(cfg.inlet,{batch:Buffer.from('warm\r').toString('base64')});await waitFor(/DONE_warm/);
  }
  if(cfg.scenario==='mixed'){
@@ -252,7 +340,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  if(cfg.scenario==='state-border'){
    // The border's own state word, read from the painted top border, and the color
    // of the border's own corner cell painted with it (spec rule 25).
-   const border=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ \S+ (running|idle|waiting) /);if(m)return m[1];}return '';};
+   const border=()=>{for(let y=0;y<sideTerm.rows;y++){const m=(sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);if(m)return m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running';}return '';};
    const corner=()=>{for(let y=0;y<sideTerm.rows;y++){const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),x=(line?.translateToString()||'').indexOf('┌');if(x>=0){const c=line.getCell(x);return c.getFgColorMode()+':'+c.getFgColor()+(c.isDim()?':dim':'');}}return '';};
    const until=async(word,began)=>{while(Date.now()-began<4000){await new Promise(resolve=>sideTerm.write('',resolve));if(border()===word)return Date.now()-began;await new Promise(resolve=>setTimeout(resolve,20));}throw Error('the border never showed '+word+' (shows '+border()+')');};
    await until('idle',Date.now());stateColors.push(['idle',corner()]);
@@ -345,7 +433,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    if(/NATIVE_ESC_[^\r]*\^\[5~/.test(raw))throw Error('a shown page let PgUp reach the native');
  }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/\] (?:\x1b\[[0-9;]*m)*project/);
+ if(cfg.scenario==='display')await waitFor(/project\/|\] (?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
@@ -354,7 +442,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,peer}));
+ console.log(JSON.stringify({ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -472,7 +560,7 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'}:
             config.update(columns=180,rows=40)
         if scenario=='route-pages':config.update(columns=80,rows=24)
         if scenario=='fleet-modal':
@@ -488,13 +576,13 @@ class SessionShellPTYTest(unittest.TestCase):
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state'} else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         birth=Path('/proc/'+str(child.pid)+'/stat').read_text().rsplit(') ',1)[1].split()[19]
         try:
-            stdout,stderr=child.communicate(timeout=35)
+            stdout,stderr=child.communicate(timeout=90 if scenario=='live-state' else 35)
         except subprocess.TimeoutExpired:
             fd=os.pidfd_open(child.pid)
             try:
@@ -606,6 +694,24 @@ class SessionShellPTYTest(unittest.TestCase):
         result=self.run_loop('startup-state')['startup']
         print(json.dumps({'event':'session-shell-startup-state','ms':result.get('ms')}))
         self.assertEqual(result.get('word'),'idle')
+
+    def test_the_panel_state_follows_the_natives_own_screen_before_its_hooks(self):
+        # Spec 11-12 rule 6: the panel's state is the host's own observation of the
+        # native (Claude's REPL writes its UI state into its session record as it
+        # paints); each hook (a new process, as the real ones) only confirms it later.
+        # An Enter the native does not take as a prompt claims nothing.
+        result=self.run_loop('live-state')['live_state']
+        import statistics
+        summary={key:{'median':statistics.median(values),'max':max(values)} for key,values in result.items()
+                 if isinstance(values,list) and values and all(isinstance(v,(int,float)) for v in values)}
+        hooks={}
+        for kind,ms in result.get('hooks',()):hooks.setdefault(kind,[]).append(ms)
+        print(json.dumps({'event':'session-shell-live-state','ms':summary,'false_running':result['false_running'],
+                          'hook_ms':{kind:{'median':statistics.median(v),'max':max(v)} for kind,v in hooks.items()}}))
+        for key in ('submit','busy','idle','waiting','approve','approveIdle'):
+            self.assertEqual(len(result[key]),10,key);self.assertNotIn(None,result[key],key)
+            self.assertLess(max(result[key]),400,key)
+        self.assertEqual(result['false_running'],0)
 
     def test_a_late_projection_is_applied_and_never_replaces_a_newer_one(self):
         # A projection held past the host's limit is still painted when it comes,

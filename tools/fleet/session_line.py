@@ -123,7 +123,9 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
         git = "no-git"
     after = [(" (" + git + ")", "dim")] if git else []
     if project:
-        words("folder", project, "loc_repo", 64 if complete else 24, 2,
+        # Spec E9 rule 29: the repository name ends in `/` (a folder); a name cut to its
+        # budget loses the mark with its tail, so it shows only on a whole name.
+        words("folder", project + "/", "loc_repo", 64 if complete else 24, 2,
               before=[("[" + tag + "] ", "tag")] if tag else [], after=after)
     elif tag and (fields is None or "folder" in fields):
         groups.append({"name": "folder", "text": "[" + tag + "]", "key": "tag", "budget": cell_width(tag) + 2,

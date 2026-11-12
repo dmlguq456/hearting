@@ -74,12 +74,57 @@ function sameTerminal(pid, root) {
   } catch { return false; }
 }
 let native, rootNative, sid = '', sequence = 0, selection = 0, state = 'unknown', epoch = 0, empty = false;
-// Spec rule 26: while no lifecycle event has named this session's state (start,
-// resume, /clear, a session switch), the panel shows the runtime's own turn record
-// the projection already reads (Claude's session record, Codex's rollout). Display
-// only: `state`, readiness and every input gate keep the host's own value.
-let nativeTurn = '';
-function shownState(){return state==='unknown'&&nativeTurn?nativeTurn:state;}
+// What the panel shows as this session's state is the host's own observation (spec
+// rules 25-26, 11-12 rule 6); hook events confirm and correct it. Display only: `state`
+// (the lifecycle the hooks report), readiness and every input gate keep their meaning.
+// - Claude's REPL writes its own UI state into its session record as it paints it
+//   (`busy` while it shows progress, `waiting` with a dialog or question open, `idle`);
+//   the host reads that record the moment its watched file changes, so the panel turns
+//   with the native screen instead of after a hook's process start.
+// - Codex appends each turn's start and end to its rollout (read with the projection);
+//   a newer reading than the last hook event wins. After an approval the question
+//   screen leaving (the readiness judgment's own form test) means the turn goes on.
+// - OpenCode's in-process plugin reports its native events directly.
+// Nothing here polls: readings come from file events and native output the host
+// already receives.
+let nativeTurn = '', turnMark = 0, eventMark = 0, seenTurn = null, clock = 0, turnRecord = '';
+const TURN={busy:'working',idle:'idle',waiting:'blocked'};
+function shownState(){
+  if(state==='submitting')return state;
+  if(harness==='claude'&&nativeTurn)return nativeTurn;
+  if(seenTurn&&seenTurn.mark>eventMark)return seenTurn.value;
+  return state==='unknown'&&nativeTurn?nativeTurn:state;
+}
+// One reading of the native's own turn record, ordered by when it was asked for.
+function noteTurn(turn,mark){
+  if(mark<turnMark)return;
+  const before=shownState();
+  if(turn!==nativeTurn&&turn&&turnMark&&mark>eventMark)seenTurn={value:turn,mark};
+  nativeTurn=turn;turnMark=mark;
+  if(shownState()!==before)queueDisplay();
+}
+function readTurnRecord(){
+  if(harness!=='claude'||!turnRecord||!native||!sid||relay||ended)return;
+  const mark=++clock;let value;
+  try{
+    const st=fs.lstatSync(turnRecord);if(!st.isFile()||st.uid!==process.getuid()||st.size>65536)return;
+    value=JSON.parse(fs.readFileSync(turnRecord,'utf8'));
+  }catch{return;}
+  // The same identity the pane reader requires: this exact process and session.
+  if(!value||value.pid!==native.pid||String(value.procStart??'')!==String(native.start)||value.sessionId!==sid)return;
+  noteTurn(TURN[value.status]||'',mark);
+}
+// Codex after an approval: the question screen shown, then gone, while no newer event came.
+let formSeen=false,formRevision=-1,formAsking=false;
+function observeForm(){
+  if(harness!=='codex'||!sid||relay||ended||formAsking||formRevision===screenRevision||shownState()!=='blocked')return;
+  formAsking=true;formRevision=screenRevision;const mark=++clock,events=eventMark,selected=selection;
+  source('readiness',{screen:screenSnapshot(),state}).then(result=>{
+    if(selected!==selection||events!==eventMark||!result?.ok)return;
+    if(result.reason==='form-open'){formSeen=true;return;}
+    if(formSeen&&shownState()==='blocked'){formSeen=false;seenTurn={value:'working',mark};queueDisplay();}
+  }).finally(()=>{formAsking=false;if(formRevision!==screenRevision)schedule();});
+}
 let nativeEpoch = 0, lastEnter = -1, submitted = -1, currentDelivery, releasing, heldBytes = 0;
 let expanded = true, relay = false, paste = false, keyTail = '', cursorVisible = true;
 let screenRevision = 0;
@@ -269,8 +314,8 @@ function readRouteRaw(){
 }
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
-    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
+    model:stale?{...panelModel,stale}:panelModel,native:displayValues,state:shownState(),sid,harness,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
+    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),
     cellWidth,background:terminalBackground,
     routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
@@ -291,7 +336,9 @@ function spun(y,row){
 }
 let beatTimer,beatPhase=-1;
 function beating(){return panelAnimated&&activated&&!ended&&!relay&&!fleetView&&!settings&&expanded&&panelRows.length>0;}
-function armBeat(){if(!beatTimer&&beating())beatTimer=setTimeout(beatTick,100-Date.now()%100);}
+// With no spinner painted (only a blink, such as an idle steward's mark) the beat wakes
+// once a second, at the blink's own phase change, not every spinner frame.
+function armBeat(){if(!beatTimer&&beating()){const step=paintedSpins.size?100:1000;beatTimer=setTimeout(beatTick,step-Date.now()%step);}}
 function beatTick(){
   beatTimer=undefined;if(!beating())return;
   const phase=Math.floor(Date.now()/1000)%2;
@@ -358,7 +405,7 @@ function observeSelectedModel(lines){
 function render() {
   frameTimer=undefined;if(ended||!activated||relay)return;
   try {
-    observeNativeSelection();
+    observeNativeSelection();observeForm();
     const nativeLines=Array.from({length:terminal.rows},(_,i)=>
       terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     const observed=nativeDisplay.observe(harness,nativeLines,sid);
@@ -542,7 +589,11 @@ function observeFiles(paths) {
       const row={targets};
       row.watch=fs.watch(directory,(_event,name)=>{
         const changed=name?path.join(directory,String(name)):directory;
-        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep)))queueProjection();
+        if(!name||row.targets.some(target=>target===changed||target.startsWith(changed+path.sep))){
+          // The native's own turn record is read at once; the rest waits for the projection.
+          if(turnRecord&&(changed===turnRecord||!name))readTurnRecord();
+          queueProjection();
+        }
       });
       row.watch.on('error',()=>{row.watch.close();watchers.delete(directory);sourceError={reason:'file-observation-unavailable'};});
       watchers.set(directory,row);
@@ -555,12 +606,14 @@ async function projection() {
   if(!sid||ended||relay)return;if(projecting){projectionPending=true;return;}
   projecting=true;projectionPending=false;const selected=selection;
   try{
+    const asked=++clock;
     const data=await source('projection',{columns:panelColumns(),rows,state,expanded,native_context:nativeContext?.percent,native_badges:nativeMcp?{...(nativeContext||{}),mcp:nativeMcp}:nativeContext,retained_questions:block.references(),answer_busy:!!actionWorker||!!currentDelivery});
     if(relay||selected!==selection)return;if(!data.ok){sourceError=data;return;}sourceError=undefined;
-    nativeTurn=['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'';
+    turnRecord=harness==='claude'&&typeof data.turn_record==='string'&&path.isAbsolute(data.turn_record)?data.turn_record:'';
+    noteTurn(['idle','working','blocked'].includes(data.native_turn)?data.native_turn:'',asked);
     // Close the read-before-watch gap once when the input set changes.
     if(observeFiles(data.watch))projectionPending=true;
-    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,nativeTurn]);
+    const key=JSON.stringify([harness==='claude'?null:[data.footer,data.segments],data.lines,data.block,data.questions,data.help,data.native_footer,data.panel,cols,expanded,currentDelivery,heldBytes,state,shownState()]);
     const freshDisplay=Object.fromEntries(Object.entries(data.native_display||{}).filter(([,value])=>value!=null));
     if(bootstrapModel&&freshDisplay.model){nativeSelected={};bootstrapModel=false;}
     displayValues={...displayValues,...freshDisplay,...nativeSelected};publishNativeDisplay();
@@ -632,7 +685,7 @@ async function releaseHeld(ref,cancel=false) {
   // No new direct writes may overtake keys the owner is still draining.
   process.stdin.pause();
   await inputOwner.release(ref,cancel);
-  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting')state='unknown';queueProjection();}
+  if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting'){state='unknown';eventMark=++clock;}queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 function screenSnapshot() {
@@ -865,7 +918,7 @@ async function lifecycle(req) {
     displayValues={...nativeSelected};
     panelModel={labels:panelModel.labels,styles:panelModel.styles};panelSections=undefined;panelLines=[];
     projectionKey='';footer='';footerSegments=[];routeDetail=false;routeScroll=0;
-    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';empty=false;submitted=-1;block.leave();block.update([]);
+    sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;submitted=-1;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
     const selected=selection;
@@ -876,7 +929,7 @@ async function lifecycle(req) {
   if(req.sid!==sid)return {ok:false,reason:'selection-changed'};
   sequence=req.seq;const was=state;
   if(req.event==='deselect'){
-    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
+    selection++;sid='';state=harness==='opencode'?'idle':'unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;footer='';footerSegments=[];panelLines=[];panelSections=undefined;panelModel={};displayValues={};nativeContext=undefined;routeDetail=false;routeScroll=0;panelOpen.clear();block.update([]);
     for(const row of watchers.values())row.watch.close();watchers.clear();
     source('register');rebuildDisplay();return {ok:true};
   }
@@ -886,6 +939,8 @@ async function lifecycle(req) {
   } else if(req.event==='stop'||req.event==='idle') { state='idle';empty=false; }
   else if(req.event==='working') { state='working';empty=false; }
   else {state='blocked';empty=false;}
+  // A hook event is newer than every reading asked for before it.
+  eventMark=++clock;if(state==='blocked'&&was!=='blocked')formSeen=false;
   // The border's state is the host's own: paint it now, not after the projection.
   if(state!==was)queueDisplay();
   projection();return {ok:true,...status()};
@@ -921,7 +976,7 @@ async function request(req) {
   const selected=selection,revision=screenRevision;
   const data=await source('payload',{ref:req.ref,claim:req.claim,screen:screenSnapshot(),state});
   if(!data.ok||selected!==selection||revision!==screenRevision||!safe())return {ok:false,reason:data.reason||'input-changed',not_started:true};
-  currentDelivery=req.ref;state='submitting';empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueProjection();
+  currentDelivery=req.ref;state='submitting';eventMark=++clock;empty=false;epoch++;nativeEpoch++;lastEnter=nativeEpoch;queueDisplay();queueProjection();
   if(deliveries.size>=128)deliveries.delete(deliveries.keys().next().value);
   deliveries.set(req.ref,'transport-accepted');
   // The retained owner is the sole writer for this admitted paste/50ms Enter

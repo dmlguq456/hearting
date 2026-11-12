@@ -459,7 +459,9 @@ else
   if [ "$wt" = unknown ]; then git_text="${git_text} 🚧 ?"
   elif [ "$wt" -gt 0 ] 2>/dev/null; then git_text="${git_text} 🚧 ${wt}"; fi
 fi
-hseg="${CYAN}${S_SESSION_PROJECT:-$dir}${RST}"
+# The repository name ends in `/` (a folder), as the shared line writes it (spec E9 rule 29).
+project_name="${S_SESSION_PROJECT:-$dir}"
+hseg="${CYAN}${project_name}${project_name:+/}${RST}"
 [ -n "$S_SESSION_TAG" ] && hseg="[${S_SESSION_TAG}] ${hseg}"
 git_text="${git_text# }"
 [ -n "$git_text" ] && hseg="${hseg} ${DIM}(${git_text})${RST}"

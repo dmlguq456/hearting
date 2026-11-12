@@ -804,6 +804,13 @@ def _observe_session(observe, harness, sid, pid, start):
     return values, watched
 
 
+# The shared style keys the panel paints by name (state glyphs and frame, harness names,
+# the steward mark's two beats); the rest arrive already styled.
+PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
+                    "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
+                    "hb_claude", "hb_codex", "hb_opencode", "hb_other")
+
+
 def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=None,
                      columns=100, rows=30, state="unknown", expanded=True, native_context=None,
                      native_badges=None, retained_questions=(), pane_binding=None, answer_busy=False) -> dict:
@@ -844,6 +851,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         values["mcp"] = mcp
     if harness == "claude" and isinstance(native_badges,dict):
         values.update(native_route=native_badges.get('native_route'),native_wait=native_badges.get('native_wait'))
+    # Fleet's steward mark, from the same role evidence Fleet's collector reads (markers and
+    # relations); no collection pass. A failed read shows no mark.
+    try:
+        from fleet.collectors import steward as steward_role
+        values["steward"] = bool(steward_role.role_flag(harness, sid, cwd=values.get("cwd")))
+    except Exception:
+        values["steward"] = False
     values.update(harness=harness, tag=tag, native_sid=sid if harness == "codex" else None,
                   state=state, route_label=_plain(route),
                   answer_wait=(counts[0] if counts[0] >= 0 else None) if counts and counts[1] > 0 else (0 if counts else None))
@@ -899,7 +913,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["summary"] = [styled(line) for line in panel["summary"]]
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
-    for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
+    for name in ("head", "repo", "git", "selected", "context", "quota", "jobs", "mcp"):
         panel[name] = styled(panel[name])
     for row in panel["routes"]:
         paint = {}
@@ -920,8 +934,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
         from fleet.session_panel import notice_line
         panel["notice"] = styled(notice_line(values, panel["routes"], board, display, time.time()))
     panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                       for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
-                                   "g_spin", "g_work_off")}
+                       for key in PANEL_STYLE_KEYS}
     panel.update(colors=colors, no_color=no_color)  # The panel's theme and shade map these.
     if harness == "codex" and native_pid:
         native_footer, config_path = _codex_footer_plan(values, sid, native_pid,
@@ -932,19 +945,18 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             watched.append(config_path)
     watched.extend((str(human_wait_state._cache_path()),
                     str(session_tidy._prompt_seq_path(session_tidy.session_seat(seat, harness, sid)))))
-    turn = None
-    if state == "unknown" and native_pid:
-        # Spec rule 26, display only: before a lifecycle event names this session's
-        # state, the runtime's own turn record (Claude's session record, Codex's
-        # rollout; the files watched above) as the pane reader reads it. It never
-        # stands for input readiness.
-        try:
-            from terminal_surface import native_turn
-            turn = native_turn(harness, native_pid, sid)
-        except Exception:
-            turn = None
+    # Spec rule 26 and the 11-12 rule 6: the runtime's own turn record, read with the
+    # session above (its files are watched), for the host's own display of this session's
+    # state. Display only: it never stands for input readiness.
+    turn = values.get("native_turn")
+    turn_record = None
+    if harness == "claude" and native_pid:
+        # The record the host reads itself the moment its watched file changes.
+        from fleet.collectors import claude as claude_collector
+        turn_record = os.fspath(Path(claude_collector._home()) / "sessions" / f"{int(native_pid)}.json")
     return {"footer": "".join(row["text"] for row in segments), "segments": segments,
             **({"native_turn": turn} if turn in ("idle", "working", "blocked") else {}),
+            **({"turn_record": turn_record} if turn_record else {}),
             "watch": watched, "lines": [styled(line) for line in lines],
             "questions": board, "context": values.get("ctx_pct"), "native_footer": native_footer,
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
@@ -1138,12 +1150,11 @@ def _backend_operation(request: dict) -> dict:
             panel["status"] = []
             panel["summary"] = []
             panel["session"] = panel["brief"] = []
-            for name in ("head", "git", "selected", "context", "quota", "jobs", "mcp"):
+            for name in ("head", "repo", "git", "selected", "context", "quota", "jobs", "mcp"):
                 panel[name] = [{"text": text, **style_components(key, colors=colors, no_color=no_color)}
                                for text, key in panel[name]]
             panel["styles"] = {key: style_components(key, colors=colors, no_color=no_color)
-                               for key in ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "lvl_g", "lvl_y", "lvl_r",
-                                           "g_spin", "g_work_off", "g_blocked")}
+                               for key in PANEL_STYLE_KEYS}
             panel.update(colors=colors, no_color=no_color)
             return {"ok": True, "panel": panel}
         try:

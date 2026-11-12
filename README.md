@@ -166,9 +166,11 @@ Claude shows the same status area inside the panel as Codex and OpenCode; while
 the panel shows it, Claude's own statusline row below becomes a notice row that
 stays empty unless you owe an answer, a warning applies or news just arrived.
 The full statusline returns whenever the panel is hidden.
-The panel's frame separates Hearting's work from the native conversation and
-takes the color of this session's state word on its top-left (running, waiting;
-idle stays neutral); a failed route colors only its own route box. Its
+The panel's top border names the session as Fleet's row does (state glyph,
+session number, harness, and `⚑` for a steward), and its frame takes that
+state's color the moment the native screen changes (running, waiting; idle stays
+neutral); a failed route colors only its own route box. Below the model and
+context, a thin rule parts this session's title and what it is doing now. Its
 background stays neutral.
 Below the route and any question, the panel always shows the rest of the
 statusline: folder, title, branch and Git state, usage and running jobs, then

@@ -445,7 +445,15 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
     mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
                                     "lvl_r" if mcp.get("failed") else "lvl_g")]
                  if isinstance(mcp, dict) and mcp.get("total") else [])
-    return {"head": session_head(values), "git": session_git(values), "selected": selected,
+    # Spec E9 rule 29: Fleet's session-row head (number, harness, steward mark) goes to the
+    # top border; the repository row keeps the project alone (`hearting/`).
+    head = session_head(values)
+    tag = sanitize_title(str(values.get("tag") or "")).strip()
+    return {"head": head, "repo": [part for part in head if part[1] != "tag"],
+            "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
+            "steward": values.get("steward") is True,
+            "now": sanitize_title(str(values.get("now") or ""))[:320],
+            "git": session_git(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
