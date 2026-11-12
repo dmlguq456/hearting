@@ -81,7 +81,7 @@ BASE_STORE="$(mktemp -d)"; BASE_PROJ="$(mktemp -d)"; WORKDIR="$(mktemp -d)"
 ABSORB_TMP="$(mktemp -d)"
 trap 'rm -rf "$BASE_STORE" "$BASE_PROJ" "$WORKDIR" "$ABSORB_TMP"' EXIT
 export MEM_STORE="$BASE_STORE" MEM_PROJECTS="$BASE_PROJ" MEM_WRITE_EVENTS="$BASE_STORE/write-events.jsonl"
-cd "$WORKDIR"   # non-git → project_key = bare enc_cwd (repo-independent)
+cd "${WORKDIR:?}"   # non-git → project_key = bare enc_cwd (repo-independent)
 
 PKEY="$(PYTHONPATH="$ROOT/tools/memory" python3 -c 'import mem; print(mem.project_key())')"
 
@@ -577,7 +577,7 @@ SYNC_JOURNAL="$SYNC_STORE/write-events.jsonl"
 if [ -n "$(find "$SYNC_STORE" -mindepth 1 -print -quit)" ]; then
   bad "fenced sync store was not empty at allocation"
 fi
-if git -C "$SYNC_STORE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if git -C "${SYNC_STORE:?}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   bad "fenced sync store unexpectedly belongs to a Git worktree"
 else
   ok "fenced sync store is fresh and non-Git"
@@ -595,7 +595,7 @@ printf '%s\n' '---' 'type: lesson' '---' \
 SYNC_BEFORE="$ABSORB_TMP/sync-before"; SYNC_AFTER="$ABSORB_TMP/sync-after"
 runtime_snapshot "$SYNC_BEFORE"
 if (
-  cd "$SYNC_ROOT"
+  cd "${SYNC_ROOT:?}"
   run_checked env MEM_STORE="$SYNC_STORE" MEM_PROJECTS="$SYNC_PROJECTS" MEM_PROFILE="$SYNC_PROFILE" \
     MEM_WRITE_EVENTS="$SYNC_JOURNAL" MEM_DUMP_COMMIT=0 MEM_DUMP_PUSH=0 \
     MEM_CWD="/wrong/repo" MEM_DISTILL=1 MEM_ACTOR=curator \
@@ -645,7 +645,7 @@ PY
   # An explicit `mem migrate --apply --all-projects` remains the recovery path
   # for files a prior enabled period left behind (D-81.3).
   if (
-    cd "$SYNC_ROOT"
+    cd "${SYNC_ROOT:?}"
     run_checked env MEM_STORE="$SYNC_STORE" MEM_PROJECTS="$SYNC_PROJECTS" MEM_PROFILE="$SYNC_PROFILE" \
       MEM_WRITE_EVENTS="$SYNC_JOURNAL" MEM_CWD="/wrong/repo" \
       python3 "$MEM" migrate --apply --all-projects >/dev/null

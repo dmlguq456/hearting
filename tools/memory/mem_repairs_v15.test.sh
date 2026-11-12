@@ -121,7 +121,7 @@ type: lesson
 ---
 absorb path regression: auto-memory record must carry the canonical project key
 EOF
-( cd "$TMP" && MEM_STORE="$STORE2" MEM_PROJECTS="$PROJECTS" \
+( cd "${TMP:?}" && MEM_STORE="$STORE2" MEM_PROJECTS="$PROJECTS" \
     python3 "$MEM" migrate --apply --all-projects >/dev/null 2>&1 )
 DB2="$STORE2/memory.db"
 [ "$(q "$DB2" "SELECT cwd_origin FROM records WHERE source LIKE 'auto-memory:%'")" = "$CANON" ] \

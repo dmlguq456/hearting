@@ -212,8 +212,8 @@ export MEM_STORE="$STORE_3" MEM_PROJECTS="$PROJ_3"
 
 # Sub-case (a): git init + remote origin → "git:github.com/org/repo"
 REPO_3A="$(mktemp -d)"
-git -C "$REPO_3A" init -q 2>/dev/null
-git -C "$REPO_3A" remote add origin "git@github.com:org/repo.git" 2>/dev/null
+git -C "${REPO_3A:?}" init -q 2>/dev/null
+git -C "${REPO_3A:?}" remote add origin "git@github.com:org/repo.git" 2>/dev/null
 pkey_3a=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
 import mem
@@ -225,8 +225,8 @@ print(mem.project_key('$REPO_3A'))
 
 # Sub-case (b): worktree from remote repo → same git: key
 WT_3B="$(mktemp -d)"; rm -rf "$WT_3B"
-git -C "$REPO_3A" commit --allow-empty -m "init" -q 2>/dev/null
-git -C "$REPO_3A" worktree add "$WT_3B" -b wt-branch-3b -q 2>/dev/null
+git -C "${REPO_3A:?}" commit --allow-empty -m "init" -q 2>/dev/null
+git -C "${REPO_3A:?}" worktree add "$WT_3B" -b wt-branch-3b -q 2>/dev/null
 pkey_3b=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
 import mem
@@ -238,8 +238,8 @@ print(mem.project_key('$WT_3B'))
 
 # Sub-case (c): no-remote git, seed=True, mv repo dir, re-resolve → same id: key
 REPO_3C="$(mktemp -d)"
-git -C "$REPO_3C" init -q 2>/dev/null
-git -C "$REPO_3C" commit --allow-empty -m "init" -q 2>/dev/null
+git -C "${REPO_3C:?}" init -q 2>/dev/null
+git -C "${REPO_3C:?}" commit --allow-empty -m "init" -q 2>/dev/null
 pkey_3c_orig=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
 import mem
@@ -270,8 +270,8 @@ print(mem.project_key('$REPO_3C_MOVED'))
 
 # Sub-case (d): no-remote git worktree — worktree key == main key
 REPO_3D="$(mktemp -d)"
-git -C "$REPO_3D" init -q 2>/dev/null
-git -C "$REPO_3D" commit --allow-empty -m "init" -q 2>/dev/null
+git -C "${REPO_3D:?}" init -q 2>/dev/null
+git -C "${REPO_3D:?}" commit --allow-empty -m "init" -q 2>/dev/null
 # Seed the marker on main repo first
 pkey_3d_main=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
@@ -279,7 +279,7 @@ import mem
 print(mem.project_key('$REPO_3D', seed=True))
 " 2>/dev/null)
 WT_3D="$(mktemp -d)"; rm -rf "$WT_3D"
-git -C "$REPO_3D" worktree add "$WT_3D" -b wt-branch-3d -q 2>/dev/null
+git -C "${REPO_3D:?}" worktree add "$WT_3D" -b wt-branch-3d -q 2>/dev/null
 pkey_3d_wt=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
 import mem
@@ -350,9 +350,9 @@ export MEM_STORE="$STORE_4" MEM_PROJECTS="$PROJ_4"
 # Create a real git repo with a remote (so project_key != enc_cwd)
 # Use a path with a dash component to exercise the decoder
 REPO_4="$(mktemp -d)"
-git -C "$REPO_4" init -q 2>/dev/null
-git -C "$REPO_4" remote add origin "git@github.com:test-org/my-repo-4.git" 2>/dev/null
-git -C "$REPO_4" commit --allow-empty -m "init" -q 2>/dev/null
+git -C "${REPO_4:?}" init -q 2>/dev/null
+git -C "${REPO_4:?}" remote add origin "git@github.com:test-org/my-repo-4.git" 2>/dev/null
+git -C "${REPO_4:?}" commit --allow-empty -m "init" -q 2>/dev/null
 
 real_enc=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
@@ -607,9 +607,9 @@ export MEM_STORE="$STORE_7" MEM_PROJECTS="$PROJ_7"
 
 # Create git repo with remote (deterministic project_key)
 REPO_7="$(mktemp -d)"
-git -C "$REPO_7" init -q 2>/dev/null
-git -C "$REPO_7" remote add origin "git@github.com:myorg/cluster-e-test.git" 2>/dev/null
-git -C "$REPO_7" commit --allow-empty -m "init" -q 2>/dev/null
+git -C "${REPO_7:?}" init -q 2>/dev/null
+git -C "${REPO_7:?}" remote add origin "git@github.com:myorg/cluster-e-test.git" 2>/dev/null
+git -C "${REPO_7:?}" commit --allow-empty -m "init" -q 2>/dev/null
 
 PKEY_7=$(python3 -c "
 import sys; sys.path.insert(0, '$ROOT/tools/memory')
@@ -621,7 +621,7 @@ print(mem.project_key('$REPO_7'))
 
 # Create worktree
 WT_7="$(mktemp -d)"; rm -rf "$WT_7"
-git -C "$REPO_7" worktree add "$WT_7" -b wt-branch-7 -q 2>/dev/null
+git -C "${REPO_7:?}" worktree add "$WT_7" -b wt-branch-7 -q 2>/dev/null
 
 # Seed a durable project record with cwd_origin == project_key(REPO_7)
 # using --cwd-origin so it matches the project regardless of current cwd
@@ -630,21 +630,21 @@ python3 "$MEM" add durable thread \
   --cwd-origin "$PKEY_7" >/dev/null 2>&1
 
 # Run mem inject from inside the worktree (cd to WT_7)
-inject_out_7=$(cd "$WT_7" && python3 "$MEM" inject 2>/dev/null)
+inject_out_7=$(cd "${WT_7:?}" && python3 "$MEM" inject 2>/dev/null)
 
 echo "$inject_out_7" | grep -q "cluster e inject recall worktree" \
   && ok "⑦: inject from worktree retrieves project record (same project_key)" \
   || bad "⑦: inject from worktree did not find project record (output: ${inject_out_7:0:200})"
 
 # Run mem recall from worktree
-recall_out_7=$(cd "$WT_7" && python3 "$MEM" recall "cluster e inject recall worktree" --all 2>/dev/null)
+recall_out_7=$(cd "${WT_7:?}" && python3 "$MEM" recall "cluster e inject recall worktree" --all 2>/dev/null)
 
 echo "$recall_out_7" | grep -q "cluster e inject recall worktree" \
   && ok "⑦: recall from worktree retrieves project record" \
   || bad "⑦: recall from worktree did not find project record"
 
 # Assert inject_cleanup_candidates path works from worktree (inject must not fail)
-inject_rc7=$(cd "$WT_7" && python3 "$MEM" inject >/dev/null 2>&1; echo $?)
+inject_rc7=$(cd "${WT_7:?}" && python3 "$MEM" inject >/dev/null 2>&1; echo $?)
 [ "$inject_rc7" = "0" ] \
   && ok "⑦: inject_cleanup_candidates path from worktree exits 0 (no crash)" \
   || bad "⑦: inject from worktree failed (rc=$inject_rc7)"
@@ -655,7 +655,7 @@ python3 "$MEM" add durable thread "${NDP_PREFIX_7}AAA tail" --cwd-origin "$PKEY_
 python3 "$MEM" add durable thread "${NDP_PREFIX_7}BBB tail" --cwd-origin "$PKEY_7" >/dev/null 2>&1
 python3 "$MEM" index --rebuild >/dev/null 2>&1
 
-inject_cleanup_7=$(cd "$WT_7" && python3 "$MEM" inject 2>/dev/null)
+inject_cleanup_7=$(cd "${WT_7:?}" && python3 "$MEM" inject 2>/dev/null)
 # cleanup section should surface (near-dup records exist scoped to PKEY_7)
 # inject uses project_key(cwd) as encc — from WT_7, that should == PKEY_7
 echo "$inject_cleanup_7" | grep -q "Cleanup signals" \

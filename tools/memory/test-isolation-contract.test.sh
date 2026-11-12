@@ -65,4 +65,10 @@ total=$(find "$ROOT/tools/memory" -maxdepth 1 -name '*.test.sh' -type f \
   ! -name 'test-isolation-contract.test.sh' | wc -l | tr -d ' ')
 [ "$count" -eq "$total" ]
 
+# Without a usable TMPDIR the suite stops instead of running on the caller's roots.
+stopped_rc=0
+stopped_out=$( (TMPDIR="$ROOT_FIX/missing/tmp"; hearting_test_isolate; echo continued) 2>/dev/null) || stopped_rc=$?
+[ "$stopped_rc" -eq 70 ]
+[ -z "$stopped_out" ]
+
 printf '%s\n' 'test isolation contract: PASS'

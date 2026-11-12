@@ -428,12 +428,24 @@ class DirectRunEntersIsolation(unittest.TestCase):
     def test_a_caller_chosen_home_is_kept(self):
         probe = self.root / "probe.py"
         probe.write_text("import json, os\nprint(json.dumps(dict(os.environ)))\n", encoding="utf-8")
-        env = dict(self.caller, HOME=str(self.root / "fixture-home"))
+        (self.root / "fixture-tmp").mkdir()
+        env = dict(self.caller, HOME=str(self.root / "fixture-home"), TMPDIR=str(self.root / "fixture-tmp"),
+                   TMUX_PANE="%0")
         result = self._run([sys.executable, str(RUNNER), "--direct-run", sys.executable, str(probe)], env)
         self.assertEqual(result.returncode, 0, result.stderr)
         seen = json.loads(result.stdout)
         self.assertEqual(seen["HOME"], str(self.root / "fixture-home"))
         self.assertEqual(seen["HEARTING_TEST_ISOLATED"], "caller-home")
+        self.assertEqual(seen["HEARTING_REQUIRE_PIDNS"], "1")
+        self.assertFalse([k for k in seen if k.startswith(("AGENT_", "HERDR_")) or k in ("TMUX", "TMUX_PANE")])
+
+    def test_a_caller_chosen_home_with_a_missing_tmpdir_is_refused(self):
+        marker = self.root / "ran"
+        env = dict(self.caller, HOME=str(self.root / "fixture-home"))  # TMPDIR names a missing dir
+        result = self._run([sys.executable, str(RUNNER), "--direct-run", "touch", str(marker)], env)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("direct-test-refused:", result.stderr)
+        self.assertFalse(marker.exists())
 
     def test_no_private_root_refuses_in_one_line_and_runs_nothing(self):
         mod = load_runner_module()
