@@ -1459,6 +1459,74 @@ class FleetQuestionBackendIntegrationTests(unittest.TestCase):
             self.assertNotIn("NOT-A-NATIVE-ID-SENTINEL", json.dumps(rows))
         self.assertFalse(self.replies)
 
+    def _open_loading_row(self):
+        from fleet.explorer.state import NavState, reduce
+        selected, effects = reduce(NavState(view="QUESTIONS"), {
+            "type": "click", "action": ("question.select", self.ref["id"], self.ref)})
+        self.assertEqual(selected.question_overlay["state"], "loading")
+        return selected, effects[0]
+
+    def test_finished_read_survives_an_empty_follow_up_run(self):
+        """2026-11-11: an opened question stayed on "loading" for good.
+
+        The pump hands over only its latest value. A follow-up run that found
+        the action queue empty published ``None`` right after the read, and the
+        read was never adopted; reopening a "loading" row issues no new read.
+        """
+        from collections import deque
+        from fleet import render
+
+        selected, effect = self._open_loading_row()
+        pump = mock.Mock(running=False)
+        pump.poll.return_value = (2, None)  # the empty follow-up won the handover
+        with mock.patch.object(render, "_EXPLORER_STATE", selected), \
+             mock.patch.object(render, "_EXPLORER_MODEL", SimpleNamespace(
+                 questions=({"id": self.item_id, "ref": self.ref},))), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_QUEUE", deque([effect])), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_RESULTS", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_PUMP", pump), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_GENERATION", 0), \
+             mock.patch.object(render, "_EXPLORER_REPLAY_ACTIVE", False), \
+             mock.patch.dict(os.environ, {"FLEET_DEMO": ""}):
+            render._explorer_question_worker()
+            self.assertIsNone(render._explorer_question_worker())  # empty follow-up
+            render._explorer_question_pump_tick()
+            overlay = render._EXPLORER_STATE.question_overlay
+        self.assertEqual(overlay["state"], "open")
+        self.assertEqual(overlay["detail"]["request_id"], self.request_id)
+        self.assertFalse(self.replies)
+
+    def test_unread_question_ends_on_the_native_prompt_status_and_adopts_a_late_read(self):
+        from collections import deque
+        from fleet import render
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        selected, effect = self._open_loading_row()
+        pump = mock.Mock(running=True)
+        pump.poll.return_value = None
+        clock = [100.0]
+        with mock.patch.object(render, "_EXPLORER_STATE", selected), \
+             mock.patch.object(render, "_EXPLORER_MODEL", SimpleNamespace(
+                 questions=({"id": self.item_id, "ref": self.ref},))), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_QUEUE", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_RESULTS", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_PUMP", pump), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_LOADING", (None, 0.0)), \
+             mock.patch.object(render.time, "monotonic", side_effect=lambda: clock[0]):
+            render._explorer_question_pump_tick()
+            clock[0] += render.QUESTION_READ_WAIT_S - 1
+            render._explorer_question_pump_tick()
+            self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "loading")
+            clock[0] += 2
+            render._explorer_question_pump_tick()
+            overlay = render._EXPLORER_STATE.question_overlay
+            self.assertEqual(overlay["state"], "unknown")
+            self.assertIn("native prompt", overlay["status"])
+            render._explorer_accept_question_result(
+                {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)})
+            self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "open")
+        self.assertFalse(self.replies)
+
     def test_delayed_native_status_refreshes_until_terminal_without_resubmitting(self):
         from collections import deque
         from fleet import render
