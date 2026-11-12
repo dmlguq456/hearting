@@ -15,6 +15,7 @@ codex/opencode headless dispatch appears ONLY via jobs.log (their argv has no /a
 live_stage() derives the real pipeline stage from plans/*_<slug>/ artifacts (ported from
 statusline.sh:131-171) so the label reflects live progress, not the static argv.
 """
+import bisect
 import contextlib
 from contextvars import ContextVar
 import functools
@@ -942,30 +943,67 @@ def _build_registry_derived_index(rows):
     })
 
 
+def _row_order(row):
+    return row[0]
+
+
+def _carried_segment_rows(old_rows, old_segments, new_segments):
+    """Converted rows of every new segment that is the same object as an old one.
+
+    A segment object is immutable and owns a fixed range of physical orders, so
+    the rows already converted for that range are the rows of the same segment
+    now, whatever else the new generation changed (a rewrite included).
+    """
+    if not old_rows or not old_segments:
+        return {}
+    spans = {}
+    start = 0
+    for segment in old_segments:
+        spans[id(segment)] = (start, segment.order_end)
+        start = segment.order_end
+    carried = {}
+    for segment in new_segments:
+        span = spans.get(id(segment))
+        if span is not None:
+            low = bisect.bisect_left(old_rows, span[0], key=_row_order)
+            high = bisect.bisect_left(old_rows, span[1], key=_row_order)
+            carried[id(segment)] = old_rows[low:high]
+    return carried
+
+
 def _parse_registry_view(path, view, generation):
     """Adapt already parsed immutable records without splitting the same rows again."""
     absolute = os.path.abspath(os.fspath(path))
     with _PARSED_REGISTRY_CACHE_LOCK:
         previous = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
-        old_rows = (_PARSED_REGISTRY_ROWS.get(previous, ())
-                    if _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources() else ())
+        current_sources = _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources()
+        old_rows = _PARSED_REGISTRY_ROWS.get(previous, ()) if current_sources else ()
+        old_segments = _PARSED_REGISTRY_SEGMENTS.get(previous) if current_sources else None
+    carried = _carried_segment_rows(old_rows, old_segments, view._segments)
     # A replacement carries a new file generation; exact fields still prove
     # an unchanged row conversion, independently of its new physical order.
-    by_fields = {row[1]: row for row in old_rows}
+    by_fields = None
     rows = []
-    for record in view.records:
-        old = (by_fields.get(record.fields)
-               if type(record) is _dispatch_registry_cache.RegistryRecord else None)
-        if old is not None and old[0] == record.order:
-            rows.append(old)
+    for segment in view._segments:
+        held = carried.get(id(segment))
+        if held is not None:
+            rows.extend(held)
             continue
-        if old is None:
-            metadata = _registry_record_metadata(record)
-            if not isinstance(metadata, RegistryMetadata):
-                metadata = MappingProxyType(metadata)
-        else:
-            metadata = old[2]
-        rows.append((record.order, record.fields, metadata))
+        if by_fields is None:
+            by_fields = {row[1]: row for row in old_rows}
+        for record in segment.records:
+            old = (by_fields.get(record.fields)
+                   if type(record) is _dispatch_registry_cache.RegistryRecord else None)
+            if old is not None and old[0] == record.order:
+                rows.append(old)
+                continue
+            if old is None:
+                metadata = _registry_record_metadata(record)
+                if not isinstance(metadata, RegistryMetadata):
+                    metadata = MappingProxyType(metadata)
+            else:
+                metadata = old[2]
+            rows.append((record.order, record.fields, metadata))
     complete_count = view.line_count - int(view.has_partial_tail)
     malformed = sum(1 for segment in view._segments
                     for _order, line in segment.malformed_lines if line.strip())
@@ -1005,6 +1043,20 @@ def parsed_registry_rows(path):
     generation = None
     view = None
     if lines is None:
+        # Outside a pass the shared view is still the one parse of this file: a
+        # direct caller adapts it like a pass does instead of splitting the text again.
+        try:
+            shared = _dispatch_registry_cache.registry_view(Path(path))
+        except (OSError, ValueError):
+            shared = None
+        if shared is not None:
+            shared_generation = tuple(shared.signature)
+            found, cached = _cached_registry_rows(path, shared_generation)
+            if found:
+                return cached
+            if (shared._prefix_reuse_eligible and not shared.has_partial_tail
+                    and not shared.has_invalid_utf8):
+                return _parse_registry_view(path, shared, shared_generation)
         try:
             source = Path(path)
             before = source.stat()

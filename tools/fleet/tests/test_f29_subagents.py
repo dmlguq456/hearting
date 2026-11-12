@@ -632,7 +632,11 @@ class CodexSubagentTest(unittest.TestCase):
             replacement = os.path.join(tmp, "replacement.jsonl")
             self._lifecycle(replacement, [("task_started", "replacement")])
             os.replace(replacement, path)
-            self.assertIsNone(codex._latest_task_lifecycle(path))
+            # The replaced file is read again from its start in the same call.
+            self.assertEqual(
+                codex._latest_task_lifecycle(path),
+                ("task_started", "replacement"),
+            )
             self.assertEqual(
                 codex._latest_task_lifecycle(path),
                 ("task_started", "replacement"),

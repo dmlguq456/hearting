@@ -8,19 +8,26 @@ one input the way a real writer does, then compares
 
 * WARM  - one long-lived process that keeps all of its caches between steps, and
 * FRESH - a new subprocess with empty caches (and no disk cache), same fixture,
-          same injected clock, same function.
+          same injected clock, same function, and
+* RESUME - a new subprocess that finds the disk cursor the warm process left behind
+          (E24..E27 only), same fixture, same injected clock.
+
+WARM also cuts the registry into small segments (``_PARSE_CHUNK_LINES``) while FRESH
+uses the default, so "a different way of splitting the work gives the same answer"
+is compared on every event.
 
 The comparison is exact except for the small allow-list ``ALLOWED``.  There is
 no timing assertion in this file; speed is measured by
 ``tools/measure_e2e_latency.py`` and is never a gate here.
 
-A failure message starts with the event id (``E01``..``E20``) and the JSON
+A failure message starts with the event id (``E01``..``E27``) and the JSON
 pointer of the first difference, so a falsifier run can tell which event caught
 it.  Weakening a scenario or widening ``ALLOWED`` to make a stale value pass is
 the thing this file exists to prevent.
 """
 from __future__ import annotations
 
+import collections.abc
 import contextlib
 import datetime as _datetime
 import hashlib
@@ -48,6 +55,7 @@ for _entry in (ROOT, ROOT / "utilities", ROOT / "tools"):
 # ---------------------------------------------------------------------------
 
 CLOCK_BASE = 1_800_000_000.0          # 2027-01-15T08:00:00Z, later than any real mtime
+WARM_CHUNK_LINES = 3                  # the warm process cuts the registry into 3-row segments
 FLEET_PACKAGES = ("fleet", "tools.fleet")   # the producer imports the second spelling
 
 # Modules that bind the wall clock by name.  ``.now()`` / ``strftime`` readers
@@ -127,6 +135,9 @@ class FixtureClock:
 # ``normalize`` below (fixture roots), not listed here.
 
 ALLOWED: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"^/_meta(/|$)"),
+     "how the computing process obtained its values (for example how many Codex cursors it "
+     "continued from disk); it is read by the self-checks of E24..E27, never an observed value"),
     (re.compile(r"^/o3_fleet/(fast_first|full)/observations/[^/]+/(last_success_at|age)$"),
      "health bookkeeping stamped with time.monotonic(): relative to the process start "
      "(a warm process by definition has an older first success than a new one); "
@@ -489,12 +500,13 @@ def _expand(value, work: str):
 
 
 @contextlib.contextmanager
-def hermetic(fixture_root, scratch, clock: FixtureClock):
+def hermetic(fixture_root, scratch, clock: FixtureClock, cache_home=None):
     """Fixture-only environment, and the patches that turn live inputs into fixture data.
 
     The process census and liveness verdict come from ``liveness.json`` on every
     call, so a change there is an input like any other.  No cache is touched.
-    ``scratch`` holds HOME/XDG state of one computing process.
+    ``scratch`` holds HOME/XDG state of one computing process; ``cache_home`` names
+    another process's XDG cache (a RESUME computation reads what WARM left there).
     """
     scratch = Path(scratch)
     root = Path(fixture_root)
@@ -517,7 +529,8 @@ def hermetic(fixture_root, scratch, clock: FixtureClock):
 
     env = {
         "HOME": str(scratch / "home"), "XDG_STATE_HOME": str(state_home),
-        "XDG_DATA_HOME": str(scratch / "data"), "XDG_CACHE_HOME": str(scratch / "cache"),
+        "XDG_DATA_HOME": str(scratch / "data"),
+        "XDG_CACHE_HOME": str(cache_home if cache_home is not None else scratch / "cache"),
         "TMPDIR": str(scratch / "tmp"), "AGENT_DISPATCH_JOBS": str(fx.jobs),
         "AGENT_RESOURCE_RUN_INDEX": str(scratch / "resource-runs.index.json"),
         "AGENT_HOME": str(ROOT), "CLAUDE_CONFIG_DIR": str(fx.claude),
@@ -658,23 +671,40 @@ def place_demand(fixture_root, scratch, value: dict, when: float) -> None:
         touch(path, when - 1)
 
 
-def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict | None = None) -> dict:
-    """O1..O4 for the fixture as it is now: a pure function of fixture and clock."""
+def _codex_disk_resumes() -> int:
+    module = sys.modules.get("fleet.collectors.codex")
+    return int(getattr(module, "_LIFECYCLE_DISK_RESUMES", 0)) if module is not None else 0
+
+
+def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict | None = None,
+            cache_home=None) -> dict:
+    """O1..O4 for the fixture as it is now: a pure function of fixture and clock.
+
+    ``mode``: ``warm`` is the long-lived process (small registry segments);
+    ``fresh`` starts from nothing; ``resume`` starts from nothing except the parse
+    cache directory ``cache_home`` that the warm process wrote.
+    """
     clock = FixtureClock(now)
-    if mode == "fresh" and demand is not None:
+    if mode != "warm" and demand is not None:
         place_demand(fixture_root, scratch, demand, now)
-    with hermetic(fixture_root, scratch, clock) as fx:
+    with hermetic(fixture_root, scratch, clock, cache_home) as fx:
         import dispatch_capacity_evidence as capacity
-        # A fresh process must not borrow the warm side's disk cache either.
+        import dispatch_registry_cache as registry_cache
+        # Only the warm side's disk cache of capacity evidence is kept.
         disk = capacity._DISK_CACHE
-        capacity._DISK_CACHE = disk and mode != "fresh"
+        capacity._DISK_CACHE = disk and mode == "warm"
+        chunk = WARM_CHUNK_LINES if mode == "warm" else registry_cache._PARSE_CHUNK_LINES
+        resumed_before = _codex_disk_resumes()
         try:
-            return {
-                "o1_registry": observe_registry(fx, capacity, clock),
-                "o2_streams": observe_streams(fx),
-                "o3_fleet": observe_fleet(Path(scratch)),
-                "o4_producer": observe_producer(),
-            }
+            with mock.patch.object(registry_cache, "_PARSE_CHUNK_LINES", chunk):
+                observed = {
+                    "o1_registry": observe_registry(fx, capacity, clock),
+                    "o2_streams": observe_streams(fx),
+                    "o3_fleet": observe_fleet(Path(scratch)),
+                    "o4_producer": observe_producer(),
+                }
+            observed["_meta"] = {"lifecycle_disk_resumes": _codex_disk_resumes() - resumed_before}
+            return observed
         finally:
             capacity._DISK_CACHE = disk
 
@@ -682,7 +712,9 @@ def compute(fixture_root, scratch, now: float, mode: str = "warm", demand: dict 
 def _plain(value):
     if hasattr(value, "_asdict"):
         value = value._asdict()
-    if isinstance(value, dict):
+    if isinstance(value, (dict, types.MappingProxyType, collections.abc.Mapping)):
+        # Whatever mapping type holds the metadata (a dict, a mappingproxy, the Fleet's
+        # RegistryMetadata), its items are what is observed.
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (set, frozenset)):
         return sorted((_plain(item) for item in value), key=_canonical)
@@ -790,7 +822,9 @@ def observe_producer() -> dict:
 
 def main_child(argv) -> int:
     fixture_root, scratch, now, demand = argv[0], argv[1], float(argv[2]), json.loads(argv[3])
-    sys.stdout.write(_canonical(compute(fixture_root, scratch, now, "fresh", demand)))
+    mode = argv[4] if len(argv) > 4 else "fresh"
+    cache_home = argv[5] if len(argv) > 5 else None
+    sys.stdout.write(_canonical(compute(fixture_root, scratch, now, mode, demand, cache_home)))
     return 0
 
 
@@ -818,17 +852,9 @@ def pointer_token(key) -> str:
     return str(key).replace("~", "~0").replace("/", "~1").replace("\x00", "\\0")
 
 
-def first_difference(left, right, pointer: str = "", tolerate=()):
-    """``(pointer, left, right)`` of the first unallowed difference, else None.
-
-    ``tolerate`` is a per-step list of patterns for the one documented exception
-    (see ``ONE_PASS_UNKNOWN``): at those pointers the left side may say "unknown"
-    (None) where the right side has a value; a different value is never tolerated.
-    """
+def first_difference(left, right, pointer: str = ""):
+    """``(pointer, left, right)`` of the first unallowed difference, else None."""
     if any(pattern.search(pointer) for pattern, _reason in ALLOWED):
-        return None
-    if (tolerate and left is None and right is not None
-            and any(pattern.search(pointer) for pattern in tolerate)):
         return None
     if type(left) is not type(right):
         return pointer or "/", left, right
@@ -840,8 +866,7 @@ def first_difference(left, right, pointer: str = "", tolerate=()):
                 if not any(p.search(found[0]) for p, _r in ALLOWED):
                     return found
                 continue
-            found = first_difference(left[key], right[key], pointer + "/" + pointer_token(key),
-                                     tolerate)
+            found = first_difference(left[key], right[key], pointer + "/" + pointer_token(key))
             if found:
                 return found
         return None
@@ -853,7 +878,7 @@ def first_difference(left, right, pointer: str = "", tolerate=()):
                     return (where, left[index] if index < len(left) else "<absent>",
                             right[index] if index < len(right) else "<absent>")
                 continue
-            found = first_difference(left[index], right[index], where, tolerate)
+            found = first_difference(left[index], right[index], where)
             if found:
                 return found
         return None
@@ -894,6 +919,21 @@ class Lab:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+    def resume(self, fixture_root, now: float, demand: dict, cache_home) -> dict:
+        """A new process that starts from the parse cache the warm process wrote."""
+        scratch = Path(tempfile.mkdtemp(prefix="resume-", dir=str(self.base)))
+        try:
+            done = subprocess.run(
+                [sys.executable, str(SELF), "--compute", str(fixture_root), str(scratch),
+                 repr(now), json.dumps(demand), "resume", str(cache_home)],
+                capture_output=True, text=True, env=self.child_env(), timeout=300, cwd=str(self.base))
+            if done.returncode != 0:
+                raise AssertionError("resume child failed (%d): %s" % (done.returncode, done.stderr[-1500:]))
+            return normalize(json.loads(done.stdout), ((str(fixture_root), "$FX"), (str(scratch), "$SCRATCH")))
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
 class Run:
     """The state of one event: its fixture, its clock, its warm process scratch."""
 
@@ -921,8 +961,12 @@ class Run:
     def fresh(self) -> dict:
         return self.lab.fresh(self.fx.root, self.clock.now, self.demand)
 
-    def mismatch(self, step: str, warm: dict, fresh: dict, tolerate=()) -> str | None:
-        found = first_difference(warm, fresh, tolerate=tolerate)
+    def resume(self) -> dict:
+        return self.lab.resume(self.fx.root, self.clock.now, self.demand,
+                               self.warm_scratch / "cache")
+
+    def mismatch(self, step: str, warm: dict, fresh: dict) -> str | None:
+        found = first_difference(warm, fresh)
         if found is None:
             return None
         pointer, left, right = found
@@ -941,24 +985,16 @@ def changed(before: dict, after: dict) -> bool:
 # writer wherever one exists), after which warm and fresh must agree, the fresh
 # answer must have moved (self-check B), and one unchanged pass must still agree.
 
-# The one documented exception.  ``codex._latest_task_lifecycle`` says, in its own
-# docstring, that after rotation or truncation of a rollout it "removes the cursor and
-# returns no lifecycle for that observation; a later clean call may initialize afresh".
-# So for exactly that observation the answer is unknown (None) where a fresh process
-# knows the value.  The tolerance is narrow on purpose: only these pointers, only None
-# against a value, only on the first pass after a truncate/rotate step - the unchanged
-# pass that follows must be byte-equal.  Whether "unknown for one pass" is acceptable or
-# the reader should re-initialize in the same call is an owner decision (see the report).
-ONE_PASS_UNKNOWN = (
-    re.compile(r"^/o2_streams/codex_lifecycle(_exact)?$"),
-    re.compile(r"^/o3_fleet/(fast_first|full)/sessions/\d+/task_lifecycle$"),
-)
-
-
 class Step:
-    def __init__(self, label, mutate, *, clock_only=False, tolerate=()):
+    """One mutation. ``resume`` (E24..E27): also start a new process that finds the
+    Codex cursor the warm process left on disk; ``"used"`` means it must have
+    continued from it, ``"rejected"`` that it must have read the file from the start.
+    ``prefix`` (E21..E23): what the warm registry reader must have reused, so a
+    replacement event cannot pass without exercising the reuse it is about."""
+
+    def __init__(self, label, mutate, *, clock_only=False, resume=None, prefix=None):
         self.label, self.mutate, self.clock_only = label, mutate, clock_only
-        self.tolerate = tuple(tolerate)
+        self.resume, self.prefix = resume, prefix
 
 
 def _new_open_row(fx: Fixture, name: str, **extra) -> str:
@@ -1149,6 +1185,60 @@ def e20c(run):  # rotated: renamed away, a new log with another history under th
     run.fx.write_stream(path, rows, run.clock.now - 1)
 
 
+def e21(run):  # a replacement that keeps the leading rows: one middle row changes, one is added
+    rows = run.fx.current_rows()
+    rows[9] = rows[9].replace("fixture-history", "fixture-history-edited", 1)
+    rows.append(_new_open_row(run.fx, "after-middle-edit"))
+    run.fx.replace_registry(rows)
+
+
+def e22(run):  # the first rows leave (an archive): every later row moves up
+    run.fx.replace_registry(run.fx.current_rows()[2:] + [_new_open_row(run.fx, "after-archive")])
+
+
+def e23(run):  # one middle row is deleted and a row is added: later rows keep their text, not their order
+    rows = run.fx.current_rows()
+    del rows[8]
+    rows.append(_new_open_row(run.fx, "after-delete"))
+    run.fx.replace_registry(rows)
+
+
+def _append_rollout(run, rows: list[dict]) -> None:
+    path = run.fx.codex_rollout()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(run.fx.jsonl(rows))
+    touch(path, run.clock.now - 1)
+
+
+def e24(run):  # codex lifecycle log appended after the cursor was left on disk
+    _append_rollout(run, run.fx.codex_rows(turns=3, complete_last=False)[2:])
+
+
+def e25(run):  # bytes just before the saved offset change in place, then the log grows
+    path = run.fx.codex_rollout()
+    raw = path.read_bytes()
+    assert b"turn-0" in raw
+    path.write_bytes(raw.replace(b"turn-0", b"turn-X"))
+    _append_rollout(run, [{"type": "event_msg", "timestamp": iso(run.clock.now - 5),
+                           "payload": {"type": "task_complete", "turn_id": "turn-X"}}])
+
+
+def e26(run):  # rotated: another file (new inode) under the same name, longer than the saved offset
+    path = run.fx.codex_rollout()
+    os.rename(path, path.with_name(path.name + ".old"))
+    run.fx.write_stream(path, run.fx.codex_rows(turns=4, complete_last=True), run.clock.now - 1)
+
+
+def e27(run):  # truncated in place and written again, longer than the saved offset, other turns
+    rows = run.fx.codex_rows(turns=1)[:1]
+    for turn in range(5):
+        rows.append({"type": "event_msg", "timestamp": iso(CLOCK_BASE - 800 + turn),
+                     "payload": {"type": "task_started", "turn_id": "other-%d" % turn}})
+        rows.append({"type": "event_msg", "timestamp": iso(CLOCK_BASE - 790 + turn),
+                     "payload": {"type": "task_complete", "turn_id": "other-%d" % turn}})
+    run.fx.write_stream(run.fx.codex_rollout(), rows, run.clock.now - 1)
+
+
 EVENTS = [
     ("E01", "registry append: a new attempt row", [Step("append", e01)]),
     ("E02", "the same attempt appended several times", [Step("append x3", e02)]),
@@ -1175,8 +1265,21 @@ EVENTS = [
     ("E18", "only the file a session-chain node names changes", [Step("chain node file", e18)]),
     ("E19", "external write into a directory the warm pass created", [Step("demand", e19)]),
     ("E20", "codex lifecycle log: append, truncate, rotate",
-     [Step("append", e20a), Step("truncate", e20b, tolerate=ONE_PASS_UNKNOWN),
-      Step("rotate", e20c, tolerate=ONE_PASS_UNKNOWN)]),
+     [Step("append", e20a), Step("truncate", e20b), Step("rotate", e20c)]),
+    ("E21", "whole registry replaced, leading rows kept, a middle row changed",
+     [Step("replace", e21, prefix="reuse")]),
+    ("E22", "whole registry replaced, the first rows removed (order shifts)",
+     [Step("replace", e22, prefix="lines")]),
+    ("E23", "whole registry replaced, a middle row deleted and a row added",
+     [Step("replace", e23, prefix="reuse")]),
+    ("E24", "a new process continues the codex cursor from disk, the log grew",
+     [Step("append after saved cursor", e24, resume="used")]),
+    ("E25", "a new process finds the bytes before the saved offset changed",
+     [Step("boundary rewritten, then appended", e25, resume="rejected")]),
+    ("E26", "a new process finds the log rotated (new inode)",
+     [Step("rotate", e26, resume="rejected")]),
+    ("E27", "a new process finds the log truncated and written longer",
+     [Step("truncate and rewrite", e27, resume="rejected")]),
 ]
 
 
@@ -1251,11 +1354,33 @@ class IncrementalEquivalenceTests(unittest.TestCase):
         return run, fresh
 
     def check_step(self, run: Run, step: Step, before: dict) -> dict:
+        import dispatch_registry_cache as registry_cache
         step.mutate(run)
         fresh = run.fresh()
+        if step.resume:
+            # Before the warm pass: it must not touch the cursor the new process reads.
+            resumed = run.resume()
+            problem = run.mismatch(step.label + " (resumed process)", resumed, fresh)
+            self.assertIsNone(problem, problem)
+            used = resumed["_meta"]["lifecycle_disk_resumes"]
+            if step.resume == "used":
+                self.assertGreaterEqual(
+                    used, 1, "%s: the new process did not continue from the disk cursor, so "
+                    "this event tested nothing" % run.eid)
+            else:
+                self.assertEqual(
+                    used, 0, "%s: the new process continued from a disk cursor that no longer "
+                    "matched the file" % run.eid)
+        metrics = registry_cache.metrics_snapshot()
         warm = run.warm()
-        problem = run.mismatch(step.label, warm, fresh, step.tolerate)
+        problem = run.mismatch(step.label, warm, fresh)
         self.assertIsNone(problem, problem)
+        if step.prefix:
+            after = registry_cache.metrics_snapshot()
+            key = "prefix_reuses" if step.prefix == "reuse" else "line_parse_reuses"
+            self.assertGreater(
+                after[key], metrics[key], "%s: the warm reader did not reuse anything across the "
+                "replacement (%s), so this event tested nothing" % (run.eid, key))
         # Self-check B: an event that cannot move the answer tests nothing.
         self.assertTrue(
             changed(before, fresh),
