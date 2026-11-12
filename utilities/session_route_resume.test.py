@@ -325,6 +325,25 @@ class ReopenHookTest(_Base):
         with mock.patch.object(srr, "request", side_effect=RuntimeError("boom")):
             self.assertFalse(srr.reopened("claude", SID))
 
+    def test_opencode_resume_report_requests_takeover(self):
+        # OpenCode's start hook names no source: its reopening is the selected TUI's resume report.
+        child = subprocess.Popen(["bash", "-c", f"exec -a opencode {sys.executable} -c 'import time; time.sleep(30)' -s {SID}"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(child.wait, 5)
+        self.addCleanup(child.kill)
+        end = time.monotonic() + 5
+        while time.monotonic() < end and Path(f"/proc/{child.pid}/cmdline").read_bytes().split(b"\0")[0] != b"opencode":
+            time.sleep(.02)
+        start = Path(f"/proc/{child.pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+        from fleet.collectors import opencode
+        with mock.patch("os.getppid", return_value=child.pid), \
+             mock.patch.object(opencode, "session_of_process", return_value=(SID, "opencode-tui-selection")), \
+             mock.patch.object(srr, "reopened") as reopened, \
+             mock.patch("session_resume.register", return_value=None) as register:
+            session_resume.record_opencode_resume({"harness": "opencode", "pid": child.pid, "start": start, "sid": SID})
+        reopened.assert_called_once_with("opencode", SID)
+        register.assert_called_once()
+
     def test_register_alone_requests_nothing(self):
         # `register` is also the steward's periodic pass: it never starts a route.
         self.record_start("claude", "resume")

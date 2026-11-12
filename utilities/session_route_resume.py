@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """A reopened session takes over the routes it left running, with no hand command.
 
-The SessionStart hook of a reopened session (`session_tidy.run_hook`, `start` with
-source `resume`) calls `reopened` once; the steward's periodic pass does not. A
+The reopening itself calls `reopened`: the SessionStart hook (`session_tidy.run_hook`,
+`start` with source `resume`), or OpenCode's selected-TUI resume report
+(`session_resume.record_opencode_resume`); the steward's periodic pass does not. A
 detached `run` then does what a person did by hand for each route this session
 launched whose work is still running: `capability-route.py start --route <file>`.
 A route that was only composed, or whose owner already ended, stays for a person's
@@ -128,7 +129,7 @@ def child_env(harness, sid, env=None):
 
 
 def reopened(harness, sid, *, env=None):
-    """The SessionStart(resume) hook's one call. Never raises.
+    """The reopening's one call (SessionStart resume, or OpenCode's resume report). Never raises.
 
     `env` is the hook's marker environment: a dispatched worker takes over nothing.
     """

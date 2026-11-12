@@ -101,8 +101,9 @@ rather than a signal from the installer, so no install path has to find live
 windows; where the link's directory cannot be watched, only the idle check
 remains.
 A session reopened under the same native session ID (Claude `--resume`, Codex
-`resume`, OpenCode `-s`) takes back the routes it left running. Its SessionStart
-hook (never the steward's periodic resume pass) starts, once per resume, a detached
+`resume`, OpenCode `-s`) takes back the routes it left running. The reopening itself
+(the SessionStart hook with source `resume`, or OpenCode's selected-TUI resume report;
+never the steward's periodic resume pass) starts, once per resume, a detached
 `utilities/session_route_resume.py` that runs `capability-route.py start --route`
 for every route this session's route-chain ledger names whose file exists, has no
 outcome, and has work this session launched still open in the dispatch registry:
