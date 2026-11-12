@@ -960,6 +960,12 @@ def _carried_segment_rows(old_rows, old_segments, new_segments):
     A segment object is immutable and owns a fixed range of physical orders, so
     the rows already converted for that range are the rows of the same segment
     now, whatever else the new generation changed (a rewrite included).
+
+    The key is ``id(segment)``, which names one object only while the old segments are
+    held: ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as ``old_rows`` is kept.
+    A segment a rewrite recognised again (``_RegistrySegment.resynced``) is a new object over
+    the same rows, so it is not carried here; the row conversion is carried for it by the
+    ``by_fields`` lookup of ``_parse_registry_view`` (the same fields at the same order).
     """
     if not old_rows or not old_segments:
         return {}
@@ -2309,8 +2315,10 @@ _CLAUDE_SUBAGENT_SCAN_BYTES = 8 * 1024 * 1024
 _CLAUDE_STREAM_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _CODEX_ATTEMPT_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _OPENCODE_ATTEMPT_CACHE = {}    # path -> ((mtime_ns, size, dev, ino), parsed)
-# Every registry attempt is re-observed each tick, so the FIFO bound must exceed the
-# attempt count; a smaller bound evicts each entry before its next hit.
+# The attempt logs a pass reads are those of the jobs ``_job_selection`` selects (an open or live
+# attempt, a recent one, a dead owner inside its window), not every registry attempt: a finished
+# attempt older than that is no job at all. The FIFO bound only has to exceed that selected set, so
+# a smaller bound would evict an entry before its next hit; 4,096 is well above it and unchanged.
 _ATTEMPT_PARSE_CACHE_LIMIT = 4096
 
 

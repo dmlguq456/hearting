@@ -770,6 +770,10 @@ class RegistryView:
                         content_sha256=hashlib.sha256(piece).digest()))
                     _METRICS["segment_rebuilds"] += 1
                     order += len(rows)
+                # A finished view holds at most _MAX_SEGMENTS segments: the one that makes it
+                # _MAX_SEGMENTS + 1 (257) exists only here, and is merged at once with the
+                # _COMPACT_SEGMENTS before it. A resynced rewrite keeps the old cuts, so it does
+                # not change that count.
                 if len(segments) > _MAX_SEGMENTS:
                     compacted = _RegistrySegment.compact(tuple(segments[-_COMPACT_SEGMENTS:]))
                     segments = segments[:-_COMPACT_SEGMENTS] + [compacted]
@@ -826,6 +830,7 @@ class RegistryView:
                 appended_segment = _RegistrySegment(complete, order_base, byte_end=byte_end,
                                                     prefix_sha256=prefix_digest, content_sha256=own)
                 new_segments.append(appended_segment)
+            # Same bound as in the full read above: 257 segments exist only until this merge.
             if len(new_segments) > _MAX_SEGMENTS:
                 compacted = _RegistrySegment.compact(tuple(new_segments[-_COMPACT_SEGMENTS:]))
                 new_segments = new_segments[:-_COMPACT_SEGMENTS] + [compacted]
