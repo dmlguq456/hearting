@@ -938,28 +938,42 @@ class FailOldScenario(SessionUpgradeScenario):
         if not before["host_pid"] or not before["native_pid"]:
             run.note("no live session-shell binding before the install")
             return "inconclusive"
-        ev["install_b"] = install_release_b(run)
-        if ev["install_b"]["exit"] != 0:
-            run.note("release B activation failed")
-            return "inconclusive"
-        old, seen = before["host_pid"], set()
-        end = time.monotonic() + SWITCH_WAIT
-        while time.monotonic() < end:
-            hosts = host_processes(run.home.env)
-            seen.update(hosts)
-            if len(seen) > 1 and hosts == [old]:
-                break               # a successor came and went
-            time.sleep(0.1)
-        time.sleep(4)               # past the 2 s the owner gives a retired host
+        # The switch can start and end while the activation is still running: sample host
+        # processes from before the install until the end.
+        old, seen, sampling = before["host_pid"], {}, threading.Event()
+
+        def sample():
+            while not sampling.is_set():
+                at = time.monotonic()
+                for pid in host_processes(run.home.env):
+                    seen.setdefault(pid, [at, at])[1] = at
+                sampling.wait(0.05)
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+        try:
+            ev["install_b"] = install_release_b(run)
+            if ev["install_b"]["exit"] != 0:
+                run.note("release B activation failed")
+                return "inconclusive"
+            end = time.monotonic() + SWITCH_WAIT
+            while time.monotonic() < end and not (set(seen) - {old}
+                                                  and host_processes(run.home.env) == [old]):
+                time.sleep(0.1)     # until a successor came and went
+            time.sleep(4)           # past the 2 s the owner gives a retired host
+        finally:
+            sampling.set()
+            sampler.join(2)
         hosts = host_processes(run.home.env)
         unbound = not bindings(run.home.env, run.harness)
         ev["host_after"] = hosts[0] if len(hosts) == 1 else hosts
         ev["native_after"] = before["native_pid"] if pid_alive(before["native_pid"]) else None
         ev["native_same"] = ev["native_after"] == before["native_pid"]
-        dropped = sorted(seen - {old})
-        kept = hosts == [old] and unbound
-        ev["fail_injection"] = (("old host relays alone; successor %s dropped" % dropped) if kept
-                                else "FAILED: hosts %s, bound %s" % (hosts, not unbound))
+        # Each successor's sampled life; it never outlives the drop by the 2 s a retired host gets.
+        dropped = {pid: round(last - first, 2) for pid, (first, last) in seen.items() if pid != old}
+        ev["successors"] = dropped
+        kept = hosts == [old] and unbound and bool(dropped)
+        ev["fail_injection"] = (("old host relays alone; successor %s dropped" % sorted(dropped)) if kept
+                                else "FAILED: hosts %s, bound %s, successors %s" % (hosts, not unbound, dropped))
         ev["key_reached"] = key_reaches_native(run)
         return "pass" if kept and ev["native_same"] and ev["key_reached"] else "fail"
 
