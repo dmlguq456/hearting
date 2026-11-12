@@ -425,27 +425,41 @@ class DirectRunEntersIsolation(unittest.TestCase):
         self._assert_isolated(self._run(["bash", str(shell), str(pidfile)], self.caller), pidfile)
         self.assertTrue(mod.DIRECT_RUN_MARKER == "HEARTING_TEST_ISOLATED")
 
-    def test_a_caller_chosen_home_is_kept(self):
-        probe = self.root / "probe.py"
-        probe.write_text("import json, os\nprint(json.dumps(dict(os.environ)))\n", encoding="utf-8")
+    def test_a_worker_shaped_caller_passes_no_path_outside_the_private_root(self):
+        # The caller looks like a real dispatched worker's pane (every state-path
+        # key a worker carries, plus exported XDG homes); any HOME it chose, with
+        # or without a usable TMPDIR, still gets only the private root.
+        real = self.root / "real"
+        worker = {key: str(real / key.lower()) for key in (
+            "AGENT_RUNTIME_DIR", "AGENT_ARTIFACT_OUTPUT_DIR", "AGENT_MODEL_GOVERNOR_ROOT",
+            "AGENT_DISPATCH_COMPLETION_STATE_FILE", "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE",
+            "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERDR_BIN_PATH", "XDG_RUNTIME_DIR",
+            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR")}
+        worker.update(AGENT_DISPATCH_ATTEMPT_ID="att-real", AGENT_DISPATCH_PARENT_ATTEMPT_ID="att-parent",
+                      HERDR_AGENT="claude", HERDR_TAB_ID="tab-real", HERDR_WORKSPACE_ID="ws-real",
+                      TMUX_PANE="%0")
         (self.root / "fixture-tmp").mkdir()
-        env = dict(self.caller, HOME=str(self.root / "fixture-home"), TMPDIR=str(self.root / "fixture-tmp"),
-                   TMUX_PANE="%0")
-        result = self._run([sys.executable, str(RUNNER), "--direct-run", sys.executable, str(probe)], env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        seen = json.loads(result.stdout)
-        self.assertEqual(seen["HOME"], str(self.root / "fixture-home"))
-        self.assertEqual(seen["HEARTING_TEST_ISOLATED"], "caller-home")
-        self.assertEqual(seen["HEARTING_REQUIRE_PIDNS"], "1")
-        self.assertFalse([k for k in seen if k.startswith(("AGENT_", "HERDR_")) or k in ("TMUX", "TMUX_PANE")])
-
-    def test_a_caller_chosen_home_with_a_missing_tmpdir_is_refused(self):
-        marker = self.root / "ran"
-        env = dict(self.caller, HOME=str(self.root / "fixture-home"))  # TMPDIR names a missing dir
-        result = self._run([sys.executable, str(RUNNER), "--direct-run", "touch", str(marker)], env)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("direct-test-refused:", result.stderr)
-        self.assertFalse(marker.exists())
+        homes = ((self.account_home, str(self.root / "gone")),
+                 (str(self.root / "fixture-home"), str(self.root / "gone")),
+                 (str(self.root / "fixture-home"), str(self.root / "fixture-tmp")))
+        probe = self.root / "probe.py"
+        probe.write_text(self.PROBE, encoding="utf-8")
+        for index, (home, tmpdir) in enumerate(homes):
+            with self.subTest(home=home, tmpdir=tmpdir):
+                pidfile = self.root / f"worker-{index}.pid"
+                env = dict(self.caller, **worker, HOME=home, TMPDIR=tmpdir)
+                result = self._run([sys.executable, str(RUNNER), "--direct-run", sys.executable, str(probe),
+                                    str(pidfile)], env)
+                seen = json.loads(result.stdout.strip().splitlines()[-1])["env"]
+                private = Path(seen["HOME"]).parent
+                self._assert_isolated(result, pidfile)
+                outside = {key: value for key, value in seen.items() if key not in ("PATH", "PYTHONPATH")
+                           for part in value.split(os.pathsep)
+                           if part.startswith("/") and not Path(part).is_relative_to(private)}
+                self.assertEqual(outside, {})
+                self.assertEqual(seen["PYTHONPATH"], str(ROOT))
+                self.assertFalse([key for key, value in seen.items()
+                                  if str(real) in value or value in ("att-real", "tab-real", "%0")])
 
     def test_no_private_root_refuses_in_one_line_and_runs_nothing(self):
         mod = load_runner_module()

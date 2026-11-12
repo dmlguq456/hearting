@@ -36,7 +36,6 @@ import hashlib
 import json
 import math
 import os
-import pwd
 import py_compile
 import re
 import shutil
@@ -475,40 +474,21 @@ DIRECT_RUN_MARKER = "HEARTING_TEST_ISOLATED"
 _DIRECT_RUN_PASSTHROUGH_PREFIX = "HEARTING_REQUIRE_"
 
 
-def _home_is_account_home(env: dict[str, str]) -> bool:
-    home = env.get("HOME")
-    if not home:
-        return True
-    try:
-        account_home = pwd.getpwuid(os.getuid()).pw_dir
-    except KeyError:
-        return True
-    return os.path.realpath(home) == os.path.realpath(account_home)
-
-
 def direct_run(command: list[str]) -> int:
     """Run one hand-started suite command under build_isolated_env().
 
-    A caller that already chose a non-account HOME (a suite re-running itself
-    with a fixture HOME, as tools/fleet/tests/test_now_scroll_burst.py does with
-    an inherited pty fd) keeps its environment, minus the live-session keys the
-    isolated env never carries; a TMPDIR that is set but not a directory is
-    refused, since suites fall back to the cwd when mktemp fails there.
-    Otherwise the suite gets a fresh private root that is removed, with every
-    process still using it, at exit.
+    Every caller, whatever HOME or TMPDIR it exported, gets a fresh private root
+    that is removed, with every process still using it, at exit. Nothing of the
+    caller's environment reaches the suite beyond build_isolated_env()'s own
+    passthrough and the HEARTING_REQUIRE_* switches: a suite that re-runs itself
+    with a fixture HOME passes DIRECT_RUN_MARKER on, as every self-re-running
+    suite does, and never comes back here (2026-11-12: a branch that kept a
+    non-account HOME caller's env minus a list of keys let AGENT_RUNTIME_DIR and
+    XDG_*_HOME through to real state).
     """
     if not command:
         print("usage: run-tests.py --direct-run <command...>", file=sys.stderr)
         return 2
-    if not _home_is_account_home(dict(os.environ)):
-        tmpdir = os.environ.get("TMPDIR")
-        if tmpdir is not None and not os.path.isdir(tmpdir):
-            print(f"direct-test-refused: TMPDIR={tmpdir!r} is not a directory; nothing was run",
-                  file=sys.stderr)
-            return 2
-        env = {key: value for key, value in os.environ.items()
-               if key not in _EXPLICIT_UNSET_KEYS and key not in ("TMUX", "TMUX_PANE")}
-        os.execvpe(command[0], command, {**env, DIRECT_RUN_MARKER: "caller-home"})
     try:
         tmp = Path(tempfile.mkdtemp(prefix="hearting-direct-test-", dir=str(choose_suite_temp_parent())))
     except (OSError, SystemExit) as exc:
