@@ -49,13 +49,13 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 "responsible": "supervision-controller", "required_action": "inspect-recovery",
                 "pending_delivery_id": "delivery-x"}
 
-    def render(self, rows, process_state, reason="supervisor-exited"):
+    def render(self, rows, process_state, reason="supervisor-exited", process_reason="attempt-descendant-live"):
         from types import SimpleNamespace
         self.jobs.write_text("".join(row(aid, status=status, **{k: v for k, v in meta.items() if k != "attempt_id"})
                                      for aid, (status, meta) in rows.items()))
         receipt = {**self.receipt(*sorted(rows)), "reason": reason, "owner_attempt_id": next(iter(rows))}
         with patch_split(contract, "observed_attempt_liveness",
-                         return_value=SimpleNamespace(process_state=process_state, process_reason="attempt-descendant-live")), \
+                         return_value=SimpleNamespace(process_state=process_state, process_reason=process_reason)), \
              mock.patch("codex_dispatch_terminal.terminal_envelope_observed", return_value=False):
             return supervision.render_text(receipt)
 
@@ -73,6 +73,26 @@ class SupervisorExitedSettlementTest(unittest.TestCase):
                 self.assertIn("Do not report this to the user as blocked", text)
                 self.assertIn("dispatch-registry.py reconcile --jobs", text)
                 self.assertNotIn("Explain the blockage", text)
+
+    def test_a_pass_owner_whose_cleanup_proof_is_incomplete_gets_only_the_settlement_text(self):
+        """BC-SETTLE-NOTICE-1112: the same settlement rendered while its cleanup proof is still
+        unverifiable (hook context) and after it drained (Stop feedback) says one thing."""
+        for harness in ("claude", "codex", "opencode"):
+            for process_state, process_reason in [("unverifiable", "post-exit-receipt-incomplete"),
+                                                  ("unverifiable", "attempt-descendant-unverifiable"),
+                                                  ("quiescent", "governed-process-group-drained")]:
+                with self.subTest(harness=harness, process=process_reason):
+                    text = self.render({"att-owner": ("done", self.owner(harness, attempt_id="att-owner"))},
+                                       process_state, process_reason=process_reason)
+                    self.assertTrue(text.startswith("Hearting settlement in progress -- not a blockage."), text)
+                    self.assertNotIn("needs attention", text)
+                    self.assertNotIn("Explain the blockage", text)
+        for status, extra in (("open", {}), ("done", {"failure_class": "fail", "note": "dead-runtime"})):
+            with self.subTest(status=status, **extra):   # no committed PASS: the attention text alone
+                text = self.render({"att-owner": (status, self.owner("claude", attempt_id="att-owner", **extra))},
+                                   "unverifiable", process_reason="post-exit-receipt-incomplete")
+                self.assertTrue(text.startswith("Hearting supervision needs attention."), text)
+                self.assertNotIn("not a blockage", text)
 
     def test_a_pass_owner_with_a_running_process_is_neither_blocked_nor_called_settlement(self):
         """RV-PR1444-1110 F1: a live tagged descendant may be work the worker started, not a helper."""

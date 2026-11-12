@@ -222,19 +222,41 @@ def observed_owner_lifecycle(args):
     return observed, phase, metadata
 
 
-def _finish_recovery(args) -> bool:
-    """Retire state only after every owned execution is settled.
-
-    A failed cleanup hands the exact obligation to the existing parent queue;
-    preserving supervisor state makes a failed handback recoverable on restart.
-    """
-    from dispatch_supervision import _owned_rows, _pending, materialize
+def _owned_pending(args):
+    from dispatch_supervision import _owned_rows, _pending
     rows = _owned_rows(Path(args.jobs), args.attempt_id)
     owned = {args.attempt_id} if args.attempt_id in rows else set()
     for aid in rows:
         if rows[aid][1].get("parent_attempt_id") == args.attempt_id:
             owned.add(aid)
-    if owned and _pending(rows, sorted(owned), Path(args.jobs), reason="supervisor-exited"):
+    pending = bool(owned) and _pending(rows, sorted(owned), Path(args.jobs), reason="supervisor-exited")
+    return owned, pending
+
+
+def _finish_recovery(args, *, clock=time.monotonic, sleep=time.sleep) -> bool:
+    """Retire state only after every owned execution is settled.
+
+    A failed cleanup hands the exact obligation to the existing parent queue;
+    preserving supervisor state makes a failed handback recoverable on restart.
+
+    When every owned attempt ended normally with PASS and only Hearting's own
+    settlement remains, the notice waits for the same settling ceiling the join
+    uses (SETTLING_NOTICE_SECONDS) and is never recorded when settlement
+    finishes first. Anything else -- an open row, a live or unknown process --
+    is noticed at once, as before.
+    """
+    from dispatch_completion_join import SETTLING_NOTICE_SECONDS
+    from dispatch_supervision import materialize, settlement_only
+    owned, pending = _owned_pending(args)
+    settling_since = None
+    while pending and settlement_only(Path(args.jobs), sorted(owned)):
+        settling_since = clock() if settling_since is None else settling_since
+        if clock() - settling_since >= SETTLING_NOTICE_SECONDS:
+            break
+        # The same cadence as a retained recovery retry; nothing is closed or signalled here.
+        sleep(max(args.interval, 30.0))
+        owned, pending = _owned_pending(args)
+    if pending:
         materialize(Path(args.jobs), owned, reason="supervisor-exited")
         return False
     _remove_supervisor_state(args)

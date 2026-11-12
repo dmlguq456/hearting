@@ -1651,9 +1651,41 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
 
 
 # Settlement verdicts left after a committed PASS: the process tree is still draining
-# (`wait`) or the completion controller has not delivered yet. Unverifiable, reconcile
-# and conflict verdicts are not settlement.
+# (`wait`) or the completion controller has not delivered yet. Reconcile and conflict
+# verdicts are not settlement; an unverifiable verdict is settlement only for the exact
+# cleanup proofs a normally ended worker is still completing (SETTLING_PROCESS_REASONS).
 SETTLING_ACTIONS = frozenset({"wait", "advance", "complete"})
+# After the final result is committed (`done`), these unverifiable reasons mean only that
+# the exact post-exit cleanup proof is not complete yet -- the judgment itself is unchanged
+# and still fail-closed; it decides only the timing and wording of a notice.
+SETTLING_PROCESS_REASONS = frozenset({"post-exit-receipt-incomplete", "attempt-descendant-unverifiable"})
+SETTLING_PROOF = "settle"
+
+
+def _settling_action(status: str, meta: dict) -> str | None:
+    """The settlement action of one attempt that ended with a committed PASS, else None."""
+    from dispatch_attempt_policy import terminal_conflict_pending, verdict_pass
+    if status != "done" or not verdict_pass(meta) or terminal_conflict_pending(meta):
+        return None
+    proof, decision = _settlement_decision(status, meta)
+    if decision.action in SETTLING_ACTIONS:
+        return decision.action
+    if decision.action == "recover" and proof.process_reason in SETTLING_PROCESS_REASONS:
+        return SETTLING_PROOF
+    return None
+
+
+def settlement_only(jobs: Path, attempts) -> bool:
+    """True when every attempt ended normally with PASS and only Hearting's own settlement
+    (cleanup proof, completion summary or delivery) remains. A running process (`wait`), an
+    open row, or anything unreadable is not settlement-only."""
+    try:
+        rows = _rows(Path(jobs), set(attempts))
+        return bool(attempts) and all(
+            _settling_action(*rows[aid]) in {"advance", "complete", SETTLING_PROOF}
+            for aid in attempts)
+    except Exception:  # noqa: BLE001 -- unknown evidence is noticed at once, as before
+        return False
 
 
 def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
@@ -1664,7 +1696,6 @@ def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
     The supervisor's exit then is the ordinary end of a finished worker: the route's own
     completion notice follows from the completion controller, which keeps its own deadline
     notices. Display only -- the record, its delivery and the controller's duty are unchanged."""
-    from dispatch_attempt_policy import terminal_conflict_pending, verdict_pass
     if receipt.get("reason") != "supervisor-exited":
         return []
     settled = []
@@ -1672,11 +1703,8 @@ def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
         attempts = list(receipt["monitored_attempt_ids"])
         rows = _rows(Path(receipt["job_registry"]), set(attempts) | {receipt["owner_attempt_id"]})
         for aid in attempts:
-            status, meta = rows[aid]
-            if status != "done" or not verdict_pass(meta) or terminal_conflict_pending(meta):
-                return []
-            action = _settlement_decision(status, meta)[1].action
-            if action not in SETTLING_ACTIONS:
+            action = _settling_action(*rows[aid])
+            if action is None:
                 return []
             settled.append((aid, action))
     except Exception:  # noqa: BLE001 -- unknown evidence keeps the ordinary attention text
@@ -1719,8 +1747,8 @@ def _settling_text(receipt: dict, settled: list[tuple[str, str]]) -> str:
                 + commands + residue)
     return ("Hearting settlement in progress -- not a blockage. "
             f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
-            f"{', '.join(attempts)} finished with PASS and no process of it is running; only Hearting's own "
-            "settlement remains (completion summary or completion delivery). The route's completion notice "
+            f"{', '.join(attempts)} finished with PASS; only Hearting's own settlement remains (its "
+            "post-exit cleanup check, completion summary or completion delivery). The route's completion notice "
             "follows from the existing completion controller. Do not report this to the user as blocked, "
             "and do not restart, retry, cancel, or erase anything. If that completion never arrives, the "
             "controller keeps the duty and its own deadline notice follows. Read-only diagnosis: "
