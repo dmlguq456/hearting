@@ -1,6 +1,7 @@
 """Read-only projection of unanswered human-gate decisions for Fleet."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -675,7 +676,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
     for jobs in jobs_paths:
         path = Path(jobs)
         try:
-            with registry_read_scope():
+            with registry_read_scope(), contextlib.ExitStack() as lineage_pin:
                 snapshot = registry_snapshot(path)
                 if not snapshot.complete:
                     health.append({"source": "registry", "path": str(path),
@@ -686,6 +687,10 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     from dispatch_seat_handover import effective_parent, effective_parent_harness
                     from peer_read_context import PeerReadContext
                     read_context = PeerReadContext()
+                    # One observation of the lineage per pass: every wait below resolves its
+                    # owner against the same one (a writer that lands meanwhile is seen by the
+                    # next pass), instead of listing and stating every ledger once per wait.
+                    lineage_pin.enter_context(read_context.pinned_lineage())
                 except ImportError:
                     effective_parent = effective_parent_harness = None
                     read_context = None
