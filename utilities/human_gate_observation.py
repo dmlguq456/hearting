@@ -58,17 +58,38 @@ def _cached(cache, key, loader):
     return value
 
 
-def _generation_candidates(view):
-    """Compile only indexed route/owner candidates once per registry generation."""
-    generation_key = (view.path_identity, view.signature)
-    cached = _GENERATION_CACHE.get(generation_key)
-    if cached is not None:
-        _GENERATION_CACHE.move_to_end(generation_key)
-        return cached
+# Partial results of ``_generation_candidates``, one per registry segment, keyed by the identity of
+# the segment's ``records`` tuple. A segment's owner and route-alias rows are a pure function of
+# its records (their fields, their orders), and a segment that a rewrite recognised again shares
+# its predecessor's ``records`` object (``_RegistrySegment.resynced``), so the same object means the
+# same bytes at the same orders. Each held entry keeps its ``records`` alive, so the id cannot be
+# reused for another tuple. Per path only the current generation's segments are held.
+_SEGMENT_PARTS = {}
+_METRICS = {"generation_segment_builds": 0, "generation_segment_reuses": 0}
+
+
+def metrics_snapshot():
+    return dict(_METRICS)
+
+
+def _route_key_of(meta):
+    return (meta.get("owner_route_id") or meta.get("route_id"),
+            meta.get("owner_route_hash") or meta.get("route_hash"),
+            meta.get("owner_route_file") or meta.get("route_file"))
+
+
+def _merged_activity(old, new):
+    """The later of two activity times, ignoring a time that is not finite (nan when neither is)."""
+    return (old if not math.isfinite(new) else new
+            if not math.isfinite(old) else max(new, old))
+
+
+def _segment_candidates(segment):
+    """Owner and route-alias candidates of one registry segment: ``(owners, first_order, successors, routes)``."""
     owners = {}
     first_order = {}
     successors = set()
-    for row in view.answer_wait_owner_candidates():
+    for row in segment.observation_owners:
         parsed = row.completion_metadata()
         meta = {key: parsed[key] for key in _OBSERVATION_META_KEYS if key in parsed}
         attempt = meta.get("attempt_id")
@@ -82,7 +103,12 @@ def _generation_candidates(view):
                           ("automatic_retry_of", "replacement_original_attempt_id", "prior_attempt_id")
                           if meta.get(name))
     routes = {}
-    for row in view.route_alias_candidates():
+    selected = {}
+    for rows in segment.completion_by_route_alias.values():
+        for row in rows:
+            selected[row.order] = row
+    for order in sorted(selected):
+        row = selected[order]
         parsed = row.completion_metadata()
         meta = {key: parsed[key] for key in _OBSERVATION_META_KEYS if key in parsed}
         route_file = meta.get("owner_route_file") or meta.get("route_file")
@@ -103,11 +129,59 @@ def _generation_candidates(view):
         route_key = (route_id, digest, route_file)
         previous = routes.get(route_key)
         if previous:
-            old_activity = previous[2]
-            activity = (old_activity if not math.isfinite(activity) else activity
-                        if not math.isfinite(old_activity) else max(activity, old_activity))
+            activity = _merged_activity(previous[2], activity)
         routes[route_key] = (row, meta, activity)
-    result = (owners, first_order, successors, routes)
+    return owners, first_order, successors, routes
+
+
+def _generation_candidates(view):
+    """Compile only indexed route/owner candidates once per registry generation.
+
+    A new generation merges its segments' partial results in file order, and builds only the
+    segments it has not seen: the later segment wins for an attempt or a route, an attempt's first
+    order is its earliest, a route's activity is the latest finite one (``_merged_activity`` is
+    associative, so folding segment by segment equals folding row by row). The fifth item answers
+    the S3 "no later owner on the same route" question in one lookup: per route triple, the
+    greatest first order of any owner attempt on it. Order is the line number of a registry row,
+    unique within one generation, so "another owner began after this one" is "the greatest first
+    order on the route exceeds this owner's own".
+    """
+    generation_key = (view.path_identity, view.signature)
+    cached = _GENERATION_CACHE.get(generation_key)
+    if cached is not None:
+        _GENERATION_CACHE.move_to_end(generation_key)
+        return cached
+    held = _SEGMENT_PARTS.get(view.path_identity) or {}
+    current = {}
+    owners = {}
+    first_order = {}
+    successors = set()
+    routes = {}
+    for segment in view._segments:
+        key = id(segment.records)
+        entry = held.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _segment_candidates(segment))
+            _METRICS["generation_segment_builds"] += 1
+        else:
+            _METRICS["generation_segment_reuses"] += 1
+        current[key] = entry
+        part_owners, part_first, part_successors, part_routes = entry[1]
+        owners.update(part_owners)
+        for attempt, order in part_first.items():
+            first_order.setdefault(attempt, order)
+        successors.update(part_successors)
+        for route_key, (row, meta, activity) in part_routes.items():
+            previous = routes.get(route_key)
+            routes[route_key] = (row, meta, _merged_activity(previous[2], activity) if previous else activity)
+    _SEGMENT_PARTS[view.path_identity] = current
+    latest_start = {}
+    for attempt, (_status, meta, _fields, _order, _row) in owners.items():
+        route_key = _route_key_of(meta)
+        started = first_order[attempt]
+        if started > latest_start.get(route_key, -1):
+            latest_start[route_key] = started
+    result = (owners, first_order, successors, routes, latest_start)
     _GENERATION_CACHE[generation_key] = result
     _GENERATION_CACHE.move_to_end(generation_key)
     while len(_GENERATION_CACHE) > _GENERATION_LIMIT:
@@ -694,7 +768,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                 except ImportError:
                     effective_parent = effective_parent_harness = None
                     read_context = None
-                latest, first_order, successor_sources, route_candidates = _generation_candidates(view)
+                latest, first_order, successor_sources, route_candidates, latest_start = _generation_candidates(view)
                 import route_authority
                 for attempt, (status, meta, fields, row_order, row) in latest.items():
                     if meta.get("worker_type") != "owner" or attempt in successor_sources:
@@ -711,12 +785,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                     # The same jobs identity and exact route binding must have no
                     # later owner attempt. Children and different route/hash rows do not close it.
                     registered_order = first_order.get(attempt, row_order)
-                    later = any(other_id != attempt and first_order.get(other_id, other_order) > registered_order
-                                and (other_meta.get("owner_route_id") or other_meta.get("route_id")) == route_id
-                                and (other_meta.get("owner_route_hash") or other_meta.get("route_hash")) == route_digest
-                                and (other_meta.get("owner_route_file") or other_meta.get("route_file")) == route_file
-                                for other_id, (_s, other_meta, _f, other_order, _row) in latest.items())
-                    if later:
+                    if latest_start.get((route_id, route_digest, route_file), -1) > registered_order:
                         continue
                     try:
                         project_root = str(Path(__file__).resolve().parents[1])

@@ -682,6 +682,7 @@ REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuse
                      "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
 OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
+GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses")
 
 
 def counters() -> dict:
@@ -703,6 +704,13 @@ def counters() -> dict:
     owner_stats = owner_input.metrics_snapshot() if hasattr(owner_input, "metrics_snapshot") else {}
     for name in OWNER_INPUT_COUNTERS:
         out[name] = int(owner_stats.get(name, 0))
+    for name in GATE_COUNTERS:
+        out[name] = 0
+    for module_name in ("human_gate_observation", "utilities.human_gate_observation"):
+        module = sys.modules.get(module_name)
+        stats = module.metrics_snapshot() if hasattr(module, "metrics_snapshot") else {}
+        for name in GATE_COUNTERS:
+            out[name] += int(stats.get(name, 0))
     return out
 
 
@@ -1435,6 +1443,79 @@ def e40d(run):  # owner a holds an answer and its journal cannot be read: the de
     _unreadable_journal(run, "att-blocked-a")
 
 
+def route0_pairs(run, name: str) -> dict:
+    """Metadata of a row on route 0's exact route triple (its owner's), as an owner of that route writes it."""
+    record = route_record(run.fx.root, 0, revision=run.fx.revision[0])
+    route_file = str(run.fx.route_path(0))
+    return {"attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+            "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-" + name,
+            "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+            "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": route_file,
+            "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+            "owner_route_file": route_file}
+
+
+def e34a(run):  # an attempt row of route 0 is appended
+    run.fx.append_rows([attempt_row(run.clock.now - 20, "running", "slug-0", {
+        **route0_pairs(run, "route0-more"), "launch_claimed": "1"}, str(run.fx.work))])
+
+
+def e34b(run):  # the same attempt is appended several times, one writer call each
+    for status in ("running", "running", "done"):
+        run.fx.append_rows([attempt_row(run.clock.now - 10, status, "slug-0", {
+            **route0_pairs(run, "route0-again"),
+            **({"ended_at": "%.3f" % (run.clock.now - 5)} if status == "done" else {})}, str(run.fx.work))])
+
+
+def e34c(run):  # in place: an early history row and a BLOCKED owner row change; the segments between keep theirs
+    rows = run.fx.current_rows()
+    rows[9] = rows[9].replace("fixture-history", "fixture-history-edited-early", 1)
+    at = next(index for index, row in enumerate(rows) if "att-blocked-a" in row)
+    rows[at] = rows[at].replace("ended_at=%.3f" % (CLOCK_BASE - 2900),
+                                "ended_at=%.3f" % (CLOCK_BASE - 2800), 1)
+    assert rows[at] != run.fx.current_rows()[at] and rows[9] != run.fx.current_rows()[9]
+    run.fx.replace_registry(rows)
+
+
+def e34d(run):  # an owner that began later on the same route: the BLOCKED owner is no longer the last
+    owner = run.blocked["att-blocked-a"]
+    record = json.loads(owner["route_file"].read_text(encoding="utf-8"))
+    run.fx.append_rows([attempt_row(run.clock.now - 15, "open", "blocked-a-next", {
+        "attempt_schema_version": "2", "capability": "autopilot-code", "harness": "claude",
+        "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-blocked-a-next",
+        "parent_sid": CLAUDE_SID, "parent_harness": "claude",
+        "route_id": record["route_id"], "route_hash": record["route_hash"], "route_file": str(owner["route_file"]),
+        "owner_route_id": record["route_id"], "owner_route_hash": record["route_hash"],
+        "owner_route_file": str(owner["route_file"]), "launch_claimed": "1", "launch_started": "1"},
+        str(run.fx.work))])
+
+
+def _alias_row(run, name: str, stamp, route: dict) -> str:
+    return attempt_row(stamp, "done", "alias-" + name, {
+        "attempt_schema_version": "2", "dispatch_depth": "2", "worker_type": "child", "harness": "codex",
+        "attempt_id": "att-alias-" + name, "parent_sid": OTHER_SID, "parent_harness": "claude",
+        "route_id": route["route_id"], "route_hash": route["route_hash"], "route_file": route["route_file"]},
+        str(run.fx.work))
+
+
+def _alias_route(run) -> dict:
+    record = route_record(run.fx.root, 2, revision=0)
+    return {"route_id": record["route_id"], "route_hash": record["route_hash"],
+            "route_file": str(run.fx.root / "routes" / "alias-route.json")}
+
+
+def e34e1(run):  # the first row of a route has no usable time (its activity is nan)
+    run.fx.append_rows([_alias_row(run, "x1", "not-a-time", _alias_route(run))])
+
+
+def e34e2(run):  # a later row of the same route has one: the route's activity is now that time
+    run.fx.append_rows([_alias_row(run, "x2", iso(CLOCK_BASE - 500), _alias_route(run))])
+
+
+def e34e3(run):  # an even later row has none again: it does not take the time away
+    run.fx.append_rows([_alias_row(run, "x3", "still-not-a-time", _alias_route(run))])
+
+
 def e42_batches(run):
     _append_batches(run)
 
@@ -1535,6 +1616,28 @@ EVENTS = [
       Step("same size and mtime, other content", e28b, expect={**REG_STILL, **CODEX_STILL})]),
     ("E29", "a claude transcript rewritten with the same size and mtime",
      [Step("same stat", e29, expect={**REG_STILL, **CODEX_STILL})]),
+    # E34: the answer-wait candidates are built per registry segment and merged in file order.
+    ("E34a", "an attempt row of route 0 appended",
+     [Step("append", e34a, expect={**REG_APPEND, "generation_segment_builds": "+",
+                                   "generation_segment_reuses": "+", **CODEX_STILL})]),
+    ("E34b", "the same attempt appended several times",
+     [Step("append x3", e34b, expect={**REG_APPEND, "generation_segment_builds": "+",
+                                      "generation_segment_reuses": "+", **CODEX_STILL})]),
+    ("E34c", "in place: an early row and a BLOCKED owner row change",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("replace its row", e34c, expect={**REG_KEEP_PREFIX, "generation_segment_builds": "+",
+                                            "generation_segment_reuses": "+", **CODEX_STILL})]),
+    ("E34d", "an owner that began later on the BLOCKED owner's route",
+     [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("later owner appended", e34d, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                 **CODEX_STILL})]),
+    # E34e: a route whose rows sit in several segments, some with no usable time (activity nan).
+    ("E34e", "one route over several segments, some rows without a usable time",
+     [Step("first row without a time", e34e1, expect={**REG_APPEND, **CODEX_STILL}),
+      Step("later row with a time", e34e2, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                   **CODEX_STILL}),
+      Step("later row without a time", e34e3, expect={**REG_APPEND, "generation_segment_reuses": "+",
+                                                      **CODEX_STILL})]),
     # E40: the owner-input decision (route verification) runs only for an owner that holds a kept
     # answer; with nothing kept the answer is [] whatever the decision says.
     ("E40", "a kept answer appears for a BLOCKED owner, then is consumed",
@@ -1713,7 +1816,10 @@ class IncrementalEquivalenceTests(unittest.TestCase):
 
     # -- the events -------------------------------------------------------
     def test_events(self):
+        only = {item for item in os.environ.get("EQUIV_EVENTS", "").split(",") if item}
         for eid, _description, steps in EVENTS:
+            if only and eid not in only:      # a falsifier run names the events it is about
+                continue
             with self.subTest(event=eid):
                 self.run_event(eid, steps)
 
