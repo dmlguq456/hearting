@@ -571,10 +571,17 @@ class SessionShellPTYTest(unittest.TestCase):
         if peer is not None:
             audit=directory/'audit.py'
             # Counts every subprocess the sender starts and its wall time; nothing else changes.
+            # The shared obligation runner is the one start counted apart: a queued message
+            # is a retained duty, and the sender starts that runner only when none holds its lock.
             audit.write_text('import json,runpy,sys,time\nout=sys.argv[1];sys.argv=sys.argv[2:]\n'
-                'calls=[]\nsys.addaudithook(lambda e,a:calls.append(str(a[1][0]) if a[1] else "?") if e=="subprocess.Popen" else None)\n'
+                'calls=[];runners=[]\n'
+                'def hook(e,a):\n'
+                ' if e!="subprocess.Popen":return\n'
+                ' argv=a[1] if isinstance(a[1],(list,tuple)) else []\n'
+                ' (runners if len(argv)>2 and str(argv[2])=="__obligation-runner" else calls).append(str(argv[0]) if argv else "?")\n'
+                'sys.addaudithook(hook)\n'
                 'began=time.monotonic()\ntry:\n runpy.run_path(sys.argv[0],run_name="__main__")\nexcept SystemExit:\n pass\n'
-                'finally:\n open(out,"w").write(json.dumps({"subprocesses":len(calls),"programs":sorted(set(calls)),"ms":round((time.monotonic()-began)*1000)}))\n')
+                'finally:\n open(out,"w").write(json.dumps({"subprocesses":len(calls),"programs":sorted(set(calls)),"runner_starts":len(runners),"ms":round((time.monotonic()-began)*1000)}))\n')
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
@@ -644,7 +651,12 @@ class SessionShellPTYTest(unittest.TestCase):
                     self.assertIn('prompted=queued',rows[label]['receipt'])
                     self.assertIn('via=session-shell',rows[label]['receipt'])
                     self.assertTrue(rows[label].get('typed'),rows[label])
+                    # Resolution and delivery start no process. The one start allowed is the shared
+                    # obligation runner of the retained queued-message duty: it happens only when no
+                    # runner holds the lock, which depends on whether an earlier send in this state
+                    # root left one alive (the same result at origin/main when this test runs alone).
                     self.assertEqual(rows[label]['subprocesses'],0,rows[label])
+                    self.assertLessEqual(rows[label]['runner_starts'],1,rows[label])
                 for label in ('other_server','other_namespace'):
                     self.assertIn('prompted=unverified reason=target-pane-unresolved',rows[label]['receipt'])
                 self.assertEqual(herdr_calls,0)
