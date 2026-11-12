@@ -29,11 +29,15 @@ a path that still shares the plan-time primary inode gets its own copy back,
 and its group stays open (retried by the next revert and counted in
 `remaining_groups` and `still_linked`) until none of its paths is linked.
 
-Applying to a real store: while apply runs (estimated 17-21 min for hearting,
-4-6 min for cairn) start no new work and no spec transaction on that store;
-every link changes the primary's ctime, so a reader of that revision fails its
-integrity check in that moment. If apply stops early, rerun the same apply
-until `remaining_groups: 0` before any revert. If revert keeps reporting the
+Applying to a real store: apply only when the `plan` counts match what you
+expect and `skipped` shows no large `recent-24h`. While apply runs (estimated
+17-21 min for hearting, 4-6 min for cairn) start no new work and no spec
+transaction on that store; every link changes the primary's ctime, so a reader
+of that revision fails its integrity check in that moment. If apply stops
+early, rerun the same apply until `remaining_groups: 0` before any revert.
+After a reboot or remount apply refuses with `root-volume-changed`; then
+`revert` that journal and `plan` again with a new journal. Revert is a separate
+decision, never run as part of the apply steps. If revert keeps reporting the
 same skipped path, stop and report that path.
 
 Remaining window: the last re-check and `os.replace` are two steps. An atomic
@@ -890,7 +894,13 @@ def _revert_closed(event):
     return event is not None and all(skip.get("reason") in REVERT_DONE for skip in event.get("skipped") or [])
 
 
-def _link_state(root, group, link):
+def _dev_now(journal):
+    """Recorded root volume number -> its number now: a reboot or remount renumbers an NFS
+    volume's st_dev while the inode numbers stay, so links are found by today's number."""
+    return {journal.header["root_dev"]: os.stat(journal.root).st_dev}
+
+
+def _link_state(root, group, link, dev_now):
     """Whether a planned path shares the plan-time primary inode (what apply links to) now."""
     try:
         st = _lstat(str(root / link["path"]))
@@ -898,15 +908,16 @@ def _link_state(root, group, link):
         return MISSING
     except OSError as error:
         return _error_reason(error)
-    if (st.st_dev, st.st_ino) == (group["primary"]["dev"], group["primary"]["ino"]) and stat.S_ISREG(st.st_mode):
+    dev = dev_now.get(group["primary"]["dev"], group["primary"]["dev"])
+    if (st.st_dev, st.st_ino) == (dev, group["primary"]["ino"]) and stat.S_ISREG(st.st_mode):
         return LINKED
     return OTHER
 
 
-def _link_states(root, groups, threads=16):
+def _link_states(root, groups, dev_now, threads=16):
     pairs = [(group, link) for group in groups for link in group["links"]]
     with concurrent.futures.ThreadPoolExecutor(threads) as pool:
-        states = list(pool.map(lambda pair: _link_state(root, *pair), pairs))
+        states = list(pool.map(lambda pair: _link_state(root, *pair, dev_now), pairs))
     return {(group["id"], link["path"]): state for (group, link), state in zip(pairs, states)}
 
 
@@ -916,7 +927,7 @@ def verify(journal_path, *, hash_primaries=True):
     report = {"groups": 0, "linked_ok": 0, "diverged": 0, "missing": 0, "primary_bad": 0, "reverted_groups": 0,
               "still_linked": 0, "unrecorded_links": 0, "unreadable": 0,
               "diverged_paths": [], "bad_primaries": [], "unrecorded_paths": []}
-    states = _link_states(root, journal.groups)
+    states = _link_states(root, journal.groups, _dev_now(journal))
     for group in journal.groups:
         applied = journal.applied.get(group["id"])
         recorded = set(applied["linked"]) | set(applied["already"]) if applied else set()
@@ -1033,6 +1044,7 @@ def revert(journal_path, *, staging=None, max_seconds=None):
     """
     journal = Journal(journal_path)
     root = journal.root
+    dev_now = _dev_now(journal)
     journal.lock()
     stage = _staging(journal, staging)
     deadline = _Deadline(max_seconds)
@@ -1049,7 +1061,7 @@ def revert(journal_path, *, staging=None, max_seconds=None):
             recorded = set(applied.get("linked") or []) | set(applied.get("already") or [])
             event = {"kind": "reverted", "group": group["id"], "restored": [], "skipped": []}
             for link in group["links"]:
-                state = _link_state(root, group, link)
+                state = _link_state(root, group, link, dev_now)
                 if state == LINKED:
                     try:
                         reason = _revert_path(root, group, link, stage)
@@ -1076,7 +1088,7 @@ def revert(journal_path, *, staging=None, max_seconds=None):
         stage.remove_if_empty()
     open_groups = [g for g in journal.groups if not _revert_closed(journal.reverted.get(g["id"]))]
     totals["remaining_groups"] = len(open_groups)
-    totals["still_linked"] = sum(1 for state in _link_states(root, open_groups).values() if state == LINKED)
+    totals["still_linked"] = sum(1 for state in _link_states(root, open_groups, dev_now).values() if state == LINKED)
     return totals
 
 

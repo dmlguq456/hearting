@@ -542,5 +542,35 @@ class RevertTest(Base):
                 self.assertEqual((report["still_linked"], report["reverted_groups"]), (0, 1))
                 self.assertEqual(D.revert(journal)["groups_done"], 0)
 
+    def test_verify_and_revert_find_links_after_the_volume_is_renumbered(self):
+        # A reboot or remount gives an NFS volume a new st_dev; inode numbers stay. Rewriting
+        # the journal's recorded numbers leaves the tool seeing exactly that state.
+        s = Store(self.base)
+        for rid in ("rrev_1", "rrev_2", "rrev_3"):
+            s.revision(rid, {"a.md": b"a" * 5000, "b.md": b"b" * 5000})
+        original = s.snapshot()
+        journal, header, groups, _ = self.plan(s)
+        self.assertEqual(D.apply(journal)["linked"], 4)
+        old, new = header["root_dev"], header["root_dev"] + 1
+
+        def renumber(value):
+            if isinstance(value, dict):
+                return {k: new if k in ("dev", "root_dev") and v == old else renumber(v) for k, v in value.items()}
+            return [renumber(v) for v in value] if isinstance(value, list) else value
+        lines = [renumber(json.loads(line)) for line in journal.read_text().splitlines()]
+        journal.write_text("".join(json.dumps(line, sort_keys=True) + "\n" for line in lines))
+        self.assertEqual(D.Journal(journal).groups[0]["primary"]["dev"], new)
+        report = D.verify(journal)
+        self.assertEqual((report["linked_ok"], report["still_linked"], report["diverged"]), (4, 4, 0))
+        result = D.revert(journal)
+        self.assertEqual((result["restored"], result["remaining_groups"], result["still_linked"]), (4, 0, 0))
+        self.assertEqual(result["skipped"], {})
+        self.assertEqual(self.linked_paths(s, groups), [])
+        restored = s.snapshot()
+        for rel, (_, mtime_ns, mode, data) in original.items():
+            self.assertEqual(restored[rel][1:], (mtime_ns, mode, data), rel)
+        report = D.verify(journal)
+        self.assertEqual((report["still_linked"], report["reverted_groups"]), (0, 2))
+
 if __name__ == "__main__":
     unittest.main()
