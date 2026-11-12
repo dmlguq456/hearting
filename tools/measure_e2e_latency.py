@@ -231,7 +231,9 @@ def history_verdicts(scale: dict) -> list[str]:
         verdict = ("history 비례는 주원인 아님 (두 배에서 교체 직후 추가분 증가 < 20%)" if max(changes) < CONTRAST_LIMIT
                    else "history 비례가 주원인 후보 (두 배에서 교체 직후 추가분 증가 ≥ 20%)")
     else:
-        verdict = "history 비례 판정 불가 (양쪽이 registry를 다시 해석한 교체 직후 pass가 없음)"
+        verdict = ("history 비례 판정 불가 (양쪽이 registry를 다시 해석한 교체 직후 pass가 없음) — "
+                   "전체 재해석이 없는 증분 경로에서는 이 칸이 모두 판정 불가로 나오는 것이 정상이다. "
+                   "추가분 숫자(위 줄)와 d1의 전체 시간 large/small로 판단한다")
     lines.insert(0, f"**history 2배 대조 (바뀐 직후 pass의 추가분): {verdict}**")
     lines[1:1] = d1_lines(scale)
     fixed = []
@@ -384,8 +386,23 @@ def _md_segments(report: dict) -> list[str]:
     return out
 
 
+def _md_drawn(report: dict) -> list[str]:
+    drawn = report.get("drawn_detail")
+    if not drawn:
+        return []
+    return ["## 그려진 화면 모델의 route 세부", "",
+            f"- `_draw` frame {drawn['frames']}개 가운데 route 세부(owner attempt·활성 단계)가 있는 것 {drawn['with_detail']}개, "
+            f"빈 것 **{drawn['empty']}개** (세부가 한 번 보인 뒤의 frame만 센다)",
+            f"- 빈 frame이 화면에 있던 시간 {_fmt(drawn['empty_s'])}s / {_fmt(drawn['span_s'])}s, 빈 구간 {drawn['empty_runs']}번, "
+            f"가장 긴 빈 구간 {_fmt(drawn['longest_empty_s'])}s", ""]
+
+
 def _md_info(report: dict) -> list[str]:
+    code = report.get("code") or {}
+    head = (f"{code.get('head')} ({code.get('branch')}, 추적 파일 변경 {code.get('tracked_changes')}개)"
+            if code.get("git") else f"git 아님: {code.get('note')}")
     out = ["", "## 실행 정보", "",
+           f"- 측정한 코드: {head}",
            f"- elapsed_s: {report.get('elapsed_s')}",
            f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
            f"- fixture: registry {report.get('fixture', {}).get('bytes')} bytes, "
@@ -422,12 +439,15 @@ def render_markdown(report: dict) -> str:
             out.append(f"- fixture {pair['label']}: small {pair['small'].get('rows')} rows / "
                        f"{pair['small'].get('fixture_bytes')} bytes, large {pair['large'].get('rows')} rows / "
                        f"{pair['large'].get('fixture_bytes')} bytes")
-        out += ["", "## 실행 정보", "", f"- elapsed_s: {report.get('elapsed_s')}",
+        code = report.get("code") or {}
+        out += ["", "## 실행 정보", "",
+                f"- 측정한 코드: {code.get('head') if code.get('git') else 'git 아님: ' + str(code.get('note'))}",
+                f"- elapsed_s: {report.get('elapsed_s')}",
                 f"- load before/after: {report.get('load_before')} / {report.get('load_after')}",
                 f"- cleanup: {json.dumps(report.get('cleanup'))}"]
         return "\n".join(out) + "\n"
     for name, build in (("기준 T1~T4", _md_baseline), ("registry 밖 사건", _md_outside),
-                        ("무변화 대 교체", _md_contrast),
+                        ("그려진 모델", _md_drawn), ("무변화 대 교체", _md_contrast),
                         ("pass 구간", _md_passes), ("T3 launch", _md_launches),
                         ("구간 중앙값", _md_segments), ("실행 정보", _md_info)):
         out += _guarded(name, build, report)
@@ -454,6 +474,30 @@ def run_history_scale(fixture_mod, t12, scratch_root: Path, keep: bool) -> tuple
                               "the rows again at a smaller row size so each registry stays <= 50 MiB."}, cleanups
 
 
+def code_head(repo: Path | None = None) -> dict:
+    """The git head of the code that was measured (the tree is a repository, or it says it is not).
+
+    A before/after comparison runs the same tool on two trees; the head in the report is what
+    tells a reader which code produced the numbers. A tree that is not a repository (an archive
+    export) is recorded as such instead of leaving the field out.
+    """
+    import subprocess
+    root = str(repo or Path(__file__).resolve().parents[1])
+
+    def git(*cmd):
+        return subprocess.run(["git", "-C", root, *cmd], capture_output=True, text=True, timeout=20)
+    try:
+        head = git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return {"git": False, "root": root, "note": "측정한 트리가 git 저장소가 아니다 (archive export 등)"}
+        dirty = git("status", "--porcelain", "--untracked-files=no")
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        return {"git": True, "root": root, "head": head.stdout.strip(), "branch": branch.stdout.strip(),
+                "tracked_changes": len([l for l in dirty.stdout.splitlines() if l.strip()])}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"git": False, "root": root, "note": f"git head를 읽지 못함: {type(exc).__name__}"}
+
+
 def cmd_run(args) -> int:
     fixture_mod = _module("fixture")
     t12 = _module("t12")
@@ -461,7 +505,7 @@ def cmd_run(args) -> int:
         print("e2e_latency modules are not present", file=sys.stderr)
         return 2
     started = time.monotonic()
-    report: dict = {"command": "run", "reps": args.reps, "load_before": _load(), "results": [],
+    report: dict = {"command": "run", "reps": args.reps, "code": code_head(), "load_before": _load(), "results": [],
                     "passes": [], "notes": [], "not_measured": [], "history_scale": None}
     cleanups = []
     code = 0
@@ -499,6 +543,7 @@ def cmd_run(args) -> int:
                 report["not_measured"].extend(result["not_measured"])
                 report["shim_mode"] = result.get("shim_mode")
                 report["outside_registry"] = result.get("outside_registry")
+                report["drawn_detail"] = result.get("drawn_detail")
                 report["events"] = result["events"]
             if only & {"t1", "t2"} and only & {"t3", "t4"}:
                 # T1/T2 leave the fixture changed (closed and killed routes, new launches, a replaced

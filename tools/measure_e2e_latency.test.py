@@ -423,7 +423,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(check["failures"], ["human_wait_state._refresh_cache"])
         self.assertFalse(check["ok"])
         fleet = shim_pass.self_check([{"root": "__init__.collect_all", "seg": {}}], "fleet")
-        self.assertEqual(fleet["failures"], ["render._explorer_compose"])
+        self.assertEqual(fleet["failures"], ["render._explorer_compose", "render._draw"])
 
     def test_orchestrator_exits_one_and_publishes_nothing_when_blind(self):
         fake_fixture = types_namespace(build=lambda **kw: {
@@ -539,6 +539,40 @@ class ReportTests(unittest.TestCase):
         self.assertIn("판정 불가 (full parses 1/0", text)
         self.assertNotIn("주원인 후보", text)
 
+    def test_history_verdict_says_to_read_the_extra_numbers_when_every_cell_is_unjudgeable(self):
+        # follow-up 4b: an incremental registry path re-parses nothing, so every cell reads "판정 불가"
+        def side(after):
+            return {"roles": {"producer": {
+                "warm_median_s": 0.4, "after_replace_s": after, "extra_s": after - 0.4,
+                "after_row": {"metrics": {"full_metadata_parses": 0}}}}}
+        text = "\n".join(tool.history_verdicts({"pairs": [{"label": "A", "small": side(0.5), "large": side(0.55)}]}))
+        self.assertIn("history 비례 판정 불가", text)
+        self.assertIn("추가분 숫자", text)
+        self.assertIn("d1의 전체 시간", text)
+
+    def test_report_names_the_git_head_of_the_measured_code(self):
+        # follow-up 6: a tree that is a repository gives its head; one that is not says so
+        head = tool.code_head(ROOT)
+        self.assertTrue(head["git"])
+        self.assertRegex(head["head"], r"^[0-9a-f]{40}$")
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            outside = tool.code_head(Path(tmp))
+        self.assertFalse(outside["git"])
+        self.assertIn("git 저장소가 아니다", outside["note"])
+        report = self.sample()
+        report["code"] = head
+        self.assertIn(head["head"], tool.render_markdown(report))
+        report["code"] = outside
+        self.assertIn("git 아님", tool.render_markdown(report))
+
+    def test_report_prints_the_empty_frames_of_the_drawn_model(self):
+        report = self.sample()
+        report["drawn_detail"] = {"frames": 10, "with_detail": 6, "empty": 4, "empty_runs": 2,
+                                  "empty_s": 2.5, "longest_empty_s": 1.5, "span_s": 12.0}
+        text = tool.render_markdown(report)
+        self.assertIn("그려진 화면 모델의 route 세부", text)
+        self.assertIn("빈 것 **4개**", text)
+
     def test_table_says_how_many_events_were_seen(self):
         report = self.sample()
         report["results"][0]["events"]["route-start"].update(n=2, n_total=3)
@@ -596,6 +630,98 @@ class VisibleTests(unittest.TestCase):
         digest["routes"]["rt-1"].update(state="idle")
         self.assertTrue(visible.t2(self.ev("owner-dead"), digest))
         self.assertFalse(visible.t2(self.ev("owner-dead"), None))
+
+
+class DrawnModelTests(unittest.TestCase):
+    """Follow-up 2 and the flicker check: T2 follows the model ``_draw`` drew, not the one composed."""
+
+    ROUTE_WITH = {"a": {"state": "working", "attempt": "att-1", "active": ["execute"]}}
+    ROUTE_EMPTY = {"a": {"state": "working", "attempt": None, "active": []}}
+
+    def draws(self, models, step=1_000_000_000):
+        return [{"root": "render._draw", "t0": i * step, "t1": i * step + 10, "seg": {},
+                 **({"model": {"routes": m, "questions": []}} if m is not None else {})}
+                for i, m in enumerate(models)]
+
+    def test_shim_takes_the_digest_after_draw_not_after_compose(self):
+        source = shim_pass.render()
+        self.assertIn('if name == "render._draw":', source)
+        self.assertNotIn('if name == "render._explorer_compose":\n                # After t1', source)
+        self.assertIn(("render", "_draw"), shim_pass.FLEET_ROOTS)
+
+    def test_arrival_is_a_draw_whose_model_shows_the_value(self):
+        ev = {"kind": "route-start", "t_ns": 5, "expect": {"route_id": "a", "attempt_id": "att-1"}}
+        rows = shim_pass.with_models(self.draws([self.ROUTE_EMPTY, self.ROUTE_EMPTY, self.ROUTE_WITH]))
+        arrival = t12._fleet_arrival(rows, ev)
+        self.assertIs(arrival, rows[2])
+        self.assertIsNone(t12._fleet_arrival(rows[:2], ev))
+
+    def test_empty_frames_count_only_after_detail_was_shown(self):
+        # before the first frame with detail nothing is "gone"; afterwards an empty one is a blank
+        models = [self.ROUTE_EMPTY, self.ROUTE_EMPTY, self.ROUTE_WITH, self.ROUTE_WITH, self.ROUTE_EMPTY,
+                  self.ROUTE_EMPTY, self.ROUTE_WITH, None, self.ROUTE_EMPTY, self.ROUTE_WITH]
+        rows = self.draws(models)
+        for index in (1, 3, 5, 7):          # the digest is written only when it changed
+            rows[index].pop("model", None)
+        out = t12.drawn_detail(rows)
+        self.assertEqual(out["frames"], 8)        # from the first detail frame on, frames that have routes
+        self.assertEqual(out["with_detail"], 5)
+        self.assertEqual(out["empty"], 3)
+        self.assertEqual(out["empty_runs"], 2)
+        self.assertEqual(out["longest_empty_s"], 2.0)
+
+    def test_a_steady_screen_has_no_empty_frame(self):
+        out = t12.drawn_detail(self.draws([self.ROUTE_WITH, None, None, self.ROUTE_WITH]))
+        self.assertEqual((out["empty"], out["empty_runs"], out["longest_empty_s"]), (0, 0, 0.0))
+        self.assertEqual(t12.drawn_detail([]), {**t12.drawn_detail([])})
+        self.assertEqual(t12.drawn_detail([])["frames"], 0)
+
+
+class SourceShapeTests(unittest.TestCase):
+    """Follow-up 5: a source line that changed shape must not silently restore the default."""
+
+    def setUp(self):
+        t12.SOURCE_SHAPE_WARNINGS.clear()
+        self.addCleanup(t12.SOURCE_SHAPE_WARNINGS.clear)
+
+    def test_current_source_is_read_without_a_warning(self):
+        self.assertGreater(t12.registry_min_gap(), 0)
+        self.assertGreater(t12.producer_cadence_s(), 0)
+        self.assertEqual(t12.SOURCE_SHAPE_WARNINGS, [])
+
+    def test_unreadable_shape_returns_the_default_and_leaves_a_warning(self):
+        with mock.patch.object(Path, "read_text", return_value="_REGISTRY_MIN_GAP_RENAMED = 5\n"):
+            self.assertEqual(t12.registry_min_gap(), 2.0)
+            self.assertEqual(t12.producer_cadence_s(), 30.0)
+        text = "\n".join(t12.SOURCE_SHAPE_WARNINGS)
+        self.assertIn("registry_min_gap", text)
+        self.assertIn("producer_cadence_s", text)
+        self.assertIn("WARNING", text)
+        with mock.patch.object(Path, "read_text", return_value="_REGISTRY_MIN_GAP_RENAMED = 5\n"):
+            t12.registry_min_gap()
+        self.assertEqual(len(t12.SOURCE_SHAPE_WARNINGS), 2)             # the same warning is not repeated
+
+    def test_the_warning_reaches_the_report_notes(self):
+        with mock.patch.object(Path, "read_text", return_value=""):
+            t12.registry_min_gap()
+        report = t12._assemble({"sessions": []}, [], [], [], [], 2.0, 0.025, [], [], {}, "/nonexistent/producer.jsonl")
+        self.assertTrue(any("registry_min_gap" in note for note in report["notes"]))
+        self.assertIn("drawn_detail", report)
+
+
+class UnpublishedEventTests(unittest.TestCase):
+    """Follow-up 8: an event that was detected but whose publishing pass cannot be found says why."""
+
+    def test_detect_without_a_publisher_pass_is_listed_with_its_reason(self):
+        ev = {"kind": "route-start", "seq": 1, "t_ns": 1_000, "t_start_ns": 900, "detect_ns": 5_000,
+              "projection_s": 0.01, "expect": {"route_id": "a", "attempt_id": "att-1"}}
+        late_pass = {"root": "human_wait_state._refresh_cache", "index": 1, "t0": 9_000_000_000,
+                     "t1": 9_100_000_000, "seg": {}}
+        report = t12._assemble({"sessions": []}, ["route-start"], [ev], [late_pass], [], 2.0, 0.025, [], [], {}, "/nonexistent/producer.jsonl")
+        reasons = [item["reason"] for item in report["not_measured"] if "route-start#1 T1" in item["what"]]
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(reasons[0].startswith("no_publisher_pass"))
+        self.assertNotIn("not_visible", reasons[0])
 
 
 class PhasePlanTests(unittest.TestCase):

@@ -39,7 +39,7 @@ TARGETS = (
     ("dispatch_registry_cache", "RegistryView.__init__"),
     ("dispatch_replacement", "registry_rows"),
     ("session_line", "session_route_status"),
-    ("render", "_explorer_compose"),
+    ("render", "_explorer_compose"), ("render", "_draw"),
     # The route judgments (speed-e2e leg C): what an answer-wait pass and a Fleet pass spend per
     # route, and where a registry replacement's time goes.
     ("human_gate_observation", "_generation_candidates"), ("human_gate_observation", "_route_outcome"),
@@ -57,9 +57,9 @@ TARGETS = (
     ("dispatch_registry_cache", "_iter_lf_chunks"),
 )
 PRODUCER_ROOTS = (("human_wait_state", "_refresh_cache"),)
-FLEET_ROOTS = (("__init__", "collect_all"), ("render", "_explorer_compose"))
+FLEET_ROOTS = (("__init__", "collect_all"), ("render", "_explorer_compose"), ("render", "_draw"))
 REQUIRED = {"producer": ("human_wait_state._refresh_cache",),
-            "fleet": ("__init__.collect_all", "render._explorer_compose")}
+            "fleet": ("__init__.collect_all", "render._explorer_compose", "render._draw")}
 
 SHIM_SOURCE = r'''
 import importlib.util, json, os, sys, threading, time
@@ -176,8 +176,9 @@ if _OUT:
                        metrics={k: after[k] - before.get(k, 0) for k in after
                                 if isinstance(after[k], (int, float)) and after[k] != before.get(k, 0)},
                        pid=os.getpid())
-            if name == "render._explorer_compose":
-                # After t1 is taken, so it is not part of the pass: what the screen model now shows.
+            if name == "render._draw":
+                # After t1 is taken, so it is not part of the pass: the model this frame was drawn
+                # from (``_draw`` has decided between the published, replayed and loading frame by now).
                 digest = _model_digest()
                 if digest is not None and digest != _last_model[0]:
                     acc["model"] = _last_model[0] = digest
