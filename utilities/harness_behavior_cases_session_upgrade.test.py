@@ -262,5 +262,89 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(open_route.text, "route 2 done")
 
 
+class VerdictTest(unittest.TestCase):
+    """The held variants' verdict, driven through ``drive`` with the live plumbing replaced."""
+
+    class Run:
+        harness = "claude"
+
+        def __init__(self):
+            self.evidence = {}
+            self.notes = []
+            self.tui = self
+
+        def note(self, text): self.notes.append(text)
+        def prompt(self, text): return True
+        def wait_requests(self, count, timeout): return True
+        def wait_idle(self, quiet, timeout): return True
+        def main_requests(self): return []
+        def screen(self): return self.text
+        text = "native screen\nDRAFT-KEPT-HERE"
+
+    def drive(self, scenario, *, changes, draft_on_screen=True, same_pids=True):
+        """``changes``: one answer per ``wait_host_change`` call (after release, then after the next prompt)."""
+        answers = iter(changes)
+        run = self.Run()
+        run.text = "native screen" + ("\nDRAFT-KEPT-HERE" if draft_on_screen else "")
+        snap = {"host_pid": 10, "native_pid": 20, "digest": "d", "cursor": (1, 1), "history": "h", "history_size": 0}
+        after = dict(snap, host_pid=11 if any(changes) else 10)
+        shots = iter([snap, snap, after])
+        patches = {
+            "snapshot": lambda *a, **k: next(shots),
+            "session_id": lambda run: "sid",
+            "install_release_b": lambda run, fail=False: {"exit": 0},
+            "wait_host_change": lambda *a, **k: next(answers),
+            "key_reaches_native": lambda run: True,
+            "host_status": lambda run: {},
+            "DEFER_WAIT": 0,
+        }
+        saved = {name: getattr(su, name) for name in patches}
+        for name, value in patches.items():
+            setattr(su, name, value)
+        scenario.hold_state = lambda run: "held"
+        scenario.release_state = lambda run: None
+        scenario.first_turn = lambda run: True
+        try:
+            verdict = scenario.drive(run)
+        finally:
+            for name, value in saved.items():
+                setattr(su, name, value)
+        return verdict, run.evidence["upgrade"]
+
+    def test_a_draft_switch_right_after_release_passes_and_is_recorded_as_such(self):
+        scenario = su.DraftScenario()
+        scenario.DRAFT = "DRAFT-KEPT-HERE"
+        verdict, ev = self.drive(scenario, changes=[True])
+        self.assertEqual(verdict, "pass", ev)
+        self.assertIs(ev["switched_after_release"], True)
+        self.assertEqual(ev["switched_after_next_prompt"], "-")
+
+    def test_a_draft_switch_only_after_the_next_turn_passes_and_is_recorded_as_such(self):
+        scenario = su.DraftScenario()
+        scenario.DRAFT = "DRAFT-KEPT-HERE"
+        verdict, ev = self.drive(scenario, changes=[None, True])
+        self.assertEqual(verdict, "pass", ev)
+        self.assertIs(ev["switched_after_release"], False)
+        self.assertIs(ev["switched_after_next_prompt"], True)
+
+    def test_no_switch_even_after_the_next_turn_fails(self):
+        scenario = su.QuestionScenario()
+        verdict, ev = self.drive(scenario, changes=[None, None])
+        self.assertEqual(verdict, "fail", ev)
+        self.assertIs(ev["switched_after_next_prompt"], False)
+
+    def test_a_lost_draft_byte_fails(self):
+        scenario = su.DraftScenario()
+        scenario.DRAFT = "DRAFT-KEPT-HERE"
+        verdict, ev = self.drive(scenario, changes=[True], draft_on_screen=False)
+        self.assertEqual(verdict, "fail", ev)
+        self.assertIs(ev["draft_kept"], False)
+
+    def test_other_held_states_still_need_the_switch_right_after_release(self):
+        verdict, ev = self.drive(su.TurnScenario(), changes=[None, True])
+        self.assertEqual(verdict, "fail", ev)
+        self.assertIs(ev["switched_after_next_prompt"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

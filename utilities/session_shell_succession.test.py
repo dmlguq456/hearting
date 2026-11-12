@@ -84,6 +84,7 @@ if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
  if(process.env.HEARTING_SHELL_SUCCESSOR==='1'){
   fs.appendFileSync(dir+'/spawns',process.pid+' '+process.env.HEARTING_SHELL_GENERATION+'\n');
   const m=mode();
+  if(m==='load-throw'){fs.writeSync(2,'at Module._load (node:internal/modules/cjs/loader)\r\nNode.js v24 injected load failure\r\n');throw Error('injected load failure');}
   if(m==='bypass'){fs.writeSync(Number(process.env.HEARTING_SHELL_START_FD),'BYPASS\n');process.exit(0);}
   if(m==='commit-throw'){const read=fs.readFileSync;fs.readFileSync=function(f,...a){if(String(f).includes('succession-'))throw Error('injected');return read.call(this,f,...a);};}
   if(m==='exit-after-switch'){const rename=fs.renameSync;fs.renameSync=function(a,b){const r=rename.call(this,a,b);if(String(b).endsWith('control.sock'))setImmediate(()=>process.exit(3));return r;};}
@@ -561,7 +562,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
 
     # ----------------------------------------------------------------- S7
     def test_a_failing_successor_leaves_the_old_host_and_the_native_untouched(self):
-        for fault in ('bypass', 'commit-throw', 'exit-after-switch'):
+        for fault in ('load-throw', 'bypass', 'commit-throw', 'exit-after-switch'):
             with self.subTest(fault=fault):
                 window = self.window()
                 first = window.wait_binding(); self.settle(window)
@@ -579,6 +580,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 self.assertEqual(row['host_pid'], first['host_pid'])
                 self.assertTrue(process_row(first['host_pid'])['live'])
                 self.only_line_differs(window, before, r'New release waiting|새 판 대기')
+                # What a dying successor says never reaches the terminal the old host still owns.
+                self.assertNotIn(b'injected load failure', bytes(window.raw))
                 # Keys typed while a successor was dying still arrive, exactly once, in order.
                 window.type('k1k2\r'); window.until('DONE_k1k2')
                 self.assertEqual((window.root/'native-read').read_bytes().count(b'k1k2\r'), 1)

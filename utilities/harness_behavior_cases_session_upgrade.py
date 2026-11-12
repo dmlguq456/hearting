@@ -58,6 +58,8 @@ FAIL_ENV = "HEARTING_UPGRADE_FIXTURE_FAIL"
 FAIL_LINE = ("if(process.env.%s==='1'&&Number(process.env.HEARTING_SHELL_GENERATION||0)>0)"
              "throw new Error('fixture: successor refuses');\n" % FAIL_ENV)
 NOT_PRODUCED = "not-produced"
+# What a successor that throws at load writes with node's own error printer.
+LOAD_ERROR_MARKS = ("Module._load", "Node.js v", "successor refuses")
 # Claude Code refuses a foreground `sleep N` command, so the long step is a python sleep.
 LONG_COMMAND = ("python3 -c \"import time; time.sleep(90); print('SCENARIO-UPGRADE-LONG-DONE')\"")
 
@@ -414,6 +416,8 @@ class SessionUpgradeScenario(Scenario):
     hold = False            # a held state must defer the switch until it is released
     fail = False
     scrollback = False
+    DRAFT = ""
+    next_turn_ok = False
 
     # -- model script ------------------------------------------------------
     def script(self, run):
@@ -519,6 +523,11 @@ class SessionUpgradeScenario(Scenario):
                     and held["native_pid"] == before["native_pid"]
                     and quiet["sha"] == before_quiet["sha"])
             ev["deferred"] = "yes" if same else "NO"
+            if self.DRAFT:
+                ev["draft_kept"] = self.DRAFT[:20] in shown
+                if not ev["draft_kept"]:
+                    verdict = "fail"
+                    run.note("a draft byte was lost while the switch was held")
             if not same:
                 ev["held_before"] = before
                 ev["held_after"] = held
@@ -528,6 +537,7 @@ class SessionUpgradeScenario(Scenario):
                 run.note("the switch was not deferred while the state was held")
             self.release_state(run)
         moved = wait_host_change(run, before["host_pid"])
+        released = bool(moved)
         if not moved:
             ev["host_status_after_wait"] = host_status(run)
             ev["screen_tail_after_wait"] = "\n".join(run.tui.screen().rstrip().splitlines()[-6:])
@@ -537,25 +547,44 @@ class SessionUpgradeScenario(Scenario):
                 run.prompt("SCENARIO-UPGRADE follow-up")
                 run.wait_requests(count + 1, 60)
                 run.wait_idle(6, 90)
-                ev["switched_after_next_prompt"] = bool(wait_host_change(run, before["host_pid"], 20))
+                moved_next = wait_host_change(run, before["host_pid"], 20)
+                ev["switched_after_next_prompt"] = bool(moved_next)
+                if self.next_turn_ok and moved_next:
+                    moved = moved_next
+        elif self.hold:
+            ev["switched_after_next_prompt"] = "-"
         after = snapshot(run)
         ev.update(native_after=after["native_pid"], host_after=after["host_pid"])
         if self.fail:
             kept = (after["host_pid"] == before["host_pid"]
                     and after["native_pid"] == before["native_pid"] and not moved)
             ev["fail_injection"] = "old host kept" if kept else "FAILED: host changed"
-            ev["screen_same"] = after["digest"] == before["digest"]
+            # What the person sees of the native is the same apart from the one waiting line the
+            # old host paints (the host's own panel keeps counting time and is left out).
+            final_text = run.tui.screen()
+            ev["screen_same"] = (screen_digest(final_text, blank=WAIT_NOTE, native=True)["sha"]
+                                 == before_quiet["sha"])
             ev["cursor_same"] = after["cursor"] == before["cursor"]
+            ev["stderr_on_screen"] = any(mark in final_text for mark in LOAD_ERROR_MARKS)
+            if ev["stderr_on_screen"]:
+                ev["screen_same"] = False
             if not ev["screen_same"] or not ev["cursor_same"]:
                 ev["cursor"] = {"before": before["cursor"], "after": after["cursor"]}
-                ev["screen_row_diff"] = row_diff(kept_rows(screen_rows(before_text)),
-                                                 kept_rows(screen_rows(run.tui.screen())))
+                ev["screen_row_diff"] = row_diff(kept_rows(screen_rows(before_text, WAIT_NOTE, True)),
+                                                 kept_rows(screen_rows(final_text, WAIT_NOTE, True)))
             ev["key_reached"] = key_reaches_native(run)
             return "pass" if kept and ev["screen_same"] and ev["key_reached"] and verdict == "pass" \
                 else "fail"
-        ev["switched_after_release" if self.hold else "switched"] = bool(moved)
+        if self.hold:
+            # "Switch only when the composer is provably empty": after an erased draft, an answered
+            # form, history-scroll keys or a turn stopped without a stop callback that proof is the
+            # next submitted turn; the report says which of the two moments it was.
+            ev["switched_after_release"] = released
+        else:
+            ev["switched"] = bool(moved)
         if not moved:
-            run.note("the host did not change after release B was installed")
+            run.note("the host did not change after release B was installed"
+                     + ("" if not self.next_turn_ok else " nor after the next submitted turn"))
             return "fail"
         ev["native_same"] = after["native_pid"] == before["native_pid"]
         if not self.hold:
@@ -589,6 +618,7 @@ class DraftScenario(SessionUpgradeScenario):
     name = "session-upgrade-draft"
     summary = "A draft is in the composer: the switch waits, the draft stays, then the switch happens."
     hold = True
+    next_turn_ok = True     # an erased draft leaves the composer unproven: the next submitted turn settles it
     DRAFT = "SCENARIO-UPGRADE-DRAFT unsent"
 
     def hold_state(self, run):
@@ -630,6 +660,7 @@ class QuestionScenario(SessionUpgradeScenario):
     name = "session-upgrade-question"
     summary = "A native question is open: the switch waits until it is answered."
     hold = True
+    next_turn_ok = True     # a form answered with Enter leaves the composer unproven too
 
     def hold_state(self, run):
         before = len(run.main_requests())

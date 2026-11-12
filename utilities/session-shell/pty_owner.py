@@ -169,7 +169,9 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
         try:
             os.set_blocking(c.ready_r,False)
             os.set_blocking(master,False)
+            # A successor owns nothing of the terminal until it takes over: its stderr (a load error) never reaches it.
             gen.host=subprocess.Popen([node,str(host_path),harness,*wrapped],env=env,
+                                      stderr=subprocess.DEVNULL if successor else None,
                                       pass_fds=(master,c.ready_w,c.status_r,c.display_control.fileno(),held_fd,c.succ_host.fileno()))
             gen.start=birth(gen.host.pid);gen.fd=os.pidfd_open(gen.host.pid)
         except OSError:

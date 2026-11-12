@@ -56,17 +56,21 @@ notices a change from a watch on the link's directory and at each idle
 transition, with no timer. While a newer host is installed and not yet taken,
 the notice slot shows one lowest-priority line (`session_shell.upgrade_pending`).
 The host asks the PTY owner for a successor only at a safe moment: idle, an
-empty composer (a draft typed and erased waits for the next submitted turn), no
-open form or answerable question, no route page, settings, Fleet explorer or
-panel focus, and no delivery, held bytes, paste, drag or action worker. The
-owner starts the successor from the same installed path. The old host stops
+empty composer, no open form or answerable question, no route page, settings,
+Fleet explorer or panel focus, and no delivery, held bytes, paste, drag or
+action worker. Keys that reached native since the last submitted turn leave the
+composer unproven (an erased draft, a form answered with Enter, history-scroll
+keys, a turn stopped without a stop callback), so the switch then follows the
+next submitted turn. The owner starts the successor from the same installed path. The old host stops
 reading, withdraws its binding and writes a private seed: the native screen
 with every line above the viewport, cursor, modes, scroll region and display
 state. The successor restores it, takes the same `control.sock` path by an
 atomic rename, registers, paints only the differences, and reads the PTY and
 keyboard only after the owner commits the switch. The native process, its
 conversation, the draft and pending deliveries stay; success shows nothing. A
-failure or timeout before the commit resumes the old host as it was, and keys
+failure or timeout before the commit resumes the old host as it was (its
+display is painted whole once, and the successor's stderr never reaches the
+terminal), and keys
 typed meanwhile wait in the terminal buffer for whichever host reads next.
 After three failures toward one installed file the window stops asking and
 keeps the waiting line. When the seed cannot carry the lines above the viewport

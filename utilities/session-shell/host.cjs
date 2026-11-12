@@ -1092,7 +1092,8 @@ async function resumeHost(failed=true) {
   // A host that only asked (nothing frozen) learns the attempt is over. A counted failure may retry at once,
   // another end (not safe after all) waits a second so a persistent condition cannot spin.
   if(upgrade)upgrade.retryAfter=failed?0:Date.now()+1000;
-  if(!succeeding){if(upgrade)upgrade.requested=false;checkRelease();return;}
+  // A host that only asked also paints the whole screen once: whatever a dying successor wrote is overwritten.
+  if(!succeeding){if(upgrade)upgrade.requested=false;last=[];footerLast='\0';if(!relay&&!ended)schedule();checkRelease();return;}
   try{
     let ino=-1;try{ino=fs.statSync(socketPath).ino;}catch{}
     if(ino!==socketIno){
