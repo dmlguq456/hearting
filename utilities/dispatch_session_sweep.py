@@ -1068,6 +1068,38 @@ _PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES = {
             "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
             "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
 }
+# The follow-up the short first close shipped just before the decision wording
+# (ask for at most one decision), same current headers. Receipt recovery only.
+_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask for at most one decision the "
+           "person must make; and point to the detailed record. Keep the runtime summary below as agent "
+           "context and record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask for at most one necessary "
+            "decision, and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+# The follow-up the decision wording shipped just before the recommended next step was
+# limited to reversible work, same current headers. Receipt recovery only.
+_DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+           "decide and state a recommended in-scope next step (such as fixing and re-testing) as proceeding; "
+           "and point to the detailed record. Keep the runtime summary below as agent context and record; "
+           "do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+            "decide, state a recommended in-scope next step (such as fixing and re-testing) as proceeding, "
+            "and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
 _LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -1879,9 +1911,13 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
-        # Shipped forms: current; previous follow-up under current headers; that
-        # follow-up under the older headers; and the legacy full body.
-        variants = {rendered, previous_rendered, legacy_rendered,
+        # Shipped forms: current; the three previous follow-ups under current headers
+        # (the earliest one also under the older headers); and the legacy full body.
+        short_rendered, decision_rendered = (_replace_runtime_v1_followups(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected], frozen) if rendered else ""
+            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES))
+        variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
                     _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):

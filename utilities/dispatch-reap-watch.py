@@ -39,8 +39,7 @@ from dispatch_completion_join import (
     apply_exact_route_free_support_classification,
     classify_exact_route_free_review_outcome,
     classify_exact_route_free_support_outcome,
-    close_finished_child,
-    close_wrapper_pass,
+    close_reaped_child,
     exact_attempt_row,
     materialize_after_terminal_close,
 )
@@ -375,9 +374,9 @@ def watch(args: argparse.Namespace) -> int:
         if record[1].get("route_file") and record[1].get("route_node"):
             try:
                 row = exact_attempt_row(args.jobs, args.attempt_id)
-                reason = close_finished_child(row, jobs=args.jobs)
+                reason = close_reaped_child(row, jobs=args.jobs)
                 if reason.startswith("completion-"):
-                    close_wrapper_pass(row, jobs=args.jobs)
+                    close_reaped_child(row, jobs=args.jobs, refused_before=True)
             except JoinContractError:
                 return 65
         return 0

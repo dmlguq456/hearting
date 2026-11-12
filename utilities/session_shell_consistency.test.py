@@ -216,7 +216,10 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
    questions:()=>question?[[{text:'Choose the destination'}],[{text:'1 Current project'}],[{text:state==='draft'?'› My draft':'Ctrl+] answer'}]]:[]};
- const rows=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
+ all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
+ const rows=all.map(r=>r.slice(1));
  assert.deepEqual(rows[1],rows[0],state+' codex');assert.deepEqual(rows[2],rows[0],state+' opencode');
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.

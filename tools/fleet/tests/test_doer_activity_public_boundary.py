@@ -5,8 +5,8 @@ public model carries only allow-listed summaries (a worktree file, an executable
 listed action of that executable or worktree file). Every case below plants one marker in a
 tool call (open
 and just finished) and in the worker's own words, and the marker must be absent from all
-five public places: the job JSON, Fleet's activity rows, the shell feed row, and the shell
-panel painted at 40 and 80 columns.
+public places: the job JSON, Fleet's activity rows and a one-step route's folded row, the
+shell feed row, and the shell panel painted at 40 and 80 columns and folded at 52.
 """
 
 import base64
@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from fleet import session_line, session_panel  # noqa: E402
 from fleet.collectors import dispatch as dispatch_collector  # noqa: E402
 from fleet.explorer import live, tables  # noqa: E402
+from fleet.explorer.grid import CellGrid  # noqa: E402
 from fleet.model import DispatchJob  # noqa: E402
 
 MARK = "DEMO1552SensitiveValue"
@@ -156,6 +157,15 @@ class DoerActivityPublicBoundaryTest(unittest.TestCase):
         doer = live._route_doer(None, job, False, now=1794445400.0)
         fleet = "\n".join("".join(part[0] for part in row)
                           for row in tables.route_activity_rows({"doer": doer}))
+        # The folded ROUTES row of a one-step route carries the same summary (2026-11-12).
+        folded = {"id": "r", "title": "t", "age": "1m", "state": "working", "activity": "running",
+                  "harness": "claude", "legs": [["code", "active", None]], "tree_label": "code",
+                  "stages": [{"name": "one-shot", "st": "active"}], "doer": doer}
+        for width in (120, 150):
+            grid = CellGrid(width, 1)
+            tables.draw_route_row(grid, 0, width, 0, folded,
+                                  tables.route_row_columns(width, (folded,)))
+            fleet += "\n" + "".join(str(cell[0] or "") for cell in grid.cells[0])
         shell = session_line.route_doer({"doer": doer}, [], lambda *a, **k: None, live)
         feed = session_panel.route_row({"id": "r", "state": "working", **shell})
         route = {"id": "r", "title": "Synthetic task", "state": "working", "kind": "working",
@@ -181,6 +191,10 @@ class DoerActivityPublicBoundaryTest(unittest.TestCase):
         painted = self._painted
         self.assertIn("after Edit · src/app.py", painted["claude:edit_body"]["40"].replace("\n", ""))
         self.assertIn(">_ cat · notes.txt", painted["claude:pipe_tail"]["80"])
+        # The folded places were really drawn too.
+        _public, fleet, _feed, _route = self._surfaces(jobs["claude:edit_body"])
+        self.assertIn("● Edit src/app.py", fleet)
+        self.assertIn(">_ cat", painted["claude:pipe_tail"]["52-folded"])
 
     def test_short_lowercase_marker_reaches_no_public_surface(self):
         lower_b64 = base64.b64encode(LOWER_MARK.encode()).decode()
@@ -230,9 +244,10 @@ class DoerActivityPublicBoundaryTest(unittest.TestCase):
         source.write_text(json.dumps(routes, ensure_ascii=False))
         script = r"""
 const fs=require('fs'),view=require(process.argv[1]),routes=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
-const out={};for(const [key,route] of Object.entries(routes)){out[key]={};for(const width of [40,80]){
- const x=view.render({width,height:40,side:width<80,model:{routes:[route],route_count:1,messages:[]},sid:'s',
-  configuration:{},expandedKeys:['route:r'],questions:()=>[]});
+const out={};for(const [key,route] of Object.entries(routes)){out[key]={};for(const width of [40,80,'52-folded']){
+ const w=parseInt(width),folded=String(width).endsWith('folded');
+ const x=view.render({width:w,height:40,side:folded||w<80,model:{routes:[route],route_count:1,messages:[]},sid:'s',
+  configuration:{},expandedKeys:folded?[]:['route:r'],questions:()=>[]});
  out[key][width]=x.rows.map(r=>r.map(p=>p.text).join('')).join('\n');}}
 process.stdout.write(JSON.stringify(out));"""
         result = subprocess.run(

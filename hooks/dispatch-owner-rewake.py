@@ -1268,7 +1268,9 @@ def classified_receipt(
             if summary:
                 instruction += ("\nFirst close: give the result in one or two sentences, preserve any "
                                 "important remaining failure, unfinished work, or user-impacting limit, "
-                                "ask for at most one decision the person must make, and point to the "
+                                "ask only what only the person can decide, state a recommended in-scope, "
+                                "reversible next step (such as fixing and re-testing) as proceeding, and "
+                                "point to the "
                                 "detailed record. Keep the runtime summary below as agent context and "
                                 "record; do not reproduce it for the person.\n" + summary)
         elif parked and parked["status"] == "blocked":
