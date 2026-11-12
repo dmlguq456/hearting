@@ -687,7 +687,7 @@ class RuntimeProjectionTest(unittest.TestCase):
                                             "--title", oc_agent + " OC task"])
 
     def test_statusline_leads_with_the_project_and_carries_no_title(self):
-        """2026-11-11 (spec rule 10): `[number] project (git) │ model …`, no folder glyph
+        """2026-11-11 (spec rule 10): `[number] project/ (git) │ model …`, no folder glyph
         and no session title; a title equal to the folder is not repeated either."""
         with tempfile.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
@@ -696,7 +696,8 @@ class RuntimeProjectionTest(unittest.TestCase):
             self.successful_title(root, sid, "Real title")
             out = strip(self.statusline(root, sid, "Automatic stdin title").stdout)
             self.assertNotIn("Real title", out)
-            self.assertTrue(out.split("│")[0].strip().split(" (")[0].endswith(root.name), out)
+            # E9 rule 29: the repository name ends in `/`.
+            self.assertTrue(out.split("│")[0].strip().split(" (")[0].endswith(root.name + "/"), out)
             self.assertNotIn("📁", out)
             self.successful_title(root, sid, root.name)
             bare = strip(self.statusline(root, sid, "Automatic stdin title").stdout)
