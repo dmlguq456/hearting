@@ -131,7 +131,7 @@ def _complete_exact_routed_attempt(jobs: Path, metadata: dict[str, str], complet
 def _complete_routed_attempt_from_terminal_evidence(
     jobs: Path, metadata: dict[str, str], worktree: str
 ) -> None:
-    """Isomorphic to adapters/codex/bin/dispatch-harvest.py (round_1 finding
+    """Isomorphic to utilities/dispatch-harvest.py (round_1 finding
     5, SD-70/78): derive completion evidence from the row's own terminal
     envelope when no explicit ``--completion`` marker was named. The exact
     route/hash/node/attempt binding is enforced by `ROUTE.complete_node`

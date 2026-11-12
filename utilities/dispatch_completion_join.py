@@ -1080,10 +1080,10 @@ def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
 def harvest_command_lines(prompt: str) -> list[str]:
     """Extract the exact harvest command lines a supervisor prompt prescribes.
 
-    Both supervisors emit a command on its own line: the existing harvest
-    operation or portable read-only inspection. Used by the producer<->guard
-    parity fixture (plan SS3.4 D1b) so that fixture never needs a
-    hand-written command literal.
+    Both supervisors emit a command on its own line: the shared harvest or
+    portable read-only inspection (an earlier receipt may still name the Codex
+    `preflight.sh harvest` wrapper). Used by the producer<->guard parity fixture
+    (plan SS3.4 D1b) so that fixture never needs a hand-written command literal.
     """
 
     lines = []
@@ -1097,6 +1097,9 @@ def harvest_command_lines(prompt: str) -> list[str]:
             and tokens[1] == "harvest"
             and tokens[0].endswith("preflight.sh")
         ):
+            lines.append(line)
+        elif (len(tokens) >= 2 and tokens[0] in {"python", "python3"}
+              and tokens[1].endswith("/utilities/dispatch-harvest.py")):
             lines.append(line)
         elif (len(tokens) >= 3 and tokens[0] in {"python", "python3"}
               and tokens[1].endswith("/utilities/dispatch-registry.py")
@@ -1156,22 +1159,41 @@ def delivery_required_action(state: CurrentDeliveryState) -> str:
     return _delivery_choice(state).next_action
 
 
-def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surface: str) -> str:
-    """Project an already-decided record action; grant no workflow authority."""
+def completion_harvest_command(attempt_id: str, action: str, *, jobs: str) -> str:
+    """Project an already-decided record action; grant no workflow authority.
+
+    Every line names a shared `utilities/` entry point of this tree, so an owner
+    on any harness is shown the same command (no adapter path)."""
+    from parent_next_directive import entrypoint
     if action == "finish-workflow":
-        from parent_next_directive import entrypoint
-        utility = entrypoint(Path(__file__).resolve().parents[1], "utilities/dispatch_terminal_commit.py")
+        utility = entrypoint(ROOT, "utilities/dispatch_terminal_commit.py")
         return f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(jobs)} --attempt {shlex.quote(attempt_id)}"
-    if action not in {"complete-open", "inspect-done-failure"}:
-        return ""
     if action == "inspect-done-failure":
-        from parent_next_directive import entrypoint
-        utility = entrypoint(Path(__file__).resolve().parents[1], "utilities/dispatch-registry.py")
+        utility = entrypoint(ROOT, "utilities/dispatch-registry.py")
         registry = f" --jobs {shlex.quote(jobs)}" if jobs else ""
         return f"python3 {shlex.quote(str(utility))} observed-status{registry} --attempt {shlex.quote(attempt_id)}"
+    if action != "complete-open":
+        return ""
     registry = f"--jobs {shlex.quote(jobs)} " if jobs else ""
-    status = "--status open --mark-done" if action == "complete-open" else "--status done"
-    return f"{shlex.quote(surface)} harvest {registry}--attempt-id {shlex.quote(attempt_id)} {status}"
+    return (f"python3 {shlex.quote(str(entrypoint(ROOT, HARVEST_ENTRYPOINT)))} {registry}"
+            f"--attempt-id {shlex.quote(attempt_id)} --status open --mark-done")
+
+
+HARVEST_ENTRYPOINT = "utilities/dispatch-harvest.py"
+# The open-row line the immediately previous release shipped: the Codex adapter
+# wrapper of this same tree. Receipt recovery only.
+_PREVIOUS_HARVEST_ENTRYPOINT = "adapters/codex/bin/preflight.sh"
+
+
+def previous_harvest_wording(text: str) -> str:
+    """`text` with each current open-row harvest line as the previous release wrote it.
+
+    Recovery recognizes an already queued or injected body by its exact bytes;
+    every other byte of `text` is left as it is."""
+    from parent_next_directive import entrypoint
+    current = f"python3 {shlex.quote(str(entrypoint(ROOT, HARVEST_ENTRYPOINT)))} "
+    previous = f"{shlex.quote(str(ROOT / _PREVIOUS_HARVEST_ENTRYPOINT))} harvest "
+    return text.replace(current, previous)
 
 
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
@@ -1259,7 +1281,7 @@ RUNTIME_V1_FOLLOWUP_PREFIXES = {
 }
 
 
-def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
+def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
         return ("Parent-requested close has settled. No harvest, next-stage launch, "
@@ -1311,7 +1333,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                 continue  # Legacy/corrupt context retains the exact inspection surface below.
     commands = [work_commands.get(child["attempt_id"]) or
                 completion_harvest_command(child["attempt_id"], child["required_action"],
-                    jobs=jobs, surface=surface) for child in receipt["children"]]
+                    jobs=jobs) for child in receipt["children"]]
     if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
         notes = [f"The approved route plan names a next leg (index {child['next_leg']['index']}): "
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
@@ -3454,13 +3476,20 @@ def classify_supervised_shell_command(
             return None
         return SupervisorShellAction("harvest", attempt, "done", False)
 
-    if (
+    harvest_args = None
+    if (len(tokens) >= 2 and tokens[0] in {"python", "python3"}
+            and _local_contract_path(base, tokens[1], HARVEST_ENTRYPOINT, extra_roots)):
+        harvest_args = tokens[2:]
+    elif (
         len(tokens) >= 2
-        and _local_contract_path(base, tokens[0], "adapters/codex/bin/preflight.sh", extra_roots)
+        and _local_contract_path(base, tokens[0], _PREVIOUS_HARVEST_ENTRYPOINT, extra_roots)
         and tokens[1] == "harvest"
     ):
+        # The Codex wrapper an earlier receipt names runs the same shared body.
+        harvest_args = tokens[2:]
+    if harvest_args is not None:
         options = _parse_long_options(
-            tokens[2:],
+            harvest_args,
             {"--attempt-id", "--status", "--completion", "--jobs"},
             {"--mark-done", "--keep-home", "--failure-detail"},
         )

@@ -148,9 +148,7 @@ def _resume_native_receiving_turn(duty, store, row, record, recipient_sid, stora
             return True
         from dispatch_completion_join import completion_followup_text
         encoded = json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        followup = completion_followup_text(
-            receipt, jobs=str(jobs_path),
-            surface=str(_UTILITIES_DIR.parent / "adapters/codex/bin/preflight.sh"))
+        followup = completion_followup_text(receipt, jobs=str(jobs_path))
         request_context = observation.get("native_request_context")
         original_request = None
         request_reference = None

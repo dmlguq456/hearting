@@ -3393,6 +3393,40 @@ console.log(JSON.stringify({prompts, logs}));
                         self.assertEqual(SWEEP._opencode_delivery_expectations(
                             [self.root], "opencode-turn", self.SID, messages), [])
 
+    def test_open_row_harvest_line_from_the_previous_release_is_recognized(self):
+        # PG-35: the open-row line now names the shared entry point. A body the
+        # previous release already queued named the Codex wrapper of the same
+        # tree; build that one from frozen bytes, never from the module helper.
+        import dispatch_completion_join as JOIN
+        did = "delivery-" + "9" * 32
+        attempt = "att-0000000000000000000000000000cccc"
+        self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+            "attempt_id": attempt, "status": "open", "readiness": "ready",
+            "reason": "terminal-observed", "required_action": "complete-open",
+            "harness": "opencode", "delivery_classification": "attention"}]))
+        record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+        followup = SWEEP._followup(self.root, record)
+        jobs = SWEEP.record_jobs(self.root, record)
+        current_line = (f"python3 {JOIN.ROOT / 'utilities' / 'dispatch-harvest.py'} --jobs "
+                        f"{jobs} --attempt-id {attempt} --status open --mark-done")
+        frozen_line = (f"{JOIN.ROOT / 'adapters' / 'codex' / 'bin' / 'preflight.sh'} harvest --jobs "
+                       f"{jobs} --attempt-id {attempt} --status open --mark-done")
+        self.assertIn(current_line, followup)
+        current = SWEEP.delivery_context([(self.root, [record])])
+        previous = current.replace(current_line, frozen_line, 1)
+        self.assertNotEqual(previous, current)
+        for body in (current, previous):
+            messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                         "parts": [{"type": "text", "text": body}]}]
+            self.assertEqual([item["text"] for item in SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, messages)], [body])
+        for altered in (previous + " ", previous.replace("preflight.sh harvest", "preflight.sh  harvest", 1),
+                        current.replace(current_line, frozen_line.replace("/codex/", "/opencode/"), 1)):
+            messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                         "parts": [{"type": "text", "text": altered}]}]
+            self.assertEqual(SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, messages), [])
+
     def test_previous_mixed_headers_settle_exact_native_receipts_without_resend(self):
         import session_notice
         for version, legacy in (("previous-short", False), ("legacy-long", True)):
