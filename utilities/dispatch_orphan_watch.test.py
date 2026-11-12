@@ -661,5 +661,91 @@ class WatchLifetimeTest(unittest.TestCase):
             self.watch._finish_recovery(self.args)
 
 
+class SettlingSupervisorExitNoticeTest(unittest.TestCase):
+    """BC-SETTLE-NOTICE-1112: a PASS owner's supervisor exit during its own settlement is
+    noticed only past the join's settling ceiling; a real loss is noticed at once."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / "jobs.log"
+        self.watch = load_watch_module()
+        self.args = SimpleNamespace(jobs=self.jobs, attempt_id="att-life", pid=4242,
+                                    pid_start="1", interval=2.0)
+        self.now = [1000.0]
+        self.sleeps = []
+
+    def clock(self):
+        return self.now[0]
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now[0] += seconds
+
+    def write(self, status, **extra):
+        meta = {"attempt_schema_version": "2", "dispatch_depth": "1", "worker_type": "owner",
+                "attempt_id": "att-life", "workflow_completion": "runtime-v1",
+                "failure_class": "pass", "note": "completed-supervisor", **extra}
+        self.jobs.write_text(f"2026-11-12T00:00:00Z\t{status}\t/r\t/w\towner\t"
+                             + ",".join(f"{k}={v}" for k, v in meta.items()) + "\n", encoding="utf-8")
+
+    def finish(self, process_state, process_reason, *, settled_after=None):
+        """Run _finish_recovery; `_pending` stays true until `settled_after` seconds pass."""
+        import dispatch_contract as contract
+        import dispatch_supervision
+        from split_module_fixture import patch_split
+        start = self.now[0]
+
+        def pending(*_args, **_kwargs):
+            return settled_after is None or self.now[0] - start < settled_after
+
+        notices = []
+        with patch_split(contract, "observed_attempt_liveness", return_value=SimpleNamespace(
+                    process_state=process_state, process_reason=process_reason)), \
+                mock.patch("codex_dispatch_terminal.terminal_envelope_observed", return_value=True), \
+                mock.patch.object(dispatch_supervision, "_pending", side_effect=pending), \
+                mock.patch.object(dispatch_supervision, "materialize",
+                                  side_effect=lambda *a, **k: notices.append((self.now[0] - start, k))), \
+                mock.patch.object(self.watch, "_remove_supervisor_state") as removed:
+            finished = self.watch._finish_recovery(self.args, clock=self.clock, sleep=self.sleep)
+        return finished, [at for at, _kw in notices], removed.call_count
+
+    def test_settlement_that_finishes_inside_the_ceiling_records_no_notice(self):
+        for reason in ("post-exit-receipt-incomplete", "attempt-descendant-unverifiable"):
+            with self.subTest(reason=reason):
+                self.write("done")
+                self.assertEqual(self.finish("unverifiable", reason, settled_after=150), (True, [], 1))
+        with self.subTest(reason="route-completion-pending"):   # quiescent, completion not delivered yet
+            self.assertEqual(self.finish("quiescent", "governed-process-group-drained", settled_after=150),
+                             (True, [], 1))
+
+    def test_settlement_that_never_finishes_is_noticed_once_at_the_ceiling(self):
+        from dispatch_completion_join import SETTLING_NOTICE_SECONDS
+        self.write("done")
+        finished, notices, removed = self.finish("unverifiable", "post-exit-receipt-incomplete")
+        self.assertFalse(finished)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(notices), 1)
+        self.assertGreaterEqual(notices[0], SETTLING_NOTICE_SECONDS)
+        self.assertLess(notices[0], SETTLING_NOTICE_SECONDS + max(self.sleeps))
+
+    def test_a_real_loss_or_running_process_is_noticed_at_once(self):
+        cases = {
+            "no-terminal-signal": ("open", {"failure_class": "", "note": ""}, "unverifiable",
+                                   "post-exit-receipt-incomplete"),
+            "owner-alive-supervisor-gone": ("open", {"failure_class": "", "note": ""}, "live", "process-alive"),
+            "failed-owner": ("done", {"failure_class": "fail", "note": "dead-runtime"}, "unverifiable",
+                             "post-exit-receipt-incomplete"),
+            "pass-with-running-process": ("done", {}, "live", "attempt-descendant-live"),
+            "pass-other-unknown": ("done", {}, "unverifiable", "process-boot-unverifiable"),
+        }
+        for name, (status, extra, state, reason) in cases.items():
+            with self.subTest(case=name):
+                self.sleeps.clear()
+                self.write(status, **extra)
+                self.assertEqual(self.finish(state, reason), (False, [0.0], 0))
+                self.assertEqual(self.sleeps, [])
+
+
 if __name__ == "__main__":
     unittest.main()
