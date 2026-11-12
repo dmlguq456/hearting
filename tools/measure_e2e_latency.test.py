@@ -389,6 +389,9 @@ class ShimTests(unittest.TestCase):
     def test_shim_source_compiles(self):
         compile(shim_pass.render(), "sitecustomize.py", "exec")
         self.assertIn(("human_wait_state", "_refresh_cache"), shim_pass.TARGETS)
+        # the segments the holder memo (speed-e2e leg C) is judged by
+        self.assertIn(("dispatch", "_prime_route_display_rows"), shim_pass.TARGETS)
+        self.assertIn(("dispatch_seat_handover", "job_holders"), shim_pass.TARGETS)
 
     def test_script_run_as_main_is_recorded_by_code_object(self):
         # The producer's case: the file is ``__main__`` and a nested function in it is a target.

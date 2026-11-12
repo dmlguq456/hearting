@@ -50,7 +50,8 @@ TARGETS = (
     ("dispatch_supervision", "_recorded_completion_result"),
     ("dispatch_seat_handover", "effective_parent"), ("dispatch_seat_handover", "_lineage_signature"),
     ("dispatch", "_registry_evidence_for_path"), ("dispatch", "_build_registry_derived_index"),
-    ("dispatch", "_job_selection"),
+    ("dispatch", "_job_selection"), ("dispatch", "_prime_route_display_rows"),
+    ("dispatch_seat_handover", "job_holders"),
     # The floor and the rebuild inside ``RegistryView`` after a replacement: reading and digesting
     # the new generation against segment reconstruction.
     ("dispatch_registry_cache", "_reusable_prefix"), ("dispatch_registry_cache", "_RegistrySegment.__init__"),
