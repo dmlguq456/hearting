@@ -92,9 +92,9 @@ Process exit is not workflow completion (`core/WORKFLOW.md §0.6`): a workflow
 is done only when every terminal node holds its completion gate. Keep
 unfinished work here or in its registered continuation. A receipt, queue
 entry, or ACK is not execution. When a result arrives, review it and do the
-approved follow-through. Close material work with the first-report content
-required by §0.5; its card is optional. Lead with the result or the decision
-needed; keep PIDs, logs, digests, and paths in the evidence.
+approved follow-through. Close material work with the §0.5 contract: result in one or two sentences,
+open failures, unfinished work or limits, unknowns, at most one decision, a
+record pointer. Keep requested output; summary and evidence stay there.
 
 ## Memory and context
 

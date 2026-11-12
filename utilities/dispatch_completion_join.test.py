@@ -4466,14 +4466,15 @@ class NextLegReceiptTest(unittest.TestCase):
             receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
-        required = ("Original request/format apply", "Review result",
-                    "approved follow-through", "First close:",
-                    "checks run/reused/skipped/unrun", "commit/PR/deployment/serving",
+        required = ("Original request/format apply", "Review the result",
+                    "continue approved work", "First close:",
+                    "one or two sentences", "important remaining failure",
+                    "at most one necessary decision", "point to the detailed record",
                     "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
                     "handled exact repeats need no ACK", "new failures/conflicts",
                     "unfinished work, questions")
-        self.assertTrue(all(part in fixed_text for part in required))
-        self.assertLessEqual(len(COMPLETION_DELIVERY_HEADER) + len(text), 583)
+        missing = [part for part in required if part not in fixed_text]
+        self.assertFalse(missing, f"missing completion-close obligations: {missing}")
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
 
@@ -4495,12 +4496,13 @@ class NextLegReceiptTest(unittest.TestCase):
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        self.assertIn("First close: changes/why", before)  # no sealed summary: the text is unchanged
+        self.assertIn("First close: give the result in one or two sentences", before)
+        self.assertIn("point to the detailed record", before)
         self.assertNotIn("[완료 요약]", before)
         self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("show the runtime summary below to the person first, as written", text)
-        self.assertIn("then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
-                      "commit/PR/deployment/serving, limits.", text)   # a one-line summary never shrinks the close
+        self.assertIn("one or two sentences", text)
+        self.assertIn("Keep the runtime summary below as agent context and record; do not reproduce it for the person.", text)
+        self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
         self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),
@@ -6492,7 +6494,9 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
             "pgid": str(os.getpid()), "pid_scope": "namespace-local",
             "pid_ns": namespace, "pid_observer_ns": namespace,
         }
-        child_line = row("done", attempt, parent, "execute", process_metadata=child_metadata)
+        # The worker vanished: its row is still open and it left no final
+        # runtime envelope, so this is not a normal exit awaiting its receipt.
+        child_line = row("open", attempt, parent, "execute", process_metadata=child_metadata)
         live_line = row("open", attempt, parent, "execute", process_metadata=live_metadata)
         sibling_line = row("open", sibling, parent, "sibling", process_metadata=sibling_metadata)
         sibling_done_line = row("done", sibling, parent, "sibling", process_metadata=sibling_metadata)
@@ -6612,6 +6616,113 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
         by_attempt = {child["attempt_id"]: child for child in receipt["children"]}
         self.assertEqual(by_attempt[sibling]["reason"], "process-alive")
         self.assertEqual(len(notices), 0)
+
+
+class SettlingReceiptNoticeTest(unittest.TestCase):
+    """A normally finished child awaiting its post-exit receipt is settling."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.jobs = self.root / "jobs.log"
+        self.parent = "att-parent"
+        self.attempt = "att-settling-child"
+        namespace = D.process_namespace_identity()
+        self.owner = row("open", self.parent, "-", "owner", process_metadata={
+            "attempt_id": self.parent, "parent_sid": "sess-settling-owner",
+            "parent_completion_delivery": "claude-parent-runtime",
+            "owner_route_id": "rt-settling", "harness": "claude",
+        })
+        live = {
+            "pid": str(os.getpid()), "pid_start": D.process_start_ticks(os.getpid()),
+            "pgid": str(os.getpid()), "pid_scope": "namespace-local",
+            "pid_ns": namespace, "pid_observer_ns": namespace, "harness": "claude",
+            "launch_outcome": "governed-process-reaped", "attempt_id": self.attempt,
+            "registered_worker": "1", "worker_type": "stage",
+            "route_id": "rt-settling", "route_node": "execute",
+        }
+        exited = dict(live, pid="99999999", pgid="99999999", pid_ns="pid:[999999999]")
+        proof = D.QuiescenceProof(
+            True, "cancellation-quiescence-proven", self.attempt, "exact-teardown",
+            int(exited["pgid"]), "empty", "empty", True,
+            D._cancellation_quiescence_binding_digest(exited),
+        )
+        self.proof = proof
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=proof):
+            cleanup = D._terminal_cleanup_values(exited)
+        self.live_line = row("open", self.attempt, self.parent, "execute", process_metadata=live)
+        self.awaiting_line = row("done", self.attempt, self.parent, "execute", process_metadata=exited)
+        self.ready_line = row("done", self.attempt, self.parent, "execute",
+                              process_metadata=dict(exited, **cleanup))
+
+    def join(self, phases, timeout):
+        self.jobs.write_text(self.owner + phases[0][1], encoding="utf-8")
+        initial = JOIN.current_children(self.jobs, self.parent)
+        clock = {"t": 0.0, "phase": 0}
+        observations = []
+
+        def refresh(_attempts):
+            clock["t"], line = phases[min(clock["phase"], len(phases) - 1)]
+            clock["phase"] += 1
+            self.jobs.write_text(self.owner + line, encoding="utf-8")
+            return JOIN.current_children(self.jobs, self.parent)
+
+        original_observe = JOIN.write_join_observation
+
+        def observe(*args, **kwargs):
+            result = original_observe(*args, **kwargs)
+            value = JOIN.read_join_observation(self.jobs, {"parent_attempt_id": self.parent},
+                                               now=time.time())
+            observations.append((clock["t"], value.get("state")))
+            return result
+
+        context = __import__("runtime_observation").ObservationContext(max_entries=8)
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock["t"]), \
+             mock.patch.object(JOIN.time, "sleep"), \
+             mock.patch.object(JOIN, "write_join_observation", side_effect=observe):
+            receipt = JOIN._join_snapshot(
+                jobs=self.jobs, initial=initial, refresh=refresh,
+                identity={"parent_attempt_id": self.parent}, interval=0.01, timeout=timeout,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None,
+                recovery=None, observation_jobs=self.jobs, observation_context=context,
+            )
+        notices = [record for record in (
+                       json.loads(path.read_text(encoding="utf-8"))
+                       for path in (self.root / "pending-delivery").glob("*/*.json"))
+                   if record.get("receipt", {}).get("kind") == "supervision"
+                   and record["receipt"].get("reason") == "process-unverifiable"]
+        return receipt, notices, observations
+
+    def test_receipt_arriving_after_the_short_threshold_sends_no_notice(self):
+        short, ceiling = JOIN.UNVERIFIABLE_NOTICE_SECONDS, JOIN.SETTLING_NOTICE_SECONDS
+        late = 61.0 + (short + ceiling) / 2
+        receipt, notices, observations = self.join([
+            (0.0, self.live_line), (61.0, self.awaiting_line),
+            (61.0 + short + 1, self.awaiting_line), (late, self.awaiting_line),
+            (late + 1, self.ready_line), (late + 2, self.ready_line),
+        ], timeout=late + 2)
+        self.assertEqual(receipt["state"], "ready", receipt)
+        self.assertEqual(notices, [])
+        self.assertNotIn("attention", [state for _t, state in observations], observations)
+
+    def test_receipt_that_never_arrives_is_noticed_once_at_the_settling_ceiling(self):
+        ceiling = JOIN.SETTLING_NOTICE_SECONDS
+        receipt, notices, observations = self.join([
+            (0.0, self.live_line), (61.0, self.awaiting_line),
+            (61.0 + ceiling - 0.1, self.awaiting_line), (61.0 + ceiling, self.awaiting_line),
+            (62.0 + ceiling, self.awaiting_line),
+        ], timeout=62.0 + ceiling)
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+        self.assertIn((61.0 + ceiling - 0.1, "waiting"), observations, observations)
+        self.assertIn((61.0 + ceiling, "attention"), observations, observations)
 
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
