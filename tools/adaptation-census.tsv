@@ -426,6 +426,7 @@ tool-deferred	design-mcp
 tool-deferred	dispatch-discriminators.tsv
 tool-deferred	dispatch-refusal-census.py
 tool-deferred	dispatch_refusal_census.test.py
+tool-deferred	e2e_latency
 tool-deferred	entry-skill-layer.test.py
 tool-deferred	figure-semantic-verify.test.py
 tool-deferred	fixture_processes.py
@@ -442,6 +443,8 @@ tool-deferred	installed-layout-triggers.tsv
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
+tool-deferred	measure_e2e_latency.py
+tool-deferred	measure_e2e_latency.test.py
 tool-deferred	measure_hook_before_after.py
 tool-deferred	measure_state_file_before_after.py
 tool-deferred	migration-manifest.py
