@@ -251,9 +251,9 @@ function readRouteRaw(){
 function panelViewNow(){
   const view=panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model:panelModel,native:displayValues,state,sid,frame:spinFrame(),sections:panelSections,configuration:displayConfiguration,
-    settings,routeDetail,routePage,routeScroll,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
+    settings,routeDetail,routePage,attempts:routeRaw?.sid===sid?routeRaw.attempts:[],expandedKeys:[...panelOpen],focused:block.focused,cwd:process.cwd(),harness,
     cellWidth,background:terminalBackground,
-    questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
+    routeScroll,questions:options=>actionLines.length&&block.focused?actionLines:block.detail(options)});
   // A message no longer kept closes its page here too, so its page keys go back to the native.
   if(typeof routeDetail==='string'&&view.routeDetail===false){routeDetail=false;routePage=0;}
   routePageCount=view.routePages;return view;
