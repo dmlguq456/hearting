@@ -210,7 +210,8 @@ class KillFixtureTest(_WatchMixin, unittest.TestCase):
             record = json.loads(observation_path.read_text())["native_wait"]
             self.assertEqual(record["state"], "armed")
             self.assertNotIn("pid", record)
-        self.assertEqual(self._wait_calls(), [])
+        # No native wait child and no Herdr call of any kind (the call guard stayed empty).
+        self.assertEqual(self.calllog.read_text() if self.calllog.exists() else "", "")
 
     def test_failed_self_naming_releases_lock_so_the_same_watch_can_reattach(self):
         arm = self._armed()

@@ -4824,7 +4824,9 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
                     result.update(status="unavailable", reason="census-unavailable")
                     return
                 try:
-                    rows = fleet._projection_sessions()
+                    # Native registry rows only: a grant made while arming a watch or
+                    # wait must not ask Herdr for its agent list.
+                    rows = fleet._registry_sessions()
                     repository = fleet.repository_for_session(harness, session_id, sessions=rows)
                     if repository is None:
                         result.update(status="granted", reason="repository-unknown")

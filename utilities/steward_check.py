@@ -377,7 +377,8 @@ def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
 def _holder_cwd(harness: str, session_id: str):
     """The holder's own single cwd from the collector's session rows, or None."""
     collector = _collector()
-    rows_of = getattr(collector, "_projection_sessions", None)
+    # Native registry rows: the holder's cwd never needs a Herdr agent list.
+    rows_of = getattr(collector, "_registry_sessions", None)
     keys_of = getattr(collector, "_session_keys", None)
     if rows_of is None or keys_of is None:
         return None

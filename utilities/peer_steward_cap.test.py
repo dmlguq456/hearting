@@ -101,6 +101,8 @@ class GrantFixture(unittest.TestCase):
         self.rows = []
         for patcher in (mock.patch.object(fleet_steward, "_projection_sessions",
                                           side_effect=lambda: list(self.rows)),
+                        mock.patch.object(fleet_steward, "_registry_sessions",
+                                          side_effect=lambda: list(self.rows)),
                         mock.patch("fleet.collectors.herdr.list_agents", return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -427,7 +427,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
         rows = [SimpleNamespace(harness="claude", session_id=SID, cwd="/repo/wt"),
                 SimpleNamespace(harness="codex", session_id="other", cwd="/elsewhere")]
         collector = SimpleNamespace(
-            _projection_sessions=lambda: rows,
+            _registry_sessions=lambda: rows,
             _session_keys=lambda row: {(row.harness, row.session_id)})
         from fleet import session_work
         observed = mock.Mock(return_value=([{"type": "backlog", "headline": "  #1425   review "},
@@ -440,7 +440,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
     def test_unknown_or_ambiguous_cwd_reads_no_backlog(self):
         rows = [SimpleNamespace(harness="claude", session_id=SID, cwd="/a"),
                 SimpleNamespace(harness="claude", session_id=SID, cwd="/b")]
-        collector = SimpleNamespace(_projection_sessions=lambda: rows,
+        collector = SimpleNamespace(_registry_sessions=lambda: rows,
                                     _session_keys=lambda row: {(row.harness, row.session_id)})
         from fleet import session_work
         with mock.patch.object(SC, "_collector", return_value=collector), \
@@ -494,7 +494,7 @@ class StewardCheckOwnTargetsTest(CheckBase):
             mock.patch.object(SC, "_observe_role", side_effect=REAL_OBSERVE),
             mock.patch.object(self.steward, "read_markers", return_value=markers),
             mock.patch.object(self.steward, "read_relations", return_value=[]),
-            mock.patch.object(self.steward, "_projection_sessions", return_value=rows),
+            mock.patch.object(self.steward, "_registry_sessions", return_value=rows),
             mock.patch.object(self.steward, "_native_role_sessions", return_value=[])]
         for patch in patches:
             patch.start()
@@ -1145,7 +1145,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         con.commit()
         con.close()
         collector = SimpleNamespace(
-            _projection_sessions=lambda: [SimpleNamespace(cwd=str(repo))],
+            _registry_sessions=lambda: [SimpleNamespace(cwd=str(repo))],
             _session_keys=lambda row: {(HARNESS, SID)})
         memory._project_cache.clear()
         self.addCleanup(memory._project_cache.clear)

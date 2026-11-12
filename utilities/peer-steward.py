@@ -873,6 +873,10 @@ def cmd_wait(args):
         payload = None
     agent = (payload or {}).get("result", {}).get("agent") if isinstance(payload, dict) else None
     error = (payload or {}).get("error", {}) if isinstance(payload, dict) else {}
+    if not isinstance(agent, dict) and error.get("code") == "session_ended":
+        # `wait_native` carries the confirmed-ended agent beside the error, not
+        # under `result`; without this a confirmed end printed as unknown.
+        agent = payload.get("agent")
     if not isinstance(agent, dict):
         state = "timeout" if error.get("code") == "timeout" else "unknown"
         print(_typed_line(state, harness, sid, target, pane or "-"))
@@ -3685,7 +3689,11 @@ def cmd_watch(args):
             "server": server,
             "steward_server": getattr(args, "steward_server", None) or server,
             "readiness_endpoint": "native:" + str(server),
-            "agent": {key: agent.get(key, "-") for key in ("harness", "session_id", "name", "pane")},
+            # The exact native process birth rides with the target: the runner's
+            # readiness pass and the observer's lifetime check compare it, and a
+            # watch armed without it can never be told apart from a replacement.
+            "agent": {**{key: agent.get(key, "-") for key in ("harness", "session_id", "name", "pane")},
+                      **{key: agent.get(key) for key in ("pid", "pid_start", "pid_namespace")}},
             "initial_state": state,
             "steward": {
                 "harness": steward_harness,
@@ -3870,9 +3878,23 @@ def cmd_watch_run(args):
         # Only after the wake handler exists: naming ourselves lets the runner
         # signal this process.
         arm = _record_own_watch_identity(args.watch_id, paths, server) or arm
+        # A result the runner published before this observer was named in its arm
+        # could not wake it; take up whatever the observation holds now.
+        latest_observation = _read_json(paths.observation)
+        if isinstance(latest_observation, dict):
+            observation = latest_observation
+            if isinstance(latest_observation.get("native_wait"), dict):
+                wait_record = latest_observation["native_wait"]
 
         steward_seat = arm.get("steward_seat") or {}
         if int(arm.get("observer_protocol", 0) or 0) >= 3:
+            # The shared runner reads the native state this watch waits on; an
+            # armed watch with no runner would stay silent forever. Starting it
+            # is the same existing producer call every other duty makes.
+            try:
+                peer_obligations.ensure_normal_runner(reconciliation_required=True)
+            except Exception:
+                pass
             from peer_steward_native import native_lifetime
             target_pid = expected_agent.get("pid")
             target_start = expected_agent.get("pid_start")
@@ -3987,13 +4009,24 @@ def cmd_watch_run(args):
                                "native_wait": wait_record, "observed_ts": _utc_now()}
                 _write_watch_observation(paths, observation)
             else:
-                wait_record = {"state": "armed", "started_ts": _utc_now()}
-                observation = {**observation, "schema_version": _WATCH_SCHEMA,
-                               "watch_id": args.watch_id, "state": "waiting",
-                               "reason": "native-watch-runner-owned",
-                               "server": server, "agent": expected_agent,
-                               "native_wait": wait_record, "observed_ts": _utc_now()}
-                _write_watch_observation(paths, observation)
+                # The runner may have published a result since this observer read its
+                # observation; announcing "armed" over it would lose the change.
+                published = _read_json(paths.observation)
+                published_wait = (published or {}).get("native_wait")
+                if isinstance(published_wait, dict) and published_wait.get("state") == "result":
+                    observation, wait_record = published, published_wait
+                elif (published or {}).get("state") == "terminal_pending":
+                    # A confirmed end/replacement request landed while this observer was
+                    # starting; the loop below settles it before anything else.
+                    observation, wait_record = published, {"state": "armed", "started_ts": _utc_now()}
+                else:
+                    wait_record = {"state": "armed", "started_ts": _utc_now()}
+                    observation = {**observation, "schema_version": _WATCH_SCHEMA,
+                                   "watch_id": args.watch_id, "state": "waiting",
+                                   "reason": "native-watch-runner-owned",
+                                   "server": server, "agent": expected_agent,
+                                   "native_wait": wait_record, "observed_ts": _utc_now()}
+                    _write_watch_observation(paths, observation)
 
         if terminal_reason:
             _write_terminal_watch_receipt(args.watch_id, arm, terminal_reason)
@@ -4224,6 +4257,14 @@ def cmd_watch_run(args):
                     terminal_reason = _terminal_watch_request(paths, expected, server)
                     if terminal_reason:
                         break
+                    # The runner publishes a meaningful native change into this
+                    # watch's observation and wakes it; take that result up.
+                    latest = _read_json(paths.observation)
+                    latest_wait = latest.get("native_wait") if isinstance(latest, dict) else None
+                    if isinstance(latest_wait, dict) and latest_wait.get("state") == "result":
+                        identity, _sid, _why = _watch_native_result_identity(arm, latest_wait)
+                        if identity in {"match", "terminal", "unbound", "sidless"}:
+                            observation, wait_record = latest, latest_wait
                     if (wait_record or {}).get("state") == "result" and (
                             wait_record.get("agent_state") in {"idle", "done"}):
                         readiness = _watch_transition_readiness(
@@ -4436,7 +4477,9 @@ def _spawn_watch_observer(watch_id, arm, *, service_current=None,
         ledger = dict(arm)
         ledger["observer_generation"] = int(arm.get("observer_generation", 1)) + 1
         ledger["rearm_count"] = int(arm.get("rearm_count", 0)) + 1
-        ledger["observer_protocol"] = 2
+        # A reattached watch keeps its protocol: lowering a native (3) arm to 2 would
+        # make every later observer read it as a legacy arm and stay unknown forever.
+        ledger["observer_protocol"] = max(2, int(arm.get("observer_protocol", 0) or 0))
         _write_json_atomic(paths.arm, ledger)
         # Opened last: nothing that can fail before the spawn holds it open.
         log_fd = os.open(str(paths.log), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
@@ -6127,7 +6170,7 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                                                "agent": expected, "done_ts": _utc_now()},
                                "observed_ts": _utc_now()}
                     _write_json_atomic(paths.observation, current)
-                    _wake_watch_observer(arm)
+                    _wake_watch_observer(_read_json(paths.arm) or arm)
                     changed = True
                 continue
             current_pid, current_start = observed.get("pid"), observed.get("pid_start")
@@ -6155,7 +6198,7 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                                                "agent": expected, "done_ts": _utc_now()},
                                "observed_ts": _utc_now()}
                     _write_json_atomic(paths.observation, current)
-                    _wake_watch_observer(arm)
+                    _wake_watch_observer(_read_json(paths.arm) or arm)
                     changed = True
                 continue
             state = observed.get("agent_status") or "unknown"
@@ -6165,20 +6208,35 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                               "pid": current_pid, "pid_start": str(current_start),
                               "pid_namespace": observed.get("pid_namespace"),
                               "name": observed.get("name") or expected.get("name") or sid[:8]}
-            previous_state = previous_wait.get("agent_state")
+            # Only an accepted result counts as "already reported": an unknown record
+            # keeps the state it could not attribute and must not mask the real change.
+            previous_state = (previous_wait.get("agent_state")
+                              if previous_wait.get("state") == "result" else None)
             initial_state = arm.get("initial_state")
             until = set(arm.get("until") or ())
             trigger = (state == "blocked" and previous_state != "blocked") or (
                 state in {"idle", "done"} and (
                     state in until or (initial_state not in {None, "unknown", state}
                                        and previous_state != state)))
-            if not trigger:
+            # A watch that already took this change up asks the runner, through a
+            # token in its observation, for one fresh authority read before it
+            # publishes; that request is answered here even though the native
+            # state no longer changes.
+            serving = (previous_wait.get("state") == "result" and previous_state == state
+                       and state in {"idle", "done"}
+                       and isinstance(previous.get("readiness_transition"), dict))
+            if not trigger and not serving:
+                if previous.get("state") == "terminal_pending":
+                    # A confirmed end/replacement request waits for its watcher; a
+                    # no-notice observation must never overwrite it.
+                    continue
                 current = {**previous, "schema_version": _WATCH_SCHEMA,
                            "watch_id": watch_id,
                            "state": "working" if state == "working" else "unknown",
                            "reason": "native-state-no-notice", "server": server,
                            "observed_status": state, "observed_ts": _utc_now()}
-                if previous_wait.get("state") != "result":
+                if (previous_wait.get("state") != "result"
+                        and (_read_json(paths.observation) or {}).get("state") != "terminal_pending"):
                     _write_json_atomic(paths.observation, current)
                 continue
             result = {"agent_state": state, "agent": identity_agent,
@@ -6222,7 +6280,7 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                         projection, producer_pid=os.getpid(), producer_start=producer_start,
                         incarnation=incarnation, generation=generation, lineage=lineage,
                         authority=authority)
-            _wake_watch_observer(arm)
+            _wake_watch_observer(_read_json(paths.arm) or arm)
             changed = True
     return changed
 
