@@ -682,6 +682,7 @@ REGISTRY_COUNTERS = ("cache_hits", "content_reads", "delta_reads", "append_reuse
                      "segment_resyncs", "segment_rebuilds")
 CODEX_COUNTERS = ("hits", "append_reads", "full_reads")
 OWNER_INPUT_COUNTERS = ("owner_decisions", "owner_decision_skips")
+FOLD_COUNTERS = ("segment_folds", "segment_fold_reuses")
 GATE_COUNTERS = ("generation_segment_builds", "generation_segment_reuses",
                  "route_wait_recomputes", "route_wait_reuses")
 
@@ -705,6 +706,13 @@ def counters() -> dict:
     owner_stats = owner_input.metrics_snapshot() if hasattr(owner_input, "metrics_snapshot") else {}
     for name in OWNER_INPUT_COUNTERS:
         out[name] = int(owner_stats.get(name, 0))
+    for name in FOLD_COUNTERS:
+        out[name] = 0
+    for pkg in FLEET_PACKAGES:
+        module = sys.modules.get(pkg + ".collectors.dispatch")
+        stats = module.registry_fold_metrics() if hasattr(module, "registry_fold_metrics") else {}
+        for name in FOLD_COUNTERS:
+            out[name] += int(stats.get(name, 0))
     for name in GATE_COUNTERS:
         out[name] = 0
     for module_name in ("human_gate_observation", "utilities.human_gate_observation"):
@@ -1675,7 +1683,8 @@ EVENTS = [
     ("E34c", "in place: an early row and a BLOCKED owner row change",
      [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
       Step("replace its row", e34c, expect={**REG_KEEP_PREFIX, "generation_segment_builds": "+",
-                                            "generation_segment_reuses": "+", **CODEX_STILL})]),
+                                            "generation_segment_reuses": "+", "segment_folds": "+",
+                                            "segment_fold_reuses": "+", **CODEX_STILL})]),
     ("E34d", "an owner that began later on the BLOCKED owner's route",
      [Step("two BLOCKED owners", blocked_setup, expect={**REG_APPEND, **CODEX_STILL}),
       Step("later owner appended", e34d, expect={**REG_APPEND, "generation_segment_reuses": "+",

@@ -4220,6 +4220,170 @@ class RegistryEvidence(dict):
     """A published registry graph whose route histories have copy-on-write ownership."""
 
 
+# Per-segment partial folds of ``_registry_evidence_for_path`` (see ``_segmented_evidence``): the
+# partial of a segment is a pure function of its rows, which are a pure function of the segment's
+# ``records`` tuple (the same object means the same bytes at the same orders; a rewrite that
+# recognised a segment keeps that tuple) and of the four classifying functions. One generation per
+# path is held (each entry keeps its ``records`` alive, so the id cannot name another tuple).
+_REGISTRY_FOLD_PARTS = {}
+_REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0}
+
+
+def registry_fold_metrics():
+    return dict(_REGISTRY_FOLD_STATS)
+
+
+def _fold_registry_segment(rows, path):
+    """What folding these rows one by one (``_registry_evidence_for_path``) adds, kept apart.
+
+    Returns ``(nodes, attempts)``: ``nodes[route_id][route_node] = (attempt history, values)`` where
+    the values are the keys the rows set on the node in file order (later rows win) and the history
+    is the entries they appended; ``attempts[attempt_id]`` is the evidence of that attempt's last row.
+    """
+    nodes = {}
+    for registry_order, fields, meta in rows:
+        ts, status, _repo, _worktree, slug, _pipe = fields
+        route_id = meta.get("route_id")
+        route_node = meta.get("route_node")
+        attempt_id = meta.get("attempt_id")
+        if not attempt_id and (not route_id or not route_node):
+            continue
+        attempt_contract = _attempt_contract(meta)
+        harness = _infer_harness(meta, slug) if attempt_id else None
+        if not route_id or not route_node:
+            continue
+        pid_s = meta.get("pid")
+        pid = int(pid_s) if (pid_s or "").isdigit() else None
+        attention_reason = _attempt_attention(meta)
+        per_route = nodes.get(route_id)
+        if per_route is None:
+            per_route = nodes[route_id] = {}
+        cell = per_route.get(route_node)
+        if cell is None:
+            cell = per_route[route_node] = ([], {})
+        history, values = cell
+        history.append({
+            "attempt_id": attempt_id,
+            "status": status,
+            "pid": pid,
+            "dispatch_depth": attempt_contract["dispatch_depth"],
+            "transport": attempt_contract["transport"],
+            "execution_surface": attempt_contract["execution_surface"],
+            "registered_worker": attempt_contract["registered_worker"],
+            "fallback_hop": attempt_contract["fallback_hop"],
+            "contract_status": attempt_contract["attempt_contract_status"],
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "note": meta.get("note"),
+            "registry_order": registry_order,
+            "attention_reason": attention_reason,
+        })
+        values.update({
+            "route_file": meta.get("route_file"),
+            "route_hash": meta.get("route_hash"),
+            "parent": meta.get("parent") or meta.get("parent_slug"),
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "registry_order": registry_order,
+            "_registry_path": path,
+            "attempt_id": attempt_id,
+            "attention_reason": (attention_reason
+                                 if attempt_contract["attempt_contract_status"] == "current"
+                                 else None),
+        })
+        if attempt_contract["attempt_contract_status"] != "current":
+            continue
+        values.update({
+            "status": status, "slug": slug, "ts": _iso_to_epoch(ts),
+            "pid": pid,
+            "harness": harness if harness is not None else _infer_harness(meta, slug),
+            "model": meta.get("model"),
+            "effort": meta.get("effort") or meta.get("reasoning"),
+            "completion_gate": meta.get("completion_gate"),
+            "note": meta.get("note"),
+        })
+    latest = {}
+    for registry_order, fields, meta in rows:
+        if meta.get("attempt_id"):
+            latest[meta["attempt_id"]] = (registry_order, fields, meta)
+    attempts = {}
+    for attempt_id, (registry_order, fields, meta) in latest.items():
+        _ts, status, _repo, _worktree, slug, _pipe = fields
+        attempts[attempt_id] = {
+            "attempt_id": attempt_id,
+            "status": status,
+            "route_id": meta.get("route_id"),
+            "route_node": meta.get("route_node"),
+            "harness": _infer_harness(meta, slug),
+            "slug": slug,
+            "registry_order": registry_order,
+            **_attempt_contract(meta),
+        }
+    return nodes, attempts
+
+
+def _segmented_evidence(path, rows, functions):
+    """The evidence of ``rows`` from per-segment partial folds, or None when they cannot be used.
+
+    The registry's segments are immutable ranges of whole rows; a rewrite recognises the segments
+    whose bytes and first order did not change and keeps their ``records``. The partial of such a
+    segment is kept, and only new or changed segments are folded; the partials are merged in file
+    order with the rules of the row-by-row fold (later rows win per key, histories concatenate,
+    an attempt's last row decides). The merge copies, so nothing a kept partial holds is mutated.
+    """
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        rows_key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        if rows_key is None or _PARSED_REGISTRY_ROWS.get(rows_key) is not rows:
+            return None
+        segments = _PARSED_REGISTRY_SEGMENTS.get(rows_key)
+        held = _REGISTRY_FOLD_PARTS.get(absolute)
+    if not segments or not all(hasattr(segment, "records") and hasattr(segment, "order_start")
+                               for segment in segments):
+        return None
+    reusable = held[1] if held is not None and all(a is b for a, b in zip(functions, held[0])) else {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _fold_registry_segment(rows[low:high], path))
+            _REGISTRY_FOLD_STATS["segment_folds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["segment_fold_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    routes, path_attempts = {}, {}
+    for nodes, attempts in parts:
+        for route_id, per_route in nodes.items():
+            target = routes.get(route_id)
+            if target is None:
+                target = routes[route_id] = {}
+            for route_node, (history, values) in per_route.items():
+                cell = target.get(route_node)
+                if cell is None:
+                    cell = target[route_node] = ([], {})
+                cell[0].extend(history)
+                cell[1].update(values)
+        path_attempts.update(attempts)
+    path_result = {}
+    for route_id, per_route in routes.items():
+        evidence = RegistryRouteEvidence()
+        for route_node, (history, values) in per_route.items():
+            node = {"attempt_history": history}
+            node.update(values)
+            evidence[route_node] = node
+        path_result[route_id] = evidence
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_FOLD_PARTS[absolute] = (functions, current)
+        while len(_REGISTRY_FOLD_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_FOLD_PARTS.pop(next(iter(_REGISTRY_FOLD_PARTS)))
+    return path_result, path_attempts
+
+
 def _registry_evidence_for_path(path, rows):
     """Fold only appended records, without mutating any published history graph."""
     key = (type(path), os.fspath(path))
@@ -4240,6 +4404,12 @@ def _registry_evidence_for_path(path, rows):
     path_result = dict(held[2]) if prefix else {}
     path_attempts = dict(held[3]) if prefix else {}
     suffix = rows[len(held[0].rows):] if prefix else rows
+    if not prefix:
+        # A rewrite, not an append: only the segments that changed are folded again.
+        segmented = _segmented_evidence(path, rows, functions)
+        if segmented is not None:
+            path_result, path_attempts = segmented
+            suffix = ()
     changed_routes, changed_nodes = set(), set()
     for registry_order, fields, parsed_meta in suffix:
         # Parsed metadata is immutable and every consumer below is read-only.
@@ -4338,7 +4508,10 @@ def _registry_evidence_for_path(path, rows):
             **attempt_contract,
         }
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts))
+        # A schema-derived charge (about 3 KB of evidence per row, measured on the live shape):
+        # measuring the exact graph walks every row's evidence again on every new generation.
+        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts),
+                                          weight=len(rows) * 3000 + 4096)
         if key in _REGISTRY_EVIDENCE_CACHE:
             _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
         while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:
