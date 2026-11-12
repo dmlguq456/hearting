@@ -5789,7 +5789,9 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
             return
     if transferred_is_current and transferred and transferred.get("state") in {"queued", "unverified"}:
         return  # The existing message courier owns this accepted/ambiguous send.
-    if not notice_id and holder and rewake._holder_alive(holder) and rewake._holder_alive(parent):
+    # A `lapsed` arm is not watched, even while its holder carries another row's wake.
+    if (not notice_id and holder and (arm or {}).get("state") != "lapsed"
+            and rewake._holder_alive(holder) and rewake._holder_alive(parent)):
         return
     old_server = _HERDR_SESSION
     globals()["_HERDR_SESSION"] = None if identity["server"] == "default" else identity["server"]

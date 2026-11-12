@@ -657,10 +657,12 @@ stamp path in `core/HOOKS.md`.
   carrier watches every attempt of that session that no live hook process
   watches: a lapsed or holder-less arm, or a fresh open row no Bash call armed
   (a launch registered after its own tool call returned). One hook process
-  holds them and wakes once for whichever is due first; the woken turn re-arms
-  the rest. Thus an attention turn with no Bash call still resumes the exact
+  holds them and wakes once for whichever is due first, passing over a
+  finished row whose completion another carrier already delivered; the woken
+  turn re-arms the rest, even while that process still lives, since nobody
+  waits on a lapsed arm. Thus an attention turn with no Bash call still resumes the exact
   completion wait, and a reopened conversation is woken for work its old
-  process started, while a live holder or an ended arm stays quiet. The arm
+  process started, while a live waiting holder or an ended arm stays quiet. The arm
   names the Claude process its holder wakes; once the launch-time process is
   provably gone, the same session id in its new process carries the wake
   (a resumed Claude conversation is a later delivery, not a misdelivery), and

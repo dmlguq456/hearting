@@ -548,10 +548,60 @@ def boundary_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
 _TERMINAL_WAIT_STATUSES = frozenset({"", "open", "running"})
 
 
+def _completion_due(launch: Launch) -> str:
+    """For a finished row held by `_first_due`, what its wait does with it:
+    `due` when this wait's carrier could claim the completion now, `ended` when
+    the completion was carried elsewhere, `lapsed` when it is still open but not
+    this carrier's to carry, `wait` while it may still become due.
+
+    Only a delivery-owing completion is claim-gated (`_delivery_owing_row`);
+    any other end notice goes out as before. The owed record is judged the way
+    the carrier's claim would take it, without claiming: `pending`, or an
+    expired lease the batch claim reclaims, and not held for its siblings. A
+    closed record was delivered by another carrier (the woken turn's sweep, a
+    sibling's batch claim). A singleton lease another carrier let expire is
+    never re-sent by this carrier (`_carrier_one_claim`); its arm is released
+    for the courier that owns it. A missing record, a live lease, or a batch
+    hold may still become due."""
+
+    owing = _delivery_owing_row(launch)
+    if owing is None:
+        return "due"
+    delivery_id, recipient_key = owing.get("delivery_id", ""), owing.get("parent_sid", "")
+    if not delivery_id or not recipient_key:
+        return "ended"
+    root = launch.jobs.resolve(strict=False).parent
+    try:
+        record = pending_delivery.read(root, recipient_key, delivery_id)
+    except pending_delivery.PendingDeliveryError:
+        return "wait"
+    if record is None:
+        return "wait"
+    state = record.get("state")
+    if state not in pending_delivery.OPEN_STATES:
+        return "ended"
+    if state != "pending" and int(record.get("claim_deadline_ns") or 0) > time.monotonic_ns():
+        return "wait"
+    try:
+        from dispatch_notice_state import resolve_delivery_batch
+        batch = resolve_delivery_batch(launch.jobs, record, recipient_key=recipient_key,
+                                       delivery_root=root)
+    except Exception:
+        batch = None
+    if batch and batch.get("held"):
+        return "wait"
+    if state != "pending" and not (batch and len(batch.get("delivery_ids") or ()) > 1):
+        return "lapsed"
+    return "due"
+
+
 def _first_due(claims: list[tuple[Launch, ArmClaim]]) -> tuple[Launch, ArmClaim] | None:
-    """Hold several arms and return the first whose row ended or whose owner's
-    gate waits for a carrier; every other arm is left `lapsed`, so the woken
-    turn's next Bash call or Stop re-arms it once this process has exited."""
+    """Hold several arms and return the first whose row ended with a completion
+    this wait can still carry (`_completion_due`), or whose owner's gate waits
+    for a carrier. A finished row with nothing left for this wait is settled and
+    dropped, and the wait goes on for the rest; every arm not returned is left
+    `lapsed` for the woken turn's next Bash call or Stop to re-arm, even while
+    this process still lives."""
 
     interval = _bounded_number("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300)
     maximum = _bounded_number("AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400)
@@ -559,24 +609,33 @@ def _first_due(claims: list[tuple[Launch, ArmClaim]]) -> tuple[Launch, ArmClaim]
     for launch, claim in claims:
         _retain_completion(launch, claim)
     pending = list(claims)
+    released: list[ArmClaim] = []
     gate_scans: dict[str, tuple[float, int]] = {}
     chosen = None
     while chosen is None:
         pending = [(launch, claim) for launch, claim in pending if _holds_arm(claim)]
         if not pending:
             break
-        chosen = next(((launch, claim) for launch, claim in pending
-                       if _owner_status(launch) not in _TERMINAL_WAIT_STATUSES), None)
-        if chosen is None:
+        for launch, claim in pending:
+            if _owner_status(launch) in _TERMINAL_WAIT_STATUSES:
+                continue
+            due = _completion_due(launch)
+            if due == "due":
+                chosen = (launch, claim)
+                break
+            if due != "wait" and settle_arm(claim, due):
+                released.append(claim)
+        pending = [(launch, claim) for launch, claim in pending if claim not in released]
+        if chosen is None and pending:
             gated = _gate_due_attempt([launch for launch, _claim in pending], gate_scans)
             chosen = next(((launch, claim) for launch, claim in pending
                            if launch.attempt_id == gated), None)
         if chosen is None:
-            if time.monotonic() >= deadline:
+            if not pending or time.monotonic() >= deadline:
                 break
             time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
     for _launch, claim in claims:
-        if chosen is None or claim is not chosen[1]:
+        if claim not in released and (chosen is None or claim is not chosen[1]):
             settle_arm(claim, "lapsed")
     return chosen
 
@@ -788,7 +847,10 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "ended"
     if state not in ARM_STATES:
         return "unreadable"
-    if _holder_alive(existing.get("holder")) and not handed:
+    # A `lapsed` arm is one its holder stopped waiting on (a timeout, or a row a
+    # boundary wait holding several did not wake for); that holder may still
+    # live while it carries another row's wake (`_first_due`).
+    if state != "lapsed" and _holder_alive(existing.get("holder")) and not handed:
         return "held-live"
     if state == "gate-wake-sent" and _gate_record_open(
             jobs, (metadata or {}).get("parent_sid") or existing.get("session_id") or session,

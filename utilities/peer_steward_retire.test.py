@@ -8222,6 +8222,27 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             self._resume_with_agents(store.get(duty["id"]), store)
         self.assertEqual(read()["state"], "expired")
 
+    def test_an_arm_its_live_holder_lapsed_does_not_keep_the_retained_wake_waiting(self):
+        # RV-PR1565 required 2 (1b): one boundary wait holding several rows lapses the
+        # rows it did not wake for and lives on carrying another; it watches them no more.
+        import dispatch_completion_join as join
+
+        rewake = self._retained_rewake()
+        live = list(rewake._process_identity(os.getpid()))
+        store, duty, row, record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-lapsed", pid=999999999, start="123456789", ns=live[2])
+        arm = rewake.arm_path(self.jobs_path, "att-d3-lapsed")
+        arm.parent.mkdir(parents=True, exist_ok=True)
+        arm.write_text(json.dumps({"schema": 1, "attempt_id": "att-d3-lapsed",
+                                   "session_id": row.metadata["parent_sid"], "holder": live,
+                                   "runtime": live, "state": "lapsed", "arms": 2,
+                                   "gate_delivery_id": None}), encoding="utf-8")
+        with mock.patch.object(join, "reconcile_pending_delivery",
+                               side_effect=AssertionError("global sweep")):
+            self._resume_with_agents(duty, store)
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])["state"], "expired")
+
     def test_closed_route_without_runtime_pid_is_not_required(self):
         import dispatch_completion_join as join
         import artifact_lifecycle
