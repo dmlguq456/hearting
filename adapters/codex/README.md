@@ -279,8 +279,9 @@ the Codex projection. Codex exposes its adapter-owned liveness command through
 `adapters/codex/bin/preflight.sh liveness [jobs.log]`, backed by
 `~/.codex/sessions/**/*.jsonl` metadata and mtime.
 Codex also exposes `adapters/codex/bin/preflight.sh harvest` for registry-only
-status and selected `open` to `done` updates. It intentionally does not merge
-branches or delete worktrees.
+status and selected `open` to `done` updates; it runs the shared
+`utilities/dispatch-harvest.py`, the entry point completion receipts name. It
+intentionally does not merge branches or delete worktrees.
 
 ## Native Skill Projection
 

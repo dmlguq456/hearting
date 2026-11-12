@@ -1172,9 +1172,7 @@ def _followup(root: Path, record: dict) -> str:
         jobs = record_jobs(root, record)
         if jobs is None:
             return ""
-        return completion_followup_text(
-            receipt, jobs=str(jobs),
-            surface=str(Path(__file__).resolve().parents[1] / "adapters" / "codex" / "bin" / "preflight.sh"))
+        return completion_followup_text(receipt, jobs=str(jobs))
     except Exception:  # noqa: BLE001 -- the bounded receipt line still reaches the parent
         return ""
 
@@ -1927,6 +1925,9 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                 .replace("No recorded refusal is available.", "No current refusal record is available.")
                 .replace("The last recorded checkpoint is ", "The current checkpoint is ")
                 for text in tuple(variants))
+        # Each form as the previous release wrote an open-row harvest line (the Codex wrapper path).
+        from dispatch_completion_join import previous_harvest_wording
+        variants.update(previous_harvest_wording(text) for text in tuple(variants) if text)
         if not rendered or native_text not in variants:
             continue
         candidate = _opencode_expected_message(native_text, identities)
