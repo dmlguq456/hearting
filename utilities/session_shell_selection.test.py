@@ -260,13 +260,16 @@ const fs=require('node:fs'),vm=require('node:vm'),a=require('node:assert/strict'
 const source=fs.readFileSync(process.argv[1],'utf8');
 const begin=source.indexOf('async function lifecycle(req)');
 const body=source.slice(begin,source.indexOf('async function request(req)',begin));
+const input=source.slice(source.indexOf('async function refreshReadiness()'),source.indexOf('function observeReport(data)'));
 const row={pid:10,start:'s'},noop=()=>{};
 const c={processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
  nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
  projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
- seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,block:{leave:noop,update:noop},publishNativeDisplay:noop,
- queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,source:()=>Promise.resolve(),projection:noop};
-vm.createContext(c);vm.runInContext(body,c);
+ seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,block:{leave:noop,update:noop},publishNativeDisplay:noop,
+ queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,projection:noop,
+ epoch:0,nativeEpoch:0,keyTail:'',paste:false,relay:false,screenRevision:0,screenSnapshot:()=>'',queueProjection:noop,
+ source:op=>Promise.resolve(op==='readiness'?{ok:true,ready:true}:{})};
+vm.createContext(c);vm.runInContext(body+input,c);
 const plain=v=>JSON.parse(JSON.stringify(v??null));
 let seq=0;
 const observed=()=>{
@@ -286,6 +289,13 @@ const start=(sid,how,harness='claude',event='start')=>{c.harness=harness;return 
   observed();a.equal((await start('S'+seq,how,harness,event)).ok,true);
   a.deepEqual(plain(c.nativeSelected),{},how+' '+event);a.equal(c.panelModel.selected,undefined,how+' '+event);
   a.equal(c.panelModel.repo[0].text,'hearting/',how+' '+event);
+ }
+ // RV-PR1565 F1: a start or select follows the Enter that chose it (a resume picker), so that
+ // frontier is submitted and the screen reading may settle it; a key typed after it is a draft.
+ for(const [how,harness,event] of [['resume','claude','start'],[undefined,'codex','select']]){
+  c.observeInput(Buffer.from('\x1b[B\r'));a.equal((await start('E'+seq,how,harness,event)).ok,true);
+  a.equal(c.submitted,c.lastEnter,how+' '+event);await c.refreshReadiness();a.equal(c.empty,true,how+' '+event);
+  c.observeInput(Buffer.from('x'));await c.refreshReadiness();a.equal(c.empty,false,'a key after the '+event+' is a draft');
  }
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """

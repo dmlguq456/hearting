@@ -924,6 +924,13 @@
       "hard_block": false
     },
     {
+      "slug": "hook__dispatch-owner-rewake.py__SessionStart",
+      "name": "dispatch-owner-rewake.py",
+      "mono": "dispatch-owner-rewake.py",
+      "event": "SessionStart",
+      "hard_block": false
+    },
+    {
       "slug": "hook__herdr-agent-state__SessionStart",
       "name": "herdr-agent-state session",
       "mono": "herdr-agent-state",
