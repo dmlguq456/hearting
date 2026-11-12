@@ -1573,6 +1573,43 @@ def e37a(run):  # the clock crosses the 72 h window a wait folds at; no input of
     run.clock.advance(150)
 
 
+def e30(run):  # both files route 1 is read from change, size and mtime restored (new inodes)
+    for path in (run.fx.route_path(1), run.fx.node_route_path(1)):
+        before = path.stat()
+        raw = path.read_bytes()
+        marker = b'"fixture_revision": 0'
+        assert marker in raw, "the route record no longer carries its revision marker"
+        path.write_bytes(raw.replace(marker, b'"fixture_revision": 7', 1))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
+def _visibility_sidecar(run) -> Path:
+    record = route_record(run.fx.root, 0)
+    return run.fx.root / "artifacts" / ".runtime" / "routes" / (record["route_id"] + ".outcome.json")
+
+
+def e31a(run):  # a closed-route sidecar where the route-visibility reader looks for it
+    record = route_record(run.fx.root, 0)
+    write_json(_visibility_sidecar(run), {
+        "route_id": record["route_id"], "route_hash": record["route_hash"],
+        "terminal_gate_proven": True, "closed_at": iso(CLOCK_BASE - 2000)}, CLOCK_BASE - 1)
+
+
+def e31b(run):  # the same sidecar, one digit of closed_at changed, size and mtime_ns restored
+    path = _visibility_sidecar(run)
+    before = path.stat()
+    raw = path.read_bytes()
+    stamp = iso(CLOCK_BASE - 2000).encode()
+    other = iso(CLOCK_BASE - 2000 + 600).encode()
+    assert stamp in raw and len(stamp) == len(other) and stamp != other
+    path.write_bytes(raw.replace(stamp, other, 1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+
+
 def e42_batches(run):
     _append_batches(run)
 
@@ -1696,6 +1733,12 @@ EVENTS = [
                                                    **CODEX_STILL}),
       Step("later row without a time", e34e3, expect={**REG_APPEND, "generation_segment_reuses": "+",
                                                       **CODEX_STILL})]),
+    # E30/E31: caches keyed by (mtime, size) only that a route judgment reads through.
+    ("E30", "a route record rewritten with the same size and mtime",
+     [Step("same stat, other content", e30, expect={**REG_STILL, "route_wait_reuses": "+", **CODEX_STILL})]),
+    ("E31", "a route-visibility outcome sidecar rewritten with the same size and mtime",
+     [Step("sidecar written", e31a, expect={**REG_STILL, **CODEX_STILL}),
+      Step("same size and mtime, other content", e31b, expect={**REG_STILL, **CODEX_STILL})]),
     # E32/E33/E35/E37: the S2 judgment of a route is computed again only when one of its inputs changed.
     ("E32a", "a raised gate appears in one route's journal",
      [Step("gate raised", e32a, expect={**REG_STILL, "route_wait_recomputes": 1,
