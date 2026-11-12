@@ -948,6 +948,10 @@ async function lifecycle(req) {
     sequence=req.seq;selection++;native=reporter;sid=req.sid;state='unknown';nativeTurn='';turnMark=0;seenTurn=null;turnRecord='';formSeen=false;eventMark=++clock;empty=false;block.leave();block.update([]);
     publishNativeDisplay();queueDisplay();
     if(currentDelivery)releaseHeld(currentDelivery,true);
+    // A start or selection follows the keys that chose it (a resume picker's Enter, /clear):
+    // bytes up to that Enter were submitted, so the screen reading can settle this frontier.
+    // Without this, a seat reopened through a picker refused every delivery until a prompt.
+    submitted=lastEnter;
     const selected=selection;
     // Display collection must never delay the native start hook or input.
     setImmediate(()=>{if(selected===selection)source('register').then(()=>projection());});
