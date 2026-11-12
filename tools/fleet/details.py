@@ -959,6 +959,8 @@ def merge(basic, detail):
                 # to an unchanged observation, but cannot erase current evidence.
                 if not isinstance(row, Session) and current.exec_tool is None:
                     current.exec_tool = getattr(previous, "exec_tool", None)
+                if not isinstance(row, Session) and getattr(current, "last_text", None) is None:
+                    current.last_text = getattr(previous, "last_text", None)
                 if not getattr(row, "shell_jobs", None):
                     current.shell_jobs = list(getattr(previous, "shell_jobs", None) or [])
                 if (not getattr(row, "shell_job_observation", None)

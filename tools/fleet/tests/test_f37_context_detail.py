@@ -607,6 +607,61 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertEqual(render._native_context_gauge(later), (None, None))
         self.assertFalse(hasattr(dispatch_collector, "_CLAUDE_OBSERVED_WINDOWS"))
 
+    def test_a_launch_that_disables_1m_knows_its_200k_window_from_the_first_turn(self):
+        # The attempt's own sealed launch switch, recorded by the real wrapper function,
+        # settles 200K before any result: the gauge shows from the first observation.
+        running = self._job("att-disable-1m")
+        running._registry_metadata = self._launch_metadata(
+            {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000", "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
+        self.assertEqual(running._registry_metadata["claude_compaction_disable_1m"], "1")
+        self._write_log(running, [self._init("sid-d1m", version="9.9.9"),
+                                  self._assistant("sid-d1m", "claude-fable-5", 50000)])
+        dispatch_collector._enrich_claude_stream_session(running)
+        self.assertEqual(running.context_window_tokens, 200000)
+        self.assertEqual(running._context_window_source, "claude-launch-disable-1m")
+        self.assertEqual(render._native_context_gauge(running), (25, 200000))
+
+    def test_an_unset_or_disagreeing_disable_1m_switch_keeps_the_window_unknown(self):
+        cases = ({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"}},
+                 {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"},
+                  "settings_env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"}})
+        for index, case in enumerate(cases):
+            job = self._job("att-d1m-unknown-%d" % index)
+            job._registry_metadata = self._launch_metadata(**case)
+            self._write_log(job, [self._init("sid-u%d" % index, version="9.9.9"),
+                                  self._assistant("sid-u%d" % index, "claude-fable-5", 250136)])
+            dispatch_collector._enrich_claude_stream_session(job)
+            self.assertIsNone(job.context_window_tokens, case)
+            self.assertEqual(render._native_context_gauge(job), (None, None))
+
+    def test_open_tool_target_start_and_last_line_come_from_the_attempts_own_stream(self):
+        job = self._job("att-activity")
+        job.cwd = "/work/tree"
+        row = self._assistant("sid-act", "claude-fable-5", 1000)
+        row["timestamp"] = "2026-11-12T01:00:00Z"
+        row["message"]["content"] = [
+            {"type": "text", "text": "충돌 일곱 곳을 풀었고\n두 묶음 시험을 돌린다 API_KEY=sk-live-abcdefghijklmnopq"},
+            {"type": "tool_use", "name": "Bash", "id": "toolu-act",
+             "input": {"command": "cd /work/tree && python3 tools/run-tests.py --select 'utilities/peer*'"}}]
+        self._write_log(job, [self._init("sid-act"), row])
+        dispatch_collector._enrich_claude_stream_session(job)
+        # `cd <worktree> &&` keeps the shell label; the line it runs is the target.
+        self.assertEqual(job.exec_tool["name"], "Bash")
+        self.assertEqual(job.exec_tool["target"], "python3 tools/run-tests.py --select 'utilities/peer*'")
+        self.assertEqual(job.exec_tool["since"], 1794445200.0)
+        self.assertEqual(job.last_text["text"], "충돌 일곱 곳을 풀었고 두 묶음 시험을 돌린다 [redacted]")
+        self.assertNotIn("sk-live", json.dumps(job.to_dict()))
+        edit = self._job("att-edit")
+        edit.cwd = "/work/tree"
+        row = self._assistant("sid-edit", "claude-fable-5", 1000)
+        row["message"]["content"] = [{"type": "tool_use", "name": "Edit", "id": "toolu-edit",
+                                      "input": {"file_path": "/work/tree/utilities/session-shell/host.cjs",
+                                                "old_string": "PRIVATE", "new_string": "PRIVATE"}}]
+        self._write_log(edit, [self._init("sid-edit"), row])
+        dispatch_collector._enrich_claude_stream_session(edit)
+        self.assertEqual(edit.exec_tool, {"name": "Edit", "target": "utilities/session-shell/host.cjs"})
+        self.assertNotIn("PRIVATE", json.dumps(edit.to_dict()))
+
     def test_a_running_turn_shows_its_percent_once_its_own_result_reports_the_window(self):
         running, _finished = self._first_turn_and_finished_turn()
         self._write_log(running, [self._init("sid-run", version="9.9.9"),
@@ -737,7 +792,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertIsNone(job._context_evidence)
         self.assertEqual(job.to_dict()["subagents"][0]["agent_type"], "fact-check")
 
-    def test_attempt_stream_projects_only_open_tool_executable_label(self):
+    def test_attempt_stream_projects_open_tool_label_and_masked_target(self):
         job = self._job()
         row = self._assistant("sid-child", "claude-fable-5", 160)
         row["message"]["content"] = [{
@@ -746,7 +801,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         }]
         self._write_log(job, [row])
         dispatch_collector._enrich_claude_stream_session(job)
-        self.assertEqual(job.exec_tool, {"name": "python3"})
+        self.assertEqual(job.exec_tool, {"name": "python3", "target": "train.py [redacted]"})
         self.assertNotIn("SECRET", json.dumps(job.to_dict()))
 
         dispatch_collector._CLAUDE_STREAM_CACHE.clear()
@@ -806,7 +861,7 @@ class ClaudeStreamSessionTest(unittest.TestCase):
         self.assertEqual(job.context_window_tokens, 1000000)
         self.assertEqual(job.ctx_pct, 25)
         self.assertEqual(job.context_display_window_tokens, 367000)
-        self.assertEqual(job.exec_tool, {"name": "python3"})
+        self.assertEqual(job.exec_tool, {"name": "python3", "target": "exact.py"})
         self.assertEqual(job._context_evidence.source, "claude-session-transcript")
         self.assertEqual(job.resolved_model, "claude-fable-5")
 
@@ -1133,8 +1188,8 @@ class CodexAttemptTelemetryTest(unittest.TestCase):
         self.assertEqual(job.session_total_tokens, 156000)
         self.assertEqual(job.context_window_tokens, 200000)
         self.assertEqual(job._runtime_session_id, thread_id)
-        self.assertEqual(job.exec_tool, {"name": "python3"})
-        self.assertNotIn("secret", json.dumps(job.to_dict()))
+        self.assertEqual(job.exec_tool, {"name": "python3", "target": "train.py [redacted]"})
+        self.assertNotIn("omitted", json.dumps(job.to_dict()))
         visible = text(render._dispatch_summary_detail_row(job, term_width=168))
         self.assertIn("⚙ python3", visible)
 

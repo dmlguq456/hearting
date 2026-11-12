@@ -212,6 +212,30 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertIn("opencode" + model + "high", flat(opened[model_at:model_at + 3]))
         self.assertFalse([line for line in opened[model_at:model_at + 3] if "…" in line])
 
+    def test_route_doer_now_and_last_line_come_from_its_own_stream_and_unfold(self):
+        # A one-shot owner is its route's doer: its open tool's target and age and its last
+        # line ride the route record and unfold, each on one row; nothing is made up.
+        now = 1_800_000_000.0
+        said = "충돌 일곱 곳을 풀었고 두 묶음 시험을 돌리는 중"
+        vm = build_view_model(self.route_snapshot(
+            exec_tool={"name": "Bash", "target": "tools/run-tests.py --select utilities/peer*",
+                       "since": now - 185}, last_text={"text": said, "at": now - 200}), now=now)
+        doer = vm.routes[0]["doer"]
+        self.assertEqual((doer["tool"], doer["target"], doer["tool_age"], doer["said"]),
+                         ("Bash", "tools/run-tests.py --select utilities/peer*", "3m", said))
+        for width in (120, 150):
+            rows = unfolded_rows(draw(vm, OPENED, width, 60))
+            text = "\n".join(rows)
+            self.assertIn(">_ Bash · tools/run-tests.py --select utilities/peer*  3m", text)
+            self.assertIn('"' + said + '"', text)
+        idle = build_view_model(self.route_snapshot(last_text={"text": said}), now=now)
+        self.assertTrue(idle.routes[0]["doer"]["idle_tool"])
+        self.assertIn(">_ no tool", "\n".join(unfolded_rows(draw(idle, OPENED, 120, 60))))
+        snapshot = self.route_snapshot()
+        snapshot["jobs"][0].liveness = "idle"
+        quiet = build_view_model(snapshot, now=now)
+        self.assertFalse({"target", "tool_age", "said", "idle_tool"} & set(quiet.routes[0]["doer"]))
+
     def test_session_page_and_route_owner_use_the_model_cell_words(self):
         vm = build_view_model(self.route_snapshot())
         session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")

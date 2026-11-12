@@ -112,7 +112,8 @@ class CommonSessionLineTest(unittest.TestCase):
             # A Claude headless worker reports tokens but no window: no percent is made up.
             "rt-b": [job(attempt_id="o2", depth=1, worker_type="owner", route_node="one-shot", liveness="working",
                          harness="claude", model="opus", effort="medium", active_context_tokens=250_136,
-                         exec_tool={"name": "Bash"}, elapsed_min=5.0)],
+                         exec_tool={"name": "Bash", "target": "tools/run-tests.py --select x"},
+                         last_text={"text": "두 묶음 시험을 돌리는 중"}, elapsed_min=5.0)],
             "rt-c": [job(attempt_id="o3", depth=1, worker_type="owner", liveness="dead", harness="claude",
                          ctx_pct=12, elapsed_min=54.0)],
         }
@@ -140,6 +141,13 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(a["since"], 10_000.0 - 87 * 60)   # absolute: a re-published pass still ages
         # No window known: the exact token count, never a made-up percent.
         self.assertNotIn("ctx_pct", b); self.assertEqual(b["ctx_tokens"], 250_136); self.assertEqual(b["tool"], "Bash")
+        # The doer's own now and last line reach the panel row and its painted values.
+        self.assertEqual((b["target"], b["said"]), ("tools/run-tests.py --select x", "두 묶음 시험을 돌리는 중"))
+        from tools.fleet.session_panel import route_row
+        painted = route_row(b, now=10_000.0)
+        self.assertEqual((painted["tool"], painted["target"], painted["said"]),
+                         ("Bash", "tools/run-tests.py --select x", "두 묶음 시험을 돌리는 중"))
+        self.assertNotIn("said", c); self.assertNotIn("idle_tool", c)
         self.assertNotIn("ctx_pct", c); self.assertNotIn("tool", c); self.assertEqual(c["elapsed_min"], 54.0)
         self.assertEqual([row["marker"] for row in (a, b, c, d)], ["idle", "working", "dead", "dead"])
         self.assertTrue(d["closed"])

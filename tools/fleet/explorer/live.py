@@ -960,7 +960,7 @@ def _context_tokens(job):
     return value if type(value) is int and value >= 0 else None
 
 
-def _route_doer(worker, owner, dead):
+def _route_doer(worker, owner, dead, now=None):
     """Who does the route's work now, for its one-line row: harness, model, effort, context
     (percent, window, or the exact token count when no window is known), the open tool and
     the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
@@ -978,10 +978,44 @@ def _route_doer(worker, owner, dead):
     live = _get(job, "liveness") == "working"
     agents = sum(1 for item in (_get(job, "subagents") or ())
                  if _get(item, "active") is True)
-    return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
+    doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
+    return doer
+
+
+def _doer_activity(job, tool, live, now=None):
+    """What the doer is on now and last said, from its own stream read (nothing derived):
+    the open tool's target line and start (the native event time, else its running call's
+    process age), ``idle_tool`` while it works with no tool open, and its last line."""
+    out = {}
+    if isinstance(tool, Mapping):
+        target = _text(tool.get("target"))
+        if target:
+            out["target"] = target
+        since = _num(tool.get("since"))
+        child = _get(job, "exec_child")
+        # The running call's age stands in only for the same command (a shell tool or
+        # the executable the label names), never for an unrelated open tool.
+        same = isinstance(child, Mapping) and (
+            _text(tool.get("name")) in ("Bash", "bash", "command_execution", "exec")
+            or _text(child.get("comm")) == _text(tool.get("name")))
+        age = _num(child.get("etime_s")) if same else None
+        if since is None and age is not None:
+            since = (time.time() if now is None else now) - age
+        if since is not None:
+            out["tool_since"] = since
+            out["tool_age"] = _dur(max(0.0, (time.time() if now is None else now) - since) / 60)
+    elif live:
+        out["idle_tool"] = True
+    said = _get(job, "last_text")
+    if isinstance(said, Mapping) and _text(said.get("text")):
+        out["said"] = _text(said["text"])
+        if _num(said.get("at")) is not None:
+            out["said_at"] = _num(said["at"])
+    return out
 
 
 def _route_records(snapshot, session_rows, session_index, resolver, now):
@@ -1213,7 +1247,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             route["worker_context_index"] = worker_context_index
         doer_job = (selected_worker if worker_context_index is not None
                     else context_jobs[0] if len(context_jobs) == 1 else None)
-        doer = _route_doer(doer_job, owner, dead)
+        doer = _route_doer(doer_job, owner, dead, now)
         if doer is not None:
             route["doer"] = doer
         if record:

@@ -165,8 +165,12 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     // The feed carries one open tool and sub-agent count for the route (its
     // doer), not one per stage: like Fleet's ROUTES row (`└ >_ tool · +n agent`)
     // it stands once on its own row and never on a stage it may not belong to.
-    const doing=join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]);
+    // With it, what the tool acts on and for how long, or that none is open; then the
+    // doer's last line (Fleet's unfolded `>_ tool · target  3m` and `"…"` rows).
+    const doing=join([r.tool?[text('>_ ','lvl_g'),text(r.tool,'loc_repo'),...(r.target?[text(' · '+r.target)]:[]),...(r.tool_age?[text('  '+r.tool_age,'dim')]:[])]:
+      r.idle_tool?[text('>_ ','dim'),text('no tool','dim')]:[],r.agents?[text('+'+r.agents+' agent')]:[]]);
     if(doing.length&&(stages.length||live(r)))items.push(doing);
+    if(r.said)items.push({one:true,parts:[text('"'+r.said+'"','dim')]});
     const used=new Set();
     stages.forEach((stage,i)=>{
       const mark=stage.mark||'';
@@ -204,7 +208,11 @@ function render({frame=0,width,height,side,fill=side,model={},native={},state,si
     for(const item of items){
       // A stage's own notes sit two cells further in, under the stage they belong to.
       const parts=Array.isArray(item)?item:item.parts,first=item.sub?lead+'  ':lead,rest=first+'  ';
-      const rows=[];inner-=rest.length;try{wrap(parts,Infinity,undefined,rows);}finally{inner+=rest.length;}
+      const rows=[];
+      // A worker's own words (`one`) keep one row, cut with `…`, as Fleet draws them.
+      if(item.one){const room=inner-first.length,all=parts.reduce((n,p)=>n+measure(clean(p.text)),0);
+        rows.push(all<=room?parts:[...clip(parts,Math.max(0,room-1)).parts,text('…','dim')]);}
+      else{inner-=rest.length;try{wrap(parts,Infinity,undefined,rows);}finally{inner+=rest.length;}}
       rows.forEach((row,i)=>out.push([text(i?rest:first),...row]));
     }
     return out;

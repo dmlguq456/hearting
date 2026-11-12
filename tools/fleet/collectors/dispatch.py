@@ -2346,6 +2346,88 @@ def _tool_label(name, tool_input=None, command=None):
     return str(name)[:48] if isinstance(name, str) and name else None
 
 
+_ONE_LINE_LIMIT = 120
+_TOKEN_SHAPED = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,})\b")
+# The input field that names what a native tool acts on. A tool not listed has no
+# target here (its name alone is shown); a URL is never shown (query strings carry keys).
+_TOOL_TARGET_FIELDS = (
+    ("command", "cmd"), ("file_path", "notebook_path", "path", "filePath"),
+    ("pattern", "query"), ("description",))
+
+
+def _one_line(value, limit=_ONE_LINE_LIMIT):
+    """One display line of a worker's own text: control characters removed, whitespace
+    collapsed, credentials masked by the existing shell-job rule, cut with ``…``."""
+    line = shell_jobs.command_summary(value) if isinstance(value, str) else None
+    if not line:
+        return None
+    line = _TOKEN_SHAPED.sub("[redacted]", line.rstrip("…"))
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+
+
+def _tool_target(name, tool_input=None, command=None):
+    """What one open tool call acts on, as one masked line (``run-tests --select …``,
+    ``/abs/utilities/session-shell/host.cjs``), or None when its input names nothing."""
+    raw = command
+    if raw is None and isinstance(tool_input, Mapping):
+        for fields in _TOOL_TARGET_FIELDS:
+            raw = next((tool_input[key] for key in fields
+                        if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
+            if raw is not None:
+                break
+    if not isinstance(raw, str):
+        return None
+    try:
+        words = shlex.split(raw) if len(raw) < 4096 else ()
+    except ValueError:
+        words = ()
+    if (len(words) == 3 and os.path.basename(words[0]) in {"sh", "bash", "zsh"}
+            and words[1] in {"-c", "-lc"}):
+        raw = words[2]                     # the command a native shell wrapper runs
+    raw = re.sub(r"^\s*cd\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s*&&\s*", "", raw)   # where it runs is the row's worktree
+    return _one_line(raw, 80)
+
+
+def _job_activity(job, exec_tool, last_text):
+    """Attach the open tool (its target relative to the job's worktree) and the last line."""
+    if isinstance(exec_tool, Mapping) and isinstance(exec_tool.get("target"), str):
+        cwd = (getattr(job, "cwd", None) or "").rstrip("/")
+        target = exec_tool["target"]
+        if cwd and cwd in target:
+            target = target.replace(cwd + "/", "").replace(cwd, ".")
+        exec_tool = dict(exec_tool, target=target)
+    job.exec_tool = dict(exec_tool) if isinstance(exec_tool, Mapping) else None
+    job.last_text = dict(last_text) if isinstance(last_text, Mapping) and last_text.get("text") else None
+
+
+def _said(text, stamp=None):
+    """The worker's last assistant line as one masked line, with its native time."""
+    line = _one_line(text)
+    return {"text": line, "at": shell_jobs.parse_time(stamp)} if line else None
+
+
+def _open_tool(label, name=None, tool_input=None, stamp=None, command=None):
+    """One open tool call: its label, the masked line it acts on and its start time."""
+    tool = {"name": label}
+    target = _tool_target(name, tool_input, command)
+    words = target.split(" ") if target else []
+    lead = next((i for i, word in enumerate(words) if word.rsplit("/", 1)[-1] == label), None)
+    if lead is not None and all(word in ("env", "command", "sudo") or "=" in word
+                                for word in words[:lead]):
+        target = " ".join(words[lead + 1:]) or None   # ``python3 · tools/…``, not twice
+    if target and target != label:
+        tool["target"] = target
+    since = shell_jobs.parse_time(stamp)
+    if since is not None:
+        tool["since"] = since
+    return tool
+
+
+def _codex_open_command(label, command, stamp=None):
+    return _open_tool(label, "command_execution", stamp=stamp,
+                      command=shell_jobs._codex_shell_command_display(command) or command)
+
+
 def _supervised_claude_transcript(job, receipt_path):
     """Resolve one supervisor-announced transcript, never a cwd/session neighbour.
 
@@ -2401,7 +2483,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-target-v1"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -2434,6 +2516,7 @@ def _parse_claude_stream_tail(path):
     model_windows = {}
     model_max_output = {}
     open_tools = {}
+    last_text = None
     for line in lines:
         try:
             payload = json.loads(line)
@@ -2465,7 +2548,13 @@ def _parse_claude_stream_tail(path):
                     tool_id = item.get("id")
                     label = _tool_label(item.get("name"), item.get("input"))
                     if isinstance(tool_id, str) and label:
-                        open_tools[tool_id] = {"name": label}
+                        # Raw here; only the call still open at the end is masked (cost).
+                        open_tools[tool_id] = (label, item.get("name"), item.get("input"),
+                                               payload.get("timestamp"))
+                for item in content:
+                    if (isinstance(item, dict) and item.get("type") == "text"
+                            and isinstance(item.get("text"), str) and item["text"].strip()):
+                        last_text = (item["text"], payload.get("timestamp"))
         elif row_type == "user" and isinstance(message, dict):
             content = message.get("content")
             if isinstance(content, list):
@@ -2508,13 +2597,38 @@ def _parse_claude_stream_tail(path):
         "session_input_tokens": _counter(cumulative.get("input_tokens")),
         "session_cached_input_tokens": _counter(cumulative.get("cache_read_input_tokens")),
         "session_output_tokens": _counter(cumulative.get("output_tokens")),
-        "exec_tool": next(reversed(open_tools.values())) if open_tools else None,
+        "exec_tool": (_open_tool(*next(reversed(open_tools.values())))
+                      if open_tools else None),
+        "last_text": _said(*last_text) if last_text else None,
     }
     _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CLAUDE_STREAM_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
         _CLAUDE_STREAM_CACHE.pop(next(iter(_CLAUDE_STREAM_CACHE)))
     return parsed
+
+
+_CLAUDE_STANDARD_WINDOW = 200_000
+
+
+def _claude_own_window(metadata, model_id):
+    """This attempt's own Claude context window before its first turn result, or None.
+
+    ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` holds a Claude 4+ model at its standard 200K window
+    (each has at least 200K), so that switch as this attempt's launch recorded it
+    (``claude_compaction_disable_1m``, the home settings value beside it) settles the
+    window from the first observation. Without it the window is 200K or 1M and stays
+    unknown until the attempt's own result reports it: no usage-based guess and nothing
+    from another attempt (#1514 F1). A disagreeing pair stays unknown too.
+    """
+    from ..context_policy import _claude_model_output_floor, _truthy
+    if _claude_model_output_floor(model_id) is None:
+        return None, None
+    values = {metadata.get(key) for key in ("claude_compaction_disable_1m",
+                                            "claude_settings_disable_1m")} - {None, "", "absent"}
+    if len(values) == 1 and _truthy(next(iter(values))):
+        return _CLAUDE_STANDARD_WINDOW, "claude-launch-disable-1m"
+    return None, None
 
 
 def _claude_attempt_policy(metadata, *, runtime_version, model_id, raw_window, max_output,
@@ -2614,6 +2728,10 @@ def _enrich_claude_stream_session(job, fast_first=False):
     job._dispatch_context_owned = True
     active_context_tokens = parsed.get("active_context_tokens")
     context_window_tokens = parsed.get("context_window_tokens")
+    job._context_window_source = "claude-result-model-usage" if context_window_tokens else None
+    if not context_window_tokens:
+        context_window_tokens, job._context_window_source = _claude_own_window(
+            getattr(job, "_registry_metadata", None) or {}, parsed.get("model"))
     telemetry = telemetry_from_explicit(
         adapter="claude", session_id=parsed.get("session_id"),
         active_context_tokens=active_context_tokens,
@@ -2635,7 +2753,7 @@ def _enrich_claude_stream_session(job, fast_first=False):
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
     job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
     job._context_evidence = None
-    job.exec_tool = parsed.get("exec_tool")
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_text"))
     if job.ctx_pct is not None:
         try:
             st = os.stat(telemetry_path)
@@ -2719,7 +2837,7 @@ def _parse_codex_attempt_tail(path):
     if cached and cached[0] == cache_key:
         return cached[1]
     disk_key = parse_cache.key("codex-attempt", path, cache_key,
-                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES))
+                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-target-v1"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
@@ -2754,6 +2872,7 @@ def _parse_codex_attempt_tail(path):
     latest_usage = None
     thread_ids = head_thread_ids | _codex_attempt_thread_ids(lines)
     open_commands = {}
+    last_text = None
     activity = None
     current_turn = None
     closed_turns = set()
@@ -2805,16 +2924,21 @@ def _parse_codex_attempt_tail(path):
             item_id = item.get("id")
             label = _tool_label("command_execution", command=item.get("command"))
             if isinstance(item_id, str) and label:
-                open_commands[item_id] = {"name": label}
+                open_commands[item_id] = (label, item.get("command"), payload.get("timestamp"))
         elif row_type == "item.completed":
             item = payload.get("item")
             if isinstance(item, dict):
                 open_commands.pop(item.get("id"), None)
+                if (item.get("type") == "agent_message" and isinstance(item.get("text"), str)
+                        and item["text"].strip()):
+                    last_text = (item["text"], payload.get("timestamp"))
     parsed = {"token_usage": latest_usage,
               "thread_id": next(iter(thread_ids)) if len(thread_ids) == 1 else None,
               "thread_ambiguity": len(thread_ids) > 1,
               "activity": activity if len(thread_ids) == 1 else None,
-              "exec_tool": next(reversed(open_commands.values())) if open_commands else None}
+              "exec_tool": _codex_open_command(*next(reversed(open_commands.values())))
+              if open_commands else None,
+              "last_text": _said(*last_text) if last_text and len(thread_ids) <= 1 else None}
     _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CODEX_ATTEMPT_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
@@ -2877,7 +3001,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
         # supervisor usage event and open command item. Once the exact attempt log
         # contains multiple thread ids, none of its counters, activity, or exec
         # labels can be assigned to this worker without borrowing a thread's data.
-        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None)
+        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None, last_text=None)
         job._runtime_session_id = None
         job.context = None
         job.ctx_pct = None
@@ -2983,7 +3107,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
                 observed_at=st.st_mtime, fresh_until=st.st_mtime + 900)
         except OSError:
             pass
-    job.exec_tool = parsed.get("exec_tool")
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_text"))
     if thread_id and not fast_first:
         job.shell_jobs = shell_jobs.observe_jobs(
             shell_jobs.read_codex_jobs(path, session_id=thread_id, attempt_id=job.attempt_id),
@@ -3179,11 +3303,14 @@ def _enrich_opencode_native_activity(job, session_id, fast_first=False):
             _OPENCODE_ACTIVITY_CACHE[key] = (signatures, activity, shell_observation)
             if len(_OPENCODE_ACTIVITY_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
                 _OPENCODE_ACTIVITY_CACHE.pop(next(iter(_OPENCODE_ACTIVITY_CACHE)))
-        job.exec_tool = None
         tool = activity.get("tool")
-        if tool:
-            label = _tool_label(tool.get("name"), tool.get("input"))
-            job.exec_tool = {"name": label} if label else None
+        label = _tool_label(tool.get("name"), tool.get("input")) if tool else None
+        summary = activity.get("summary")
+        # "model responding" / "runtime waiting" are reader states, not the worker's words.
+        said = (_one_line(summary) if summary not in ("model responding", "runtime waiting")
+                else None)
+        _job_activity(job, _open_tool(label, tool.get("name"), tool.get("input")) if label else None,
+                      {"text": said, "at": activity.get("summary_ts")} if said else None)
         if activity.get("summary"):
             job._native_now = (activity["summary"], activity.get("summary_ts"))
         observed = shell_observation
